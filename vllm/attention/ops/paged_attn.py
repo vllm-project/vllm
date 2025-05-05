@@ -57,8 +57,7 @@ class PagedAttention:
         num_blocks = kv_cache.shape[1]
 
         key_cache = kv_cache[0]
-        key_cache = key_cache.view(num_blocks, num_kv_heads, head_size // x,
-                                   -1, x)
+        key_cache = key_cache.view(num_blocks, num_kv_heads, head_size // x, -1, x)
         value_cache = kv_cache[1]
         value_cache = value_cache.view(num_blocks, num_kv_heads, head_size, -1)
         return key_cache, value_cache
@@ -116,8 +115,7 @@ class PagedAttention:
         output = torch.empty_like(query)
         block_size = value_cache.shape[3]
         num_seqs, num_heads, head_size = query.shape
-        max_num_partitions = ((max_seq_len + _PARTITION_SIZE - 1) //
-                              _PARTITION_SIZE)
+        max_num_partitions = ((max_seq_len + _PARTITION_SIZE - 1) // _PARTITION_SIZE)
         # NOTE(woosuk): We use a simple heuristic to decide whether to use
         # PagedAttention V1 or V2. If the number of partitions is 1, we use
         # V1 to avoid the overhead of reduction. Also, if the number of

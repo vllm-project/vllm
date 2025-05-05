@@ -69,12 +69,10 @@ class Blip2QFormerMultiHeadAttention(nn.Module):
         if config.hidden_size % config.num_attention_heads != 0:
             raise ValueError(
                 f"The hidden size ({config.hidden_size}) is not a multiple of "
-                f"the number of attention heads ({config.num_attention_heads})"
-            )
+                f"the number of attention heads ({config.num_attention_heads})")
 
         self.num_attention_heads = config.num_attention_heads
-        self.attention_head_size = (config.hidden_size //
-                                    config.num_attention_heads)
+        self.attention_head_size = (config.hidden_size // config.num_attention_heads)
         self.all_head_size = self.num_attention_heads * self.attention_head_size
         self.scaling = self.attention_head_size**-0.5
 
@@ -86,8 +84,7 @@ class Blip2QFormerMultiHeadAttention(nn.Module):
         self.key = nn.Linear(kv_hidden_size, self.all_head_size)
         self.value = nn.Linear(kv_hidden_size, self.all_head_size)
 
-        self.position_embedding_type = getattr(config,
-                                               "position_embedding_type",
+        self.position_embedding_type = getattr(config, "position_embedding_type",
                                                "absolute")
         if self.position_embedding_type != "absolute":
             raise NotImplementedError("Unsupported position_embedding_type: "
@@ -96,8 +93,7 @@ class Blip2QFormerMultiHeadAttention(nn.Module):
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
 
     def transpose_for_scores(self, x):
-        x = x.view(*x.size()[:-1], self.num_attention_heads,
-                   self.attention_head_size)
+        x = x.view(*x.size()[:-1], self.num_attention_heads, self.attention_head_size)
         return x.permute(0, 2, 1, 3)
 
     def forward(
@@ -108,10 +104,8 @@ class Blip2QFormerMultiHeadAttention(nn.Module):
         is_cross_attention = encoder_hidden_states is not None
 
         if is_cross_attention:
-            key_layer = self.transpose_for_scores(
-                self.key(encoder_hidden_states))
-            value_layer = self.transpose_for_scores(
-                self.value(encoder_hidden_states))
+            key_layer = self.transpose_for_scores(self.key(encoder_hidden_states))
+            value_layer = self.transpose_for_scores(self.value(encoder_hidden_states))
         else:
             key_layer = self.transpose_for_scores(self.key(hidden_states))
             value_layer = self.transpose_for_scores(self.value(hidden_states))
@@ -120,10 +114,8 @@ class Blip2QFormerMultiHeadAttention(nn.Module):
 
         query_layer = self.transpose_for_scores(mixed_query_layer)
 
-        attention_scores = torch.matmul(query_layer,
-                                        key_layer.transpose(-1, -2))
-        attention_probs = torch.softmax(attention_scores * self.scaling,
-                                        dim=-1)
+        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
+        attention_probs = torch.softmax(attention_scores * self.scaling, dim=-1)
 
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
@@ -144,8 +136,7 @@ class Blip2QFormerSelfOutput(nn.Module):
         super().__init__()
 
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
-        self.LayerNorm = nn.LayerNorm(config.hidden_size,
-                                      eps=config.layer_norm_eps)
+        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
     def forward(
@@ -216,8 +207,7 @@ class Blip2QFormerOutput(nn.Module):
         super().__init__()
 
         self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
-        self.LayerNorm = nn.LayerNorm(config.hidden_size,
-                                      eps=config.layer_norm_eps)
+        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
     def forward(
@@ -266,8 +256,7 @@ class Blip2QFormerLayer(nn.Module):
 
         self.intermediate_query = Blip2QFormerIntermediate(
             config, prefix=f"{prefix}.intermediate_query")
-        self.output_query = Blip2QFormerOutput(config,
-                                               prefix=f"{prefix}.output_query")
+        self.output_query = Blip2QFormerOutput(config, prefix=f"{prefix}.output_query")
 
     def forward(
         self,
@@ -300,8 +289,7 @@ class Blip2QFormerLayer(nn.Module):
                     self.seq_len_dim,
                     attention_output[:, query_length:, :],
                 )
-                layer_output = torch.cat([layer_output, layer_output_text],
-                                         dim=1)
+                layer_output = torch.cat([layer_output, layer_output_text], dim=1)
         else:
             layer_output = apply_chunking_to_forward(
                 self.feed_forward_chunk,
@@ -312,14 +300,12 @@ class Blip2QFormerLayer(nn.Module):
 
         return layer_output
 
-    def feed_forward_chunk(self,
-                           attention_output: torch.Tensor) -> torch.Tensor:
+    def feed_forward_chunk(self, attention_output: torch.Tensor) -> torch.Tensor:
         intermediate_output = self.intermediate(attention_output)
         layer_output = self.output(intermediate_output, attention_output)
         return layer_output
 
-    def feed_forward_chunk_query(
-            self, attention_output: torch.Tensor) -> torch.Tensor:
+    def feed_forward_chunk_query(self, attention_output: torch.Tensor) -> torch.Tensor:
         intermediate_output = self.intermediate_query(attention_output)
         layer_output = self.output_query(intermediate_output, attention_output)
         return layer_output
@@ -381,8 +367,7 @@ class Blip2QFormerModel(nn.Module):
 
         self.config = config
 
-        self.layernorm = nn.LayerNorm(config.hidden_size,
-                                      eps=config.layer_norm_eps)
+        self.layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
         self.encoder = Blip2QFormerEncoder(config,
@@ -518,8 +503,7 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         self.vision_model = BlipVisionModel(config.vision_config, quant_config)
 
         self.query_tokens = nn.Parameter(
-            torch.zeros(1, config.num_query_tokens,
-                        config.qformer_config.hidden_size))
+            torch.zeros(1, config.num_query_tokens, config.qformer_config.hidden_size))
 
         self.qformer = Blip2QFormerModel(config.qformer_config,
                                          cache_config=cache_config,
@@ -548,14 +532,13 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
 
         if actual_dims != expected_dims:
             expected_expr = ("batch_size", *map(str, expected_dims))
-            raise ValueError(
-                f"The expected shape of pixel values is {expected_expr}. "
-                f"You supplied {tuple(data.shape)}.")
+            raise ValueError(f"The expected shape of pixel values is {expected_expr}. "
+                             f"You supplied {tuple(data.shape)}.")
 
         return data
 
-    def _parse_and_validate_image_input(
-            self, **kwargs: object) -> Optional[Blip2ImageInputs]:
+    def _parse_and_validate_image_input(self,
+                                        **kwargs: object) -> Optional[Blip2ImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
 
@@ -597,16 +580,14 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
 
         return image_features
 
-    def _process_image_pixels(self,
-                              inputs: Blip2ImagePixelInputs) -> torch.Tensor:
+    def _process_image_pixels(self, inputs: Blip2ImagePixelInputs) -> torch.Tensor:
         assert self.vision_model is not None
 
         pixel_values = inputs["data"]
 
         return self._image_pixels_to_features(self.vision_model, pixel_values)
 
-    def _process_image_input(self,
-                             image_input: Blip2ImageInputs) -> torch.Tensor:
+    def _process_image_input(self, image_input: Blip2ImageInputs) -> torch.Tensor:
 
         if image_input["type"] == "image_embeds":
             return image_input["data"]
@@ -614,8 +595,7 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         assert self.vision_model is not None
         image_features = self._process_image_pixels(image_input)
 
-        query_tokens = self.query_tokens.expand(image_features.shape[0], -1,
-                                                -1)
+        query_tokens = self.query_tokens.expand(image_features.shape[0], -1, -1)
         query_output = self.qformer(
             query_embeds=query_tokens,
             encoder_hidden_states=image_features,
@@ -626,8 +606,8 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
@@ -641,9 +621,9 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                _IMAGE_TOKEN_ID)
+            inputs_embeds = merge_multimodal_embeddings(input_ids, inputs_embeds,
+                                                        multimodal_embeddings,
+                                                        _IMAGE_TOKEN_ID)
         return inputs_embeds
 
     def forward(
@@ -693,8 +673,7 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         # condition is for v0 compatibility.
         elif inputs_embeds is None:
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
+            inputs_embeds = self.get_input_embeddings(input_ids, vision_embeddings)
             input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
@@ -709,10 +688,8 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states, sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

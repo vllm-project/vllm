@@ -8,9 +8,8 @@ import vllm._custom_ops as ops
 from vllm.platforms import current_platform
 
 if not current_platform.has_device_capability(100):
-    pytest.skip(
-        reason="Cutlass MLA Requires compute capability of 10 or above.",
-        allow_module_level=True)
+    pytest.skip(reason="Cutlass MLA Requires compute capability of 10 or above.",
+                allow_module_level=True)
 
 
 def ref_mla(
@@ -26,18 +25,12 @@ def ref_mla(
 
     for i in range(bs):
         # gather and flatten KV-cache
-        kv = kv_cache[
-            block_tables[i]]  # (max_num_blocks, block_size, head_dim)
-        kv = kv.view(1, -1,
-                     head_dim)[:, :seq_lens[i]]  # (1, seq_len, head_dim)
+        kv = kv_cache[block_tables[i]]  # (max_num_blocks, block_size, head_dim)
+        kv = kv.view(1, -1, head_dim)[:, :seq_lens[i]]  # (1, seq_len, head_dim)
         v = kv[:, :, :v_head_dim]
 
         q = query[i].view(num_heads, 1, head_dim)
-        o = F.scaled_dot_product_attention(q,
-                                           kv,
-                                           v,
-                                           scale=scale,
-                                           enable_gqa=True)
+        o = F.scaled_dot_product_attention(q, kv, v, scale=scale, enable_gqa=True)
         out[i] = o.view(num_heads, v_head_dim)
 
     return out
@@ -76,9 +69,7 @@ def test_cutlass_mla_decode(dtype: torch.dtype, mean_seq_len: int, bs: int,
     block_num = ((block_num + pack_factor - 1) // pack_factor) * pack_factor
 
     q = torch.randn(bs, h_q, d)
-    block_table = torch.randint(0,
-                                bs * block_num, (bs, block_num),
-                                dtype=torch.int32)
+    block_table = torch.randint(0, bs * block_num, (bs, block_num), dtype=torch.int32)
 
     kv_cache = torch.randn(block_table.numel(), block_size, d)
 
@@ -87,7 +78,7 @@ def test_cutlass_mla_decode(dtype: torch.dtype, mean_seq_len: int, bs: int,
     out_ans = torch.zeros_like(out_ref)
     q_nope = q[:, :, :dv].clone()
     q_pe = q[:, :, dv:].clone()
-    ops.cutlass_mla_decode(out_ans, q_nope, q_pe, kv_cache, seq_lens,
-                           block_table, scale)
+    ops.cutlass_mla_decode(out_ans, q_nope, q_pe, kv_cache, seq_lens, block_table,
+                           scale)
 
     torch.testing.assert_close(out_ans, out_ref, atol=1e-2, rtol=1e-2)

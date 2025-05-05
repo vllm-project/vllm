@@ -43,18 +43,17 @@ class GraniteMoeSharedMLP(nn.Module):
 
         self.input_size = config.hidden_size
         self.hidden_size = config.shared_intermediate_size
-        self.input_linear = MergedColumnParallelLinear(
-            input_size=self.input_size,
-            output_sizes=[self.hidden_size] * 2,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.input_linear")
-        self.output_linear = RowParallelLinear(
-            self.hidden_size,
-            self.input_size,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.output_linear")
+        self.input_linear = MergedColumnParallelLinear(input_size=self.input_size,
+                                                       output_sizes=[self.hidden_size] *
+                                                       2,
+                                                       bias=False,
+                                                       quant_config=quant_config,
+                                                       prefix=f"{prefix}.input_linear")
+        self.output_linear = RowParallelLinear(self.hidden_size,
+                                               self.input_size,
+                                               bias=False,
+                                               quant_config=quant_config,
+                                               prefix=f"{prefix}.output_linear")
         if config.hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {config.hidden_act}. "
                              "Only silu is supported for now.")
@@ -105,8 +104,7 @@ class GraniteMoeSharedDecoderLayer(nn.Module):
                 prefix=f"{prefix}.shared_mlp"
             )
 
-        self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
 
@@ -170,8 +168,7 @@ class GraniteMoeSharedModel(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: GraniteMoeSharedDecoderLayer(
-                config, cache_config, quant_config=quant_config, prefix=prefix
-            ),
+                config, cache_config, quant_config=quant_config, prefix=prefix),
             prefix=f"{prefix}.layers")
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -208,18 +205,15 @@ class GraniteMoeSharedModel(nn.Module):
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         new_weights = {}
         for n, p in weights:
             if n.endswith('.block_sparse_moe.input_linear.weight'):
                 for e in range(p.size(0)):
-                    w1_name = n.replace(
-                        '.block_sparse_moe.input_linear.weight',
-                        f".block_sparse_moe.experts.{e}.w1.weight")
-                    w3_name = n.replace(
-                        '.block_sparse_moe.input_linear.weight',
-                        f".block_sparse_moe.experts.{e}.w3.weight")
+                    w1_name = n.replace('.block_sparse_moe.input_linear.weight',
+                                        f".block_sparse_moe.experts.{e}.w1.weight")
+                    w3_name = n.replace('.block_sparse_moe.input_linear.weight',
+                                        f".block_sparse_moe.experts.{e}.w3.weight")
                     w1_param, w3_param = p[e].chunk(2, dim=0)
                     assert w1_name not in new_weights
                     assert w3_name not in new_weights
@@ -227,9 +221,8 @@ class GraniteMoeSharedModel(nn.Module):
                     new_weights[w3_name] = w3_param
             elif n.endswith('.block_sparse_moe.output_linear.weight'):
                 for e in range(p.size(0)):
-                    w2_name = n.replace(
-                        '.block_sparse_moe.output_linear.weight',
-                        f".block_sparse_moe.experts.{e}.w2.weight")
+                    w2_name = n.replace('.block_sparse_moe.output_linear.weight',
+                                        f".block_sparse_moe.experts.{e}.w2.weight")
                     w2_param = p[e]
                     assert w2_name not in new_weights
                     new_weights[w2_name] = w2_param
@@ -271,8 +264,7 @@ class GraniteMoeSharedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.lora_config = lora_config
 
         self.model = GraniteMoeSharedModel(vllm_config=vllm_config,
-                                           prefix=maybe_prefix(
-                                               prefix, "model"))
+                                           prefix=maybe_prefix(prefix, "model"))
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
@@ -291,8 +283,7 @@ class GraniteMoeSharedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size,
-                                                scale=1 /
-                                                self.config.logits_scaling)
+                                                scale=1 / self.config.logits_scaling)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -308,16 +299,13 @@ class GraniteMoeSharedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                    inputs_embeds)
         return hidden_states
 
-    def compute_logits(
-            self, hidden_states: torch.Tensor,
-            sampling_metadata: SamplingMetadata) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+    def compute_logits(self, hidden_states: torch.Tensor,
+                       sampling_metadata: SamplingMetadata) -> Optional[torch.Tensor]:
+        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
         return logits
 
-    def make_empty_intermediate_tensors(
-            self, batch_size: int, dtype: torch.dtype,
-            device: torch.device) -> IntermediateTensors:
+    def make_empty_intermediate_tensors(self, batch_size: int, dtype: torch.dtype,
+                                        device: torch.device) -> IntermediateTensors:
         return IntermediateTensors({
             "hidden_states":
             torch.zeros((batch_size, self.config.hidden_size),
@@ -329,11 +317,9 @@ class GraniteMoeSharedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                         device=device),
         })
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(
             self,
-            skip_prefixes=(["lm_head."]
-                           if self.config.tie_word_embeddings else None),
+            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)

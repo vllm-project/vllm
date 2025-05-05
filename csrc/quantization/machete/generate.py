@@ -283,15 +283,14 @@ class ImplConfig:
 
 def generate_sch_sig(schedule_config: ScheduleConfig) -> str:
     tile_shape = (
-        f"{schedule_config.tile_shape_mn[0]}x{schedule_config.tile_shape_mn[1]}"
-    )
+        f"{schedule_config.tile_shape_mn[0]}x{schedule_config.tile_shape_mn[1]}")
     cluster_shape = (f"{schedule_config.cluster_shape_mnk[0]}" +
                      f"x{schedule_config.cluster_shape_mnk[1]}" +
                      f"x{schedule_config.cluster_shape_mnk[2]}")
     kernel_schedule = VLLMKernelScheduleTag[schedule_config.kernel_schedule]\
         .split("::")[-1]
-    epilogue_schedule = EpilogueScheduleTag[
-        schedule_config.epilogue_schedule].split("::")[-1]
+    epilogue_schedule = EpilogueScheduleTag[schedule_config.epilogue_schedule].split(
+        "::")[-1]
     tile_scheduler = TileSchedulerTag[schedule_config.tile_scheduler]\
         .split("::")[-1]
 
@@ -349,8 +348,7 @@ def to_cute_constant(value: list[int]):
 
 def unique_schedules(impl_configs: list[ImplConfig]):
     return list(
-        set(sch for impl_config in impl_configs
-            for sch in impl_config.schedules))
+        set(sch for impl_config in impl_configs for sch in impl_config.schedules))
 
 
 def unsigned_type_with_bitwidth(num_bits):
@@ -510,8 +508,7 @@ def generate():
     # For now we use the same heuristic for all types
     # Heuristic is currently tuned for H100s
     default_heuristic = [
-        (cond, ScheduleConfig(*tile_config,
-                              **sch_common_params))  # type: ignore
+        (cond, ScheduleConfig(*tile_config, **sch_common_params))  # type: ignore
         for cond, tile_config in default_tile_heuristic_config.items()
     ]
 
@@ -557,8 +554,7 @@ def generate():
             a_token_scale=DataType.void,
             out=a,
             accumulator=DataType.f32,
-        ) for b in (DataType.u4, DataType.u8)
-        for a in (DataType.f16, DataType.bf16))
+        ) for b in (DataType.u4, DataType.u8) for a in (DataType.f16, DataType.bf16))
 
     impl_configs += [
         ImplConfig(x[0], x[1], x[2])
@@ -605,8 +601,7 @@ def generate():
     # For now we use the same heuristic for all types
     # Heuristic is currently tuned for H100s
     qqq_heuristic = [
-        (cond, ScheduleConfig(*tile_config,
-                              **sch_common_params))  # type: ignore
+        (cond, ScheduleConfig(*tile_config, **sch_common_params))  # type: ignore
         for cond, tile_config in qqq_tile_heuristic_config.items()
     ]
 
@@ -634,10 +629,9 @@ def generate():
     ]
 
     impl_configs += [
-        ImplConfig(x[0], x[1], x[2])
-        for x in zip(QQQ_kernel_types,
-                     itertools.repeat(get_unique_schedules(qqq_heuristic)),
-                     itertools.repeat(qqq_heuristic))
+        ImplConfig(x[0], x[1], x[2]) for x in zip(
+            QQQ_kernel_types, itertools.repeat(get_unique_schedules(qqq_heuristic)),
+            itertools.repeat(qqq_heuristic))
     ]
 
     output_dir = os.path.join(SCRIPT_DIR, "generated")

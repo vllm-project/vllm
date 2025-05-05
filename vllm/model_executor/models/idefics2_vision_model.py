@@ -63,8 +63,7 @@ class Idefics2VisionEmbeddings(nn.Module):
         self.num_patches_per_side = self.image_size // self.patch_size
         self.num_patches = self.num_patches_per_side**2
         self.num_positions = self.num_patches
-        self.position_embedding = nn.Embedding(self.num_positions,
-                                               self.embed_dim)
+        self.position_embedding = nn.Embedding(self.num_positions, self.embed_dim)
 
     def forward(self,
                 pixel_values: torch.FloatTensor,
@@ -144,16 +143,15 @@ class Idefics2VisionAttention(nn.Module):
         )
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
-        self.attn = MultiHeadAttention(self.num_heads_per_partition,
-                                       self.head_dim, self.scale)
+        self.attn = MultiHeadAttention(self.num_heads_per_partition, self.head_dim,
+                                       self.scale)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(
-            hidden_states
-        )  # batch_size, q_len, 3 * num_heads_per_partition * head_dim
+            hidden_states)  # batch_size, q_len, 3 * num_heads_per_partition * head_dim
         query_states, key_states, value_states = qkv.chunk(3, dim=-1)
         out = self.attn(query_states, key_states, value_states)
         attn_output, _ = self.out_proj(out)
@@ -206,13 +204,11 @@ class Idefics2EncoderLayer(nn.Module):
         self.self_attn = Idefics2VisionAttention(config,
                                                  quant_config=quant_config,
                                                  prefix=f"{prefix}.self_attn")
-        self.layer_norm1 = nn.LayerNorm(self.embed_dim,
-                                        eps=config.layer_norm_eps)
+        self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.mlp = Idefics2VisionMLP(config,
                                      quant_config=quant_config,
                                      prefix=f"{prefix}.mlp")
-        self.layer_norm2 = nn.LayerNorm(self.embed_dim,
-                                        eps=config.layer_norm_eps)
+        self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
 
     def forward(
         self,
@@ -315,8 +311,7 @@ class Idefics2VisionTransformer(nn.Module):
         if len(self.encoder.layers) > config.num_hidden_layers:
             raise ValueError(
                 f"The original encoder only has {num_hidden_layers} "
-                f"layers, but you requested {len(self.encoder.layers)} layers."
-            )
+                f"layers, but you requested {len(self.encoder.layers)} layers.")
 
         self.require_post_norm = require_post_norm
         self.post_layernorm = nn.LayerNorm(
@@ -342,8 +337,7 @@ class Idefics2VisionTransformer(nn.Module):
         last_hidden_state = self.post_layernorm(encoder_outputs)
         return last_hidden_state
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -360,8 +354,7 @@ class Idefics2VisionTransformer(nn.Module):
                 continue
 
             # post_layernorm is optional
-            if (name.startswith("post_layernorm.")
-                    and not self.require_post_norm):
+            if (name.startswith("post_layernorm.") and not self.require_post_norm):
                 continue
 
             # omit layers when num_hidden_layers_override is set
@@ -380,8 +373,7 @@ class Idefics2VisionTransformer(nn.Module):
                 break
             else:
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params

@@ -45,12 +45,11 @@ def test_assert_enough_kv_space(num_steps: int):
         for prompt, output in zip(prompts, prev_output_tokens)
     ]
 
-    inputs = create_seq_group_metadata_from_prompts(
-        prompts,
-        num_gpu_blocks,
-        block_size,
-        final_prompt_lens,
-        continuations=prev_output_tokens)
+    inputs = create_seq_group_metadata_from_prompts(prompts,
+                                                    num_gpu_blocks,
+                                                    block_size,
+                                                    final_prompt_lens,
+                                                    continuations=prev_output_tokens)
 
     assert_enough_kv_space = MultiStepWorker._assert_enough_kv_space  # pylint: disable=protected-access
     worker = MagicMock()
@@ -113,10 +112,7 @@ def test_same_output_for_single_step():
     final_prompt_lens = [len(prompt) + num_steps for prompt in prompts]
 
     multi_step_seq_group = create_seq_group_metadata_from_prompts(
-        prompts,
-        num_gpu_blocks,
-        block_size,
-        final_prompt_lens=final_prompt_lens)
+        prompts, num_gpu_blocks, block_size, final_prompt_lens=final_prompt_lens)
 
     zero_kv_cache(multi_step_worker.cache_engine)
     set_random_seed(seed)
@@ -129,28 +125,18 @@ def test_same_output_for_single_step():
     actual_output = actual_output[0]
 
     single_step_seq_group = create_seq_group_metadata_from_prompts(
-        prompts,
-        num_gpu_blocks,
-        block_size,
-        final_prompt_lens=final_prompt_lens)
+        prompts, num_gpu_blocks, block_size, final_prompt_lens=final_prompt_lens)
 
     zero_kv_cache(worker.cache_engine)
     set_random_seed(seed)
-    expected_output = worker.execute_model(
-        execute_model_req=ExecuteModelRequest(
-            seq_group_metadata_list=single_step_seq_group))[0]
+    expected_output = worker.execute_model(execute_model_req=ExecuteModelRequest(
+        seq_group_metadata_list=single_step_seq_group))[0]
 
-    actual_token_ids = [
-        output.samples[0].output_token for output in actual_output
-    ]
+    actual_token_ids = [output.samples[0].output_token for output in actual_output]
     actual_logprobs = [output.samples[0].logprobs for output in actual_output]
 
-    expected_token_ids = [
-        output.samples[0].output_token for output in expected_output
-    ]
-    expected_logprobs = [
-        output.samples[0].logprobs for output in expected_output
-    ]
+    expected_token_ids = [output.samples[0].output_token for output in expected_output]
+    expected_logprobs = [output.samples[0].logprobs for output in expected_output]
 
     assert actual_token_ids == expected_token_ids
 
@@ -190,9 +176,8 @@ def test_same_output_for_multi_step():
     num_steps = block_size + 1
 
     random.seed(seed)
-    prompts = [[
-        random.randint(0, 1000) for _ in range(random.randint(10, 20))
-    ] for _ in range(10)]
+    prompts = [[random.randint(0, 1000) for _ in range(random.randint(10, 20))]
+               for _ in range(10)]
 
     final_prompt_lens = [len(prompt) + num_steps for prompt in prompts]
 
@@ -242,27 +227,19 @@ def test_same_output_for_multi_step():
             continuations[i].append(seq_group_output.samples[0].output_token)
 
     # Get token ids and logprobs for comparison.
-    multi_step_output_logprobs: list[list[dict[int,
-                                               Logprob]]] = [[]
-                                                             for _ in prompts]
-    single_step_output_logprobs: list[list[dict[int,
-                                                Logprob]]] = [[]
-                                                              for _ in prompts]
+    multi_step_output_logprobs: list[list[dict[int, Logprob]]] = [[] for _ in prompts]
+    single_step_output_logprobs: list[list[dict[int, Logprob]]] = [[] for _ in prompts]
 
     multi_step_output_token_ids: list[list[int]] = [[] for _ in prompts]
     single_step_output_token_ids: list[list[int]] = [[] for _ in prompts]
     for i, _ in enumerate(prompts):
-        for multi_step, single_step in zip(multi_step_output,
-                                           single_step_output):
-            multi_step_output_token_ids[i].append(
-                multi_step[i].samples[0].output_token)
+        for multi_step, single_step in zip(multi_step_output, single_step_output):
+            multi_step_output_token_ids[i].append(multi_step[i].samples[0].output_token)
             single_step_output_token_ids[i].append(
                 single_step[i].samples[0].output_token)
 
-            multi_step_output_logprobs[i].append(
-                multi_step[i].samples[0].logprobs)
-            single_step_output_logprobs[i].append(
-                single_step[i].samples[0].logprobs)
+            multi_step_output_logprobs[i].append(multi_step[i].samples[0].logprobs)
+            single_step_output_logprobs[i].append(single_step[i].samples[0].logprobs)
 
     # Print per-sequence token ids
     for i, (multi_step_tokens, single_step_tokens) in enumerate(
@@ -272,15 +249,14 @@ def test_same_output_for_multi_step():
         print(f'{i=} equal {multi_step_tokens == single_step_tokens}')
 
     # Assert token ids are equal.
-    for multi_step_tokens, single_step_tokens in zip(
-            multi_step_output_token_ids, single_step_output_token_ids):
+    for multi_step_tokens, single_step_tokens in zip(multi_step_output_token_ids,
+                                                     single_step_output_token_ids):
         assert multi_step_tokens == single_step_tokens
 
     # Assert logprobs are equal.
-    for multi_step_logprobs, single_step_logprobs in zip(
-            multi_step_output_logprobs, single_step_output_logprobs):
-        assert_logprobs_dict_allclose(multi_step_logprobs,
-                                      single_step_logprobs)
+    for multi_step_logprobs, single_step_logprobs in zip(multi_step_output_logprobs,
+                                                         single_step_output_logprobs):
+        assert_logprobs_dict_allclose(multi_step_logprobs, single_step_logprobs)
 
 
 @torch.inference_mode()
@@ -487,8 +463,7 @@ def test_multi_step_with_batch_expansion_incorrect_output():
 # The choice of backends forces the multi_step_worker to choose between
 # the vanilla model_runner and TP1DraftModelRunner and that we can test
 # both code paths.
-@pytest.mark.parametrize('attn_backend',
-                         [_Backend.XFORMERS, _Backend.FLASH_ATTN])
+@pytest.mark.parametrize('attn_backend', [_Backend.XFORMERS, _Backend.FLASH_ATTN])
 def test_multi_step_correct_kvcache(num_steps, attn_backend):
     """Verify that the KV cache of the draft model 
     is correctly updated for sequences with bonus token.
@@ -520,10 +495,8 @@ def test_multi_step_correct_kvcache(num_steps, attn_backend):
         prompts = [[0] for _ in range(batch_size)]
         # Already generate two tokens for the sequence
         # so that we can simulate the bonus token case
-        multi_step_continuations = [[
-            random.randint(0, 1000),
-            random.randint(0, 1000)
-        ] for _ in prompts]
+        multi_step_continuations = [[random.randint(0, 1000),
+                                     random.randint(0, 1000)] for _ in prompts]
         final_prompt_lens = [len(prompt) + 2 + num_steps for prompt in prompts]
 
         seq_ids_with_bonus_token_in_last_step = set(range(batch_size))
@@ -536,11 +509,11 @@ def test_multi_step_correct_kvcache(num_steps, attn_backend):
 
         # Run multi-step.
         zero_kv_cache(multi_step_worker.cache_engine)
-        multi_step_worker.sampler_output(execute_model_req=ExecuteModelRequest(
-            seq_group_metadata_list=seq_group_metadata_list),
-                                         sample_len=num_steps,
-                                         seq_ids_with_bonus_token_in_last_step=
-                                         seq_ids_with_bonus_token_in_last_step)
+        multi_step_worker.sampler_output(
+            execute_model_req=ExecuteModelRequest(
+                seq_group_metadata_list=seq_group_metadata_list),
+            sample_len=num_steps,
+            seq_ids_with_bonus_token_in_last_step=seq_ids_with_bonus_token_in_last_step)
 
         # Run single-step repeatedly.
         zero_kv_cache(worker.cache_engine)
@@ -552,9 +525,8 @@ def test_multi_step_correct_kvcache(num_steps, attn_backend):
             block_size,
             continuations=single_step_continuations,
             final_prompt_lens=final_prompt_lens)
-        single_step_output = worker.execute_model(
-            execute_model_req=ExecuteModelRequest(
-                seq_group_metadata_list=seq_group_metadata_list))
+        single_step_output = worker.execute_model(execute_model_req=ExecuteModelRequest(
+            seq_group_metadata_list=seq_group_metadata_list))
         for _ in range(num_steps):
             seq_group_metadata_list = create_seq_group_metadata_from_prompts(
                 prompts,
@@ -576,13 +548,10 @@ def test_multi_step_correct_kvcache(num_steps, attn_backend):
         single_step_gpu_cache = worker.cache_engine[0].gpu_cache
         multi_step_gpu_cache = multi_step_worker.cache_engine[0].gpu_cache
         num_layers = len(single_step_gpu_cache)
-        allclose = lambda a, b: torch.allclose(
-            a.cuda(), b.cuda(), rtol=1e-2, atol=1e-2)
+        allclose = lambda a, b: torch.allclose(a.cuda(), b.cuda(), rtol=1e-2, atol=1e-2)
         for i in range(num_layers):
-            assert allclose(single_step_gpu_cache[i][0],
-                            multi_step_gpu_cache[i][0])
-            assert allclose(single_step_gpu_cache[i][1],
-                            multi_step_gpu_cache[i][1])
+            assert allclose(single_step_gpu_cache[i][0], multi_step_gpu_cache[i][0])
+            assert allclose(single_step_gpu_cache[i][1], multi_step_gpu_cache[i][1])
 
 
 @torch.inference_mode()
@@ -623,11 +592,9 @@ def test_draft_proposals_full_speculation_len():
 
     seq_group_metadata_list, _, _ = create_batch(batch_size, k)
 
-    proposals = proposer.get_spec_proposals(
-        execute_model_req=ExecuteModelRequest(
-            seq_group_metadata_list=seq_group_metadata_list,
-            num_lookahead_slots=k),
-        seq_ids_with_bonus_token_in_last_step=set())
+    proposals = proposer.get_spec_proposals(execute_model_req=ExecuteModelRequest(
+        seq_group_metadata_list=seq_group_metadata_list, num_lookahead_slots=k),
+                                            seq_ids_with_bonus_token_in_last_step=set())
 
     assert torch.is_tensor(proposals.proposal_token_ids)
     assert torch.is_tensor(proposals.proposal_probs)
@@ -658,15 +625,11 @@ def test_draft_proposals_no_speculations():
         max_proposal_len=prompt_len + k - 1,
     )
 
-    seq_group_metadata_list, _, _ = create_batch(batch_size,
-                                                 k,
-                                                 prompt_len=prompt_len)
+    seq_group_metadata_list, _, _ = create_batch(batch_size, k, prompt_len=prompt_len)
 
-    proposals = proposer.get_spec_proposals(
-        execute_model_req=ExecuteModelRequest(
-            seq_group_metadata_list=seq_group_metadata_list,
-            num_lookahead_slots=k),
-        seq_ids_with_bonus_token_in_last_step=set())
+    proposals = proposer.get_spec_proposals(execute_model_req=ExecuteModelRequest(
+        seq_group_metadata_list=seq_group_metadata_list, num_lookahead_slots=k),
+                                            seq_ids_with_bonus_token_in_last_step=set())
 
     assert torch.is_tensor(proposals.proposal_token_ids)
     assert torch.is_tensor(proposals.proposal_probs)
@@ -695,10 +658,9 @@ def test_draft_proposals_mixed_k():
     expected_num_proposal_seqs = 6
     expected_num_no_proposal_seqs = batch_size - expected_num_proposal_seqs
 
-    prompt_len = [
-        small_prompt_len for _ in range(expected_num_proposal_seqs - 1)
-    ] + [long_prompt_len
-         for _ in range(expected_num_no_proposal_seqs)] + [small_prompt_len]
+    prompt_len = [small_prompt_len for _ in range(expected_num_proposal_seqs - 1)] + [
+        long_prompt_len for _ in range(expected_num_no_proposal_seqs)
+    ] + [small_prompt_len]
 
     draft_worker = MagicMock()
     proposer = Top1Proposer(
@@ -719,12 +681,11 @@ def test_draft_proposals_mixed_k():
                                 vocab_size,
                                 device=device,
                                 dtype=torch.float32),
-            sampled_token_ids=torch.randint(
-                low=0,
-                high=vocab_size,
-                size=(expected_num_proposal_seqs, ),
-                device=device,
-                dtype=torch.long),
+            sampled_token_ids=torch.randint(low=0,
+                                            high=vocab_size,
+                                            size=(expected_num_proposal_seqs, ),
+                                            device=device,
+                                            dtype=torch.long),
         ) for _ in range(k)
     ], True
 
@@ -735,11 +696,9 @@ def test_draft_proposals_mixed_k():
         prev_output_token_len=prev_output_token_len,
     )
 
-    proposals = proposer.get_spec_proposals(
-        execute_model_req=ExecuteModelRequest(
-            seq_group_metadata_list=seq_group_metadata_list,
-            num_lookahead_slots=k),
-        seq_ids_with_bonus_token_in_last_step=set())
+    proposals = proposer.get_spec_proposals(execute_model_req=ExecuteModelRequest(
+        seq_group_metadata_list=seq_group_metadata_list, num_lookahead_slots=k),
+                                            seq_ids_with_bonus_token_in_last_step=set())
 
     assert torch.is_tensor(proposals.proposal_token_ids)
     assert torch.is_tensor(proposals.proposal_probs)
@@ -777,8 +736,7 @@ def test_use_draft_model_runner_advance_step():
     # Mock "_gpu_advance_step" to raise an exception when called.
     exception_secret = "artificial stop"
     worker.model_runner._gpu_advance_step = MagicMock()
-    worker.model_runner._gpu_advance_step.side_effect = ValueError(
-        exception_secret)
+    worker.model_runner._gpu_advance_step.side_effect = ValueError(exception_secret)
 
     seq_group_metadata_list, _, _ = create_batch(batch_size,
                                                  k,
@@ -819,17 +777,16 @@ def test_expand_execute_model_request_sync_with_expand_hidden_states():
 
     execute_model_request = ExecuteModelRequest(
         seq_group_metadata_list,
-        previous_hidden_states=HiddenStates(
-            torch.arange(batch_size), seq_group_metadata_list,
-            torch.arange(batch_size, 2 * batch_size)))
+        previous_hidden_states=HiddenStates(torch.arange(batch_size),
+                                            seq_group_metadata_list,
+                                            torch.arange(batch_size, 2 * batch_size)))
 
     expanded_execute_model_request, orig_seq_group_ids = MultiStepWorker.\
         _expand_execute_model_request(execute_model_request,
                                       seq_with_bonus_token_in_last_step)
 
     all_seq_ids = torch.tensor(
-        get_all_seq_ids(
-            expanded_execute_model_request.seq_group_metadata_list))
+        get_all_seq_ids(expanded_execute_model_request.seq_group_metadata_list))
     ref_expanded_hidden_states = all_seq_ids + batch_size
     ref_expanded_hidden_states[orig_seq_group_ids] -= batch_size
 

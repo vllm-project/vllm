@@ -103,8 +103,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
 
         self._computed_blocks_tracker = ComputedBlocksTracker(
             self.block_allocator, self.block_size, self.enable_caching)
-        self._last_access_blocks_tracker = LastAccessBlocksTracker(
-            self.block_allocator)
+        self._last_access_blocks_tracker = LastAccessBlocksTracker(self.block_allocator)
 
     def can_allocate(self,
                      seq_group: SequenceGroup,
@@ -137,8 +136,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             device=Device.GPU)
 
         # Use watermark to avoid frequent cache eviction.
-        if (self.num_total_gpu_blocks - num_required_blocks
-                < self.watermark_blocks):
+        if (self.num_total_gpu_blocks - num_required_blocks < self.watermark_blocks):
             return AllocStatus.NEVER
         if num_free_gpu_blocks - num_required_blocks >= self.watermark_blocks:
             return AllocStatus.OK
@@ -157,8 +155,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             extra_hash = seq.extra_hash()
 
             # Add blocks to the block table only if the sequence is non empty.
-            block_table.allocate(token_ids=seq.get_token_ids(),
-                                 extra_hash=extra_hash)
+            block_table.allocate(token_ids=seq.get_token_ids(), extra_hash=extra_hash)
 
         return block_table
 
@@ -221,15 +218,12 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             block_table = self.block_tables[seq.seq_id]
 
-            num_touched_blocks += (
-                block_table.get_num_blocks_touched_by_append_slots(
-                    token_ids=block_table.get_unseen_token_ids(
-                        seq.get_token_ids()),
-                    num_lookahead_slots=num_lookahead_slots,
-                ))
+            num_touched_blocks += (block_table.get_num_blocks_touched_by_append_slots(
+                token_ids=block_table.get_unseen_token_ids(seq.get_token_ids()),
+                num_lookahead_slots=num_lookahead_slots,
+            ))
 
-        num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(
-            Device.GPU)
+        num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(Device.GPU)
         return num_touched_blocks <= num_free_gpu_blocks
 
     def append_slots(
@@ -295,19 +289,17 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             # only during freeing of block ids, the blocks are actually added to
             # the evictor (which is when the most updated time is required)
             # (This avoids expensive calls to mark_blocks_as_accessed(..))
-            self._last_access_blocks_tracker.update_last_access(
-                seq.seq_id, now)
+            self._last_access_blocks_tracker.update_last_access(seq.seq_id, now)
 
-    def mark_blocks_as_computed(self, seq_group: SequenceGroup,
-                                token_chunk_size: int):
+    def mark_blocks_as_computed(self, seq_group: SequenceGroup, token_chunk_size: int):
         # If prefix caching is enabled, mark immutable blocks as computed
         # right after they have been scheduled (for prefill). This assumes
         # the scheduler is synchronous so blocks are actually computed when
         # scheduling the next batch.
         self.block_allocator.mark_blocks_as_computed([])
 
-    def get_common_computed_block_ids(
-            self, seqs: List[Sequence]) -> GenericSequence[int]:
+    def get_common_computed_block_ids(self,
+                                      seqs: List[Sequence]) -> GenericSequence[int]:
         """Determine which blocks for which we skip prefill.
 
         With prefix caching we can skip prefill for previously-generated blocks.
@@ -382,15 +374,13 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             self.block_tables[seq.seq_id].update(blocks)
 
             seq_physical_block_id_mapping = {
-                self.block_allocator.get_physical_block_id(
-                    Device.CPU, cpu_block_id):
-                self.block_allocator.get_physical_block_id(
-                    Device.GPU, gpu_block_id)
+                self.block_allocator.get_physical_block_id(Device.CPU, cpu_block_id):
+                self.block_allocator.get_physical_block_id(Device.GPU, gpu_block_id)
                 for cpu_block_id, gpu_block_id in seq_swap_mapping.items()
             }
 
-            physical_block_id_mapping.extend(
-                list(seq_physical_block_id_mapping.items()))
+            physical_block_id_mapping.extend(list(
+                seq_physical_block_id_mapping.items()))
 
         return physical_block_id_mapping
 
@@ -406,8 +396,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         Returns:
             bool: Whether it's possible to swap out current sequence group.
         """
-        alloc_status = self._can_swap(seq_group, Device.CPU,
-                                      SequenceStatus.RUNNING)
+        alloc_status = self._can_swap(seq_group, Device.CPU, SequenceStatus.RUNNING)
         return alloc_status == AllocStatus.OK
 
     def swap_out(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
@@ -435,15 +424,13 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             self.block_tables[seq.seq_id].update(blocks)
 
             seq_physical_block_id_mapping = {
-                self.block_allocator.get_physical_block_id(
-                    Device.GPU, gpu_block_id):
-                self.block_allocator.get_physical_block_id(
-                    Device.CPU, cpu_block_id)
+                self.block_allocator.get_physical_block_id(Device.GPU, gpu_block_id):
+                self.block_allocator.get_physical_block_id(Device.CPU, cpu_block_id)
                 for gpu_block_id, cpu_block_id in seq_swap_mapping.items()
             }
 
-            physical_block_id_mapping.extend(
-                list(seq_physical_block_id_mapping.items()))
+            physical_block_id_mapping.extend(list(
+                seq_physical_block_id_mapping.items()))
 
         return physical_block_id_mapping
 
@@ -504,8 +491,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         if device == Device.GPU:
             watermark_blocks = self.watermark_blocks
 
-        if self.block_allocator.get_num_total_blocks(
-                device) < num_blocks_touched:
+        if self.block_allocator.get_num_total_blocks(device) < num_blocks_touched:
             return AllocStatus.NEVER
         elif self.block_allocator.get_num_free_blocks(
                 device) - num_blocks_touched >= watermark_blocks:

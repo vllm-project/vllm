@@ -248,8 +248,7 @@ def test_generate_block_hash_extra_keys_cache_salt():
     )
 
     # Test with no extra keys
-    extra_keys, next_mm_idx = generate_block_hash_extra_keys(
-        request_mm, 0, 5, 0)
+    extra_keys, next_mm_idx = generate_block_hash_extra_keys(request_mm, 0, 5, 0)
     assert extra_keys == ("hash1", "salt")
     assert next_mm_idx == 1
 
@@ -260,8 +259,8 @@ def test_hash_block_tokens(hash_fn):
     curr_block_token_ids = (1, 2, 3)
     extra_keys = ("key1", "key2")
 
-    block_hash = hash_block_tokens(hash_fn, parent_block_hash,
-                                   curr_block_token_ids, extra_keys)
+    block_hash = hash_block_tokens(hash_fn, parent_block_hash, curr_block_token_ids,
+                                   extra_keys)
     assert isinstance(block_hash, BlockHashType)
     assert block_hash.hash_value == hash_fn(
         (parent_block_hash, curr_block_token_ids, extra_keys))
@@ -389,8 +388,7 @@ def test_unify_kv_cache_configs():
             },
             kv_cache_groups=[
                 KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
-                KVCacheGroupSpec(["layer2"],
-                                 new_kv_cache_spec(num_kv_heads=4)),
+                KVCacheGroupSpec(["layer2"], new_kv_cache_spec(num_kv_heads=4)),
             ],
         ),
         KVCacheConfig(
@@ -401,8 +399,7 @@ def test_unify_kv_cache_configs():
             },
             kv_cache_groups=[
                 KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
-                KVCacheGroupSpec(["layer2"],
-                                 new_kv_cache_spec(num_kv_heads=4)),
+                KVCacheGroupSpec(["layer2"], new_kv_cache_spec(num_kv_heads=4)),
             ],
         ),
     ]
@@ -419,8 +416,7 @@ def test_unify_kv_cache_configs():
             },
             kv_cache_groups=[
                 KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
-                KVCacheGroupSpec(["layer2"],
-                                 new_kv_cache_spec(num_kv_heads=4)),
+                KVCacheGroupSpec(["layer2"], new_kv_cache_spec(num_kv_heads=4)),
             ],
         ),
         KVCacheConfig(
@@ -430,8 +426,7 @@ def test_unify_kv_cache_configs():
                 "layer2": KVCacheTensor(100),
             },
             kv_cache_groups=[
-                KVCacheGroupSpec(["layer2"],
-                                 new_kv_cache_spec(num_kv_heads=4)),
+                KVCacheGroupSpec(["layer2"], new_kv_cache_spec(num_kv_heads=4)),
                 KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
             ],
         ),
@@ -450,8 +445,7 @@ def test_unify_kv_cache_configs():
             },
             kv_cache_groups=[
                 KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
-                KVCacheGroupSpec(["layer2"],
-                                 new_kv_cache_spec(num_kv_heads=4)),
+                KVCacheGroupSpec(["layer2"], new_kv_cache_spec(num_kv_heads=4)),
             ],
         ),
         KVCacheConfig(
@@ -462,8 +456,7 @@ def test_unify_kv_cache_configs():
             },
             kv_cache_groups=[
                 KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
-                KVCacheGroupSpec(["layer2"],
-                                 new_kv_cache_spec(num_kv_heads=8)),
+                KVCacheGroupSpec(["layer2"], new_kv_cache_spec(num_kv_heads=8)),
             ],
         ),
     ]
@@ -471,13 +464,11 @@ def test_unify_kv_cache_configs():
         unify_kv_cache_configs(diff_kv_cache_config)
 
 
-@pytest.mark.parametrize(
-    ("model_id", "max_model_len", "want_estimated_max_len"), [
-        ("Qwen/Qwen1.5-7B", 16385, 16384),
-        ("Qwen/Qwen1.5-7B", 16383, 16383),
-    ])
-def test_estimate_max_model_len(model_id, max_model_len,
-                                want_estimated_max_len):
+@pytest.mark.parametrize(("model_id", "max_model_len", "want_estimated_max_len"), [
+    ("Qwen/Qwen1.5-7B", 16385, 16384),
+    ("Qwen/Qwen1.5-7B", 16383, 16383),
+])
+def test_estimate_max_model_len(model_id, max_model_len, want_estimated_max_len):
     # Create a VllmConfig
     model_config = ModelConfig(
         model_id,
@@ -522,8 +513,7 @@ def test_allocate_with_lookahead():
             "layer1": KVCacheTensor(100),
         },
         kv_cache_groups=[
-            KVCacheGroupSpec(["layer1"],
-                             new_kv_cache_spec(block_size=block_size)),
+            KVCacheGroupSpec(["layer1"], new_kv_cache_spec(block_size=block_size)),
         ],
     )
 
@@ -535,8 +525,7 @@ def test_allocate_with_lookahead():
     )
 
     # Test case 1: Requires additional lookahead tokens
-    kv_cache_manager = KVCacheManager(kv_cache_config=config,
-                                      max_model_len=100)
+    kv_cache_manager = KVCacheManager(kv_cache_config=config, max_model_len=100)
     blocks = kv_cache_manager.allocate_slots(
         request,
         num_tokens=3,
@@ -545,8 +534,7 @@ def test_allocate_with_lookahead():
     assert len(blocks) == 2  # ceil(5/4)=2 blocks
 
     # Test case 2: With precomputed blocks
-    kv_cache_manager = KVCacheManager(kv_cache_config=config,
-                                      max_model_len=100)
+    kv_cache_manager = KVCacheManager(kv_cache_config=config, max_model_len=100)
     # required_blocks = ceil((3 + 2) /4) = 2
     blocks = kv_cache_manager.allocate_slots(
         request,
@@ -557,8 +545,7 @@ def test_allocate_with_lookahead():
 
     # Test case 3: With precomputed blocks
     # required_blocks = ceil((3 + 4) / 4) = 2
-    kv_cache_manager = KVCacheManager(kv_cache_config=config,
-                                      max_model_len=100)
+    kv_cache_manager = KVCacheManager(kv_cache_config=config, max_model_len=100)
     blocks = kv_cache_manager.allocate_slots(
         request,
         num_tokens=3,

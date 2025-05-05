@@ -51,10 +51,7 @@ def dense_to_crow_col(x: torch.Tensor):
     crows = torch.vstack([torch.from_numpy(xi.indptr) for xi in x])
     cols = [torch.from_numpy(xi.indices) for xi in x]
     max_cols = max(len(xi) for xi in cols)
-    cols = [
-        torch.cat([xi, pad + xi.new_zeros(max_cols - xi.shape[0])])
-        for xi in cols
-    ]
+    cols = [torch.cat([xi, pad + xi.new_zeros(max_cols - xi.shape[0])]) for xi in cols]
     cols = torch.vstack(cols)
     if dim == 2:
         crows = crows[0]
@@ -128,8 +125,8 @@ def _get_sparse_attn_mask_homo_head(
             block_mask_dense,
             block_mask_dense.new_ones((block_size, block_size)),
         )
-        causal_mask = torch.tril(torch.ones(
-            max_seqlen, max_seqlen)).type_as(mask_dense)[-q_len:]
+        causal_mask = torch.tril(torch.ones(max_seqlen,
+                                            max_seqlen)).type_as(mask_dense)[-q_len:]
         mask_dense = mask_dense[-q_len:, :max_seqlen] * causal_mask
         return (
             block_mask_dense_output,
@@ -150,9 +147,7 @@ def binary_mask_to_bias(mask_dense: torch.Tensor):
     return mask_dense
 
 
-def get_head_sliding_step(n_heads: int,
-                          vert_stride: int,
-                          homo_head: bool = False):
+def get_head_sliding_step(n_heads: int, vert_stride: int, homo_head: bool = False):
     if homo_head:
         return 0
     return max(1, int(vert_stride / n_heads))
@@ -185,22 +180,21 @@ def get_sparse_attn_mask(
     assert dense_mask_type in ("binary", "bias")
     if homo_head:
         with torch.no_grad():
-            (crow, col), block_mask_dense, mask_dense = (
-                _get_sparse_attn_mask_homo_head(
-                    q_len,
-                    max_seqlen,
-                    dtype,
-                    device,
-                    block_size,
-                    local_blocks,
-                    vert_stride,
-                    return_dense,
-                ))
+            (crow,
+             col), block_mask_dense, mask_dense = (_get_sparse_attn_mask_homo_head(
+                 q_len,
+                 max_seqlen,
+                 dtype,
+                 device,
+                 block_size,
+                 local_blocks,
+                 vert_stride,
+                 return_dense,
+             ))
             crow = crow[None].expand(n_heads, crow.shape[0])
             col = col[None].expand(n_heads, col.shape[0])
             if return_dense:
-                mask_dense = mask_dense[None].expand(n_heads,
-                                                     *mask_dense.shape)
+                mask_dense = mask_dense[None].expand(n_heads, *mask_dense.shape)
                 if dense_mask_type == "bias":
                     mask_dense = binary_mask_to_bias(mask_dense)
             return (crow, col), block_mask_dense, mask_dense
@@ -211,8 +205,8 @@ def get_sparse_attn_mask(
         k_pos = torch.arange(num_blocks)[None, None]
         head_sliding_step = get_head_sliding_step(n_heads, vert_stride)
         mask_vert_strided = [
-            (torch.arange(num_blocks) + h * head_sliding_step + 1) %
-            vert_stride == 0 for h in range(n_heads)
+            (torch.arange(num_blocks) + h * head_sliding_step + 1) % vert_stride == 0
+            for h in range(n_heads)
         ]
         mask_vert_strided = torch.vstack(mask_vert_strided).unsqueeze(1)
         block_mask_dense = (((q_pos >= k_pos)
@@ -225,8 +219,8 @@ def get_sparse_attn_mask(
             block_mask_dense,
             block_mask_dense.new_ones((block_size, block_size)),
         )
-        causal_mask = torch.tril(torch.ones(
-            max_seqlen, max_seqlen)).type_as(mask_dense)[-q_len:]
+        causal_mask = torch.tril(torch.ones(max_seqlen,
+                                            max_seqlen)).type_as(mask_dense)[-q_len:]
         mask_dense = mask_dense[..., -q_len:, :max_seqlen] * causal_mask[None]
         if dense_mask_type == "bias":
             mask_dense = binary_mask_to_bias(mask_dense)

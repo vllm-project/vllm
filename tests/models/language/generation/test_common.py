@@ -87,11 +87,10 @@ AITER_MODEL_LIST = [
     ])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
-@pytest.mark.parametrize(
-    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False])
-def test_models(hf_runner, vllm_runner, example_prompts, model: str,
-                max_tokens: int, num_logprobs: int, use_rocm_aiter: bool,
-                monkeypatch) -> None:
+@pytest.mark.parametrize("use_rocm_aiter",
+                         [True, False] if current_platform.is_rocm() else [False])
+def test_models(hf_runner, vllm_runner, example_prompts, model: str, max_tokens: int,
+                num_logprobs: int, use_rocm_aiter: bool, monkeypatch) -> None:
 
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
@@ -112,21 +111,20 @@ def test_models(hf_runner, vllm_runner, example_prompts, model: str,
     use_prompt_embeds = os.getenv("VLLM_USE_V1") == "0"
 
     with hf_runner(model) as hf_model:
-        hf_outputs = hf_model.generate_greedy_logprobs_limit(
-            example_prompts, max_tokens, num_logprobs)
+        hf_outputs = hf_model.generate_greedy_logprobs_limit(example_prompts,
+                                                             max_tokens, num_logprobs)
 
-        prompt_embeds: Optional[list[torch.Tensor]] = ([] if use_prompt_embeds
-                                                       else None)
+        prompt_embeds: Optional[list[torch.Tensor]] = ([]
+                                                       if use_prompt_embeds else None)
 
         prompt_token_ids = []
         for prompt in example_prompts:
-            token_ids = hf_model.tokenizer(prompt,
-                                           return_tensors="pt").input_ids.to(
-                                               hf_model.model.device)
+            token_ids = hf_model.tokenizer(prompt, return_tensors="pt").input_ids.to(
+                hf_model.model.device)
             prompt_token_ids.append(token_ids)
             if prompt_embeds is not None:
-                prompt_embeds.append(hf_model.model.get_input_embeddings()(
-                    token_ids).squeeze(0))
+                prompt_embeds.append(
+                    hf_model.model.get_input_embeddings()(token_ids).squeeze(0))
 
     with vllm_runner(
             model,
@@ -136,8 +134,8 @@ def test_models(hf_runner, vllm_runner, example_prompts, model: str,
             max_num_seqs=2,
             enable_prompt_embeds=use_prompt_embeds,
     ) as vllm_model:
-        vllm_outputs = vllm_model.generate_greedy_logprobs(
-            example_prompts, max_tokens, num_logprobs)
+        vllm_outputs = vllm_model.generate_greedy_logprobs(example_prompts, max_tokens,
+                                                           num_logprobs)
         if prompt_embeds is not None:
             vllm_outputs_from_embeds = vllm_model.generate_greedy_logprobs(
                 prompt_embeds, max_tokens, num_logprobs)

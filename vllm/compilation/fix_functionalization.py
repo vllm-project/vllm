@@ -104,8 +104,7 @@ class FixFunctionalizationPass(VllmInductorPass):
         self.dump_graph(graph, "after_fix_functionalization")
         self.end_and_log()
 
-    def _remove(self, node_or_nodes: Union[torch.fx.Node,
-                                           Iterable[torch.fx.Node]]):
+    def _remove(self, node_or_nodes: Union[torch.fx.Node, Iterable[torch.fx.Node]]):
         """
         Stage a node (or nodes) for removal at the end of the pass.
         """
@@ -118,8 +117,7 @@ class FixFunctionalizationPass(VllmInductorPass):
                         graph: torch.fx.Graph,
                         node: torch.fx.Node,
                         mutated_args: Dict[int, Union[torch.fx.Node, str]],
-                        args: Optional[Tuple[Union[torch.fx.Node, str],
-                                             ...]] = None):
+                        args: Optional[Tuple[Union[torch.fx.Node, str], ...]] = None):
         """
         De-functionalize a node by replacing it with a call to the original.
         It also replaces the getitem users with the mutated arguments.
@@ -130,9 +128,8 @@ class FixFunctionalizationPass(VllmInductorPass):
         self._remove(node)
 
     def replace_users_with_mutated_args(self, node: torch.fx.Node,
-                                        mutated_args: Dict[int,
-                                                           Union[torch.fx.Node,
-                                                                 str]]):
+                                        mutated_args: Dict[int, Union[torch.fx.Node,
+                                                                      str]]):
         """
         Replace all getitem users of the auto-functionalized node with the
         mutated arguments.

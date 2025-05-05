@@ -53,8 +53,7 @@ class NeuronWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
                     "Cache operations are not supported for Neuron backend.")
         assert execute_model_req.num_lookahead_slots == 0, (
             "lookahead not supported for Neuron backend.")
-        output = LocalOrDistributedWorkerBase.execute_model(
-            self, execute_model_req)
+        output = LocalOrDistributedWorkerBase.execute_model(self, execute_model_req)
         return output
 
     def init_device(self) -> None:
@@ -83,8 +82,7 @@ class NeuronWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
         return num_gpu_blocks, num_cpu_blocks
 
-    def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
+    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         """Initialize the KV cache.
         """
 
@@ -104,8 +102,8 @@ class NeuronWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         return None
 
     @torch.inference_mode()
-    def prepare_worker_input(
-            self, execute_model_req: ExecuteModelRequest) -> WorkerInput:
+    def prepare_worker_input(self,
+                             execute_model_req: ExecuteModelRequest) -> WorkerInput:
         return WorkerInput(num_seq_groups=len(
             execute_model_req.seq_group_metadata_list), )
 

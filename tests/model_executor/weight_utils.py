@@ -14,8 +14,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 def test_hf_transfer_auto_activation():
     if "HF_HUB_ENABLE_HF_TRANSFER" in os.environ:
         # in case it is already set, we can't test the auto activation
-        pytest.skip(
-            "HF_HUB_ENABLE_HF_TRANSFER is set, can't test auto activation")
+        pytest.skip("HF_HUB_ENABLE_HF_TRANSFER is set, can't test auto activation")
     enable_hf_transfer()
     try:
         # enable hf hub transfer if available
@@ -23,8 +22,7 @@ def test_hf_transfer_auto_activation():
         HF_TRANFER_ACTIVE = True
     except ImportError:
         HF_TRANFER_ACTIVE = False
-    assert (huggingface_hub.constants.HF_HUB_ENABLE_HF_TRANSFER ==
-            HF_TRANFER_ACTIVE)
+    assert (huggingface_hub.constants.HF_HUB_ENABLE_HF_TRANSFER == HF_TRANFER_ACTIVE)
 
 
 def test_download_weights_from_hf():
@@ -45,10 +43,9 @@ def test_download_weights_from_hf():
 
         # now it should work offline
         huggingface_hub.constants.HF_HUB_OFFLINE = True
-        assert download_weights_from_hf(
-            "facebook/opt-125m",
-            allow_patterns=["*.safetensors", "*.bin"],
-            cache_dir=tmpdir) is not None
+        assert download_weights_from_hf("facebook/opt-125m",
+                                        allow_patterns=["*.safetensors", "*.bin"],
+                                        cache_dir=tmpdir) is not None
 
 
 if __name__ == "__main__":

@@ -116,8 +116,7 @@ def test_flash_attn_with_paged_kv(
     assert num_query_heads % num_kv_heads == 0
     max_kv_len = max(kv_lens)
     scale = head_size**-0.5
-    window_size = ((sliding_window - 1, 0) if sliding_window is not None else
-                   (-1, -1))
+    window_size = ((sliding_window - 1, 0) if sliding_window is not None else (-1, -1))
 
     query = torch.randn(num_seqs, num_query_heads, head_size, dtype=dtype)
     key_cache = torch.randn(num_blocks,
@@ -130,8 +129,7 @@ def test_flash_attn_with_paged_kv(
 
     max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
     block_tables = torch.randint(0,
-                                 num_blocks,
-                                 (num_seqs, max_num_blocks_per_seq),
+                                 num_blocks, (num_seqs, max_num_blocks_per_seq),
                                  dtype=torch.int32)
 
     q = query.unsqueeze(1)
@@ -191,9 +189,8 @@ def test_flash_attn_with_paged_kv(
 
 
 @pytest.mark.parametrize("use_out", [True, False])
-@pytest.mark.parametrize("seq_lens",
-                         [[(1, 1328), (5, 18),
-                           (129, 463)], [(1, 523), (1, 37), (1, 2011)]])
+@pytest.mark.parametrize("seq_lens", [[(1, 1328), (5, 18),
+                                       (129, 463)], [(1, 523), (1, 37), (1, 2011)]])
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
@@ -233,14 +230,10 @@ def test_varlen_with_paged_kv(
     assert num_query_heads % num_kv_heads == 0
     max_query_len = max(query_lens)
     max_kv_len = max(kv_lens)
-    window_size = ((sliding_window - 1, 0) if sliding_window is not None else
-                   (-1, -1))
+    window_size = ((sliding_window - 1, 0) if sliding_window is not None else (-1, -1))
     scale = head_size**-0.5
 
-    query = torch.randn(sum(query_lens),
-                        num_query_heads,
-                        head_size,
-                        dtype=dtype)
+    query = torch.randn(sum(query_lens), num_query_heads, head_size, dtype=dtype)
     key_cache = torch.randn(num_blocks,
                             block_size,
                             num_kv_heads,
@@ -248,14 +241,12 @@ def test_varlen_with_paged_kv(
                             dtype=dtype)
     value_cache = torch.randn_like(key_cache)
     cu_query_lens = torch.tensor([0] + query_lens,
-                                 dtype=torch.int32).cumsum(dim=0,
-                                                           dtype=torch.int32)
+                                 dtype=torch.int32).cumsum(dim=0, dtype=torch.int32)
     kv_lens = torch.tensor(kv_lens, dtype=torch.int32)
 
     max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
     block_tables = torch.randint(0,
-                                 num_blocks,
-                                 (num_seqs, max_num_blocks_per_seq),
+                                 num_blocks, (num_seqs, max_num_blocks_per_seq),
                                  dtype=torch.int32)
 
     out = torch.empty_like(query) if use_out else None

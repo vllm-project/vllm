@@ -77,9 +77,7 @@ class PromptIndexTargets:
             else:
                 if isinstance(prefix, str):
                     # Make both `list[int]`
-                    prefix = encode_tokens(tokenizer,
-                                           prefix,
-                                           add_special_tokens=False)
+                    prefix = encode_tokens(tokenizer, prefix, add_special_tokens=False)
 
             match_idx = len(prefix)
             return match_idx if prompt[:match_idx] == prefix else None
@@ -159,8 +157,7 @@ If only part of the content corresponds to feature placeholders, you can
 use {class}`PromptUpdateDetails` to specify which part.
 """
 
-PromptUpdateContent = Union[Callable[[int], PromptUpdateInfo],
-                            PromptUpdateInfo]
+PromptUpdateContent = Union[Callable[[int], PromptUpdateInfo], PromptUpdateInfo]
 """
 Given the index of the processed item within {attr}`modality`,
 output the corresponding token sequence (or text).
@@ -352,9 +349,7 @@ def _cached_encode(
     *,
     add_special_tokens: Optional[bool] = None,
 ) -> list[int]:
-    return encode_tokens(tokenizer,
-                         text,
-                         add_special_tokens=add_special_tokens)
+    return encode_tokens(tokenizer, text, add_special_tokens=add_special_tokens)
 
 
 @lru_cache(maxsize=2048)
@@ -495,10 +490,8 @@ class BoundPromptUpdate:
         if not isinstance(content, PromptUpdateDetails):
             content = PromptUpdateDetails.from_seq(content)
 
-        bound_full = _BoundPromptSequence.from_seq(self.tokenizer,
-                                                   content.full)
-        bound_content = _BoundPromptContent(full=bound_full,
-                                            is_embed=content.is_embed)
+        bound_full = _BoundPromptSequence.from_seq(self.tokenizer, content.full)
+        bound_content = _BoundPromptContent(full=bound_full, is_embed=content.is_embed)
 
         if cache_key is not None:
             self._content_cache[cache_key] = bound_content
@@ -671,9 +664,7 @@ def find_token_matches(
             for match in iter_token_matches(prompt, target.token_ids)
         ]
 
-    return [
-        match for update in prompt_updates for match in get_matches(update)
-    ]
+    return [match for update in prompt_updates for match in get_matches(update)]
 
 
 def find_text_matches(
@@ -697,9 +688,7 @@ def find_text_matches(
             for match in re.finditer(re.escape(target.text), prompt)
         ]
 
-    return [
-        match for update in prompt_updates for match in get_matches(update)
-    ]
+    return [match for update in prompt_updates for match in get_matches(update)]
 
 
 def _resolve_matches(
@@ -762,8 +751,8 @@ def _apply_matches(
 
         for item_idx in range(item_start_idx, item_end_idx):
             content = origin.get_content(item_idx)
-            insert_seq = (content.full.text if isinstance(prompt, str) else
-                          content.full.token_ids)
+            insert_seq = (content.full.text
+                          if isinstance(prompt, str) else content.full.token_ids)
 
             out_seqs.append(insert_seq)
 
@@ -913,8 +902,8 @@ class ProcessingCache:
             return sys.getsizeof(leaf)
 
         def get_item_size(
-            value: Union[MultiModalKwargs, MultiModalKwargsItem,
-                         Mapping[str, NestedTensors]]
+            value: Union[MultiModalKwargs, MultiModalKwargsItem, Mapping[str,
+                                                                         NestedTensors]]
         ) -> int:
             size = json_reduce_leaves(
                 lambda a, b: a + b,
@@ -922,8 +911,8 @@ class ProcessingCache:
             )
 
             if debug:
-                logger.debug("Calculated size of %s to be %.2f GiB",
-                             type(value), size / GiB_bytes)
+                logger.debug("Calculated size of %s to be %.2f GiB", type(value),
+                             size / GiB_bytes)
 
             return size
 
@@ -1073,8 +1062,8 @@ class BaseProcessingInfo:
         for modality, supported_limit in supported_mm_limits.items():
             user_limit = mm_config.get_limit_per_prompt(modality)
 
-            allowed_limits[modality] = (user_limit if supported_limit is None
-                                        else min(user_limit, supported_limit))
+            allowed_limits[modality] = (user_limit if supported_limit is None else min(
+                user_limit, supported_limit))
 
         return allowed_limits
 
@@ -1143,17 +1132,15 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             num_items = len(items)
 
             if supported_limit is not None and num_items > supported_limit:
-                raise ValueError(
-                    f"The model only supports at most {supported_limit} "
-                    f"{modality} items, but you passed {num_items} "
-                    f"{modality} items in the same prompt.")
+                raise ValueError(f"The model only supports at most {supported_limit} "
+                                 f"{modality} items, but you passed {num_items} "
+                                 f"{modality} items in the same prompt.")
 
             if num_items > allowed_limit:
-                raise ValueError(
-                    "You set or defaulted to "
-                    f"'{json.dumps({modality: allowed_limit})}' in "
-                    f"`--limit-mm-per-prompt`, but passed {num_items} "
-                    f"{modality} items in the same prompt.")
+                raise ValueError("You set or defaulted to "
+                                 f"'{json.dumps({modality: allowed_limit})}' in "
+                                 f"`--limit-mm-per-prompt`, but passed {num_items} "
+                                 f"{modality} items in the same prompt.")
 
         return mm_items
 
@@ -1194,8 +1181,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         new_token_ids: list[int],
         mm_item_counts: Mapping[str, int],
     ) -> Mapping[str, list[PlaceholderFeaturesInfo]]:
-        return find_mm_placeholders(mm_prompt_updates, new_token_ids,
-                                    mm_item_counts)
+        return find_mm_placeholders(mm_prompt_updates, new_token_ids, mm_item_counts)
 
     def _get_hf_mm_data(
         self,
@@ -1377,23 +1363,20 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         cache: ProcessingCache,
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[dict[str, list[ProcessingCacheOptionalItem]], dict[
-            str, list[object]]]:
+    ) -> tuple[dict[str, list[ProcessingCacheOptionalItem]], dict[str, list[object]]]:
         model_id = self.info.model_id
 
         mm_cache_items = {
             modality: [
-                cache.get_item(model_id, modality, item,
-                               hf_processor_mm_kwargs) for item in items
+                cache.get_item(model_id, modality, item, hf_processor_mm_kwargs)
+                for item in items
             ]
             for modality, items in mm_data_items.items()
         }
 
         mm_missing_idxs = {
-            modality: [
-                idx for idx, item in enumerate(cache_items)
-                if item.value is None
-            ]
+            modality:
+            [idx for idx, item in enumerate(cache_items) if item.value is None]
             for modality, cache_items in mm_cache_items.items()
         }
         mm_missing_data = {
@@ -1415,8 +1398,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             modality: [
                 MultiModalHasher.hash_kwargs(model_id=model_id,
                                              **{modality: item},
-                                             **hf_processor_mm_kwargs)
-                for item in items
+                                             **hf_processor_mm_kwargs) for item in items
             ]
             for modality, items in mm_items.items()
         }
@@ -1624,9 +1606,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 mm_item_counts,
             )
 
-            token_ids = encode_tokens(tokenizer,
-                                      text,
-                                      add_special_tokens=False)
+            token_ids = encode_tokens(tokenizer, text, add_special_tokens=False)
             matched_updates = {
                 modality: [match._origin for match in token_matches]
                 for modality, token_matches in mm_text_matches.items()
@@ -1695,8 +1675,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             hf_processor_mm_kwargs,
             mm_kwargs,
         )
-        mm_prompt_updates = self._bind_and_group_updates(
-            unbound_prompt_updates)
+        mm_prompt_updates = self._bind_and_group_updates(unbound_prompt_updates)
 
         mm_item_counts = mm_items.get_all_counts()
         self._validate_mm_kwargs(mm_kwargs, mm_item_counts)

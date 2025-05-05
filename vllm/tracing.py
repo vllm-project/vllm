@@ -51,10 +51,9 @@ def is_otel_available() -> bool:
 def init_tracer(instrumenting_module_name: str,
                 otlp_traces_endpoint: str) -> Optional[Tracer]:
     if not is_otel_available():
-        raise ValueError(
-            "OpenTelemetry is not available. Unable to initialize "
-            "a tracer. Ensure OpenTelemetry packages are installed. "
-            f"Original error:\n{otel_import_error_traceback}")
+        raise ValueError("OpenTelemetry is not available. Unable to initialize "
+                         "a tracer. Ensure OpenTelemetry packages are installed. "
+                         f"Original error:\n{otel_import_error_traceback}")
     trace_provider = TracerProvider()
 
     span_exporter = get_span_exporter(otlp_traces_endpoint)
@@ -74,14 +73,12 @@ def get_span_exporter(endpoint):
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
             OTLPSpanExporter)  # type: ignore
     else:
-        raise ValueError(
-            f"Unsupported OTLP protocol '{protocol}' is configured")
+        raise ValueError(f"Unsupported OTLP protocol '{protocol}' is configured")
 
     return OTLPSpanExporter(endpoint=endpoint)
 
 
-def extract_trace_context(
-        headers: Optional[Mapping[str, str]]) -> Optional[Context]:
+def extract_trace_context(headers: Optional[Mapping[str, str]]) -> Optional[Context]:
     if is_otel_available():
         headers = headers or {}
         return TraceContextTextMapPropagator().extract(headers)
@@ -112,12 +109,10 @@ class SpanAttributes:
     GEN_AI_LATENCY_E2E = "gen_ai.latency.e2e"
     GEN_AI_LATENCY_TIME_IN_SCHEDULER = "gen_ai.latency.time_in_scheduler"
     # Time taken in the forward pass for this across all workers
-    GEN_AI_LATENCY_TIME_IN_MODEL_FORWARD = (
-        "gen_ai.latency.time_in_model_forward")
+    GEN_AI_LATENCY_TIME_IN_MODEL_FORWARD = ("gen_ai.latency.time_in_model_forward")
     # Time taken in the model execute function. This will include model
     # forward, block/sync across workers, cpu-gpu sync time and sampling time.
-    GEN_AI_LATENCY_TIME_IN_MODEL_EXECUTE = (
-        "gen_ai.latency.time_in_model_execute")
+    GEN_AI_LATENCY_TIME_IN_MODEL_EXECUTE = ("gen_ai.latency.time_in_model_execute")
 
 
 def contains_trace_headers(headers: Mapping[str, str]) -> bool:
@@ -126,5 +121,4 @@ def contains_trace_headers(headers: Mapping[str, str]) -> bool:
 
 @run_once
 def log_tracing_disabled_warning() -> None:
-    logger.warning(
-        "Received a request with trace context but tracing is disabled")
+    logger.warning("Received a request with trace context but tracing is disabled")

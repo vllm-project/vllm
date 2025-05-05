@@ -43,8 +43,7 @@ def test_appends_token_ids(num_new_tokens: int, seq_output_len: int):
     seq_group = create_seq_group(
         seq_prompt_len=1024,
         seq_output_lens=[seq_output_len],
-        sampling_params=SamplingParams(max_tokens=seq_output_len +
-                                       num_new_tokens,
+        sampling_params=SamplingParams(max_tokens=seq_output_len + num_new_tokens,
                                        ignore_eos=True),
     )
 

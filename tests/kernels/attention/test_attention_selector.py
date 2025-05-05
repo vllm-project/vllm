@@ -46,9 +46,7 @@ def generate_params():
             backends = DEVICE_MLA_BACKENDS[
                 device] if use_mla else DEVICE_REGULAR_ATTN_BACKENDS[device]
             for name in backends:
-                block_sizes = DEVICE_MLA_BLOCK_SIZES[device] if use_mla else [
-                    16
-                ]
+                block_sizes = DEVICE_MLA_BLOCK_SIZES[device] if use_mla else [16]
                 for block_size in block_sizes:
                     params.append(
                         pytest.param(
@@ -56,14 +54,12 @@ def generate_params():
                             name,
                             use_mla,
                             block_size,
-                            id=
-                            f"{device}_{name}_mla_{str(use_mla)[0]}_blks{block_size}"
+                            id=f"{device}_{name}_mla_{str(use_mla)[0]}_blks{block_size}"
                         ))
     return params
 
 
-@pytest.mark.parametrize("device, name, use_mla, block_size",
-                         generate_params())
+@pytest.mark.parametrize("device, name, use_mla, block_size", generate_params())
 @pytest.mark.parametrize("use_v1", [True, False])
 def test_env(
     device: str,
@@ -80,20 +76,17 @@ def test_env(
         m.setenv("VLLM_MLA_DISABLE", "1" if use_mla else "0")
 
         if device == "cpu":
-            with patch("vllm.attention.selector.current_platform",
-                       CpuPlatform()):
-                backend = get_attn_backend(16, torch.float16, torch.float16,
-                                           block_size, False)
+            with patch("vllm.attention.selector.current_platform", CpuPlatform()):
+                backend = get_attn_backend(16, torch.float16, torch.float16, block_size,
+                                           False)
             assert backend.get_name() == "TORCH_SDPA"
 
         elif device == "hip":
-            with patch("vllm.attention.selector.current_platform",
-                       RocmPlatform()):
+            with patch("vllm.attention.selector.current_platform", RocmPlatform()):
                 if use_mla:
                     # Validate HIP MLA backend-block_size combinations
-                    valid_combination = (
-                        (name == "TRITON_MLA" and block_size != 1)
-                        or (name == "ROCM_AITER_MLA" and block_size == 1))
+                    valid_combination = ((name == "TRITON_MLA" and block_size != 1) or
+                                         (name == "ROCM_AITER_MLA" and block_size == 1))
 
                     if valid_combination:
                         backend = get_attn_backend(16,
@@ -111,8 +104,7 @@ def test_env(
                                              block_size,
                                              False,
                                              use_mla=use_mla)
-                        assert f"The selected backend, {name}" in str(
-                            exc_info.value)
+                        assert f"The selected backend, {name}" in str(exc_info.value)
                 else:
                     backend = get_attn_backend(16,
                                                torch.float16,
@@ -124,8 +116,7 @@ def test_env(
                     assert backend.get_name() == expected
 
         elif device == "cuda":
-            with patch("vllm.attention.selector.current_platform",
-                       CudaPlatform()):
+            with patch("vllm.attention.selector.current_platform", CudaPlatform()):
                 if use_mla:
                     if name == "FLASHMLA" and block_size == 64:
                         from vllm.attention.backends.flashmla import (
@@ -153,8 +144,7 @@ def test_env(
                                                    block_size,
                                                    False,
                                                    use_mla=use_mla)
-                        expected = ("TRITON_MLA_VLLM_V1"
-                                    if use_v1 else "TRITON_MLA")
+                        expected = ("TRITON_MLA_VLLM_V1" if use_v1 else "TRITON_MLA")
                         assert backend.get_name() == expected
                 elif name == "FLASHINFER":
                     backend = get_attn_backend(16,
@@ -185,8 +175,7 @@ def test_flash_attn(monkeypatch: pytest.MonkeyPatch):
         m.setenv(STR_BACKEND_ENV_VAR, STR_FLASH_ATTN_VAL)
 
         # Unsupported CUDA arch
-        monkeypatch.setattr(torch.cuda, "get_device_capability", lambda:
-                            (7, 5))
+        monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (7, 5))
         backend = get_attn_backend(16, torch.float16, None, 16, False)
         assert backend.get_name() != STR_FLASH_ATTN_VAL
 
@@ -214,8 +203,7 @@ def test_flash_attn(monkeypatch: pytest.MonkeyPatch):
 
         # Restore the original module if it existed
         if original_module is not None:
-            monkeypatch.setitem(sys.modules, 'vllm_flash_attn',
-                                original_module)
+            monkeypatch.setitem(sys.modules, 'vllm_flash_attn', original_module)
         else:
             monkeypatch.delitem(sys.modules, 'vllm_flash_attn', raising=False)
 
@@ -231,8 +219,8 @@ def test_flash_attn(monkeypatch: pytest.MonkeyPatch):
 @pytest.mark.parametrize("use_v1", [True, False])
 def test_invalid_env(use_v1: bool, monkeypatch: pytest.MonkeyPatch):
 
-    with monkeypatch.context() as m, patch(
-            "vllm.attention.selector.current_platform", CudaPlatform()):
+    with monkeypatch.context() as m, patch("vllm.attention.selector.current_platform",
+                                           CudaPlatform()):
         m.setenv("VLLM_USE_V1", "1" if use_v1 else "0")
         m.setenv(STR_BACKEND_ENV_VAR, STR_INVALID_VAL)
 

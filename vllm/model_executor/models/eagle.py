@@ -94,9 +94,8 @@ class EAGLE(nn.Module):
             self.model.model.layers[0].input_layernorm = DummyInputLayerNorm(
                 weight=self.model.model.layers[0].input_layernorm.weight)
 
-        if not hasattr(
-                self.config.model,
-                "skip_output_norm") or self.config.model.skip_output_norm:
+        if not hasattr(self.config.model,
+                       "skip_output_norm") or self.config.model.skip_output_norm:
             self.model.model.norm = DummyOutputNorm()
 
         self.add_para_norm = False
@@ -119,8 +118,7 @@ class EAGLE(nn.Module):
 
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                self.truncated_vocab_size,
-                                                logit_scale)
+                                                self.truncated_vocab_size, logit_scale)
 
         # Token map is a idx to token mapping to reduce the vocab size for
         # the draft model. Using smaller vocab size for draft, containing
@@ -146,14 +144,11 @@ class EAGLE(nn.Module):
             inputs_embeds = self.get_input_embeddings(input_ids)
 
         if self.add_para_norm:
-            inputs_embeds = torch.cat([
-                self.enorm(inputs_embeds),
-                self.hnorm(previous_hidden_states)
-            ],
-                                      dim=-1)
+            inputs_embeds = torch.cat(
+                [self.enorm(inputs_embeds),
+                 self.hnorm(previous_hidden_states)], dim=-1)
         else:
-            inputs_embeds = torch.cat([inputs_embeds, previous_hidden_states],
-                                      dim=-1)
+            inputs_embeds = torch.cat([inputs_embeds, previous_hidden_states], dim=-1)
 
         inputs_embeds = self.fc(inputs_embeds)
 
@@ -169,8 +164,7 @@ class EAGLE(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
 
         if self.token_map is not None:
             _logits = logits
@@ -194,8 +188,7 @@ class EAGLE(nn.Module):
         for name, loaded_weight in weights:
             if name == "token_map":
                 if self.config.truncated_vocab_size < self.config.vocab_size:
-                    self.token_map = nn.Parameter(loaded_weight,
-                                                  requires_grad=False)
+                    self.token_map = nn.Parameter(loaded_weight, requires_grad=False)
             elif name.startswith("fc.weight"):
                 weight_loader = getattr(self.fc.weight, "weight_loader",
                                         default_weight_loader)
@@ -216,8 +209,7 @@ class EAGLE(nn.Module):
                 weight_loader = getattr(self.hnorm.weight, "weight_loader",
                                         default_weight_loader)
                 weight_loader(self.hnorm.weight, loaded_weight)
-            elif name.startswith("model.lm_head.") or name.startswith(
-                    "model.model."):
+            elif name.startswith("model.lm_head.") or name.startswith("model.model."):
                 model_weights[name.split("model.", 1)[-1]] = loaded_weight
             elif name.startswith("lm_head.") or name.startswith("model."):
                 model_weights[name] = loaded_weight

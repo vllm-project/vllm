@@ -61,8 +61,7 @@ class BitBLASLinearKernel(MPLinearKernel):
         qweight = b_q_weight.T.contiguous().view(
             quant_config.torch_storage_dtype)  # type: ignore[union-attr]
         intweight = unpack_gptq_qweight(
-            qweight,
-            quant_config.weight_bits).contiguous()  # type: ignore[union-attr]
+            qweight, quant_config.weight_bits).contiguous()  # type: ignore[union-attr]
         if self.bitblas_matmul.weight_transform is not None:  # type: ignore[attr-defined]
             qweight = self.bitblas_matmul.weight_transform(  # type: ignore[attr-defined]
                 intweight.cpu()).cuda()
@@ -89,9 +88,9 @@ class BitBLASLinearKernel(MPLinearKernel):
                     general_compress(
                         intzeros.T.contiguous().cpu().numpy(),
                         weight_bits,
-                    )).to(qweight.device).
-                to(quant_config.torch_storage_dtype  # type: ignore[union-attr]
-                   ).contiguous())
+                    )).to(qweight.device).to(
+                        quant_config.torch_storage_dtype  # type: ignore[union-attr]
+                    ).contiguous())
         else:
             raise ValueError("Unsupported zeros type: {}".format(zeros_mode))
 
@@ -102,17 +101,15 @@ class BitBLASLinearKernel(MPLinearKernel):
         return 70
 
     @classmethod
-    def can_implement(cls,
-                      c: MPLinearLayerConfig) -> Tuple[bool, Optional[str]]:
+    def can_implement(cls, c: MPLinearLayerConfig) -> Tuple[bool, Optional[str]]:
 
         is_bitblas_installed = True
 
         try:
             import bitblas
             if bitblas.__version__ < MINIMUM_BITBLAS_VERSION:
-                raise ImportError(
-                    "bitblas version is wrong. Please "
-                    f"install bitblas>={MINIMUM_BITBLAS_VERSION}")
+                raise ImportError("bitblas version is wrong. Please "
+                                  f"install bitblas>={MINIMUM_BITBLAS_VERSION}")
         except ImportError:
             is_bitblas_installed = False
 
@@ -260,14 +257,12 @@ class BitBLASLinearKernel(MPLinearKernel):
 
         bitblas_matmul = global_operator_cache.get(config)
         if bitblas_matmul is None:
-            bitblas_matmul = Matmul(config,
-                                    target=BITBLAS_TARGET,
-                                    enable_tuning=False)
+            bitblas_matmul = Matmul(config, target=BITBLAS_TARGET, enable_tuning=False)
             if enable_tuning:
                 bitblas_matmul.hardware_aware_finetune(topk=20)
                 global_operator_cache.add(config, bitblas_matmul)
-                global_operator_cache.save_into_database(
-                    BITBLAS_DATABASE_PATH, BITBLAS_TARGET)
+                global_operator_cache.save_into_database(BITBLAS_DATABASE_PATH,
+                                                         BITBLAS_TARGET)
                 TUNING_MESSAGE = (
                     f"BitBLAS Operator {config} tuned and saved to database.")
                 logger.info(TUNING_MESSAGE)

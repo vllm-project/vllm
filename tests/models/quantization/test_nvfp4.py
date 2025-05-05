@@ -38,8 +38,7 @@ EXPECTED_STRS_MAP = {
 # the hardware being run on.
 # Disabled to prevent it from breaking the build
 @pytest.mark.skip(
-    reason=
-    "Prevent unstable test based on golden strings from breaking the build "
+    reason="Prevent unstable test based on golden strings from breaking the build "
     " and test input model being too large and hanging the system.")
 @pytest.mark.skipif(not is_quant_method_supported("nvfp4"),
                     reason="nvfp4 is not supported on this GPU type.")

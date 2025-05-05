@@ -56,9 +56,7 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.eh_proj = nn.Linear(config.hidden_size * 2,
-                                 config.hidden_size,
-                                 bias=False)
+        self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
         self.shared_head = SharedHead(config=config, quant_config=quant_config)
         self.mtp_block = DeepseekV2DecoderLayer(config, prefix, model_config,
                                                 cache_config, quant_config)
@@ -106,8 +104,8 @@ class DeepSeekMultiTokenPredictor(nn.Module):
                 cache_config=vllm_config.cache_config,
                 quant_config=vllm_config.quant_config,
             )
-            for idx in range(self.mtp_start_layer_idx,
-                             self.mtp_start_layer_idx + self.num_mtp_layers)
+            for idx in range(self.mtp_start_layer_idx, self.mtp_start_layer_idx +
+                             self.num_mtp_layers)
         })
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
@@ -136,8 +134,7 @@ class DeepSeekMultiTokenPredictor(nn.Module):
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         current_step_idx = (spec_step_idx % self.num_mtp_layers)
-        mtp_layer = self.layers[str(self.mtp_start_layer_idx +
-                                    current_step_idx)]
+        mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]
         logits = self.logits_processor(mtp_layer.shared_head.head,
                                        mtp_layer.shared_head(hidden_states),
                                        sampling_metadata)
@@ -150,8 +147,7 @@ class DeepSeekMTP(nn.Module):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
         self.model = DeepSeekMultiTokenPredictor(vllm_config=vllm_config,
-                                                 prefix=maybe_prefix(
-                                                     prefix, "model"))
+                                                 prefix=maybe_prefix(prefix, "model"))
 
     def forward(
         self,
@@ -162,9 +158,8 @@ class DeepSeekMTP(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions,
-                                   previous_hidden_states, inputs_embeds,
-                                   spec_step_idx)
+        hidden_states = self.model(input_ids, positions, previous_hidden_states,
+                                   inputs_embeds, spec_step_idx)
         return hidden_states
 
     def compute_logits(
@@ -176,8 +171,7 @@ class DeepSeekMTP(nn.Module):
         return self.model.compute_logits(hidden_states, sampling_metadata,
                                          spec_step_idx)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),

@@ -179,7 +179,4 @@ if prompt := st.chat_input("Type your message here..."):
             message_placeholder.markdown(full_response)
 
     # Save llm response to session history
-    st.session_state.messages.append({
-        "role": "assistant",
-        "content": full_response
-    })
+    st.session_state.messages.append({"role": "assistant", "content": full_response})

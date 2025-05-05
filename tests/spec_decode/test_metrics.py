@@ -41,9 +41,7 @@ def test_second_call_returns_metrics():
 
     collect_interval_s = 5.0
     timer = MagicMock()
-    timer.side_effect = [
-        0.0, collect_interval_s + 0.1, collect_interval_s + 0.2
-    ]
+    timer.side_effect = [0.0, collect_interval_s + 0.1, collect_interval_s + 0.2]
 
     collector = AsyncMetricsCollector(spec_decode_sampler=spec_decode_sampler,
                                       timer=timer,
@@ -178,9 +176,7 @@ def test_initial_metrics_has_correct_values(has_data: bool):
 
     collect_interval_s = 5.0
     timer = MagicMock()
-    timer.side_effect = [
-        0.0, collect_interval_s + 0.1, collect_interval_s + 0.2
-    ]
+    timer.side_effect = [0.0, collect_interval_s + 0.1, collect_interval_s + 0.2]
 
     collector = AsyncMetricsCollector(spec_decode_sampler=spec_decode_sampler,
                                       timer=timer,
@@ -195,8 +191,7 @@ def test_initial_metrics_has_correct_values(has_data: bool):
     assert metrics.emitted_tokens == num_emitted_tokens
 
     if has_data:
-        assert (metrics.draft_acceptance_rate == num_accepted_tokens /
-                num_draft_tokens)
+        assert (metrics.draft_acceptance_rate == num_accepted_tokens / num_draft_tokens)
         assert (metrics.system_efficiency == num_emitted_tokens /
                 max_num_emitted_tokens)
     else:

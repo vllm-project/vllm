@@ -36,8 +36,8 @@ def compute_meta(
     # does not need to launch the triton kernel, which can improve performance
     if batch_size == 1 and lora_indices_tensor == -1:
         no_lora = True
-    return (b_seq_start_tensor, seq_length_tensor, lora_indices_tensor,
-            batch_size, max_length, token_nums, no_lora)
+    return (b_seq_start_tensor, seq_length_tensor, lora_indices_tensor, batch_size,
+            max_length, token_nums, no_lora)
 
 
 # TODO see if this can be vectorized
@@ -93,8 +93,7 @@ def convert_mapping(
                                         device=device,
                                         dtype=torch.long)
     prompt_mapping: List[int] = [
-        lora_index_to_id.index(x) if x > 0 else -1
-        for x in mapping.prompt_mapping
+        lora_index_to_id.index(x) if x > 0 else -1 for x in mapping.prompt_mapping
     ]
     lora_idx = None
     for i in range(len(index_mapping_indices)):
@@ -131,8 +130,8 @@ def convert_mapping(
     sampler_indices_padded = sampler_indices.clone()
     sampler_indices_padded[sampler_indices_padded == -1] = max_loras - 1
     sampler_indices_padded = torch.arange(
-        0, len(sampler_indices_padded), device=device, dtype=torch.long) + (
-            sampler_indices_padded * len(sampler_indices_padded))
+        0, len(sampler_indices_padded), device=device,
+        dtype=torch.long) + (sampler_indices_padded * len(sampler_indices_padded))
     long_lora_indices = None
     long_lora_indices_len: Optional[int] = None
     if long_lora_context:

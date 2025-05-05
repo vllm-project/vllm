@@ -31,8 +31,7 @@ from vllm.attention.ops.nki_flash_attn import reshape_and_cache
         (4, 2, 16, 2, 16),  # Tiny test case
         (1, 1, 8, 1, 8),  # Minimal possible
     ])
-def test_reshape_and_cache(num_tokens, n_kv_head, d_head, num_blocks,
-                           block_size):
+def test_reshape_and_cache(num_tokens, n_kv_head, d_head, num_blocks, block_size):
     # Set random seed for reproducibility
     torch.manual_seed(42)
 
@@ -46,9 +45,7 @@ def test_reshape_and_cache(num_tokens, n_kv_head, d_head, num_blocks,
     slot_mapping_cpu = torch.randperm(num_blocks * block_size)[:num_tokens]
 
     # Run reference implementation on CPU
-    block_indices = torch.div(slot_mapping_cpu,
-                              block_size,
-                              rounding_mode="floor")
+    block_indices = torch.div(slot_mapping_cpu, block_size, rounding_mode="floor")
     block_offsets = slot_mapping_cpu % block_size
 
     for i in range(num_tokens):
@@ -75,10 +72,7 @@ def test_reshape_and_cache(num_tokens, n_kv_head, d_head, num_blocks,
     value_cache_result = value_cache.cpu()
 
     # Assert results match
-    torch.testing.assert_close(key_cache_result,
-                               key_cache_cpu,
-                               rtol=1e-5,
-                               atol=1e-5)
+    torch.testing.assert_close(key_cache_result, key_cache_cpu, rtol=1e-5, atol=1e-5)
     torch.testing.assert_close(value_cache_result,
                                value_cache_cpu,
                                rtol=1e-5,

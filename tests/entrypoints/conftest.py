@@ -148,8 +148,7 @@ def sample_enum_json_schema():
         "properties": {
             "status": {
                 "type": "string",
-                "enum": ["active", "inactive",
-                         "pending"]  # Literal values using enum
+                "enum": ["active", "inactive", "pending"]  # Literal values using enum
             },
             "priority": {
                 "type": "string",
@@ -164,8 +163,7 @@ def sample_enum_json_schema():
                     },
                     "severity": {
                         "type": "integer",
-                        "enum": [1, 2, 3, 4,
-                                 5]  # Enum can also contain numbers
+                        "enum": [1, 2, 3, 4, 5]  # Enum can also contain numbers
                     }
                 },
                 "required": ["type", "severity"]
@@ -185,8 +183,8 @@ def sample_enum_json_schema():
 @pytest.fixture
 def sample_guided_choice():
     return [
-        "Python", "Java", "JavaScript", "C++", "C#", "PHP", "TypeScript",
-        "Ruby", "Swift", "Kotlin"
+        "Python", "Java", "JavaScript", "C++", "C#", "PHP", "TypeScript", "Ruby",
+        "Swift", "Kotlin"
     ]
 
 

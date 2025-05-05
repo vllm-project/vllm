@@ -172,8 +172,7 @@ class ConformerEncoderLayer(nn.Module):
             attention_innner_dim,
             attention_glu_type,
             bias_in_glu,
-            use_pt_scaled_dot_product_attention=
-            use_pt_scaled_dot_product_attention,
+            use_pt_scaled_dot_product_attention=use_pt_scaled_dot_product_attention,
             group_size=attn_group_sizes,
         )
         self.conv = ConvModule(
@@ -336,8 +335,7 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
         relative_attention_bias_args=None,
         positional_dropout_rate=0.0,
         nemo_conv_settings=None,
-        conv2d_extra_padding: Literal["feat", "feat_time", "none",
-                                      True] = "none",
+        conv2d_extra_padding: Literal["feat", "feat_time", "none", True] = "none",
         attention_group_size=1,
         encoder_embedding_config=None,
     ):
@@ -368,9 +366,8 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
             if nemo_conv_settings:
                 default_nemo_conv_settings.update(nemo_conv_settings)
                 for i in ["subsampling_factor", "feat_in", "feat_out"]:
-                    assert (
-                        i not in nemo_conv_settings
-                    ), "{i} should be specified outside of the NeMo dictionary"
+                    assert (i not in nemo_conv_settings
+                            ), "{i} should be specified outside of the NeMo dictionary"
 
             self.embed = NemoConvSubsampling(**default_nemo_conv_settings, )
         else:
@@ -379,9 +376,8 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
         self.pos_emb = AbsolutePositionalEncoding(attention_dim,
                                                   positional_dropout_rate)
 
-        self.relative_attention_bias_type = (
-            relative_attention_bias_args.get("type")
-            if relative_attention_bias_args else None)
+        self.relative_attention_bias_type = (relative_attention_bias_args.get("type")
+                                             if relative_attention_bias_args else None)
         if self.relative_attention_bias_type == "t5":
             assert (self.num_heads % self.attention_group_size == 0
                     ), "attention_group_size must divide n_head"
@@ -389,8 +385,7 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
                 self.num_heads // self.attention_group_size,
                 max_distance=relative_attention_bias_args.get(
                     "t5_bias_max_distance", 1000),
-                symmetric=relative_attention_bias_args.get(
-                    "t5_bias_symmetric", False),
+                symmetric=relative_attention_bias_args.get("t5_bias_symmetric", False),
             )
         else:
             raise NotImplementedError
@@ -417,18 +412,16 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
                 ]
             is_causal = self.nemo_conv_settings.get("is_causal", False)
             if is_causal and subsampling_causal_cond:
-                lens_change = (torch.ceil(feature_lens /
-                                          self.time_reduction).long()
-                               if isinstance(feature_lens, Tensor) else
-                               math.ceil(feature_lens / self.time_reduction))
+                lens_change = (torch.ceil(feature_lens / self.time_reduction).long()
+                               if isinstance(feature_lens, Tensor) else math.ceil(
+                                   feature_lens / self.time_reduction))
                 feature_lens_remainder = feature_lens % self.time_reduction
                 if isinstance(feature_lens, Tensor):
                     lens_change[feature_lens_remainder != 1] += 1
                 elif feature_lens_remainder != 1:
                     lens_change += 1
                 return lens_change
-            ceil_func = (math.ceil
-                         if isinstance(feature_lens, int) else torch.ceil)
+            ceil_func = (math.ceil if isinstance(feature_lens, int) else torch.ceil)
             return ceil_func(feature_lens / self.time_reduction)
 
     @abc.abstractmethod
@@ -497,15 +490,10 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
 
         enc_streaming_mask = (adaptive_enc_mask(
             seq_len, chunk_start_idx,
-            left_window=left_chunk_train_eff).unsqueeze(0).expand(
-                [batch_size, -1, -1]))
+            left_window=left_chunk_train_eff).unsqueeze(0).expand([batch_size, -1, -1]))
         return enc_streaming_mask
 
-    def forward_embeddings(self,
-                           xs_pad,
-                           masks,
-                           chunk_size_nc=None,
-                           left_chunk_nc=None):
+    def forward_embeddings(self, xs_pad, masks, chunk_size_nc=None, left_chunk_nc=None):
         """Forwarding the inputs through the top embedding layers
 
         Args:
@@ -530,8 +518,7 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
 
         batch_size = xs_pad.shape[0]
 
-        enc_streaming_mask = self._streaming_mask(seq_len, batch_size,
-                                                  self.chunk_size,
+        enc_streaming_mask = self._streaming_mask(seq_len, batch_size, self.chunk_size,
                                                   self.left_chunk)
 
         if xs_pad.is_cuda:
@@ -539,8 +526,7 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
             xs_pad = xs_pad.cuda()
 
         input_tensor = xs_pad
-        input_tensor, masks = self._forward_embeddings_core(
-            input_tensor, masks)
+        input_tensor, masks = self._forward_embeddings_core(input_tensor, masks)
 
         streaming_mask = enc_streaming_mask
         if streaming_mask is not None and masks is not None:
@@ -551,8 +537,8 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
             hs_mask = streaming_mask
 
         if chunk_size_nc is not None:
-            enc_streaming_mask_nc = self._streaming_mask(
-                seq_len, batch_size, chunk_size_nc, left_chunk_nc)
+            enc_streaming_mask_nc = self._streaming_mask(seq_len, batch_size,
+                                                         chunk_size_nc, left_chunk_nc)
             if xs_pad.is_cuda:
                 enc_streaming_mask_nc = enc_streaming_mask_nc.cuda()
             if masks is not None:
@@ -784,8 +770,7 @@ class ConformerEncoder(TransformerEncoderBase):
         time_reduction=4,
         use_pt_scaled_dot_product_attention=False,
         nemo_conv_settings=None,
-        conv2d_extra_padding: Literal["feat", "feat_time", "none",
-                                      True] = "none",
+        conv2d_extra_padding: Literal["feat", "feat_time", "none", True] = "none",
         replication_pad_for_subsample_embedding=False,
         attention_group_size=1,
         encoder_embedding_config=None,
@@ -813,8 +798,8 @@ class ConformerEncoder(TransformerEncoderBase):
         self.kernel_size = kernel_size
         self.replication_pad_for_subsample_embedding: bool = (
             replication_pad_for_subsample_embedding)
-        assert (self.num_heads % attention_group_size == 0
-                ), "attention_group_size must divide n_head"
+        assert (self.num_heads %
+                attention_group_size == 0), "attention_group_size must divide n_head"
         self.num_heads_k = self.num_heads // attention_group_size
 
         self.encoders = MultiSequential(*[
@@ -840,8 +825,7 @@ class ConformerEncoder(TransformerEncoderBase):
                 attention_glu_type=attention_glu_type,
                 activation_checkpointing=activation_checkpointing,
                 export=export,
-                use_pt_scaled_dot_product_attention=
-                use_pt_scaled_dot_product_attention,
+                use_pt_scaled_dot_product_attention=use_pt_scaled_dot_product_attention,
                 attn_group_sizes=attention_group_size,
             ) for _ in range(num_blocks)
         ])
@@ -859,8 +843,7 @@ class ConformerEncoder(TransformerEncoderBase):
         max_audio_length = xs_pad.shape[1]
         batch_size = xs_pad.shape[0]
         enc_streaming_mask = self._streaming_mask(max_audio_length, batch_size,
-                                                  self.chunk_size,
-                                                  self.left_chunk)
+                                                  self.chunk_size, self.left_chunk)
         enc_streaming_mask = enc_streaming_mask.to(device)
         if mask is None:
             return enc_streaming_mask
@@ -868,8 +851,7 @@ class ConformerEncoder(TransformerEncoderBase):
         feature_lens = mask.sum(1)
         padding_length = feature_lens
         pad_mask = (torch.arange(0, max_audio_length,
-                                 device=device).expand(padding_length.size(0),
-                                                       -1)
+                                 device=device).expand(padding_length.size(0), -1)
                     < padding_length.unsqueeze(1))
         pad_mask = pad_mask.unsqueeze(1)
         pad_mask = pad_mask & enc_streaming_mask
@@ -903,9 +885,8 @@ class ConformerEncoder(TransformerEncoderBase):
             else:
                 chunk_pad_size = 0
             if chunk_pad_size > 0:
-                input_tensor_pad = F.pad(input_tensor,
-                                         (0, 0, 0, chunk_pad_size), "constant",
-                                         0)
+                input_tensor_pad = F.pad(input_tensor, (0, 0, 0, chunk_pad_size),
+                                         "constant", 0)
                 input_tensor = input_tensor_pad.to(input_tensor.device)
             input_tensor = unfold_tensor(input_tensor, max_seq_len)
             if masks is not None:
@@ -919,27 +900,25 @@ class ConformerEncoder(TransformerEncoderBase):
                 extra_padded_subsamlped_pad_mask = \
                     extra_padded_subsamlped_pad_mask.unsqueeze(-1).float()
                 masks_unfold = unfold_tensor(
-                    extra_padded_subsamlped_pad_mask, max_seq_len
-                )  # unfold the pad mask like we did to the input tensor
+                    extra_padded_subsamlped_pad_mask,
+                    max_seq_len)  # unfold the pad mask like we did to the input tensor
                 masks_unfold = masks_unfold.squeeze(
                     -1).bool()  # unfold op does not support bool tensor
             else:
                 masks_unfold = None
             hs_mask = self.calculate_hs_mask(
-                input_tensor, input_tensor.device, masks_unfold
-            )  # calculate hs_mask based on the unfolded pad mask
+                input_tensor, input_tensor.device,
+                masks_unfold)  # calculate hs_mask based on the unfolded pad mask
 
         # layer_emb = None
 
-        relative_attention_bias = self.init_relative_attention_bias(
-            input_tensor)
+        relative_attention_bias = self.init_relative_attention_bias(input_tensor)
 
         _simplified_path = (self.extra_layer_output_idx == -1
                             and relative_attention_bias is None)
 
         if _simplified_path:
-            input_tensor, *_ = self.encoders(input_tensor, pos_k, pos_v,
-                                             hs_mask)
+            input_tensor, *_ = self.encoders(input_tensor, pos_k, pos_v, hs_mask)
         else:
             for i, layer in enumerate(self.encoders):
                 input_tensor, _, _, _ = layer(
@@ -1022,10 +1001,7 @@ class WindowQformer(nn.Module):
         # NT' x 1 x D
         q = self.queries.expand(bsz * slen, -1, -1)
         for layer in self.decoders:
-            q = layer(tgt=q,
-                      memory=embed_chunk,
-                      tgt_mask=None,
-                      memory_mask=mask)
+            q = layer(tgt=q, memory=embed_chunk, tgt_mask=None, memory_mask=mask)
 
         if self.after_norm is not None:
             q = self.after_norm(q)
@@ -1066,13 +1042,11 @@ class AudioEmbedding(nn.Module):
         else:
             raise NotImplementedError("")
 
-        assert (audio_dim_out
-                is not None), "Remember to set values for audio_dim_out"
+        assert (audio_dim_out is not None), "Remember to set values for audio_dim_out"
         self.audio_dim_out = audio_dim_out
         self.audio_dim_in = n_mels
 
-        self.freeze_audio_processor = kwargs.get("freeze_audio_processor",
-                                                 False)
+        self.freeze_audio_processor = kwargs.get("freeze_audio_processor", False)
 
         self.downsample_rate = kwargs.get("downsample_rate", 1)
 
@@ -1084,8 +1058,8 @@ class AudioEmbedding(nn.Module):
             self.qformer = None
 
         if kwargs.get("use_conv_downsample", False):
-            assert (self.qformer is None
-                    ), "don't support use qformer and conv downsample together"
+            assert (self.qformer
+                    is None), "don't support use qformer and conv downsample together"
             nemo_conv_settings = kwargs.get("nemo_conv_settings", {})
             default_nemo_conv_settings = {
                 "subsampling": "dw_striding",
@@ -1101,9 +1075,8 @@ class AudioEmbedding(nn.Module):
             if nemo_conv_settings:
                 default_nemo_conv_settings.update(nemo_conv_settings)
                 for i in ["subsampling_factor", "feat_in", "feat_out"]:
-                    assert (
-                        i not in nemo_conv_settings
-                    ), "{i} should be specified outside of the NeMo dictionary"
+                    assert (i not in nemo_conv_settings
+                            ), "{i} should be specified outside of the NeMo dictionary"
 
             self.conv_ds = NemoConvSubsampling(**default_nemo_conv_settings, )
         else:
@@ -1117,26 +1090,20 @@ class AudioEmbedding(nn.Module):
             # (do not use image_projection and image_proj_norm)
             dim_projection = hidden_size
             depth = 2
-            self.linear_downsample_rate = (1 if (self.qformer or self.conv_ds)
-                                           else self.downsample_rate)
+            self.linear_downsample_rate = (1 if (self.qformer or self.conv_ds) else
+                                           self.downsample_rate)
             layers = [
-                nn.Linear(audio_dim_out * self.linear_downsample_rate,
-                          dim_projection)
+                nn.Linear(audio_dim_out * self.linear_downsample_rate, dim_projection)
             ]
             for _ in range(1, depth):
-                layers.extend(
-                    [nn.GELU(),
-                     nn.Linear(dim_projection, dim_projection)])
+                layers.extend([nn.GELU(), nn.Linear(dim_projection, dim_projection)])
             self.audio_projection = nn.Sequential(*layers)
             # NOTE vision-speech tasks use a separate projection layer
             layers = [
-                nn.Linear(audio_dim_out * self.linear_downsample_rate,
-                          dim_projection)
+                nn.Linear(audio_dim_out * self.linear_downsample_rate, dim_projection)
             ]
             for _ in range(1, depth):
-                layers.extend(
-                    [nn.GELU(),
-                     nn.Linear(dim_projection, dim_projection)])
+                layers.extend([nn.GELU(), nn.Linear(dim_projection, dim_projection)])
             self.audio_projection_for_vision = nn.Sequential(*layers)
         else:
             raise NotImplementedError(
@@ -1150,8 +1117,7 @@ class AudioEmbedding(nn.Module):
     def set_audio_embeds(self, input_embeds: torch.FloatTensor) -> None:
         self.input_embeds = input_embeds
 
-    def set_audio_embed_sizes(self,
-                              audio_embed_sizes: torch.LongTensor) -> None:
+    def set_audio_embed_sizes(self, audio_embed_sizes: torch.LongTensor) -> None:
         self.audio_embed_sizes = audio_embed_sizes
 
     def get_audio_features(
@@ -1166,11 +1132,9 @@ class AudioEmbedding(nn.Module):
         """
         if self.freeze_audio_processor:
             with torch.no_grad():
-                audio_features, masks = self.encoder(input_embeds,
-                                                     audio_attention_mask)
+                audio_features, masks = self.encoder(input_embeds, audio_attention_mask)
         else:
-            audio_features, masks = self.encoder(input_embeds,
-                                                 audio_attention_mask)
+            audio_features, masks = self.encoder(input_embeds, audio_attention_mask)
 
         if self.qformer is not None:
             audio_features, _ = self.qformer(audio_features, mask=None)

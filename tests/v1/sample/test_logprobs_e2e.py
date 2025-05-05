@@ -35,10 +35,9 @@ def test_promt_logprobs_e2e_server():
     with RemoteOpenAIServer(MODEL, SERVER_ARGS) as remote_server:
         url = f"{remote_server.url_for('v1')}/completions"
 
-        model_args = (
-            f"model={MODEL},"
-            f"base_url={url},"
-            f"num_concurrent={NUM_CONCURRENT},tokenized_requests=False")
+        model_args = (f"model={MODEL},"
+                      f"base_url={url},"
+                      f"num_concurrent={NUM_CONCURRENT},tokenized_requests=False")
 
         results = lm_eval.simple_evaluate(
             model="local-completions",

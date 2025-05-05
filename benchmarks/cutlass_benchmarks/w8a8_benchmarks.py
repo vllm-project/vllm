@@ -43,14 +43,13 @@ def bench_fn(label: str, sub_label: str, description: str, fn: Callable, *args,
     ).blocked_autorange(min_run_time=min_run_time)
 
 
-def bench_int8(
-        dtype: torch.dtype,
-        m: int,
-        k: int,
-        n: int,
-        label: str,
-        sub_label: str,
-        bench_kernels: Optional[list[str]] = None) -> Iterable[TMeasurement]:
+def bench_int8(dtype: torch.dtype,
+               m: int,
+               k: int,
+               n: int,
+               label: str,
+               sub_label: str,
+               bench_kernels: Optional[list[str]] = None) -> Iterable[TMeasurement]:
     """Benchmark INT8-based kernels."""
     assert dtype == torch.int8
     a, b = make_rand_tensors(torch.int8, m, n, k)
@@ -62,27 +61,25 @@ def bench_int8(
 
     bench_fns = {
         "pytorch_bf16_bf16_bf16_matmul-no-scales":
-        lambda: torch.mm(a.to(dtype=torch.bfloat16), b.to(dtype=torch.bfloat16)
-                         ),
+        lambda: torch.mm(a.to(dtype=torch.bfloat16), b.to(dtype=torch.bfloat16)),
         "pytorch_fp16_fp16_fp16_matmul-no-scales":
         lambda: torch.mm(a.to(dtype=torch.float16), b.to(dtype=torch.float16)),
         "cutlass_i8_i8_bf16_scaled_mm":
         lambda: ops.cutlass_scaled_mm(a, b, scale_a, scale_b, torch.bfloat16),
         "cutlass_i8_i8_bf16_scaled_mm_bias":
-        lambda: ops.cutlass_scaled_mm(a, b, scale_a, scale_b, torch.bfloat16,
-                                      bias),
+        lambda: ops.cutlass_scaled_mm(a, b, scale_a, scale_b, torch.bfloat16, bias),
         "cutlass_i8_i8_bf16_scaled_mm_azp":
-        lambda: ops.cutlass_scaled_mm_azp(a, b, scale_a, scale_b, torch.
-                                          bfloat16, azp_adj),
+        lambda: ops.cutlass_scaled_mm_azp(a, b, scale_a, scale_b, torch.bfloat16,
+                                          azp_adj),
         "cutlass_i8_i8_bf16_scaled_mm_azp_bias":
-        lambda: ops.cutlass_scaled_mm_azp(a, b, scale_a, scale_b, torch.
-                                          bfloat16, azp_adj, None, bias),
+        lambda: ops.cutlass_scaled_mm_azp(a, b, scale_a, scale_b, torch.bfloat16,
+                                          azp_adj, None, bias),
         "cutlass_i8_i8_bf16_scaled_mm_azp_pt":
-        lambda: ops.cutlass_scaled_mm_azp(a, b, scale_a, scale_b, torch.
-                                          bfloat16, azp_adj, azp),
+        lambda: ops.cutlass_scaled_mm_azp(a, b, scale_a, scale_b, torch.bfloat16,
+                                          azp_adj, azp),
         "cutlass_i8_i8_bf16_scaled_mm_azp_pt_bias":
-        lambda: ops.cutlass_scaled_mm_azp(a, b, scale_a, scale_b, torch.
-                                          bfloat16, azp_adj, azp, bias),
+        lambda: ops.cutlass_scaled_mm_azp(a, b, scale_a, scale_b, torch.bfloat16,
+                                          azp_adj, azp, bias),
     }
 
     timers = []
@@ -95,26 +92,21 @@ def bench_int8(
     return timers
 
 
-def bench_fp8(
-        dtype: torch.dtype,
-        m: int,
-        k: int,
-        n: int,
-        label: str,
-        sub_label: str,
-        bench_kernels: Optional[list[str]] = None) -> Iterable[TMeasurement]:
+def bench_fp8(dtype: torch.dtype,
+              m: int,
+              k: int,
+              n: int,
+              label: str,
+              sub_label: str,
+              bench_kernels: Optional[list[str]] = None) -> Iterable[TMeasurement]:
     """Benchmark FP8-based kernels."""
     assert dtype == torch.float8_e4m3fn
     a, b = make_rand_tensors(torch.float8_e4m3fn, m, n, k)
     a_cont = a.contiguous()
     scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
     scale_b = torch.tensor(1.0, device="cuda", dtype=torch.float32)
-    block_scale_a = torch.rand((m, k // 128),
-                               device="cuda",
-                               dtype=torch.float32)
-    block_scale_b = torch.rand((k // 128, n // 128),
-                               device="cuda",
-                               dtype=torch.float32)
+    block_scale_a = torch.rand((m, k // 128), device="cuda", dtype=torch.float32)
+    block_scale_b = torch.rand((k // 128, n // 128), device="cuda", dtype=torch.float32)
     block_scale_a_M_major = block_scale_a.t().contiguous().t()
     block_scale_b_K_major = block_scale_b.t().contiguous().t()
     bias = torch.zeros((n, ), device="cuda", dtype=torch.bfloat16)
@@ -123,43 +115,31 @@ def bench_fp8(
 
     bench_fns = {
         "pytorch_bf16_bf16_bf16_matmul-no-scales":
-        lambda: torch.mm(a.to(dtype=torch.bfloat16), b.to(dtype=torch.bfloat16)
-                         ),
+        lambda: torch.mm(a.to(dtype=torch.bfloat16), b.to(dtype=torch.bfloat16)),
         "pytorch_fp16_fp16_fp16_matmul-no-scales":
         lambda: torch.mm(a.to(dtype=torch.float16), b.to(dtype=torch.float16)),
         "pytorch_fp8_fp8_fp16_scaled_mm":
-        lambda: torch._scaled_mm(
-            a, b, scale_a, scale_b, out_dtype=torch.float16),
+        lambda: torch._scaled_mm(a, b, scale_a, scale_b, out_dtype=torch.float16),
         "pytorch_fp8_fp8_fp16_scaled_mm_fast_accum":
-        lambda: torch._scaled_mm(a,
-                                 b,
-                                 scale_a,
-                                 scale_b,
-                                 out_dtype=torch.float16,
-                                 use_fast_accum=True),
-        "pytorch_fp8_fp8_bf16_scaled_mm":
         lambda: torch._scaled_mm(
-            a, b, scale_a, scale_b, out_dtype=torch.bfloat16),
+            a, b, scale_a, scale_b, out_dtype=torch.float16, use_fast_accum=True),
+        "pytorch_fp8_fp8_bf16_scaled_mm":
+        lambda: torch._scaled_mm(a, b, scale_a, scale_b, out_dtype=torch.bfloat16),
         "pytorch_fp8_fp8_bf16_scaled_mm_fast_accum":
-        lambda: torch._scaled_mm(a,
-                                 b,
-                                 scale_a,
-                                 scale_b,
-                                 out_dtype=torch.bfloat16,
-                                 use_fast_accum=True),
+        lambda: torch._scaled_mm(
+            a, b, scale_a, scale_b, out_dtype=torch.bfloat16, use_fast_accum=True),
         "cutlass_fp8_fp8_bf16_scaled_mm":
         lambda: ops.cutlass_scaled_mm(a, b, scale_a, scale_b, torch.bfloat16),
         "cutlass_fp8_fp8_fp16_scaled_mm":
         lambda: ops.cutlass_scaled_mm(a, b, scale_a, scale_b, torch.float16),
         "cutlass_fp8_fp8_bf16_scaled_mm_bias":
-        lambda: ops.cutlass_scaled_mm(a, b, scale_a, scale_b, torch.bfloat16,
-                                      bias),
+        lambda: ops.cutlass_scaled_mm(a, b, scale_a, scale_b, torch.bfloat16, bias),
         "cutlass_fp8_fp8_fp16_scaled_mm_bias":
         lambda: ops.cutlass_scaled_mm(a, b, scale_a, scale_b, torch.float16,
                                       bias.to(dtype=torch.float16)),
         "triton_fp8_fp8_fp16_scaled_mm_blockwise":
-        lambda: w8a8_block_fp8_matmul(a_cont, b.t(), block_scale_a,
-                                      block_scale_b.t(), (128, 128)),
+        lambda: w8a8_block_fp8_matmul(a_cont, b.t(), block_scale_a, block_scale_b.t(),
+                                      (128, 128)),
         "cutlass_fp8_fp8_fp16_scaled_mm_blockwise":
         lambda: ops.cutlass_scaled_mm(a, b, block_scale_a_M_major,
                                       block_scale_b_K_major, torch.float16),
@@ -226,8 +206,7 @@ def make_output(data: Iterable[TMeasurement],
 
 
 def run_square_bench(args):
-    dim_sizes = list(
-        range(args.dim_start, args.dim_end + 1, args.dim_increment))
+    dim_sizes = list(range(args.dim_start, args.dim_end + 1, args.dim_increment))
     MKNs = list(zip(dim_sizes, dim_sizes, dim_sizes))
     data = run(args.dtype, MKNs, bench_kernels=args.kernels)
     make_output(data, MKNs, f"square_bench-{args.dtype}")
@@ -321,9 +300,7 @@ Benchmark Cutlass GEMM.
         nargs="+",
         type=str,
         default=None,
-        help=
-        "Exact names of the kernels to benchmark. If not set, runs all kernels."
-    )
+        help="Exact names of the kernels to benchmark. If not set, runs all kernels.")
 
     subparsers = parser.add_subparsers(dest="cmd")
 

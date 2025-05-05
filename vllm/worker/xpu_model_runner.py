@@ -92,8 +92,7 @@ class ModelInputForXPUWithSamplingMetadata(ModelInputForXPU):
             "input_positions": self.input_positions,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
-        _add_sampling_metadata_broadcastable_dict(tensor_dict,
-                                                  self.sampling_metadata)
+        _add_sampling_metadata_broadcastable_dict(tensor_dict, self.sampling_metadata)
         return tensor_dict
 
     @classmethod
@@ -122,8 +121,7 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
         self.block_size = self.runner.block_size
         self.device = self.runner.device
 
-    def prepare(self,
-                finished_requests_ids: Optional[List[str]] = None) -> None:
+    def prepare(self, finished_requests_ids: Optional[List[str]] = None) -> None:
         self.seq_group_metadata_list: List[SequenceGroupMetadata] = []
 
     def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata):
@@ -134,12 +132,10 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
         # Prepare input tensors.
         if is_prompt:
             (input_tokens, input_positions, attn_metadata, seq_lens,
-             multi_modal_kwargs) = self._prepare_prompt(
-                 self.seq_group_metadata_list)
+             multi_modal_kwargs) = self._prepare_prompt(self.seq_group_metadata_list)
         else:
             (input_tokens, input_positions,
-             attn_metadata) = self._prepare_decode(
-                 self.seq_group_metadata_list)
+             attn_metadata) = self._prepare_decode(self.seq_group_metadata_list)
             seq_lens = None
             multi_modal_kwargs = None
 
@@ -163,9 +159,8 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
         slot_mapping: List[int] = []
         seq_lens: List[int] = []
         multi_modal_kwargs_list: List[MultiModalKwargs] = []
-        multi_modal_placeholder_maps: Dict[
-            str,
-            MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
+        multi_modal_placeholder_maps: Dict[str, MultiModalPlaceholderMap] = defaultdict(
+            MultiModalPlaceholderMap)
 
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
@@ -196,8 +191,7 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
                 multi_modal_kwargs_list.append(mm_kwargs)
 
                 for modality, placeholder_map in placeholder_maps.items():
-                    multi_modal_placeholder_maps[modality].extend(
-                        placeholder_map)
+                    multi_modal_placeholder_maps[modality].extend(placeholder_map)
 
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized
@@ -221,27 +215,23 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
                     slot_mapping.append(_PAD_SLOT_ID)
                     continue
 
-                block_number = block_table[i //
-                                           self.block_size]  # type: ignore
+                block_number = block_table[i // self.block_size]  # type: ignore
                 block_offset = i % self.block_size  # type: ignore
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
 
         num_prompt_tokens = len(input_tokens)
 
-        input_tokens = torch.tensor(input_tokens,
-                                    dtype=torch.long,
+        input_tokens = torch.tensor(input_tokens, dtype=torch.long,
                                     device=self.device)  # type: ignore
         input_positions = torch.tensor(input_positions,
                                        dtype=torch.long,
                                        device=self.device)  # type: ignore
-        slot_mapping = torch.tensor(slot_mapping,
-                                    dtype=torch.long,
+        slot_mapping = torch.tensor(slot_mapping, dtype=torch.long,
                                     device=self.device)  # type: ignore
         placeholder_index_maps = {
             modality: placeholder_map.index_map()
-            for modality, placeholder_map in
-            multi_modal_placeholder_maps.items()
+            for modality, placeholder_map in multi_modal_placeholder_maps.items()
         }
 
         max_seqlen = max(seq_lens)
@@ -308,25 +298,18 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
                 slot_mapping.append(slot)
 
                 if self.sliding_window is not None:
-                    sliding_window_blocks = (self.sliding_window //
-                                             self.block_size)
+                    sliding_window_blocks = (self.sliding_window // self.block_size)
                     block_table = block_table[-sliding_window_blocks:]
                 block_tables.append(block_table)
 
         max_decode_seq_len = max(seq_lens)
 
-        input_tokens = torch.tensor(input_tokens,
-                                    dtype=torch.long,
-                                    device=self.device)
+        input_tokens = torch.tensor(input_tokens, dtype=torch.long, device=self.device)
         input_positions = torch.tensor(input_positions,
                                        dtype=torch.long,
                                        device=self.device)
-        slot_mapping = torch.tensor(slot_mapping,
-                                    dtype=torch.long,
-                                    device=self.device)
-        seq_lens_tensor = torch.tensor(seq_lens,
-                                       dtype=torch.int,
-                                       device=self.device)
+        slot_mapping = torch.tensor(slot_mapping, dtype=torch.long, device=self.device)
+        seq_lens_tensor = torch.tensor(seq_lens, dtype=torch.int, device=self.device)
 
         block_tables = make_tensor_with_pad(
             block_tables,
@@ -437,12 +420,10 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
         # To exercise the worst scenario for GPU memory consumption,
         # the number of seqs (batch_size) is chosen to maximize the number
         # of images processed.
-        max_mm_tokens = self.mm_registry.get_max_multimodal_tokens(
-            self.model_config)
+        max_mm_tokens = self.mm_registry.get_max_multimodal_tokens(self.model_config)
         if max_mm_tokens > 0:
             max_num_seqs_orig = max_num_seqs
-            max_num_seqs = min(max_num_seqs,
-                               max_num_batched_tokens // max_mm_tokens)
+            max_num_seqs = min(max_num_seqs, max_num_batched_tokens // max_mm_tokens)
             if max_num_seqs < 1:
                 expr = (f"min({max_num_seqs_orig}, "
                         f"{max_num_batched_tokens} // {max_mm_tokens})")
@@ -487,14 +468,11 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
         return
 
     def make_model_input_from_broadcasted_tensor_dict(
-            self,
-            tensor_dict: Dict[str,
-                              Any]) -> ModelInputForXPUWithSamplingMetadata:
-        return (
-            ModelInputForXPUWithSamplingMetadata.from_broadcasted_tensor_dict(
-                tensor_dict,
-                attn_backend=self.attn_backend,
-            ))
+            self, tensor_dict: Dict[str, Any]) -> ModelInputForXPUWithSamplingMetadata:
+        return (ModelInputForXPUWithSamplingMetadata.from_broadcasted_tensor_dict(
+            tensor_dict,
+            attn_backend=self.attn_backend,
+        ))
 
     def _prepare_model_input_tensors(
         self,
@@ -523,18 +501,17 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
         metadata for the sampling step.
 
         """
-        model_input = self._prepare_model_input_tensors(
-            seq_group_metadata_list, finished_requests_ids)
+        model_input = self._prepare_model_input_tensors(seq_group_metadata_list,
+                                                        finished_requests_ids)
         # Sampling metadata is only required for the final pp group
         generators = self.get_generators(finished_requests_ids)
-        sampling_metadata = SamplingMetadata.prepare(
-            seq_group_metadata_list,
-            model_input.seq_lens,
-            model_input.query_lens,
-            self.device,
-            pin_memory=False,
-            generators=generators,
-            cache=self.sampling_metadata_cache)
+        sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list,
+                                                     model_input.seq_lens,
+                                                     model_input.query_lens,
+                                                     self.device,
+                                                     pin_memory=False,
+                                                     generators=generators,
+                                                     cache=self.sampling_metadata_cache)
 
         return dataclasses.replace(model_input,
                                    sampling_metadata=sampling_metadata,
@@ -549,8 +526,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
         num_steps: int = 1,
     ) -> Optional[List[SamplerOutput]]:
         if num_steps > 1:
-            raise ValueError(
-                "XPUModelRunner does not support multi-step execution.")
+            raise ValueError("XPUModelRunner does not support multi-step execution.")
 
         model_executable = self.model
         if (self.observability_config is not None
@@ -562,8 +538,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
                 intermediate_tensors=intermediate_tensors,
-                **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs
-                                             or {},
+                **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs or {},
                                              device=self.device))
         # Compute the logits in the last pipeline stage.
         if not get_pp_group().is_last_rank:
@@ -592,8 +567,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time
                 and output is not None):
-            model_forward_time = (model_forward_end_time -
-                                  model_forward_start_time)
+            model_forward_time = (model_forward_end_time - model_forward_start_time)
             # If there are multiple workers, we are still tracking the latency
             # from the start time of the driver worker to the end time of the
             # driver worker. The model forward time will then end up covering

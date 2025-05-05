@@ -21,8 +21,7 @@ class CollectEnvSubcommand(CLISubcommand):
         collect_env_main()
 
     def subparser_init(
-            self,
-            subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
+            self, subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
         serve_parser = subparsers.add_parser(
             "collect-env",
             help="Start collecting environment information.",

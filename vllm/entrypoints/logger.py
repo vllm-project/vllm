@@ -23,8 +23,7 @@ class RequestLogger:
         request_id: str,
         prompt: Optional[str],
         prompt_token_ids: Optional[list[int]],
-        params: Optional[Union[SamplingParams, PoolingParams,
-                               BeamSearchParams]],
+        params: Optional[Union[SamplingParams, PoolingParams, BeamSearchParams]],
         lora_request: Optional[LoRARequest],
         prompt_adapter_request: Optional[PromptAdapterRequest],
     ) -> None:
@@ -39,6 +38,5 @@ class RequestLogger:
         logger.info(
             "Received request %s: prompt: %r, "
             "params: %s, prompt_token_ids: %s, "
-            "lora_request: %s, prompt_adapter_request: %s.", request_id,
-            prompt, params, prompt_token_ids, lora_request,
-            prompt_adapter_request)
+            "lora_request: %s, prompt_adapter_request: %s.", request_id, prompt, params,
+            prompt_token_ids, lora_request, prompt_adapter_request)

@@ -52,8 +52,7 @@ class EmbeddingAllReduceRMSNormPattern(AllReduceRMSNormPattern):
             arg3_1: torch.Tensor,
         ):
             embedding = torch.ops.aten.embedding.default(arg2_1, mul_6)
-            where = torch.ops.aten.where.self(unsqueeze, full_default,
-                                              embedding)
+            where = torch.ops.aten.where.self(unsqueeze, full_default, embedding)
             all_reduce = tensor_model_parallel_all_reduce(where)
             rmsnorm = torch.ops.higher_order.auto_functionalized(
                 torch.ops._C.rms_norm.default,
@@ -74,8 +73,7 @@ class EmbeddingAllReduceRMSNormPattern(AllReduceRMSNormPattern):
             arg3_1: torch.Tensor,
         ):
             embedding = torch.ops.aten.embedding.default(arg2_1, mul_6)
-            where = torch.ops.aten.where.self(unsqueeze, full_default,
-                                              embedding)
+            where = torch.ops.aten.where.self(unsqueeze, full_default, embedding)
 
             tp = get_tp_group()
             tp_size = get_tensor_model_parallel_world_size()
@@ -91,16 +89,15 @@ class EmbeddingAllReduceRMSNormPattern(AllReduceRMSNormPattern):
                 epsilon=self.epsilon,
             )
 
-            all_gather = torch.ops.vllm.all_gather.default(
-                rmsnorm[1],
-                dim=0,
-                world_size=tp_size,
-                group_name=tp.unique_name)
+            all_gather = torch.ops.vllm.all_gather.default(rmsnorm[1],
+                                                           dim=0,
+                                                           world_size=tp_size,
+                                                           group_name=tp.unique_name)
 
             return all_gather, reduce_scatter
 
-        pm.register_replacement(pattern, replacement, self.get_inputs(),
-                                pm.fwd_only, pm_pass)
+        pm.register_replacement(pattern, replacement, self.get_inputs(), pm.fwd_only,
+                                pm_pass)
 
 
 class MiddleAllReduceRMSNormPattern(AllReduceRMSNormPattern):
@@ -109,9 +106,7 @@ class MiddleAllReduceRMSNormPattern(AllReduceRMSNormPattern):
         mm_1 = torch.empty([4, 4], device=self.device, dtype=self.dtype)
 
         residual = torch.empty([4, 4], device=self.device, dtype=self.dtype)
-        rms_norm_weights = torch.empty([4, 4],
-                                       device=self.device,
-                                       dtype=self.dtype)
+        rms_norm_weights = torch.empty([4, 4], device=self.device, dtype=self.dtype)
 
         return [
             residual,
@@ -157,15 +152,14 @@ class MiddleAllReduceRMSNormPattern(AllReduceRMSNormPattern):
                 epsilon=self.epsilon,
             )
 
-            all_gather = torch.ops.vllm.all_gather.default(
-                rmsnorm[1],
-                dim=0,
-                world_size=tp_size,
-                group_name=tp.unique_name)
+            all_gather = torch.ops.vllm.all_gather.default(rmsnorm[1],
+                                                           dim=0,
+                                                           world_size=tp_size,
+                                                           group_name=tp.unique_name)
             return all_gather, rmsnorm[2]
 
-        pm.register_replacement(pattern, replacement, self.get_inputs(),
-                                pm.fwd_only, pm_pass)
+        pm.register_replacement(pattern, replacement, self.get_inputs(), pm.fwd_only,
+                                pm_pass)
 
 
 class LastAllReduceRMSNormPattern(AllReduceRMSNormPattern):
@@ -174,9 +168,7 @@ class LastAllReduceRMSNormPattern(AllReduceRMSNormPattern):
         mm_1 = torch.empty([4, 4], device=self.device, dtype=self.dtype)
 
         residual = torch.empty([4, 4], device=self.device, dtype=self.dtype)
-        rms_norm_weights = torch.empty([4, 4],
-                                       device=self.device,
-                                       dtype=self.dtype)
+        rms_norm_weights = torch.empty([4, 4], device=self.device, dtype=self.dtype)
 
         return [
             residual,
@@ -222,16 +214,15 @@ class LastAllReduceRMSNormPattern(AllReduceRMSNormPattern):
                 epsilon=self.epsilon,
             )
 
-            normalized = torch.ops.vllm.all_gather.default(
-                rmsnorm[1],
-                dim=0,
-                world_size=tp_size,
-                group_name=tp.unique_name)
+            normalized = torch.ops.vllm.all_gather.default(rmsnorm[1],
+                                                           dim=0,
+                                                           world_size=tp_size,
+                                                           group_name=tp.unique_name)
 
             return normalized
 
-        pm.register_replacement(pattern, replacement, self.get_inputs(),
-                                pm.fwd_only, pm_pass)
+        pm.register_replacement(pattern, replacement, self.get_inputs(), pm.fwd_only,
+                                pm_pass)
 
 
 class SequenceParallelismPass(VllmInductorPass):
@@ -242,8 +233,8 @@ class SequenceParallelismPass(VllmInductorPass):
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="sequence_parallelism_pass")
         for epsilon in [1e-5, 1e-6]:
-            EmbeddingAllReduceRMSNormPattern(
-                epsilon, self.dtype, self.device).register(self.patterns)
+            EmbeddingAllReduceRMSNormPattern(epsilon, self.dtype,
+                                             self.device).register(self.patterns)
 
             MiddleAllReduceRMSNormPattern(epsilon, self.dtype,
                                           self.device).register(self.patterns)

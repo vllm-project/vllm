@@ -19,14 +19,10 @@ def test_sliding_window_possible_cached_prefix():
     )
 
     block_pool = BlockPool(num_gpu_blocks=100, enable_caching=True)
-    manager = SlidingWindowManager(sliding_window_spec,
-                                   block_pool,
-                                   use_eagle=False)
+    manager = SlidingWindowManager(sliding_window_spec, block_pool, use_eagle=False)
 
     def run_one_case(block_is_cached, expect_length):
-        block_hash_list = [
-            BlockHashType(i, ()) for i in range(len(block_is_cached))
-        ]
+        block_hash_list = [BlockHashType(i, ()) for i in range(len(block_is_cached))]
 
         block_pool.cached_block_hash_to_block.clear()
 
@@ -46,8 +42,7 @@ def test_sliding_window_possible_cached_prefix():
         for i in range(2):
             if i < expect_length:
                 block_index = expect_length - i - 1
-                assert computed_blocks[
-                    block_index].block_id == block_index + 10
+                assert computed_blocks[block_index].block_id == block_index + 10
 
     run_one_case([False] * 10, 0)
     run_one_case([True], 1)
@@ -56,17 +51,14 @@ def test_sliding_window_possible_cached_prefix():
     run_one_case([True, True, False], 2)
     run_one_case([True, True, True], 3)
     run_one_case([True, True, True, False], 3)
-    run_one_case([
-        True, True, False, True, False, False, True, True, False, True, True,
-        True
-    ], 12)
-    run_one_case([
-        True, True, False, True, False, False, True, True, False, False, False
-    ], 8)
-    run_one_case([
-        True, True, False, True, False, False, True, True, False, False, False,
-        True
-    ], 8)
+    run_one_case(
+        [True, True, False, True, False, False, True, True, False, True, True, True],
+        12)
+    run_one_case(
+        [True, True, False, True, False, False, True, True, False, False, False], 8)
+    run_one_case(
+        [True, True, False, True, False, False, True, True, False, False, False, True],
+        8)
 
 
 def test_sliding_window_remove_skipped_blocks():
@@ -81,16 +73,14 @@ def test_sliding_window_remove_skipped_blocks():
 
     block_pool = BlockPool(num_gpu_blocks=2000, enable_caching=True)
 
-    manager = SlidingWindowManager(sliding_window_spec,
-                                   block_pool,
-                                   use_eagle=False)
+    manager = SlidingWindowManager(sliding_window_spec, block_pool, use_eagle=False)
 
     null_block_id = block_pool.null_block.block_id
 
     def id_to_block_table(ids):
         return [
-            KVCacheBlock(id_)
-            if id_ != null_block_id else block_pool.null_block for id_ in ids
+            KVCacheBlock(id_) if id_ != null_block_id else block_pool.null_block
+            for id_ in ids
         ]
 
     def assert_block_id(block_table, ids):

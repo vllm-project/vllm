@@ -29,17 +29,14 @@ def create_proposal(propose_lens: list[int], vocab_size: int,
             proposal_probs[i][:propose_lens[i]], dim=-1)
 
     propose_lens = torch.tensor(propose_lens, device=device)
-    return SpeculativeProposals(proposal_token_ids, proposal_probs,
-                                propose_lens)
+    return SpeculativeProposals(proposal_token_ids, proposal_probs, propose_lens)
 
 
-def assert_score_equal(score1: SpeculativeScores,
-                       score2: SpeculativeScores) -> None:
+def assert_score_equal(score1: SpeculativeScores, score2: SpeculativeScores) -> None:
     assert torch.allclose(score1.probs, score2.probs)
     assert torch.allclose(score1.logprobs, score2.logprobs)
-    assert torch.equal(
-        score1.token_ids,
-        score2.token_ids), f"{score1.token_ids}, {score2.token_ids}"
+    assert torch.equal(score1.token_ids,
+                       score2.token_ids), f"{score1.token_ids}, {score2.token_ids}"
 
 
 @pytest.mark.parametrize('model_name', ['facebook/opt-125m'])
@@ -49,8 +46,7 @@ def assert_score_equal(score1: SpeculativeScores,
 @pytest.mark.parametrize('device', ['cuda'])
 @pytest.mark.parametrize('prefill_chunking', [False, True])
 def test_scorer(model_name: str, batch_size: int, max_propose_len: int,
-                mixed_propose_len: bool, device: str,
-                prefill_chunking: bool) -> None:
+                mixed_propose_len: bool, device: str, prefill_chunking: bool) -> None:
     """
     Compare the batch expansion scorer and mqa scorer return the same score.
     We test for both queries with the same propose length and different 
@@ -59,8 +55,7 @@ def test_scorer(model_name: str, batch_size: int, max_propose_len: int,
     seed = 0
     block_size = 32
     num_gpu_blocks = 2048 // block_size
-    scorer_worker = create_worker(Worker, model_name, block_size,
-                                  num_gpu_blocks, seed)
+    scorer_worker = create_worker(Worker, model_name, block_size, num_gpu_blocks, seed)
     scorer_worker.model_runner.disable_logprobs = True  # accessed by mqa_scorer
     scorer_worker.model_runner.sampler.include_gpu_probs_tensor = True
     scorer_worker.model_runner.sampler.should_modify_greedy_probs_inplace = True
@@ -90,12 +85,10 @@ def test_scorer(model_name: str, batch_size: int, max_propose_len: int,
                                      block_size=block_size,
                                      num_gpu_blocks=num_gpu_blocks,
                                      seq_ids=list(
-                                         range(batch_size,
-                                               batch_size + n_prefills)))
+                                         range(batch_size, batch_size + n_prefills)))
         # re-order to guarantee prefill|decode order
         target_group_metadatalist = [
-            seq_group_metadatalist[i] for i, p in enumerate(propose_lens)
-            if p > 0
+            seq_group_metadatalist[i] for i, p in enumerate(propose_lens) if p > 0
         ]
         seq_group_metadatalist = prefill + target_group_metadatalist
         propose_lens = [0] * n_prefills + [p for p in propose_lens if p > 0]
@@ -104,10 +97,8 @@ def test_scorer(model_name: str, batch_size: int, max_propose_len: int,
     requests = ExecuteModelRequest(seq_group_metadatalist,
                                    num_lookahead_slots=max_propose_len)
 
-    batch_expansion_scorer = BatchExpansionTop1Scorer(scorer_worker, device,
-                                                      vocab_size)
-    batch_expansion_score = batch_expansion_scorer.score_proposals(
-        requests, proposals)
+    batch_expansion_scorer = BatchExpansionTop1Scorer(scorer_worker, device, vocab_size)
+    batch_expansion_score = batch_expansion_scorer.score_proposals(requests, proposals)
 
     mqa_scorer = MQAScorer(scorer_worker, device, vocab_size)
     mqa_score = mqa_scorer.score_proposals(requests, proposals)

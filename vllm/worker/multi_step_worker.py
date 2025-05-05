@@ -52,11 +52,10 @@ class MultiStepWorker(Worker):
             # on first step we prepare the worker input and model input normally
             worker_input: WorkerInput = self.prepare_worker_input(
                 execute_model_req=execute_model_req)
-            model_input: StatefulModelInput = (
-                self.model_runner.prepare_model_input(
-                    execute_model_req.seq_group_metadata_list,
-                    execute_model_req.virtual_engine,
-                    execute_model_req.finished_requests_ids))
+            model_input: StatefulModelInput = (self.model_runner.prepare_model_input(
+                execute_model_req.seq_group_metadata_list,
+                execute_model_req.virtual_engine,
+                execute_model_req.finished_requests_ids))
 
             if execute_model_req.async_callback:
                 model_input.frozen_model_input = dataclasses.replace(  # type: ignore
@@ -136,8 +135,7 @@ class MultiStepWorker(Worker):
     def prepare_input(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None,
-    ) -> Optional[Tuple[StatefulModelInput, WorkerInput, Dict[str,
-                                                              torch.Tensor]]]:
+    ) -> Optional[Tuple[StatefulModelInput, WorkerInput, Dict[str, torch.Tensor]]]:
         """
         Depending on the current state of the request and multi step worker,
         this method may skip the normal _prepare_model_input and

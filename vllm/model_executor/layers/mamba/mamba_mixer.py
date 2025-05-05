@@ -65,8 +65,7 @@ class MambaMixer(CustomOp):
         # doesn't allow to override it
         self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
 
-        self.in_proj = MergedColumnParallelLinear(hidden_size,
-                                                  [intermediate_size] * 2,
+        self.in_proj = MergedColumnParallelLinear(hidden_size, [intermediate_size] * 2,
                                                   bias=use_bias)
 
         # selective projection used to make dt, B and C input dependent
@@ -130,8 +129,8 @@ class MambaMixer(CustomOp):
             has_weight=rms_norm_has_weight,
         ) if use_rms_norm else None
 
-    def forward_native(self, hidden_states: torch.Tensor,
-                       conv_state: torch.Tensor, ssm_state: torch.Tensor):
+    def forward_native(self, hidden_states: torch.Tensor, conv_state: torch.Tensor,
+                       ssm_state: torch.Tensor):
         pass
 
     def forward_cuda(self, hidden_states: torch.Tensor,
@@ -179,8 +178,8 @@ class MambaMixer(CustomOp):
 
         if self.is_lora_enabled:
             #   lora kernel requires contiguous tensor
-            ssm_parameters = self.x_proj(
-                hidden_states.transpose(-2, -1).contiguous())[0]
+            ssm_parameters = self.x_proj(hidden_states.transpose(-2,
+                                                                 -1).contiguous())[0]
         else:
             ssm_parameters = self.x_proj(hidden_states.transpose(-2, -1))[0]
 
@@ -199,8 +198,8 @@ class MambaMixer(CustomOp):
 
         discrete_time_step = self.dt_proj(time_step)[0].transpose(-2, -1)
         # 3.c perform the recurrence y ← SSM(A, B, C)(x)
-        time_proj_bias = (self.dt_proj.bias.float() if hasattr(
-            self.dt_proj, "bias") else None)
+        time_proj_bias = (self.dt_proj.bias.float()
+                          if hasattr(self.dt_proj, "bias") else None)
 
         if attn_metadata.query_start_loc is not None \
             and attn_metadata.context_lens_tensor is not None:
@@ -239,6 +238,5 @@ class MambaMixer(CustomOp):
             contextualized_states = self.out_proj(
                 scan_outputs.transpose(-2, -1).contiguous())[0]
         else:
-            contextualized_states = self.out_proj(
-                scan_outputs.transpose(-2, -1))[0]
+            contextualized_states = self.out_proj(scan_outputs.transpose(-2, -1))[0]
         return contextualized_states

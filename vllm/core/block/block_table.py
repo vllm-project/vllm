@@ -203,10 +203,9 @@ class BlockTable:
         for _ in range(blocks_to_allocate):
             assert len(self._blocks) > 0
             self._blocks.append(
-                self._allocator.allocate_mutable_block(
-                    prev_block=self._blocks[-1],
-                    device=device,
-                    extra_hash=extra_hash))
+                self._allocator.allocate_mutable_block(prev_block=self._blocks[-1],
+                                                       device=device,
+                                                       extra_hash=extra_hash))
 
     def fork(self) -> "BlockTable":
         """Creates a new BlockTable instance with a copy of the blocks from the
@@ -278,12 +277,11 @@ class BlockTable:
         # ones after the appended ones.
         return sequence_token_ids[self.num_full_slots:]
 
-    def _allocate_blocks_for_token_ids(
-            self,
-            prev_block: Optional[Block],
-            token_ids: List[int],
-            device: Device,
-            extra_hash: Optional[int] = None) -> List[Block]:
+    def _allocate_blocks_for_token_ids(self,
+                                       prev_block: Optional[Block],
+                                       token_ids: List[int],
+                                       device: Device,
+                                       extra_hash: Optional[int] = None) -> List[Block]:
         blocks: List[Block] = []
 
         block_token_ids = []
@@ -307,8 +305,9 @@ class BlockTable:
             assert len(tail_token_ids) == 1
             cur_token_ids = tail_token_ids[0]
 
-            block = self._allocator.allocate_mutable_block(
-                prev_block=prev_block, device=device, extra_hash=extra_hash)
+            block = self._allocator.allocate_mutable_block(prev_block=prev_block,
+                                                           device=device,
+                                                           extra_hash=extra_hash)
             block.append_token_ids(cur_token_ids)
 
             blocks.append(block)
@@ -357,8 +356,8 @@ class BlockTable:
         """
         return self._num_full_slots
 
-    def get_num_blocks_touched_by_append_slots(
-            self, token_ids: List[int], num_lookahead_slots: int) -> int:
+    def get_num_blocks_touched_by_append_slots(self, token_ids: List[int],
+                                               num_lookahead_slots: int) -> int:
         """Determine how many blocks will be "touched" by appending the token
         ids.
 
@@ -371,14 +370,12 @@ class BlockTable:
         # return len(token_blocks)
 
         num_token_ids = len(token_ids) + num_lookahead_slots
-        first_chunk_size = self._block_size - (self._num_full_slots %
-                                               self._block_size)
+        first_chunk_size = self._block_size - (self._num_full_slots % self._block_size)
         num_token_blocks = (1 + math.ceil(
             (num_token_ids - first_chunk_size) / self._block_size))
         return num_token_blocks
 
-    def _chunk_token_blocks_for_append(
-            self, token_ids: List[int]) -> List[List[int]]:
+    def _chunk_token_blocks_for_append(self, token_ids: List[int]) -> List[List[int]]:
         """Split the token ids into block-sized chunks so they can be easily
         appended to blocks. The first such "token block" may have less token ids
         than the block size, since the last allocated block may be partially
@@ -390,9 +387,7 @@ class BlockTable:
         if not token_ids:
             return []
 
-        first_chunk_size = self._block_size - (self._num_full_slots %
-                                               self._block_size)
+        first_chunk_size = self._block_size - (self._num_full_slots % self._block_size)
         token_blocks = [token_ids[:first_chunk_size]]
-        token_blocks.extend(
-            chunk_list(token_ids[first_chunk_size:], self._block_size))
+        token_blocks.extend(chunk_list(token_ids[first_chunk_size:], self._block_size))
         return token_blocks

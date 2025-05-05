@@ -559,8 +559,7 @@ def test_find_update_text(
             expected_by_mm_count,
     ) in expected_by_update_type_mm_count.items():
         mm_prompt_updates = {
-            key:
-            [update_type(key, target, repl_by_key[key]).bind(mock_tokenizer)]
+            key: [update_type(key, target, repl_by_key[key]).bind(mock_tokenizer)]
             for key, target in target_by_key.items()
         }
         mm_matches = {
@@ -733,8 +732,7 @@ def test_find_update_tokens(
             expected_by_mm_count,
     ) in expected_by_update_type_mm_count.items():
         mm_prompt_updates = {
-            key:
-            [update_type(key, target, repl_by_key[key]).bind(mock_tokenizer)]
+            key: [update_type(key, target, repl_by_key[key]).bind(mock_tokenizer)]
             for key, target in target_by_key.items()
         }
         mm_matches = {
@@ -913,9 +911,8 @@ def _dummy_elem(modality: str, key: str, size: int):
 
 
 def _dummy_item(modality: str, size_by_key: dict[str, int]):
-    return MultiModalKwargsItem.from_elems([
-        _dummy_elem(modality, key, size) for key, size in size_by_key.items()
-    ])
+    return MultiModalKwargsItem.from_elems(
+        [_dummy_elem(modality, key, size) for key, size in size_by_key.items()])
 
 
 def _dummy_kw(size_by_key_modality: dict[str, dict[str, int]]):
@@ -1078,8 +1075,7 @@ def test_hf_processor_kwargs(model_id, call_kwargs, expected_kwargs):
         assert kwargs == call_kwargs
         return _ProcessorProxy(orig_get_hf_processor())
 
-    processor.info.get_hf_processor = MethodType(get_hf_processor,
-                                                 processor.info)
+    processor.info.get_hf_processor = MethodType(get_hf_processor, processor.info)
 
     out_kwargs = processor._call_hf_processor(
         prompt="",

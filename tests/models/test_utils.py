@@ -74,6 +74,5 @@ def test_module_with_child_containing_batchnorm_can_autoload():
     # Ensure the stats are updated
     assert torch.all(
         new_mod.nested_mod.bn.running_mean == mod.nested_mod.bn.running_mean)
-    assert torch.all(
-        new_mod.nested_mod.bn.running_var == mod.nested_mod.bn.running_var)
+    assert torch.all(new_mod.nested_mod.bn.running_var == mod.nested_mod.bn.running_var)
     assert new_mod.nested_mod.bn.num_batches_tracked.item() == 1

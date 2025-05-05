@@ -118,8 +118,7 @@ def test_llm_model_error(monkeypatch, tensor_parallel_size: int,
                   enforce_eager=True,
                   tensor_parallel_size=tensor_parallel_size)
 
-        with pytest.raises(
-                EngineDeadError if enable_multiprocessing else Exception):
+        with pytest.raises(EngineDeadError if enable_multiprocessing else Exception):
             llm.generate("Hello my name is Robert and I")
 
         # Confirm all the processes are cleaned up.

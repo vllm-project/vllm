@@ -53,8 +53,7 @@ def test_parse_fine_tuned_lora_name_valid():
         ),
     }
     for name, module_name, is_lora_a, is_bias in fixture:
-        assert (module_name, is_lora_a,
-                is_bias) == parse_fine_tuned_lora_name(name)
+        assert (module_name, is_lora_a, is_bias) == parse_fine_tuned_lora_name(name)
 
 
 def test_parse_fine_tuned_lora_name_invalid():
@@ -126,8 +125,7 @@ def test_get_adapter_absolute_path_local_existing(mock_abspath, mock_exist):
 
 @patch('huggingface_hub.snapshot_download')
 @patch('os.path.exists')
-def test_get_adapter_absolute_path_huggingface(mock_exist,
-                                               mock_snapshot_download):
+def test_get_adapter_absolute_path_huggingface(mock_exist, mock_snapshot_download):
     # Hugging Face model identifier
     path = 'org/repo'
     absolute_path = '/mock/snapshot/path'
@@ -143,6 +141,5 @@ def test_get_adapter_absolute_path_huggingface_error(mock_exist,
     # Hugging Face model identifier with download error
     path = 'org/repo'
     mock_exist.return_value = False
-    mock_snapshot_download.side_effect = HfHubHTTPError(
-        "failed to query model info")
+    mock_snapshot_download.side_effect = HfHubHTTPError("failed to query model info")
     assert get_adapter_absolute_path(path) == path

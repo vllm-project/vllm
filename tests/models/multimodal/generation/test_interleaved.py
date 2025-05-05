@@ -64,9 +64,7 @@ def test_models(vllm_runner, model, dtype: str, max_tokens: int) -> None:
     outputs = [(total_str, total_str.find("assistant\n") + len("assistant\n"))
                for total_str in all_results]
     prompt_lengths = [prompt_len for _, prompt_len in outputs]
-    generated_strs = [
-        total_str[prompt_len:] for total_str, prompt_len in outputs
-    ]
+    generated_strs = [total_str[prompt_len:] for total_str, prompt_len in outputs]
     interleaved_prompt_len, noninterleaved_prompt_len = prompt_lengths
     interleaved_output_str, noninterleaved_output_str = generated_strs
 

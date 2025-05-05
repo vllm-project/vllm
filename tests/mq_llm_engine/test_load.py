@@ -26,8 +26,7 @@ def tmp_socket():
 
 @pytest.mark.asyncio
 async def test_load(tmp_socket):
-    with RemoteMQLLMEngine(engine_args=ENGINE_ARGS,
-                           ipc_path=tmp_socket) as engine:
+    with RemoteMQLLMEngine(engine_args=ENGINE_ARGS, ipc_path=tmp_socket) as engine:
 
         client = await engine.make_client()
 
@@ -37,8 +36,7 @@ async def test_load(tmp_socket):
         tasks = []
         for request_id in request_ids:
             tasks.append(
-                asyncio.create_task(
-                    generate(client, request_id, NUM_EXPECTED_TOKENS)))
+                asyncio.create_task(generate(client, request_id, NUM_EXPECTED_TOKENS)))
 
         # Confirm that we got all the EXPECTED tokens from the requests.
         failed_request_id = None

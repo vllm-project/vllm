@@ -125,8 +125,8 @@ def list_repo_files(
         # directly list files if model is local
         if (local_path := Path(repo_id)).exists():
             return [
-                str(file.relative_to(local_path))
-                for file in local_path.rglob('*') if file.is_file()
+                str(file.relative_to(local_path)) for file in local_path.rglob('*')
+                if file.is_file()
             ]
         # if model is remote, use hf_hub api to list files
         try:
@@ -182,10 +182,7 @@ def file_or_path_exists(model: Union[str, Path], config_name: str,
     # hf_hub. This will fail in offline mode.
 
     # Call HF to check if the file exists
-    return file_exists(str(model),
-                       config_name,
-                       revision=revision,
-                       token=HF_TOKEN)
+    return file_exists(str(model), config_name, revision=revision, token=HF_TOKEN)
 
 
 def patch_rope_scaling(config: PretrainedConfig) -> None:
@@ -204,10 +201,9 @@ def patch_rope_scaling_dict(rope_scaling: Dict[str, Any]) -> None:
         rope_type = rope_scaling["rope_type"]
         rope_type_legacy = rope_scaling["type"]
         if rope_type != rope_type_legacy:
-            raise ValueError(
-                f"Found conflicts between 'rope_type={rope_type}' (modern "
-                f"field) and 'type={rope_type_legacy}' (legacy field). "
-                "You should only specify one of them.")
+            raise ValueError(f"Found conflicts between 'rope_type={rope_type}' (modern "
+                             f"field) and 'type={rope_type_legacy}' (legacy field). "
+                             "You should only specify one of them.")
 
     if "rope_type" not in rope_scaling and "type" in rope_scaling:
         rope_scaling["rope_type"] = rope_scaling["type"]
@@ -277,12 +273,9 @@ def get_config(
 
     if config_format == ConfigFormat.AUTO:
         try:
-            if is_gguf or file_or_path_exists(
-                    model, HF_CONFIG_NAME, revision=revision):
+            if is_gguf or file_or_path_exists(model, HF_CONFIG_NAME, revision=revision):
                 config_format = ConfigFormat.HF
-            elif file_or_path_exists(model,
-                                     MISTRAL_CONFIG_NAME,
-                                     revision=revision):
+            elif file_or_path_exists(model, MISTRAL_CONFIG_NAME, revision=revision):
                 config_format = ConfigFormat.MISTRAL
             else:
                 raise ValueError(
@@ -291,16 +284,15 @@ def get_config(
                     "or params.json (Mistral format).")
 
         except Exception as e:
-            error_message = (
-                "Invalid repository ID or local directory specified:"
-                " '{model}'.\nPlease verify the following requirements:\n"
-                "1. Provide a valid Hugging Face repository ID.\n"
-                "2. Specify a local directory that contains a recognized "
-                "configuration file.\n"
-                "   - For Hugging Face models: ensure the presence of a "
-                "'config.json'.\n"
-                "   - For Mistral models: ensure the presence of a "
-                "'params.json'.\n").format(model=model)
+            error_message = ("Invalid repository ID or local directory specified:"
+                             " '{model}'.\nPlease verify the following requirements:\n"
+                             "1. Provide a valid Hugging Face repository ID.\n"
+                             "2. Specify a local directory that contains a recognized "
+                             "configuration file.\n"
+                             "   - For Hugging Face models: ensure the presence of a "
+                             "'config.json'.\n"
+                             "   - For Mistral models: ensure the presence of a "
+                             "'params.json'.\n").format(model=model)
 
             raise ValueError(error_message) from e
 
@@ -336,14 +328,12 @@ def get_config(
                 )
             except ValueError as e:
                 if (not trust_remote_code
-                        and "requires you to execute the configuration file"
-                        in str(e)):
-                    err_msg = (
-                        "Failed to load the model config. If the model "
-                        "is a custom model not yet available in the "
-                        "HuggingFace transformers library, consider setting "
-                        "`trust_remote_code=True` in LLM or using the "
-                        "`--trust-remote-code` flag in the CLI.")
+                        and "requires you to execute the configuration file" in str(e)):
+                    err_msg = ("Failed to load the model config. If the model "
+                               "is a custom model not yet available in the "
+                               "HuggingFace transformers library, consider setting "
+                               "`trust_remote_code=True` in LLM or using the "
+                               "`--trust-remote-code` flag in the CLI.")
                     raise RuntimeError(err_msg) from e
                 else:
                     raise e
@@ -354,17 +344,15 @@ def get_config(
         supported_formats = [
             fmt.value for fmt in ConfigFormat if fmt != ConfigFormat.AUTO
         ]
-        raise ValueError(
-            f"Unsupported config format: {config_format}. "
-            f"Supported formats are: {', '.join(supported_formats)}. "
-            f"Ensure your model uses one of these configuration formats "
-            f"or specify the correct format explicitly.")
+        raise ValueError(f"Unsupported config format: {config_format}. "
+                         f"Supported formats are: {', '.join(supported_formats)}. "
+                         f"Ensure your model uses one of these configuration formats "
+                         f"or specify the correct format explicitly.")
 
     # Special architecture mapping check for GGUF models
     if is_gguf:
         if config.model_type not in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
-            raise RuntimeError(
-                f"Can't get gguf config for {config.model_type}.")
+            raise RuntimeError(f"Can't get gguf config for {config.model_type}.")
         model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
         config.update({"architectures": [model_type]})
 
@@ -411,17 +399,15 @@ def get_hf_file_to_dict(file_name: str,
     the contents of the downloaded file.
     """
 
-    file_path = try_get_local_file(model=model,
-                                   file_name=file_name,
-                                   revision=revision)
+    file_path = try_get_local_file(model=model, file_name=file_name, revision=revision)
 
     if file_path is None:
         try:
             hf_hub_file = hf_hub_download(model, file_name, revision=revision)
         except huggingface_hub.errors.OfflineModeIsEnabled:
             return None
-        except (RepositoryNotFoundError, RevisionNotFoundError,
-                EntryNotFoundError, LocalEntryNotFoundError) as e:
+        except (RepositoryNotFoundError, RevisionNotFoundError, EntryNotFoundError,
+                LocalEntryNotFoundError) as e:
             logger.debug("File or repository not found in hf_hub_download", e)
             return None
         except HfHubHTTPError as e:
@@ -471,12 +457,10 @@ def get_pooling_config(model: str, revision: Optional[str] = 'main'):
     logger.info("Found sentence-transformers modules configuration.")
 
     pooling = next((item for item in modules_dict
-                    if item["type"] == "sentence_transformers.models.Pooling"),
-                   None)
+                    if item["type"] == "sentence_transformers.models.Pooling"), None)
     normalize = bool(
         next((item for item in modules_dict
-              if item["type"] == "sentence_transformers.models.Normalize"),
-             False))
+              if item["type"] == "sentence_transformers.models.Normalize"), False))
 
     if pooling:
 
@@ -518,8 +502,7 @@ def get_pooling_config_name(pooling_name: str) -> Union[str, None]:
 
 @cache
 def get_sentence_transformer_tokenizer_config(model: str,
-                                              revision: Optional[str] = 'main'
-                                              ):
+                                              revision: Optional[str] = 'main'):
     """
     Returns the tokenization configuration dictionary for a
     given Sentence Transformer BERT model.
@@ -546,8 +529,7 @@ def get_sentence_transformer_tokenizer_config(model: str,
     encoder_dict = None
 
     for config_file in sentence_transformer_config_files:
-        if try_get_local_file(model=model,
-                              file_name=config_file,
+        if try_get_local_file(model=model, file_name=config_file,
                               revision=revision) is not None:
             encoder_dict = get_hf_file_to_dict(config_file, model, revision)
             if encoder_dict:
@@ -556,16 +538,13 @@ def get_sentence_transformer_tokenizer_config(model: str,
     if not encoder_dict and not model.startswith("/"):
         try:
             # If model is on HuggingfaceHub, get the repo files
-            repo_files = list_repo_files(model,
-                                         revision=revision,
-                                         token=HF_TOKEN)
+            repo_files = list_repo_files(model, revision=revision, token=HF_TOKEN)
         except Exception:
             repo_files = []
 
         for config_name in sentence_transformer_config_files:
             if config_name in repo_files:
-                encoder_dict = get_hf_file_to_dict(config_name, model,
-                                                   revision)
+                encoder_dict = get_hf_file_to_dict(config_name, model, revision)
                 if encoder_dict:
                     break
 
@@ -684,32 +663,26 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
 
     config_dict["model_type"] = config_dict.get("model_type", "transformer")
     config_dict["hidden_act"] = config_dict.get("activation", "silu")
-    config_dict["tie_word_embeddings"] = config_dict.get(
-        "tie_embeddings", False)
+    config_dict["tie_word_embeddings"] = config_dict.get("tie_embeddings", False)
     config_dict["max_seq_len"] = config_dict.get("max_seq_len", 128_000)
-    config_dict["max_position_embeddings"] = config_dict.get(
-        "max_position_embeddings", 128_000)
+    config_dict["max_position_embeddings"] = config_dict.get("max_position_embeddings",
+                                                             128_000)
 
     if config_dict.get("quantization") is not None:
         quantization = config_dict.get("quantization", {})
         if quantization.get("qformat_weight") == "fp8_e4m3":
             # This maps to the FP8 static per-tensor quantization scheme
-            quantization_config = {
-                "quant_method": "fp8",
-                "activation_scheme": "static"
-            }
+            quantization_config = {"quant_method": "fp8", "activation_scheme": "static"}
         elif quantization.get("quant_method") == "compressed-tensors":
             # Pass through the quantization config to compressed-tensors
             quantization_config = quantization
         else:
-            raise ValueError(
-                f"Found unknown quantization='{quantization}' in config")
+            raise ValueError(f"Found unknown quantization='{quantization}' in config")
 
         config_dict["quantization_config"] = quantization_config
 
-    config_type: Literal["text",
-                         "multimodal"] = "multimodal" if config_dict.get(
-                             "vision_encoder") is not None else "text"
+    config_type: Literal["text", "multimodal"] = "multimodal" if config_dict.get(
+        "vision_encoder") is not None else "text"
 
     if config_dict.get("moe") is not None:
         config_dict["architectures"] = ["MixtralForCausalLM"]
@@ -720,10 +693,7 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
         multimodal_config = config_dict.pop("vision_encoder")
         quantization_config = config_dict.get("quantization_config", {})
 
-        config_dict = {
-            "text_config": config_dict,
-            "vision_config": multimodal_config
-        }
+        config_dict = {"text_config": config_dict, "vision_config": multimodal_config}
         config_dict["architectures"] = ["PixtralForConditionalGeneration"]
         config_dict["model_type"] = "pixtral"
         if quantization_config:
@@ -735,10 +705,8 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
 
     # transform to HF config format
     if config_type == "multimodal":
-        config_dict["text_config"] = PretrainedConfig(
-            **config_dict["text_config"])
-        config_dict["vision_config"] = PretrainedConfig(
-            **config_dict["vision_config"])
+        config_dict["text_config"] = PretrainedConfig(**config_dict["text_config"])
+        config_dict["vision_config"] = PretrainedConfig(**config_dict["vision_config"])
 
     return PretrainedConfig(**config_dict)
 

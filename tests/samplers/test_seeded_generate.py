@@ -62,8 +62,7 @@ def test_random_sample_with_seed(
             llm._add_request(prompt, params=params)
 
     results = llm._run_engine(use_tqdm=False)
-    all_outputs = [[out.token_ids for out in output.outputs]
-                   for output in results]
+    all_outputs = [[out.token_ids for out in output.outputs] for output in results]
 
     for i in range(0, len(example_prompts), 6):
         outputs = all_outputs[i:i + 6]

@@ -13,9 +13,7 @@ from ..openai.test_vision import TEST_IMAGE_URLS
 def text_llm():
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
-    llm = LLM(model="meta-llama/Llama-3.2-1B-Instruct",
-              enforce_eager=True,
-              seed=0)
+    llm = LLM(model="meta-llama/Llama-3.2-1B-Instruct", enforce_eager=True, seed=0)
 
     with llm.deprecate_legacy_api():
         yield weakref.proxy(llm)
@@ -95,8 +93,7 @@ def vision_llm():
     cleanup_dist_env_and_memory()
 
 
-@pytest.mark.parametrize("image_urls",
-                         [[TEST_IMAGE_URLS[0], TEST_IMAGE_URLS[1]]])
+@pytest.mark.parametrize("image_urls", [[TEST_IMAGE_URLS[0], TEST_IMAGE_URLS[1]]])
 def test_chat_multi_image(vision_llm, image_urls: list[str]):
     messages = [{
         "role":

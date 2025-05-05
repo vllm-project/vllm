@@ -176,12 +176,11 @@ class EngineCoreClient(ABC):
                                        max_size: Optional[int] = None) -> None:
         raise NotImplementedError
 
-    async def collective_rpc_async(
-            self,
-            method: Union[str, Callable[..., _R]],
-            timeout: Optional[float] = None,
-            args: tuple = (),
-            kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
+    async def collective_rpc_async(self,
+                                   method: Union[str, Callable[..., _R]],
+                                   timeout: Optional[float] = None,
+                                   args: tuple = (),
+                                   kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
         raise NotImplementedError
 
 
@@ -337,8 +336,7 @@ class BackgroundResources:
                 shutdown_sender.send(b'')
 
     def validate_alive(self, frames: Sequence[zmq.Frame]):
-        if len(frames) == 1 and (frames[0].buffer
-                                 == EngineCoreProc.ENGINE_CORE_DEAD):
+        if len(frames) == 1 and (frames[0].buffer == EngineCoreProc.ENGINE_CORE_DEAD):
             self.engine_dead = True
             raise EngineDeadError()
 
@@ -389,8 +387,8 @@ class MPClient(EngineCoreClient):
             self.resources.input_socket = self.input_socket
 
             new_core_engine = lambda index, local_dp_rank=None: CoreEngine(
-                vllm_config, executor_class, log_stats, input_path, self.
-                output_path, index, local_dp_rank)
+                vllm_config, executor_class, log_stats, input_path, self.output_path,
+                index, local_dp_rank)
 
             # Start engine core process(es).
             self._init_core_engines(vllm_config, new_core_engine,
@@ -483,8 +481,8 @@ class MPClient(EngineCoreClient):
             self.pending_messages.pop()
 
 
-def _process_utility_output(output: UtilityOutput,
-                            utility_results: dict[int, AnyFuture]):
+def _process_utility_output(output: UtilityOutput, utility_results: dict[int,
+                                                                         AnyFuture]):
     """Set the result from a utility method in the waiting future"""
     future = utility_results.pop(output.call_id)
     if output.failure_message is not None:
@@ -539,8 +537,7 @@ class SyncMPClient(MPClient):
                     resources.validate_alive(frames)
                     outputs = decoder.decode(frames)
                     if outputs.utility_output:
-                        _process_utility_output(outputs.utility_output,
-                                                utility_results)
+                        _process_utility_output(outputs.utility_output, utility_results)
                     else:
                         outputs_queue.put_nowait(outputs)
             except Exception as e:
@@ -584,8 +581,7 @@ class SyncMPClient(MPClient):
         call_id = uuid.uuid1().int >> 64
         future: Future[Any] = Future()
         self.utility_results[call_id] = future
-        self._send_input(EngineCoreRequestType.UTILITY,
-                         (call_id, method, args))
+        self._send_input(EngineCoreRequestType.UTILITY, (call_id, method, args))
 
         return future.result()
 
@@ -631,8 +627,7 @@ class SyncMPClient(MPClient):
                        timeout: Optional[float] = None,
                        args: tuple = (),
                        kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
-        return self.call_utility("collective_rpc", method, timeout, args,
-                                 kwargs)
+        return self.call_utility("collective_rpc", method, timeout, args, kwargs)
 
     def save_sharded_state(self,
                            path: str,
@@ -653,8 +648,7 @@ class AsyncMPClient(MPClient):
             log_stats=log_stats,
         )
 
-        self.outputs_queue = asyncio.Queue[Union[EngineCoreOutputs,
-                                                 Exception]]()
+        self.outputs_queue = asyncio.Queue[Union[EngineCoreOutputs, Exception]]()
         try:
             # If we are running in an asyncio event loop, start the queue task.
             # Otherwise, it will be started lazily. If it is not started here,
@@ -677,12 +671,11 @@ class AsyncMPClient(MPClient):
         outputs_queue = self.outputs_queue
         output_handler: Optional[Callable[[AsyncMPClient, EngineCoreOutputs],
                                           Awaitable[None]]] = getattr(
-                                              self.__class__,
-                                              "process_engine_outputs", None)
+                                              self.__class__, "process_engine_outputs",
+                                              None)
         _self_ref = weakref.ref(self) if output_handler else None
         output_path = self.output_path
-        output_socket = make_zmq_socket(self.ctx, output_path,
-                                        zmq.constants.PULL)
+        output_socket = make_zmq_socket(self.ctx, output_path, zmq.constants.PULL)
         resources.output_socket = output_socket
 
         async def process_outputs_socket():
@@ -692,8 +685,7 @@ class AsyncMPClient(MPClient):
                     resources.validate_alive(frames)
                     outputs: EngineCoreOutputs = decoder.decode(frames)
                     if outputs.utility_output:
-                        _process_utility_output(outputs.utility_output,
-                                                utility_results)
+                        _process_utility_output(outputs.utility_output, utility_results)
                         continue
 
                     if output_handler is not None:
@@ -734,8 +726,7 @@ class AsyncMPClient(MPClient):
         message = (request_type.value, *self.encoder.encode(request))
         return self._send_input_message(message, engine, request)
 
-    def _send_input_message(self, message: tuple[bytestr,
-                                                 ...], engine: CoreEngine,
+    def _send_input_message(self, message: tuple[bytestr, ...], engine: CoreEngine,
                             objects: Any) -> Awaitable[Any]:
         """
         objects is a reference to retain until zmq is finished with the
@@ -760,12 +751,9 @@ class AsyncMPClient(MPClient):
         return future
 
     async def call_utility_async(self, method: str, *args) -> Any:
-        return await self._call_utility_async(method,
-                                              *args,
-                                              engine=self.core_engine)
+        return await self._call_utility_async(method, *args, engine=self.core_engine)
 
-    async def _call_utility_async(self, method: str, *args,
-                                  engine: CoreEngine) -> Any:
+    async def _call_utility_async(self, method: str, *args, engine: CoreEngine) -> Any:
         call_id = uuid.uuid1().int >> 64
         future = asyncio.get_running_loop().create_future()
         self.utility_results[call_id] = future
@@ -817,17 +805,15 @@ class AsyncMPClient(MPClient):
                                        path: str,
                                        pattern: Optional[str] = None,
                                        max_size: Optional[int] = None) -> None:
-        await self.call_utility_async("save_sharded_state", path, pattern,
-                                      max_size)
+        await self.call_utility_async("save_sharded_state", path, pattern, max_size)
 
-    async def collective_rpc_async(
-            self,
-            method: Union[str, Callable[..., _R]],
-            timeout: Optional[float] = None,
-            args: tuple = (),
-            kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
-        return await self.call_utility_async("collective_rpc", method, timeout,
-                                             args, kwargs)
+    async def collective_rpc_async(self,
+                                   method: Union[str, Callable[..., _R]],
+                                   timeout: Optional[float] = None,
+                                   args: tuple = (),
+                                   kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
+        return await self.call_utility_async("collective_rpc", method, timeout, args,
+                                             kwargs)
 
 
 class DPAsyncMPClient(AsyncMPClient):
@@ -874,8 +860,7 @@ class DPAsyncMPClient(AsyncMPClient):
         self.reqs_in_flight[request.request_id] = chosen_engine
         chosen_engine.num_reqs_in_flight += 1
 
-        to_await = self._send_input(EngineCoreRequestType.ADD, request,
-                                    chosen_engine)
+        to_await = self._send_input(EngineCoreRequestType.ADD, request, chosen_engine)
         if not self.engines_running:
             # Send request to chosen engine and dp start loop
             # control message to all other engines.
@@ -908,8 +893,7 @@ class DPAsyncMPClient(AsyncMPClient):
 
         elif outputs.start_wave is not None and (
                 outputs.start_wave > self.current_wave or
-            (outputs.start_wave == self.current_wave
-             and not self.engines_running)):
+            (outputs.start_wave == self.current_wave and not self.engines_running)):
             # Engine received request for a non-current wave so we must ensure
             # that other engines progress to the next wave.
             self.current_wave = outputs.start_wave
@@ -920,9 +904,9 @@ class DPAsyncMPClient(AsyncMPClient):
     def _start_wave_coros(self, exclude_index: int) -> list[Awaitable[None]]:
         logger.debug("Sending start DP wave %d.", self.current_wave)
         return [
-            self._send_input(EngineCoreRequestType.START_DP_WAVE,
-                             self.current_wave, engine)
-            for engine in self.core_engines if engine.index != exclude_index
+            self._send_input(EngineCoreRequestType.START_DP_WAVE, self.current_wave,
+                             engine) for engine in self.core_engines
+            if engine.index != exclude_index
         ]
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
@@ -942,8 +926,6 @@ class DPAsyncMPClient(AsyncMPClient):
         for engine, req_ids in by_engine.items():
             await self._abort_requests(req_ids, engine)
 
-    async def _abort_requests(self, request_ids: list[str],
-                              engine: CoreEngine) -> None:
+    async def _abort_requests(self, request_ids: list[str], engine: CoreEngine) -> None:
         if not self.resources.engine_dead:
-            await self._send_input(EngineCoreRequestType.ABORT, request_ids,
-                                   engine)
+            await self._send_input(EngineCoreRequestType.ABORT, request_ids, engine)

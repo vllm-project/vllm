@@ -34,8 +34,7 @@ tools = [{
             "type": "object",
             "properties": {
                 "city": {
-                    "type":
-                    "string",
+                    "type": "string",
                     "description":
                     "The city to find the weather for, e.g. 'San Francisco'"
                 },
@@ -115,8 +114,7 @@ def handle_tool_calls_arguments(chunks: list[Any]) -> list[str]:
 
             if tool_call.function:
                 if tool_call.function.name:
-                    print(
-                        f"streamed tool call name: {tool_call.function.name}")
+                    print(f"streamed tool call name: {tool_call.function.name}")
 
                 if tool_call.function.arguments:
                     arguments[tool_call_idx] += tool_call.function.arguments

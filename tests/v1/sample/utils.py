@@ -19,8 +19,7 @@ BatchLogprobsSpecType = list[tuple[Optional[int], Optional[int]]]
 
 
 def get_test_batch(
-    batch_logprobs_composition: BatchLogprobsComposition
-) -> BatchLogprobsSpecType:
+        batch_logprobs_composition: BatchLogprobsComposition) -> BatchLogprobsSpecType:
     """Generate logprobs configs for a batch of requests
     
     A given request's logprobs configuration is (1) num_sample_logprobs and (2)
@@ -118,8 +117,7 @@ def assert_incr_detok_str_matches_non_incr_detok_str(
         rgx, '', non_incremental_detokenization_str)), (msg)
 
 
-def compute_correct_cumulative_logprob(
-        completion_output: CompletionOutput) -> float:
+def compute_correct_cumulative_logprob(completion_output: CompletionOutput) -> float:
     """Compute known-good value for evaluating cumulative logprob
     
     Args:

@@ -114,23 +114,17 @@ def rmsnorm_vllm(
 
 def calculate_diff(batch_size, seq_len, hidden_size, use_residual=True):
     dtype = torch.bfloat16
-    x = torch.randn(batch_size,
-                    seq_len,
-                    hidden_size,
-                    dtype=dtype,
-                    device="cuda")
+    x = torch.randn(batch_size, seq_len, hidden_size, dtype=dtype, device="cuda")
     weight = torch.ones(hidden_size, dtype=dtype, device="cuda")
     residual = torch.randn_like(x) if use_residual else None
 
-    output_naive = rmsnorm_naive(
-        x.clone(), weight,
-        residual.clone() if residual is not None else None)
+    output_naive = rmsnorm_naive(x.clone(), weight,
+                                 residual.clone() if residual is not None else None)
     output_flashinfer = rmsnorm_flashinfer(
         x.clone(), weight,
         residual.clone() if residual is not None else None)
-    output_vllm = rmsnorm_vllm(
-        x.clone(), weight,
-        residual.clone() if residual is not None else None)
+    output_vllm = rmsnorm_vllm(x.clone(), weight,
+                               residual.clone() if residual is not None else None)
 
     if use_residual:
         output_naive = output_naive[0]
@@ -152,8 +146,7 @@ def calculate_diff(batch_size, seq_len, hidden_size, use_residual=True):
 batch_size_range = [2**i for i in range(0, 7, 2)]
 seq_length_range = [2**i for i in range(6, 11, 1)]
 head_num_range = [32, 48]
-configs = list(
-    itertools.product(head_num_range, batch_size_range, seq_length_range))
+configs = list(itertools.product(head_num_range, batch_size_range, seq_length_range))
 
 
 def get_benchmark(use_residual):
@@ -167,19 +160,14 @@ def get_benchmark(use_residual):
             line_names=["HuggingFace", "FlashInfer", "vLLM"],
             styles=[("blue", "-"), ("green", "-"), ("red", "-")],
             ylabel="us",
-            plot_name=
-            f"rmsnorm-perf-{'with' if use_residual else 'without'}-residual",
+            plot_name=f"rmsnorm-perf-{'with' if use_residual else 'without'}-residual",
             args={},
         ))
     def benchmark(head_num, batch_size, seq_len, provider):
         dtype = torch.bfloat16
         hidden_size = head_num * 128  # assuming head_dim = 128
 
-        x = torch.randn(batch_size,
-                        seq_len,
-                        hidden_size,
-                        dtype=dtype,
-                        device="cuda")
+        x = torch.randn(batch_size, seq_len, hidden_size, dtype=dtype, device="cuda")
         weight = torch.ones(hidden_size, dtype=dtype, device="cuda")
         residual = torch.randn_like(x) if use_residual else None
 

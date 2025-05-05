@@ -84,8 +84,7 @@ class LoRARequest(
         instances based on lora_name. This allows for identification
         and comparison lora adapter across engines.
         """
-        return isinstance(value,
-                          self.__class__) and self.lora_name == value.lora_name
+        return isinstance(value, self.__class__) and self.lora_name == value.lora_name
 
     def __hash__(self) -> int:
         """

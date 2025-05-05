@@ -111,27 +111,21 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
     if args.dataset == 'json' or args.dataset == 'json-unique':
         if args.json_schema_path is None:
             dir_path = os.path.dirname(os.path.realpath(__file__))
-            args.json_schema_path = os.path.join(dir_path,
-                                                 "structured_schemas",
+            args.json_schema_path = os.path.join(dir_path, "structured_schemas",
                                                  "structured_schema_1.json")
         json_schemas = []
         with open(args.json_schema_path) as f:
             schema = json.load(f)
 
         if args.dataset == 'json-unique':
-            json_schemas = [
-                copy.deepcopy(schema) for _ in range(args.num_prompts)
-            ]
+            json_schemas = [copy.deepcopy(schema) for _ in range(args.num_prompts)]
             for i in range(len(json_schemas)):
                 if "properties" not in json_schemas[i]:
                     json_schemas[i]["properties"] = {}
-                json_schemas[i]["properties"][
-                    f"__optional_field_{uuid.uuid4()}"] = {
-                        "type":
-                        "string",
-                        "description":
-                        "An unique optional field to avoid cached schemas"
-                    }
+                json_schemas[i]["properties"][f"__optional_field_{uuid.uuid4()}"] = {
+                    "type": "string",
+                    "description": "An unique optional field to avoid cached schemas"
+                }
         else:
             json_schemas = [schema] * args.num_prompts
 
@@ -213,8 +207,7 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
 
     elif args.dataset == "xgrammar_bench":
         requests: list[SampleRequest] = []
-        dataset = datasets.load_dataset("NousResearch/json-mode-eval",
-                                        split="train")
+        dataset = datasets.load_dataset("NousResearch/json-mode-eval", split="train")
         full_dataset_len = len(dataset)
 
         def _filter_func(item):
@@ -432,8 +425,7 @@ async def benchmark(
 
     print("Starting initial single prompt test run...")
     structured_output_req_idx = random.sample(
-        range(len(input_requests)),
-        int(len(input_requests) * structured_output_ratio))
+        range(len(input_requests)), int(len(input_requests) * structured_output_ratio))
 
     test_request = input_requests[0]
     test_req_extra_body = (prepare_extra_body(test_request)
@@ -482,22 +474,18 @@ async def benchmark(
     # and it will simplify the code in limited_request_func.
     #    semaphore = (asyncio.Semaphore(max_concurrency)
     #                 if max_concurrency else contextlib.nullcontext())
-    semaphore = (asyncio.Semaphore(max_concurrency)
-                 if max_concurrency else None)
+    semaphore = (asyncio.Semaphore(max_concurrency) if max_concurrency else None)
 
     async def limited_request_func(request_func_input, pbar):
         if semaphore is None:
-            return await request_func(request_func_input=request_func_input,
-                                      pbar=pbar)
+            return await request_func(request_func_input=request_func_input, pbar=pbar)
         async with semaphore:
-            return await request_func(request_func_input=request_func_input,
-                                      pbar=pbar)
+            return await request_func(request_func_input=request_func_input, pbar=pbar)
 
     benchmark_start_time = time.perf_counter()
     tasks: list[asyncio.Task] = []
     expected: list[str] = []
-    async for i, request in get_request(input_requests, request_rate,
-                                        burstiness):
+    async for i, request in get_request(input_requests, request_rate, burstiness):
         extra_body = prepare_extra_body(
             request) if i in structured_output_req_idx else None
         request_func_input = RequestFuncInput(
@@ -512,8 +500,7 @@ async def benchmark(
         expected.append(request.completion)
         tasks.append(
             asyncio.create_task(
-                limited_request_func(request_func_input=request_func_input,
-                                     pbar=pbar)))
+                limited_request_func(request_func_input=request_func_input, pbar=pbar)))
     outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
 
     if profile:
@@ -547,11 +534,9 @@ async def benchmark(
 
     print("{s:{c}^{n}}".format(s=' Serving Benchmark Result ', n=50, c='='))
     print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
-    print("{:<40} {:<10.2f}".format("Benchmark duration (s):",
-                                    benchmark_duration))
+    print("{:<40} {:<10.2f}".format("Benchmark duration (s):", benchmark_duration))
     print("{:<40} {:<10}".format("Total input tokens:", metrics.total_input))
-    print("{:<40} {:<10}".format("Total generated tokens:",
-                                 metrics.total_output))
+    print("{:<40} {:<10}".format("Total generated tokens:", metrics.total_output))
     print("{:<40} {:<10.2f}".format("Request throughput (req/s):",
                                     metrics.request_throughput))
     if goodput_config_dict:
@@ -619,16 +604,13 @@ async def benchmark(
             metrics, f"median_{metric_attribute_name}_ms")
         result[f"std_{metric_attribute_name}_ms"] = getattr(
             metrics, f"std_{metric_attribute_name}_ms")
-        for p, value in getattr(metrics,
-                                f"percentiles_{metric_attribute_name}_ms"):
+        for p, value in getattr(metrics, f"percentiles_{metric_attribute_name}_ms"):
             p_word = str(int(p)) if int(p) == p else str(p)
-            print("{:<40} {:<10.2f}".format(f"P{p_word} {metric_name} (ms):",
-                                            value))
+            print("{:<40} {:<10.2f}".format(f"P{p_word} {metric_name} (ms):", value))
             result[f"p{p_word}_{metric_attribute_name}_ms"] = value
 
     process_one_metric("ttft", "TTFT", "Time to First Token")
-    process_one_metric("tpot", "TPOT",
-                       "Time per Output Token (excl. 1st token)")
+    process_one_metric("tpot", "TPOT", "Time per Output Token (excl. 1st token)")
     process_one_metric("itl", "ITL", "Inter-token Latency")
     process_one_metric("e2el", "E2EL", "End-to-end Latency")
 
@@ -702,15 +684,13 @@ def check_goodput_args(args):
         goodput_config_dict = parse_goodput(args.goodput)
         for slo_name, slo_val in goodput_config_dict.items():
             if slo_name not in VALID_NAMES:
-                raise ValueError(
-                    f"Invalid metric name found, {slo_name}: {slo_val}. "
-                    "The service level objective name should be one of "
-                    f"{str(VALID_NAMES)}. ")
+                raise ValueError(f"Invalid metric name found, {slo_name}: {slo_val}. "
+                                 "The service level objective name should be one of "
+                                 f"{str(VALID_NAMES)}. ")
             if slo_val < 0:
-                raise ValueError(
-                    f"Invalid value found, {slo_name}: {slo_val}. "
-                    "The service level objective value should be "
-                    "non-negative.")
+                raise ValueError(f"Invalid value found, {slo_name}: {slo_val}. "
+                                 "The service level objective value should be "
+                                 "non-negative.")
     return goodput_config_dict
 
 
@@ -776,9 +756,7 @@ def main(args: argparse.Namespace):
             disable_tqdm=args.disable_tqdm,
             profile=args.profile,
             selected_percentile_metrics=args.percentile_metrics.split(","),
-            selected_percentiles=[
-                float(p) for p in args.metric_percentiles.split(",")
-            ],
+            selected_percentiles=[float(p) for p in args.metric_percentiles.split(",")],
             ignore_eos=args.ignore_eos,
             max_concurrency=args.max_concurrency,
             structured_output_ratio=args.structured_output_ratio,
@@ -791,22 +769,15 @@ def main(args: argparse.Namespace):
     print("correct_rate(%)", score, '\n')
     if args.save_results:
         results = {
-            "backend":
-            backend,
-            "model_id":
-            model_id,
-            "tokenizer_id":
-            tokenizer_id,
-            "num_prompts":
-            args.num_prompts,
+            "backend": backend,
+            "model_id": model_id,
+            "tokenizer_id": tokenizer_id,
+            "num_prompts": args.num_prompts,
             "request_rate":
             args.request_rate if args.request_rate < float("inf") else "inf",
-            "burstiness":
-            args.burstiness,
-            "max_concurrency":
-            args.max_concurrency,
-            "correct_rate(%)":
-            score
+            "burstiness": args.burstiness,
+            "max_concurrency": args.max_concurrency,
+            "correct_rate(%)": score
         }
         results = {"outputs": ret, **results, **benchmark_result}
 
@@ -843,12 +814,10 @@ if __name__ == "__main__":
         default="/v1/completions",
         help="API endpoint.",
     )
-    parser.add_argument("--dataset",
-                        default='json',
-                        choices=[
-                            'json', 'json-unique', 'grammar', 'regex',
-                            'choice', 'xgrammar_bench'
-                        ])
+    parser.add_argument(
+        "--dataset",
+        default='json',
+        choices=['json', 'json-unique', 'grammar', 'regex', 'choice', 'xgrammar_bench'])
     parser.add_argument("--json-schema-path",
                         type=str,
                         default=None,
@@ -997,14 +966,12 @@ if __name__ == "__main__":
                         type=float,
                         default=1.0,
                         help="Ratio of Structured Outputs requests")
-    parser.add_argument("--structured-output-backend",
-                        type=str,
-                        choices=[
-                            "outlines", "lm-format-enforcer", "xgrammar",
-                            "guidance", "auto"
-                        ],
-                        default="auto",
-                        help="Backend to use for structured outputs")
+    parser.add_argument(
+        "--structured-output-backend",
+        type=str,
+        choices=["outlines", "lm-format-enforcer", "xgrammar", "guidance", "auto"],
+        default="auto",
+        help="Backend to use for structured outputs")
 
     args = parser.parse_args()
     main(args)

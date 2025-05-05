@@ -212,12 +212,10 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
     - torch.Tensor: The output tensor after applying the MoE layer.
     """
     # Check constraints.
-    assert hidden_states.shape[0] == gating_output.shape[
-        0], "Number of tokens mismatch"
-    assert hidden_states.shape[
-        1] == w1.shape[1] * 16, "Hidden size mismatch w1"
-    assert hidden_states.shape[1] == w2.shape[2] // (
-        num_bits // 2), "Hidden size mismatch w2"
+    assert hidden_states.shape[0] == gating_output.shape[0], "Number of tokens mismatch"
+    assert hidden_states.shape[1] == w1.shape[1] * 16, "Hidden size mismatch w1"
+    assert hidden_states.shape[1] == w2.shape[2] // (num_bits //
+                                                     2), "Hidden size mismatch w2"
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
     assert w1.is_contiguous(), "Expert weights1 must be contiguous"
     assert w2.is_contiguous(), "Expert weights2 must be contiguous"
@@ -279,63 +277,61 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
     use_atomic_add = hidden_states.dtype == torch.half or \
         torch.cuda.get_device_capability(hidden_states.device)[0] >= 9
 
-    intermediate_cache1 = ops.moe_wna16_marlin_gemm(
-        hidden_states,
-        intermediate_cache1,
-        w1,
-        w1_scale,
-        w1_zeros,
-        g_idx1,
-        sort_indices1,
-        workspace,
-        sorted_token_ids,
-        expert_ids,
-        num_tokens_post_padded,
-        topk_weights,
-        moe_block_size=block_size_m,
-        top_k=topk,
-        mul_topk_weights=False,
-        is_ep=expert_map is not None,
-        b_q_type=scalar_type1,
-        size_m=M,
-        size_n=2 * N,
-        size_k=K,
-        is_k_full=is_k_full,
-        use_atomic_add=use_atomic_add,
-        use_fp32_reduce=True,
-        is_zp_float=False)
+    intermediate_cache1 = ops.moe_wna16_marlin_gemm(hidden_states,
+                                                    intermediate_cache1,
+                                                    w1,
+                                                    w1_scale,
+                                                    w1_zeros,
+                                                    g_idx1,
+                                                    sort_indices1,
+                                                    workspace,
+                                                    sorted_token_ids,
+                                                    expert_ids,
+                                                    num_tokens_post_padded,
+                                                    topk_weights,
+                                                    moe_block_size=block_size_m,
+                                                    top_k=topk,
+                                                    mul_topk_weights=False,
+                                                    is_ep=expert_map is not None,
+                                                    b_q_type=scalar_type1,
+                                                    size_m=M,
+                                                    size_n=2 * N,
+                                                    size_k=K,
+                                                    is_k_full=is_k_full,
+                                                    use_atomic_add=use_atomic_add,
+                                                    use_fp32_reduce=True,
+                                                    is_zp_float=False)
 
-    torch.ops._C.silu_and_mul(intermediate_cache2,
-                              intermediate_cache1.view(-1, 2 * N))
+    torch.ops._C.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, 2 * N))
 
     if expert_map is not None:
         intermediate_cache3.zero_()
 
-    intermediate_cache3 = ops.moe_wna16_marlin_gemm(
-        intermediate_cache2,
-        intermediate_cache3,
-        w2,
-        w2_scale,
-        w2_zeros,
-        g_idx2,
-        sort_indices2,
-        workspace,
-        sorted_token_ids,
-        expert_ids,
-        num_tokens_post_padded,
-        topk_weights,
-        moe_block_size=block_size_m,
-        top_k=1,
-        mul_topk_weights=True,
-        is_ep=expert_map is not None,
-        b_q_type=scalar_type2,
-        size_m=M * topk,
-        size_n=K,
-        size_k=N,
-        is_k_full=is_k_full,
-        use_atomic_add=use_atomic_add,
-        use_fp32_reduce=True,
-        is_zp_float=False).view(-1, topk, K)
+    intermediate_cache3 = ops.moe_wna16_marlin_gemm(intermediate_cache2,
+                                                    intermediate_cache3,
+                                                    w2,
+                                                    w2_scale,
+                                                    w2_zeros,
+                                                    g_idx2,
+                                                    sort_indices2,
+                                                    workspace,
+                                                    sorted_token_ids,
+                                                    expert_ids,
+                                                    num_tokens_post_padded,
+                                                    topk_weights,
+                                                    moe_block_size=block_size_m,
+                                                    top_k=1,
+                                                    mul_topk_weights=True,
+                                                    is_ep=expert_map is not None,
+                                                    b_q_type=scalar_type2,
+                                                    size_m=M * topk,
+                                                    size_n=K,
+                                                    size_k=N,
+                                                    is_k_full=is_k_full,
+                                                    use_atomic_add=use_atomic_add,
+                                                    use_fp32_reduce=True,
+                                                    is_zp_float=False).view(
+                                                        -1, topk, K)
 
     output = hidden_states if inplace else torch.empty_like(hidden_states)
     return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),

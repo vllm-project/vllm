@@ -57,8 +57,7 @@ class ArcticMLP(nn.Module):
         self.ffn_dim = config.intermediate_size if not is_residual_mlp \
             else self.hidden_size
 
-        self.w13 = MergedColumnParallelLinear(self.hidden_size,
-                                              [self.ffn_dim] * 2,
+        self.w13 = MergedColumnParallelLinear(self.hidden_size, [self.ffn_dim] * 2,
                                               bias=False,
                                               quant_config=quant_config)
         self.w2 = RowParallelLinear(self.ffn_dim,
@@ -128,8 +127,8 @@ class ArcticMoE(nn.Module):
                     quant_config=quant_config,
                 )
                 self.w2s = DeepSpeedFPParameter(
-                    torch.Size((self.num_experts, self.hidden_size,
-                                self.intermediate_size)),
+                    torch.Size(
+                        (self.num_experts, self.hidden_size, self.intermediate_size)),
                     params_dtype=params_dtype,
                     quant_config=quant_config,
                 )
@@ -181,10 +180,8 @@ class ArcticMoE(nn.Module):
         if self.is_quant:
             if 2 * num_tokens <= self.num_experts:
                 # If much fewer tokens than experts, use selective dequantize.
-                ws_dequantized = self.ws.ds_selective_dequantize(
-                    topk_ids.flatten())
-                w2s_dequantized = self.w2s.ds_selective_dequantize(
-                    topk_ids.flatten())
+                ws_dequantized = self.ws.ds_selective_dequantize(topk_ids.flatten())
+                w2s_dequantized = self.w2s.ds_selective_dequantize(topk_ids.flatten())
                 # We gathered the experts to the tokens so update the mapping.
                 topk_ids = torch.arange(
                     0,
@@ -203,8 +200,7 @@ class ArcticMoE(nn.Module):
             topk_ids,
             inplace=True)
         if self.reduce_results and self.tp_size > 1:
-            final_hidden_states = tensor_model_parallel_all_reduce(
-                final_hidden_states)
+            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
         return final_hidden_states.view(num_tokens, hidden_size)
 
     def forward(self, hidden_states: torch.Tensor):
@@ -314,8 +310,7 @@ class ArcticDecoderLayer(nn.Module):
             prefix=f"{prefix}.block_sparse_moe",
         )
 
-        self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
 
@@ -368,10 +363,9 @@ class ArcticModel(nn.Module):
         quant_config = vllm_config.quant_config
 
         self.vocab_size = config.vocab_size
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-            org_num_embeddings=self.vocab_size)
+        self.embed_tokens = VocabParallelEmbedding(self.vocab_size,
+                                                   config.hidden_size,
+                                                   org_num_embeddings=self.vocab_size)
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: ArcticDecoderLayer(
@@ -379,9 +373,8 @@ class ArcticModel(nn.Module):
             prefix=f"{prefix}.layers")
         self._attn_implementation = config._attn_implementation
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(["hidden_states"],
-                                                    config.hidden_size))
+        self.make_empty_intermediate_tensors = (make_empty_intermediate_tensors_factory(
+            ["hidden_states"], config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -454,12 +447,10 @@ class ArcticForCausalLM(nn.Module, SupportsPP, SupportsQuant):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -472,12 +463,10 @@ class ArcticForCausalLM(nn.Module, SupportsPP, SupportsQuant):
         num_layers = self.config.num_hidden_layers
 
         for layer in range(num_layers):
-            mlp_params_mapping.append(
-                (f"layers.{layer}.residual_mlp.w13.weight",
-                 f"layers.{layer}.residual_mlp.w1.weight", 0))
-            mlp_params_mapping.append(
-                (f"layers.{layer}.residual_mlp.w13.weight",
-                 f"layers.{layer}.residual_mlp.w3.weight", 1))
+            mlp_params_mapping.append((f"layers.{layer}.residual_mlp.w13.weight",
+                                       f"layers.{layer}.residual_mlp.w1.weight", 0))
+            mlp_params_mapping.append((f"layers.{layer}.residual_mlp.w13.weight",
+                                       f"layers.{layer}.residual_mlp.w3.weight", 1))
             if layer % 2 == 0:
                 # MLP layers
                 mlp_params_mapping.append(
@@ -499,10 +488,9 @@ class ArcticForCausalLM(nn.Module, SupportsPP, SupportsQuant):
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
 
-        logger.info(
-            "It will take ~10 minutes loading from the 16-bit weights. "
-            "Alternatively, use the prequantized 8-bit weights of arctic "
-            "and set load-format to `sharded_state` will accelerate loading.")
+        logger.info("It will take ~10 minutes loading from the 16-bit weights. "
+                    "Alternatively, use the prequantized 8-bit weights of arctic "
+                    "and set load-format to `sharded_state` will accelerate loading.")
         for name, loaded_weight in weights:
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:

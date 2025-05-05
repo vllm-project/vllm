@@ -48,8 +48,7 @@ def get_local_guidance_guided_decoding_logits_processor(
         grm = llguidance.grammar_from("regex", guided_params.regex)
     elif guided_params.choice:
         # choice just uses regex
-        choices = (regex_escape(str(choice))
-                   for choice in guided_params.choice)
+        choices = (regex_escape(str(choice)) for choice in guided_params.choice)
         choices_regex = "(" + "|".join(choices) + ")"
         grm = llguidance.grammar_from("regex", choices_regex)
     elif guided_params.grammar:

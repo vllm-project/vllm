@@ -15,9 +15,8 @@ try:
         from vllm.attention.backends.rocm_flash_attn import (
             ROCmFlashAttentionMetadata as FlashAttentionMetadata)
 except (ModuleNotFoundError, ImportError) as err:
-    raise RuntimeError(
-        "Draft model speculative decoding currently only supports "
-        "CUDA and ROCm flash attention backend.") from err
+    raise RuntimeError("Draft model speculative decoding currently only supports "
+                       "CUDA and ROCm flash attention backend.") from err
 
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalKwargs
@@ -54,13 +53,11 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
 
         self.indices_of_seq_with_bonus_tokens = None
 
-    def _update_sampling_metadata(self, sampling_metadata, num_seqs,
-                                  num_queries):
+    def _update_sampling_metadata(self, sampling_metadata, num_seqs, num_queries):
 
         assert sampling_metadata.num_prompts == 0
         assert len(sampling_metadata.seq_groups) == num_queries
-        assert sampling_metadata.selected_token_indices.shape == (
-            num_queries, )
+        assert sampling_metadata.selected_token_indices.shape == (num_queries, )
         # assert sampling_metadata.categorized_sample_indices == TODO: Add if needed # noqa: E501
 
         # Verify that all sequences are decodes
@@ -88,13 +85,12 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
         attn_metadata = model_input.attn_metadata
         assert isinstance(attn_metadata, FlashAttentionMetadata)
 
-        attn_metadata.advance_step(model_input, sampled_token_ids,
-                                   self.block_size, num_seqs, num_queries)
+        attn_metadata.advance_step(model_input, sampled_token_ids, self.block_size,
+                                   num_seqs, num_queries)
 
         # Update sampling_metadata
         sampling_metadata = model_input.sampling_metadata
-        self._update_sampling_metadata(sampling_metadata, num_seqs,
-                                       num_queries)
+        self._update_sampling_metadata(sampling_metadata, num_seqs, num_queries)
 
         # Create new input
         new_model_input = self._model_input_cls(
@@ -118,13 +114,11 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
         if debug_advance_input:
             logger.debug("NEW INPUT: ")
             logger.debug("  input_tokens = %s", new_model_input.input_tokens)
-            logger.debug("  input_positions = %s",
-                         new_model_input.input_positions)
+            logger.debug("  input_positions = %s", new_model_input.input_positions)
             logger.debug("  seq_lens = %d", new_model_input.seq_lens)
             logger.debug("  query_lens = %d", new_model_input.query_lens)
             logger.debug("  attn_metadata:")
-            logger.debug("    seq_lens_tensor: %s",
-                         attn_metadata.seq_lens_tensor)
+            logger.debug("    seq_lens_tensor: %s", attn_metadata.seq_lens_tensor)
             logger.debug("    slot_mapping: %s", attn_metadata.slot_mapping)
             logger.debug("    block_tables: %s", attn_metadata.block_tables)
 
@@ -157,8 +151,7 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
         # TODO: Add soft-tuning prompt adapter support
         return not self.prompt_adapter_config
 
-    def set_indices_of_seq_with_bonus_tokens(self,
-                                             indices_of_seq_with_bonus_tokens):
+    def set_indices_of_seq_with_bonus_tokens(self, indices_of_seq_with_bonus_tokens):
         self.indices_of_seq_with_bonus_tokens = indices_of_seq_with_bonus_tokens
 
     @torch.inference_mode()
@@ -206,8 +199,7 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                                  "inputs_embeds")
             if model_input.multi_modal_kwargs:
                 raise ValueError(
-                    "TP1DraftModelRunner has no support for multi_modal_kwargs"
-                )
+                    "TP1DraftModelRunner has no support for multi_modal_kwargs")
         else:
             if self.lora_config:
                 assert model_input.lora_requests is not None
@@ -218,9 +210,8 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
             if self.prompt_adapter_config:
                 assert model_input.prompt_adapter_requests is not None
                 assert model_input.prompt_adapter_mapping is not None
-                self.set_active_prompt_adapters(
-                    model_input.prompt_adapter_requests,
-                    model_input.prompt_adapter_mapping)
+                self.set_active_prompt_adapters(model_input.prompt_adapter_requests,
+                                                model_input.prompt_adapter_mapping)
 
             self.attn_state.begin_forward(model_input)
 
@@ -237,8 +228,7 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
             # We can skip CPU samples for spec token generation.
             # (We do allow CPU samples for num_steps == 1 to support the
             # fallback case, where supports_gpu_multi_step(..) does not pass)
-            model_input.sampling_metadata.skip_sampler_cpu_output = (
-                not is_fallback)
+            model_input.sampling_metadata.skip_sampler_cpu_output = (not is_fallback)
 
             # Attn attr defines if we use cuda graphs
             use_cuda_graph = model_input.attn_metadata.use_cuda_graph
@@ -247,14 +237,12 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
         if use_cuda_graph:
             if model_input.inputs_embeds is None:
                 graph_batch_size = model_input.input_tokens.shape[0]
-                model_executable = (
-                    self.graph_runners[model_input.virtual_engine][(
-                        graph_batch_size, False)])
+                model_executable = (self.graph_runners[model_input.virtual_engine][(
+                    graph_batch_size, False)])
             else:
                 graph_batch_size = model_input.inputs_embeds.shape[0]
-                model_executable = (
-                    self.graph_runners[model_input.virtual_engine][(
-                        graph_batch_size, True)])
+                model_executable = (self.graph_runners[model_input.virtual_engine][(
+                    graph_batch_size, True)])
 
             if previous_hidden_states is not None:
                 hidden_states = torch.cat([
@@ -287,8 +275,7 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                 spec_step_idx = kwargs.get("spec_step_idx", step)
                 model_execute_kwargs["spec_step_idx"] = spec_step_idx
                 compute_logits_kwargs["spec_step_idx"] = spec_step_idx
-            with set_forward_context(model_input.attn_metadata,
-                                     self.vllm_config):
+            with set_forward_context(model_input.attn_metadata, self.vllm_config):
                 hidden_states = model_executable(
                     input_ids=model_input.input_tokens,
                     inputs_embeds=None,
@@ -328,8 +315,7 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                 assert num_tokens_per_seq == 1
                 count = 0
                 for i in range(nums_seqs):
-                    bonus_seq_idx = self.indices_of_seq_with_bonus_tokens[
-                        count]
+                    bonus_seq_idx = self.indices_of_seq_with_bonus_tokens[count]
                     if i != bonus_seq_idx:
                         # The following might cause a cpu->gpu sync
                         # However, the performance impact is negligible as we

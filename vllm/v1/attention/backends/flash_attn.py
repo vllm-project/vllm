@@ -186,8 +186,7 @@ def make_local_attention_virtual_batches(
         attn_chunk_size - ((seq_lens_np - q_seqlens) % attn_chunk_size),
         q_seqlens).astype(np.int32)
     tokens_in_last_block = attn_chunk_size + (seq_lens_np % -attn_chunk_size)
-    local_blocks = 1 + cdiv(q_seqlens - q_tokens_in_first_block,
-                            attn_chunk_size)
+    local_blocks = 1 + cdiv(q_seqlens - q_tokens_in_first_block, attn_chunk_size)
 
     # Once we know the number of local blocks we can compute the request spans
     #  for each batch idx, we can figure out the number of "virtual" requests we
@@ -214,8 +213,7 @@ def make_local_attention_virtual_batches(
     seqlens_q_local[arange == 0] = q_tokens_in_first_block
     # set the remaining blocks
     seqlens_q_local[arange > 0] = np.minimum(
-        seqlens_q_local - attn_chunk_size * (arange - 1),
-        attn_chunk_size)[arange > 0]
+        seqlens_q_local - attn_chunk_size * (arange - 1), attn_chunk_size)[arange > 0]
 
     # convert from q_seqlens to cu_seqlens_q
     cu_seqlens_q_local = np.pad(np.cumsum(seqlens_q_local), (1, 0))\
@@ -226,9 +224,7 @@ def make_local_attention_virtual_batches(
     #  batch
     # For our example this will be:
     #   seqlens_k_local = [4, 2, 4, 4, 4, 1, 4, 1]
-    seqlens_k_local = np.full(cu_num_blocks[-1],
-                              attn_chunk_size,
-                              dtype=np.int32)
+    seqlens_k_local = np.full(cu_num_blocks[-1], attn_chunk_size, dtype=np.int32)
     seqlens_k_local[cu_num_blocks - 1] = tokens_in_last_block
 
     k_seqstarts_absolute = np.repeat(seq_lens_np, local_blocks) - \
@@ -292,10 +288,8 @@ class FlashAttentionMetadataBuilder:
         model_config = runner.model_config
 
         self.runner = runner
-        self.num_heads_q = model_config.get_num_attention_heads(
-            runner.parallel_config)
-        self.num_heads_kv = model_config.get_num_kv_heads(
-            runner.parallel_config)
+        self.num_heads_q = model_config.get_num_attention_heads(runner.parallel_config)
+        self.num_heads_kv = model_config.get_num_kv_heads(runner.parallel_config)
         self.headdim = model_config.get_head_size()
         self.page_size = self.runner.block_size
 
@@ -312,8 +306,7 @@ class FlashAttentionMetadataBuilder:
               common_prefix_len: int):
         max_seq_len = self.runner.seq_lens_np[:num_reqs].max()
         query_start_loc_cpu = self.runner.query_start_loc_cpu[:num_reqs + 1]
-        query_start_loc = query_start_loc_cpu.to(self.runner.device,
-                                                 non_blocking=True)
+        query_start_loc = query_start_loc_cpu.to(self.runner.device, non_blocking=True)
         seq_lens_cpu = self.runner.seq_lens_cpu[:num_reqs]
         seq_lens = seq_lens_cpu.to(self.runner.device, non_blocking=True)
         block_table = (
@@ -337,8 +330,8 @@ class FlashAttentionMetadataBuilder:
                 elif len(sliding_window_configs) > 1:
                     self.aot_schedule = False
 
-        def schedule(batch_size, cu_query_lens, max_query_len, seqlens,
-                     max_seq_len, causal):
+        def schedule(batch_size, cu_query_lens, max_query_len, seqlens, max_seq_len,
+                     causal):
             if self.aot_schedule:
                 return get_scheduler_metadata(
                     batch_size=batch_size,
@@ -368,8 +361,8 @@ class FlashAttentionMetadataBuilder:
                 )
             local_query_start_loc = torch.from_numpy(virt_q_cu_seqlens_np).to(
                 self.runner.device, non_blocking=True)
-            local_seqused_k = torch.from_numpy(virt_k_seqlens_np).to(
-                self.runner.device, non_blocking=True)
+            local_seqused_k = torch.from_numpy(virt_k_seqlens_np).to(self.runner.device,
+                                                                     non_blocking=True)
             local_max_query_len = seqlens_q_local_np.max()
             local_max_seq_len = virt_k_seqlens_np.max()
             local_scheduler_metadata = schedule(
@@ -398,23 +391,19 @@ class FlashAttentionMetadataBuilder:
             prefix_kv_lens = torch.tensor([common_prefix_len],
                                           dtype=torch.int32,
                                           device=self.runner.device)
-            suffix_kv_lens = (self.runner.seq_lens_np[:num_reqs] -
-                              common_prefix_len)
-            suffix_kv_lens = torch.from_numpy(suffix_kv_lens).to(
-                self.runner.device)
-            prefix_scheduler_metadata = schedule(
-                batch_size=1,
-                cu_query_lens=cu_prefix_query_lens,
-                max_query_len=num_actual_tokens,
-                seqlens=prefix_kv_lens,
-                max_seq_len=common_prefix_len,
-                causal=False)
+            suffix_kv_lens = (self.runner.seq_lens_np[:num_reqs] - common_prefix_len)
+            suffix_kv_lens = torch.from_numpy(suffix_kv_lens).to(self.runner.device)
+            prefix_scheduler_metadata = schedule(batch_size=1,
+                                                 cu_query_lens=cu_prefix_query_lens,
+                                                 max_query_len=num_actual_tokens,
+                                                 seqlens=prefix_kv_lens,
+                                                 max_seq_len=common_prefix_len,
+                                                 causal=False)
             scheduler_metadata = schedule(batch_size=num_reqs,
                                           cu_query_lens=query_start_loc,
                                           max_query_len=max_query_len,
                                           seqlens=suffix_kv_lens,
-                                          max_seq_len=max_seq_len -
-                                          common_prefix_len,
+                                          max_seq_len=max_seq_len - common_prefix_len,
                                           causal=True)
         else:
             cu_prefix_query_lens = None
@@ -468,8 +457,7 @@ class FlashAttentionImpl(AttentionImpl):
         use_irope: bool = False,
     ) -> None:
         if blocksparse_params is not None:
-            raise ValueError(
-                "FlashAttention does not support block-sparse attention.")
+            raise ValueError("FlashAttention does not support block-sparse attention.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -571,8 +559,7 @@ class FlashAttentionImpl(AttentionImpl):
             value_cache = value_cache.view(torch.float8_e4m3fn)
             num_tokens, num_heads, head_size = query.shape
             query, _ = ops.scaled_fp8_quant(
-                query.reshape(
-                    (num_tokens, num_heads * head_size)).contiguous(),
+                query.reshape((num_tokens, num_heads * head_size)).contiguous(),
                 layer._q_scale)
             query = query.reshape((num_tokens, num_heads, head_size))
 
@@ -774,12 +761,9 @@ def cascade_attention(
         return_softmax_lse=True,
         scheduler_metadata=prefix_scheduler_metadata,
         fa_version=fa_version,
-        q_descale=q_descale.expand(descale_shape)
-        if q_descale is not None else None,
-        k_descale=k_descale.expand(descale_shape)
-        if k_descale is not None else None,
-        v_descale=v_descale.expand(descale_shape)
-        if v_descale is not None else None,
+        q_descale=q_descale.expand(descale_shape) if q_descale is not None else None,
+        k_descale=k_descale.expand(descale_shape) if k_descale is not None else None,
+        v_descale=v_descale.expand(descale_shape) if v_descale is not None else None,
     )
 
     descale_shape = (cu_query_lens.shape[0] - 1, key_cache.shape[-2])
@@ -801,14 +785,10 @@ def cascade_attention(
         return_softmax_lse=True,
         scheduler_metadata=suffix_scheduler_metadata,
         fa_version=fa_version,
-        q_descale=q_descale.expand(descale_shape)
-        if q_descale is not None else None,
-        k_descale=k_descale.expand(descale_shape)
-        if k_descale is not None else None,
-        v_descale=v_descale.expand(descale_shape)
-        if v_descale is not None else None,
+        q_descale=q_descale.expand(descale_shape) if q_descale is not None else None,
+        k_descale=k_descale.expand(descale_shape) if k_descale is not None else None,
+        v_descale=v_descale.expand(descale_shape) if v_descale is not None else None,
     )
 
     # Merge prefix and suffix outputs, and store the result in output.
-    merge_attn_states(output, prefix_output, prefix_lse, suffix_output,
-                      suffix_lse)
+    merge_attn_states(output, prefix_output, prefix_lse, suffix_output, suffix_lse)

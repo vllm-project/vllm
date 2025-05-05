@@ -37,8 +37,7 @@ class ModelInputForNeuron(ModelRunnerInputBase):
     sampling_metadata: Optional["SamplingMetadata"] = None
     multi_modal_kwargs: Optional[BatchedTensorInputs] = None
 
-    def as_broadcastable_tensor_dict(
-            self) -> Dict[str, Union[int, torch.Tensor]]:
+    def as_broadcastable_tensor_dict(self) -> Dict[str, Union[int, torch.Tensor]]:
         raise NotImplementedError("ModelInputForNeuron cannot be broadcast.")
 
     @classmethod
@@ -86,8 +85,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                 "On-device sampling is turned on in Neuron by default, only "
                 "top_k, top_p, and temperature are current supported sampling "
                 "parameters. To turn off the on-device sampling, please set "
-                "the environment variable NEURON_ON_DEVICE_SAMPLING_DISABLED=1."
-            )
+                "the environment variable NEURON_ON_DEVICE_SAMPLING_DISABLED=1.")
             self.model_config.neuron_sampling_params = GenerationConfig(
                 max_length=self.scheduler_config.max_model_len,
                 do_sample=True,
@@ -101,13 +99,11 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
 
     def load_model(self) -> None:
         if find_spec("transformers_neuronx") is not None:
-            self.model = get_neuron_model(
-                self.model_config,
-                parallel_config=self.parallel_config,
-                scheduler_config=self.scheduler_config)
+            self.model = get_neuron_model(self.model_config,
+                                          parallel_config=self.parallel_config,
+                                          scheduler_config=self.scheduler_config)
         else:
-            raise NotImplementedError(
-                "Supports only Transformer-NeuronX based models.")
+            raise NotImplementedError("Supports only Transformer-NeuronX based models.")
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -208,9 +204,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                                                max_len=1,
                                                dtype=torch.long,
                                                device=self.device)
-        context_lens = torch.tensor(context_lens,
-                                    dtype=torch.int,
-                                    device=self.device)
+        context_lens = torch.tensor(context_lens, dtype=torch.int, device=self.device)
         input_block_ids = torch.tensor(input_block_ids,
                                        dtype=torch.long,
                                        device=self.device)
@@ -222,11 +216,10 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         return ModelInputForNeuron.from_broadcasted_tensor_dict(tensor_dict)
 
     def prepare_model_input(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        virtual_engine: int = 0,
-        finished_requests_ids: Optional[List[str]] = None
-    ) -> ModelInputForNeuron:
+            self,
+            seq_group_metadata_list: List[SequenceGroupMetadata],
+            virtual_engine: int = 0,
+            finished_requests_ids: Optional[List[str]] = None) -> ModelInputForNeuron:
         multi_modal_kwargs = None
         # NOTE: We assume that all sequences in the group are all prompts or
         # all decodes.
@@ -234,8 +227,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         # Prepare input tensors.
         if is_prompt:
             (input_tokens, input_positions, input_block_ids, seq_lens,
-             multi_modal_kwargs
-             ) = self._prepare_prompt(seq_group_metadata_list)
+             multi_modal_kwargs) = self._prepare_prompt(seq_group_metadata_list)
         else:
             (input_tokens, input_positions,
              input_block_ids) = self._prepare_decode(seq_group_metadata_list)
@@ -268,8 +260,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                                    sampling_metadata=sampling_metadata,
                                    multi_modal_kwargs=multi_modal_kwargs)
 
-    def _update_neuron_sampling_params(self,
-                                       sampling_metadata: SamplingMetadata):
+    def _update_neuron_sampling_params(self, sampling_metadata: SamplingMetadata):
         # Update Neuron sampling parameters (GenerationConfig in Neuron)
         current_sampling_params = self.model_config.neuron_sampling_params
         assert current_sampling_params is not None, (
@@ -279,8 +270,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         top_k = current_sampling_params.top_k
         top_p = current_sampling_params.top_p
         temperature = current_sampling_params.temperature
-        for index, sequence_group_to_sample in enumerate(
-                sampling_metadata.seq_groups):
+        for index, sequence_group_to_sample in enumerate(sampling_metadata.seq_groups):
             top_k[index] = self._convert_to_neuron_top_k(
                 sequence_group_to_sample.sampling_params.top_k)
             top_p[index] = sequence_group_to_sample.sampling_params.top_p
@@ -303,16 +293,14 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         num_steps: int = 1,
     ) -> Optional[List[SamplerOutput]]:
         if num_steps > 1:
-            raise ValueError(
-                "NeuronModelRunner does not support multi-step execution.")
+            raise ValueError("NeuronModelRunner does not support multi-step execution.")
 
         with set_forward_context(None, self.vllm_config, 0):
             hidden_states = self.model(
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
                 input_block_ids=model_input.input_block_ids,
-                **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs
-                                             or {},
+                **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs or {},
                                              device=self.device),
             )
 

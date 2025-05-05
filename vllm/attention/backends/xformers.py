@@ -53,8 +53,8 @@ class XFormersBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
-        return PagedAttention.get_kv_cache_shape(num_blocks, block_size,
-                                                 num_kv_heads, head_size)
+        return PagedAttention.get_kv_cache_shape(num_blocks, block_size, num_kv_heads,
+                                                 head_size)
 
     @staticmethod
     def swap_blocks(
@@ -192,8 +192,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             # metadata structure
             return self._cached_prefill_metadata
 
-        assert ((self.seq_lens is not None)
-                or (self.encoder_seq_lens is not None))
+        assert ((self.seq_lens is not None) or (self.encoder_seq_lens is not None))
         assert ((self.seq_lens_tensor is not None)
                 or (self.encoder_seq_lens_tensor is not None))
 
@@ -204,8 +203,8 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                          self.seq_start_loc[:self.num_prefills + 1])
         slot_mapping = (None if self.slot_mapping is None else
                         self.slot_mapping[:self.num_prefill_tokens])
-        seq_lens = (None if self.seq_lens is None else
-                    self.seq_lens[:self.num_prefills])
+        seq_lens = (None
+                    if self.seq_lens is None else self.seq_lens[:self.num_prefills])
         seq_lens_tensor = (None if self.seq_lens_tensor is None else
                            self.seq_lens_tensor[:self.num_prefills])
         context_lens_tensor = (None if self.context_lens_tensor is None else
@@ -219,8 +218,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=0,
             slot_mapping=slot_mapping,
-            multi_modal_placeholder_index_maps=self.
-            multi_modal_placeholder_index_maps,
+            multi_modal_placeholder_index_maps=self.multi_modal_placeholder_index_maps,
             enable_kv_scales_calculation=self.enable_kv_scales_calculation,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
@@ -307,8 +305,7 @@ def _get_attn_bias(
     * Appropriate attention bias value given the attention type
     '''
 
-    if (attn_type == AttentionType.DECODER
-            or attn_type == AttentionType.ENCODER_ONLY):
+    if (attn_type == AttentionType.DECODER or attn_type == AttentionType.ENCODER_ONLY):
         return attn_metadata.attn_bias
     elif attn_type == AttentionType.ENCODER:
         return attn_metadata.encoder_attn_bias
@@ -335,8 +332,7 @@ def _set_attn_bias(
                  encoder/decoder cross-attention
     '''
 
-    if (attn_type == AttentionType.DECODER
-            or attn_type == AttentionType.ENCODER_ONLY):
+    if (attn_type == AttentionType.DECODER or attn_type == AttentionType.ENCODER_ONLY):
         attn_metadata.attn_bias = attn_bias
     elif attn_type == AttentionType.ENCODER:
         attn_metadata.encoder_attn_bias = attn_bias
@@ -392,8 +388,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         use_irope: bool = False,
     ) -> None:
         if blocksparse_params is not None:
-            raise ValueError(
-                "XFormers does not support block-sparse attention.")
+            raise ValueError("XFormers does not support block-sparse attention.")
         if logits_soft_cap is not None:
             logger.warning_once("XFormers does not support logits soft cap. "
                                 "Outputs may be slightly off.")
@@ -535,9 +530,10 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 # If kv_cache is not provided, the new key and value tensors are
                 # not cached. This happens during the initial memory
                 # profiling run.
-                PagedAttention.write_to_paged_cache(
-                    key, value, key_cache, value_cache, updated_slot_mapping,
-                    self.kv_cache_dtype, layer._k_scale, layer._v_scale)
+                PagedAttention.write_to_paged_cache(key, value, key_cache, value_cache,
+                                                    updated_slot_mapping,
+                                                    self.kv_cache_dtype, layer._k_scale,
+                                                    layer._v_scale)
         (num_prefill_query_tokens, num_prefill_kv_tokens,
         num_decode_query_tokens) = \
             get_num_prefill_decode_query_kv_tokens(attn_metadata, attn_type)
@@ -560,8 +556,11 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 # normal attention.
                 # block tables are empty if the prompt does not have a cached
                 # prefix.
-                out = self._run_memory_efficient_xformers_forward(
-                    query, key, value, prefill_meta, attn_type=attn_type)
+                out = self._run_memory_efficient_xformers_forward(query,
+                                                                  key,
+                                                                  value,
+                                                                  prefill_meta,
+                                                                  attn_type=attn_type)
                 assert out.shape == output[:num_prefill_query_tokens].shape
                 output[:num_prefill_query_tokens] = out
             else:
@@ -655,13 +654,11 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             # from a spec from the doc).
             query = query.view(query.shape[0], self.num_kv_heads,
                                self.num_queries_per_kv, query.shape[-1])
-            key = key[:, :,
-                      None, :].expand(key.shape[0], self.num_kv_heads,
-                                      self.num_queries_per_kv, key.shape[-1])
+            key = key[:, :, None, :].expand(key.shape[0], self.num_kv_heads,
+                                            self.num_queries_per_kv, key.shape[-1])
             value = value[:, :,
                           None, :].expand(value.shape[0], self.num_kv_heads,
-                                          self.num_queries_per_kv,
-                                          value.shape[-1])
+                                          self.num_queries_per_kv, value.shape[-1])
 
         # Set attention bias if not provided. This typically happens at
         # the very attention layer of every iteration.
@@ -698,8 +695,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     assert attn_metadata.seq_lens is not None
 
                     # Encoder self-attention mask is non-causal
-                    attn_bias = BlockDiagonalMask.from_seqlens(
-                        attn_metadata.seq_lens, device=query.device)
+                    attn_bias = BlockDiagonalMask.from_seqlens(attn_metadata.seq_lens,
+                                                               device=query.device)
 
                 # Self-attention block of decoder branch just
                 # uses the seq_lens directly
@@ -713,15 +710,13 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     raise ValueError("Unknown AttentionType: %s", attn_type)
 
                 if self.sliding_window is not None:
-                    attn_bias = attn_bias.make_local_attention(
-                        self.sliding_window)
+                    attn_bias = attn_bias.make_local_attention(self.sliding_window)
                 attn_bias = [attn_bias]
             else:
                 assert attn_type == AttentionType.DECODER
                 assert attn_metadata.seq_lens is not None
-                attn_bias = _make_alibi_bias(self.alibi_slopes,
-                                             self.num_kv_heads, query.dtype,
-                                             attn_metadata.seq_lens)
+                attn_bias = _make_alibi_bias(self.alibi_slopes, self.num_kv_heads,
+                                             query.dtype, attn_metadata.seq_lens)
 
             _set_attn_bias(attn_metadata, attn_bias, attn_type)
 
@@ -733,13 +728,12 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             query = query.unsqueeze(0)
             key = key.unsqueeze(0)
             value = value.unsqueeze(0)
-            out = xops.memory_efficient_attention_forward(
-                query,
-                key,
-                value,
-                attn_bias=attn_bias[0],
-                p=0.0,
-                scale=self.scale)
+            out = xops.memory_efficient_attention_forward(query,
+                                                          key,
+                                                          value,
+                                                          attn_bias=attn_bias[0],
+                                                          p=0.0,
+                                                          scale=self.scale)
             return out.view_as(original_query)
 
         # Attention with alibi slopes.
@@ -751,13 +745,12 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         start = 0
         for i, seq_len in enumerate(attn_metadata.seq_lens):
             end = start + seq_len
-            out = xops.memory_efficient_attention_forward(
-                query[None, start:end],
-                key[None, start:end],
-                value[None, start:end],
-                attn_bias=attn_bias[i],
-                p=0.0,
-                scale=self.scale)
+            out = xops.memory_efficient_attention_forward(query[None, start:end],
+                                                          key[None, start:end],
+                                                          value[None, start:end],
+                                                          attn_bias=attn_bias[i],
+                                                          p=0.0,
+                                                          scale=self.scale)
             # TODO(woosuk): Unnecessary copy. Optimize.
             output[start:end].copy_(out.view_as(original_query[start:end]))
             start += seq_len

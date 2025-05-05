@@ -190,24 +190,20 @@ def sparsemixer(scores, jitter_eps=0.01):
     )
     with torch.no_grad():
         # compute mask for sparsity
-        mask_logits_threshold, max_ind = masked_scores.max(dim=-1,
-                                                           keepdim=True)
+        mask_logits_threshold, max_ind = masked_scores.max(dim=-1, keepdim=True)
         factor = scores.abs().clamp(min=mask_logits_threshold)
         mask_logits_threshold = ((mask_logits_threshold - scores) /
                                  factor) > (2 * jitter_eps)
 
     # apply mask
-    masked_gates_top2 = masked_scores.masked_fill(mask_logits_threshold,
-                                                  float("-inf"))
+    masked_gates_top2 = masked_scores.masked_fill(mask_logits_threshold, float("-inf"))
     selected_experts_top2 = max_ind
     # compute scores for gradients
     masked_gates_top2 = torch.softmax(masked_gates_top2, dim=-1)
-    multiplier_top2 = masked_gates_top2.gather(dim=-1,
-                                               index=selected_experts_top2)
+    multiplier_top2 = masked_gates_top2.gather(dim=-1, index=selected_experts_top2)
 
     multiplier = torch.concat((multiplier, multiplier_top2), dim=-1)
-    selected_experts = torch.concat((selected_experts, selected_experts_top2),
-                                    dim=-1)
+    selected_experts = torch.concat((selected_experts, selected_experts_top2), dim=-1)
 
     return (
         multiplier,
@@ -262,18 +258,17 @@ class PhiMoE(nn.Module):
             quant_config=None,
         )
 
-        self.experts = FusedMoE(
-            num_experts=num_experts,
-            top_k=top_k,
-            hidden_size=hidden_size,
-            intermediate_size=intermediate_size,
-            params_dtype=params_dtype,
-            reduce_results=True,
-            renormalize=False,
-            quant_config=quant_config,
-            tp_size=tp_size,
-            custom_routing_function=phimoe_routing_function,
-            prefix=f"{prefix}.experts")
+        self.experts = FusedMoE(num_experts=num_experts,
+                                top_k=top_k,
+                                hidden_size=hidden_size,
+                                intermediate_size=intermediate_size,
+                                params_dtype=params_dtype,
+                                reduce_results=True,
+                                renormalize=False,
+                                quant_config=quant_config,
+                                tp_size=tp_size,
+                                custom_routing_function=phimoe_routing_function,
+                                prefix=f"{prefix}.experts")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.
@@ -464,9 +459,8 @@ class PhiMoEModel(nn.Module):
                                  eps=config.rms_norm_eps,
                                  elementwise_affine=True)
 
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size))
+        self.make_empty_intermediate_tensors = (make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -505,8 +499,7 @@ class PhiMoEModel(nn.Module):
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -523,14 +516,13 @@ class PhiMoEModel(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
-            if (self.quant_config is not None and
-                (scale_name := self.quant_config.get_cache_scale(name))):
+            if (self.quant_config is not None
+                    and (scale_name := self.quant_config.get_cache_scale(name))):
                 # Loading kv cache quantization scales
                 param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
-                                 loaded_weight[0])
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                loaded_weight = (loaded_weight
+                                 if loaded_weight.dim() == 0 else loaded_weight[0])
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
@@ -653,12 +645,10 @@ class PhiMoEForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(["rotary_emb.inv_freq"]),

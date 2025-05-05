@@ -69,9 +69,8 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
     def _log_prompt_logprob_unsupported_warning_once():
         # Reminder: Please update docs/source/features/compatibility_matrix.md
         # If the feature combo become valid
-        logger.warning(
-            "Prompt logprob is not supported by multi step workers. "
-            "(e.g., speculative decode uses multi step workers).")
+        logger.warning("Prompt logprob is not supported by multi step workers. "
+                       "(e.g., speculative decode uses multi step workers).")
 
     def process_outputs(self,
                         sequence_group: SequenceGroup,
@@ -97,8 +96,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         # if a client disconnects from the api server.
         seqs = sequence_group.get_seqs(status=SequenceStatus.RUNNING)
         if seqs is None:
-            seqs = sequence_group.get_seqs(
-                status=SequenceStatus.FINISHED_ABORTED)
+            seqs = sequence_group.get_seqs(status=SequenceStatus.FINISHED_ABORTED)
 
         for output in outputs:
             if output.samples[0].output_token != VLLM_INVALID_TOKEN_ID:
@@ -106,22 +104,17 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
                     output.step_index] += 1
 
         assert seqs, "Expected RUNNING or FINISHED_ABORTED sequences"
-        assert len(seqs) == 1, (
-            "Beam search not supported in multi-step decoding.")
+        assert len(seqs) == 1, ("Beam search not supported in multi-step decoding.")
         seq = seqs[0]
         seq_id = seq.seq_id
         # This method is defined in the more generic
         # SequenceGroupOutputProcessor, but here we assume that the outputs are
         # of a more specific type.
-        assert all([
-            isinstance(output, CompletionSequenceGroupOutput)
-            for output in outputs
-        ])
+        assert all(
+            [isinstance(output, CompletionSequenceGroupOutput) for output in outputs])
         compl_outputs = cast(List[CompletionSequenceGroupOutput], outputs)
-        assert all([
-            seq_id == output.samples[0].parent_seq_id
-            for output in compl_outputs
-        ])
+        assert all(
+            [seq_id == output.samples[0].parent_seq_id for output in compl_outputs])
 
         if is_async:
             # Async case: We process tokens one by one. Here, we know the token
@@ -162,8 +155,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             sampling_params=sampling_params,
         )
 
-    def _process_seq_outputs(self, seq: Sequence,
-                             valid_samples: List[SequenceOutput],
+    def _process_seq_outputs(self, seq: Sequence, valid_samples: List[SequenceOutput],
                              sampling_params: SamplingParams) -> None:
         output_token_ids = [sample.output_token for sample in valid_samples]
         output_logprobs = [sample.logprobs for sample in valid_samples]

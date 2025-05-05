@@ -23,8 +23,7 @@ def test_fastsafetensors_model_loader():
         fastsafetensors_tensors = {}
         hf_safetensors_tensors = {}
 
-        for name, tensor in fastsafetensors_weights_iterator(
-                safetensors, True):
+        for name, tensor in fastsafetensors_weights_iterator(safetensors, True):
             fastsafetensors_tensors[name] = tensor
 
         for name, tensor in safetensors_weights_iterator(safetensors, True):
@@ -34,12 +33,9 @@ def test_fastsafetensors_model_loader():
 
         for name, fastsafetensors_tensor in fastsafetensors_tensors.items():
             fastsafetensors_tensor = fastsafetensors_tensor.to('cpu')
-            assert fastsafetensors_tensor.dtype == hf_safetensors_tensors[
-                name].dtype
-            assert fastsafetensors_tensor.shape == hf_safetensors_tensors[
-                name].shape
-            assert torch.all(
-                fastsafetensors_tensor.eq(hf_safetensors_tensors[name]))
+            assert fastsafetensors_tensor.dtype == hf_safetensors_tensors[name].dtype
+            assert fastsafetensors_tensor.shape == hf_safetensors_tensors[name].shape
+            assert torch.all(fastsafetensors_tensor.eq(hf_safetensors_tensors[name]))
 
 
 if __name__ == "__main__":

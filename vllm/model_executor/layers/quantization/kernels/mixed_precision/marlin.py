@@ -23,8 +23,7 @@ class MarlinLinearKernel(MPLinearKernel):
         return 80
 
     @classmethod
-    def can_implement(cls,
-                      c: MPLinearLayerConfig) -> Tuple[bool, Optional[str]]:
+    def can_implement(cls, c: MPLinearLayerConfig) -> Tuple[bool, Optional[str]]:
 
         quant_types = query_marlin_supported_quant_types(c.zero_points)
         if c.weight_type not in quant_types:
@@ -53,8 +52,7 @@ class MarlinLinearKernel(MPLinearKernel):
         self.is_k_full = marlin_is_k_full(c.has_g_idx, row_parallel)
 
         # Allocate marlin workspace.
-        self.workspace = marlin_make_workspace(c.partition_weight_shape[1],
-                                               device)
+        self.workspace = marlin_make_workspace(c.partition_weight_shape[1], device)
 
         # Default names since marlin requires empty parameters for these,
         # TODO: remove this requirement from marlin (allow optional tensors)

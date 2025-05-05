@@ -173,8 +173,7 @@ class MultiModalProfiler(Generic[_I]):
             mm_counts = self.get_mm_limits()
 
         factory = self.dummy_inputs
-        processor_inputs = factory.get_dummy_processor_inputs(
-            seq_len, mm_counts)
+        processor_inputs = factory.get_dummy_processor_inputs(seq_len, mm_counts)
 
         return self.processor.apply(
             prompt=processor_inputs.prompt_text,

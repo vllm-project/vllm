@@ -25,8 +25,7 @@ from ...distributed.conftest import MockSubscriber
 from ...utils import create_new_process_for_each_test
 
 if not current_platform.is_cuda():
-    pytest.skip(reason="V1 currently only supported on CUDA.",
-                allow_module_level=True)
+    pytest.skip(reason="V1 currently only supported on CUDA.", allow_module_level=True)
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
@@ -105,8 +104,7 @@ def test_engine_core_client(monkeypatch: pytest.MonkeyPatch,
         m.setattr(EngineCore, "echo", echo, raising=False)
 
         engine_args = EngineArgs(model=MODEL_NAME, enforce_eager=True)
-        vllm_config = engine_args.create_engine_config(
-            UsageContext.UNKNOWN_CONTEXT)
+        vllm_config = engine_args.create_engine_config(UsageContext.UNKNOWN_CONTEXT)
         executor_class = Executor.get_class(vllm_config)
         client = EngineCoreClient.make_client(
             multiprocess_mode=multiprocessing_mode,
@@ -131,8 +129,8 @@ def test_engine_core_client(monkeypatch: pytest.MonkeyPatch,
         loop_until_done(client, outputs)
 
         for req_id in request_ids:
-            assert len(outputs[req_id]) == MAX_TOKENS, (
-                f"{outputs[req_id]=}, {MAX_TOKENS=}")
+            assert len(
+                outputs[req_id]) == MAX_TOKENS, (f"{outputs[req_id]=}, {MAX_TOKENS=}")
         """Abort Request Cycle."""
 
         # Note: this code pathway will only work for multiprocessing
@@ -276,8 +274,7 @@ def test_kv_cache_events(
                                  block_size=block_size)
         engine_args.kv_events_config = publisher_config
 
-        vllm_config = engine_args.create_engine_config(
-            UsageContext.UNKNOWN_CONTEXT)
+        vllm_config = engine_args.create_engine_config(UsageContext.UNKNOWN_CONTEXT)
 
         executor_class = Executor.get_class(vllm_config)
         client = EngineCoreClient.make_client(
@@ -319,17 +316,16 @@ def test_kv_cache_events(
             seq, received = result
 
             assert seq == 0, "Sequence number mismatch"
-            assert len(received.events) == 1, (
-                "We should have exactly one BlockStored event")
+            assert len(
+                received.events) == 1, ("We should have exactly one BlockStored event")
             event = received.events[0]
-            assert isinstance(
-                event, BlockStored), ("We should have a BlockStored event")
+            assert isinstance(event,
+                              BlockStored), ("We should have a BlockStored event")
             assert len(event.block_hashes) == num_blocks, (
                 "We should have a BlockStored event with 2 block_hashes")
             assert event.block_size == block_size, (
                 "Block size should be the same as the block size")
-            assert event.parent_block_hash is None, (
-                "Parent block hash should be None")
+            assert event.parent_block_hash is None, ("Parent block hash should be None")
             assert event.lora_id is None, "Lora id should be None"
             assert len(event.token_ids) == num_blocks * block_size, (
                 "Token ids should be the same as the custom tokens")

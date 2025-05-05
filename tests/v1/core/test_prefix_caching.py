@@ -35,8 +35,7 @@ def make_request(request_id,
         multi_modal_inputs=multi_modal_inputs,
         multi_modal_hashes=mm_hashes,
         multi_modal_placeholders=mm_positions,
-        sampling_params=SamplingParams(max_tokens=17,
-                                       prompt_logprobs=prompt_logprobs),
+        sampling_params=SamplingParams(max_tokens=17, prompt_logprobs=prompt_logprobs),
         eos_token_id=100,
         arrival_time=0,
         lora_request=None,
@@ -88,8 +87,7 @@ def test_prefill(hash_algo):
     parent_block_hash = None
     for block_id in (1, 2, 3):
         block_tokens = tuple(all_token_ids[(block_id - 1) * 16:block_id * 16])
-        block_hash = hash_block_tokens(hash_fn, parent_block_hash,
-                                       block_tokens)
+        block_hash = hash_block_tokens(hash_fn, parent_block_hash, block_tokens)
         assert manager.block_pool.blocks[block_id].block_hash == block_hash
         assert manager.block_pool.blocks[block_id].ref_cnt == 1
         parent_block_hash = block_hash.hash_value
@@ -127,8 +125,7 @@ def test_prefill(hash_algo):
     # [unique_req1 (5)]
     # [common (3, 2, 1)]
     assert [
-        b.block_id
-        for b in manager.block_pool.free_block_queue.get_all_free_blocks()
+        b.block_id for b in manager.block_pool.free_block_queue.get_all_free_blocks()
     ] == [6, 7, 8, 9, 10, 4, 5, 3, 2, 1]
 
     # Cache hit in the common prefix when the original block is already free.
@@ -150,9 +147,8 @@ def test_prefill(hash_algo):
         b.ref_cnt == 0
         for b in manager.block_pool.free_block_queue.get_all_free_blocks()
     ])
-    assert len([
-        b for b in manager.block_pool.free_block_queue.get_all_free_blocks()
-    ]) == 6
+    assert len([b for b in manager.block_pool.free_block_queue.get_all_free_blocks()
+                ]) == 6
 
     manager.free(req2)
 
@@ -205,8 +201,7 @@ def test_prefill_plp():
     parent_block_hash = None
     for block_id in (1, 2, 3):
         block_tokens = tuple(all_token_ids[(block_id - 1) * 16:block_id * 16])
-        block_hash = hash_block_tokens(hash_fn, parent_block_hash,
-                                       block_tokens)
+        block_hash = hash_block_tokens(hash_fn, parent_block_hash, block_tokens)
         assert manager.block_pool.blocks[block_id].block_hash == block_hash
         assert manager.block_pool.blocks[block_id].ref_cnt == 1
         parent_block_hash = block_hash.hash_value
@@ -245,16 +240,13 @@ def test_prefill_plp():
     # [unique_req1 (5)]
     # [common (3, 2, 1)]
     assert [
-        b.block_id
-        for b in manager.block_pool.free_block_queue.get_all_free_blocks()
+        b.block_id for b in manager.block_pool.free_block_queue.get_all_free_blocks()
     ] == [6, 7, 8, 9, 10, 4, 5, 3, 2, 1]
 
     # Request #2 is a prompt-logprobs request:
     # NO cache hit in the common prefix; duplicates request #0 cached blocks
     unique_token_ids = [3] * 6
-    req2 = make_request("2",
-                        common_token_ids + unique_token_ids,
-                        prompt_logprobs=5)
+    req2 = make_request("2", common_token_ids + unique_token_ids, prompt_logprobs=5)
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req2)
     assert len(manager.req_to_block_hashes[req2.request_id]) == 3
     assert not computed_blocks
@@ -329,8 +321,7 @@ def test_evict():
     assert len(blocks) == 6  # 5 full + 1 partial
 
     # 3 blocks.
-    req1 = make_request("1", list(range(last_token_id,
-                                        last_token_id + 3 * 16)))
+    req1 = make_request("1", list(range(last_token_id, last_token_id + 3 * 16)))
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
     assert not computed_blocks
     assert num_computed_tokens == 0
@@ -345,8 +336,7 @@ def test_evict():
     manager.free(req1)
     assert manager.block_pool.free_block_queue.num_free_blocks == 10
     assert [
-        b.block_id
-        for b in manager.block_pool.free_block_queue.get_all_free_blocks()
+        b.block_id for b in manager.block_pool.free_block_queue.get_all_free_blocks()
     ] == [10, 6, 5, 4, 3, 2, 1, 9, 8, 7]
 
     # Touch the first 2 blocks.
@@ -438,8 +428,7 @@ def test_computed_blocks_not_evicted():
     assert computed_blocks[0].block_id == 1
     assert num_computed_tokens == block_size
 
-    blocks = manager.allocate_slots(req2, num_tokens * 2 - num_tokens,
-                                    computed_blocks)
+    blocks = manager.allocate_slots(req2, num_tokens * 2 - num_tokens, computed_blocks)
     assert len(blocks) == 1
     assert blocks[0].block_id == 2
 
@@ -558,9 +547,7 @@ def test_mm_prefix_caching():
     # A unique image plus some text tokens.
     unique_token_ids = [-1] * 7 + [100] * 4
     all_token_ids = common_token_ids + unique_token_ids
-    mm_positions = common_mm_positions + [
-        PlaceholderRange(offset=48, length=7)
-    ]
+    mm_positions = common_mm_positions + [PlaceholderRange(offset=48, length=7)]
     mm_hashes = common_mm_hashes + ["ccc"]
     req0 = make_request("0",
                         all_token_ids,
@@ -594,9 +581,7 @@ def test_mm_prefix_caching():
     # Cache hit.
     unique_token_ids = [-1] * 7 + [200] * 5
     all_token_ids = common_token_ids + unique_token_ids
-    mm_positions = common_mm_positions + [
-        PlaceholderRange(offset=48, length=7)
-    ]
+    mm_positions = common_mm_positions + [PlaceholderRange(offset=48, length=7)]
     mm_hashes = common_mm_hashes + ["ccc"]
     req1 = make_request("1",
                         all_token_ids,
@@ -938,8 +923,7 @@ def test_eagle_with_sliding_window():
     assert num_tokens == 1 * block_size
 
     # Evict the first block in the request
-    assert manager.block_pool.get_cached_block(
-        block_hash_first_block) is not None
+    assert manager.block_pool.get_cached_block(block_hash_first_block) is not None
     manager.block_pool.cached_block_hash_to_block.pop(block_hash_first_block)
 
     # New request

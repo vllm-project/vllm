@@ -18,12 +18,12 @@ def check_implementation(
     num_logprobs = 5
 
     with vllm_runner(model, **kwargs) as vllm_model:
-        vllm_outputs = vllm_model.generate_greedy_logprobs(
-            example_prompts, max_tokens, num_logprobs)
+        vllm_outputs = vllm_model.generate_greedy_logprobs(example_prompts, max_tokens,
+                                                           num_logprobs)
 
     with hf_runner(model) as hf_model:
-        hf_outputs = hf_model.generate_greedy_logprobs_limit(
-            example_prompts, max_tokens, num_logprobs)
+        hf_outputs = hf_model.generate_greedy_logprobs_limit(example_prompts,
+                                                             max_tokens, num_logprobs)
 
     check_logprobs_close(
         outputs_0_lst=hf_outputs,
@@ -82,17 +82,18 @@ def test_quantization(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-    with vllm_runner(
-            model, model_impl="auto", enforce_eager=True,
-            **quantization_kwargs) as vllm_model:  # type: ignore[arg-type]
-        vllm_outputs = vllm_model.generate_greedy_logprobs(
-            example_prompts, max_tokens=max_tokens, num_logprobs=num_logprobs)
+    with vllm_runner(model,
+                     model_impl="auto",
+                     enforce_eager=True,
+                     **quantization_kwargs) as vllm_model:  # type: ignore[arg-type]
+        vllm_outputs = vllm_model.generate_greedy_logprobs(example_prompts,
+                                                           max_tokens=max_tokens,
+                                                           num_logprobs=num_logprobs)
 
-    with vllm_runner(
-            model,
-            model_impl="transformers",
-            enforce_eager=True,
-            **quantization_kwargs) as vllm_model:  # type: ignore[arg-type]
+    with vllm_runner(model,
+                     model_impl="transformers",
+                     enforce_eager=True,
+                     **quantization_kwargs) as vllm_model:  # type: ignore[arg-type]
         transformers_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens=max_tokens, num_logprobs=num_logprobs)
     check_logprobs_close(

@@ -68,10 +68,7 @@ def benchmark_config(config: BenchmarkConfig,
                          hidden_size,
                          shard_intermediate_size // 2,
                          dtype=init_dtype)
-    gating_output = torch.randn(num_iters,
-                                num_tokens,
-                                num_experts,
-                                dtype=torch.float32)
+    gating_output = torch.randn(num_iters, num_tokens, num_experts, dtype=torch.float32)
 
     w1_scale = None
     w2_scale = None
@@ -92,10 +89,10 @@ def benchmark_config(config: BenchmarkConfig,
             n_tiles_w2 = (K + block_n - 1) // block_n
             k_tiles_w1 = (K + block_k - 1) // block_k
             k_tiles_w2 = (N + block_k - 1) // block_k
-            w1_scale = torch.rand((E, n_tiles_w1, k_tiles_w1),
-                                  dtype=torch.float32) * factor_for_scale
-            w2_scale = torch.rand((E, n_tiles_w2, k_tiles_w2),
-                                  dtype=torch.float32) * factor_for_scale
+            w1_scale = torch.rand(
+                (E, n_tiles_w1, k_tiles_w1), dtype=torch.float32) * factor_for_scale
+            w2_scale = torch.rand(
+                (E, n_tiles_w2, k_tiles_w2), dtype=torch.float32) * factor_for_scale
         else:
             w1_scale = torch.randn(num_experts, dtype=torch.float32)
             w2_scale = torch.randn(num_experts, dtype=torch.float32)
@@ -212,8 +209,7 @@ def get_rocm_tuning_space(use_fp16):
     return param_ranges
 
 
-def get_configs_compute_bound(use_fp16,
-                              block_quant_shape) -> list[dict[str, int]]:
+def get_configs_compute_bound(use_fp16, block_quant_shape) -> list[dict[str, int]]:
     configs: list[BenchmarkConfig] = []
 
     if current_platform.is_rocm():
@@ -259,10 +255,10 @@ def prune_rocm_search_space(num_tokens, shard_intermediate_size, hidden_size,
                             search_space, is_fp16, topk):
     N1, K1 = shard_intermediate_size, hidden_size
     N2, K2 = hidden_size, shard_intermediate_size // 2
-    pruned_space_1 = prune_rocm_configs(num_tokens * topk, N1, K1,
-                                        search_space, is_fp16)
-    pruned_space_2 = prune_rocm_configs(num_tokens * topk, N2, K2,
-                                        search_space, is_fp16)
+    pruned_space_1 = prune_rocm_configs(num_tokens * topk, N1, K1, search_space,
+                                        is_fp16)
+    pruned_space_2 = prune_rocm_configs(num_tokens * topk, N2, K2, search_space,
+                                        is_fp16)
     search_space = merge_unique_dicts(pruned_space_1, pruned_space_2)
     return search_space
 
@@ -303,11 +299,9 @@ def prune_rocm_configs(M, N, K, configs, is_fp16=True):
             if (matrix_instr_nonkdim > BLOCK_SIZE_M
                     or matrix_instr_nonkdim > BLOCK_SIZE_N):
                 continue
-            if (matrix_instr_nonkdim >= M
-                    and matrix_instr_nonkdim != BLOCK_SIZE_M):
+            if (matrix_instr_nonkdim >= M and matrix_instr_nonkdim != BLOCK_SIZE_M):
                 continue
-            if (matrix_instr_nonkdim >= N
-                    and matrix_instr_nonkdim != BLOCK_SIZE_N):
+            if (matrix_instr_nonkdim >= N and matrix_instr_nonkdim != BLOCK_SIZE_N):
                 continue
         # Skip BLOCK_SIZE that is too large compare to M/N
         # unless BLOCK_SIZE is already small enough
@@ -403,8 +397,7 @@ class BenchmarkWorker:
                                         dtype_str,
                                         is_marlin=False)
         else:
-            config = op_config[min(op_config.keys(),
-                                   key=lambda x: abs(x - num_tokens))]
+            config = op_config[min(op_config.keys(), key=lambda x: abs(x - num_tokens))]
         kernel_time = benchmark_config(config,
                                        num_tokens,
                                        num_experts,
@@ -437,10 +430,9 @@ class BenchmarkWorker:
         best_time = float("inf")
         if current_platform.is_rocm():
             is_fp16 = not (use_fp8_w8a8 or use_int8_w8a16)
-            search_space = prune_rocm_search_space(num_tokens,
-                                                   shard_intermediate_size,
-                                                   hidden_size, search_space,
-                                                   is_fp16, topk)
+            search_space = prune_rocm_search_space(num_tokens, shard_intermediate_size,
+                                                   hidden_size, search_space, is_fp16,
+                                                   topk)
 
         need_device_guard = False
         if current_platform.is_rocm():
@@ -448,23 +440,21 @@ class BenchmarkWorker:
             if visible_device != f"{self.device_id}":
                 need_device_guard = True
 
-        with torch.cuda.device(
-                self.device_id) if need_device_guard else nullcontext():
+        with torch.cuda.device(self.device_id) if need_device_guard else nullcontext():
             for config in tqdm(search_space):
                 try:
-                    kernel_time = benchmark_config(
-                        config,
-                        num_tokens,
-                        num_experts,
-                        shard_intermediate_size,
-                        hidden_size,
-                        topk,
-                        dtype,
-                        use_fp8_w8a8,
-                        use_int8_w8a16,
-                        num_iters=20,
-                        block_quant_shape=block_quant_shape,
-                        use_deep_gemm=use_deep_gemm)
+                    kernel_time = benchmark_config(config,
+                                                   num_tokens,
+                                                   num_experts,
+                                                   shard_intermediate_size,
+                                                   hidden_size,
+                                                   topk,
+                                                   dtype,
+                                                   use_fp8_w8a8,
+                                                   use_int8_w8a16,
+                                                   num_iters=20,
+                                                   block_quant_shape=block_quant_shape,
+                                                   use_deep_gemm=use_deep_gemm)
                 except triton.runtime.autotuner.OutOfResources:
                     # Some configurations may be invalid and fail to compile.
                     continue
@@ -534,8 +524,8 @@ def get_weight_block_size_safety(config, default_value=None):
 def main(args: argparse.Namespace):
     print(args)
 
-    config = AutoConfig.from_pretrained(
-        args.model, trust_remote_code=args.trust_remote_code)
+    config = AutoConfig.from_pretrained(args.model,
+                                        trust_remote_code=args.trust_remote_code)
     if config.architectures[0] == "DbrxForCausalLM":
         E = config.ffn_config.moe_num_experts
         topk = config.ffn_config.moe_top_k
@@ -552,9 +542,7 @@ def main(args: argparse.Namespace):
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
         shard_intermediate_size = 2 * intermediate_size // args.tp_size
-    elif config.architectures[0] in [
-            "Qwen2MoeForCausalLM", "Qwen3MoeForCausalLM"
-    ]:
+    elif config.architectures[0] in ["Qwen2MoeForCausalLM", "Qwen3MoeForCausalLM"]:
         E = config.num_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
@@ -576,8 +564,8 @@ def main(args: argparse.Namespace):
 
     if args.batch_size is None:
         batch_sizes = [
-            1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 256, 512, 1024, 1536,
-            2048, 3072, 4096
+            1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 256, 512, 1024, 1536, 2048, 3072,
+            4096
         ]
     else:
         batch_sizes = [args.batch_size]
@@ -586,9 +574,8 @@ def main(args: argparse.Namespace):
 
     if current_platform.is_rocm() and "HIP_VISIBLE_DEVICES" in os.environ:
         # Ray will set ROCR_VISIBLE_DEVICES for device visibility
-        logger.warning(
-            "Ray uses ROCR_VISIBLE_DEVICES to control device accessibility."
-            "Replacing HIP_VISIBLE_DEVICES with ROCR_VISIBLE_DEVICES.")
+        logger.warning("Ray uses ROCR_VISIBLE_DEVICES to control device accessibility."
+                       "Replacing HIP_VISIBLE_DEVICES with ROCR_VISIBLE_DEVICES.")
         val = os.environ["HIP_VISIBLE_DEVICES"]
         os.environ["ROCR_VISIBLE_DEVICES"] = val
         del os.environ["HIP_VISIBLE_DEVICES"]
@@ -614,18 +601,17 @@ def main(args: argparse.Namespace):
         print(f"Start tuning over {len(search_space)} configurations...")
 
         start = time.time()
-        configs = _distribute(
-            "tune", [(batch_size, E, shard_intermediate_size, hidden_size,
-                      topk, dtype, use_fp8_w8a8, use_int8_w8a16, search_space,
-                      block_quant_shape, use_deep_gemm)
-                     for batch_size in batch_sizes])
+        configs = _distribute("tune",
+                              [(batch_size, E, shard_intermediate_size, hidden_size,
+                                topk, dtype, use_fp8_w8a8, use_int8_w8a16, search_space,
+                                block_quant_shape, use_deep_gemm)
+                               for batch_size in batch_sizes])
         best_configs = {
             M: sort_config(config)
             for M, config in zip(batch_sizes, configs)
         }
-        save_configs(best_configs, E, shard_intermediate_size, hidden_size,
-                     topk, dtype, use_fp8_w8a8, use_int8_w8a16,
-                     block_quant_shape)
+        save_configs(best_configs, E, shard_intermediate_size, hidden_size, topk, dtype,
+                     use_fp8_w8a8, use_int8_w8a16, block_quant_shape)
         end = time.time()
         print(f"Tuning took {end - start:.2f} seconds")
     else:

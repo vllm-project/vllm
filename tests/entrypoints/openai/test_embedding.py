@@ -46,15 +46,13 @@ async def client(server):
 
 @pytest.fixture(scope="module")
 def hf_model(hf_runner):
-    with hf_runner(MODEL_NAME, dtype=DTYPE,
-                   is_sentence_transformer=True) as hf_model:
+    with hf_runner(MODEL_NAME, dtype=DTYPE, is_sentence_transformer=True) as hf_model:
         yield hf_model
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_single_embedding(hf_model, client: openai.AsyncOpenAI,
-                                model_name: str):
+async def test_single_embedding(hf_model, client: openai.AsyncOpenAI, model_name: str):
     input_texts = [
         "The chef prepared a delicious meal.",
     ]
@@ -98,8 +96,7 @@ async def test_single_embedding(hf_model, client: openai.AsyncOpenAI,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_batch_embedding(hf_model, client: openai.AsyncOpenAI,
-                               model_name: str):
+async def test_batch_embedding(hf_model, client: openai.AsyncOpenAI, model_name: str):
     # test list[str]
     input_texts = [
         "The cat sat on the mat.", "A feline was resting on a rug.",
@@ -145,8 +142,7 @@ async def test_batch_embedding(hf_model, client: openai.AsyncOpenAI,
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_conversation_embedding(server: RemoteOpenAIServer,
-                                      client: openai.AsyncOpenAI,
-                                      model_name: str):
+                                      client: openai.AsyncOpenAI, model_name: str):
     messages = [{
         "role": "user",
         "content": "The cat sat on the mat.",
@@ -216,8 +212,7 @@ async def test_batch_base64_embedding(hf_model, client: openai.AsyncOpenAI,
     base64_data = []
     for data in responses_base64.data:
         base64_data.append(
-            np.frombuffer(base64.b64decode(data.embedding),
-                          dtype="float32").tolist())
+            np.frombuffer(base64.b64decode(data.embedding), dtype="float32").tolist())
 
     run_embedding_correctness_test(hf_model, input_texts, base64_data)
 
@@ -230,17 +225,14 @@ async def test_batch_base64_embedding(hf_model, client: openai.AsyncOpenAI,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_single_embedding_truncation(client: openai.AsyncOpenAI,
-                                           model_name: str):
+async def test_single_embedding_truncation(client: openai.AsyncOpenAI, model_name: str):
     input_texts = [
         "Como o Brasil pode fomentar o desenvolvimento de modelos de IA?",
     ]
 
     # test single embedding
     embedding_response = await client.embeddings.create(
-        model=model_name,
-        input=input_texts,
-        extra_body={"truncate_prompt_tokens": 10})
+        model=model_name, input=input_texts, extra_body={"truncate_prompt_tokens": 10})
     embeddings = EmbeddingResponse.model_validate(
         embedding_response.model_dump(mode="json"))
 
@@ -252,13 +244,11 @@ async def test_single_embedding_truncation(client: openai.AsyncOpenAI,
     assert embeddings.usage.total_tokens == 10
 
     input_tokens = [
-        1, 24428, 289, 18341, 26165, 285, 19323, 283, 289, 26789, 3871, 28728,
-        9901, 340, 2229, 385, 340, 315, 28741, 28804, 2
+        1, 24428, 289, 18341, 26165, 285, 19323, 283, 289, 26789, 3871, 28728, 9901,
+        340, 2229, 385, 340, 315, 28741, 28804, 2
     ]
     embedding_response = await client.embeddings.create(
-        model=model_name,
-        input=input_tokens,
-        extra_body={"truncate_prompt_tokens": 10})
+        model=model_name, input=input_tokens, extra_body={"truncate_prompt_tokens": 10})
     embeddings = EmbeddingResponse.model_validate(
         embedding_response.model_dump(mode="json"))
 

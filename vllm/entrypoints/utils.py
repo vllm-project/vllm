@@ -75,8 +75,7 @@ def load_aware_call(func):
 
     @functools.wraps(func)
     async def wrapper(*args, **kwargs):
-        raw_request = kwargs.get("raw_request",
-                                 args[1] if len(args) > 1 else None)
+        raw_request = kwargs.get("raw_request", args[1] if len(args) > 1 else None)
 
         if raw_request is None:
             raise ValueError(
@@ -94,17 +93,14 @@ def load_aware_call(func):
 
         if isinstance(response, (JSONResponse, StreamingResponse)):
             if response.background is None:
-                response.background = BackgroundTask(decrement_server_load,
-                                                     raw_request)
+                response.background = BackgroundTask(decrement_server_load, raw_request)
             elif isinstance(response.background, BackgroundTasks):
-                response.background.add_task(decrement_server_load,
-                                             raw_request)
+                response.background.add_task(decrement_server_load, raw_request)
             elif isinstance(response.background, BackgroundTask):
                 # Convert the single BackgroundTask to BackgroundTasks
                 # and chain the decrement_server_load task to it
                 tasks = BackgroundTasks()
-                tasks.add_task(response.background.func,
-                               *response.background.args,
+                tasks.add_task(response.background.func, *response.background.args,
                                **response.background.kwargs)
                 tasks.add_task(decrement_server_load, raw_request)
                 response.background = tasks
@@ -148,10 +144,9 @@ def _validate_truncation_size(
             truncate_prompt_tokens = max_model_len
 
         if truncate_prompt_tokens > max_model_len:
-            raise ValueError(
-                f"truncate_prompt_tokens value ({truncate_prompt_tokens}) "
-                f"is greater than max_model_len ({max_model_len})."
-                f" Please, select a smaller truncation size.")
+            raise ValueError(f"truncate_prompt_tokens value ({truncate_prompt_tokens}) "
+                             f"is greater than max_model_len ({max_model_len})."
+                             f" Please, select a smaller truncation size.")
 
         if tokenization_kwargs is not None:
             tokenization_kwargs["truncation"] = True

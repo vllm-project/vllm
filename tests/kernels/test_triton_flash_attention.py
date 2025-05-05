@@ -32,9 +32,7 @@ class ReferenceAttention:
         scores = torch.einsum('bhqd,bhkd->bhqk', q,
                               k).float() * self.input_metadata.sm_scale
         if self.input_metadata.causal:
-            mask = torch.tril(torch.ones(self.N_CTX_Q,
-                                         self.N_CTX_K,
-                                         device="cuda"),
+            mask = torch.tril(torch.ones(self.N_CTX_Q, self.N_CTX_K, device="cuda"),
                               diagonal=self.N_CTX_K - self.N_CTX_Q)
             scores[:, :, mask == 0] = float("-inf")
 
@@ -103,10 +101,8 @@ class ReferenceAttention:
             if is_mqa:
                 k_curr = k_curr.reshape(k_curr.shape[0], -1, k_curr.shape[3])
                 v_curr = v_curr.reshape(v_curr.shape[0], -1, v_curr.shape[3])
-            scores = torch.einsum('qhd,khd->qhk', q[start_q:end_q],
-                                  k_curr).float()
-            p = torch.softmax(scores * self.input_metadata.sm_scale,
-                              dim=-1).half()
+            scores = torch.einsum('qhd,khd->qhk', q[start_q:end_q], k_curr).float()
+            p = torch.softmax(scores * self.input_metadata.sm_scale, dim=-1).half()
             ref_out[start_q:end_q] = torch.einsum('qhk,khd->qhd', p, v_curr)
         return ref_out
 
@@ -122,8 +118,7 @@ def quantize_input(q, k, v, fp8_kv=False, use_o_scale=False):
     # model.
     p_scale = None
 
-    o_scale = torch.rand(1, device="cuda",
-                         requires_grad=False) if use_o_scale else None
+    o_scale = torch.rand(1, device="cuda", requires_grad=False) if use_o_scale else None
 
     return q, k, v, q_descale, k_descale, v_descale, p_scale, o_scale
 
@@ -159,10 +154,9 @@ def input_helper(
     if use_alibi:
         # for n heads the set of slopes is the geometric sequence that starts
         # 2^(-8/n)
-        alibi_slopes = torch.tensor(
-            [2**(-8 / HQ * i) for i in range(1, HQ + 1)],
-            dtype=torch.float32,
-            device="cuda").repeat(Z, 1)
+        alibi_slopes = torch.tensor([2**(-8 / HQ * i) for i in range(1, HQ + 1)],
+                                    dtype=torch.float32,
+                                    device="cuda").repeat(Z, 1)
     else:
         alibi_slopes = None
 
@@ -174,26 +168,13 @@ def input_helper(
     else:
         bias = None
 
-    q = torch.randn(q_tensor_shape,
-                    dtype=dtype,
-                    device="cuda",
-                    requires_grad=False)
-    k = torch.randn(k_tensor_shape,
-                    dtype=dtype,
-                    device="cuda",
-                    requires_grad=False)
-    v = torch.randn(k_tensor_shape,
-                    dtype=dtype,
-                    device="cuda",
-                    requires_grad=False)
+    q = torch.randn(q_tensor_shape, dtype=dtype, device="cuda", requires_grad=False)
+    k = torch.randn(k_tensor_shape, dtype=dtype, device="cuda", requires_grad=False)
+    v = torch.randn(k_tensor_shape, dtype=dtype, device="cuda", requires_grad=False)
 
     if is_fp8:
         (q, k, v, q_descale, k_descale, v_descale, p_scale,
-         o_scale) = quantize_input(q,
-                                   k,
-                                   v,
-                                   use_o_scale=use_o_scale,
-                                   fp8_kv=fp8_kv)
+         o_scale) = quantize_input(q, k, v, use_o_scale=use_o_scale, fp8_kv=fp8_kv)
     else:
         q_descale = k_descale = v_descale = p_scale = o_scale = None
 
@@ -230,12 +211,8 @@ def varlen_input_helper(Z,
     if not equal_seqlens:
         max_seqlens_q = N_CTX_Q // Z
         max_seqlens_k = N_CTX_K // Z
-        seqlens_q = torch.randint(1,
-                                  max_seqlens_q + 1, (Z, ),
-                                  dtype=torch.int32)
-        seqlens_k = torch.randint(1,
-                                  max_seqlens_k + 1, (Z, ),
-                                  dtype=torch.int32)
+        seqlens_q = torch.randint(1, max_seqlens_q + 1, (Z, ), dtype=torch.int32)
+        seqlens_k = torch.randint(1, max_seqlens_k + 1, (Z, ), dtype=torch.int32)
     else:
         seqlens_q = torch.full((Z, ), N_CTX_Q // Z)
         seqlens_k = torch.full((Z, ), N_CTX_K // Z)
@@ -288,8 +265,8 @@ def test_op_fwd(Z,
                 layout,
                 dtype=torch.float16):
     current_platform.seed_everything(0)
-    q, k, v, input_metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD,
-                                           dtype, layout, use_alibi, causal)
+    q, k, v, input_metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype,
+                                           layout, use_alibi, causal)
 
     o = torch.empty_like(q)
 
@@ -313,8 +290,8 @@ def test_op_fwd(Z,
                                       -1).reshape(v.shape[0], -1, v.shape[2],
                                                   v.shape[3])
 
-    ref_impl = ReferenceAttention(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD,
-                                  use_alibi, dtype, input_metadata)
+    ref_impl = ReferenceAttention(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, use_alibi, dtype,
+                                  input_metadata)
     ref_out = ref_impl.fwd(q, k, v)
 
     torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
@@ -361,11 +338,11 @@ def test_op_fwd_fp8(Z,
 
     o = torch.empty_like(q_quantized) if use_o_scale else None
 
-    tri_out, _ = triton_attention_rocm(q_quantized, k_quantized, v_quantized,
-                                       o, input_metadata)
+    tri_out, _ = triton_attention_rocm(q_quantized, k_quantized, v_quantized, o,
+                                       input_metadata)
 
-    ref_impl = ReferenceAttention(Z, H, H, N_CTX_Q, N_CTX_K, D_HEAD, False,
-                                  dtype, input_metadata)
+    ref_impl = ReferenceAttention(Z, H, H, N_CTX_Q, N_CTX_K, D_HEAD, False, dtype,
+                                  input_metadata)
     ref_out = ref_impl.fwd_fp8(q_quantized, k_quantized, v_quantized)
 
     # compare
@@ -408,11 +385,10 @@ def test_op_fwd_fp8_kv(Z,
 
     o = torch.empty_like(q)
 
-    tri_out, _ = triton_attention_rocm(q, k_quantized, v_quantized, o,
-                                       input_metadata)
+    tri_out, _ = triton_attention_rocm(q, k_quantized, v_quantized, o, input_metadata)
 
-    ref_impl = ReferenceAttention(Z, H, H, N_CTX_Q, N_CTX_K, D_HEAD, False,
-                                  dtype, input_metadata)
+    ref_impl = ReferenceAttention(Z, H, H, N_CTX_Q, N_CTX_K, D_HEAD, False, dtype,
+                                  input_metadata)
     ref_out = ref_impl.fwd_fp8_kv(q, k_quantized, v_quantized)
 
     torch.testing.assert_close(ref_out, tri_out, atol=3e-2, rtol=8e-1)
@@ -444,8 +420,8 @@ def test_op_fwd_bias(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_bias, dtype):
     # triton implementation
     tri_out, _ = triton_attention_rocm(q, k, v, o, input_metadata)
 
-    ref_impl = ReferenceAttention(Z, H, H, N_CTX_Q, N_CTX_K, D_HEAD, False,
-                                  dtype, input_metadata)
+    ref_impl = ReferenceAttention(Z, H, H, N_CTX_Q, N_CTX_K, D_HEAD, False, dtype,
+                                  input_metadata)
     ref_out = ref_impl.fwd(q, k, v)
 
     # compare
@@ -453,15 +429,12 @@ def test_op_fwd_bias(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_bias, dtype):
 
 
 # NOTE: Uses thd layout, so also tests thd.
-@pytest.mark.parametrize('Z, H, N_CTX, D_HEAD', [(1, 48, 256, 64),
-                                                 (4, 48, 512, 64),
-                                                 (16, 48, 512, 64),
-                                                 (64, 48, 128, 128)])
+@pytest.mark.parametrize('Z, H, N_CTX, D_HEAD', [(1, 48, 256, 64), (4, 48, 512, 64),
+                                                 (16, 48, 512, 64), (64, 48, 128, 128)])
 @pytest.mark.parametrize('causal', [True, False])
 def test_op_varlen_fwd(Z, H, N_CTX, D_HEAD, causal, dtype=torch.float16):
 
-    q, k, v, input_metadata = varlen_input_helper(Z, H, H, N_CTX, N_CTX,
-                                                  D_HEAD, dtype)
+    q, k, v, input_metadata = varlen_input_helper(Z, H, H, N_CTX, N_CTX, D_HEAD, dtype)
 
     tri_out = torch.empty_like(q)
     triton_attention_rocm(q, k, v, tri_out, input_metadata)
@@ -479,21 +452,15 @@ def test_op_varlen_fwd(Z, H, N_CTX, D_HEAD, causal, dtype=torch.float16):
                                                       (4, 48, 4, 512, 64),
                                                       (4, 64, 16, 128, 128)])
 @pytest.mark.parametrize('causal', [False])
-def test_op_varlen_mqa_fwd(Z,
-                           HQ,
-                           HK,
-                           N_CTX,
-                           D_HEAD,
-                           causal,
-                           dtype=torch.float16):
-    q, k, v, input_metadata = varlen_input_helper(Z, HQ, HK, N_CTX, N_CTX,
-                                                  D_HEAD, dtype)
+def test_op_varlen_mqa_fwd(Z, HQ, HK, N_CTX, D_HEAD, causal, dtype=torch.float16):
+    q, k, v, input_metadata = varlen_input_helper(Z, HQ, HK, N_CTX, N_CTX, D_HEAD,
+                                                  dtype)
 
     tri_out = torch.empty_like(q)
     triton_attention_rocm(q, k, v, tri_out, input_metadata)
 
-    ref_impl = ReferenceAttention(Z, HQ, HK, N_CTX, N_CTX, D_HEAD, False,
-                                  dtype, input_metadata)
+    ref_impl = ReferenceAttention(Z, HQ, HK, N_CTX, N_CTX, D_HEAD, False, dtype,
+                                  input_metadata)
     ref_out = ref_impl.varlen_fwd(q, k, v, is_mqa=True)
 
     torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)

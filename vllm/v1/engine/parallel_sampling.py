@@ -30,15 +30,13 @@ class ParentRequest:
     # To efficiently obtain child sampling params
     cached_child_sampling_params: Optional[SamplingParams]
 
-    def __init__(self, request_id: str,
-                 sampling_params: SamplingParams) -> None:
+    def __init__(self, request_id: str, sampling_params: SamplingParams) -> None:
         self.request_id = request_id
         self.sampling_params = sampling_params
 
         self.child_requests = set()
         self.output_aggregator = [None] * sampling_params.n if (
-            sampling_params.output_kind
-            == RequestOutputKind.FINAL_ONLY) else []
+            sampling_params.output_kind == RequestOutputKind.FINAL_ONLY) else []
         self.max_num_generation_tokens = 0
         self.cached_child_sampling_params = None
 
@@ -127,6 +125,5 @@ class ParentRequest:
 
         # Child requests finished, we can now record to iteration stats
         if parent_req is None or not parent_req.child_requests:
-            iteration_stats.max_num_generation_tokens_iter.append(
-                num_generation_tokens)
+            iteration_stats.max_num_generation_tokens_iter.append(num_generation_tokens)
             iteration_stats.n_params_iter.append(n_param)

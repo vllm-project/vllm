@@ -108,10 +108,9 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
         )
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    PrithviGeoSpatialMAEMultiModalProcessor,
-    info=PrithviGeoSpatialMAEProcessingInfo,
-    dummy_inputs=PrithviGeoSpatialMAEInputBuilder)
+@MULTIMODAL_REGISTRY.register_processor(PrithviGeoSpatialMAEMultiModalProcessor,
+                                        info=PrithviGeoSpatialMAEProcessingInfo,
+                                        dummy_inputs=PrithviGeoSpatialMAEInputBuilder)
 class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree, SupportsMultiModal,
                            SupportsV0Only):
     """ Prithvi Masked Autoencoder"""
@@ -148,10 +147,9 @@ class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree, SupportsMultiModal,
         self.model = self._instantiate_model(
             vllm_config.model_config.hf_config.to_dict()["pretrained_cfg"])
         if self.model is None:
-            raise ValueError(
-                "Unsupported task. "
-                "Only SemanticSegmentationTask is supported for now "
-                "by PrithviGeospatialMAE.")
+            raise ValueError("Unsupported task. "
+                             "Only SemanticSegmentationTask is supported for now "
+                             "by PrithviGeospatialMAE.")
 
     def _parse_and_validate_multimodal_data(
             self, **kwargs) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
@@ -181,10 +179,9 @@ class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree, SupportsMultiModal,
         **kwargs: object,
     ):
 
-        pixel_values, location_coords = (
-            self._parse_and_validate_multimodal_data(**kwargs))
-        model_output = self.model(pixel_values,
-                                  location_coords=location_coords)
+        pixel_values, location_coords = (self._parse_and_validate_multimodal_data(
+            **kwargs))
+        model_output = self.model(pixel_values, location_coords=location_coords)
 
         return model_output.output
 
@@ -195,8 +192,7 @@ class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree, SupportsMultiModal,
     ) -> Optional[PoolerOutput]:
         return PoolerOutput([PoolingSequenceGroupOutput(hidden_states)])
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         params_list = []
         model_buffers = dict(self.named_buffers())
         loaded_buffers = []

@@ -9,8 +9,7 @@ from msgspec.msgpack import Decoder
 #
 # Types copied from vllm.distributed.kv_events
 #
-class EventBatch(msgspec.Struct, array_like=True, omit_defaults=True,
-                 gc=False):
+class EventBatch(msgspec.Struct, array_like=True, omit_defaults=True, gc=False):
     ts: float
     events: list[Any]
 

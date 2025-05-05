@@ -49,8 +49,7 @@ def run_aria(questions: list[str], modality: str) -> ModelRequestData:
     )
 
     prompts = [(f"<|im_start|>user\n<fim_prefix><|img|><fim_suffix>{question}"
-                "<|im_end|>\n<|im_start|>assistant\n")
-               for question in questions]
+                "<|im_end|>\n<|im_start|>assistant\n") for question in questions]
 
     stop_token_ids = [93532, 93653, 944, 93421, 1019, 93653, 93519]
 
@@ -134,8 +133,7 @@ def run_deepseek_vl2(questions: list[str], modality: str) -> ModelRequestData:
     )
 
     prompts = [
-        f"<|User|>: <image>\n{question}\n\n<|Assistant|>:"
-        for question in questions
+        f"<|User|>: <image>\n{question}\n\n<|Assistant|>:" for question in questions
     ]
 
     return ModelRequestData(
@@ -249,8 +247,7 @@ def run_h2ovl(questions: list[str], modality: str) -> ModelRequestData:
         limit_mm_per_prompt={"image": 1},
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name,
-                                              trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     messages = [[{
         'role': 'user',
         'content': f"<image>\n{question}"
@@ -289,9 +286,10 @@ def run_idefics3(questions: list[str], modality: str) -> ModelRequestData:
         },
         limit_mm_per_prompt={"image": 1},
     )
-    prompts = [(
-        f"<|begin_of_text|>User:<image>{question}<end_of_utterance>\nAssistant:"
-    ) for question in questions]
+    prompts = [
+        (f"<|begin_of_text|>User:<image>{question}<end_of_utterance>\nAssistant:")
+        for question in questions
+    ]
 
     return ModelRequestData(
         engine_args=engine_args,
@@ -316,10 +314,8 @@ def run_smolvlm(questions: list[str], modality: str) -> ModelRequestData:
         },
         limit_mm_per_prompt={"image": 1},
     )
-    prompts = [
-        (f"<|im_start|>User:<image>{question}<end_of_utterance>\nAssistant:")
-        for question in questions
-    ]
+    prompts = [(f"<|im_start|>User:<image>{question}<end_of_utterance>\nAssistant:")
+               for question in questions]
 
     return ModelRequestData(
         engine_args=engine_args,
@@ -340,8 +336,7 @@ def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
         limit_mm_per_prompt={"image": 1},
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name,
-                                              trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     messages = [[{
         'role': 'user',
         'content': f"<image>\n{question}"
@@ -391,9 +386,7 @@ def run_kimi_vl(questions: list[str], modality: str) -> ModelRequestData:
 def run_llava(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
 
-    prompts = [
-        f"USER: <image>\n{question}\nASSISTANT:" for question in questions
-    ]
+    prompts = [f"USER: <image>\n{question}\nASSISTANT:" for question in questions]
 
     engine_args = EngineArgs(
         model="llava-hf/llava-1.5-7b-hf",
@@ -426,13 +419,10 @@ def run_llava_next(questions: list[str], modality: str) -> ModelRequestData:
 
 # LlaVA-NeXT-Video
 # Currently only support for video input
-def run_llava_next_video(questions: list[str],
-                         modality: str) -> ModelRequestData:
+def run_llava_next_video(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "video"
 
-    prompts = [
-        f"USER: <video>\n{question} ASSISTANT:" for question in questions
-    ]
+    prompts = [f"USER: <video>\n{question} ASSISTANT:" for question in questions]
     engine_args = EngineArgs(
         model="llava-hf/LLaVA-NeXT-Video-7B-hf",
         max_model_len=8192,
@@ -447,8 +437,7 @@ def run_llava_next_video(questions: list[str],
 
 
 # LLaVA-OneVision
-def run_llava_onevision(questions: list[str],
-                        modality: str) -> ModelRequestData:
+def run_llava_onevision(questions: list[str], modality: str) -> ModelRequestData:
 
     if modality == "video":
         prompts = [
@@ -479,10 +468,7 @@ def run_mantis(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
 
     llama3_template = '<|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n'  # noqa: E501
-    prompts = [
-        llama3_template.format(f"{question}\n<image>")
-        for question in questions
-    ]
+    prompts = [llama3_template.format(f"{question}\n<image>") for question in questions]
 
     engine_args = EngineArgs(
         model="TIGER-Lab/Mantis-8B-siglip-llama3",
@@ -522,8 +508,7 @@ def run_minicpmv_base(questions: list[str], modality: str, model_name):
     # 2.6: image, video
     # o2.6: image, video, audio
     # model_name = "openbmb/MiniCPM-o-2_6"
-    tokenizer = AutoTokenizer.from_pretrained(model_name,
-                                              trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     engine_args = EngineArgs(
         model=model_name,
         max_model_len=4096,
@@ -615,8 +600,7 @@ def run_mllama(questions: list[str], modality: str) -> ModelRequestData:
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     messages = [[{
-        "role":
-        "user",
+        "role": "user",
         "content": [{
             "type": "image"
         }, {
@@ -650,8 +634,7 @@ def run_llama4(questions: list[str], modality: str) -> ModelRequestData:
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     messages = [[{
-        "role":
-        "user",
+        "role": "user",
         "content": [{
             "type": "image"
         }, {
@@ -709,8 +692,7 @@ def run_nvlm_d(questions: list[str], modality: str) -> ModelRequestData:
         limit_mm_per_prompt={"image": 1},
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name,
-                                              trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     messages = [[{
         'role': 'user',
         'content': f"<image>\n{question}"
@@ -836,8 +818,7 @@ def run_phi4mm(questions: list[str], modality: str) -> ModelRequestData:
     # we have to manually specify the path of the lora weights.
     vision_lora_path = os.path.join(model_path, "vision-lora")
     prompts = [
-        f"<|user|><|image_1|>{question}<|end|><|assistant|>"
-        for question in questions
+        f"<|user|><|image_1|>{question}<|end|><|assistant|>" for question in questions
     ]
     engine_args = EngineArgs(
         model=model_path,
@@ -924,12 +905,10 @@ def run_qwen2_vl(questions: list[str], modality: str) -> ModelRequestData:
     elif modality == "video":
         placeholder = "<|video_pad|>"
 
-    prompts = [
-        ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-         f"<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>"
-         f"{question}<|im_end|>\n"
-         "<|im_start|>assistant\n") for question in questions
-    ]
+    prompts = [("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+                f"<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>"
+                f"{question}<|im_end|>\n"
+                "<|im_start|>assistant\n") for question in questions]
 
     return ModelRequestData(
         engine_args=engine_args,
@@ -959,12 +938,10 @@ def run_qwen2_5_vl(questions: list[str], modality: str) -> ModelRequestData:
     elif modality == "video":
         placeholder = "<|video_pad|>"
 
-    prompts = [
-        ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-         f"<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>"
-         f"{question}<|im_end|>\n"
-         "<|im_start|>assistant\n") for question in questions
-    ]
+    prompts = [("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+                f"<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>"
+                f"{question}<|im_end|>\n"
+                "<|im_start|>assistant\n") for question in questions]
 
     return ModelRequestData(
         engine_args=engine_args,
@@ -1021,8 +998,7 @@ def run_skyworkr1v(questions: list[str], modality: str) -> ModelRequestData:
         limit_mm_per_prompt={"image": 1},
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name,
-                                              trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     messages = [[{
         'role': 'user',
         'content': f"<image>\n{question}"
@@ -1109,8 +1085,7 @@ def get_multi_modal_input(args):
 
     if args.modality == "video":
         # Input video and question
-        video = VideoAsset(name="baby_reading",
-                           num_frames=args.num_frames).np_ndarrays
+        video = VideoAsset(name="baby_reading", num_frames=args.num_frames).np_ndarrays
         vid_questions = ["Why is this video funny?"]
 
         return {
@@ -1122,8 +1097,8 @@ def get_multi_modal_input(args):
     raise ValueError(msg)
 
 
-def apply_image_repeat(image_repeat_prob, num_prompts, data,
-                       prompts: list[str], modality):
+def apply_image_repeat(image_repeat_prob, num_prompts, data, prompts: list[str],
+                       modality):
     """Repeats images with provided probability of "image_repeat_prob". 
     Used to simulate hit/miss for the MM preprocessor cache.
     """
@@ -1206,10 +1181,9 @@ def parse_args():
         action='store_true',
         help='If True, disables caching of multi-modal preprocessor/mapper.')
 
-    parser.add_argument(
-        '--time-generate',
-        action='store_true',
-        help='If True, then print the total generate() call time')
+    parser.add_argument('--time-generate',
+                        action='store_true',
+                        help='If True, then print the total generate() call time')
 
     parser.add_argument(
         '--use-different-prompt-per-request',
@@ -1266,9 +1240,8 @@ def main(args):
         # Batch inference
         if args.image_repeat_prob is not None:
             # Repeat images with specified probability of "image_repeat_prob"
-            inputs = apply_image_repeat(args.image_repeat_prob,
-                                        args.num_prompts, data, prompts,
-                                        modality)
+            inputs = apply_image_repeat(args.image_repeat_prob, args.num_prompts, data,
+                                        prompts, modality)
         else:
             # Use the same image for all prompts
             inputs = [{

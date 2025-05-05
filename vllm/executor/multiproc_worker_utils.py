@@ -59,8 +59,7 @@ class ResultFuture(threading.Event, Generic[T]):
         return self.result.value  # type: ignore[return-value]
 
 
-def _set_future_result(future: Union[ResultFuture, asyncio.Future],
-                       result: Result):
+def _set_future_result(future: Union[ResultFuture, asyncio.Future], result: Result):
     if isinstance(future, ResultFuture):
         future.set_result(result)
         return
@@ -88,8 +87,7 @@ class ResultHandler(threading.Thread):
         for task_id, future in self.tasks.items():
             _set_future_result(
                 future,
-                Result(task_id=task_id,
-                       exception=ChildProcessError("worker died")))
+                Result(task_id=task_id, exception=ChildProcessError("worker died")))
 
     def close(self):
         self.result_queue.put(_TERMINATE)
@@ -117,8 +115,8 @@ class WorkerMonitor(threading.Thread):
                 if process.sentinel in dead_sentinels:
                     process.join(JOIN_TIMEOUT_S)
                 if process.exitcode is not None and process.exitcode != 0:
-                    logger.error("Worker %s pid %s died, exit code: %s",
-                                 process.name, process.pid, process.exitcode)
+                    logger.error("Worker %s pid %s died, exit code: %s", process.name,
+                                 process.pid, process.exitcode)
             # Cleanup any remaining workers
             if logger:
                 logger.info("Killing local vLLM worker processes")
@@ -183,8 +181,7 @@ class ProcessWorkerWrapper:
         self._enqueue_task(future, method, args, kwargs)
         return future
 
-    async def execute_method_async(self, method: Union[str, bytes], *args,
-                                   **kwargs):
+    async def execute_method_async(self, method: Union[str, bytes], *args, **kwargs):
         future = asyncio.get_running_loop().create_future()
         self._enqueue_task(future, method, args, kwargs)
         return await future
@@ -235,12 +232,10 @@ def _run_worker_process(
             except KeyboardInterrupt:
                 break
             except BaseException as e:
-                logger.exception(
-                    "Exception in worker %s while processing method %s.",
-                    process_name, method)
+                logger.exception("Exception in worker %s while processing method %s.",
+                                 process_name, method)
                 exception = e
-            result_queue.put(
-                Result(task_id=task_id, value=output, exception=exception))
+            result_queue.put(Result(task_id=task_id, value=output, exception=exception))
     except KeyboardInterrupt:
         pass
     except Exception:
@@ -301,12 +296,11 @@ def set_multiprocessing_worker_envs(parallel_config):
     # container where CPU limits can cause throttling.
     default_omp_num_threads = 1
     if "OMP_NUM_THREADS" not in os.environ and (
-            current_parallelism :=
-            torch.get_num_threads()) > default_omp_num_threads:
+            current_parallelism := torch.get_num_threads()) > default_omp_num_threads:
         logger.warning(
             "Reducing Torch parallelism from %d threads to %d to avoid "
             "unnecessary CPU contention. Set OMP_NUM_THREADS in the "
-            "external environment to tune this value as needed.",
-            current_parallelism, default_omp_num_threads)
+            "external environment to tune this value as needed.", current_parallelism,
+            default_omp_num_threads)
         os.environ["OMP_NUM_THREADS"] = str(default_omp_num_threads)
         torch.set_num_threads(default_omp_num_threads)

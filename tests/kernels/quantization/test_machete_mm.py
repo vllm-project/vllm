@@ -18,9 +18,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
-CUDA_DEVICES = [
-    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
-]
+CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
 
 # TODO: in future PR refactor this and `is_quant_method_supported` in the kernel
 #  unit tests to a common utility function. Currently the use of
@@ -136,8 +134,7 @@ def maybe_convert_zeropoints(zps: Optional[torch.Tensor], s: torch.Tensor):
     return zps if zps is None else -1 * s * (zps.to(s.dtype))
 
 
-def group_size_valid(shape: tuple[int, int, int],
-                     group_size: Optional[int]) -> bool:
+def group_size_valid(shape: tuple[int, int, int], group_size: Optional[int]) -> bool:
     return group_size is None or group_size == -1 or group_size % shape[2] == 0
 
 
@@ -259,9 +256,7 @@ def machete_mm_test_helper(types: TypeConfig,
 
 @pytest.mark.skipif(not IS_SUPPORTED_BY_GPU,
                     reason="Machete is not supported on this GPU type.")
-@pytest.mark.parametrize("shape",
-                         MNK_SHAPES,
-                         ids=lambda x: "x".join(str(v) for v in x))
+@pytest.mark.parametrize("shape", MNK_SHAPES, ids=lambda x: "x".join(str(v) for v in x))
 @pytest.mark.parametrize("types", TEST_TYPES)
 def test_machete_all_schedules(shape, types: TypeConfig):
 
@@ -286,9 +281,7 @@ def test_machete_all_schedules(shape, types: TypeConfig):
 
 @pytest.mark.skipif(not IS_SUPPORTED_BY_GPU,
                     reason="Machete is not supported on this GPU type.")
-@pytest.mark.parametrize("shape",
-                         MNK_SHAPES,
-                         ids=lambda x: "x".join(str(v) for v in x))
+@pytest.mark.parametrize("shape", MNK_SHAPES, ids=lambda x: "x".join(str(v) for v in x))
 @pytest.mark.parametrize("types", TEST_TYPES)
 def test_machete_heuristic(shape, types: TypeConfig):
     group_sizes: list[Optional[int]] = []
@@ -371,8 +364,8 @@ def test_machete_cuda_graph():
     group_size = 128
     zero_points = False
 
-    w_ref, w_q_packed, w_s, w_zp = machete_quantize_and_pack(
-        a.dtype, b, wtype, stype, group_size, zero_points)
+    w_ref, w_q_packed, w_s, w_zp = machete_quantize_and_pack(a.dtype, b, wtype, stype,
+                                                             group_size, zero_points)
 
     # Construct a trivial model with a single layer that calls a machete kernel
     model = MacheteLayer(

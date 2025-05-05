@@ -72,8 +72,7 @@ def run_granite_speech(question: str, audio_count: int) -> ModelRequestData:
 # MiniCPM-O
 def run_minicpmo(question: str, audio_count: int) -> ModelRequestData:
     model_name = "openbmb/MiniCPM-o-2_6"
-    tokenizer = AutoTokenizer.from_pretrained(model_name,
-                                              trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     engine_args = EngineArgs(
         model=model_name,
         trust_remote_code=True,
@@ -87,10 +86,7 @@ def run_minicpmo(question: str, audio_count: int) -> ModelRequestData:
 
     audio_placeholder = "(<audio>./</audio>)" * audio_count
     audio_chat_template = "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n<|spk_bos|><|spk|><|spk_eos|><|tts_bos|>' }}{% endif %}"  # noqa: E501
-    messages = [{
-        'role': 'user',
-        'content': f'{audio_placeholder}\n{question}'
-    }]
+    messages = [{'role': 'user', 'content': f'{audio_placeholder}\n{question}'}]
     prompt = tokenizer.apply_chat_template(messages,
                                            tokenize=False,
                                            add_generation_prompt=True,
@@ -172,9 +168,8 @@ def run_qwen2_5_omni(question: str, audio_count: int):
         limit_mm_per_prompt={"audio": audio_count},
     )
 
-    audio_in_prompt = "".join([
-        "<|audio_bos|><|AUDIO|><|audio_eos|>\n" for idx in range(audio_count)
-    ])
+    audio_in_prompt = "".join(
+        ["<|audio_bos|><|AUDIO|><|audio_eos|>\n" for idx in range(audio_count)])
 
     default_system = (
         "You are Qwen, a virtual human developed by the Qwen Team, Alibaba "
@@ -196,10 +191,7 @@ def run_ultravox(question: str, audio_count: int) -> ModelRequestData:
     model_name = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    messages = [{
-        'role': 'user',
-        'content': "<|audio|>\n" * audio_count + question
-    }]
+    messages = [{'role': 'user', 'content': "<|audio|>\n" * audio_count + question}]
     prompt = tokenizer.apply_chat_template(messages,
                                            tokenize=False,
                                            add_generation_prompt=True)
@@ -220,8 +212,7 @@ def run_ultravox(question: str, audio_count: int) -> ModelRequestData:
 
 # Whisper
 def run_whisper(question: str, audio_count: int) -> ModelRequestData:
-    assert audio_count == 1, (
-        "Whisper only support single audio input per prompt")
+    assert audio_count == 1, ("Whisper only support single audio input per prompt")
     model_name = "openai/whisper-large-v3-turbo"
 
     prompt = "<|startoftranscript|>"
@@ -303,10 +294,8 @@ def main(args):
     mm_data = {}
     if audio_count > 0:
         mm_data = {
-            "audio": [
-                asset.audio_and_sample_rate
-                for asset in audio_assets[:audio_count]
-            ]
+            "audio":
+            [asset.audio_and_sample_rate for asset in audio_assets[:audio_count]]
         }
 
     assert args.num_prompts > 0

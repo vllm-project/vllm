@@ -31,10 +31,7 @@ def http_bot(prompt):
         "stream": True,
         "max_tokens": 128,
     }
-    response = requests.post(args.model_url,
-                             headers=headers,
-                             json=pload,
-                             stream=True)
+    response = requests.post(args.model_url, headers=headers, json=pload, stream=True)
 
     for chunk in response.iter_lines(chunk_size=8192,
                                      decode_unicode=False,
@@ -48,8 +45,7 @@ def http_bot(prompt):
 def build_demo():
     with gr.Blocks() as demo:
         gr.Markdown("# vLLM text completion demo\n")
-        inputbox = gr.Textbox(label="Input",
-                              placeholder="Enter text and press ENTER")
+        inputbox = gr.Textbox(label="Input", placeholder="Enter text and press ENTER")
         outputbox = gr.Textbox(label="Output",
                                placeholder="Generated result from the model")
         inputbox.submit(http_bot, [inputbox], [outputbox])
@@ -68,9 +64,7 @@ def parse_args():
 
 def main(args):
     demo = build_demo()
-    demo.queue().launch(server_name=args.host,
-                        server_port=args.port,
-                        share=True)
+    demo.queue().launch(server_name=args.host, server_port=args.port, share=True)
 
 
 if __name__ == "__main__":

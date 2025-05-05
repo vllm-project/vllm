@@ -33,8 +33,7 @@ def test_skip_tokenizer_initialization(model: str):
 
 @pytest.mark.parametrize("model", ["distilbert/distilgpt2"])
 @pytest.mark.parametrize("enable_prompt_embeds", [True, False])
-def test_enable_prompt_embeds(hf_runner, model: str,
-                              enable_prompt_embeds: bool):
+def test_enable_prompt_embeds(hf_runner, model: str, enable_prompt_embeds: bool):
     prompt = "abc"
 
     with hf_runner(model) as hf_model:

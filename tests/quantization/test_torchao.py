@@ -16,8 +16,7 @@ def test_pre_quantized_model(vllm_runner):
                      quantization="torchao",
                      dtype="bfloat16",
                      enforce_eager=True) as llm:
-        output = llm.generate_greedy(["The capital of France is"],
-                                     max_tokens=32)
+        output = llm.generate_greedy(["The capital of France is"], max_tokens=32)
     assert output
     print(output)
 
@@ -29,8 +28,7 @@ def test_pre_quantized_model(vllm_runner):
         "cuda:0",
         # {"": "cuda"},
     ])
-def test_opt_125m_int4wo_model_loading_with_params(vllm_runner,
-                                                   pt_load_map_location):
+def test_opt_125m_int4wo_model_loading_with_params(vllm_runner, pt_load_map_location):
     """
     Test loading roberta-base model with no lm_head.
     """
@@ -40,8 +38,7 @@ def test_opt_125m_int4wo_model_loading_with_params(vllm_runner,
                      quantization="torchao",
                      dtype="bfloat16",
                      pt_load_map_location=pt_load_map_location) as llm:
-        output = llm.generate_greedy(["The capital of France is"],
-                                     max_tokens=32)
+        output = llm.generate_greedy(["The capital of France is"], max_tokens=32)
 
         assert output
         print(output)

@@ -27,14 +27,12 @@ class Executor(ExecutorBase):
     def get_class(vllm_config: VllmConfig) -> type["Executor"]:
         executor_class: type[Executor]
         parallel_config = vllm_config.parallel_config
-        distributed_executor_backend = (
-            parallel_config.distributed_executor_backend)
+        distributed_executor_backend = (parallel_config.distributed_executor_backend)
         # distributed_executor_backend must be set in VllmConfig.__post_init__
         if isinstance(distributed_executor_backend, type):
             if not issubclass(distributed_executor_backend, ExecutorBase):
-                raise TypeError(
-                    "distributed_executor_backend must be a subclass of "
-                    f"ExecutorBase. Got {distributed_executor_backend}.")
+                raise TypeError("distributed_executor_backend must be a subclass of "
+                                f"ExecutorBase. Got {distributed_executor_backend}.")
             executor_class = distributed_executor_backend
         elif distributed_executor_backend == "ray":
             from vllm.v1.executor.ray_distributed_executor import (  # noqa
@@ -54,14 +52,12 @@ class Executor(ExecutorBase):
                              f"{distributed_executor_backend}")
         return executor_class
 
-    def initialize_from_config(self,
-                               kv_cache_configs: list[KVCacheConfig]) -> None:
+    def initialize_from_config(self, kv_cache_configs: list[KVCacheConfig]) -> None:
         """
         Initialize the KV caches and begin the model execution loop of the
         underlying workers.
         """
-        self.collective_rpc("initialize_from_config",
-                            args=(kv_cache_configs, ))
+        self.collective_rpc("initialize_from_config", args=(kv_cache_configs, ))
         self.collective_rpc("compile_or_warm_up_model")
 
     def register_failure_callback(self, callback: FailureCallback):
@@ -83,8 +79,7 @@ class Executor(ExecutorBase):
         self,
         scheduler_output,
     ) -> Union[ModelRunnerOutput, Future[ModelRunnerOutput]]:
-        output = self.collective_rpc("execute_model",
-                                     args=(scheduler_output, ))
+        output = self.collective_rpc("execute_model", args=(scheduler_output, ))
         return output[0]
 
     @property

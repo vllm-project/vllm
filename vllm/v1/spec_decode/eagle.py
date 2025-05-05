@@ -41,12 +41,11 @@ class EagleProposer:
         self.hidden_size = vllm_config.model_config.get_hidden_size()
 
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
-                               == CompilationLevel.PIECEWISE and
-                               not self.vllm_config.model_config.enforce_eager)
+                               == CompilationLevel.PIECEWISE
+                               and not self.vllm_config.model_config.enforce_eager)
 
         self.cudagraph_batch_sizes = list(
-            reversed(
-                self.vllm_config.compilation_config.cudagraph_capture_sizes))
+            reversed(self.vllm_config.compilation_config.cudagraph_capture_sizes))
 
         # persistent buffers for cuda graph
         self.input_ids = torch.zeros(self.max_num_tokens,
@@ -56,14 +55,12 @@ class EagleProposer:
                                      dtype=torch.int64,
                                      device=device)
 
-        self.hidden_states = torch.zeros(
-            (self.max_num_tokens, self.hidden_size),
-            dtype=self.dtype,
-            device=device)
+        self.hidden_states = torch.zeros((self.max_num_tokens, self.hidden_size),
+                                         dtype=self.dtype,
+                                         device=device)
         # We need +1 here because the arange is used to set query_start_loc,
         # which has one more element than batch_size.
-        self.arange = torch.arange(vllm_config.scheduler_config.max_num_seqs +
-                                   1,
+        self.arange = torch.arange(vllm_config.scheduler_config.max_num_seqs + 1,
                                    device=device,
                                    dtype=torch.int32)
 
@@ -179,8 +176,7 @@ class EagleProposer:
             exceeds_max_model_len = positions >= self.max_model_len
             # Mask out the position ids that exceed the max model length.
             # Otherwise, we may get out-of-range error in RoPE.
-            clamped_positions = torch.where(exceeds_max_model_len, 0,
-                                            positions)
+            clamped_positions = torch.where(exceeds_max_model_len, 0, positions)
 
             # Increment the sequence lengths.
             attn_metadata.max_seq_len += 1
@@ -194,8 +190,7 @@ class EagleProposer:
 
             # Compute the slot mapping.
             block_numbers = clamped_positions // self.block_size
-            block_ids = block_table.gather(dim=1,
-                                           index=block_numbers.view(-1, 1))
+            block_ids = block_table.gather(dim=1, index=block_numbers.view(-1, 1))
             block_ids = block_ids.view(-1)
             attn_metadata.slot_mapping = (block_ids * self.block_size +
                                           clamped_positions % self.block_size)
@@ -221,8 +216,7 @@ class EagleProposer:
                     hidden_states=self.hidden_states[:input_batch_size],
                 )
             hidden_states = hidden_states[:batch_size]
-            logits = self.model.compute_logits(last_hidden_states[:batch_size],
-                                               None)
+            logits = self.model.compute_logits(last_hidden_states[:batch_size], None)
             draft_token_ids = logits.argmax(dim=-1)
             draft_token_ids_list.append(draft_token_ids)
 
@@ -246,8 +240,7 @@ class EagleProposer:
         #                 a + b, a + b + 1, ..., a + b + c - n3 - 1]
 
         # [0, a, a + b, a + b + c] -> [a, b, c]
-        query_len_per_req = (cu_target_query_lens[1:] -
-                             cu_target_query_lens[:-1])
+        query_len_per_req = (cu_target_query_lens[1:] - cu_target_query_lens[:-1])
         # [a, b, c] -> [a - n1, b - n2, c - n3]
         num_tokens_per_req = query_len_per_req - num_rejected_tokens
 
@@ -284,9 +277,8 @@ class EagleProposer:
         target_device = self.vllm_config.device_config.device
         # We need to set the vllm_config here to register attention
         # layers in the forward context.
-        with set_default_torch_dtype(
-                draft_model_config.dtype), set_current_vllm_config(
-                    self.vllm_config):
+        with set_default_torch_dtype(draft_model_config.dtype), set_current_vllm_config(
+                self.vllm_config):
             draft_model_cls, arch = ModelRegistry.resolve_model_cls(
                 draft_model_config.architectures)
             self.model = draft_model_cls(
@@ -297,8 +289,7 @@ class EagleProposer:
             loader.get_all_weights(draft_model_config, self.model))
         if self.vllm_config.speculative_config.method == "eagle3":
             if "model.embed_tokens.weight" not in loaded_weights:
-                logger.info(
-                    "Loading EAGLE embedding weights from the target model.")
+                logger.info("Loading EAGLE embedding weights from the target model.")
                 self.model.model.embed_tokens = target_model.model.embed_tokens
         else:
             logger.info("Loading EAGLE LM head weights from the target model.")
@@ -309,8 +300,7 @@ class EagleProposer:
         self,
         num_tokens: int,
     ) -> None:
-        with set_forward_context(None, self.vllm_config,
-                                 num_tokens=num_tokens):
+        with set_forward_context(None, self.vllm_config, num_tokens=num_tokens):
             self.model(
                 input_ids=self.input_ids[:num_tokens],
                 positions=self.positions[:num_tokens],

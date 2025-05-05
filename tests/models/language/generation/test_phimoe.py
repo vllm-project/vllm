@@ -21,8 +21,7 @@ def test_phimoe_routing_function():
                          dtype=torch.float32,
                          requires_grad=False).view(4, 2),
             "gating_output":
-            torch.tensor([0.1, 0.2, 0.3, 0.4],
-                         dtype=torch.float32,
+            torch.tensor([0.1, 0.2, 0.3, 0.4], dtype=torch.float32,
                          requires_grad=False),
             "topk":
             2,
@@ -35,8 +34,7 @@ def test_phimoe_routing_function():
                          dtype=torch.float32,
                          requires_grad=False).view(4, 2),
             "gating_output":
-            torch.tensor([0.4, 0.2, 0.3, 0.4],
-                         dtype=torch.float32,
+            torch.tensor([0.4, 0.2, 0.3, 0.4], dtype=torch.float32,
                          requires_grad=False),
             "topk":
             2,
@@ -47,10 +45,10 @@ def test_phimoe_routing_function():
 
     ground_truth = {
         0: {
-            "topk_weights":
-            torch.tensor([1., 1.], dtype=torch.float32, requires_grad=False),
-            "topk_ids":
-            torch.tensor([3, 2], dtype=torch.long, requires_grad=False),
+            "topk_weights": torch.tensor([1., 1.],
+                                         dtype=torch.float32,
+                                         requires_grad=False),
+            "topk_ids": torch.tensor([3, 2], dtype=torch.long, requires_grad=False),
         },
         1: {
             "topk_weights":
@@ -62,8 +60,7 @@ def test_phimoe_routing_function():
 
     for test_id in test_case:
         topk_weights, topk_ids = phimoe_routing_function(**test_case[test_id])
-        assert torch.allclose(topk_weights,
-                              ground_truth[test_id]["topk_weights"])
+        assert torch.allclose(topk_weights, ground_truth[test_id]["topk_weights"])
         assert torch.equal(topk_ids, ground_truth[test_id]["topk_ids"])
 
 
@@ -85,12 +82,12 @@ def test_models(
     num_logprobs: int,
 ) -> None:
     with hf_runner(model, dtype=dtype) as hf_model:
-        hf_outputs = hf_model.generate_greedy_logprobs_limit(
-            example_prompts, max_tokens, num_logprobs)
+        hf_outputs = hf_model.generate_greedy_logprobs_limit(example_prompts,
+                                                             max_tokens, num_logprobs)
 
     with vllm_runner(model, dtype=dtype) as vllm_model:
-        vllm_outputs = vllm_model.generate_greedy_logprobs(
-            example_prompts, max_tokens, num_logprobs)
+        vllm_outputs = vllm_model.generate_greedy_logprobs(example_prompts, max_tokens,
+                                                           num_logprobs)
     check_logprobs_close(
         outputs_0_lst=hf_outputs,
         outputs_1_lst=vllm_outputs,

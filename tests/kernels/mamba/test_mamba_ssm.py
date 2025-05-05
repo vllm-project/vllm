@@ -74,10 +74,8 @@ def selective_state_update_ref(state,
     dt = F.softplus(dt) if dt_softplus else dt
     dA = torch.exp(rearrange(dt, "b h d -> b h d 1") *
                    A)  # (batch, nheads, dim, dstate)
-    B = repeat(B, "b g n -> b (g h) n",
-               h=nheads // ngroups)  # (batch, nheads, dstate)
-    C = repeat(C, "b g n -> b (g h) n",
-               h=nheads // ngroups)  # (batch, nheads, dstate)
+    B = repeat(B, "b g n -> b (g h) n", h=nheads // ngroups)  # (batch, nheads, dstate)
+    C = repeat(C, "b g n -> b (g h) n", h=nheads // ngroups)  # (batch, nheads, dstate)
     dB = rearrange(dt, "b h d -> b h d 1") * rearrange(
         B, "b h n -> b h 1 n")  # (batch, nheads, dim, dstate)
     state.copy_(state * dA +
@@ -212,8 +210,7 @@ def selective_scan_opcheck_fn(u,
 
 
 @pytest.mark.parametrize('wtype', [torch.float32])
-@pytest.mark.parametrize('itype',
-                         [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize('itype', [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize('seqlen', [128, 256, 512, 1024, 2048, 4096])
 @pytest.mark.parametrize('has_delta_bias', [True])
 @pytest.mark.parametrize('delta_softplus', [True])
@@ -223,9 +220,9 @@ def selective_scan_opcheck_fn(u,
 @pytest.mark.parametrize("is_variable_C", [True])
 @pytest.mark.parametrize("is_variable_B", [True])
 @pytest.mark.parametrize("scan_chunks", [1, 2, 3])
-def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D,
-                        has_z, has_delta_bias, delta_softplus, seqlen, itype,
-                        wtype, scan_chunks):
+def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_z,
+                        has_delta_bias, delta_softplus, seqlen, itype, wtype,
+                        scan_chunks):
     if varBC_groups > 1 and (not is_variable_B or not is_variable_C):
         pytest.skip()  # This config is not applicable
     device = 'cuda'
@@ -249,9 +246,7 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D,
         B_shape = [batch_size, dstate, seqlen]
     else:
         B_shape = [batch_size, varBC_groups, dstate, seqlen]
-    B = torch.randn(B_shape,
-                    device=device,
-                    dtype=wtype if not is_variable_B else itype)
+    B = torch.randn(B_shape, device=device, dtype=wtype if not is_variable_B else itype)
     B_ref = B.clone()
     if not is_variable_C:
         C_shape = [dim, dstate]
@@ -259,27 +254,22 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D,
         C_shape = [batch_size, dstate, seqlen]
     else:
         C_shape = [batch_size, varBC_groups, dstate, seqlen]
-    C = torch.randn(C_shape,
-                    device=device,
-                    dtype=wtype if not is_variable_C else itype)
+    C = torch.randn(C_shape, device=device, dtype=wtype if not is_variable_C else itype)
     C_ref = C.clone()
     D = torch.randn(dim, device=device, dtype=torch.float32) if has_D else None
     D_ref = D.clone()
     z = torch.randn(batch_size, dim, seqlen, device=device,
                     dtype=itype) if has_z else None
     z_ref = z.clone() if has_z else None
-    delta_bias = (0.5 * torch.rand(dim, device=device, dtype=torch.float32)
-                  ) if has_delta_bias else None
+    delta_bias = (
+        0.5 *
+        torch.rand(dim, device=device, dtype=torch.float32)) if has_delta_bias else None
     u = torch.randn(batch_size, dim, seqlen, device=device, dtype=itype)
     u_ref = u.clone()
-    delta = (0.5 *
-             torch.rand(batch_size, dim, seqlen, device=device, dtype=itype))
+    delta = (0.5 * torch.rand(batch_size, dim, seqlen, device=device, dtype=itype))
     delta_ref = delta.clone()
     state_shape = (batch_size, u.shape[1], int(A.shape[1]))
-    state = torch.randn(state_shape,
-                        device=u.device,
-                        dtype=itype,
-                        requires_grad=False)
+    state = torch.randn(state_shape, device=u.device, dtype=itype, requires_grad=False)
     state_ref = state.clone()
     out = None
     out_ref = None
@@ -311,24 +301,22 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D,
             z=_z,
             delta_bias=delta_bias,
             delta_softplus=delta_softplus,
-            has_initial_state=torch.ones(batch_size,
-                                         device=u.device,
-                                         dtype=torch.bool) if c > 0 else None)
+            has_initial_state=torch.ones(batch_size, device=u.device, dtype=torch.bool)
+            if c > 0 else None)
         outs.append(out)
     if len(outs) > 1:
         out = torch.cat(outs, dim=-1)
 
-    out_ref, state_ref, *rest = selective_scan_ref(
-        u_ref,
-        delta_ref,
-        A_ref,
-        B_ref,
-        C_ref,
-        D_ref,
-        z=z_ref,
-        delta_bias=delta_bias,
-        delta_softplus=delta_softplus,
-        return_last_state=True)
+    out_ref, state_ref, *rest = selective_scan_ref(u_ref,
+                                                   delta_ref,
+                                                   A_ref,
+                                                   B_ref,
+                                                   C_ref,
+                                                   D_ref,
+                                                   z=z_ref,
+                                                   delta_bias=delta_bias,
+                                                   delta_softplus=delta_softplus,
+                                                   return_last_state=True)
 
     assert out is not None and out_ref is not None
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
@@ -347,8 +335,7 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D,
                               ssm_states=state)
 
 
-@pytest.mark.parametrize("itype",
-                         [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("itype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("has_z", [False, True])
 @pytest.mark.parametrize("dstate", [16, 32, 64])
 @pytest.mark.parametrize("dim", [2048, 2048 + 16, 4096])
@@ -410,10 +397,9 @@ def test_selective_state_update(dim, dstate, has_z, itype):
 @pytest.mark.parametrize("is_variable_B", [True])
 # tests correctness in case subset of the sequences are padded
 @pytest.mark.parametrize("with_padding", [False, True])
-def test_selective_scan_varlen(with_padding, is_variable_B, is_variable_C,
-                               varBC_groups, has_D, has_z, has_delta_bias,
-                               delta_softplus, return_last_state, seqlen,
-                               itype, wtype):
+def test_selective_scan_varlen(with_padding, is_variable_B, is_variable_C, varBC_groups,
+                               has_D, has_z, has_delta_bias, delta_softplus,
+                               return_last_state, seqlen, itype, wtype):
     if varBC_groups > 1 and (not is_variable_B or not is_variable_C):
         pytest.skip()  # This config is not applicable
     device = 'cuda'
@@ -439,39 +425,33 @@ def test_selective_scan_varlen(with_padding, is_variable_B, is_variable_C,
     nsplits = padded_batch_size - 1
     eos_pos = torch.randperm(seqlen - 1)[:nsplits].sort().values
     seqlens.append(
-        torch.diff(
-            torch.cat(
-                [torch.tensor([-1]), eos_pos,
-                 torch.tensor([seqlen - 1])])).tolist())
+        torch.diff(torch.cat([torch.tensor([-1]), eos_pos,
+                              torch.tensor([seqlen - 1])])).tolist())
 
     assert sum(seqlens[-1]) == seqlen
     assert all(s > 0 for s in seqlens[-1])
 
     total_entries = batch_size * 10
     cumsum = torch.cumsum(torch.tensor(seqlens[0]), dim=0).to(torch.int32)
-    cumsum = torch.concat([torch.tensor([0], dtype=torch.int32), cumsum],
-                          dim=0).cuda()
+    cumsum = torch.concat([torch.tensor([0], dtype=torch.int32), cumsum], dim=0).cuda()
 
     dim = 4
     dstate = 8
     A = (-0.5 * torch.rand(dim, dstate, device=device, dtype=wtype))
     A_ref = A.clone()
     B_shape = [varBC_groups, dstate, seqlen]
-    B = torch.randn(B_shape,
-                    device=device,
-                    dtype=wtype if not is_variable_B else itype)
+    B = torch.randn(B_shape, device=device, dtype=wtype if not is_variable_B else itype)
     B_ref = B.clone()
     C_shape = [varBC_groups, dstate, seqlen]
-    C = torch.randn(C_shape,
-                    device=device,
-                    dtype=wtype if not is_variable_C else itype)
+    C = torch.randn(C_shape, device=device, dtype=wtype if not is_variable_C else itype)
     C_ref = C.clone()
     D = torch.randn(dim, device=device, dtype=torch.float32) if has_D else None
     D_ref = D.clone()
     z = torch.randn(dim, seqlen, device=device, dtype=itype)
     z_ref = z.clone()
-    delta_bias = (0.5 * torch.rand(dim, device=device, dtype=torch.float32)
-                  ) if has_delta_bias else None
+    delta_bias = (
+        0.5 *
+        torch.rand(dim, device=device, dtype=torch.float32)) if has_delta_bias else None
     u = torch.randn(dim, seqlen, device=device, dtype=itype)
     u_ref = u.clone()
     delta = (0.5 * torch.rand(dim, seqlen, device=device, dtype=itype))
@@ -485,17 +465,13 @@ def test_selective_scan_varlen(with_padding, is_variable_B, is_variable_C,
                              dtype=itype,
                              requires_grad=False)
     prev_state_ref = prev_state.clone()
-    state_indices = torch.randperm(total_entries,
-                                   dtype=torch.int32,
+    state_indices = torch.randperm(total_entries, dtype=torch.int32,
                                    device=u.device)[:batch_size]
-    unused_states_bool = torch.ones(total_entries,
-                                    dtype=torch.bool,
-                                    device=device)
+    unused_states_bool = torch.ones(total_entries, dtype=torch.bool, device=device)
     unused_states_bool[state_indices] = False
     padded_state_indices = torch.concat([
         state_indices,
-        torch.as_tensor(
-            [PAD_SLOT_ID] * padding, dtype=torch.int32, device=device),
+        torch.as_tensor([PAD_SLOT_ID] * padding, dtype=torch.int32, device=device),
     ],
                                         dim=-1)
 
@@ -528,8 +504,7 @@ def test_selective_scan_varlen(with_padding, is_variable_B, is_variable_C,
             return_last_state=return_last_state,
             prev_state=prev_state_ref[padded_state_indices[i]].unsqueeze(0)
             if has_initial_state[i] else None,
-            final_state_out=prev_state_ref[padded_state_indices[i]].unsqueeze(
-                0))
+            final_state_out=prev_state_ref[padded_state_indices[i]].unsqueeze(0))
         outs_ref.append(out_ref_s)
     out_ref = torch.cat(outs_ref, dim=-1)[0]
 
@@ -540,20 +515,19 @@ def test_selective_scan_varlen(with_padding, is_variable_B, is_variable_C,
     print("Output state diff mean", (prev_state - prev_state_ref).mean())
     assert torch.allclose(prev_state, prev_state_ref, rtol=rtol, atol=atol)
     assert torch.allclose(unpadded_out, out_ref, rtol=rtol, atol=atol)
-    selective_scan_opcheck_fn(u, delta, A, B, C, D, z, delta_bias,
-                              delta_softplus, cumsum, padded_state_indices,
-                              has_initial_state, prev_state)
+    selective_scan_opcheck_fn(u, delta, A, B, C, D, z, delta_bias, delta_softplus,
+                              cumsum, padded_state_indices, has_initial_state,
+                              prev_state)
 
 
-@pytest.mark.parametrize("itype",
-                         [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("itype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("has_z", [True])
 @pytest.mark.parametrize("dstate", [16, 32, 64])
 @pytest.mark.parametrize("dim", [2048, 2048 + 16, 4096])
 # tests correctness in case subset of the sequences are padded
 @pytest.mark.parametrize("with_padding", [True, False])
-def test_selective_state_update_with_batch_indices(with_padding, dim, dstate,
-                                                   has_z, itype):
+def test_selective_state_update_with_batch_indices(with_padding, dim, dstate, has_z,
+                                                   itype):
     device = "cuda"
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (5e-3, 1e-2)
     if itype == torch.bfloat16:
@@ -567,16 +541,13 @@ def test_selective_state_update_with_batch_indices(with_padding, dim, dstate,
     padded_batch_size = batch_size + padding
     total_entries = 10 * batch_size
     state = torch.randn(total_entries, dim, dstate, dtype=itype, device=device)
-    state_indices = torch.randperm(total_entries)[:batch_size].to(
-        dtype=torch.int32, device=device)
-    unused_states_bool = torch.ones(total_entries,
-                                    dtype=torch.bool,
-                                    device=device)
+    state_indices = torch.randperm(total_entries)[:batch_size].to(dtype=torch.int32,
+                                                                  device=device)
+    unused_states_bool = torch.ones(total_entries, dtype=torch.bool, device=device)
     unused_states_bool[state_indices] = False
     padded_state_indices = torch.concat([
         state_indices,
-        torch.as_tensor(
-            [PAD_SLOT_ID] * padding, dtype=torch.int32, device=device)
+        torch.as_tensor([PAD_SLOT_ID] * padding, dtype=torch.int32, device=device)
     ],
                                         dim=0)
     x = torch.randn(padded_batch_size, dim, device=device, dtype=itype)
@@ -615,27 +586,21 @@ def test_selective_state_update_with_batch_indices(with_padding, dim, dstate,
     print("Output diff max", (out[:batch_size] - out_ref).max())
     print("Output diff mean", (out[:batch_size] - out_ref).mean())
     print("Output state diff max", (state[state_indices, :] - state_ref).max())
-    print("Output state diff mean",
-          (state[state_indices, :] - state_ref).mean())
+    print("Output state diff mean", (state[state_indices, :] - state_ref).mean())
     # test padded entries stay the same
     if with_padding:
-        assert torch.equal(state_before[unused_states_bool],
-                           state[unused_states_bool])
+        assert torch.equal(state_before[unused_states_bool], state[unused_states_bool])
         assert torch.equal(x[batch_size + 1:], x[batch_size + 1:])
         assert torch.equal(dt[batch_size + 1:], dt[batch_size + 1:])
         assert torch.equal(B[batch_size + 1:], B[batch_size + 1:])
         assert torch.equal(C[batch_size + 1:], C[batch_size + 1:])
 
     # test "real" entries
-    assert torch.allclose(state[state_indices, :],
-                          state_ref,
-                          rtol=rtol,
-                          atol=atol)
+    assert torch.allclose(state[state_indices, :], state_ref, rtol=rtol, atol=atol)
     assert torch.allclose(out[:batch_size], out_ref, rtol=rtol, atol=atol)
 
 
-@pytest.mark.parametrize("itype",
-                         [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("itype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("has_z", [False, True])
 @pytest.mark.parametrize("tie_hdim", [False, True])
 @pytest.mark.parametrize("ngroups", [1, 2, 4])
@@ -660,27 +625,20 @@ def test_selective_state_update_with_heads_with_batch_indices(
                         dstate,
                         dtype=itype,
                         device=device)
-    state_indices = torch.randperm(total_entries)[:batch_size].to(
-        dtype=torch.int32, device=device)
+    state_indices = torch.randperm(total_entries)[:batch_size].to(dtype=torch.int32,
+                                                                  device=device)
 
     x = torch.randn(batch_size, nheads, headdim, device=device, dtype=itype)
     if not tie_hdim:
-        dt = torch.randn(batch_size,
-                         nheads,
-                         headdim,
-                         device=device,
-                         dtype=itype)
+        dt = torch.randn(batch_size, nheads, headdim, device=device, dtype=itype)
         dt_bias = torch.rand(nheads, headdim, device=device) - 4.0
         A = -torch.rand(nheads, headdim, dstate, device=device) - 1.0
         D = torch.randn(nheads, headdim, device=device)
     else:
-        dt = repeat(torch.randn(batch_size, nheads, device=device,
-                                dtype=itype),
+        dt = repeat(torch.randn(batch_size, nheads, device=device, dtype=itype),
                     "b h -> b h p",
                     p=headdim)
-        dt_bias = repeat(torch.rand(nheads, device=device) - 4.0,
-                         "h -> h p",
-                         p=headdim)
+        dt_bias = repeat(torch.rand(nheads, device=device) - 4.0, "h -> h p", p=headdim)
         A = repeat(-torch.rand(nheads, device=device) - 1.0,
                    "h -> h p n",
                    p=headdim,
@@ -715,8 +673,5 @@ def test_selective_state_update_with_heads_with_batch_indices(
 
     print(f"Output max diff: {(out - out_ref).abs().max().item()}")
     print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
-    assert torch.allclose(state[state_indices, :],
-                          state_ref,
-                          rtol=rtol,
-                          atol=atol)
+    assert torch.allclose(state[state_indices, :], state_ref, rtol=rtol, atol=atol)
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)

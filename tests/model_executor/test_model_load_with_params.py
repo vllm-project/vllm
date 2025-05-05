@@ -13,8 +13,7 @@ MAX_MODEL_LEN = 128
 MODEL_NAME = os.environ.get("MODEL_NAME", "BAAI/bge-base-en-v1.5")
 REVISION = os.environ.get("REVISION", "main")
 
-MODEL_NAME_ROBERTA = os.environ.get("MODEL_NAME",
-                                    "intfloat/multilingual-e5-small")
+MODEL_NAME_ROBERTA = os.environ.get("MODEL_NAME", "intfloat/multilingual-e5-small")
 REVISION_ROBERTA = os.environ.get("REVISION", "main")
 
 

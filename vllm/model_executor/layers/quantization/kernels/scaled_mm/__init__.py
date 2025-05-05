@@ -26,8 +26,7 @@ _POSSIBLE_KERNELS: Dict[PlatformEnum, List[Type[ScaledMMLinearKernel]]] = {
 
 def choose_scaled_mm_linear_kernel(
         config: ScaledMMLinearLayerConfig,
-        compute_capability: Optional[int] = None
-) -> Type[ScaledMMLinearKernel]:
+        compute_capability: Optional[int] = None) -> Type[ScaledMMLinearKernel]:
     """
     Choose an ScaledMMLinearKernel that can implement the given config for the 
     given compute capability. Attempts to choose the best kernel in terms of 
@@ -77,8 +76,7 @@ def choose_scaled_mm_linear_kernel(
             return kernel
         else:
             failure_reasons.append(
-                f' {kernel.__name__} cannot implement due to: {failure_reason}'
-            )
+                f' {kernel.__name__} cannot implement due to: {failure_reason}')
 
     raise ValueError(
         "Failed to find a kernel that can implement the "\

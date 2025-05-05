@@ -70,8 +70,7 @@ def test_zip_enc_dec_prompts(mm_processor_kwargs, expected_mm_kwargs):
                                          mm_processor_kwargs)
     assert len(zipped_prompts) == len(encoder_prompts) == len(decoder_prompts)
     for enc, dec, exp_kwargs, zipped in zip(encoder_prompts, decoder_prompts,
-                                            expected_mm_kwargs,
-                                            zipped_prompts):
+                                            expected_mm_kwargs, zipped_prompts):
         assert isinstance(zipped, dict)
         assert len(zipped.keys()) == 3
         assert zipped['encoder_prompt'] == enc

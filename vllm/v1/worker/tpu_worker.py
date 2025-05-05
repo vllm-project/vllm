@@ -58,8 +58,7 @@ class TPUWorker:
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
         else:
-            self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
-                self.cache_config.cache_dtype]
+            self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[self.cache_config.cache_dtype]
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
@@ -94,8 +93,7 @@ class TPUWorker:
         torch.set_default_dtype(self.model_config.dtype)
 
         # Initialize the distributed environment.
-        init_tpu_worker_distributed_environment(self.parallel_config,
-                                                self.rank,
+        init_tpu_worker_distributed_environment(self.parallel_config, self.rank,
                                                 self.distributed_init_method,
                                                 self.local_rank)
 
@@ -146,19 +144,16 @@ class TPUWorker:
 
                 # Use an empty tensor instead of `None`` to force Dynamo to pass
                 # it by reference, rather by specializing on the value ``None``.
-                tpu_kv_cache = torch.tensor([],
-                                            dtype=dtype,
-                                            device=self.device)
+                tpu_kv_cache = torch.tensor([], dtype=dtype, device=self.device)
                 kv_caches[layer_name] = tpu_kv_cache
             else:
                 raise NotImplementedError(
                     f"Unsupported KV cache spec '{type(layer_spec)}'")
 
         runner_kv_caches: list[torch.Tensor] = []
-        bind_kv_cache(
-            kv_caches,
-            self.vllm_config.compilation_config.static_forward_context,
-            runner_kv_caches)
+        bind_kv_cache(kv_caches,
+                      self.vllm_config.compilation_config.static_forward_context,
+                      runner_kv_caches)
 
         # `max_num_tokens >= max_num_batched_tokens` due to padding.
         self.model_runner.profile_run(self.model_runner.max_num_tokens)

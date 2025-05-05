@@ -330,16 +330,13 @@ async def benchmark(
     # and it will simplify the code in limited_request_func.
     #    semaphore = (asyncio.Semaphore(max_concurrency)
     #                 if max_concurrency else contextlib.nullcontext())
-    semaphore = (asyncio.Semaphore(max_concurrency)
-                 if max_concurrency else None)
+    semaphore = (asyncio.Semaphore(max_concurrency) if max_concurrency else None)
 
     async def limited_request_func(request_func_input, pbar):
         if semaphore is None:
-            return await request_func(request_func_input=request_func_input,
-                                      pbar=pbar)
+            return await request_func(request_func_input=request_func_input, pbar=pbar)
         async with semaphore:
-            return await request_func(request_func_input=request_func_input,
-                                      pbar=pbar)
+            return await request_func(request_func_input=request_func_input, pbar=pbar)
 
     benchmark_start_time = time.perf_counter()
     tasks: list[asyncio.Task] = []
@@ -364,8 +361,7 @@ async def benchmark(
                                               extra_body=extra_body)
         tasks.append(
             asyncio.create_task(
-                limited_request_func(request_func_input=request_func_input,
-                                     pbar=pbar)))
+                limited_request_func(request_func_input=request_func_input, pbar=pbar)))
     outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
 
     if profile:
@@ -399,11 +395,9 @@ async def benchmark(
 
     print("{s:{c}^{n}}".format(s=' Serving Benchmark Result ', n=50, c='='))
     print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
-    print("{:<40} {:<10.2f}".format("Benchmark duration (s):",
-                                    benchmark_duration))
+    print("{:<40} {:<10.2f}".format("Benchmark duration (s):", benchmark_duration))
     print("{:<40} {:<10}".format("Total input tokens:", metrics.total_input))
-    print("{:<40} {:<10}".format("Total generated tokens:",
-                                 metrics.total_output))
+    print("{:<40} {:<10}".format("Total generated tokens:", metrics.total_output))
     print("{:<40} {:<10.2f}".format("Request throughput (req/s):",
                                     metrics.request_throughput))
     if goodput_config_dict:
@@ -420,8 +414,7 @@ async def benchmark(
         "total_input_tokens": metrics.total_input,
         "total_output_tokens": metrics.total_output,
         "request_throughput": metrics.request_throughput,
-        "request_goodput:":
-        metrics.request_goodput if goodput_config_dict else None,
+        "request_goodput:": metrics.request_goodput if goodput_config_dict else None,
         "output_throughput": metrics.output_throughput,
         "total_token_throughput": metrics.total_token_throughput,
         "input_lens": [output.prompt_len for output in outputs],
@@ -457,16 +450,13 @@ async def benchmark(
             metrics, f"median_{metric_attribute_name}_ms")
         result[f"std_{metric_attribute_name}_ms"] = getattr(
             metrics, f"std_{metric_attribute_name}_ms")
-        for p, value in getattr(metrics,
-                                f"percentiles_{metric_attribute_name}_ms"):
+        for p, value in getattr(metrics, f"percentiles_{metric_attribute_name}_ms"):
             p_word = str(int(p)) if int(p) == p else str(p)
-            print("{:<40} {:<10.2f}".format(f"P{p_word} {metric_name} (ms):",
-                                            value))
+            print("{:<40} {:<10.2f}".format(f"P{p_word} {metric_name} (ms):", value))
             result[f"p{p_word}_{metric_attribute_name}_ms"] = value
 
     process_one_metric("ttft", "TTFT", "Time to First Token")
-    process_one_metric("tpot", "TPOT",
-                       "Time per Output Token (excl. 1st token)")
+    process_one_metric("tpot", "TPOT", "Time per Output Token (excl. 1st token)")
     process_one_metric("itl", "ITL", "Inter-token Latency")
     process_one_metric("e2el", "E2EL", "End-to-end Latency")
 
@@ -483,15 +473,13 @@ def check_goodput_args(args):
         goodput_config_dict = parse_goodput(args.goodput)
         for slo_name, slo_val in goodput_config_dict.items():
             if slo_name not in VALID_NAMES:
-                raise ValueError(
-                    f"Invalid metric name found, {slo_name}: {slo_val}. "
-                    "The service level objective name should be one of "
-                    f"{str(VALID_NAMES)}. ")
+                raise ValueError(f"Invalid metric name found, {slo_name}: {slo_val}. "
+                                 "The service level objective name should be one of "
+                                 f"{str(VALID_NAMES)}. ")
             if slo_val < 0:
-                raise ValueError(
-                    f"Invalid value found, {slo_name}: {slo_val}. "
-                    "The service level objective value should be "
-                    "non-negative.")
+                raise ValueError(f"Invalid value found, {slo_name}: {slo_val}. "
+                                 "The service level objective value should be "
+                                 "non-negative.")
     return goodput_config_dict
 
 
@@ -510,13 +498,12 @@ def parse_goodput(slo_pairs):
     return goodput_config_dict
 
 
-def save_to_pytorch_benchmark_format(args: argparse.Namespace,
-                                     results: dict[str, Any],
+def save_to_pytorch_benchmark_format(args: argparse.Namespace, results: dict[str, Any],
                                      file_name: str) -> None:
     metrics = [
-        "median_ttft_ms", "mean_ttft_ms", "std_ttft_ms", "p99_ttft_ms",
-        "mean_tpot_ms", "median_tpot_ms", "std_tpot_ms", "p99_tpot_ms",
-        "median_itl_ms", "mean_itl_ms", "std_itl_ms", "p99_itl_ms"
+        "median_ttft_ms", "mean_ttft_ms", "std_ttft_ms", "p99_ttft_ms", "mean_tpot_ms",
+        "median_tpot_ms", "std_tpot_ms", "p99_tpot_ms", "median_itl_ms", "mean_itl_ms",
+        "std_itl_ms", "p99_itl_ms"
     ]
     # These raw data might be useful, but they are rather big. They can be added
     # later if needed
@@ -558,9 +545,8 @@ def main(args: argparse.Namespace):
                               trust_remote_code=args.trust_remote_code)
 
     if args.dataset_name is None:
-        raise ValueError(
-            "Please specify '--dataset-name' and the corresponding "
-            "'--dataset-path' if required.")
+        raise ValueError("Please specify '--dataset-name' and the corresponding "
+                         "'--dataset-path' if required.")
 
     if args.dataset_name == "sonnet":
         dataset = SonnetDataset(dataset_path=args.dataset_path)
@@ -608,12 +594,11 @@ def main(args: argparse.Namespace):
                 dataset_name for cls in HuggingFaceDataset.__subclasses__()
                 for dataset_name in cls.SUPPORTED_DATASET_PATHS
             ])
-            raise ValueError(
-                f"Unsupported dataset path: {args.dataset_path}. "
-                "Huggingface dataset only supports dataset_path"
-                f" from one of following: {supported_datasets}. "
-                "Please consider contributing if you would "
-                "like to add support for additional dataset formats.")
+            raise ValueError(f"Unsupported dataset path: {args.dataset_path}. "
+                             "Huggingface dataset only supports dataset_path"
+                             f" from one of following: {supported_datasets}. "
+                             "Please consider contributing if you would "
+                             "like to add support for additional dataset formats.")
 
         if (dataset_class.IS_MULTIMODAL and backend not in \
             ["openai-chat", "openai-audio"]):
@@ -676,9 +661,8 @@ def main(args: argparse.Namespace):
 
     # Sampling parameters are only supported by openai-compatible backend.
     if sampling_params and args.backend not in OPENAI_COMPATIBLE_BACKENDS:
-        raise ValueError(
-            "Sampling parameters are only supported by openai-compatible "
-            "backends.")
+        raise ValueError("Sampling parameters are only supported by openai-compatible "
+                         "backends.")
 
     if "temperature" not in sampling_params:
         sampling_params["temperature"] = 0.0  # Default to greedy decoding.
@@ -702,9 +686,7 @@ def main(args: argparse.Namespace):
             disable_tqdm=args.disable_tqdm,
             profile=args.profile,
             selected_percentile_metrics=args.percentile_metrics.split(","),
-            selected_percentiles=[
-                float(p) for p in args.metric_percentiles.split(",")
-            ],
+            selected_percentiles=[float(p) for p in args.metric_percentiles.split(",")],
             ignore_eos=args.ignore_eos,
             goodput_config_dict=goodput_config_dict,
             max_concurrency=args.max_concurrency,
@@ -732,11 +714,10 @@ def main(args: argparse.Namespace):
                     result_json[kvstring[0].strip()] = kvstring[1].strip()
                 else:
                     raise ValueError(
-                        "Invalid metadata format. Please use KEY=VALUE format."
-                    )
+                        "Invalid metadata format. Please use KEY=VALUE format.")
         # Traffic
-        result_json["request_rate"] = (args.request_rate if args.request_rate
-                                       < float("inf") else "inf")
+        result_json["request_rate"] = (args.request_rate
+                                       if args.request_rate < float("inf") else "inf")
         result_json["burstiness"] = args.burstiness
         result_json["max_concurrency"] = args.max_concurrency
 
@@ -746,8 +727,8 @@ def main(args: argparse.Namespace):
         if not args.save_detailed:
             # Remove fields with too many data points
             for field in [
-                    "input_lens", "output_lens", "ttfts", "itls",
-                    "generated_texts", "errors"
+                    "input_lens", "output_lens", "ttfts", "itls", "generated_texts",
+                    "errors"
             ]:
                 if field in result_json:
                     del result_json[field]
@@ -761,8 +742,7 @@ def main(args: argparse.Namespace):
             file_name = args.result_filename
         if args.result_dir:
             file_name = os.path.join(args.result_dir, file_name)
-        with open(file_name,
-                  mode="a+" if args.append_result else "w",
+        with open(file_name, mode="a+" if args.append_result else "w",
                   encoding='utf-8') as outfile:
             # Append a newline.
             if args.append_result and outfile.tell() != 0:
@@ -967,22 +947,19 @@ if __name__ == "__main__":
         "--sonnet-input-len",
         type=int,
         default=550,
-        help=
-        "Number of input tokens per request, used only for sonnet dataset.",
+        help="Number of input tokens per request, used only for sonnet dataset.",
     )
     sonnet_group.add_argument(
         "--sonnet-output-len",
         type=int,
         default=150,
-        help=
-        "Number of output tokens per request, used only for sonnet dataset.",
+        help="Number of output tokens per request, used only for sonnet dataset.",
     )
     sonnet_group.add_argument(
         "--sonnet-prefix-len",
         type=int,
         default=200,
-        help=
-        "Number of prefix tokens per request, used only for sonnet dataset.",
+        help="Number of prefix tokens per request, used only for sonnet dataset.",
     )
 
     sharegpt_group = parser.add_argument_group("sharegpt dataset options")
@@ -998,15 +975,13 @@ if __name__ == "__main__":
         "--random-input-len",
         type=int,
         default=1024,
-        help=
-        "Number of input tokens per request, used only for random sampling.",
+        help="Number of input tokens per request, used only for random sampling.",
     )
     random_group.add_argument(
         "--random-output-len",
         type=int,
         default=128,
-        help=
-        "Number of output tokens per request, used only for random sampling.",
+        help="Number of output tokens per request, used only for random sampling.",
     )
     random_group.add_argument(
         "--random-range-ratio",

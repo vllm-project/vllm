@@ -17,8 +17,7 @@ class AbstractWorkerManager(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def set_active_adapters(self, requests: Set[Any],
-                            mapping: Optional[Any]) -> None:
+    def set_active_adapters(self, requests: Set[Any], mapping: Optional[Any]) -> None:
         raise NotImplementedError
 
     @abstractmethod

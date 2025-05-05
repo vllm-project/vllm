@@ -56,8 +56,8 @@ class GuidedDecodingParams:
         whitespace_pattern: Optional[str] = None,
         structural_tag: Optional[str] = None,
     ) -> Optional["GuidedDecodingParams"]:
-        if all(arg is None for arg in (json, regex, choice, grammar,
-                                       json_object, structural_tag)):
+        if all(arg is None
+               for arg in (json, regex, choice, grammar, json_object, structural_tag)):
             return None
         # Extract json schemas from pydantic models
         if isinstance(json, (BaseModel, type(BaseModel))):
@@ -76,8 +76,8 @@ class GuidedDecodingParams:
     def __post_init__(self):
         """Validate that some fields are mutually exclusive."""
         guide_count = sum([
-            self.json is not None, self.regex is not None, self.choice
-            is not None, self.grammar is not None, self.json_object is not None
+            self.json is not None, self.regex is not None, self.choice is not None,
+            self.grammar is not None, self.json_object is not None
         ])
         if guide_count > 1:
             raise ValueError(
@@ -87,12 +87,11 @@ class GuidedDecodingParams:
         if self.backend is not None and ":" in self.backend:
             self._extract_backend_options()
 
-    @deprecated(
-        "Passing guided decoding backend options inside backend in the format "
-        "'backend:...' is deprecated. This will be removed in v0.10.0. Please "
-        "use the dedicated arguments '--disable-fallback', "
-        "'--disable-any-whitespace' and '--disable-additional-properties' "
-        "instead.")
+    @deprecated("Passing guided decoding backend options inside backend in the format "
+                "'backend:...' is deprecated. This will be removed in v0.10.0. Please "
+                "use the dedicated arguments '--disable-fallback', "
+                "'--disable-any-whitespace' and '--disable-additional-properties' "
+                "instead.")
     def _extract_backend_options(self):
         """Extract backend options from the backend string."""
         assert isinstance(self.backend, str)
@@ -273,8 +272,7 @@ class SamplingParams(
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
         logits_processors: Optional[list[LogitsProcessor]] = None,
-        truncate_prompt_tokens: Optional[Annotated[int,
-                                                   msgspec.Meta(ge=1)]] = None,
+        truncate_prompt_tokens: Optional[Annotated[int, msgspec.Meta(ge=1)]] = None,
         output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
         guided_decoding: Optional[GuidedDecodingParams] = None,
         logit_bias: Optional[Union[dict[int, float], dict[str, float]]] = None,
@@ -292,10 +290,8 @@ class SamplingParams(
         return SamplingParams(
             n=1 if n is None else n,
             best_of=best_of,
-            presence_penalty=0.0
-            if presence_penalty is None else presence_penalty,
-            frequency_penalty=0.0
-            if frequency_penalty is None else frequency_penalty,
+            presence_penalty=0.0 if presence_penalty is None else presence_penalty,
+            frequency_penalty=0.0 if frequency_penalty is None else frequency_penalty,
             repetition_penalty=1.0
             if repetition_penalty is None else repetition_penalty,
             temperature=1.0 if temperature is None else temperature,
@@ -333,9 +329,8 @@ class SamplingParams(
         # if we need to return `n` or `_real_n` results
         if self.best_of:
             if self.best_of < self.n:
-                raise ValueError(
-                    f"best_of must be greater than or equal to n, "
-                    f"got n={self.n} and best_of={self.best_of}.")
+                raise ValueError(f"best_of must be greater than or equal to n, "
+                                 f"got n={self.n} and best_of={self.best_of}.")
             if not self._real_n:
                 self._real_n = self.n
                 self.n = self.best_of
@@ -397,9 +392,8 @@ class SamplingParams(
             raise ValueError("frequency_penalty must be in [-2, 2], got "
                              f"{self.frequency_penalty}.")
         if self.repetition_penalty <= 0.0:
-            raise ValueError(
-                "repetition_penalty must be greater than zero, got "
-                f"{self.repetition_penalty}.")
+            raise ValueError("repetition_penalty must be greater than zero, got "
+                             f"{self.repetition_penalty}.")
         if self.temperature < 0.0:
             raise ValueError(
                 f"temperature must be non-negative, got {self.temperature}.")
@@ -415,18 +409,15 @@ class SamplingParams(
             raise ValueError("min_p must be in [0, 1], got "
                              f"{self.min_p}.")
         if self.max_tokens is not None and self.max_tokens < 1:
-            raise ValueError(
-                f"max_tokens must be at least 1, got {self.max_tokens}.")
+            raise ValueError(f"max_tokens must be at least 1, got {self.max_tokens}.")
         if self.min_tokens < 0:
             raise ValueError(f"min_tokens must be greater than or equal to 0, "
                              f"got {self.min_tokens}.")
         if self.max_tokens is not None and self.min_tokens > self.max_tokens:
-            raise ValueError(
-                f"min_tokens must be less than or equal to "
-                f"max_tokens={self.max_tokens}, got {self.min_tokens}.")
+            raise ValueError(f"min_tokens must be less than or equal to "
+                             f"max_tokens={self.max_tokens}, got {self.min_tokens}.")
         if self.logprobs is not None and self.logprobs < 0:
-            raise ValueError(
-                f"logprobs must be non-negative, got {self.logprobs}.")
+            raise ValueError(f"logprobs must be non-negative, got {self.logprobs}.")
         if self.prompt_logprobs is not None and self.prompt_logprobs < 0:
             raise ValueError(f"prompt_logprobs must be non-negative, got "
                              f"{self.prompt_logprobs}.")
@@ -442,9 +433,8 @@ class SamplingParams(
         if any(not stop_str for stop_str in self.stop):
             raise ValueError("stop cannot contain an empty string.")
         if self.stop and not self.detokenize:
-            raise ValueError(
-                "stop strings are only supported when detokenize is True. "
-                "Set detokenize=True to use stop.")
+            raise ValueError("stop strings are only supported when detokenize is True. "
+                             "Set detokenize=True to use stop.")
         if self.best_of != self._real_n and self.output_kind == (
                 RequestOutputKind.DELTA):
             raise ValueError("best_of must equal n to use output_kind=DELTA")
@@ -454,10 +444,9 @@ class SamplingParams(
             raise ValueError("n must be 1 when using greedy sampling, "
                              f"got {self.n}.")
 
-    def update_from_generation_config(
-            self,
-            generation_config: dict[str, Any],
-            model_eos_token_id: Optional[int] = None) -> None:
+    def update_from_generation_config(self,
+                                      generation_config: dict[str, Any],
+                                      model_eos_token_id: Optional[int] = None) -> None:
         """Update if there are non-default values from generation_config"""
 
         if model_eos_token_id is not None:
@@ -496,16 +485,15 @@ class SamplingParams(
                     # Mistral tokenizers should not add special tokens
                     prompt_token_ids = tokenizer.encode(text=prompt)
                 else:
-                    prompt_token_ids = tokenizer.encode(
-                        text=prompt, add_special_tokens=False)
+                    prompt_token_ids = tokenizer.encode(text=prompt,
+                                                        add_special_tokens=False)
 
                 # If no space at the beginning
                 # or if prefix space produces a new word token
-                if (not add_prefix_space) or (
-                        add_prefix_space and prompt_token_ids[0]
-                        != self._bad_words_token_ids[-1][0]
-                        and len(prompt_token_ids) == len(
-                            self._bad_words_token_ids[-1])):
+                if (not add_prefix_space) or (add_prefix_space and prompt_token_ids[0]
+                                              != self._bad_words_token_ids[-1][0]
+                                              and len(prompt_token_ids) == len(
+                                                  self._bad_words_token_ids[-1])):
                     self._bad_words_token_ids.append(prompt_token_ids)
 
         invalid_token_ids = [
@@ -514,12 +502,11 @@ class SamplingParams(
             if token_id < 0 or token_id > tokenizer.max_token_id
         ]
         if len(invalid_token_ids) > 0:
-            raise ValueError(
-                f"The model vocabulary size is {tokenizer.max_token_id+1},"
-                f" but the following tokens"
-                f" were specified as bad: {invalid_token_ids}."
-                f" All token id values should be integers satisfying:"
-                f" 0 <= token_id <= {tokenizer.max_token_id}.")
+            raise ValueError(f"The model vocabulary size is {tokenizer.max_token_id+1},"
+                             f" but the following tokens"
+                             f" were specified as bad: {invalid_token_ids}."
+                             f" All token id values should be integers satisfying:"
+                             f" 0 <= token_id <= {tokenizer.max_token_id}.")
 
     @cached_property
     def sampling_type(self) -> SamplingType:
@@ -554,31 +541,30 @@ class SamplingParams(
         return copy.deepcopy(self, memo=logit_processor_refs)
 
     def __repr__(self) -> str:
-        return (
-            f"SamplingParams(n={self.n}, "
-            f"presence_penalty={self.presence_penalty}, "
-            f"frequency_penalty={self.frequency_penalty}, "
-            f"repetition_penalty={self.repetition_penalty}, "
-            f"temperature={self.temperature}, "
-            f"top_p={self.top_p}, "
-            f"top_k={self.top_k}, "
-            f"min_p={self.min_p}, "
-            f"seed={self.seed}, "
-            f"stop={self.stop}, "
-            f"stop_token_ids={self.stop_token_ids}, "
-            f"bad_words={self.bad_words}, "
-            f"include_stop_str_in_output={self.include_stop_str_in_output}, "
-            f"ignore_eos={self.ignore_eos}, "
-            f"max_tokens={self.max_tokens}, "
-            f"min_tokens={self.min_tokens}, "
-            f"logprobs={self.logprobs}, "
-            f"prompt_logprobs={self.prompt_logprobs}, "
-            f"skip_special_tokens={self.skip_special_tokens}, "
-            "spaces_between_special_tokens="
-            f"{self.spaces_between_special_tokens}, "
-            f"truncate_prompt_tokens={self.truncate_prompt_tokens}, "
-            f"guided_decoding={self.guided_decoding}, "
-            f"extra_args={self.extra_args})")
+        return (f"SamplingParams(n={self.n}, "
+                f"presence_penalty={self.presence_penalty}, "
+                f"frequency_penalty={self.frequency_penalty}, "
+                f"repetition_penalty={self.repetition_penalty}, "
+                f"temperature={self.temperature}, "
+                f"top_p={self.top_p}, "
+                f"top_k={self.top_k}, "
+                f"min_p={self.min_p}, "
+                f"seed={self.seed}, "
+                f"stop={self.stop}, "
+                f"stop_token_ids={self.stop_token_ids}, "
+                f"bad_words={self.bad_words}, "
+                f"include_stop_str_in_output={self.include_stop_str_in_output}, "
+                f"ignore_eos={self.ignore_eos}, "
+                f"max_tokens={self.max_tokens}, "
+                f"min_tokens={self.min_tokens}, "
+                f"logprobs={self.logprobs}, "
+                f"prompt_logprobs={self.prompt_logprobs}, "
+                f"skip_special_tokens={self.skip_special_tokens}, "
+                "spaces_between_special_tokens="
+                f"{self.spaces_between_special_tokens}, "
+                f"truncate_prompt_tokens={self.truncate_prompt_tokens}, "
+                f"guided_decoding={self.guided_decoding}, "
+                f"extra_args={self.extra_args})")
 
 
 class BeamSearchParams(

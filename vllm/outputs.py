@@ -145,14 +145,12 @@ class RequestOutput:
                     if aggregate:
                         # Merge outputs with same index
                         completion.text += next_completion.text
-                        if not isinstance(completion.token_ids,
-                                          MutableSequence):
+                        if not isinstance(completion.token_ids, MutableSequence):
                             completion.token_ids = list(completion.token_ids)
                         completion.token_ids.extend(next_completion.token_ids)
                         if next_completion.logprobs:
                             assert completion.logprobs is not None
-                            completion.logprobs.extend(
-                                next_completion.logprobs)
+                            completion.logprobs.extend(next_completion.logprobs)
                         completion.cumulative_logprob = (
                             next_completion.cumulative_logprob)
                         completion.finish_reason = next_completion.finish_reason
@@ -166,14 +164,13 @@ class RequestOutput:
 
     @classmethod
     def from_seq_group(
-        cls, seq_group: SequenceGroup, use_cache: bool,
-        seq_id_to_seq_group: dict[str, SequenceGroupBase]
-    ) -> Optional["RequestOutput"]:
+            cls, seq_group: SequenceGroup, use_cache: bool,
+            seq_id_to_seq_group: dict[str,
+                                      SequenceGroupBase]) -> Optional["RequestOutput"]:
         finished = seq_group.is_finished()
 
         if seq_group.request_id in seq_id_to_seq_group:
-            group: SequenceGroupBase = seq_id_to_seq_group[
-                seq_group.request_id]
+            group: SequenceGroupBase = seq_id_to_seq_group[seq_group.request_id]
             assembled_seq_group = group.maybe_assemble_group(seq_group)
             if finished:
                 group.finish_seq(seq_group)
@@ -191,8 +188,7 @@ class RequestOutput:
 
         sampling_params = seq_group.sampling_params
         if sampling_params is None:
-            raise ValueError(
-                "Sampling parameters are missing for a CompletionRequest.")
+            raise ValueError("Sampling parameters are missing for a CompletionRequest.")
 
         if sampling_params.output_kind == RequestOutputKind.FINAL_ONLY and (
                 not finished):
@@ -223,8 +219,7 @@ class RequestOutput:
         # num_cached_tokens should be the same for all the sequences
         num_cached_tokens = None
         for i, seq in enumerate(top_n_seqs):
-            output_text = seq.get_output_text_to_return(
-                text_buffer_length, delta)
+            output_text = seq.get_output_text_to_return(text_buffer_length, delta)
 
             output_token_ids = seq.get_output_token_ids_to_return(delta)
             num_output_tokens = 1 if isinstance(output_token_ids,
@@ -274,8 +269,7 @@ class RequestOutput:
                 output.cumulative_logprob = seq.get_cumulative_logprob() \
                     if include_logprobs else None
                 output.logprobs = output_logprobs
-                output.finish_reason = SequenceStatus.get_finished_reason(
-                    seq.status)
+                output.finish_reason = SequenceStatus.get_finished_reason(seq.status)
                 output.stop_reason = seq.stop_reason
 
             else:
@@ -283,8 +277,7 @@ class RequestOutput:
                     top_n_seqs.index(seq), output_text, [output_token_ids]
                     if isinstance(output_token_ids, int) else output_token_ids,
                     seq.get_cumulative_logprob() if include_logprobs else None,
-                    output_logprobs,
-                    SequenceStatus.get_finished_reason(seq.status),
+                    output_logprobs, SequenceStatus.get_finished_reason(seq.status),
                     seq.stop_reason)
 
             outputs.append(output)
@@ -357,8 +350,8 @@ class PoolingRequestOutput(Generic[_O]):
         finished (bool): A flag indicating whether the pooling is completed.
     """
 
-    def __init__(self, request_id: str, outputs: _O,
-                 prompt_token_ids: list[int], finished: bool):
+    def __init__(self, request_id: str, outputs: _O, prompt_token_ids: list[int],
+                 finished: bool):
         self.request_id = request_id
         self.prompt_token_ids = prompt_token_ids
         self.finished = finished
@@ -374,8 +367,8 @@ class PoolingRequestOutput(Generic[_O]):
         prompt_token_ids = seq_group.prompt_token_ids
         finished = seq_group.is_finished()
 
-        return PoolingRequestOutput(seq_group.request_id, output,
-                                    prompt_token_ids, finished)
+        return PoolingRequestOutput(seq_group.request_id, output, prompt_token_ids,
+                                    finished)
 
     def __repr__(self):
         """

@@ -68,8 +68,7 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
             hidden_states=hidden_states,
         )
 
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual)
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
         # Fully Connected
         hidden_states = self.mlp(hidden_states)
@@ -135,8 +134,7 @@ class LlamaModel(nn.Module):
         hidden_states, hidden_prenorm = self.norm(hidden_states, residual)
         return hidden_states, hidden_prenorm
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -160,8 +158,7 @@ class LlamaModel(nn.Module):
                 break
             else:
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
@@ -178,12 +175,11 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
                                 prefix="model")
 
         logit_scale = getattr(self.config, "logit_scale", 1.0)
-        self.lm_head = ParallelLMHead(
-            self.config.draft_vocab_size,
-            self.config.hidden_size,
-            org_num_embeddings=self.config.draft_vocab_size,
-            padding_size=(DEFAULT_VOCAB_PADDING_SIZE),
-            prefix="")
+        self.lm_head = ParallelLMHead(self.config.draft_vocab_size,
+                                      self.config.hidden_size,
+                                      org_num_embeddings=self.config.draft_vocab_size,
+                                      padding_size=(DEFAULT_VOCAB_PADDING_SIZE),
+                                      prefix="")
         self.logits_processor = LogitsProcessor(self.config.draft_vocab_size,
                                                 scale=logit_scale)
         self.draft_id_to_target_id = nn.Parameter(
@@ -205,8 +201,7 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
         base = torch.arange(self.config.draft_vocab_size, device=logits.device)
         targets = base + self.draft_id_to_target_id
         logits_new = logits.new_full((

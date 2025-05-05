@@ -33,8 +33,7 @@ def _seq_idx_to_chunk_indices_offsets(seq_idx, chunk_size: int):
 
     # outputs will have length expansion of chunks that do not divide
     # chunk_size
-    N = math.ceil(seq_idx.shape[-1] / chunk_size) + (cu_seqlens % chunk_size
-                                                     > 0).sum()
+    N = math.ceil(seq_idx.shape[-1] / chunk_size) + (cu_seqlens % chunk_size > 0).sum()
     chunk_indices = torch.arange(N, dtype=torch.int, device=seq_idx.device)
     chunk_offsets = torch.zeros((N, ), dtype=torch.int, device=seq_idx.device)
 
@@ -48,8 +47,7 @@ def _seq_idx_to_chunk_indices_offsets(seq_idx, chunk_size: int):
         # get the dimensions
         # - the + 1 for _e is to shift the boundary by one chunk
         # - this shifting is not needed if chunk_size divides e
-        _s, _e = s // chunk_size + p, e // chunk_size + p + (e % chunk_size
-                                                             > 0)
+        _s, _e = s // chunk_size + p, e // chunk_size + p + (e % chunk_size > 0)
 
         # adjust inidces and offsets
         chunk_indices[_s:_e] -= p
@@ -68,8 +66,9 @@ def prepare_mamba2_metadata(
     # currently we really only support the FlashAttention backend
     has_initial_states = None
     prep_initial_states = False
-    if (isinstance(attn_metadata, (FlashAttentionMetadata, XFormersMetadata,
-                                   PlaceholderAttentionMetadata))
+    if (isinstance(
+            attn_metadata,
+        (FlashAttentionMetadata, XFormersMetadata, PlaceholderAttentionMetadata))
             and attn_metadata.context_lens_tensor is not None):
         has_initial_states = attn_metadata.context_lens_tensor > 0
         # precompute flag to avoid device syncs later in mamba2 forwards

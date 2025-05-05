@@ -108,15 +108,13 @@ class MixtralMoE(nn.Module):
         self.num_total_experts = config.num_local_experts
         self.top_k = config.num_experts_per_tok
         if self.tp_size > self.num_total_experts:
-            raise ValueError(
-                f"Tensor parallel size {self.tp_size} is greater than "
-                f"the number of experts {self.num_total_experts}.")
+            raise ValueError(f"Tensor parallel size {self.tp_size} is greater than "
+                             f"the number of experts {self.num_total_experts}.")
         # Split experts equally between ranks
-        self.expert_indicies = np.array_split(range(
-            self.num_total_experts), self.tp_size)[self.rank].tolist()
+        self.expert_indicies = np.array_split(range(self.num_total_experts),
+                                              self.tp_size)[self.rank].tolist()
         if not self.expert_indicies:
-            raise ValueError(
-                f"Rank {self.rank} has no experts assigned to it.")
+            raise ValueError(f"Rank {self.rank} has no experts assigned to it.")
 
         self.experts = nn.ModuleList([
             MixtralMLP(self.num_total_experts,
@@ -147,11 +145,9 @@ class MixtralMoE(nn.Module):
         for expert_idx in self.expert_indicies:
             expert_layer = self.experts[expert_idx]
             expert_mask = (selected_experts == expert_idx)
-            expert_weights = (routing_weights * expert_mask).sum(dim=-1,
-                                                                 keepdim=True)
+            expert_weights = (routing_weights * expert_mask).sum(dim=-1, keepdim=True)
 
-            current_hidden_states = expert_layer(hidden_states).mul_(
-                expert_weights)
+            current_hidden_states = expert_layer(hidden_states).mul_(expert_weights)
             if final_hidden_states is None:
                 final_hidden_states = current_hidden_states
             else:
@@ -265,10 +261,8 @@ class MixtralDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
         )
-        self.block_sparse_moe = MixtralMoE(config=config,
-                                           quant_config=quant_config)
-        self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
+        self.block_sparse_moe = MixtralMoE(config=config, quant_config=quant_config)
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
 
@@ -283,16 +277,14 @@ class MixtralDecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(
-                hidden_states, residual)
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
 
         # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual)
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.block_sparse_moe(hidden_states)
         return hidden_states, residual
 
@@ -315,13 +307,11 @@ class MixtralModel(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: MixtralDecoderLayer(
-                config, cache_config, quant_config=quant_config, prefix=prefix
-            ),
+                config, cache_config, quant_config=quant_config, prefix=prefix),
             prefix=f"{prefix}.layers")
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size))
+        self.make_empty_intermediate_tensors = (make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -393,12 +383,10 @@ class MixtralForCausalLM(nn.Module, SupportsPP):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -434,14 +422,12 @@ class MixtralForCausalLM(nn.Module, SupportsPP):
                 if name.endswith(".bias") and name not in params_dict:
                     continue
                 # Skip experts that are not assigned to this worker.
-                if ("block_sparse_moe.experts." in name
-                        and name not in params_dict):
+                if ("block_sparse_moe.experts." in name and name not in params_dict):
                     continue
                 if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params

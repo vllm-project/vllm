@@ -54,8 +54,7 @@ class BlockTable:
 
     def move_row(self, src: int, tgt: int) -> None:
         num_blocks = self.num_blocks_per_row[src]
-        self.block_table_np[tgt, :num_blocks] = self.block_table_np[
-            src, :num_blocks]
+        self.block_table_np[tgt, :num_blocks] = self.block_table_np[src, :num_blocks]
         self.num_blocks_per_row[tgt] = num_blocks
 
     def swap_row(self, src: int, tgt: int) -> None:

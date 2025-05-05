@@ -47,12 +47,8 @@ class ConstantList(Generic[T], Sequence):
     def clear(self):
         raise Exception("Cannot clear a constant list")
 
-    def index(self,
-              item: T,
-              start: int = 0,
-              stop: Optional[int] = None) -> int:
-        return self._x.index(item, start,
-                             stop if stop is not None else len(self._x))
+    def index(self, item: T, start: int = 0, stop: Optional[int] = None) -> int:
+        return self._x.index(item, start, stop if stop is not None else len(self._x))
 
     @overload
     def __getitem__(self, item: int) -> T:
@@ -117,8 +113,8 @@ class BackgroundProcHandle:
         self.proc: Process = context.Process(target=target_fn,
                                              kwargs=process_kwargs,
                                              name=process_name)
-        self._finalizer = weakref.finalize(self, shutdown, self.proc,
-                                           input_path, output_path)
+        self._finalizer = weakref.finalize(self, shutdown, self.proc, input_path,
+                                           output_path)
         self.proc.start()
 
     def fileno(self):
@@ -205,9 +201,9 @@ def copy_slice(from_tensor: torch.Tensor, to_tensor: torch.Tensor,
     return to_tensor[:length].copy_(from_tensor[:length], non_blocking=True)
 
 
-def report_usage_stats(
-        vllm_config,
-        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT) -> None:
+def report_usage_stats(vllm_config,
+                       usage_context: UsageContext = UsageContext.ENGINE_CONTEXT
+                       ) -> None:
     """Report usage statistics if enabled."""
 
     if not is_usage_stats_enabled():

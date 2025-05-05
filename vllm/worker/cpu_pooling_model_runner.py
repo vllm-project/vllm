@@ -23,8 +23,7 @@ class ModelInputForCPUWithPoolingMetadata(ModelInputForCPU):
     pooling_metadata: Optional["PoolingMetadata"] = None
 
 
-class CPUPoolingModelRunner(
-        CPUModelRunnerBase[ModelInputForCPUWithPoolingMetadata]):
+class CPUPoolingModelRunner(CPUModelRunnerBase[ModelInputForCPUWithPoolingMetadata]):
     _model_input_cls: Type[ModelInputForCPUWithPoolingMetadata] = (
         ModelInputForCPUWithPoolingMetadata)
     _builder_cls: Type[ModelInputForCPUBuilder] = ModelInputForCPUBuilder
@@ -38,8 +37,7 @@ class CPUPoolingModelRunner(
         num_steps: int = 1,
     ) -> Optional[Union[List[PoolerOutput], IntermediateTensors]]:
         if num_steps > 1:
-            raise ValueError(
-                "CPU worker does not support multi-step execution.")
+            raise ValueError("CPU worker does not support multi-step execution.")
 
         model_executable = self.model
         cross_enc_kwargs = {}
@@ -71,9 +69,7 @@ class CPUPoolingModelRunner(
         ]
 
     def make_model_input_from_broadcasted_tensor_dict(
-            self,
-            tensor_dict: Dict[str,
-                              Any]) -> ModelInputForCPUWithPoolingMetadata:
+            self, tensor_dict: Dict[str, Any]) -> ModelInputForCPUWithPoolingMetadata:
         return ModelInputForCPUWithPoolingMetadata.from_broadcasted_tensor_dict(
             tensor_dict,
             attn_backend=self.attn_backend,
@@ -86,8 +82,8 @@ class CPUPoolingModelRunner(
         finished_requests_ids: Optional[List[str]] = None
     ) -> ModelInputForCPUWithPoolingMetadata:
         assert seq_group_metadata_list is not None
-        model_input = self._prepare_model_input_tensors(
-            seq_group_metadata_list, finished_requests_ids)
+        model_input = self._prepare_model_input_tensors(seq_group_metadata_list,
+                                                        finished_requests_ids)
         # Prepare PoolingMetadata.
         assert model_input.seq_lens is not None
         pooling_metadata = self._prepare_pooling(seq_group_metadata_list,

@@ -37,19 +37,16 @@ envs = load_module_from_path('envs', os.path.join(ROOT_DIR, 'vllm', 'envs.py'))
 VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE
 
 if sys.platform.startswith("darwin") and VLLM_TARGET_DEVICE != "cpu":
-    logger.warning(
-        "VLLM_TARGET_DEVICE automatically set to `cpu` due to macOS")
+    logger.warning("VLLM_TARGET_DEVICE automatically set to `cpu` due to macOS")
     VLLM_TARGET_DEVICE = "cpu"
-elif not (sys.platform.startswith("linux")
-          or sys.platform.startswith("darwin")):
+elif not (sys.platform.startswith("linux") or sys.platform.startswith("darwin")):
     logger.warning(
         "vLLM only supports Linux platform (including WSL) and MacOS."
         "Building on %s, "
         "so vLLM may not be able to run correctly", sys.platform)
     VLLM_TARGET_DEVICE = "empty"
 elif (sys.platform.startswith("linux") and torch.version.cuda is None
-      and os.getenv("VLLM_TARGET_DEVICE") is None
-      and torch.version.hip is None):
+      and os.getenv("VLLM_TARGET_DEVICE") is None and torch.version.hip is None):
     # if cuda or hip is not available and VLLM_TARGET_DEVICE is not set,
     # fallback to cpu
     VLLM_TARGET_DEVICE = "cpu"
@@ -119,9 +116,8 @@ class cmake_build_ext(build_ext):
             nvcc_threads = envs.NVCC_THREADS
             if nvcc_threads is not None:
                 nvcc_threads = int(nvcc_threads)
-                logger.info(
-                    "Using NVCC_THREADS=%d as the number of nvcc threads.",
-                    nvcc_threads)
+                logger.info("Using NVCC_THREADS=%d as the number of nvcc threads.",
+                            nvcc_threads)
             else:
                 nvcc_threads = 1
             num_jobs = max(1, num_jobs // nvcc_threads)
@@ -204,9 +200,8 @@ class cmake_build_ext(build_ext):
         # Make sure we use the nvcc from CUDA_HOME
         if _is_cuda():
             cmake_args += [f'-DCMAKE_CUDA_COMPILER={CUDA_HOME}/bin/nvcc']
-        subprocess.check_call(
-            ['cmake', ext.cmake_lists_dir, *build_tool, *cmake_args],
-            cwd=self.build_temp)
+        subprocess.check_call(['cmake', ext.cmake_lists_dir, *build_tool, *cmake_args],
+                              cwd=self.build_temp)
 
     def build_extensions(self) -> None:
         # Ensure that CMake is present and working
@@ -272,8 +267,8 @@ class cmake_build_ext(build_ext):
         # copy vllm/vllm_flash_attn/**/*.py from self.build_lib to current
         # directory so that they can be included in the editable build
         import glob
-        files = glob.glob(os.path.join(self.build_lib, "vllm",
-                                       "vllm_flash_attn", "**", "*.py"),
+        files = glob.glob(os.path.join(self.build_lib, "vllm", "vllm_flash_attn", "**",
+                                       "*.py"),
                           recursive=True)
         for file in files:
             dst_file = os.path.join("vllm/vllm_flash_attn",
@@ -308,19 +303,17 @@ class repackage_wheel(build_ext):
                 # Note that this does not update any local branches,
                 # but ensures that this commit ref and its history are
                 # available in our local repo.
-                subprocess.check_call([
-                    "git", "fetch", "https://github.com/vllm-project/vllm",
-                    "main"
-                ])
+                subprocess.check_call(
+                    ["git", "fetch", "https://github.com/vllm-project/vllm", "main"])
 
             # Then get the commit hash of the current branch that is the same as
             # the upstream main commit.
             current_branch = subprocess.check_output(
                 ["git", "branch", "--show-current"]).decode("utf-8").strip()
 
-            base_commit = subprocess.check_output([
-                "git", "merge-base", f"{upstream_main_commit}", current_branch
-            ]).decode("utf-8").strip()
+            base_commit = subprocess.check_output(
+                ["git", "merge-base", f"{upstream_main_commit}",
+                 current_branch]).decode("utf-8").strip()
             return base_commit
         except ValueError as err:
             raise ValueError(err) from None
@@ -332,8 +325,7 @@ class repackage_wheel(build_ext):
             return "nightly"
 
     def run(self) -> None:
-        assert _is_cuda(
-        ), "VLLM_USE_PRECOMPILED is only supported for CUDA builds"
+        assert _is_cuda(), "VLLM_USE_PRECOMPILED is only supported for CUDA builds"
 
         wheel_location = os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION", None)
         if wheel_location is None:
@@ -393,8 +385,7 @@ class repackage_wheel(build_ext):
             compiled_regex = re.compile(
                 r"vllm/vllm_flash_attn/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py")
             file_members += list(
-                filter(lambda x: compiled_regex.match(x.filename),
-                       wheel.filelist))
+                filter(lambda x: compiled_regex.match(x.filename), wheel.filelist))
 
             for file in file_members:
                 print(f"Extracting and including {file.filename} "
@@ -427,8 +418,8 @@ def _is_hpu() -> bool:
     except (FileNotFoundError, PermissionError, subprocess.CalledProcessError):
         if sys.platform.startswith("linux"):
             try:
-                output = subprocess.check_output(
-                    'lsmod | grep habanalabs | wc -l', shell=True)
+                output = subprocess.check_output('lsmod | grep habanalabs | wc -l',
+                                                 shell=True)
                 is_hpu_available = int(output) > 0
             except (ValueError, FileNotFoundError, PermissionError,
                     subprocess.CalledProcessError):
@@ -502,8 +493,7 @@ def get_rocm_version():
 def get_neuronxcc_version():
     import sysconfig
     site_dir = sysconfig.get_paths()["purelib"]
-    version_file = os.path.join(site_dir, "neuronxcc", "version",
-                                "__init__.py")
+    version_file = os.path.join(site_dir, "neuronxcc", "version", "__init__.py")
 
     # Check if the command was executed successfully
     with open(version_file) as fp:
@@ -543,8 +533,8 @@ def get_gaudi_sw_version():
                             capture_output=True,
                             env={"ENABLE_CONSOLE": "true"})
     if output.returncode == 0 and output.stdout:
-        return output.stdout.split("\n")[2].replace(
-            " ", "").split(":")[1][:-1].split("-")[0]
+        return output.stdout.split("\n")[2].replace(" ",
+                                                    "").split(":")[1][:-1].split("-")[0]
     return "0.0.0"  # when hl-smi is not available
 
 
@@ -606,8 +596,8 @@ def get_requirements() -> list[str]:
         for line in requirements:
             if line.startswith("-r "):
                 resolved_requirements += _read_requirements(line.split()[1])
-            elif not line.startswith("--") and not line.startswith(
-                    "#") and line.strip() != "":
+            elif not line.startswith("--") and not line.startswith("#") and line.strip(
+            ) != "":
                 resolved_requirements.append(line)
         return resolved_requirements
 
@@ -637,9 +627,8 @@ def get_requirements() -> list[str]:
     elif _is_xpu():
         requirements = _read_requirements("xpu.txt")
     else:
-        raise ValueError(
-            "Unsupported platform, please use CUDA, ROCm, Neuron, HPU, "
-            "or CPU.")
+        raise ValueError("Unsupported platform, please use CUDA, ROCm, Neuron, HPU, "
+                         "or CPU.")
     return requirements
 
 
@@ -655,12 +644,10 @@ if _is_cuda():
     ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa2_C"))
     if envs.VLLM_USE_PRECOMPILED or get_nvcc_cuda_version() >= Version("12.3"):
         # FA3 requires CUDA 12.3 or later
-        ext_modules.append(
-            CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa3_C"))
+        ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa3_C"))
         # Optional since this doesn't get built (produce an .so file) when
         # not targeting a hopper system
-        ext_modules.append(
-            CMakeExtension(name="vllm._flashmla_C", optional=True))
+        ext_modules.append(CMakeExtension(name="vllm._flashmla_C", optional=True))
     ext_modules.append(CMakeExtension(name="vllm.cumem_allocator"))
 
 if _build_custom_ops():
@@ -681,8 +668,7 @@ if not ext_modules:
     cmdclass = {}
 else:
     cmdclass = {
-        "build_ext":
-        repackage_wheel if envs.VLLM_USE_PRECOMPILED else cmake_build_ext
+        "build_ext": repackage_wheel if envs.VLLM_USE_PRECOMPILED else cmake_build_ext
     }
 
 setup(

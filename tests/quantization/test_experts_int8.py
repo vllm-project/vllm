@@ -25,6 +25,5 @@ def test_model_experts_int8_startup(
     max_tokens: int,
 ) -> None:
 
-    with vllm_runner(model, dtype=dtype,
-                     quantization="experts_int8") as vllm_model:
+    with vllm_runner(model, dtype=dtype, quantization="experts_int8") as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)

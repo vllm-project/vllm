@@ -41,8 +41,7 @@ def get_env_variable_attn_backend() -> Optional[_Backend]:
     * None otherwise
     '''
     backend_name = os.environ.get(STR_BACKEND_ENV_VAR)
-    return (None
-            if backend_name is None else backend_name_to_enum(backend_name))
+    return (None if backend_name is None else backend_name_to_enum(backend_name))
 
 
 # Global state allows a particular choice of backend
@@ -134,8 +133,7 @@ def _cached_get_attn_backend(
     # THIS SELECTION OVERRIDES THE VLLM_ATTENTION_BACKEND
     # ENVIRONMENT VARIABLE.
     selected_backend = None
-    backend_by_global_setting: Optional[_Backend] = (
-        get_global_forced_attn_backend())
+    backend_by_global_setting: Optional[_Backend] = (get_global_forced_attn_backend())
     if backend_by_global_setting is not None:
         selected_backend = backend_by_global_setting
     else:
@@ -145,9 +143,9 @@ def _cached_get_attn_backend(
             selected_backend = backend_name_to_enum(backend_by_env_var)
 
     # get device-specific attn_backend
-    attention_cls = current_platform.get_attn_backend_cls(
-        selected_backend, head_size, dtype, kv_cache_dtype, block_size, use_v1,
-        use_mla)
+    attention_cls = current_platform.get_attn_backend_cls(selected_backend, head_size,
+                                                          dtype, kv_cache_dtype,
+                                                          block_size, use_v1, use_mla)
     if not attention_cls:
         raise ValueError(
             f"Invalid attention backend for {current_platform.device_name}")

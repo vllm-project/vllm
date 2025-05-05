@@ -15,8 +15,7 @@ from vllm.platforms import current_platform
 
 @pytest.mark.skipif(not is_quant_method_supported("ptpc_fp8"),
                     reason="PTPC FP8 is not supported on this GPU type.")
-@pytest.mark.skipif(not current_platform.is_rocm(),
-                    reason="This test is for ROCm GPU.")
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="This test is for ROCm GPU.")
 @pytest.mark.parametrize("dtype", ["auto", "bfloat16", "float16"])
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_e4m3"])
 def test_ptpc_fp8_rocm(vllm_runner, dtype: str, kv_cache_dtype: str) -> None:

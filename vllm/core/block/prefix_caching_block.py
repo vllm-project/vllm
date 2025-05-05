@@ -104,8 +104,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # The "* extra_factor" is a buffer to allow more block objects
         # than physical blocks
         extra_factor = 4
-        self._block_pool = BlockPool(self._block_size, self._create_block,
-                                     self, num_blocks * extra_factor)
+        self._block_pool = BlockPool(self._block_size, self._create_block, self,
+                                     num_blocks * extra_factor)
 
         # An allocator for blocks that do not have prefix hashes.
         self._hashless_allocator = NaiveBlockAllocator(
@@ -194,12 +194,11 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         block.append_token_ids(token_ids)
         return block
 
-    def allocate_immutable_blocks(
-            self,
-            prev_block: Optional[Block],
-            block_token_ids: List[List[int]],
-            extra_hash: Optional[int] = None,
-            device: Optional[Device] = None) -> List[Block]:
+    def allocate_immutable_blocks(self,
+                                  prev_block: Optional[Block],
+                                  block_token_ids: List[List[int]],
+                                  extra_hash: Optional[int] = None,
+                                  device: Optional[Device] = None) -> List[Block]:
         blocks = []
         for token_ids in block_token_ids:
             prev_block = self.allocate_immutable_block(prev_block=prev_block,
@@ -311,8 +310,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
     def _maybe_allocate_hashless_block_id(self) -> Optional[BlockId]:
         try:
             # Allocate mutable block and extract its block_id
-            block = self._hashless_allocator.allocate_mutable_block(
-                prev_block=None)
+            block = self._hashless_allocator.allocate_mutable_block(prev_block=None)
             block_id = block.block_id
             self._block_pool.free_block(block)
 
@@ -396,15 +394,13 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             assert block_id is not None
 
             refcount = self._refcounter.incr(block_id)
-            assert refcount != 1, "can't fork free'd block_id = {}".format(
-                block_id)
+            assert refcount != 1, "can't fork free'd block_id = {}".format(block_id)
 
-            forked_block = self._block_pool.init_block(
-                prev_block=prev_block,
-                token_ids=block.token_ids,
-                block_size=self._block_size,
-                physical_block_id=block_id,
-                extra_hash=block.extra_hash)
+            forked_block = self._block_pool.init_block(prev_block=prev_block,
+                                                       token_ids=block.token_ids,
+                                                       block_size=self._block_size,
+                                                       physical_block_id=block_id,
+                                                       extra_hash=block.extra_hash)
 
             forked_blocks.append(forked_block)
             prev_block = forked_blocks[-1]
@@ -415,8 +411,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         assert device is None
         # The number of free blocks is the number of hashless free blocks
         # plus the number of blocks evictor could free from its list.
-        return self._hashless_allocator.get_num_free_blocks(
-        ) + self.evictor.num_blocks
+        return self._hashless_allocator.get_num_free_blocks() + self.evictor.num_blocks
 
     def get_num_total_blocks(self) -> int:
         return self._hashless_allocator.get_num_total_blocks()
@@ -450,8 +445,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             bool: True if the prefix cache is successfully reset,
             False otherwise.
         """
-        num_used_blocks = (self.get_num_total_blocks() -
-                           self.get_num_free_blocks())
+        num_used_blocks = (self.get_num_total_blocks() - self.get_num_free_blocks())
         if num_used_blocks > 0:
             logger.warning(
                 "Failed to reset prefix cache because some "
@@ -459,8 +453,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             return False
 
         # Free all blocks in the evictor.
-        while (block_id :=
-               self._maybe_allocate_evicted_block_id()) is not None:
+        while (block_id := self._maybe_allocate_evicted_block_id()) is not None:
             self._hashless_allocator.free_block_id(block_id)
 
         # Should not have any cached blocks because all blocks are evicted.
@@ -560,8 +553,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         """
         return self._cow_tracker.clear_cows()
 
-    def mark_blocks_as_accessed(self, block_ids: List[int],
-                                now: float) -> None:
+    def mark_blocks_as_accessed(self, block_ids: List[int], now: float) -> None:
         """Mark blocks as accessed, used in prefix caching.
 
         If the block is added into evictor, we need to update corresponding
@@ -574,8 +566,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             elif block_id in self.evictor:
                 self.evictor.update(block_id, now)
             else:
-                raise ValueError(
-                    "Mark block as accessed which is not belonged to GPU")
+                raise ValueError("Mark block as accessed which is not belonged to GPU")
 
     def mark_blocks_as_computed(self, block_ids: List[int]) -> None:
         # Mark all touched blocks as computed.
@@ -583,8 +574,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             self._block_tracker[block_id].computed = True
         self._touched_blocks.clear()
 
-    def _track_block_id(self, block_id: Optional[BlockId],
-                        computed: bool) -> None:
+    def _track_block_id(self, block_id: Optional[BlockId], computed: bool) -> None:
         assert block_id is not None
         self._block_tracker[block_id].enable()
         self._block_tracker[block_id].computed = computed
@@ -667,13 +657,12 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             # and the block_id is assigned to "block" to allow reusing the
             # existing "block" object
             if block.is_full:
-                tmp_block = self.allocate_immutable_block(
-                    prev_block=block.prev_block,
-                    token_ids=block.token_ids,
-                    extra_hash=block.extra_hash)
+                tmp_block = self.allocate_immutable_block(prev_block=block.prev_block,
+                                                          token_ids=block.token_ids,
+                                                          extra_hash=block.extra_hash)
             else:
-                tmp_block = self.allocate_mutable_block(
-                    prev_block=block.prev_block, extra_hash=block.extra_hash)
+                tmp_block = self.allocate_mutable_block(prev_block=block.prev_block,
+                                                        extra_hash=block.extra_hash)
                 tmp_block.append_token_ids(block.token_ids)
 
             block_id = tmp_block.block_id
@@ -717,9 +706,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         # Look for the first block that's not cached, and returns the prefix
         # i.e. blocks that are cached.
-        idx = _bisect_left(block_hashes,
-                           True,
-                           key=lambda x: not _block_is_cached(x))
+        idx = _bisect_left(block_hashes, True, key=lambda x: not _block_is_cached(x))
         return block_hashes[:idx]
 
 
@@ -765,8 +752,7 @@ class PrefixCachingBlock(Block):
     ):
         assert isinstance(allocator, PrefixCachingBlockAllocator), (
             "Currently this class is only tested with "
-            "PrefixCachingBlockAllocator. Got instead allocator = {}".format(
-                allocator))
+            "PrefixCachingBlockAllocator. Got instead allocator = {}".format(allocator))
         assert_prefix_caching_block_or_none(prev_block)
 
         self._prev_block = prev_block
@@ -907,8 +893,8 @@ class PrefixCachingBlock(Block):
 
         is_first_block = self._prev_block is None
         prev_block_hash = (
-            self._none_hash if is_first_block else
-            self._prev_block.content_hash  # type: ignore
+            self._none_hash
+            if is_first_block else self._prev_block.content_hash  # type: ignore
         )
 
         # Previous block exists but does not yet have a hash.
@@ -948,8 +934,7 @@ class PrefixCachingBlock(Block):
         """
         if is_first_block and prev_block_hash is None:
             prev_block_hash = cls._none_hash
-        return hash((is_first_block, prev_block_hash, *cur_block_token_ids,
-                     extra_hash))
+        return hash((is_first_block, prev_block_hash, *cur_block_token_ids, extra_hash))
 
 
 class ComputedBlocksTracker:
@@ -1003,8 +988,7 @@ class ComputedBlocksTracker:
         """Incrementally update the sequence's block hashes and record them."""
         assert self._enable_caching
 
-        block_hashes_recorded = self._seq_id_to_blocks_hashes.get(
-            seq.seq_id, [])
+        block_hashes_recorded = self._seq_id_to_blocks_hashes.get(seq.seq_id, [])
         cur_num_blocks_recorded = len(block_hashes_recorded)
         token_ids = seq.get_token_ids()
         assert len(token_ids) >= cur_num_blocks_recorded * self._block_size, (
@@ -1025,8 +1009,7 @@ class ComputedBlocksTracker:
         # Only update the computed block hashes for the new blocks
         for i in range(cur_num_blocks_recorded, num_computed_blocks):
             assert len(token_ids) >= (i + 1) * self._block_size
-            block_token_ids = token_ids[i * self._block_size:(i + 1) *
-                                        self._block_size]
+            block_token_ids = token_ids[i * self._block_size:(i + 1) * self._block_size]
 
             # NOTE: If there are any factors affecting the block besides
             # token_ids, they should be added as input to extra_hash.
@@ -1072,8 +1055,7 @@ class ComputedBlocksTracker:
         block_hashes = self._seq_id_to_blocks_hashes[seq.seq_id]
 
         # This is O(logN), where N is the number of blocks.
-        num_cached_blocks = len(
-            self._allocator.find_cached_blocks_prefix(block_hashes))
+        num_cached_blocks = len(self._allocator.find_cached_blocks_prefix(block_hashes))
         num_cached_tokens = num_cached_blocks * self._block_size
         self._seq_id_to_num_tokens_computed[seq.seq_id] = num_cached_tokens
         return num_cached_tokens
@@ -1114,8 +1096,7 @@ class LastAccessBlocksTracker:
         assert seq_id in self._seq_last_access
         self._seq_last_access[seq_id] = time
 
-    def update_seq_blocks_last_access(self, seq_id: int,
-                                      block_ids: List[int]) -> None:
+    def update_seq_blocks_last_access(self, seq_id: int, block_ids: List[int]) -> None:
         assert seq_id in self._seq_last_access
 
         ts = self._seq_last_access[seq_id]
@@ -1130,5 +1111,4 @@ class LastAccessBlocksTracker:
 def assert_prefix_caching_block_or_none(block: Optional[Block]):
     if block is None:
         return
-    assert isinstance(block,
-                      PrefixCachingBlock), "Got block = {}".format(block)
+    assert isinstance(block, PrefixCachingBlock), "Got block = {}".format(block)

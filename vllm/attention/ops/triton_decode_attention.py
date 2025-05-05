@@ -100,8 +100,7 @@ def _fwd_kernel_stage1(
 
     kv_len_per_split = tl.cdiv(cur_batch_seq_len, NUM_KV_SPLITS)
     split_kv_start = kv_len_per_split * split_kv_id
-    split_kv_end = tl.minimum(split_kv_start + kv_len_per_split,
-                              cur_batch_seq_len)
+    split_kv_end = tl.minimum(split_kv_start + kv_len_per_split, cur_batch_seq_len)
 
     e_max = -float("inf")
     e_sum = 0.0
@@ -281,11 +280,8 @@ def _fwd_grouped_kernel_stage1(
     cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
     cur_batch_req_idx = cur_batch
 
-    offs_q = cur_batch * stride_qbs + cur_head[:, None] * stride_qh + offs_d[
-        None, :]
-    q = tl.load(Q + offs_q,
-                mask=(mask_h[:, None]) & (mask_d[None, :]),
-                other=0.0)
+    offs_q = cur_batch * stride_qbs + cur_head[:, None] * stride_qh + offs_d[None, :]
+    q = tl.load(Q + offs_q, mask=(mask_h[:, None]) & (mask_d[None, :]), other=0.0)
 
     if BLOCK_DPE > 0:
         offs_dpe = BLOCK_DMODEL + tl.arange(0, BLOCK_DPE)
@@ -298,8 +294,7 @@ def _fwd_grouped_kernel_stage1(
 
     kv_len_per_split = tl.cdiv(cur_batch_seq_len, NUM_KV_SPLITS)
     split_kv_start = kv_len_per_split * split_kv_id
-    split_kv_end = tl.minimum(split_kv_start + kv_len_per_split,
-                              cur_batch_seq_len)
+    split_kv_end = tl.minimum(split_kv_start + kv_len_per_split, cur_batch_seq_len)
 
     e_max = tl.zeros([BLOCK_H], dtype=tl.float32) - float("inf")
     e_sum = tl.zeros([BLOCK_H], dtype=tl.float32)
@@ -325,12 +320,10 @@ def _fwd_grouped_kernel_stage1(
             qk = tl.dot(q, k.to(q.dtype))
             if BLOCK_DPE > 0:
                 offs_buf_kpe = (kv_loc[None, :] * stride_buf_kbs +
-                                cur_kv_head * stride_buf_kh +
-                                offs_dpe[:, None])
+                                cur_kv_head * stride_buf_kh + offs_dpe[:, None])
                 kpe = tl.load(
                     K_Buffer + offs_buf_kpe,
-                    mask=(offs_n[None, :] < split_kv_end) &
-                    (mask_dpe[:, None]),
+                    mask=(offs_n[None, :] < split_kv_end) & (mask_dpe[:, None]),
                     other=0.0,
                 )
                 qk += tl.dot(qpe, kpe.to(qpe.dtype))
@@ -339,8 +332,8 @@ def _fwd_grouped_kernel_stage1(
             if logit_cap > 0:
                 qk = logit_cap * tanh(qk / logit_cap)
 
-            qk = tl.where(mask_h[:, None] & (offs_n[None, :] < split_kv_end),
-                          qk, float("-inf"))
+            qk = tl.where(mask_h[:, None] & (offs_n[None, :] < split_kv_end), qk,
+                          float("-inf"))
 
             offs_buf_v = (kv_loc[:, None] * stride_buf_vbs +
                           cur_kv_head * stride_buf_vh + offs_dv[None, :])
@@ -359,8 +352,7 @@ def _fwd_grouped_kernel_stage1(
             e_sum = e_sum * re_scale + tl.sum(p, 1)
             e_max = n_e_max
 
-        offs_mid_o = (cur_batch * stride_mid_ob +
-                      cur_head[:, None] * stride_mid_oh +
+        offs_mid_o = (cur_batch * stride_mid_ob + cur_head[:, None] * stride_mid_oh +
                       split_kv_id * stride_mid_os + offs_dv[None, :])
 
         tl.store(
@@ -426,11 +418,7 @@ def _decode_grouped_att_m_fwd(
     if is_hip_:
         # https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html#mi300x-triton-kernel-performance-optimization
         # https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
-        extra_kargs = {
-            "waves_per_eu": 1,
-            "matrix_instr_nonkdim": 16,
-            "kpack": 2
-        }
+        extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
         num_stages = 1
 
     _fwd_grouped_kernel_stage1[grid](
@@ -501,8 +489,7 @@ def _fwd_kernel_stage2(
     for split_kv_id in range(0, NUM_KV_SPLITS):
         kv_len_per_split = tl.cdiv(cur_batch_seq_len, NUM_KV_SPLITS)
         split_kv_start = kv_len_per_split * split_kv_id
-        split_kv_end = tl.minimum(split_kv_start + kv_len_per_split,
-                                  cur_batch_seq_len)
+        split_kv_end = tl.minimum(split_kv_start + kv_len_per_split, cur_batch_seq_len)
 
         if split_kv_end > split_kv_start:
             tv = tl.load(Mid_O + offs_v + split_kv_id * stride_mid_os,
@@ -544,11 +531,7 @@ def _decode_softmax_reducev_fwd(
     if is_hip_:
         # https://rocm.docs.amd.com/en/docs-6.2.0/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
         # https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
-        extra_kargs = {
-            "waves_per_eu": 4,
-            "matrix_instr_nonkdim": 16,
-            "kpack": 2
-        }
+        extra_kargs = {"waves_per_eu": 4, "matrix_instr_nonkdim": 16, "kpack": 2}
 
     grid = (batch, head_num)
     _fwd_kernel_stage2[grid](
@@ -594,8 +577,7 @@ def decode_attention_fwd_normal(
         page_size,
         logit_cap,
     )
-    _decode_softmax_reducev_fwd(attn_logits, q, o, v_buffer, b_seq_len,
-                                num_kv_splits)
+    _decode_softmax_reducev_fwd(attn_logits, q, o, v_buffer, b_seq_len, num_kv_splits)
 
 
 def decode_attention_fwd_grouped(
@@ -623,8 +605,7 @@ def decode_attention_fwd_grouped(
         page_size,
         logit_cap,
     )
-    _decode_softmax_reducev_fwd(attn_logits, q, o, v_buffer, b_seq_len,
-                                num_kv_splits)
+    _decode_softmax_reducev_fwd(attn_logits, q, o, v_buffer, b_seq_len, num_kv_splits)
 
 
 def decode_attention_fwd(

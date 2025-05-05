@@ -47,9 +47,7 @@ class MsgpackEncoder:
     via dedicated messages. Note that this is a per-tensor limit.
     """
 
-    def __init__(self,
-                 size_threshold: Optional[int] = None,
-                 allow_pickle: bool = True):
+    def __init__(self, size_threshold: Optional[int] = None, allow_pickle: bool = True):
         if size_threshold is None:
             size_threshold = envs.VLLM_MSGPACK_ZERO_COPY_THRESHOLD
         self.encoder = msgpack.Encoder(enc_hook=self.enc_hook)
@@ -104,8 +102,7 @@ class MsgpackEncoder:
                 "key": elem.key,
                 "data": self._encode_nested_tensors(elem.data),
                 "field": self._encode_mm_field(elem.field),
-            } for elem in item.values()]
-                    for itemlist in mm._items_by_modality.values()
+            } for elem in item.values()] for itemlist in mm._items_by_modality.values()
                     for item in itemlist]
 
         if not self.allow_pickle:
@@ -120,8 +117,8 @@ class MsgpackEncoder:
                            pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL))
 
     def _encode_ndarray(
-        self, obj: np.ndarray
-    ) -> tuple[str, tuple[int, ...], Union[int, memoryview]]:
+            self,
+            obj: np.ndarray) -> tuple[str, tuple[int, ...], Union[int, memoryview]]:
         assert self.aux_buffers is not None
         # If the array is non-contiguous, we need to copy it first
         arr_data = obj.data if obj.data.c_contiguous else obj.tobytes()
@@ -140,8 +137,8 @@ class MsgpackEncoder:
         return obj.dtype.str, obj.shape, data
 
     def _encode_tensor(
-        self, obj: torch.Tensor
-    ) -> tuple[str, tuple[int, ...], Union[int, memoryview]]:
+            self,
+            obj: torch.Tensor) -> tuple[str, tuple[int, ...], Union[int, memoryview]]:
         assert self.aux_buffers is not None
         # this creates a copy of the tensor if it's not already contiguous
         obj = obj.contiguous()
@@ -173,8 +170,7 @@ class MsgpackEncoder:
             raise TypeError(f"Unsupported field type: {field.__class__}")
         # We just need to copy all of the field values in order
         # which will be then used to reconstruct the field.
-        field_values = (getattr(field, f.name)
-                        for f in dataclasses.fields(field))
+        field_values = (getattr(field, f.name) for f in dataclasses.fields(field))
         return name, *field_values
 
 
@@ -214,8 +210,7 @@ class MsgpackDecoder:
                 return self._decode_tensor(obj)
             if issubclass(t, MultiModalKwargs):
                 if isinstance(obj, list):
-                    return MultiModalKwargs.from_items(
-                        self._decode_mm_items(obj))
+                    return MultiModalKwargs.from_items(self._decode_mm_items(obj))
                 return MultiModalKwargs({
                     k: self._decode_nested_tensors(v)
                     for k, v in obj.items()
@@ -251,8 +246,7 @@ class MsgpackDecoder:
                 v["data"] = self._decode_nested_tensors(v["data"])
                 # Reconstruct the field processor using MultiModalFieldConfig
                 factory_meth_name, *field_args = v["field"]
-                factory_meth = getattr(MultiModalFieldConfig,
-                                       factory_meth_name)
+                factory_meth = getattr(MultiModalFieldConfig, factory_meth_name)
                 v["field"] = factory_meth(None, *field_args).field
                 elems.append(MultiModalFieldElem(**v))
             decoded_items.append(MultiModalKwargsItem.from_elems(elems))
@@ -279,5 +273,4 @@ class MsgpackDecoder:
             if code == CUSTOM_TYPE_CLOUDPICKLE:
                 return cloudpickle.loads(data)
 
-        raise NotImplementedError(
-            f"Extension type code {code} is not supported")
+        raise NotImplementedError(f"Extension type code {code} is not supported")

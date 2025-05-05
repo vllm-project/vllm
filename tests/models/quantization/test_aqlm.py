@@ -22,8 +22,7 @@ from tests.quantization.utils import is_quant_method_supported
 ground_truth_generations = [
     '\n### Features\n\n- **High-throughput**: v',
     'The major milestones in the development of artificial intelligence from '
-    '195',
-    'Compare and contrast artificial intelligence with human intelligence in '
+    '195', 'Compare and contrast artificial intelligence with human intelligence in '
     'terms of processing information. The',
     'Explain the difference between supervised and unsupervised learning.'
     '\nExplain',
@@ -50,13 +49,12 @@ def test_models(
 ) -> None:
 
     with vllm_runner(model, dtype=dtype) as vllm_model:
-        vllm_outputs = vllm_model.generate_greedy_logprobs(
-            example_prompts, max_tokens, num_logprobs)
+        vllm_outputs = vllm_model.generate_greedy_logprobs(example_prompts, max_tokens,
+                                                           num_logprobs)
 
     # loop through the prompts to compare against the ground truth generations
     for prompt_idx in range(len(example_prompts)):
-        vllm_output_ids, vllm_output_str, vllm_logprobs = vllm_outputs[
-            prompt_idx]
+        vllm_output_ids, vllm_output_str, vllm_logprobs = vllm_outputs[prompt_idx]
 
         print("Prompt:          ", repr(example_prompts[prompt_idx]))
         print("Reference output:", repr(ground_truth_generations[prompt_idx]))

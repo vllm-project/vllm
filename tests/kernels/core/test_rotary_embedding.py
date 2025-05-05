@@ -23,12 +23,12 @@ def rotary_embedding_opcheck(rot,
     # are in-place operations that update the query and key tensors.
     if offsets is not None:
         opcheck(torch.ops._C.batched_rotary_embedding,
-                (positions, query, key, rot.head_size, cos_sin_cache,
-                 rot.is_neox_style, rot.rotary_dim, offsets))
+                (positions, query, key, rot.head_size, cos_sin_cache, rot.is_neox_style,
+                 rot.rotary_dim, offsets))
     else:
-        opcheck(torch.ops._C.rotary_embedding,
-                (positions, query, key, rot.head_size, cos_sin_cache,
-                 rot.is_neox_style))
+        opcheck(
+            torch.ops._C.rotary_embedding,
+            (positions, query, key, rot.head_size, cos_sin_cache, rot.is_neox_style))
 
 
 @pytest.mark.parametrize("device", ["cuda"])
@@ -37,18 +37,15 @@ def rotary_embedding_opcheck(rot,
 @pytest.mark.parametrize("rotary_dim", [32])
 @pytest.mark.parametrize("head_size", [32, 108])
 @pytest.mark.parametrize("seq_len", [11, 1024])
-def test_rotary_embedding_opcheck(dist_init, device, max_position,
-                                  is_neox_style, rotary_dim, head_size,
-                                  seq_len):
+def test_rotary_embedding_opcheck(dist_init, device, max_position, is_neox_style,
+                                  rotary_dim, head_size, seq_len):
     batch_size = 1
     base = 10000
     num_heads = 7
-    rot = RotaryEmbedding(head_size, rotary_dim, max_position, base,
-                          is_neox_style, torch.float32)
+    rot = RotaryEmbedding(head_size, rotary_dim, max_position, base, is_neox_style,
+                          torch.float32)
 
-    positions = torch.randint(0,
-                              max_position, (batch_size, seq_len),
-                              device=device)
+    positions = torch.randint(0, max_position, (batch_size, seq_len), device=device)
     query = torch.randn(batch_size,
                         seq_len,
                         num_heads * head_size,
@@ -57,7 +54,5 @@ def test_rotary_embedding_opcheck(dist_init, device, max_position,
     key = torch.randn_like(query)
 
     rotary_embedding_opcheck(rot, positions, query, key)
-    offsets = torch.zeros(batch_size * seq_len,
-                          device=device,
-                          dtype=torch.long)
+    offsets = torch.zeros(batch_size * seq_len, device=device, dtype=torch.long)
     rotary_embedding_opcheck(rot, positions, query, key, offsets)

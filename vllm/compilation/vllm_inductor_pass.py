@@ -56,10 +56,7 @@ class VllmInductorPass(InductorPass):
 
 class PrinterInductorPass(VllmInductorPass):
 
-    def __init__(self,
-                 name: str,
-                 config: CompilationConfig.PassConfig,
-                 always=False):
+    def __init__(self, name: str, config: CompilationConfig.PassConfig, always=False):
         super().__init__(config)
         self.name = name
         self.always = always

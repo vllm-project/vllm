@@ -39,12 +39,11 @@ class MultiModalHasher:
         if isinstance(obj, torch.Tensor):
             return cls.item_to_bytes("tensor", obj.numpy())
         if isinstance(obj, np.ndarray):
-            return cls.item_to_bytes(
-                "ndarray", {
-                    "dtype": obj.dtype.str,
-                    "shape": obj.shape,
-                    "data": obj.data.tobytes(),
-                })
+            return cls.item_to_bytes("ndarray", {
+                "dtype": obj.dtype.str,
+                "shape": obj.shape,
+                "data": obj.data.tobytes(),
+            })
 
         logger.warning(
             "No serialization method found for %s. "
@@ -90,8 +89,8 @@ class MultiModalHasher:
         return hasher.hexdigest()
 
     @classmethod
-    def hash_prompt_mm_data(
-            cls, prompt: "TokensPrompt") -> Optional["MultiModalHashDict"]:
+    def hash_prompt_mm_data(cls,
+                            prompt: "TokensPrompt") -> Optional["MultiModalHashDict"]:
         """Hash multimodal data in the user input prompt if they exist."""
 
         if "multi_modal_data" not in prompt:

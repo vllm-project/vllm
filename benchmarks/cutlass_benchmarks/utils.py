@@ -10,8 +10,8 @@ import vllm._custom_ops as ops
 
 def to_fp8(tensor: torch.Tensor) -> torch.Tensor:
     finfo = torch.finfo(torch.float8_e4m3fn)
-    return torch.round(tensor.clamp(
-        min=finfo.min, max=finfo.max)).to(dtype=torch.float8_e4m3fn)
+    return torch.round(tensor.clamp(min=finfo.min,
+                                    max=finfo.max)).to(dtype=torch.float8_e4m3fn)
 
 
 def to_int8(tensor: torch.Tensor) -> torch.Tensor:
@@ -49,9 +49,7 @@ def prune_to_2_4(tensor):
 
     # Create binary mask
     mask = torch.zeros_like(reshaped)
-    mask.scatter_(dim=1,
-                  index=indices,
-                  src=torch.ones_like(indices, dtype=mask.dtype))
+    mask.scatter_(dim=1, index=indices, src=torch.ones_like(indices, dtype=mask.dtype))
 
     # Apply mask and reshape back
     pruned = reshaped * mask

@@ -67,8 +67,7 @@ def convert_prompt_ids_to_tokens(
         prompt_ids[-INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET - 2:],
         skip_special_tokens=skip_special_tokens)
     read_offset = len(new_tokens)
-    prefix_offset = max(
-        read_offset - INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET, 0)
+    prefix_offset = max(read_offset - INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET, 0)
     # This is required to guard against out-of-vocab prompt token ids
     _replace_none_with_empty(new_tokens)  # type: ignore[arg-type]
     return new_tokens, prefix_offset, read_offset
@@ -133,11 +132,8 @@ def detokenize_incrementally(
     # This is the first iteration for this sequence
     is_first_iter = prev_tokens is None
     if is_first_iter:
-        (prev_tokens, prefix_offset,
-         read_offset) = convert_prompt_ids_to_tokens(
-             tokenizer,
-             all_input_ids[:-1],
-             skip_special_tokens=skip_special_tokens)
+        (prev_tokens, prefix_offset, read_offset) = convert_prompt_ids_to_tokens(
+            tokenizer, all_input_ids[:-1], skip_special_tokens=skip_special_tokens)
     assert prev_tokens is not None
 
     # If the new token id is out of bounds, return an empty string.
@@ -161,8 +157,7 @@ def detokenize_incrementally(
     if tokenizer.is_fast or not tokenizer.get_added_vocab():
         prefix_text = tokenizer.convert_tokens_to_string(
             output_tokens[prefix_offset:read_offset])
-        new_text = tokenizer.convert_tokens_to_string(
-            output_tokens[prefix_offset:])
+        new_text = tokenizer.convert_tokens_to_string(output_tokens[prefix_offset:])
     else:
         prefix_text = _convert_tokens_to_string_with_added_encoders(
             tokenizer,

@@ -36,10 +36,9 @@ def tmp_socket():
 
 def run_with_evil_forward(engine_args: AsyncEngineArgs, ipc_path: str):
     # Make engine.
-    engine = MQLLMEngine.from_engine_args(
-        engine_args=engine_args,
-        usage_context=UsageContext.UNKNOWN_CONTEXT,
-        ipc_path=ipc_path)
+    engine = MQLLMEngine.from_engine_args(engine_args=engine_args,
+                                          usage_context=UsageContext.UNKNOWN_CONTEXT,
+                                          ipc_path=ipc_path)
 
     # Raise error during first forward pass.
     engine.engine.model_executor.execute_model = Mock(
@@ -78,13 +77,11 @@ async def test_evil_forward(tmp_socket):
         client.close()
 
 
-def run_with_evil_model_executor_health(engine_args: AsyncEngineArgs,
-                                        ipc_path: str):
+def run_with_evil_model_executor_health(engine_args: AsyncEngineArgs, ipc_path: str):
     # Make engine.
-    engine = MQLLMEngine.from_engine_args(
-        engine_args=engine_args,
-        usage_context=UsageContext.UNKNOWN_CONTEXT,
-        ipc_path=ipc_path)
+    engine = MQLLMEngine.from_engine_args(engine_args=engine_args,
+                                          usage_context=UsageContext.UNKNOWN_CONTEXT,
+                                          ipc_path=ipc_path)
 
     # Raise error during first forward pass.
     engine.engine.model_executor.check_health = Mock(side_effect=RAISED_ERROR)
@@ -95,10 +92,9 @@ def run_with_evil_model_executor_health(engine_args: AsyncEngineArgs,
 
 @pytest.mark.asyncio
 async def test_failed_health_check(tmp_socket):
-    with RemoteMQLLMEngine(
-            engine_args=ENGINE_ARGS,
-            ipc_path=tmp_socket,
-            run_fn=run_with_evil_model_executor_health) as engine:
+    with RemoteMQLLMEngine(engine_args=ENGINE_ARGS,
+                           ipc_path=tmp_socket,
+                           run_fn=run_with_evil_model_executor_health) as engine:
 
         client = await engine.make_client()
         assert client.is_running
@@ -122,10 +118,9 @@ async def test_failed_health_check(tmp_socket):
 
 def run_with_evil_abort(engine_args: AsyncEngineArgs, ipc_path: str):
     # Make engine.
-    engine = MQLLMEngine.from_engine_args(
-        engine_args=engine_args,
-        usage_context=UsageContext.UNKNOWN_CONTEXT,
-        ipc_path=ipc_path)
+    engine = MQLLMEngine.from_engine_args(engine_args=engine_args,
+                                          usage_context=UsageContext.UNKNOWN_CONTEXT,
+                                          ipc_path=ipc_path)
 
     # Raise error during abort call.
     engine.engine.abort_request = Mock(side_effect=RAISED_ERROR)
@@ -209,8 +204,7 @@ async def test_batch_error(tmp_socket):
 
 @pytest.mark.asyncio
 async def test_bad_request(tmp_socket):
-    with RemoteMQLLMEngine(engine_args=ENGINE_ARGS,
-                           ipc_path=tmp_socket) as engine:
+    with RemoteMQLLMEngine(engine_args=ENGINE_ARGS, ipc_path=tmp_socket) as engine:
 
         client = await engine.make_client()
 
@@ -220,8 +214,7 @@ async def test_bad_request(tmp_socket):
                                            sampling_params=SamplingParams(),
                                            request_id="abcd-1",
                                            lora_request=LoRARequest(
-                                               "invalid-lora", 1,
-                                               "invalid-path")):
+                                               "invalid-lora", 1, "invalid-path")):
                 pass
 
         # This request should be okay.
@@ -238,8 +231,7 @@ async def test_bad_request(tmp_socket):
 async def test_mp_crash_detection(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as m:
 
-        parser = FlexibleArgumentParser(
-            description="vLLM's remote OpenAI server.")
+        parser = FlexibleArgumentParser(description="vLLM's remote OpenAI server.")
         parser = make_arg_parser(parser)
         args = parser.parse_args([])
 
@@ -254,9 +246,8 @@ async def test_mp_crash_detection(monkeypatch: pytest.MonkeyPatch):
             pass
         end = time.perf_counter()
 
-        assert end - start < 60, (
-            "Expected vLLM to gracefully shutdown in <60s "
-            "if there is an error in the startup.")
+        assert end - start < 60, ("Expected vLLM to gracefully shutdown in <60s "
+                                  "if there is an error in the startup.")
 
 
 @pytest.mark.asyncio
@@ -275,8 +266,7 @@ async def test_mp_cuda_init():
 
 @pytest.mark.asyncio
 async def test_engine_process_death(tmp_socket):
-    with RemoteMQLLMEngine(engine_args=ENGINE_ARGS,
-                           ipc_path=tmp_socket) as engine:
+    with RemoteMQLLMEngine(engine_args=ENGINE_ARGS, ipc_path=tmp_socket) as engine:
 
         client = await engine.make_client()
         assert client.is_running
@@ -298,17 +288,15 @@ async def test_engine_process_death(tmp_socket):
         client.close()
 
 
-def run_with_evil_input_processing(engine_args: AsyncEngineArgs,
-                                   ipc_path: str):
+def run_with_evil_input_processing(engine_args: AsyncEngineArgs, ipc_path: str):
     """Simulate an exception while preparing inputs for the model.
     In the wild, this could be something like a multimodal input processor
     failing on invalid image data."""
 
     # Make engine.
-    engine = MQLLMEngine.from_engine_args(
-        engine_args=engine_args,
-        usage_context=UsageContext.UNKNOWN_CONTEXT,
-        ipc_path=ipc_path)
+    engine = MQLLMEngine.from_engine_args(engine_args=engine_args,
+                                          usage_context=UsageContext.UNKNOWN_CONTEXT,
+                                          ipc_path=ipc_path)
 
     runner = engine.engine.model_executor.driver_worker.worker.model_runner
 
@@ -350,12 +338,8 @@ async def test_failed_inputs(tmp_socket):
                     request_id=str(uuid.uuid4())):
                 pass
 
-        passing_tasks = [
-            asyncio.create_task(run_passing_request()) for _ in range(10)
-        ]
-        failing_tasks = [
-            asyncio.create_task(run_failing_request()) for _ in range(10)
-        ]
+        passing_tasks = [asyncio.create_task(run_passing_request()) for _ in range(10)]
+        failing_tasks = [asyncio.create_task(run_failing_request()) for _ in range(10)]
         await asyncio.gather(*failing_tasks, return_exceptions=True)
         await asyncio.gather(*passing_tasks)
 

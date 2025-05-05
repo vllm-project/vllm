@@ -98,10 +98,8 @@ class BambaMixerDecoderLayer(nn.Module):
                                 quant_config=quant_config)
 
         self.feed_forward = BambaMLP(config, quant_config=quant_config)
-        self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
-        self.pre_ff_layernorm = RMSNorm(config.hidden_size,
-                                        eps=config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.pre_ff_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -115,14 +113,11 @@ class BambaMixerDecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(
-                hidden_states, residual)
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        hidden_states = self.mamba(hidden_states, mamba_cache_params,
-                                   mamba2_metadata)
+        hidden_states = self.mamba(hidden_states, mamba_cache_params, mamba2_metadata)
         # Fully Connected
-        hidden_states, residual = self.pre_ff_layernorm(
-            hidden_states, residual)
+        hidden_states, residual = self.pre_ff_layernorm(hidden_states, residual)
         hidden_states = self.feed_forward(hidden_states)
         return hidden_states, residual
 
@@ -140,8 +135,7 @@ class BambaAttentionDecoderLayer(nn.Module):
         super().__init__()
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
-        max_position_embeddings = getattr(config, "max_position_embeddings",
-                                          8192)
+        max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.hidden_size = config.hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = config.num_attention_heads
@@ -204,10 +198,8 @@ class BambaAttentionDecoderLayer(nn.Module):
         )
 
         self.feed_forward = BambaMLP(config, quant_config=quant_config)
-        self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
-        self.pre_ff_layernorm = RMSNorm(config.hidden_size,
-                                        eps=config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.pre_ff_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def self_attention(
         self,
@@ -234,16 +226,14 @@ class BambaAttentionDecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(
-                hidden_states, residual)
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         hidden_states = self.self_attention(
             positions=positions,
             hidden_states=hidden_states,
         )
         # Fully Connected
-        hidden_states, residual = self.pre_ff_layernorm(
-            hidden_states, residual)
+        hidden_states, residual = self.pre_ff_layernorm(hidden_states, residual)
         hidden_states = self.feed_forward(hidden_states)
         return hidden_states, residual
 
@@ -278,8 +268,7 @@ class BambaModel(nn.Module):
 
         def get_layer(prefix: str):
             layer_idx = int(prefix.rsplit(".", 1)[1])
-            layer_class = ALL_DECODER_LAYER_TYPES[
-                config.layers_block_type[layer_idx]]
+            layer_class = ALL_DECODER_LAYER_TYPES[config.layers_block_type[layer_idx]]
             return layer_class(
                 config,
                 layer_idx,
@@ -290,12 +279,10 @@ class BambaModel(nn.Module):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers")
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size))
+        self.make_empty_intermediate_tensors = (make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size))
 
-        self.final_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
+        self.final_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -337,8 +324,7 @@ class BambaModel(nn.Module):
 
             layer_mamba_cache_params = None
             if isinstance(layer, BambaMixerDecoderLayer):
-                layer_mamba_cache_params = mamba_cache_params.at_layer_idx(
-                    i - num_attn)
+                layer_mamba_cache_params = mamba_cache_params.at_layer_idx(i - num_attn)
 
             hidden_states, residual = layer(
                 positions=positions,
@@ -356,8 +342,7 @@ class BambaModel(nn.Module):
         hidden_states, _ = self.final_layernorm(hidden_states, residual)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -402,15 +387,14 @@ class BambaModel(nn.Module):
                     continue
 
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
 
 
-class BambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
-                       IsHybrid, SupportsV0Only, SupportsQuant):
+class BambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP, IsHybrid,
+                       SupportsV0Only, SupportsQuant):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -479,9 +463,10 @@ class BambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
             num_mamba_layers = self.model_config.get_num_layers_by_block_type(
                 self.vllm_config.parallel_config, LayerBlockType.mamba)
 
-            self.mamba_cache = MambaCacheManager(
-                self.vllm_config, self.lm_head.weight.dtype, num_mamba_layers,
-                *self._get_mamba_cache_shape())
+            self.mamba_cache = MambaCacheManager(self.vllm_config,
+                                                 self.lm_head.weight.dtype,
+                                                 num_mamba_layers,
+                                                 *self._get_mamba_cache_shape())
         mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
         hidden_states = self.model(input_ids, positions, mamba_cache_params,
                                    intermediate_tensors, inputs_embeds)
@@ -489,14 +474,12 @@ class BambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         return hidden_states
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
-        return self.mamba_cache.copy_inputs_before_cuda_graphs(
-            input_buffers, **kwargs)
+        return self.mamba_cache.copy_inputs_before_cuda_graphs(input_buffers, **kwargs)
 
     def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
         return self.mamba_cache.get_seqlen_agnostic_capture_inputs(batch_size)
 
-    def _get_mamba_cache_shape(
-            self) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+    def _get_mamba_cache_shape(self) -> Tuple[Tuple[int, int], Tuple[int, int]]:
         world_size = get_tensor_model_parallel_world_size()
         hidden_size = self.config.hidden_size
 
@@ -506,12 +489,12 @@ class BambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
 
         # if n_groups is not divisible by world_size, need to extend the shards
         # to ensure all groups needed by a head is sharded along with it
-        n_groups = (self.config.mamba_n_groups + extra_groups_for_head_shards(
-            self.config.mamba_n_groups, world_size))
+        n_groups = (
+            self.config.mamba_n_groups +
+            extra_groups_for_head_shards(self.config.mamba_n_groups, world_size))
 
         # - heads and n_groups are TP-ed
-        conv_dim = (intermediate_size +
-                    2 * n_groups * self.config.mamba_d_state)
+        conv_dim = (intermediate_size + 2 * n_groups * self.config.mamba_d_state)
         conv_state_shape = (
             divide(conv_dim, world_size),
             self.config.mamba_d_conv - 1,
@@ -532,11 +515,9 @@ class BambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

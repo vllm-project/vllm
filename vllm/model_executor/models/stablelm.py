@@ -58,11 +58,11 @@ class StablelmMLP(nn.Module):
         self.config = config
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
-        self.gate_up_proj = MergedColumnParallelLinear(
-            config.hidden_size, [config.intermediate_size] * 2,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.gate_up_proj")
+        self.gate_up_proj = MergedColumnParallelLinear(config.hidden_size,
+                                                       [config.intermediate_size] * 2,
+                                                       bias=False,
+                                                       quant_config=quant_config,
+                                                       prefix=f"{prefix}.gate_up_proj")
         self.down_proj = RowParallelLinear(config.intermediate_size,
                                            config.hidden_size,
                                            bias=False,
@@ -100,8 +100,7 @@ class StablelmAttention(nn.Module):
             # Number of KV heads is less than TP size, so we replicate
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_key_value_heads == 0
-        self.num_key_value_heads = max(
-            1, self.total_num_key_value_heads // tp_size)
+        self.num_key_value_heads = max(1, self.total_num_key_value_heads // tp_size)
         self.head_dim = self.hidden_size // self.total_num_heads
         self.max_position_embeddings = config.max_position_embeddings
         self.partial_rotary_factor = getattr(
@@ -170,11 +169,9 @@ class StablelmDecoderLayer(nn.Module):
                                            quant_config,
                                            prefix=f"{prefix}.self_attn")
         self.mlp = StablelmMLP(config, quant_config, prefix=f"{prefix}.mlp")
-        norm_eps = getattr(config, "norm_eps",
-                           getattr(config, "layer_norm_eps", 1e-05))
+        norm_eps = getattr(config, "norm_eps", getattr(config, "layer_norm_eps", 1e-05))
         self.input_layernorm = nn.LayerNorm(config.hidden_size, eps=norm_eps)
-        self.post_attention_layernorm = nn.LayerNorm(config.hidden_size,
-                                                     eps=norm_eps)
+        self.post_attention_layernorm = nn.LayerNorm(config.hidden_size, eps=norm_eps)
 
     def forward(
         self,
@@ -220,12 +217,10 @@ class StableLMEpochModel(nn.Module):
                 config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.layers",
         )
-        norm_eps = getattr(config, "norm_eps",
-                           getattr(config, "layer_norm_eps", 1e-05))
+        norm_eps = getattr(config, "norm_eps", getattr(config, "layer_norm_eps", 1e-05))
         self.norm = nn.LayerNorm(config.hidden_size, eps=norm_eps)
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(["hidden_states"],
-                                                    config.hidden_size))
+        self.make_empty_intermediate_tensors = (make_empty_intermediate_tensors_factory(
+            ["hidden_states"], config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -252,8 +247,7 @@ class StableLMEpochModel(nn.Module):
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -285,8 +279,7 @@ class StableLMEpochModel(nn.Module):
                 if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
@@ -331,19 +324,16 @@ class StablelmForCausalLM(nn.Module, SupportsPP):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(
             self,
             # Models trained using ColossalAI may include these tensors in
             # the checkpoint. Skip them.
             skip_prefixes=[
-                "rotary_emb.inv_freq", "rotary_emb.cos_cached",
-                "rotary_emb.sin_cached"
+                "rotary_emb.inv_freq", "rotary_emb.cos_cached", "rotary_emb.sin_cached"
             ],
         )
         return loader.load_weights(weights)

@@ -77,15 +77,13 @@ class TypicalAcceptanceSampler(SpecDecodeDeterministicBaseSampler):
         # Only perform shape/dtype/device checking in strict mode, as it adds
         # overhead.
         if self._strict_mode:
-            self._raise_if_incorrect_input(target_with_bonus_probs,
-                                           draft_token_ids, bonus_token_ids)
+            self._raise_if_incorrect_input(target_with_bonus_probs, draft_token_ids,
+                                           bonus_token_ids)
         target_probs = target_with_bonus_probs[:, :-1]
-        accepted = self._evaluate_accepted_tokens(target_probs,
-                                                  draft_token_ids)
+        accepted = self._evaluate_accepted_tokens(target_probs, draft_token_ids)
         recovered_token_ids = self._get_recovered_token_ids(target_probs)
         output_token_ids = self._create_output(accepted, recovered_token_ids,
-                                               draft_token_ids,
-                                               bonus_token_ids)
+                                               draft_token_ids, bonus_token_ids)
         return output_token_ids
 
     def _evaluate_accepted_tokens(self, target_probs, draft_token_ids):
@@ -135,14 +133,14 @@ class TypicalAcceptanceSampler(SpecDecodeDeterministicBaseSampler):
             
         """
         device = target_probs.device
-        candidates_prob = torch.gather(
-            target_probs, dim=-1,
-            index=draft_token_ids.unsqueeze(-1)).squeeze(-1)
+        candidates_prob = torch.gather(target_probs,
+                                       dim=-1,
+                                       index=draft_token_ids.unsqueeze(-1)).squeeze(-1)
         # A small constant added to prevent computing the logarithm of zero,
         # which can lead to undefined values.
         epsilon = 1e-5
-        posterior_entropy = -torch.sum(
-            target_probs * torch.log(target_probs + epsilon), dim=-1)
+        posterior_entropy = -torch.sum(target_probs * torch.log(target_probs + epsilon),
+                                       dim=-1)
         threshold = torch.minimum(
             torch.ones_like(posterior_entropy, device=device) *
             self._posterior_threshold,

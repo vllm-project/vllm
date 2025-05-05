@@ -42,10 +42,9 @@ class BertEmbedding(nn.Module):
         self.word_embeddings = VocabParallelEmbedding(config.vocab_size,
                                                       config.hidden_size)
 
-        self.token_type_embeddings = VocabParallelEmbedding(
-            config.type_vocab_size, config.hidden_size)
-        self.LayerNorm = nn.LayerNorm(config.hidden_size,
-                                      eps=config.layer_norm_eps)
+        self.token_type_embeddings = VocabParallelEmbedding(config.type_vocab_size,
+                                                            config.hidden_size)
+        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
         self.position_embedding_type = config.position_embedding_type
         if self.position_embedding_type == "absolute":
@@ -148,15 +147,14 @@ class BertLayer(nn.Module):
                  prefix: str = ""):
         super().__init__()
 
-        self.attention = BertAttention(
-            hidden_size=config.hidden_size,
-            num_attention_heads=config.num_attention_heads,
-            layer_norm_eps=config.layer_norm_eps,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            bias=bias,
-            rotary_kwargs=rotary_kwargs,
-            prefix=f"{prefix}.attention")
+        self.attention = BertAttention(hidden_size=config.hidden_size,
+                                       num_attention_heads=config.num_attention_heads,
+                                       layer_norm_eps=config.layer_norm_eps,
+                                       cache_config=cache_config,
+                                       quant_config=quant_config,
+                                       bias=bias,
+                                       rotary_kwargs=rotary_kwargs,
+                                       prefix=f"{prefix}.attention")
 
         if config.hidden_act in ["silu", "gelu_and_mul"]:
             self.intermediate = BertGatedIntermediate(
@@ -256,14 +254,13 @@ class BertSelfAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.qkv_proj = QKVParallelLinear(
-            hidden_size=self.hidden_size,
-            head_size=self.head_dim,
-            total_num_heads=self.total_num_heads,
-            total_num_kv_heads=self.total_num_kv_heads,
-            bias=bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.qkv_proj")
+        self.qkv_proj = QKVParallelLinear(hidden_size=self.hidden_size,
+                                          head_size=self.head_dim,
+                                          total_num_heads=self.total_num_heads,
+                                          total_num_kv_heads=self.total_num_kv_heads,
+                                          bias=bias,
+                                          quant_config=quant_config,
+                                          prefix=f"{prefix}.qkv_proj")
 
         if rotary_kwargs:
             self.rotary_emb = get_rope(**rotary_kwargs)
@@ -436,15 +433,13 @@ class BertModel(nn.Module, SupportsQuant):
         else:
             attn_metadata = get_forward_context().attn_metadata
             assert hasattr(attn_metadata, "seq_lens_tensor")
-            hidden_states = self.embeddings(
-                input_ids=input_ids,
-                seq_lens=attn_metadata.seq_lens_tensor,
-                position_ids=position_ids,
-                token_type_ids=token_type_ids)
+            hidden_states = self.embeddings(input_ids=input_ids,
+                                            seq_lens=attn_metadata.seq_lens_tensor,
+                                            position_ids=position_ids,
+                                            token_type_ids=token_type_ids)
         return self.encoder(position_ids, hidden_states)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "query", "q"),
@@ -475,8 +470,7 @@ class BertModel(nn.Module, SupportsQuant):
                 if name.endswith(".bias") and name not in params_dict:
                     continue
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
@@ -527,9 +521,7 @@ class BertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant):
                    if not name.startswith("lm_head."))
         self.model.load_weights(weights)
 
-    def _build_model(self,
-                     vllm_config: VllmConfig,
-                     prefix: str = "") -> BertModel:
+    def _build_model(self, vllm_config: VllmConfig, prefix: str = "") -> BertModel:
         return BertModel(vllm_config=vllm_config,
                          prefix=prefix,
                          embedding_class=BertEmbedding)
@@ -541,8 +533,7 @@ class BertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant):
                                                 softmax=False)
 
 
-class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
-                                    SupportsQuant):
+class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQuant):
     """A model that uses Bert to provide embedding functionalities.
 
    This class encapsulates the BertModel and provides an interface for
@@ -566,8 +557,7 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
                               embedding_class=BertEmbedding,
                               add_pooling_layer=True)
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
-        self._pooler = CrossEncodingPooler(config, self.classifier,
-                                           self.bert.pooler)
+        self._pooler = CrossEncodingPooler(config, self.classifier, self.bert.pooler)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
 
@@ -587,8 +577,7 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
         for name, loaded_weight in self_weights:
             if name.startswith("classifier"):
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
 
     def pooler(
@@ -628,9 +617,7 @@ class NomicBertEmbeddingModel(BertEmbeddingModel):
             'norm2': "output.LayerNorm",
         })
 
-    def _build_model(self,
-                     vllm_config: VllmConfig,
-                     prefix: str = "") -> BertModel:
+    def _build_model(self, vllm_config: VllmConfig, prefix: str = "") -> BertModel:
         config = vllm_config.model_config.hf_config
 
         assert config.__class__.__name__ == "NomicBertConfig"
@@ -677,9 +664,7 @@ class GteEmbeddingModel(BertEmbeddingModel):
             'mlp_ln': "output.LayerNorm",
         })
 
-    def _build_model(self,
-                     vllm_config: VllmConfig,
-                     prefix: str = "") -> BertModel:
+    def _build_model(self, vllm_config: VllmConfig, prefix: str = "") -> BertModel:
         config = vllm_config.model_config.hf_config
 
         assert config.__class__.__name__ == "GteConfig"

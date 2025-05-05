@@ -45,9 +45,8 @@ if __name__ == "__main__":
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngineWithStats.from_engine_args(engine_args)
     vllm.entrypoints.api_server.engine = engine
-    uvicorn.run(
-        app,
-        host=args.host,
-        port=args.port,
-        log_level="debug",
-        timeout_keep_alive=vllm.entrypoints.api_server.TIMEOUT_KEEP_ALIVE)
+    uvicorn.run(app,
+                host=args.host,
+                port=args.port,
+                log_level="debug",
+                timeout_keep_alive=vllm.entrypoints.api_server.TIMEOUT_KEEP_ALIVE)

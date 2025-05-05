@@ -54,26 +54,23 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
         self.q_block_size = q_block_size
         self.homo_head = homo_head
         self.active_head_range = active_head_range
-        self.head_sliding_step = get_head_sliding_step(n_heads, vert_stride,
-                                                       homo_head)
+        self.head_sliding_step = get_head_sliding_step(n_heads, vert_stride, homo_head)
 
-        sparse_layout, sparse_pattern, self.dense_attn_mask = (
-            self.get_attn_pattern(dtype, device))
+        sparse_layout, sparse_pattern, self.dense_attn_mask = (self.get_attn_pattern(
+            dtype, device))
 
         if q_block_size is not None and q_block_size != block_size:
             if q_block_size > block_size:
                 assert q_block_size % block_size == 0
                 blocks_to_merge = q_block_size // block_size
                 shape = sparse_pattern.shape
-                sparse_pattern = sparse_pattern.view(shape[0], -1,
-                                                     blocks_to_merge,
+                sparse_pattern = sparse_pattern.view(shape[0], -1, blocks_to_merge,
                                                      shape[-1])
                 sparse_pattern = sparse_pattern.sum(2)
                 sparse_layout = dense_to_crow_col(sparse_pattern)
             else:
                 raise ValueError(
-                    "Does not support smaller q_block_size. It will be slower."
-                )
+                    "Does not support smaller q_block_size. It will be slower.")
 
         self.sparse_layout = sparse_layout
 
@@ -100,13 +97,7 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
                 dense_attn_mask = dense_attn_mask[h_start:h_end]
         return sparse_layout, sparse_pattern, dense_attn_mask
 
-    def varlen_attn(self,
-                    q,
-                    k,
-                    v,
-                    cu_seqlens_k,
-                    cu_seqlens_q=None,
-                    sm_scale=None):
+    def varlen_attn(self, q, k, v, cu_seqlens_k, cu_seqlens_q=None, sm_scale=None):
         """
         q, k, v: shape = (num_tokens, num_heads_q/kv, head_size).
         Support grouped attention, with `q[:, i*r:(i*r + r)]`
@@ -123,9 +114,8 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
 
         return: tensor of shape as q.
         """
-        assert (
-            IS_COMPUTE_8_OR_ABOVE
-        ), "Requires compute capability of 8 or above (Ampere or newer) to use \
+        assert (IS_COMPUTE_8_OR_ABOVE
+                ), "Requires compute capability of 8 or above (Ampere or newer) to use \
             Triton kernel."
 
         sm_scale = sm_scale or 1.0 / math.sqrt(q.size(-1))
@@ -153,8 +143,7 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
             len(cu_seqlens) - 1, x.size(1), head_repeats, maxlen, x.size(2))
         cu_seqlens = cu_seqlens.cpu()
         for i, (s, e) in enumerate(zip(cu_seqlens[:-1], cu_seqlens[1:])):
-            x_padded[i, :, :, :e - s].copy_(x[s:e].transpose(0,
-                                                             1).unsqueeze(1))
+            x_padded[i, :, :, :e - s].copy_(x[s:e].transpose(0, 1).unsqueeze(1))
         return x_padded.flatten(1, 2)
 
     @staticmethod
@@ -165,8 +154,7 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
         """
         cu_seqlens = cu_seqlens.cpu()
         total_n_tokens = cu_seqlens[-1]
-        x = x_padded.new_empty(total_n_tokens, x_padded.size(1),
-                               x_padded.size(3))
+        x = x_padded.new_empty(total_n_tokens, x_padded.size(1), x_padded.size(3))
         for i, (s, e) in enumerate(zip(cu_seqlens[:-1], cu_seqlens[1:])):
             x[s:e].copy_(x_padded[i, :, :e - s].transpose(0, 1))
         return x
@@ -176,9 +164,9 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
         NOTE: torch SPDA supports nested tensor,
         but seems extremely slow. Choose to pad instead.
         """
-        assert (cu_seqlens_q is None or
-                (cu_seqlens_q
-                 == cu_seqlens_k).all()), "Can only handle prompt with SPDA."
+        assert (cu_seqlens_q is None
+                or (cu_seqlens_q
+                    == cu_seqlens_k).all()), "Can only handle prompt with SPDA."
         assert q.size(0) == k.size(0), "can only handle prompt with SPDA."
 
         assert q.size(1) % k.size(1) == 0
@@ -189,8 +177,7 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
 
         if (self.dense_attn_mask.dtype != q.dtype
                 or self.dense_attn_mask.device != q.device):
-            _, _, self.dense_attn_mask = self.get_attn_pattern(
-                q.dtype, q.device)
+            _, _, self.dense_attn_mask = self.get_attn_pattern(q.dtype, q.device)
         attn_mask = self.dense_attn_mask[None, :, :maxlen, :maxlen]
 
         q2 = self.transpose_and_pad(q, cu_seqlens, maxlen, 1)

@@ -56,8 +56,7 @@ class ServingScores(OpenAIServing):
         request_id=str,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[Union[LoRARequest, None]] = None,
-        prompt_adapter_request: Optional[Union[PromptAdapterRequest,
-                                               None]] = None,
+        prompt_adapter_request: Optional[Union[PromptAdapterRequest, None]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
     ) -> list[PoolingRequestOutput]:
 
@@ -80,8 +79,7 @@ class ServingScores(OpenAIServing):
                     input_text)
 
             engine_prompts.append(
-                TokensPrompt(
-                    prompt_token_ids=text_token_prompt["prompt_token_ids"]))
+                TokensPrompt(prompt_token_ids=text_token_prompt["prompt_token_ids"]))
 
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
@@ -147,8 +145,7 @@ class ServingScores(OpenAIServing):
         request_id=str,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[Union[LoRARequest, None]] = None,
-        prompt_adapter_request: Optional[Union[PromptAdapterRequest,
-                                               None]] = None,
+        prompt_adapter_request: Optional[Union[PromptAdapterRequest, None]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
     ) -> list[PoolingRequestOutput]:
 
@@ -161,8 +158,7 @@ class ServingScores(OpenAIServing):
         input_pairs = [(t1, t2) for t1, t2 in zip(texts_1, texts_2)]
 
         if isinstance(tokenizer, MistralTokenizer):
-            raise ValueError(
-                "MistralTokenizer not supported for cross-encoding")
+            raise ValueError("MistralTokenizer not supported for cross-encoding")
 
         tokenize_async = make_async(tokenizer.__call__,
                                     executor=self._tokenizer_executor)
@@ -214,8 +210,8 @@ class ServingScores(OpenAIServing):
         result_generator = merge_async_iterators(*generators)
 
         # Non-streaming response
-        final_res_batch: list[
-            Optional[PoolingRequestOutput]] = [None] * len(engine_prompts)
+        final_res_batch: list[Optional[PoolingRequestOutput]] = [None
+                                                                 ] * len(engine_prompts)
 
         async for i, res in result_generator:
             final_res_batch[i] = res
@@ -247,8 +243,8 @@ class ServingScores(OpenAIServing):
         _validate_truncation_size(self.max_model_len, truncate_prompt_tokens,
                                   tokenization_kwargs)
 
-        trace_headers = (None if raw_request is None else await
-                         self._get_trace_headers(raw_request.headers))
+        trace_headers = (None if raw_request is None else await self._get_trace_headers(
+            raw_request.headers))
 
         if isinstance(texts_1, str):
             texts_1 = [texts_1]
@@ -320,11 +316,10 @@ class ServingScores(OpenAIServing):
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
-    async def do_rerank(
-        self,
-        request: RerankRequest,
-        raw_request: Optional[Request] = None
-    ) -> Union[RerankResponse, ErrorResponse]:
+    async def do_rerank(self,
+                        request: RerankRequest,
+                        raw_request: Optional[Request] = None
+                        ) -> Union[RerankResponse, ErrorResponse]:
         """
         Rerank API based on JinaAI's rerank API; implements the same
         API interface. Designed for compatibility with off-the-shelf
@@ -399,10 +394,11 @@ class ServingScores(OpenAIServing):
             usage=usage,
         )
 
-    def request_output_to_rerank_response(
-            self, final_res_batch: list[PoolingRequestOutput], request_id: str,
-            model_name: str, documents: list[str],
-            top_n: int) -> RerankResponse:
+    def request_output_to_rerank_response(self,
+                                          final_res_batch: list[PoolingRequestOutput],
+                                          request_id: str, model_name: str,
+                                          documents: list[str],
+                                          top_n: int) -> RerankResponse:
         """
         Convert the output of do_rank to a RerankResponse
         """
@@ -425,8 +421,7 @@ class ServingScores(OpenAIServing):
         if top_n < len(documents):
             results = results[:top_n]
 
-        return RerankResponse(
-            id=request_id,
-            model=model_name,
-            results=results,
-            usage=RerankUsage(total_tokens=num_prompt_tokens))
+        return RerankResponse(id=request_id,
+                              model=model_name,
+                              results=results,
+                              usage=RerankUsage(total_tokens=num_prompt_tokens))

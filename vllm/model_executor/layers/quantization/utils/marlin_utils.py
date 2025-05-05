@@ -30,12 +30,11 @@ USE_FP32_REDUCE_DEFAULT = True
 #  without runtime zero-point. We support common cases, i.e. AWQ and GPTQ.
 #  TODO: we may want to move this into the C++ so its closer to the actual impl
 def query_marlin_supported_quant_types(has_zp: bool,
-                                       device_capability: Optional[int] = None
-                                       ):
+                                       device_capability: Optional[int] = None):
     if device_capability is None:
         capability_tuple = current_platform.get_device_capability()
-        device_capability = (-1 if capability_tuple is None else
-                             capability_tuple.to_int())
+        device_capability = (-1
+                             if capability_tuple is None else capability_tuple.to_int())
 
     if device_capability < 80:
         return []
@@ -58,11 +57,10 @@ def _check_marlin_supported(
 
     if device_capability is None:
         capability_tuple = current_platform.get_device_capability()
-        device_capability = (-1 if capability_tuple is None else
-                             capability_tuple.to_int())
+        device_capability = (-1
+                             if capability_tuple is None else capability_tuple.to_int())
 
-    supported_types = query_marlin_supported_quant_types(
-        has_zp, device_capability)
+    supported_types = query_marlin_supported_quant_types(has_zp, device_capability)
 
     if quant_type not in supported_types:
         return (False, f"Marlin does not support weight_bits = {quant_type}. "
@@ -81,8 +79,7 @@ def check_marlin_supported(quant_type: ScalarType,
                            group_size: int,
                            has_zp: bool = False,
                            device_capability: Optional[int] = None) -> bool:
-    cond, _ = _check_marlin_supported(quant_type, group_size, has_zp,
-                                      device_capability)
+    cond, _ = _check_marlin_supported(quant_type, group_size, has_zp, device_capability)
     return cond
 
 
@@ -96,8 +93,8 @@ def verify_marlin_supported(quant_type: ScalarType,
 
 
 def verify_marlin_supports_shape(output_size_per_partition: int,
-                                 input_size_per_partition: int,
-                                 input_size: int, group_size: int) -> None:
+                                 input_size_per_partition: int, input_size: int,
+                                 group_size: int) -> None:
 
     # Validate output_size_per_partition
     if output_size_per_partition % GPTQ_MARLIN_MIN_THREAD_N != 0:
@@ -115,13 +112,11 @@ def verify_marlin_supports_shape(output_size_per_partition: int,
                          "Consider reducing tensor_parallel_size or running "
                          "with --quantization gptq.")
 
-    if (group_size < input_size
-            and input_size_per_partition % group_size != 0):
-        raise ValueError(
-            f"Weight input_size_per_partition = {input_size_per_partition}"
-            f" is not divisible by group_size = {group_size}. "
-            "Consider reducing tensor_parallel_size or running "
-            "with --quantization gptq.")
+    if (group_size < input_size and input_size_per_partition % group_size != 0):
+        raise ValueError(f"Weight input_size_per_partition = {input_size_per_partition}"
+                         f" is not divisible by group_size = {group_size}. "
+                         "Consider reducing tensor_parallel_size or running "
+                         "with --quantization gptq.")
 
 
 def check_marlin_supports_shape(output_size_per_partition: int,
@@ -130,8 +125,7 @@ def check_marlin_supports_shape(output_size_per_partition: int,
                                     -> Tuple[bool, Optional[str]]:
     try:
         verify_marlin_supports_shape(output_size_per_partition,
-                                     input_size_per_partition, input_size,
-                                     group_size)
+                                     input_size_per_partition, input_size, group_size)
     except ValueError as e:
         return False, e.__str__()
     return True, None
@@ -197,8 +191,7 @@ def marlin_make_empty_zp(device: torch.device) -> torch.Tensor:
                               requires_grad=False)
 
 
-def marlin_sort_g_idx(
-        g_idx: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+def marlin_sort_g_idx(g_idx: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     g_idx_sort_indices = torch.argsort(g_idx).to(torch.int)
     return g_idx[g_idx_sort_indices], g_idx_sort_indices
 
@@ -209,8 +202,7 @@ def get_scale_perms():
         scale_perm.extend([i + 8 * j for j in range(8)])
     scale_perm_single: List[int] = []
     for i in range(4):
-        scale_perm_single.extend(
-            [2 * i + j for j in [0, 1, 8, 9, 16, 17, 24, 25]])
+        scale_perm_single.extend([2 * i + j for j in [0, 1, 8, 9, 16, 17, 24, 25]])
     return scale_perm, scale_perm_single
 
 
@@ -267,8 +259,8 @@ def marlin_zero_points(zp: torch.Tensor, size_k: int, size_n: int,
     return zp
 
 
-def awq_to_marlin_zero_points(q_zp_packed: torch.Tensor, size_k: int,
-                              size_n: int, num_bits: int) -> torch.Tensor:
+def awq_to_marlin_zero_points(q_zp_packed: torch.Tensor, size_k: int, size_n: int,
+                              num_bits: int) -> torch.Tensor:
     # AWQ zero-points are quantized and packed on the column dim.
     # In addition, the values are permuted based on dequantizer.
     # Here we undo both of these, and then apply marlin permutation
@@ -290,8 +282,8 @@ def awq_to_marlin_zero_points(q_zp_packed: torch.Tensor, size_k: int,
     return marlin_zp
 
 
-def moe_awq_to_marlin_zero_points(q_zp_packed: torch.Tensor, size_k: int,
-                                  size_n: int, num_bits: int):
+def moe_awq_to_marlin_zero_points(q_zp_packed: torch.Tensor, size_k: int, size_n: int,
+                                  num_bits: int):
     num_experts = q_zp_packed.shape[0]
     output = torch.empty(
         (num_experts, q_zp_packed.shape[1], q_zp_packed.shape[2]),
@@ -299,8 +291,7 @@ def moe_awq_to_marlin_zero_points(q_zp_packed: torch.Tensor, size_k: int,
         dtype=q_zp_packed.dtype,
     )
     for e in range(num_experts):
-        output[e] = awq_to_marlin_zero_points(q_zp_packed[e], size_k, size_n,
-                                              num_bits)
+        output[e] = awq_to_marlin_zero_points(q_zp_packed[e], size_k, size_n, num_bits)
     return output
 
 

@@ -38,8 +38,7 @@ class ProperPass(InductorPass):
         ProperPass(),
         # Can also wrap callables in CallableInductorPass for compliance
         CallableInductorPass(simple_callable),
-        CallableInductorPass(simple_callable,
-                             InductorPass.hash_source(__file__))
+        CallableInductorPass(simple_callable, InductorPass.hash_source(__file__))
     ],
 )
 def test_pass_manager_uuid(callable):

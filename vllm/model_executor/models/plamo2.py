@@ -130,8 +130,7 @@ class Plamo2MambaMixer(nn.Module):
         self.hidden_size = config.hidden_size
         self.ssm_state_size = config.mamba_d_state
         self.conv_kernel_size = config.mamba_d_conv
-        self.intermediate_size = (config.mamba_num_heads *
-                                  config.hidden_size_per_head)
+        self.intermediate_size = (config.mamba_num_heads * config.hidden_size_per_head)
         self.hidden_size_per_head = config.hidden_size_per_head
         self.num_heads = config.mamba_num_heads
         self.time_step_rank = max(64, self.hidden_size // 16)
@@ -182,8 +181,8 @@ class Plamo2MambaMixer(nn.Module):
         self.D = nn.Parameter(torch.ones(self.intermediate_size // tp_size))
 
         set_weight_attrs(self.D, {"weight_loader": sharded_weight_loader(0)})
-        a_weight_loader = composed_weight_loader(
-            sharded_weight_loader(0), lambda x: -torch.exp(x.float()))
+        a_weight_loader = composed_weight_loader(sharded_weight_loader(0),
+                                                 lambda x: -torch.exp(x.float()))
         set_weight_attrs(self.A, {"weight_loader": a_weight_loader})
 
         self.out_proj = RowParallelLinear(
@@ -215,8 +214,7 @@ class Plamo2MambaMixer(nn.Module):
         length = len(hidden_states)
         projected_states = projected_states.reshape(length, self.num_heads, -1)
         gate, hidden_states = torch.split(
-            projected_states,
-            [self.hidden_size_per_head, self.hidden_size_per_head],
+            projected_states, [self.hidden_size_per_head, self.hidden_size_per_head],
             dim=-1)
         hidden_states = hidden_states.reshape(length, -1).transpose(0, 1)
         gate = gate.reshape(length, -1).transpose(0, 1)
@@ -268,17 +266,15 @@ class Plamo2MambaMixer(nn.Module):
 
         discrete_time_step = self.dt_proj(time_step)[0].transpose(-2, -1)
         # 3.c perform the recurrence y ← SSM(A, B, C)(x)
-        time_proj_bias = (self.dt_bias.float() if hasattr(
-            self.dt_proj, "bias") else None)
+        time_proj_bias = (self.dt_bias.float()
+                          if hasattr(self.dt_proj, "bias") else None)
 
         # Broadcasting as in modeling_plamo.py.
-        discrete_time_step = discrete_time_step.transpose(
-            0, 1)[..., None].expand(-1, -1, self.hidden_size_per_head)
+        discrete_time_step = discrete_time_step.transpose(0, 1)[..., None].expand(
+            -1, -1, self.hidden_size_per_head)
         discrete_time_step = discrete_time_step.reshape(
             -1, self.intermediate_size).transpose(0, 1)
-        time_proj_bias = time_proj_bias[...,
-                                        None].expand(-1,
-                                                     self.hidden_size_per_head)
+        time_proj_bias = time_proj_bias[..., None].expand(-1, self.hidden_size_per_head)
         time_proj_bias = time_proj_bias.reshape(self.intermediate_size)
 
         if attn_metadata.query_start_loc is not None \
@@ -313,8 +309,7 @@ class Plamo2MambaMixer(nn.Module):
             scan_outputs = scan_outputs.transpose(0, 1)
 
         # 4. Final linear projection
-        contextualized_states = self.out_proj(scan_outputs.transpose(-2,
-                                                                     -1))[0]
+        contextualized_states = self.out_proj(scan_outputs.transpose(-2, -1))[0]
         return contextualized_states
 
 
@@ -329,11 +324,11 @@ class DenseMLP(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
-        self.gate_up_proj = MergedColumnParallelLinear(
-            self.hidden_size, [self.intermediate_size] * 2,
-            bias=False,
-            prefix=f"{prefix}.gate_up_proj",
-            quant_config=quant_config)
+        self.gate_up_proj = MergedColumnParallelLinear(self.hidden_size,
+                                                       [self.intermediate_size] * 2,
+                                                       bias=False,
+                                                       prefix=f"{prefix}.gate_up_proj",
+                                                       quant_config=quant_config)
         self.down_proj = RowParallelLinear(self.intermediate_size,
                                            self.hidden_size,
                                            bias=False,
@@ -390,10 +385,9 @@ class Plamo2AttentionMixer(nn.Module):
                                         bias=False,
                                         quant_config=quant_config)
 
-        self.rope_theta = config.rope_theta if hasattr(config,
-                                                       "rope_theta") else 10000
-        self.rope_scaling = config.rope_scaling if hasattr(
-            config, "rope_scaling") else None
+        self.rope_theta = config.rope_theta if hasattr(config, "rope_theta") else 10000
+        self.rope_scaling = config.rope_scaling if hasattr(config,
+                                                           "rope_scaling") else None
 
         assert max_model_len is not None, "max_model_len must be provided"
         self.rotary_emb = get_rope(
@@ -465,14 +459,10 @@ class Plamo2DecoderLayer(nn.Module):
         self.mlp = DenseMLP(config=config,
                             quant_config=quant_config,
                             prefix=f"{prefix}.mlp")
-        self.pre_mixer_norm = RMSNorm(config.hidden_size,
-                                      eps=config.rms_norm_eps)
-        self.post_mixer_norm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
-        self.pre_mlp_norm = RMSNorm(config.hidden_size,
-                                    eps=config.rms_norm_eps)
-        self.post_mlp_norm = RMSNorm(config.hidden_size,
-                                     eps=config.rms_norm_eps)
+        self.pre_mixer_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_mixer_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.pre_mlp_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_mlp_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -486,8 +476,7 @@ class Plamo2DecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.pre_mixer_norm(hidden_states)
         else:
-            hidden_states, residual = self.pre_mixer_norm(
-                hidden_states, residual)
+            hidden_states, residual = self.pre_mixer_norm(hidden_states, residual)
 
         hidden_states = self.mixer(positions=positions,
                                    hidden_states=hidden_states,
@@ -529,11 +518,10 @@ class Plamo2Decoder(torch.nn.Module):
                     mamba_cache_index)
                 mamba_cache_index += 1
 
-            hidden_states, residual = layer(
-                positions=positions,
-                hidden_states=hidden_states,
-                residual=residual,
-                mamba_cache_params=layer_mamba_cache_params)
+            hidden_states, residual = layer(positions=positions,
+                                            hidden_states=hidden_states,
+                                            residual=residual,
+                                            mamba_cache_params=layer_mamba_cache_params)
         return hidden_states, residual
 
 
@@ -571,17 +559,15 @@ class Plamo2Model(Plamo2PreTrainedModel):
         hidden_states = self.embed_tokens(input_ids)
         residual = None
 
-        hidden_states, residual = self.layers(
-            positions=positions,
-            hidden_states=hidden_states,
-            residual=residual,
-            mamba_cache_params=mamba_cache_params)
+        hidden_states, residual = self.layers(positions=positions,
+                                              hidden_states=hidden_states,
+                                              residual=residual,
+                                              mamba_cache_params=mamba_cache_params)
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
 
-class Plamo2ForCausalLM(Plamo2PreTrainedModel, HasInnerState, IsHybrid,
-                        SupportsV0Only):
+class Plamo2ForCausalLM(Plamo2PreTrainedModel, HasInnerState, IsHybrid, SupportsV0Only):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -641,9 +627,10 @@ class Plamo2ForCausalLM(Plamo2PreTrainedModel, HasInnerState, IsHybrid,
             num_mamba_layers = self.model_config.get_num_layers_by_block_type(
                 self.vllm_config.parallel_config, LayerBlockType.mamba)
 
-            self.mamba_cache = MambaCacheManager(
-                self.vllm_config, self.lm_head.weight.dtype, num_mamba_layers,
-                *self._get_mamba_cache_shape())
+            self.mamba_cache = MambaCacheManager(self.vllm_config,
+                                                 self.lm_head.weight.dtype,
+                                                 num_mamba_layers,
+                                                 *self._get_mamba_cache_shape())
 
         mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
 
@@ -652,17 +639,14 @@ class Plamo2ForCausalLM(Plamo2PreTrainedModel, HasInnerState, IsHybrid,
         return hidden_states
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
-        return self.mamba_cache.copy_inputs_before_cuda_graphs(
-            input_buffers, **kwargs)
+        return self.mamba_cache.copy_inputs_before_cuda_graphs(input_buffers, **kwargs)
 
     def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
         return self.mamba_cache.get_seqlen_agnostic_capture_inputs(batch_size)
 
-    def _get_mamba_cache_shape(
-            self) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+    def _get_mamba_cache_shape(self) -> Tuple[Tuple[int, int], Tuple[int, int]]:
         world_size = get_tensor_model_parallel_world_size()
-        hidden_size = (self.config.mamba_num_heads *
-                       self.config.hidden_size_per_head)
+        hidden_size = (self.config.mamba_num_heads * self.config.hidden_size_per_head)
         conv_state_shape = (
             hidden_size // world_size,
             self.config.mamba_d_conv - 1,
@@ -678,8 +662,7 @@ class Plamo2ForCausalLM(Plamo2PreTrainedModel, HasInnerState, IsHybrid,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
         return logits
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
@@ -710,10 +693,8 @@ class Plamo2ForCausalLM(Plamo2PreTrainedModel, HasInnerState, IsHybrid,
             # Broadcast the loaded weight to match the model's parameter shape.
             if ".A" in name:
                 loaded_weight = loaded_weight[:, None, None].expand(
-                    -1, self.config.hidden_size_per_head,
-                    self.config.mamba_d_state)
-                loaded_weight = loaded_weight.reshape(
-                    -1, self.config.mamba_d_state)
+                    -1, self.config.hidden_size_per_head, self.config.mamba_d_state)
+                loaded_weight = loaded_weight.reshape(-1, self.config.mamba_d_state)
             elif ".D" in name:
                 loaded_weight = loaded_weight[:, None].expand(
                     -1, self.config.hidden_size_per_head)
@@ -731,6 +712,5 @@ class Plamo2ForCausalLM(Plamo2PreTrainedModel, HasInnerState, IsHybrid,
                 loaded_weight += 1.0
 
             param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, loaded_weight)

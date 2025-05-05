@@ -157,9 +157,8 @@ class LLM:
     @deprecate_args(
         start_index=2,  # Ignore self and model
         is_deprecated=lambda: LLM.DEPRECATE_INIT_POSARGS,
-        additional_message=(
-            "All positional arguments other than `model` will be "
-            "replaced with keyword arguments in an upcoming version."),
+        additional_message=("All positional arguments other than `model` will be "
+                            "replaced with keyword arguments in an upcoming version."),
     )
     def __init__(
         self,
@@ -253,8 +252,7 @@ class LLM:
         self,
         lora_request: Optional[LoRARequest] = None,
     ) -> AnyTokenizer:
-        return self.llm_engine.get_tokenizer_group().get_lora_tokenizer(
-            lora_request)
+        return self.llm_engine.get_tokenizer_group().get_lora_tokenizer(lora_request)
 
     def set_tokenizer(self, tokenizer: AnyTokenizer) -> None:
         tokenizer_group = self.llm_engine.get_tokenizer_group()
@@ -296,8 +294,7 @@ class LLM:
     def generate(
         self,
         prompts: str,
-        sampling_params: Optional[Union[SamplingParams,
-                                        list[SamplingParams]]] = None,
+        sampling_params: Optional[Union[SamplingParams, list[SamplingParams]]] = None,
         prompt_token_ids: Optional[list[int]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
@@ -312,8 +309,7 @@ class LLM:
     def generate(
         self,
         prompts: list[str],
-        sampling_params: Optional[Union[SamplingParams,
-                                        list[SamplingParams]]] = None,
+        sampling_params: Optional[Union[SamplingParams, list[SamplingParams]]] = None,
         prompt_token_ids: Optional[list[list[int]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
@@ -328,8 +324,7 @@ class LLM:
     def generate(
         self,
         prompts: Optional[str] = None,
-        sampling_params: Optional[Union[SamplingParams,
-                                        list[SamplingParams]]] = None,
+        sampling_params: Optional[Union[SamplingParams, list[SamplingParams]]] = None,
         *,
         prompt_token_ids: list[int],
         use_tqdm: bool = True,
@@ -345,8 +340,7 @@ class LLM:
     def generate(
         self,
         prompts: Optional[list[str]] = None,
-        sampling_params: Optional[Union[SamplingParams,
-                                        list[SamplingParams]]] = None,
+        sampling_params: Optional[Union[SamplingParams, list[SamplingParams]]] = None,
         *,
         prompt_token_ids: list[list[int]],
         use_tqdm: bool = True,
@@ -446,16 +440,13 @@ class LLM:
                 prompt_token_ids=prompt_token_ids,
             )
         else:
-            parsed_prompts = cast(Union[PromptType, Sequence[PromptType]],
-                                  prompts)
+            parsed_prompts = cast(Union[PromptType, Sequence[PromptType]], prompts)
 
         if isinstance(guided_options_request, dict):
             if len(guided_options_request) > 1:
-                raise ValueError(
-                    "You can only use one guided decoding but multiple is "
-                    f"specified: {guided_options_request}")
-            guided_options_request = GuidedDecodingRequest(
-                **guided_options_request)
+                raise ValueError("You can only use one guided decoding but multiple is "
+                                 f"specified: {guided_options_request}")
+            guided_options_request = GuidedDecodingRequest(**guided_options_request)
 
         if sampling_params is None:
             # Use default sampling params.
@@ -536,20 +527,15 @@ class LLM:
 
         def sort_beams_key(x: BeamSearchSequence) -> float:
             return get_beam_search_score(x.tokens, x.cum_logprob,
-                                         tokenizer.eos_token_id,
-                                         length_penalty)
+                                         tokenizer.eos_token_id, length_penalty)
 
-        def create_tokens_prompt_from_beam(
-                beam: BeamSearchSequence) -> TokensPrompt:
-            token_prompt_kwargs: TokensPrompt = {
-                "prompt_token_ids": beam.tokens
-            }
+        def create_tokens_prompt_from_beam(beam: BeamSearchSequence) -> TokensPrompt:
+            token_prompt_kwargs: TokensPrompt = {"prompt_token_ids": beam.tokens}
             if beam.multi_modal_data is not None:
                 token_prompt_kwargs["multi_modal_data"] = beam.multi_modal_data
 
             if beam.mm_processor_kwargs is not None:
-                token_prompt_kwargs[
-                    "mm_processor_kwargs"] = beam.mm_processor_kwargs
+                token_prompt_kwargs["mm_processor_kwargs"] = beam.mm_processor_kwargs
             return TokensPrompt(**token_prompt_kwargs)
 
         tokenizer = self.get_tokenizer()
@@ -567,8 +553,7 @@ class LLM:
             if "multi_modal_data" in prompt:
                 mm_kwargs["multi_modal_data"] = prompt["multi_modal_data"]
             if "mm_processor_kwargs" in prompt:
-                mm_kwargs["mm_processor_kwargs"] = prompt[
-                    "mm_processor_kwargs"]
+                mm_kwargs["mm_processor_kwargs"] = prompt["mm_processor_kwargs"]
 
             if "prompt_token_ids" in prompt:
                 prompt = cast(TokensPrompt, prompt)  # Needed for mypy
@@ -583,17 +568,13 @@ class LLM:
             all_beams: list[BeamSearchSequence] = list(
                 sum((instance.beams for instance in instances), []))
             pos = [0] + list(
-                itertools.accumulate(
-                    len(instance.beams) for instance in instances))
-            instance_start_and_end: list[tuple[int, int]] = list(
-                zip(pos[:-1], pos[1:]))
+                itertools.accumulate(len(instance.beams) for instance in instances))
+            instance_start_and_end: list[tuple[int, int]] = list(zip(pos[:-1], pos[1:]))
 
             if len(all_beams) == 0:
                 break
 
-            prompts_batch = [
-                create_tokens_prompt_from_beam(beam) for beam in all_beams
-            ]
+            prompts_batch = [create_tokens_prompt_from_beam(beam) for beam in all_beams]
 
             # only runs for one step
             # we don't need to use tqdm here
@@ -601,8 +582,7 @@ class LLM:
                                    sampling_params=beam_search_params,
                                    use_tqdm=False)
 
-            for (start, end), instance in zip(instance_start_and_end,
-                                              instances):
+            for (start, end), instance in zip(instance_start_and_end, instances):
                 instance_new_beams = []
                 for i in range(start, end):
                     current_beam = all_beams[i]
@@ -620,8 +600,7 @@ class LLM:
                                 cum_logprob=current_beam.cum_logprob +
                                 logprob_obj.logprob,
                                 multi_modal_data=current_beam.multi_modal_data,
-                                mm_processor_kwargs=current_beam.
-                                mm_processor_kwargs)
+                                mm_processor_kwargs=current_beam.mm_processor_kwargs)
 
                             if token_id == tokenizer.eos_token_id and \
                                 not ignore_eos:
@@ -651,8 +630,7 @@ class LLM:
         self,
         messages: Union[list[ChatCompletionMessageParam],
                         list[list[ChatCompletionMessageParam]]],
-        sampling_params: Optional[Union[SamplingParams,
-                                        list[SamplingParams]]] = None,
+        sampling_params: Optional[Union[SamplingParams, list[SamplingParams]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
         chat_template: Optional[str] = None,
@@ -715,13 +693,10 @@ class LLM:
         # Handle multi and single conversations
         if is_list_of(messages, list):
             # messages is list[list[...]]
-            list_of_messages = cast(list[list[ChatCompletionMessageParam]],
-                                    messages)
+            list_of_messages = cast(list[list[ChatCompletionMessageParam]], messages)
         else:
             # messages is list[...]
-            list_of_messages = [
-                cast(list[ChatCompletionMessageParam], messages)
-            ]
+            list_of_messages = [cast(list[ChatCompletionMessageParam], messages)]
 
         tokenizer = self.get_tokenizer(lora_request)
         model_config = self.llm_engine.get_model_config()
@@ -794,8 +769,7 @@ class LLM:
         self,
         prompts: Union[PromptType, Sequence[PromptType]],
         /,
-        pooling_params: Optional[Union[PoolingParams,
-                                       Sequence[PoolingParams]]] = None,
+        pooling_params: Optional[Union[PoolingParams, Sequence[PoolingParams]]] = None,
         *,
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: bool = True,
@@ -809,8 +783,7 @@ class LLM:
     def encode(
         self,
         prompts: str,
-        pooling_params: Optional[Union[PoolingParams,
-                                       Sequence[PoolingParams]]] = None,
+        pooling_params: Optional[Union[PoolingParams, Sequence[PoolingParams]]] = None,
         prompt_token_ids: Optional[list[int]] = None,
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: bool = True,
@@ -824,8 +797,7 @@ class LLM:
     def encode(
         self,
         prompts: list[str],
-        pooling_params: Optional[Union[PoolingParams,
-                                       Sequence[PoolingParams]]] = None,
+        pooling_params: Optional[Union[PoolingParams, Sequence[PoolingParams]]] = None,
         prompt_token_ids: Optional[list[list[int]]] = None,
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: bool = True,
@@ -839,8 +811,7 @@ class LLM:
     def encode(
         self,
         prompts: Optional[str] = None,
-        pooling_params: Optional[Union[PoolingParams,
-                                       Sequence[PoolingParams]]] = None,
+        pooling_params: Optional[Union[PoolingParams, Sequence[PoolingParams]]] = None,
         *,
         prompt_token_ids: list[int],
         truncate_prompt_tokens: Optional[int] = None,
@@ -855,8 +826,7 @@ class LLM:
     def encode(
         self,
         prompts: Optional[list[str]] = None,
-        pooling_params: Optional[Union[PoolingParams,
-                                       Sequence[PoolingParams]]] = None,
+        pooling_params: Optional[Union[PoolingParams, Sequence[PoolingParams]]] = None,
         *,
         prompt_token_ids: list[list[int]],
         truncate_prompt_tokens: Optional[int] = None,
@@ -889,8 +859,7 @@ class LLM:
         self,
         prompts: Union[Union[PromptType, Sequence[PromptType]],
                        Optional[Union[str, list[str]]]] = None,
-        pooling_params: Optional[Union[PoolingParams,
-                                       Sequence[PoolingParams]]] = None,
+        pooling_params: Optional[Union[PoolingParams, Sequence[PoolingParams]]] = None,
         prompt_token_ids: Optional[Union[list[int], list[list[int]]]] = None,
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: bool = True,
@@ -946,8 +915,7 @@ class LLM:
                 prompt_token_ids=prompt_token_ids,
             )
         else:
-            parsed_prompts = cast(Union[PromptType, Sequence[PromptType]],
-                                  prompts)
+            parsed_prompts = cast(Union[PromptType, Sequence[PromptType]], prompts)
 
         if pooling_params is None:
             # Use default pooling params.
@@ -972,8 +940,7 @@ class LLM:
         )
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
-        return self.engine_class.validate_outputs(outputs,
-                                                  PoolingRequestOutput)
+        return self.engine_class.validate_outputs(outputs, PoolingRequestOutput)
 
     def embed(
         self,
@@ -982,8 +949,7 @@ class LLM:
         *,
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: bool = True,
-        pooling_params: Optional[Union[PoolingParams,
-                                       Sequence[PoolingParams]]] = None,
+        pooling_params: Optional[Union[PoolingParams, Sequence[PoolingParams]]] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> list[EmbeddingRequestOutput]:
@@ -1010,8 +976,7 @@ class LLM:
             embedding vectors in the same order as the input prompts.
         """
         if self.llm_engine.model_config.task != "embed":
-            raise ValueError(
-                "Embedding API is only enabled for `--task embed`")
+            raise ValueError("Embedding API is only enabled for `--task embed`")
 
         items = self.encode(prompts,
                             truncate_prompt_tokens=truncate_prompt_tokens,
@@ -1052,8 +1017,7 @@ class LLM:
             embedding vectors in the same order as the input prompts.
         """
         if self.llm_engine.model_config.task != "classify":
-            raise ValueError(
-                "Classification API is only enabled for `--task classify`")
+            raise ValueError("Classification API is only enabled for `--task classify`")
 
         items = self.encode(prompts,
                             use_tqdm=use_tqdm,
@@ -1080,10 +1044,8 @@ class LLM:
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request)
 
-        encoded_output_1: list[PoolingRequestOutput] = encoded_output[
-            0:len(text_1)]
-        encoded_output_2: list[PoolingRequestOutput] = encoded_output[
-            len(text_1):]
+        encoded_output_1: list[PoolingRequestOutput] = encoded_output[0:len(text_1)]
+        encoded_output_2: list[PoolingRequestOutput] = encoded_output[len(text_1):]
 
         if len(encoded_output_1) == 1:
             encoded_output_1 = encoded_output_1 * len(encoded_output_2)
@@ -1092,8 +1054,7 @@ class LLM:
                                     embed_1=encoded_output_1,
                                     embed_2=encoded_output_2)
 
-        items = self.engine_class.validate_outputs(scores,
-                                                   PoolingRequestOutput)
+        items = self.engine_class.validate_outputs(scores, PoolingRequestOutput)
         return [ScoringRequestOutput.from_base(item) for item in items]
 
     def _cross_encoding_score(
@@ -1108,8 +1069,7 @@ class LLM:
     ) -> list[ScoringRequestOutput]:
 
         if isinstance(tokenizer, MistralTokenizer):
-            raise ValueError(
-                "Score API is only enabled for `--task embed or score`")
+            raise ValueError("Score API is only enabled for `--task embed or score`")
 
         if len(text_1) == 1:
             text_1 = text_1 * len(text_2)
@@ -1125,9 +1085,7 @@ class LLM:
         parsed_prompts = []
 
         for q, t in input_pairs:
-            prompt_inputs = tokenizer(text=q,
-                                      text_pair=t,
-                                      **tokenization_kwargs)
+            prompt_inputs = tokenizer(text=q, text_pair=t, **tokenization_kwargs)
             engine_prompt = TokensPrompt(
                 prompt_token_ids=prompt_inputs["input_ids"],
                 token_type_ids=prompt_inputs.get("token_type_ids"))
@@ -1142,8 +1100,7 @@ class LLM:
         )
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
-        items = self.engine_class.validate_outputs(outputs,
-                                                   PoolingRequestOutput)
+        items = self.engine_class.validate_outputs(outputs, PoolingRequestOutput)
 
         return [ScoringRequestOutput.from_base(item) for item in items]
 
@@ -1233,11 +1190,9 @@ class LLM:
         _validate_score_input_lens(input_text_1, input_text_2)
 
         if self.llm_engine.model_config.is_cross_encoder:
-            return self._cross_encoding_score(tokenizer, input_text_1,
-                                              input_text_2,
+            return self._cross_encoding_score(tokenizer, input_text_1, input_text_2,
                                               truncate_prompt_tokens, use_tqdm,
-                                              lora_request,
-                                              prompt_adapter_request)
+                                              lora_request, prompt_adapter_request)
         else:
             return self._embedding_score(
                 tokenizer,
@@ -1312,8 +1267,7 @@ class LLM:
         if prompts is not None:
             num_requests = len(prompts)
         if prompt_token_ids is not None:
-            if (num_requests is not None
-                    and num_requests != len(prompt_token_ids)):
+            if (num_requests is not None and num_requests != len(prompt_token_ids)):
                 raise ValueError("The lengths of prompts and prompt_token_ids "
                                  "must be the same.")
 
@@ -1366,8 +1320,7 @@ class LLM:
         if isinstance(params, list) and len(params) != num_requests:
             raise ValueError("The lengths of prompts and params "
                              "must be the same.")
-        if isinstance(lora_request,
-                      list) and len(lora_request) != num_requests:
+        if isinstance(lora_request, list) and len(lora_request) != num_requests:
             raise ValueError("The lengths of prompts and lora_request "
                              "must be the same.")
 
@@ -1388,8 +1341,8 @@ class LLM:
                 prompt,
                 params[i] if isinstance(params, Sequence) else params,
                 tokenization_kwargs=tokenization_kwargs,
-                lora_request=lora_request[i] if isinstance(
-                    lora_request, Sequence) else lora_request,
+                lora_request=lora_request[i]
+                if isinstance(lora_request, Sequence) else lora_request,
                 prompt_adapter_request=prompt_adapter_request,
                 priority=priority[i] if priority else 0,
             )
@@ -1414,10 +1367,9 @@ class LLM:
             priority=priority,
         )
 
-    def _add_guided_params(
-            self,
-            params: SamplingParams,
-            guided_options: Optional[GuidedDecodingRequest] = None):
+    def _add_guided_params(self,
+                           params: SamplingParams,
+                           guided_options: Optional[GuidedDecodingRequest] = None):
         if guided_options is None:
             return params
 
@@ -1437,9 +1389,8 @@ class LLM:
         )
         return params
 
-    def _run_engine(
-            self, *, use_tqdm: bool
-    ) -> list[Union[RequestOutput, PoolingRequestOutput]]:
+    def _run_engine(self, *,
+                    use_tqdm: bool) -> list[Union[RequestOutput, PoolingRequestOutput]]:
         # Initialize tqdm.
         if use_tqdm:
             num_requests = self.llm_engine.get_num_unfinished_requests()
@@ -1469,11 +1420,9 @@ class LLM:
                             in_spd = total_in_toks / pbar.format_dict["elapsed"]
                             total_out_toks += sum(
                                 len(stp.token_ids) for stp in output.outputs)
-                            out_spd = (total_out_toks /
-                                       pbar.format_dict["elapsed"])
-                            pbar.postfix = (
-                                f"est. speed input: {in_spd:.2f} toks/s, "
-                                f"output: {out_spd:.2f} toks/s")
+                            out_spd = (total_out_toks / pbar.format_dict["elapsed"])
+                            pbar.postfix = (f"est. speed input: {in_spd:.2f} toks/s, "
+                                            f"output: {out_spd:.2f} toks/s")
                             pbar.update(n)
                         else:
                             pbar.update(1)

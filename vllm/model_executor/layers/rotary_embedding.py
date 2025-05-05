@@ -81,8 +81,7 @@ def _apply_rotary_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
             positional embeddings.
     """
     if current_platform.is_cuda():
-        return apply_rotary_emb(x.unsqueeze(0), cos, sin,
-                                not is_neox_style).squeeze(0)
+        return apply_rotary_emb(x.unsqueeze(0), cos, sin, not is_neox_style).squeeze(0)
     else:
         return _apply_rotary_emb_torch(x, cos, sin, is_neox_style)
 
@@ -119,8 +118,8 @@ class RotaryEmbedding(CustomOp):
         # use CPU to compute the cache and then move it to GPU. However, we
         # create the cache on GPU for faster initialization. This may cause
         # a slight numerical difference between the HF implementation and ours.
-        inv_freq = 1.0 / (base**(torch.arange(
-            0, self.rotary_dim, 2, dtype=torch.float) / self.rotary_dim))
+        inv_freq = 1.0 / (base**(
+            torch.arange(0, self.rotary_dim, 2, dtype=torch.float) / self.rotary_dim))
         return inv_freq
 
     def _compute_cos_sin_cache(self) -> torch.Tensor:
@@ -153,16 +152,14 @@ class RotaryEmbedding(CustomOp):
         query = query.view(num_tokens, -1, self.head_size)
         query_rot = query[..., :self.rotary_dim]
         query_pass = query[..., self.rotary_dim:]
-        query_rot = _apply_rotary_emb_torch(query_rot, cos, sin,
-                                            self.is_neox_style)
+        query_rot = _apply_rotary_emb_torch(query_rot, cos, sin, self.is_neox_style)
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
         key_shape = key.shape
         key = key.view(num_tokens, -1, self.head_size)
         key_rot = key[..., :self.rotary_dim]
         key_pass = key[..., self.rotary_dim:]
-        key_rot = _apply_rotary_emb_torch(key_rot, cos, sin,
-                                          self.is_neox_style)
+        key_rot = _apply_rotary_emb_torch(key_rot, cos, sin, self.is_neox_style)
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 
@@ -179,16 +176,14 @@ class RotaryEmbedding(CustomOp):
         # is expensive, so avoid calling it if possible
         if self.cos_sin_cache.device != query.device or \
             self.cos_sin_cache.dtype != query.dtype:
-            self.cos_sin_cache = self.cos_sin_cache.to(query.device,
-                                                       dtype=query.dtype)
+            self.cos_sin_cache = self.cos_sin_cache.to(query.device, dtype=query.dtype)
 
         # ops.rotary_embedding()/batched_rotary_embedding()
         # are in-place operations that update the query and key tensors.
         if offsets is not None:
             ops.batched_rotary_embedding(positions, query, key, self.head_size,
-                                         self.cos_sin_cache,
-                                         self.is_neox_style, self.rotary_dim,
-                                         offsets)
+                                         self.cos_sin_cache, self.is_neox_style,
+                                         self.rotary_dim, offsets)
         else:
             ops.rotary_embedding(positions, query, key, self.head_size,
                                  self.cos_sin_cache, self.is_neox_style)
@@ -203,15 +198,13 @@ class RotaryEmbedding(CustomOp):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         from vllm._ipex_ops import ipex_ops as ops
 
-        self.cos_sin_cache = self.cos_sin_cache.to(positions.device,
-                                                   dtype=query.dtype)
+        self.cos_sin_cache = self.cos_sin_cache.to(positions.device, dtype=query.dtype)
         # ops.rotary_embedding()/batched_rotary_embedding()
         # are in-place operations that update the query and key tensors.
         if offsets is not None:
             ops.batched_rotary_embedding(positions, query, key, self.head_size,
-                                         self.cos_sin_cache,
-                                         self.is_neox_style, self.rotary_dim,
-                                         offsets)
+                                         self.cos_sin_cache, self.is_neox_style,
+                                         self.rotary_dim, offsets)
         else:
             ops.rotary_embedding(positions, query, key, self.head_size,
                                  self.cos_sin_cache, self.is_neox_style)
@@ -231,8 +224,7 @@ class RotaryEmbedding(CustomOp):
             positions = positions + offsets
         positions = positions.flatten()
         num_tokens = positions.shape[0]
-        cos_sin = self.cos_sin_cache.index_select(0, positions).view(
-            num_tokens, 1, -1)
+        cos_sin = self.cos_sin_cache.index_select(0, positions).view(num_tokens, 1, -1)
         cos, sin = cos_sin.chunk(2, dim=-1)
         # HPU RoPE kernel requires hidden dimension for cos and sin to be equal
         # to query hidden dimension, so the original tensors need to be
@@ -248,21 +240,14 @@ class RotaryEmbedding(CustomOp):
             sin = torch.cat((sin, sin), dim=-1)
         else:
             rope_mode = RotaryPosEmbeddingMode.PAIRWISE
-            sin = torch.repeat_interleave(sin,
-                                          2,
-                                          dim=-1,
-                                          output_size=cos_sin.shape[-1])
-            cos = torch.repeat_interleave(cos,
-                                          2,
-                                          dim=-1,
-                                          output_size=cos_sin.shape[-1])
+            sin = torch.repeat_interleave(sin, 2, dim=-1, output_size=cos_sin.shape[-1])
+            cos = torch.repeat_interleave(cos, 2, dim=-1, output_size=cos_sin.shape[-1])
 
         query_shape = query.shape
         query = query.view(num_tokens, -1, self.head_size)
         query_rot = query[..., :self.rotary_dim]
         query_pass = query[..., self.rotary_dim:]
-        query_rot = apply_rotary_pos_emb(query_rot, cos, sin, None, 0,
-                                         rope_mode)
+        query_rot = apply_rotary_pos_emb(query_rot, cos, sin, None, 0, rope_mode)
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
         key_shape = key.shape
@@ -309,8 +294,7 @@ class RotaryEmbedding(CustomOp):
         if offsets is not None:
             positions = positions + offsets
 
-        self.cos_sin_cache = self.cos_sin_cache.to(query.device,
-                                                   dtype=query.dtype)
+        self.cos_sin_cache = self.cos_sin_cache.to(query.device, dtype=query.dtype)
 
         positions = positions.flatten()
         num_tokens = positions.shape[0]
@@ -336,16 +320,15 @@ class RotaryEmbedding(CustomOp):
                 *query.shape[:-1], self.rotary_dim)
             query_rot = _apply_rotary_emb_neuron(query_rot, cos, sin,
                                                  self.is_neox_style)
-            query = torch.cat((query_rot, query_pass),
-                              dim=-1).reshape(query_shape)
+            query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
             key_reshaped = key.view(-1, head_size)
-            key_pass = key_reshaped[:, self.rotary_dim:].view(
-                *key.shape[:-1], head_size - self.rotary_dim)
-            key_rot = key_reshaped[:, :self.rotary_dim].view(
-                *key.shape[:-1], self.rotary_dim)
-            key_rot = _apply_rotary_emb_neuron(key_rot, cos, sin,
-                                               self.is_neox_style)
+            key_pass = key_reshaped[:,
+                                    self.rotary_dim:].view(*key.shape[:-1],
+                                                           head_size - self.rotary_dim)
+            key_rot = key_reshaped[:, :self.rotary_dim].view(*key.shape[:-1],
+                                                             self.rotary_dim)
+            key_rot = _apply_rotary_emb_neuron(key_rot, cos, sin, self.is_neox_style)
             key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 
@@ -470,8 +453,7 @@ class DynamicNTKScalingRotaryEmbedding(RotaryEmbedding):
         max_len = self.max_position_embeddings * self.scaling_factor
         base = self.base * (
             (self.scaling_factor * max_len / self.max_position_embeddings) -
-            (self.scaling_factor - 1))**(self.rotary_dim /
-                                         (self.rotary_dim - 2))
+            (self.scaling_factor - 1))**(self.rotary_dim / (self.rotary_dim - 2))
         inv_freq = self._compute_inv_freq(base)
         t = torch.arange(max_len, dtype=torch.float)
 
@@ -488,22 +470,19 @@ def _yarn_find_correction_dim(num_rotations: int,
                               base: float = 10000,
                               max_position_embeddings: int = 2048) -> float:
     return (dim * math.log(max_position_embeddings /
-                           (num_rotations * 2 * math.pi))) / (2 *
-                                                              math.log(base))
+                           (num_rotations * 2 * math.pi))) / (2 * math.log(base))
 
 
 # Find dim range bounds based on rotations
-def _yarn_find_correction_range(
-        low_rot: int,
-        high_rot: int,
-        dim: int,
-        base: float = 10000,
-        max_position_embeddings: int = 2048) -> Tuple[int, int]:
+def _yarn_find_correction_range(low_rot: int,
+                                high_rot: int,
+                                dim: int,
+                                base: float = 10000,
+                                max_position_embeddings: int = 2048) -> Tuple[int, int]:
     low = math.floor(
         _yarn_find_correction_dim(low_rot, dim, base, max_position_embeddings))
     high = math.ceil(
-        _yarn_find_correction_dim(high_rot, dim, base,
-                                  max_position_embeddings))
+        _yarn_find_correction_dim(high_rot, dim, base, max_position_embeddings))
     return max(low, 0), min(high, dim - 1)  # Clamp values just in case
 
 
@@ -550,15 +529,13 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
         self.beta_fast = beta_fast
         self.beta_slow = beta_slow
         # Get n-d magnitude scaling corrected for interpolation
-        self.mscale = float(
-            _yarn_get_mscale(self.scaling_factor) * attn_factor)
+        self.mscale = float(_yarn_get_mscale(self.scaling_factor) * attn_factor)
         super().__init__(head_size, rotary_dim, max_position_embeddings, base,
                          is_neox_style, dtype)
 
     def _compute_inv_freq(self, scaling_factor: float) -> torch.Tensor:
-        pos_freqs = self.base**(
-            torch.arange(0, self.rotary_dim, 2, dtype=torch.float) /
-            self.rotary_dim)
+        pos_freqs = self.base**(torch.arange(0, self.rotary_dim, 2, dtype=torch.float) /
+                                self.rotary_dim)
         inv_freq_extrapolation = 1.0 / pos_freqs
         inv_freq_interpolation = 1.0 / (scaling_factor * pos_freqs)
 
@@ -608,8 +585,7 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
 
         if is_neox_style is False:
             raise ValueError(
-                "`Phi3LongRoPEScaledRotaryEmbedding` only supports neox_style."
-            )
+                "`Phi3LongRoPEScaledRotaryEmbedding` only supports neox_style.")
 
         self.rotary_dim = rotary_dim
         self.head_size = head_size
@@ -624,9 +600,8 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
         if scale <= 1.0:
             scaling_factor = 1.0
         else:
-            scaling_factor = math.sqrt(
-                1 + math.log(scale) /
-                math.log(self.original_max_position_embeddings))
+            scaling_factor = math.sqrt(1 + math.log(scale) /
+                                       math.log(self.original_max_position_embeddings))
         if short_mscale is None:
             short_mscale = scaling_factor
         if long_mscale is None:
@@ -635,12 +610,12 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
         self.short_mscale = short_mscale
         self.long_mscale = long_mscale
 
-        short_cache = self._compute_cos_sin_cache(
-            original_max_position_embeddings, short_factor, short_mscale)
+        short_cache = self._compute_cos_sin_cache(original_max_position_embeddings,
+                                                  short_factor, short_mscale)
         short_cache = short_cache.to(dtype)
 
-        long_cache = self._compute_cos_sin_cache(max_position_embeddings,
-                                                 long_factor, long_mscale)
+        long_cache = self._compute_cos_sin_cache(max_position_embeddings, long_factor,
+                                                 long_mscale)
         long_cache = long_cache.to(dtype)
 
         long_short_cache = torch.cat([short_cache, long_cache], dim=0)
@@ -650,8 +625,8 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
 
     def _compute_inv_freq(self, rescale_factors: List[float]) -> torch.Tensor:
         rescale_factors = torch.tensor(rescale_factors, dtype=torch.float32)
-        inv_freq = 1.0 / (rescale_factors * (self.base**(torch.arange(
-            0, self.rotary_dim, 2, dtype=torch.float) / self.rotary_dim)))
+        inv_freq = 1.0 / (rescale_factors * (self.base**(
+            torch.arange(0, self.rotary_dim, 2, dtype=torch.float) / self.rotary_dim)))
         return inv_freq
 
     def _compute_cos_sin_cache(
@@ -740,19 +715,17 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         # Get n-d magnitude scaling corrected for interpolation.
         self.mscale = float(
             yarn_get_mscale(self.scaling_factor, float(mscale)) /
-            yarn_get_mscale(self.scaling_factor, float(mscale_all_dim)) *
-            attn_factor)
+            yarn_get_mscale(self.scaling_factor, float(mscale_all_dim)) * attn_factor)
         super().__init__(head_size, rotary_dim, max_position_embeddings, base,
                          is_neox_style, dtype)
 
     def _compute_inv_freq(self, scaling_factor: float) -> torch.Tensor:
-        pos_freqs = self.base**(
-            torch.arange(0,
-                         self.rotary_dim,
-                         2,
-                         dtype=torch.float,
-                         device=current_platform.device_type) /
-            self.rotary_dim)
+        pos_freqs = self.base**(torch.arange(0,
+                                             self.rotary_dim,
+                                             2,
+                                             dtype=torch.float,
+                                             device=current_platform.device_type) /
+                                self.rotary_dim)
         inv_freq_extrapolation = 1.0 / pos_freqs
         inv_freq_interpolation = 1.0 / (scaling_factor * pos_freqs)
 
@@ -792,10 +765,9 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
             query_pass = query[..., self.rotary_dim:]
             key_pass = key[..., self.rotary_dim:]
 
-        self.cos_sin_cache: torch.Tensor = self.cos_sin_cache.to(
-            positions.device)
-        cos_sin = self.cos_sin_cache[torch.add(positions, offsets)
-                                     if offsets is not None else positions]
+        self.cos_sin_cache: torch.Tensor = self.cos_sin_cache.to(positions.device)
+        cos_sin = self.cos_sin_cache[torch.add(positions, offsets
+                                               ) if offsets is not None else positions]
         cos, sin = cos_sin.chunk(2, dim=-1)
         if self.is_neox_style:
             # NOTE(woosuk): Here we assume that the positions tensor has the
@@ -848,8 +820,8 @@ class Llama3RotaryEmbedding(RotaryEmbedding):
 
         wave_len = 2 * math.pi / inv_freqs
         if self.low_freq_factor != self.high_freq_factor:
-            smooth = (self.orig_max_position / wave_len - self.low_freq_factor
-                      ) / (self.high_freq_factor - self.low_freq_factor)
+            smooth = (self.orig_max_position / wave_len - self.low_freq_factor) / (
+                self.high_freq_factor - self.low_freq_factor)
         else:
             smooth = 0
         new_freqs = torch.where(
@@ -858,8 +830,7 @@ class Llama3RotaryEmbedding(RotaryEmbedding):
             torch.where(
                 wave_len > low_freq_wavelen,
                 inv_freqs / self.scaling_factor,
-                (1 - smooth) * inv_freqs / self.scaling_factor +
-                smooth * inv_freqs,
+                (1 - smooth) * inv_freqs / self.scaling_factor + smooth * inv_freqs,
             ),
         )
         return new_freqs
@@ -902,8 +873,7 @@ class Llama4VisionRotaryEmbedding(RotaryEmbedding):
                    inv_freq[None, None, :]).repeat_interleave(2, dim=-1)
         freqs_y = ((frequencies_y + 1)[..., None] *
                    inv_freq[None, None, :]).repeat_interleave(2, dim=-1)
-        freqs = torch.cat([freqs_x, freqs_y],
-                          dim=-1).float().contiguous()[..., ::2]
+        freqs = torch.cat([freqs_x, freqs_y], dim=-1).float().contiguous()[..., ::2]
         freqs = freqs.masked_fill(img_idx.reshape(-1, 1, 1) < 0, 0)
         cache = torch.view_as_complex(
             torch.stack([torch.cos(freqs), torch.sin(freqs)], dim=-1))
@@ -915,10 +885,8 @@ class Llama4VisionRotaryEmbedding(RotaryEmbedding):
         key: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         self.cos_sin_cache: torch.Tensor = self.cos_sin_cache.to(query.device)
-        query_ = torch.view_as_complex(query.float().reshape(
-            *query.shape[:-1], -1, 2))
-        key_ = torch.view_as_complex(key.float().reshape(
-            *key.shape[:-1], -1, 2))
+        query_ = torch.view_as_complex(query.float().reshape(*query.shape[:-1], -1, 2))
+        key_ = torch.view_as_complex(key.float().reshape(*key.shape[:-1], -1, 2))
         broadcast_shape = [
             d if i == 1 or i == (query_.ndim - 1) else 1
             for i, d in enumerate(query_.shape)
@@ -946,8 +914,8 @@ class MRotaryEmbedding(RotaryEmbedding):
         # the input video. We enlarge max_position_embeddings to 4 times to get
         # a larger the cos and sin cache.
         self.cache_max_position_num = max_position_embeddings * 4
-        super().__init__(head_size, rotary_dim, self.cache_max_position_num,
-                         base, is_neox_style, dtype)
+        super().__init__(head_size, rotary_dim, self.cache_max_position_num, base,
+                         is_neox_style, dtype)
 
         self.mrope_section = mrope_section
         if self.mrope_section:
@@ -976,16 +944,12 @@ class MRotaryEmbedding(RotaryEmbedding):
         if positions.ndim == 2:
             assert self.mrope_section
 
-            cos = torch.cat([
-                m[i]
-                for i, m in enumerate(cos.split(self.mrope_section, dim=-1))
-            ],
-                            dim=-1)
-            sin = torch.cat([
-                m[i]
-                for i, m in enumerate(sin.split(self.mrope_section, dim=-1))
-            ],
-                            dim=-1)
+            cos = torch.cat(
+                [m[i] for i, m in enumerate(cos.split(self.mrope_section, dim=-1))],
+                dim=-1)
+            sin = torch.cat(
+                [m[i] for i, m in enumerate(sin.split(self.mrope_section, dim=-1))],
+                dim=-1)
 
         query_shape = query.shape
         query = query.view(num_tokens, -1, self.head_size)
@@ -1091,8 +1055,7 @@ class MRotaryEmbedding(RotaryEmbedding):
         video_token_id = hf_config.video_token_id
         vision_start_token_id = hf_config.vision_start_token_id
         spatial_merge_size = hf_config.vision_config.spatial_merge_size
-        tokens_per_second = getattr(hf_config.vision_config,
-                                    "tokens_per_second", 1.0)
+        tokens_per_second = getattr(hf_config.vision_config, "tokens_per_second", 1.0)
 
         input_tokens_tensor = torch.tensor(input_tokens)
         vision_start_indices = torch.argwhere(
@@ -1142,8 +1105,7 @@ class MRotaryEmbedding(RotaryEmbedding):
                 t, h // spatial_merge_size, w // spatial_merge_size
             text_len = ed - st
 
-            st_idx = llm_pos_ids_list[-1].max() + 1 if len(
-                llm_pos_ids_list) > 0 else 0
+            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
             llm_pos_ids_list.append(
                 torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
 
@@ -1160,15 +1122,13 @@ class MRotaryEmbedding(RotaryEmbedding):
             st = ed + llm_grid_t * llm_grid_h * llm_grid_w
 
         if st < len(input_tokens):
-            st_idx = llm_pos_ids_list[-1].max() + 1 if len(
-                llm_pos_ids_list) > 0 else 0
+            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
             text_len = len(input_tokens) - st
             llm_pos_ids_list.append(
                 torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
 
         llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
-        mrope_position_delta = (llm_positions.max() + 1 -
-                                len(input_tokens)).item()
+        mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
         llm_positions = llm_positions[:, context_len:seq_len]
 
         return llm_positions, mrope_position_delta
@@ -1215,8 +1175,8 @@ class MRotaryEmbedding(RotaryEmbedding):
         vision_end_token_id = thinker_config.vision_end_token_id
         seconds_per_chunk = thinker_config.seconds_per_chunk
         spatial_merge_size = thinker_config.vision_config.spatial_merge_size
-        tokens_per_second = getattr(thinker_config.vision_config,
-                                    "tokens_per_second", 25)
+        tokens_per_second = getattr(thinker_config.vision_config, "tokens_per_second",
+                                    25)
 
         if isinstance(image_grid_thw, list):
             image_grid_thw = torch.tensor(image_grid_thw)
@@ -1238,9 +1198,7 @@ class MRotaryEmbedding(RotaryEmbedding):
             new_src_item_len = len(new_src_item)
             start_idx = llm_pos_ids_list[-1].max() + 1 if len(
                 llm_pos_ids_list) > 0 else 0
-            if src_item[idx] not in [
-                    audio_token_id, video_token_id, image_token_id
-            ]:
+            if src_item[idx] not in [audio_token_id, video_token_id, image_token_id]:
                 if use_audio_in_video and idx > 0:
                     if src_item[idx] == vision_end_token_id and \
                         src_item[idx - 1] == audio_end_token_id:
@@ -1251,8 +1209,7 @@ class MRotaryEmbedding(RotaryEmbedding):
                         # processing the <|audio_bos|> after <|vision_eos|>
                         start_idx -= 1
                 new_src_item.append(src_item[idx])
-                llm_pos_ids = torch.tensor([start_idx],
-                                           dtype=torch.long).expand(3, -1)
+                llm_pos_ids = torch.tensor([start_idx], dtype=torch.long).expand(3, -1)
                 llm_pos_ids_list.append(llm_pos_ids)
             elif src_item[idx] == audio_token_id:
                 assert audio_seqlens is not None
@@ -1268,42 +1225,38 @@ class MRotaryEmbedding(RotaryEmbedding):
                 grid_ws = image_grid_thw[:, 2]
                 t_index = (torch.arange(grid_t) * 1 * tokens_per_second).long()
                 llm_pos_ids = cls._get_llm_pos_ids_for_vision(
-                    start_idx, image_idx, spatial_merge_size, t_index, grid_hs,
-                    grid_ws)
+                    start_idx, image_idx, spatial_merge_size, t_index, grid_hs, grid_ws)
                 llm_pos_ids_list.append(llm_pos_ids)
-                vision_seqlen = image_grid_thw[image_idx].prod() // (
-                    spatial_merge_size**2)
+                vision_seqlen = image_grid_thw[image_idx].prod() // (spatial_merge_size
+                                                                     **2)
                 new_src_item.extend([image_token_id] * vision_seqlen)
                 image_idx += 1
             elif src_item[idx] == video_token_id and not use_audio_in_video:
                 grid_t = video_grid_thw[video_idx][0]
                 grid_hs = video_grid_thw[:, 1]
                 grid_ws = video_grid_thw[:, 2]
-                t_index = (torch.arange(grid_t) *
-                           second_per_grid_ts[video_idx] *
+                t_index = (torch.arange(grid_t) * second_per_grid_ts[video_idx] *
                            tokens_per_second).long()
                 llm_pos_ids = cls._get_llm_pos_ids_for_vision(
-                    start_idx, video_idx, spatial_merge_size, t_index, grid_hs,
-                    grid_ws)
+                    start_idx, video_idx, spatial_merge_size, t_index, grid_hs, grid_ws)
                 llm_pos_ids_list.append(llm_pos_ids)
-                vision_seqlen = video_grid_thw[video_idx].prod() // (
-                    spatial_merge_size**2)
+                vision_seqlen = video_grid_thw[video_idx].prod() // (spatial_merge_size
+                                                                     **2)
                 new_src_item.extend([video_token_id] * vision_seqlen)
                 video_idx += 1
             else:
                 # read audio from video
                 assert audio_seqlens is not None
                 audio_seqlen = audio_seqlens[audio_idx]
-                vision_seqlen = video_grid_thw[video_idx].prod() // (
-                    spatial_merge_size**2)
+                vision_seqlen = video_grid_thw[video_idx].prod() // (spatial_merge_size
+                                                                     **2)
                 grid_t = video_grid_thw[video_idx][0]
                 grid_h = video_grid_thw[video_idx][1]
                 grid_w = video_grid_thw[video_idx][2]
                 grid_hs = video_grid_thw[:, 1]
                 grid_ws = video_grid_thw[:, 2]
                 t_ntoken_per_chunk = int(tokens_per_second * seconds_per_chunk)
-                t_index = (torch.arange(grid_t) *
-                           second_per_grid_ts[video_idx] *
+                t_index = (torch.arange(grid_t) * second_per_grid_ts[video_idx] *
                            tokens_per_second).long()
                 t_index_split_chunk = cls._split_list_into_ranges(
                     t_index, t_ntoken_per_chunk)
@@ -1312,27 +1265,24 @@ class MRotaryEmbedding(RotaryEmbedding):
                 added_audio_len = 0
                 audio_llm_pos_ids_list: List[torch.Tensor] = []
                 for t_chunk in t_index_split_chunk:
-                    vision_ntoken_per_chunk = len(
-                        t_chunk) * grid_h * grid_w // (spatial_merge_size**2)
-                    new_src_item.extend([video_token_id] *
-                                        vision_ntoken_per_chunk)
+                    vision_ntoken_per_chunk = len(t_chunk) * grid_h * grid_w // (
+                        spatial_merge_size**2)
+                    new_src_item.extend([video_token_id] * vision_ntoken_per_chunk)
                     vision_llm_pos_ids_list = cls._get_llm_pos_ids_for_vision(
-                        start_idx, video_idx, spatial_merge_size, t_chunk,
-                        grid_hs, grid_ws).split(1, dim=1)
+                        start_idx, video_idx, spatial_merge_size, t_chunk, grid_hs,
+                        grid_ws).split(1, dim=1)
                     llm_pos_ids_list.extend(vision_llm_pos_ids_list)
                     new_src_item.extend(
-                        min(t_ntoken_per_chunk, pure_audio_len -
-                            added_audio_len) * [audio_token_id])
+                        min(t_ntoken_per_chunk, pure_audio_len - added_audio_len) *
+                        [audio_token_id])
                     audio_start_idx = start_idx if len(
                         audio_llm_pos_ids_list
                     ) == 0 else audio_llm_pos_ids_list[-1][0].item() + 1
-                    if min(t_ntoken_per_chunk,
-                           pure_audio_len - added_audio_len) > 0:
+                    if min(t_ntoken_per_chunk, pure_audio_len - added_audio_len) > 0:
                         audio_llm_pos_ids_list = (torch.arange(
-                            min(t_ntoken_per_chunk, pure_audio_len -
-                                added_audio_len)).expand(3, -1) +
-                                                  audio_start_idx).split(1,
-                                                                         dim=1)
+                            min(t_ntoken_per_chunk,
+                                pure_audio_len - added_audio_len)).expand(3, -1) +
+                                                  audio_start_idx).split(1, dim=1)
                     else:
                         audio_llm_pos_ids_list = []
                     added_audio_len += min(t_ntoken_per_chunk,
@@ -1342,9 +1292,8 @@ class MRotaryEmbedding(RotaryEmbedding):
                     new_src_item.extend(
                         (pure_audio_len - added_audio_len) * [audio_token_id])
                     audio_llm_pos_ids_list = (
-                        torch.arange(pure_audio_len - added_audio_len).expand(
-                            3, -1) + llm_pos_ids_list[-1].max() + 1).split(
-                                1, dim=1)
+                        torch.arange(pure_audio_len - added_audio_len).expand(3, -1) +
+                        llm_pos_ids_list[-1].max() + 1).split(1, dim=1)
                     llm_pos_ids_list.extend(audio_llm_pos_ids_list)
                 audio_idx += 1
                 video_idx += 1
@@ -1370,22 +1319,22 @@ class MRotaryEmbedding(RotaryEmbedding):
         llm_pos_ids_list = []
         llm_grid_h = grid_hs[vision_idx] // spatial_merge_size
         llm_grid_w = grid_ws[vision_idx] // spatial_merge_size
-        h_index = (torch.arange(llm_grid_h).view(1, -1, 1).expand(
-            len(t_index), -1, llm_grid_w).flatten())
-        w_index = (torch.arange(llm_grid_w).view(1, 1, -1).expand(
-            len(t_index), llm_grid_h, -1).flatten())
-        t_index_tensor = torch.Tensor(t_index).to(llm_grid_h.device).view(
-            -1, 1).expand(-1, llm_grid_h * llm_grid_w).long().flatten()
+        h_index = (torch.arange(llm_grid_h).view(1, -1,
+                                                 1).expand(len(t_index), -1,
+                                                           llm_grid_w).flatten())
+        w_index = (torch.arange(llm_grid_w).view(1, 1,
+                                                 -1).expand(len(t_index), llm_grid_h,
+                                                            -1).flatten())
+        t_index_tensor = torch.Tensor(t_index).to(llm_grid_h.device).view(-1, 1).expand(
+            -1, llm_grid_h * llm_grid_w).long().flatten()
         _llm_pos_ids = torch.stack([t_index_tensor, h_index, w_index])
         llm_pos_ids_list.append(_llm_pos_ids + start_idx)
         llm_pos_ids = torch.cat(llm_pos_ids_list, dim=1)
         return llm_pos_ids
 
     @staticmethod
-    def _split_list_into_ranges(lst: torch.Tensor,
-                                interval: int) -> List[List[int]]:
-        ranges: List[List[int]] = [[]
-                                   for _ in range((max(lst) // interval) + 1)]
+    def _split_list_into_ranges(lst: torch.Tensor, interval: int) -> List[List[int]]:
+        ranges: List[List[int]] = [[] for _ in range((max(lst) // interval) + 1)]
         for num in lst:
             index = num // interval
             ranges[index].append(num)
@@ -1437,8 +1386,8 @@ class MRotaryEmbedding(RotaryEmbedding):
         audio_end_token_id = thinker_config.audio_end_token_id
         seconds_per_chunk = thinker_config.seconds_per_chunk
         spatial_merge_size = thinker_config.vision_config.spatial_merge_size
-        tokens_per_second = getattr(thinker_config.vision_config,
-                                    "tokens_per_second", 25)
+        tokens_per_second = getattr(thinker_config.vision_config, "tokens_per_second",
+                                    25)
 
         grid_t = video_grid_thw[0]
         grid_h = video_grid_thw[1]
@@ -1446,8 +1395,7 @@ class MRotaryEmbedding(RotaryEmbedding):
         t_ntoken_per_chunk = int(tokens_per_second * seconds_per_chunk)
         t_index = (torch.arange(grid_t) * video_second_per_grid_t *
                    tokens_per_second).long()
-        t_index_split_chunk = cls._split_list_into_ranges(
-            t_index, t_ntoken_per_chunk)
+        t_index_split_chunk = cls._split_list_into_ranges(t_index, t_ntoken_per_chunk)
 
         updates = [audio_start_token_id]
         added_audio_len = 0
@@ -1456,8 +1404,7 @@ class MRotaryEmbedding(RotaryEmbedding):
                 spatial_merge_size**2)
             updates.extend([video_token_id] * vision_ntoken_per_chunk)
 
-            audio_chunk_size = min(t_ntoken_per_chunk,
-                                   audio_len - added_audio_len)
+            audio_chunk_size = min(t_ntoken_per_chunk, audio_len - added_audio_len)
             updates.extend(audio_chunk_size * [audio_token_id])
             added_audio_len += audio_chunk_size
         if added_audio_len < audio_len:
@@ -1493,8 +1440,8 @@ def get_rope(
         rope_scaling_args = None
     if partial_rotary_factor < 1.0:
         rotary_dim = int(rotary_dim * partial_rotary_factor)
-    key = (head_size, rotary_dim, max_position, base, is_neox_style,
-           rope_scaling_args, dtype)
+    key = (head_size, rotary_dim, max_position, base, is_neox_style, rope_scaling_args,
+           dtype)
     if key in _ROPE_DICT:
         return _ROPE_DICT[key]
 
@@ -1508,18 +1455,15 @@ def get_rope(
             scaling_factor = rope_scaling["factor"]
             low_freq_factor = rope_scaling["low_freq_factor"]
             high_freq_factor = rope_scaling["high_freq_factor"]
-            original_max_position = rope_scaling[
-                "original_max_position_embeddings"]
-            rotary_emb = Llama3RotaryEmbedding(head_size, rotary_dim,
-                                               max_position, base,
-                                               is_neox_style, dtype,
+            original_max_position = rope_scaling["original_max_position_embeddings"]
+            rotary_emb = Llama3RotaryEmbedding(head_size, rotary_dim, max_position,
+                                               base, is_neox_style, dtype,
                                                scaling_factor, low_freq_factor,
-                                               high_freq_factor,
-                                               original_max_position)
+                                               high_freq_factor, original_max_position)
         elif scaling_type == "mllama4":
             rotary_emb = Llama4VisionRotaryEmbedding(head_size, rotary_dim,
-                                                     max_position, base,
-                                                     is_neox_style, dtype)
+                                                     max_position, base, is_neox_style,
+                                                     dtype)
         elif scaling_type == "default":
             if "mrope_section" in rope_scaling:
                 rotary_emb = MRotaryEmbedding(
@@ -1543,18 +1487,17 @@ def get_rope(
         elif scaling_type == "linear":
             scaling_factor = rope_scaling["factor"]
             rotary_emb = LinearScalingRotaryEmbedding(head_size, rotary_dim,
-                                                      max_position, base,
-                                                      is_neox_style,
+                                                      max_position, base, is_neox_style,
                                                       scaling_factor, dtype)
         elif scaling_type == "dynamic":
             scaling_factor = rope_scaling["factor"]
-            rotary_emb = DynamicNTKScalingRotaryEmbedding(
-                head_size, rotary_dim, max_position, base, is_neox_style,
-                scaling_factor, dtype)
+            rotary_emb = DynamicNTKScalingRotaryEmbedding(head_size, rotary_dim,
+                                                          max_position, base,
+                                                          is_neox_style, scaling_factor,
+                                                          dtype)
         elif scaling_type == "yarn":
             scaling_factor = rope_scaling["factor"]
-            original_max_position = rope_scaling[
-                "original_max_position_embeddings"]
+            original_max_position = rope_scaling["original_max_position_embeddings"]
             extra_kwargs = {
                 k: v
                 for k, v in rope_scaling.items()
@@ -1562,14 +1505,12 @@ def get_rope(
                          "beta_slow")
             }
             rotary_emb = YaRNScalingRotaryEmbedding(head_size, rotary_dim,
-                                                    original_max_position,
-                                                    base, is_neox_style,
-                                                    scaling_factor, dtype,
-                                                    **extra_kwargs)
+                                                    original_max_position, base,
+                                                    is_neox_style, scaling_factor,
+                                                    dtype, **extra_kwargs)
         elif scaling_type == "deepseek_yarn":
             scaling_factor = rope_scaling["factor"]
-            original_max_position = rope_scaling[
-                "original_max_position_embeddings"]
+            original_max_position = rope_scaling["original_max_position_embeddings"]
             # assert max_position == original_max_position * scaling_factor
             extra_kwargs = {
                 k: v
@@ -1577,23 +1518,21 @@ def get_rope(
                 if k in ("extrapolation_factor", "attn_factor", "beta_fast",
                          "beta_slow", "mscale", "mscale_all_dim")
             }
-            rotary_emb = DeepseekScalingRotaryEmbedding(
-                head_size, rotary_dim, original_max_position, base,
-                is_neox_style, scaling_factor, dtype, **extra_kwargs)
+            rotary_emb = DeepseekScalingRotaryEmbedding(head_size, rotary_dim,
+                                                        original_max_position, base,
+                                                        is_neox_style, scaling_factor,
+                                                        dtype, **extra_kwargs)
         elif scaling_type == "longrope":
             short_factor = rope_scaling["short_factor"]
             long_factor = rope_scaling["long_factor"]
-            original_max_position = rope_scaling[
-                "original_max_position_embeddings"]
+            original_max_position = rope_scaling["original_max_position_embeddings"]
             extra_kwargs = {
                 k: v
-                for k, v in rope_scaling.items()
-                if k in ("short_mscale", "long_mscale")
+                for k, v in rope_scaling.items() if k in ("short_mscale", "long_mscale")
             }
             rotary_emb = Phi3LongRoPEScaledRotaryEmbedding(
-                head_size, rotary_dim, max_position, original_max_position,
-                base, is_neox_style, dtype, short_factor, long_factor,
-                **extra_kwargs)
+                head_size, rotary_dim, max_position, original_max_position, base,
+                is_neox_style, dtype, short_factor, long_factor, **extra_kwargs)
         else:
             raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
     _ROPE_DICT[key] = rotary_emb

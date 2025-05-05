@@ -86,10 +86,8 @@ class Top1Proposer(SpeculativeProposer):
                 proposal_lens,
                 maybe_sampler_output,
                 nonzero_proposal_len_indices,
-            ) = self._remove_no_proposal_seqs(proposal_lens,
-                                              maybe_sampler_output,
-                                              nonzero_proposal_len_indices,
-                                              transposed)
+            ) = self._remove_no_proposal_seqs(proposal_lens, maybe_sampler_output,
+                                              nonzero_proposal_len_indices, transposed)
         else:
             # If no sequences can be speculated, set sampler output to None.
             maybe_sampler_output = None
@@ -109,8 +107,7 @@ class Top1Proposer(SpeculativeProposer):
         proposals = SpeculativeProposals(proposal_token_ids=proposal_tokens,
                                          proposal_probs=proposal_probs,
                                          proposal_lens=proposal_lens,
-                                         no_proposals=maybe_sampler_output
-                                         is None)
+                                         no_proposals=maybe_sampler_output is None)
         return proposals
 
     def _split_by_proposal_len(
@@ -171,19 +168,16 @@ class Top1Proposer(SpeculativeProposer):
         # because it seems not straightforward for draft workers outputting
         # transposed sampler outputs to handle the case of no proposal.
         if maybe_sampler_output is None or transposed:
-            return (proposal_lens, maybe_sampler_output,
-                    nonzero_proposal_len_indices)
+            return (proposal_lens, maybe_sampler_output, nonzero_proposal_len_indices)
 
         new_proposal_lens: List[int] = []
         new_nonzero_proposal_len_indices: List[int] = []
         new_maybe_sampler_output: List[SamplerOutput] = []
         nonzero_proposal_len_idx_ptr = 0
         seq_idx = 0
-        while seq_idx < len(
-                proposal_lens) and nonzero_proposal_len_idx_ptr < len(
-                    nonzero_proposal_len_indices):
-            if seq_idx < nonzero_proposal_len_indices[
-                    nonzero_proposal_len_idx_ptr]:
+        while seq_idx < len(proposal_lens) and nonzero_proposal_len_idx_ptr < len(
+                nonzero_proposal_len_indices):
+            if seq_idx < nonzero_proposal_len_indices[nonzero_proposal_len_idx_ptr]:
                 # Sequence is not in the original nonzero_proposal_len_indices,
                 # meaning that it has a proposal length of 0 before sending to
                 # the draft worker.
@@ -228,12 +222,10 @@ class Top1Proposer(SpeculativeProposer):
         if maybe_sampler_output is None:
             # If no speculative tokens, the sampler output will be None.
             # In this case we return empty proposals.
-            proposal_tokens = torch.tensor(-1,
-                                           dtype=torch.long,
+            proposal_tokens = torch.tensor(-1, dtype=torch.long,
                                            device=self._device).expand(
                                                batch_size, proposal_len)
-            proposal_probs = torch.tensor(0,
-                                          dtype=torch.float32,
+            proposal_probs = torch.tensor(0, dtype=torch.float32,
                                           device=self._device).expand(
                                               batch_size, proposal_len,
                                               self._vocab_size)

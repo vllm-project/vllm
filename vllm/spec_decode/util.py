@@ -122,9 +122,7 @@ def create_sequence_group_output(
     )
 
     return CompletionSequenceGroupOutput(samples=[
-        SequenceOutput(parent_seq_id=seq_id,
-                       output_token=token_id,
-                       logprobs=logprobs)
+        SequenceOutput(parent_seq_id=seq_id, output_token=token_id, logprobs=logprobs)
     ],
                                          prompt_logprobs=prompt_logprobs,
                                          step_index=step_index)
@@ -142,8 +140,8 @@ def split_batch_by_proposal_len(
 
     nonzero_lists: Tuple[List[SequenceGroupMetadata], List[int]] = ([], [])
     zero_lists: Tuple[List[SequenceGroupMetadata], List[int]] = ([], [])
-    for i, (seq_group, proposal_len) in enumerate(
-            zip(seq_group_metadata_list, proposal_lens)):
+    for i, (seq_group,
+            proposal_len) in enumerate(zip(seq_group_metadata_list, proposal_lens)):
         seq_groups, indices = nonzero_lists if proposal_len else zero_lists
         seq_groups.append(seq_group)
         indices.append(i)
@@ -168,10 +166,7 @@ def sampler_output_to_torch(
 
     # shape: [batch_size, num_sampler_output, vocab_size]
     sampled_token_probs = torch.stack(
-        [
-            sampler_output.sampled_token_probs
-            for sampler_output in sampler_output_list
-        ],
+        [sampler_output.sampled_token_probs for sampler_output in sampler_output_list],
         dim=0,
     )
 
@@ -198,10 +193,7 @@ def sampler_output_to_torch(
     if sampler_output_list[0].hidden_states is not None:
         # shape: [batch_size, num_sampler_output, hidden_dim]
         sampled_hidden_states = torch.stack(
-            [
-                sampler_output.hidden_states
-                for sampler_output in sampler_output_list
-            ],
+            [sampler_output.hidden_states for sampler_output in sampler_output_list],
             dim=0,
         )
 
@@ -220,18 +212,16 @@ def maybe_mock_device_tensors(sampler_output: SamplerOutput, batch_size: int,
     values. This will be removed in PR 7/9.
     https://docs.google.com/document/d/1rE4pr3IdspRw97XbImY4fS9IWYuJJ3HGtL7AdIKGrw8/edit#heading=h.qijw1sdidrer
     """
-    values = [
-        sampler_output.sampled_token_probs, sampler_output.sampled_token_ids
-    ]
+    values = [sampler_output.sampled_token_probs, sampler_output.sampled_token_ids]
     assert all(v is None for v in values) or not any(v is None for v in values)
     if not any(v is None for v in values):
         # Do nothing if the tensors are already created (usually in unit tests).
         return
 
     # Softmax to ensure valid probs.
-    sampler_output.sampled_token_probs = torch.nn.functional.softmax(
-        torch.rand(batch_size, vocab_size, dtype=torch.float32, device=device),
-        dim=-1)
+    sampler_output.sampled_token_probs = torch.nn.functional.softmax(torch.rand(
+        batch_size, vocab_size, dtype=torch.float32, device=device),
+                                                                     dim=-1)
 
     sampler_output.sampled_token_ids = torch.randint(low=10,
                                                      high=100,

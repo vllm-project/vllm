@@ -19,21 +19,16 @@ class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
         return 90
 
     @classmethod
-    def can_implement(
-            cls, c: ScaledMMLinearLayerConfig) -> Tuple[bool, Optional[str]]:
+    def can_implement(cls, c: ScaledMMLinearLayerConfig) -> Tuple[bool, Optional[str]]:
         if not current_platform.is_rocm():
-            return (
-                False,
-                "AiterScaledMMLinearKernel requires `aiter` which is not " +
-                "currently supported on non-ROCm platform.")
+            return (False, "AiterScaledMMLinearKernel requires `aiter` which is not " +
+                    "currently supported on non-ROCm platform.")
 
         try:
             import aiter  # noqa: F401 # deliberately attempt to import aiter
         except Exception:
-            return (
-                False,
-                "AiterScaledMMLinearKernel requires `aiter` which is not " +
-                "installed on ROCm.")
+            return (False, "AiterScaledMMLinearKernel requires `aiter` which is not " +
+                    "installed on ROCm.")
         # Check if rocm_aiter_gemm_w8a8_scaled_mm is enabled
         if not (
             envs.VLLM_ROCM_USE_AITER_LINEAR \
@@ -45,8 +40,7 @@ class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
                     "`VLLM_ROCM_USE_AITER_LINEAR` default is True.")
 
         if not c.input_symmetric:
-            return (False,
-                    "AiterScaledMMLinearKernel only supports symmetric " +
+            return (False, "AiterScaledMMLinearKernel only supports symmetric " +
                     "quantization.")
         return True, None
 
@@ -75,10 +69,7 @@ class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
         symmetric = azp_adj is None
         assert symmetric, ("AiterScaledMMLinearKernel only supports"
                            " symmetric quantization.")
-        x_q, x_s, x_zp = ops.scaled_int8_quant(x,
-                                               i_s,
-                                               i_zp,
-                                               symmetric=symmetric)
+        x_q, x_s, x_zp = ops.scaled_int8_quant(x, i_s, i_zp, symmetric=symmetric)
 
         assert x_zp is None, ("AiterScaledMMLinearKernel only supports"
                               " symmetric quantization.")
@@ -86,8 +77,7 @@ class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
 
         assert (w_q.shape[0] % 16 == 0 and w_q.shape[1] % 16 == 0)
         assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
-        assert bias is None or bias.shape[0] == w_q.shape[
-            1] and bias.dtype == out_dtype
+        assert bias is None or bias.shape[0] == w_q.shape[1] and bias.dtype == out_dtype
 
         m = x_q.shape[0]  # a
         n = w_q.shape[1]  # b

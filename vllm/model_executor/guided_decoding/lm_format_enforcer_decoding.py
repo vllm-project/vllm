@@ -16,8 +16,7 @@ from vllm.sampling_params import GuidedDecodingParams
 
 
 def get_local_lm_format_enforcer_guided_decoding_logits_processor(
-        guided_params: GuidedDecodingParams,
-        tokenizer) -> Optional[LogitsProcessor]:
+        guided_params: GuidedDecodingParams, tokenizer) -> Optional[LogitsProcessor]:
     """
     Given an OpenAI-compatible request, check for guided decoding parameters
     and get the necessary logits processor for the given guide.
@@ -25,8 +24,7 @@ def get_local_lm_format_enforcer_guided_decoding_logits_processor(
     we make a shallow copy to reuse the same underlying FSM.
     """
 
-    tokenizer_data = _cached_build_vllm_token_enforcer_tokenizer_data(
-        tokenizer)
+    tokenizer_data = _cached_build_vllm_token_enforcer_tokenizer_data(tokenizer)
     character_level_parser: CharacterLevelParser
     if guided_params.json:
         schema_dict = _normalize_json_schema_object(guided_params.json)

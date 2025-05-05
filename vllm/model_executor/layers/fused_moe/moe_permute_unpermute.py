@@ -69,8 +69,7 @@ def moe_permute(
     torch.ops._moe_C.moe_permute(hidden_states, topk_weights, topk_ids,
                                  token_expert_indices, expert_map, n_expert,
                                  n_local_expert, topk, align_block_size,
-                                 permuted_hidden_states,
-                                 expert_first_token_offset,
+                                 permuted_hidden_states, expert_first_token_offset,
                                  src_row_id2dst_row_id_map, m_indices)
     return (permuted_hidden_states, expert_first_token_offset,
             src_row_id2dst_row_id_map, m_indices)
@@ -109,8 +108,7 @@ def moe_unpermute(
                                 dtype=permuted_hidden_states.dtype,
                                 device=permuted_hidden_states.device)
 
-    torch.ops._moe_C.moe_unpermute(permuted_hidden_states, topk_weights,
-                                   topk_ids, src_row_id2dst_row_id_map,
-                                   expert_first_token_offset, n_expert,
-                                   n_local_expert, topk, hidden_states)
+    torch.ops._moe_C.moe_unpermute(permuted_hidden_states, topk_weights, topk_ids,
+                                   src_row_id2dst_row_id_map, expert_first_token_offset,
+                                   n_expert, n_local_expert, topk, hidden_states)
     return hidden_states

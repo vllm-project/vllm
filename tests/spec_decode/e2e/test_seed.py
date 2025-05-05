@@ -36,9 +36,8 @@ SPEC_MODEL = "JackFram/llama-160m"
         # Use smaller output len for fast test.
         20,
     ])
-def test_seeded_consistency(vllm_runner, common_llm_kwargs,
-                            per_test_common_llm_kwargs, baseline_llm_kwargs,
-                            test_llm_kwargs, batch_size: int,
+def test_seeded_consistency(vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
+                            baseline_llm_kwargs, test_llm_kwargs, batch_size: int,
                             temperature: float, output_len: int):
     """Verify outputs are consistent across multiple runs with same seed
     """

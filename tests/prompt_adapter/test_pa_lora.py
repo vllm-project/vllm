@@ -18,13 +18,11 @@ def do_sample(engine):
     # first prompt with a prompt adapter and second without adapter
     prompts = [
         (prompt_text,
-         SamplingParams(temperature=0.0, max_tokens=100,
-                        stop=["[/assistant]"]),
+         SamplingParams(temperature=0.0, max_tokens=100, stop=["[/assistant]"]),
          PromptAdapterRequest("hate_speech", 1, pa_path,
                               8), LoRARequest("sql_test", 1, lora_path)),
         (prompt_text,
-         SamplingParams(temperature=0.0, max_tokens=100,
-                        stop=["[/assistant]"]), None,
+         SamplingParams(temperature=0.0, max_tokens=100, stop=["[/assistant]"]), None,
          LoRARequest("sql_test", 1, lora_path)),
     ]
 

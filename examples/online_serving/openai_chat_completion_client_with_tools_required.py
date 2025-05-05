@@ -60,8 +60,7 @@ tools = [
                 "type": "object",
                 "properties": {
                     "city": {
-                        "type":
-                        "string",
+                        "type": "string",
                         "description":
                         "The city to get the forecast for, e.g. 'New York'",
                     },
@@ -72,10 +71,8 @@ tools = [
                         "The two-letter abbreviation for the state, e.g. 'NY'",
                     },
                     "days": {
-                        "type":
-                        "integer",
-                        "description":
-                        "Number of days to get the forecast for (1-7)",
+                        "type": "integer",
+                        "description": "Number of days to get the forecast for (1-7)",
                     },
                     "unit": {
                         "type": "string",

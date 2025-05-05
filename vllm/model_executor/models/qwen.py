@@ -48,10 +48,10 @@ class QWenMLP(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
-        self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size, [intermediate_size] * 2,
-            bias=False,
-            quant_config=quant_config)
+        self.gate_up_proj = MergedColumnParallelLinear(hidden_size,
+                                                       [intermediate_size] * 2,
+                                                       bias=False,
+                                                       quant_config=quant_config)
         self.c_proj = RowParallelLinear(intermediate_size,
                                         hidden_size,
                                         bias=False,
@@ -83,12 +83,10 @@ class QWenAttention(nn.Module):
     ):
         super().__init__()
         self.hidden_size = hidden_size
-        tensor_model_parallel_world_size = get_tensor_model_parallel_world_size(
-        )
+        tensor_model_parallel_world_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
         assert self.total_num_heads % tensor_model_parallel_world_size == 0
-        self.num_heads = (self.total_num_heads //
-                          tensor_model_parallel_world_size)
+        self.num_heads = (self.total_num_heads // tensor_model_parallel_world_size)
         self.head_dim = hidden_size // self.total_num_heads
         self.c_attn = QKVParallelLinear(
             hidden_size,
@@ -203,13 +201,11 @@ class QWenModel(nn.Module):
         )
         self.start_layer, self.end_layer, self.h = make_layers(
             config.num_hidden_layers,
-            lambda prefix: QWenBlock(
-                config, cache_config, quant_config, prefix=prefix),
+            lambda prefix: QWenBlock(config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.h")
         self.ln_f = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size))
+        self.make_empty_intermediate_tensors = (make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.wte(input_ids)
@@ -264,8 +260,7 @@ class QWenBaseModel(nn.Module):
         self.multimodal_config = multimodal_config
         self.quant_config = quant_config
         self.transformer = transformer_type(vllm_config=vllm_config,
-                                            prefix=maybe_prefix(
-                                                prefix, "transformer"))
+                                            prefix=maybe_prefix(prefix, "transformer"))
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
                                       quant_config=quant_config)
@@ -280,12 +275,10 @@ class QWenBaseModel(nn.Module):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "w2", 0),
@@ -318,8 +311,7 @@ class QWenBaseModel(nn.Module):
                 if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
@@ -337,9 +329,7 @@ class QWenLMHeadModel(QWenBaseModel, SupportsPP, SupportsLoRA):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
         if hasattr(config, "visual"):
-            hf_overrides = {
-                "architectures": ["QwenVLForConditionalGeneration"]
-            }
+            hf_overrides = {"architectures": ["QwenVLForConditionalGeneration"]}
             raise RuntimeError(
                 "The configuration of this model indicates that it supports "
                 "vision inputs, but you instantiated the text-only version "
@@ -355,6 +345,6 @@ class QWenLMHeadModel(QWenBaseModel, SupportsPP, SupportsLoRA):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.transformer(input_ids, positions,
-                                         intermediate_tensors, inputs_embeds)
+        hidden_states = self.transformer(input_ids, positions, intermediate_tensors,
+                                         inputs_embeds)
         return hidden_states

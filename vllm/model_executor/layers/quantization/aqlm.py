@@ -55,22 +55,21 @@ def dequantize_weight(codes: torch.Tensor,
         codebooks.shape
     out_features = num_out_groups * out_group_size
     in_features = num_in_groups * in_group_size
-    codebook_offsets = torch.arange(
-        0, num_codebooks * codebook_size, codebook_size,
-        device=codes.device)  # shape: [num_codebooks]
+    codebook_offsets = torch.arange(0,
+                                    num_codebooks * codebook_size,
+                                    codebook_size,
+                                    device=codes.device)  # shape: [num_codebooks]
     reconstructed_weight_flat = F.embedding_bag(
         codes.flatten(0, -2) + codebook_offsets,
         codebooks.flatten(0, 1).flatten(-2, -1),
-        mode="sum"
-    )  # [prod(dims) * num_out_groups * num_in_groups, out_group_size
+        mode="sum")  # [prod(dims) * num_out_groups * num_in_groups, out_group_size
     # * in_group_size]
 
     reconstructed_weight_groupwise = reconstructed_weight_flat.view(
         list(codes.shape[:-3]) +
         [num_out_groups, num_in_groups, out_group_size, in_group_size])
     if scales is not None:
-        reconstructed_weight_groupwise = reconstructed_weight_groupwise.mul(
-            scales)
+        reconstructed_weight_groupwise = reconstructed_weight_groupwise.mul(scales)
     return reconstructed_weight_groupwise.swapaxes(
         -3, -2).reshape(list(codes.shape[:-3]) + [out_features, in_features])
 
@@ -117,8 +116,8 @@ def generic_dequantize_gemm(
         shard_output = dequantize_gemm(
             input, codes.narrow(0, output_offset, output_size),
             codebooks.narrow(0, codebooks_offset, num_codebooks),
-            scales.narrow(0, output_offset, output_size), None
-            if bias is None else bias.narrow(0, output_offset, output_size))
+            scales.narrow(0, output_offset, output_size),
+            None if bias is None else bias.narrow(0, output_offset, output_size))
 
         output_slice = output.narrow(-1, output_offset, output_size)
         assert (output_slice.shape == shard_output.shape)
@@ -151,8 +150,7 @@ def optimized_dequantize_gemm(
         flattened_output *= b_scales
         return output.view(orig_shape)
     else:
-        b_scales = scales.view(scales.shape[:-3] + (-1, )).expand(
-            -1, weights.shape[1])
+        b_scales = scales.view(scales.shape[:-3] + (-1, )).expand(-1, weights.shape[1])
         weights *= b_scales
         return F.linear(input, weights, bias)
 
@@ -208,8 +206,7 @@ class AQLMConfig(QuantizationConfig):
         nbits_per_codebook = cls.get_from_keys(config, ["nbits_per_codebook"])
         num_code_books = cls.get_from_keys(config, ["num_codebooks"])
         out_group_size = cls.get_from_keys(config, ["out_group_size"])
-        return cls(in_group_size, nbits_per_codebook, num_code_books,
-                   out_group_size)
+        return cls(in_group_size, nbits_per_codebook, num_code_books, out_group_size)
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["AQLMLinearMethod"]:
@@ -228,8 +225,7 @@ class AQLMLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: AQLMConfig):
         self.quant_config = quant_config
 
-    def create_weights(self, layer: torch.nn.Module,
-                       input_size_per_partition: int,
+    def create_weights(self, layer: torch.nn.Module, input_size_per_partition: int,
                        output_partition_sizes: List[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
@@ -239,17 +235,15 @@ class AQLMLinearMethod(LinearMethodBase):
         if params_dtype != torch.half:
             raise ValueError("Only half is currently supported by aqlm")
         if input_size_per_partition % self.quant_config.in_group_size != 0:
-            raise ValueError(
-                "The input size is not aligned with the quantized "
-                "weight shape. This can be caused by too large "
-                "tensor parallel size.")
+            raise ValueError("The input size is not aligned with the quantized "
+                             "weight shape. This can be caused by too large "
+                             "tensor parallel size.")
 
         output_size_per_partition = sum(output_partition_sizes)
         if output_size_per_partition % self.quant_config.out_group_size != 0:
-            raise ValueError(
-                "The output size is not aligned with the quantized "
-                "weight shape. This can be caused by too large "
-                "tensor parallel size.")
+            raise ValueError("The output size is not aligned with the quantized "
+                             "weight shape. This can be caused by too large "
+                             "tensor parallel size.")
 
         codes = Parameter(
             torch.empty(
@@ -297,8 +291,7 @@ class AQLMLinearMethod(LinearMethodBase):
         scales = Parameter(
             torch.empty(
                 (
-                    output_size_per_partition //
-                    self.quant_config.out_group_size,
+                    output_size_per_partition // self.quant_config.out_group_size,
                     1,
                     1,
                     1,
@@ -332,8 +325,7 @@ class AQLMLinearMethod(LinearMethodBase):
         codebooks = layer.codebooks
         codes = layer.codes
         scales = layer.scales
-        output_partition_sizes = getattr(codebooks, "output_partition_sizes",
-                                         [])
+        output_partition_sizes = getattr(codebooks, "output_partition_sizes", [])
 
         nbooks = codes.shape[2]
         ingroups = codebooks.shape[3]
@@ -342,8 +334,8 @@ class AQLMLinearMethod(LinearMethodBase):
 
         # We support these formats with dedicated gemm and decompression
         # kernels.
-        if ingroups == 8 and outgroups == 1 and (
-            (bits == 256 and nbooks == 2) or (bits == 65536 and nbooks == 1)):
+        if ingroups == 8 and outgroups == 1 and ((bits == 256 and nbooks == 2) or
+                                                 (bits == 65536 and nbooks == 1)):
 
             # thresholds determined by timings on an A6000, one GPU
             use_gemv = math.prod(x.shape[:-1]) <= 6

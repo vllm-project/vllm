@@ -41,8 +41,7 @@ class GuidanceLogitsProcessor:
         if self.initialized:
             return
 
-        ll_tokenizer = self.cached_tokenizers.get(self.tokenizer.name_or_path,
-                                                  None)
+        ll_tokenizer = self.cached_tokenizers.get(self.tokenizer.name_or_path, None)
         if ll_tokenizer is None:
             ll_tokenizer = llguidance.hf.from_tokenizer(self.tokenizer, None)
             self.cached_tokenizers[self.tokenizer.name_or_path] = ll_tokenizer
@@ -75,10 +74,9 @@ class GuidanceLogitsProcessor:
             if err:
                 logger.warning("Error in LLMatcher: %s", err)
 
-        llguidance.torch.fill_next_token_bitmask(self.ll_matcher, self.bitmask,
-                                                 0)
-        llguidance.torch.apply_token_bitmask_inplace(
-            scores, self.bitmask.to(scores.device))
+        llguidance.torch.fill_next_token_bitmask(self.ll_matcher, self.bitmask, 0)
+        llguidance.torch.apply_token_bitmask_inplace(scores,
+                                                     self.bitmask.to(scores.device))
 
         self.new_sampling = True
 

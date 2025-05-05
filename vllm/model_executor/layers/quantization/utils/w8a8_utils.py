@@ -66,9 +66,8 @@ CUTLASS_FP8_SUPPORTED = cutlass_fp8_supported()
 CUTLASS_BLOCK_FP8_SUPPORTED = cutlass_block_fp8_supported()
 
 
-def per_tensor_dequantize(
-        tensor: torch.Tensor, inv_scale: Union[float,
-                                               torch.Tensor]) -> torch.Tensor:
+def per_tensor_dequantize(tensor: torch.Tensor,
+                          inv_scale: Union[float, torch.Tensor]) -> torch.Tensor:
     fake_qweight = tensor.to(torch.float16)
     dq_weight = fake_qweight * inv_scale
     return dq_weight
@@ -117,10 +116,8 @@ def requantize_with_max_scale(
         start = 0
         for idx, logical_width in enumerate(logical_widths):
             end = start + logical_width
-            weight_dq = per_tensor_dequantize(weight[start:end, :],
-                                              weight_scale[idx])
-            weight[start:end, :], _ = ops.scaled_fp8_quant(
-                weight_dq, max_w_scale)
+            weight_dq = per_tensor_dequantize(weight[start:end, :], weight_scale[idx])
+            weight[start:end, :], _ = ops.scaled_fp8_quant(weight_dq, max_w_scale)
             start = end
 
     return max_w_scale, weight
@@ -148,10 +145,8 @@ def cutlass_w8a8_scaled_mm(*, qinput: torch.Tensor, weight: torch.Tensor,
     return output.view(*output_shape)
 
 
-def rocm_per_tensor_w8a8_scaled_mm(*, qinput: torch.Tensor,
-                                   weight: torch.Tensor,
-                                   out_dtype: torch.dtype,
-                                   scale_a: torch.Tensor,
+def rocm_per_tensor_w8a8_scaled_mm(*, qinput: torch.Tensor, weight: torch.Tensor,
+                                   out_dtype: torch.dtype, scale_a: torch.Tensor,
                                    scale_b: torch.Tensor, bias: torch.Tensor,
                                    input_2d: torch.Tensor,
                                    output_shape: List) -> torch.Tensor:
@@ -171,10 +166,8 @@ def rocm_per_tensor_w8a8_scaled_mm(*, qinput: torch.Tensor,
     return torch.narrow(output, 0, 0, input_2d.shape[0]).view(*output_shape)
 
 
-def torch_per_tensor_w8a8_scaled_mm(*, qinput: torch.Tensor,
-                                    weight: torch.Tensor,
-                                    out_dtype: torch.dtype,
-                                    scale_a: torch.Tensor,
+def torch_per_tensor_w8a8_scaled_mm(*, qinput: torch.Tensor, weight: torch.Tensor,
+                                    out_dtype: torch.dtype, scale_a: torch.Tensor,
                                     scale_b: torch.Tensor, bias: torch.Tensor,
                                     input_2d: torch.Tensor,
                                     output_shape: List) -> torch.Tensor:
@@ -192,10 +185,8 @@ def torch_per_tensor_w8a8_scaled_mm(*, qinput: torch.Tensor,
     return torch.narrow(output, 0, 0, input_2d.shape[0]).view(*output_shape)
 
 
-def torch_per_token_w8a8_scaled_mm(*, qinput: torch.Tensor,
-                                   weight: torch.Tensor,
-                                   out_dtype: torch.dtype,
-                                   scale_a: torch.Tensor,
+def torch_per_token_w8a8_scaled_mm(*, qinput: torch.Tensor, weight: torch.Tensor,
+                                   out_dtype: torch.dtype, scale_a: torch.Tensor,
                                    scale_b: torch.Tensor, bias: torch.Tensor,
                                    input_2d: torch.Tensor,
                                    output_shape: List) -> torch.Tensor:
@@ -222,13 +213,10 @@ def torch_per_token_w8a8_scaled_mm(*, qinput: torch.Tensor,
     return output
 
 
-def torch_channelwise_w8a8_scaled_mm(*, qinput: torch.Tensor,
-                                     weight: torch.Tensor,
-                                     out_dtype: torch.dtype,
-                                     scale_a: torch.Tensor,
+def torch_channelwise_w8a8_scaled_mm(*, qinput: torch.Tensor, weight: torch.Tensor,
+                                     out_dtype: torch.dtype, scale_a: torch.Tensor,
                                      scale_b: torch.Tensor, bias: torch.Tensor,
-                                     input_2d: torch.Tensor,
-                                     output_shape: List,
+                                     input_2d: torch.Tensor, output_shape: List,
                                      **kwargs) -> torch.Tensor:
     # Use unfused DQ due to limitations with scaled_mm
 
@@ -270,8 +258,8 @@ def torch_channelwise_w8a8_scaled_mm(*, qinput: torch.Tensor,
 
 def dispatch_w8a8_scaled_mm(
         cutlass_fp8_supported: bool, per_tensor_weights: bool,
-        per_tensor_activations: bool, use_per_token_if_dynamic: Optional[bool]
-) -> Callable[..., torch.Tensor]:
+        per_tensor_activations: bool,
+        use_per_token_if_dynamic: Optional[bool]) -> Callable[..., torch.Tensor]:
 
     if cutlass_fp8_supported:
         return cutlass_w8a8_scaled_mm
@@ -312,8 +300,8 @@ class Fp8LinearOp:
         if pad_output is None:
             config = get_current_vllm_config().compilation_config
             pad_output = config.level < CompilationLevel.PIECEWISE
-        self.output_padding = 17 if (
-            pad_output and not current_platform.is_rocm()) else None
+        self.output_padding = 17 if (pad_output
+                                     and not current_platform.is_rocm()) else None
 
     def apply(
         self,
@@ -366,9 +354,10 @@ class Fp8LinearOp:
         per_tensor_weights = (weight_scale.numel() == 1)
         per_tensor_activations = (x_scale.numel() == 1)
 
-        w8a8_scaled_mm_func = dispatch_w8a8_scaled_mm(
-            self.cutlass_fp8_supported, per_tensor_weights,
-            per_tensor_activations, use_per_token_if_dynamic)
+        w8a8_scaled_mm_func = dispatch_w8a8_scaled_mm(self.cutlass_fp8_supported,
+                                                      per_tensor_weights,
+                                                      per_tensor_activations,
+                                                      use_per_token_if_dynamic)
 
         return w8a8_scaled_mm_func(qinput=qinput,
                                    weight=weight,

@@ -146,9 +146,9 @@ class Gemma3Attention(nn.Module):
 
         # TODO(woosuk): Add reference to the original HF implementation.
         layer_idx = extract_layer_index(prefix)
-        self.is_sliding = (getattr(
-            config, "interleaved_sliding_window", None) is not None and bool(
-                (layer_idx + 1) % config.sliding_window_pattern))
+        self.is_sliding = (getattr(config, "interleaved_sliding_window", None)
+                           is not None and bool(
+                               (layer_idx + 1) % config.sliding_window_pattern))
         # Initialize the rotary embedding.
         if self.is_sliding:
             # Local attention. Override the values in config.json.
@@ -217,11 +217,7 @@ class Gemma3Attention(nn.Module):
         # output is discarded and overwritten below. While this duplicates
         # computation, it maintains compatibility.
         # TODO(woosuk): Optimize by implementing custom attention kernels.
-        attn_output = self.naive_attn_with_masks(q,
-                                                 k,
-                                                 v,
-                                                 out=attn_output,
-                                                 **kwargs)
+        attn_output = self.naive_attn_with_masks(q, k, v, out=attn_output, **kwargs)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -305,8 +301,7 @@ class Gemma3DecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
-        self.input_layernorm = GemmaRMSNorm(config.hidden_size,
-                                            eps=config.rms_norm_eps)
+        self.input_layernorm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = GemmaRMSNorm(config.hidden_size,
                                                      eps=config.rms_norm_eps)
         self.pre_feedforward_layernorm = GemmaRMSNorm(config.hidden_size,
@@ -325,8 +320,7 @@ class Gemma3DecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(
-                hidden_states, residual)
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
@@ -370,9 +364,8 @@ class Gemma3Model(nn.Module):
         # See https://github.com/huggingface/transformers/pull/29402
         normalizer = self.config.hidden_size**0.5
         self.register_buffer("normalizer", torch.tensor(normalizer))
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size))
+        self.make_empty_intermediate_tensors = (make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         # NOTE(woosuk): Only apply the normalizer to the output of
@@ -412,8 +405,7 @@ class Gemma3Model(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -425,12 +417,11 @@ class Gemma3Model(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
-            if (self.quant_config is not None and
-                (scale_name := self.quant_config.get_cache_scale(name))):
+            if (self.quant_config is not None
+                    and (scale_name := self.quant_config.get_cache_scale(name))):
                 # Loading kv cache scales for compressed-tensors quantization
                 param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 loaded_weight = loaded_weight[0]
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
@@ -459,8 +450,7 @@ class Gemma3Model(nn.Module):
                 if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
 
@@ -492,8 +482,8 @@ class Gemma3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.quant_config = quant_config
         self.model = Gemma3Model(vllm_config=vllm_config,
                                  prefix=maybe_prefix(prefix, "model"))
-        self.logits_processor = LogitsProcessor(
-            config.vocab_size, soft_cap=config.final_logit_softcapping)
+        self.logits_processor = LogitsProcessor(config.vocab_size,
+                                                soft_cap=config.final_logit_softcapping)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
@@ -521,11 +511,9 @@ class Gemma3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                        sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(
             self,
-            skip_prefixes=(["lm_head."]
-                           if self.config.tie_word_embeddings else None),
+            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)

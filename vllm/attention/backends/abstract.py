@@ -99,8 +99,8 @@ class AttentionBackend(ABC):
         raise NotImplementedError
 
     def advance_step(self, model_input: "ModelRunnerInputBase",
-                     sampled_token_ids: Optional[torch.Tensor],
-                     block_size: int, num_seqs: int, num_queries: int) -> None:
+                     sampled_token_ids: Optional[torch.Tensor], block_size: int,
+                     num_seqs: int, num_queries: int) -> None:
         raise NotImplementedError
 
 
@@ -147,9 +147,7 @@ class AttentionMetadata:
         attention."""
         pass
 
-    def asdict_zerocopy(self,
-                        skip_fields: Optional[Set[str]] = None
-                        ) -> Dict[str, Any]:
+    def asdict_zerocopy(self, skip_fields: Optional[Set[str]] = None) -> Dict[str, Any]:
         """Similar to dataclasses.asdict, but avoids deepcopying."""
         if skip_fields is None:
             skip_fields = set()
@@ -184,10 +182,10 @@ class AttentionState(ABC, Generic[T]):
         ...
 
     @abstractmethod
-    def graph_capture_get_metadata_for_batch(
-            self,
-            batch_size: int,
-            is_encoder_decoder_model: bool = False) -> T:
+    def graph_capture_get_metadata_for_batch(self,
+                                             batch_size: int,
+                                             is_encoder_decoder_model: bool = False
+                                             ) -> T:
         """Get attention metadata for CUDA graph capture of batch_size."""
         ...
 
@@ -200,11 +198,10 @@ class AttentionState(ABC, Generic[T]):
         ...
 
     @abstractmethod
-    def prepare_graph_input_buffers(
-            self,
-            input_buffers: Dict[str, Any],
-            attn_metadata: T,
-            is_encoder_decoder_model: bool = False) -> None:
+    def prepare_graph_input_buffers(self,
+                                    input_buffers: Dict[str, Any],
+                                    attn_metadata: T,
+                                    is_encoder_decoder_model: bool = False) -> None:
         """In-place modify input buffers dict for CUDA graph replay."""
         ...
 

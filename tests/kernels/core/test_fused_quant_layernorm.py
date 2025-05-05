@@ -23,9 +23,7 @@ NUM_TOKENS_HIDDEN_SIZES = [
 ADD_RESIDUAL = [False, True]
 SCALE_UBS = [True, False]
 SEEDS = [0]
-CUDA_DEVICES = [
-    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
-]
+CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
 
 EPS = 1e-6
 
@@ -79,8 +77,8 @@ def ref_impl(rms_norm_layer: RMSNorm,
              residual: Optional[torch.Tensor],
              scale_ub: Optional[torch.Tensor]) \
         -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-    return ref_dynamic_per_token_quant(rms_norm_layer, x, quant_dtype,
-                                       residual, scale_ub)
+    return ref_dynamic_per_token_quant(rms_norm_layer, x, quant_dtype, residual,
+                                       scale_ub)
 
 
 def ops_dynamic_per_token_quant(weight: torch.Tensor,
@@ -91,9 +89,8 @@ def ops_dynamic_per_token_quant(weight: torch.Tensor,
         -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     if residual is not None:
         residual = residual.clone()
-    out, scales = ops.rms_norm_dynamic_per_token_quant(x, weight, EPS,
-                                                       quant_dtype, scale_ub,
-                                                       residual)
+    out, scales = ops.rms_norm_dynamic_per_token_quant(x, weight, EPS, quant_dtype,
+                                                       scale_ub, residual)
     return out, scales, residual
 
 
@@ -103,8 +100,7 @@ def ops_impl(weight: torch.Tensor,
              residual: Optional[torch.Tensor],
              scale_ub: Optional[torch.Tensor]) \
         -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-    return ops_dynamic_per_token_quant(weight, x, quant_dtype, residual,
-                                       scale_ub)
+    return ops_dynamic_per_token_quant(weight, x, quant_dtype, residual, scale_ub)
 
 
 @pytest.mark.parametrize("num_tokens, hidden_size", NUM_TOKENS_HIDDEN_SIZES)

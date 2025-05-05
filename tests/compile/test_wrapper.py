@@ -53,10 +53,8 @@ def test_torch_compile_wrapper():
 
         # for new input, dispatch to the compiled code directly
         new_x = torch.tensor([3])
-        assert wrapper(new_x,
-                       None).item() == 6  # dispatch to the first compiled code
-        assert wrapper(
-            new_x, cache).item() == 5  # dispatch to the second compiled code
+        assert wrapper(new_x, None).item() == 6  # dispatch to the first compiled code
+        assert wrapper(new_x, cache).item() == 5  # dispatch to the second compiled code
 
     for wrapper in wrappers:
         # make sure they have independent compiled codes

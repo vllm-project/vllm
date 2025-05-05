@@ -46,9 +46,9 @@ async def test_reject_multistep_with_guided_decoding():
     with RemoteOpenAIServer(model_name, server_args) as remote_server:
         client = remote_server.get_async_client()
 
-        with pytest.raises(openai.BadRequestError,
-                           match=re.compile(
-                               '.*Guided decoding .* multi-step decoding.*')):
+        with pytest.raises(
+                openai.BadRequestError,
+                match=re.compile('.*Guided decoding .* multi-step decoding.*')):
             await client.completions.create(
                 model=model_name,
                 prompt="Hello",

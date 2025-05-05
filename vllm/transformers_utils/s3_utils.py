@@ -48,9 +48,7 @@ def glob(s3=None,
         s3 = boto3.client("s3")
     if not path.endswith("/"):
         path = path + "/"
-    bucket_name, _, paths = list_files(s3,
-                                       path=path,
-                                       allow_pattern=allow_pattern)
+    bucket_name, _, paths = list_files(s3, path=path, allow_pattern=allow_pattern)
     return [f"s3://{bucket_name}/{path}" for path in paths]
 
 
@@ -58,8 +56,7 @@ def list_files(
         s3,
         path: str,
         allow_pattern: Optional[list[str]] = None,
-        ignore_pattern: Optional[list[str]] = None
-) -> tuple[str, str, list[str]]:
+        ignore_pattern: Optional[list[str]] = None) -> tuple[str, str, list[str]]:
     """
     List files from S3 path and filter by pattern.
 
@@ -146,16 +143,14 @@ class S3Model:
         if not s3_model_path.endswith("/"):
             s3_model_path = s3_model_path + "/"
 
-        bucket_name, base_dir, files = list_files(self.s3, s3_model_path,
-                                                  allow_pattern,
+        bucket_name, base_dir, files = list_files(self.s3, s3_model_path, allow_pattern,
                                                   ignore_pattern)
         if len(files) == 0:
             return
 
         for file in files:
-            destination_file = os.path.join(
-                self.dir,
-                file.removeprefix(base_dir).lstrip("/"))
+            destination_file = os.path.join(self.dir,
+                                            file.removeprefix(base_dir).lstrip("/"))
             local_dir = Path(destination_file).parent
             os.makedirs(local_dir, exist_ok=True)
             self.s3.download_file(bucket_name, file, destination_file)

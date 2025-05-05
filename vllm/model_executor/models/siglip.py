@@ -64,12 +64,11 @@ class SiglipVisionEmbeddings(nn.Module):
 
         self.num_patches = (self.image_size // self.patch_size)**2
         self.num_positions = self.num_patches
-        self.position_embedding = VocabParallelEmbedding(
-            self.num_positions, self.embed_dim)
+        self.position_embedding = VocabParallelEmbedding(self.num_positions,
+                                                         self.embed_dim)
         self.register_buffer(
             "position_ids",
-            torch.arange(self.num_positions, dtype=torch.int64).expand(
-                (1, -1)),
+            torch.arange(self.num_positions, dtype=torch.int64).expand((1, -1)),
             persistent=False,
         )
 
@@ -98,9 +97,9 @@ class SiglipVisionEmbeddings(nn.Module):
         # see discussion at https://github.com/facebookresearch/dino/issues/8
         height, width = height + 0.1, width + 0.1
 
-        patch_pos_embed = position_embeddings.reshape(
-            1, int(math.sqrt(num_positions)), int(math.sqrt(num_positions)),
-            dim)
+        patch_pos_embed = position_embeddings.reshape(1, int(math.sqrt(num_positions)),
+                                                      int(math.sqrt(num_positions)),
+                                                      dim)
         patch_pos_embed = patch_pos_embed.permute(0, 3, 1, 2)
         patch_pos_embed = nn.functional.interpolate(
             patch_pos_embed,
@@ -124,16 +123,15 @@ class SiglipVisionEmbeddings(nn.Module):
                 interpolate_pos_encoding: bool = False) -> torch.Tensor:
         _, _, height, width = pixel_values.shape
         target_dtype = self.patch_embedding.weight.dtype
-        patch_embeds = self.patch_embedding(pixel_values.to(
-            dtype=target_dtype))  # shape = [*, width, grid, grid]
+        patch_embeds = self.patch_embedding(
+            pixel_values.to(dtype=target_dtype))  # shape = [*, width, grid, grid]
         embeddings = patch_embeds.flatten(2).transpose(1, 2)
 
         if interpolate_pos_encoding:
             embeddings = embeddings + self.interpolate_pos_encoding(
                 embeddings, height, width)
         else:
-            embeddings = embeddings + self.position_embedding(
-                self.position_ids)
+            embeddings = embeddings + self.position_embedding(self.position_ids)
         return embeddings
 
 
@@ -176,8 +174,8 @@ class SiglipAttention(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
 
-        self.attn = MultiHeadAttention(self.num_heads_per_partition,
-                                       self.head_dim, self.scale)
+        self.attn = MultiHeadAttention(self.num_heads_per_partition, self.head_dim,
+                                       self.scale)
 
     def forward(
         self,
@@ -206,9 +204,7 @@ class SiglipMLP(nn.Module):
         self.config = config
         self.activation_fn = get_act_fn(config.hidden_act)
         # Special handling for BNB and torchao quantization
-        if quant_config and quant_config.get_name() in [
-                "bitsandbytes", "torchao"
-        ]:
+        if quant_config and quant_config.get_name() in ["bitsandbytes", "torchao"]:
             quantizable = True
         else:
             # For other quantization, we require the hidden size to be a
@@ -252,15 +248,13 @@ class SiglipEncoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
         )
-        self.layer_norm1 = nn.LayerNorm(self.embed_dim,
-                                        eps=config.layer_norm_eps)
+        self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(
             config,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
-        self.layer_norm2 = nn.LayerNorm(self.embed_dim,
-                                        eps=config.layer_norm_eps)
+        self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
 
     def forward(
         self,
@@ -337,10 +331,10 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
 
         self.probe = nn.Parameter(torch.randn(1, 1, config.hidden_size))
         # TODO(ChristopherCho): Implement vLLM version of MultiheadAttention
-        self.attention = torch.nn.MultiheadAttention(
-            config.hidden_size, config.num_attention_heads, batch_first=True)
-        self.layernorm = nn.LayerNorm(config.hidden_size,
-                                      eps=config.layer_norm_eps)
+        self.attention = torch.nn.MultiheadAttention(config.hidden_size,
+                                                     config.num_attention_heads,
+                                                     batch_first=True)
+        self.layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(config=config,
                              quant_config=quant_config,
                              prefix=f"{prefix}.mlp")
@@ -387,16 +381,14 @@ class SiglipVisionTransformer(nn.Module):
         if len(self.encoder.layers) > config.num_hidden_layers:
             raise ValueError(
                 f"The original encoder only has {num_hidden_layers} "
-                f"layers, but you requested {len(self.encoder.layers)} layers."
-            )
+                f"layers, but you requested {len(self.encoder.layers)} layers.")
 
         # If possible, skip post_layernorm to conserve memory
         if require_post_norm is None:
             require_post_norm = len(self.encoder.layers) == num_hidden_layers
 
         if require_post_norm:
-            self.post_layernorm = nn.LayerNorm(embed_dim,
-                                               eps=config.layer_norm_eps)
+            self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
         else:
             self.post_layernorm = None
 
@@ -431,9 +423,10 @@ class SiglipVisionTransformer(nn.Module):
         )
 
         # Handle post-norm (if applicable) and stacks feature layers if needed
-        encoder_outputs = resolve_visual_encoder_outputs(
-            encoder_outputs, feature_sample_layers, self.post_layernorm,
-            self.config.num_hidden_layers)
+        encoder_outputs = resolve_visual_encoder_outputs(encoder_outputs,
+                                                         feature_sample_layers,
+                                                         self.post_layernorm,
+                                                         self.config.num_hidden_layers)
 
         # TODO: add this back when pooled_output is used in inference.
         # if self.use_head:
@@ -480,8 +473,7 @@ class SiglipVisionModel(nn.Module):
             feature_sample_layers=feature_sample_layers,
         )
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -515,8 +507,7 @@ class SiglipVisionModel(nn.Module):
                 break
             else:
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params

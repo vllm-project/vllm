@@ -77,8 +77,8 @@ def log_replacement(name: str, old_module: nn.Module, new_module: nn.Module):
 
 
 def replace_linear_class(
-    linear: nn.Linear, style: Literal["colwise", "rowwise"],
-    quant_config: QuantizationConfig
+        linear: nn.Linear, style: Literal["colwise",
+                                          "rowwise"], quant_config: QuantizationConfig
 ) -> Union[ColumnParallelLinear, RowParallelLinear]:
     """
     Replace nn.Linear with one of vLLM's tensor parallel linear classes.
@@ -92,8 +92,7 @@ def replace_linear_class(
     """
 
     if not isinstance(style, str):
-        raise ValueError(
-            f"Unsupported parallel style type {type(style)}, expected str")
+        raise ValueError(f"Unsupported parallel style type {type(style)}, expected str")
 
     vllm_linear_cls = {
         "colwise": ColumnParallelLinear,
@@ -168,9 +167,8 @@ class TransformersModel(nn.Module):
         # Initialize any parameters that have not had their modules replaced
         self.init_parameters(self.model)
 
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(["hidden_states"],
-                                                    config.hidden_size))
+        self.make_empty_intermediate_tensors = (make_empty_intermediate_tensors_factory(
+            ["hidden_states"], config.hidden_size))
 
     def pipeline_parallel(self):
         """
@@ -192,12 +190,10 @@ class TransformersModel(nn.Module):
                 module_list_idx = i
 
         if len(module_lists) > 1:
-            raise ValueError(
-                "Pipeline parallel of models with multiple `ModuleList`s "
-                "in the base model are not supported yet!")
+            raise ValueError("Pipeline parallel of models with multiple `ModuleList`s "
+                             "in the base model are not supported yet!")
         if module_list_idx is None:
-            raise ValueError(
-                f"Could not find `ModuleList` in {type(self.model)}")
+            raise ValueError(f"Could not find `ModuleList` in {type(self.model)}")
 
         # Layers before module list
         for name in pp_plan[:module_list_idx]:
@@ -242,8 +238,8 @@ class TransformersModel(nn.Module):
                 for pattern, style in tp_plan.items():
                     if re.match(pattern, qual_name) and isinstance(
                             child_module, nn.Linear):
-                        new_module = replace_linear_class(
-                            child_module, style, self.quant_config)
+                        new_module = replace_linear_class(child_module, style,
+                                                          self.quant_config)
                         setattr(module, child_name, new_module)
                         log_replacement(qual_name, child_module, new_module)
                 else:
@@ -255,12 +251,11 @@ class TransformersModel(nn.Module):
         """
         Create `Attention` instances to inform KV cache allocation.
         """
-        num_heads = self.model_config.get_num_attention_heads(
-            self.parallel_config)
+        num_heads = self.model_config.get_num_attention_heads(self.parallel_config)
         head_size = self.model_config.get_head_size()
         num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
-        start, end = get_pp_indices(self.config.num_hidden_layers,
-                                    self.pp_rank, self.pp_size)
+        start, end = get_pp_indices(self.config.num_hidden_layers, self.pp_rank,
+                                    self.pp_size)
         return {
             i:
             Attention(
@@ -318,8 +313,7 @@ class TransformersModel(nn.Module):
         for name, param in module.named_parameters(recurse=False):
             if param.device == torch.device("meta"):
                 new_param = nn.Parameter(
-                    torch.empty_like(param.data,
-                                     device=self.device_config.device))
+                    torch.empty_like(param.data, device=self.device_config.device))
                 setattr(module, name, new_param)
         for child in module.children():
             self.init_parameters(child)
@@ -357,8 +351,7 @@ class TransformersModel(nn.Module):
 
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters())
 
         loaded_params = set[str]()
@@ -372,19 +365,16 @@ class TransformersModel(nn.Module):
                 continue
             if name in params_dict:
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
         return loaded_params
 
 
 @support_torch_compile
-class TransformersForCausalLM(nn.Module, SupportsQuant, SupportsLoRA,
-                              SupportsPP):
+class TransformersForCausalLM(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
     embedding_padding_modules = ["lm_head"]
-    embedding_modules = ["embed_tokens"
-                         ]  # TODO transformers will have a util to get it
+    embedding_modules = ["embed_tokens"]  # TODO transformers will have a util to get it
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -409,8 +399,7 @@ class TransformersForCausalLM(nn.Module, SupportsQuant, SupportsLoRA,
 
             logit_scale = getattr(config, "logit_scale", 1.0)
             self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                    config.vocab_size,
-                                                    logit_scale)
+                                                    config.vocab_size, logit_scale)
         else:
             self.lm_head = PPMissingLayer()
 
@@ -447,15 +436,12 @@ class TransformersForCausalLM(nn.Module, SupportsQuant, SupportsLoRA,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
-            skip_prefixes=(["lm_head."]
-                           if self.config.tie_word_embeddings else None),
+            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

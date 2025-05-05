@@ -61,12 +61,10 @@ def convert_mapping(
     """
     id_to_index = {
         id_: idx
-        for idx, id_ in enumerate(prompt_adapter_index_to_id)
-        if id_ is not None
+        for idx, id_ in enumerate(prompt_adapter_index_to_id) if id_ is not None
     }
     pa_indices = ([
-        id_to_index.get(id_, -1) if id_ > 0 else -1
-        for id_ in mapping.index_mapping
+        id_to_index.get(id_, -1) if id_ > 0 else -1 for id_ in mapping.index_mapping
     ])
 
     pa_embedding_mapping = convert_to_embedding_indices(pa_indices)
@@ -164,9 +162,9 @@ class PromptAdapterModelManager(AdapterModelManager):
         if prompt_adapter_id in self._active_adapters:
             return False
         first_free_slot = next(
-            ((i, prompt_adapter_id) for i, prompt_adapter_id in enumerate(
-                self.prompt_adapter_index_to_id) if prompt_adapter_id is None),
-            None)
+            ((i, prompt_adapter_id)
+             for i, prompt_adapter_id in enumerate(self.prompt_adapter_index_to_id)
+             if prompt_adapter_id is None), None)
         if first_free_slot is None:
             raise ValueError("No free prompt_adapter slots")
         index, _ = first_free_slot
@@ -198,16 +196,13 @@ class PromptAdapterModelManager(AdapterModelManager):
             v.set_mapping(base_indices, base_embedding_indices)
 
     def _create_prompt_adapter_modules(self):
-        for module_name, module in self.model.named_modules(
-                remove_duplicate=False):
+        for module_name, module in self.model.named_modules(remove_duplicate=False):
             if "VocabParallel" in module.__class__.__name__:
                 new_module = VocabParallelEmbeddingWithPromptAdapter(module)
-                new_module.create_prompt_adapter_weights(
-                    self.prompt_adapter_config)
-                replaced_module = self.replace_submodule(
-                    self.model, module_name, new_module)
-                self.register_module(module.__class__.__name__,
-                                     replaced_module)
+                new_module.create_prompt_adapter_weights(self.prompt_adapter_config)
+                replaced_module = self.replace_submodule(self.model, module_name,
+                                                         new_module)
+                self.register_module(module.__class__.__name__, replaced_module)
                 replaced_module.set_mapping(self.base_indices,
                                             self.base_embedding_indices)
                 break
@@ -227,8 +222,7 @@ class PromptAdapterModelManager(AdapterModelManager):
         """Pin a PromptAdapterModel in the manager cache."""
         raise NotImplementedError(
             "Pinning is not supported in PromptAdapterModelManager. "
-            "Use LRUCachePromptAdapterModelManager for pinning"
-        )  # type: ignore
+            "Use LRUCachePromptAdapterModelManager for pinning")  # type: ignore
 
     def remove_all_adapters(self):
         """Remove all PromptAdapterModel from the manager."""
@@ -261,8 +255,8 @@ class PromptAdapterModelManager(AdapterModelManager):
 
 class PromptAdapterLRUCache(AdapterLRUCache[PromptAdapterModel]):
 
-    def __init__(self, capacity: int,
-                 deactivate_prompt_adapter_fn: Callable[[int], bool]):
+    def __init__(self, capacity: int, deactivate_prompt_adapter_fn: Callable[[int],
+                                                                             bool]):
         super().__init__(capacity, deactivate_prompt_adapter_fn)
 
 
@@ -279,10 +273,10 @@ class LRUCachePromptAdapterModelManager(PromptAdapterModelManager):
         self.prompt_adapter_config = prompt_adapter_config
         super().__init__(model, max_num_seqs, max_num_batched_tokens,
                          prompt_adapter_config)
-        self._registered_adapters = PromptAdapterLRUCache(
-            self.capacity, self.deactivate_adapter)
-        self._active_adapters = PromptAdapterLRUCache(
-            self.prompt_adapter_slots, self._deactivate_adapter)
+        self._registered_adapters = PromptAdapterLRUCache(self.capacity,
+                                                          self.deactivate_adapter)
+        self._active_adapters = PromptAdapterLRUCache(self.prompt_adapter_slots,
+                                                      self._deactivate_adapter)
 
     def list_adapters(self) -> Dict[int, PromptAdapterModel]:
         """List all registered PromptAdapterModel."""
@@ -329,8 +323,7 @@ class LRUCachePromptAdapterModelManager(PromptAdapterModelManager):
         except ValueError as err:
             raise ValueError(
                 "Pinning failed. "
-                f"Prompt Adapter {prompt_adapter_id} is not registered."
-            ) from err
+                f"Prompt Adapter {prompt_adapter_id} is not registered.") from err
 
     def _pin_prompt_adapter_in_gpu_cache(self, prompt_adapter_id: int):
         if prompt_adapter_id not in self._active_adapters:

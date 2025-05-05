@@ -21,8 +21,7 @@ class TestBackend:
     Inductor config is default-initialized from VllmConfig.CompilationConfig.
     """
 
-    def __init__(self, *passes: Union[InductorPass, Callable[[fx.Graph],
-                                                             None]]):
+    def __init__(self, *passes: Union[InductorPass, Callable[[fx.Graph], None]]):
         self.custom_passes = list(passes)
         compile_config = get_current_vllm_config().compilation_config
         self.inductor_config = compile_config.inductor_compile_config
@@ -32,9 +31,7 @@ class TestBackend:
     def __call__(self, graph: fx.GraphModule, example_inputs):
         self.graph_pre_compile = deepcopy(graph)
         from torch._inductor.compile_fx import compile_fx
-        return compile_fx(graph,
-                          example_inputs,
-                          config_patches=self.inductor_config)
+        return compile_fx(graph, example_inputs, config_patches=self.inductor_config)
 
     def post_pass(self, graph: fx.Graph):
         self.graph_pre_pass = deepcopy(graph)

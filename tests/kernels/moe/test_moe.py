@@ -56,10 +56,7 @@ def test_fused_moe(
 
     if ep_size > 1:
         local_e = e // ep_size
-        e_ids = torch.randint(0,
-                              e, (local_e, ),
-                              device="cuda",
-                              dtype=torch.int32)
+        e_ids = torch.randint(0, e, (local_e, ), device="cuda", dtype=torch.int32)
         e_map = torch.full((e, ), -1, device="cuda", dtype=torch.int32)
         e_map[e_ids] = torch.arange(local_e, device="cuda", dtype=torch.int32)
         w1 = w1[e_ids]
@@ -93,10 +90,7 @@ def test_fused_moe(
                               expert_map=e_map,
                               renormalize=False)
     torch.testing.assert_close(triton_output, torch_output, atol=2e-2, rtol=0)
-    torch.testing.assert_close(iterative_output,
-                               torch_output,
-                               atol=2e-2,
-                               rtol=0)
+    torch.testing.assert_close(iterative_output, torch_output, atol=2e-2, rtol=0)
 
 
 @pytest.mark.parametrize("m", [1, 32, 222])
@@ -109,9 +103,9 @@ def test_fused_moe(
 @pytest.mark.parametrize("group_size", [64, 128])
 @pytest.mark.parametrize("has_zp", [True, False])
 @pytest.mark.parametrize("weight_bits", [4, 8])
-def test_fused_moe_wn16(m: int, n: int, k: int, e: int, topk: int,
-                        ep_size: int, dtype: torch.dtype, group_size: int,
-                        has_zp: bool, weight_bits: int):
+def test_fused_moe_wn16(m: int, n: int, k: int, e: int, topk: int, ep_size: int,
+                        dtype: torch.dtype, group_size: int, has_zp: bool,
+                        weight_bits: int):
     print(m, n, k, e, topk, dtype, group_size, has_zp, weight_bits)
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
@@ -130,15 +124,9 @@ def test_fused_moe_wn16(m: int, n: int, k: int, e: int, topk: int,
     w1_qweight = torch.empty((e, 2 * n, k // pack_factor),
                              device="cuda",
                              dtype=torch.uint8)
-    w2_qweight = torch.empty((e, k, n // pack_factor),
-                             device="cuda",
-                             dtype=torch.uint8)
-    w1_scales = torch.empty((e, 2 * n, k // group_size),
-                            device="cuda",
-                            dtype=dtype)
-    w2_scales = torch.empty((e, k, n // group_size),
-                            device="cuda",
-                            dtype=dtype)
+    w2_qweight = torch.empty((e, k, n // pack_factor), device="cuda", dtype=torch.uint8)
+    w1_scales = torch.empty((e, 2 * n, k // group_size), device="cuda", dtype=dtype)
+    w2_scales = torch.empty((e, k, n // group_size), device="cuda", dtype=dtype)
     w1_qzeros = torch.empty((e, 2 * n // pack_factor, k // group_size),
                             device="cuda",
                             dtype=torch.uint8)
@@ -154,8 +142,8 @@ def test_fused_moe_wn16(m: int, n: int, k: int, e: int, topk: int,
         else:
             w, w_ref, w_qweight, w_scales, w_qzeros = \
                 w2, w2_ref, w2_qweight, w2_scales, w2_qzeros
-        weight, qweight, scales, qzeros = quantize_weights(
-            w[expert_id].T, quant_type, group_size, has_zp, False)
+        weight, qweight, scales, qzeros = quantize_weights(w[expert_id].T, quant_type,
+                                                           group_size, has_zp, False)
         weight = weight.T
         qweight = qweight.T.contiguous().to(torch.uint8)
         scales = scales.T
@@ -174,10 +162,7 @@ def test_fused_moe_wn16(m: int, n: int, k: int, e: int, topk: int,
 
     if ep_size > 1:
         local_e = e // ep_size
-        e_ids = torch.randint(0,
-                              e, (local_e, ),
-                              device="cuda",
-                              dtype=torch.int32)
+        e_ids = torch.randint(0, e, (local_e, ), device="cuda", dtype=torch.int32)
         e_map = torch.full((e, ), -1, device="cuda", dtype=torch.int32)
         e_map[e_ids] = torch.arange(local_e, device="cuda", dtype=torch.int32)
         w1_ref = w1_ref[e_ids]
@@ -210,11 +195,10 @@ def test_fused_moe_wn16(m: int, n: int, k: int, e: int, topk: int,
     torch.testing.assert_close(triton_output, torch_output, atol=2e-2, rtol=0)
 
 
-@pytest.mark.parametrize("dtype",
-                         [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("padding", [True, False])
-@pytest.mark.parametrize(
-    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False])
+@pytest.mark.parametrize("use_rocm_aiter",
+                         [True, False] if current_platform.is_rocm() else [False])
 @torch.inference_mode()
 def test_mixtral_moe(dtype: torch.dtype, padding: bool, use_rocm_aiter: bool,
                      monkeypatch):
@@ -240,8 +224,7 @@ def test_mixtral_moe(dtype: torch.dtype, padding: bool, use_rocm_aiter: bool,
     # Load the weights
     vllm_moe.gate.weight.data[:] = hf_moe.gate.weight.data
     for i in range(config.num_local_experts):
-        weights = (hf_moe.experts[i].w1.weight.data,
-                   hf_moe.experts[i].w3.weight.data)
+        weights = (hf_moe.experts[i].w1.weight.data, hf_moe.experts[i].w3.weight.data)
         vllm_moe.experts.w13_weight[i][:] = torch.cat(weights, dim=0)
         vllm_moe.experts.w2_weight[i][:] = hf_moe.experts[i].w2.weight.data
 
@@ -252,12 +235,14 @@ def test_mixtral_moe(dtype: torch.dtype, padding: bool, use_rocm_aiter: bool,
 
     # Pad the weight if moe padding is enabled
     if padding:
-        vllm_moe.experts.w13_weight = Parameter(F.pad(
-            vllm_moe.experts.w13_weight, (0, 128), "constant", 0)[..., 0:-128],
+        vllm_moe.experts.w13_weight = Parameter(F.pad(vllm_moe.experts.w13_weight,
+                                                      (0, 128), "constant", 0)[...,
+                                                                               0:-128],
                                                 requires_grad=False)
         torch.cuda.empty_cache()
-        vllm_moe.experts.w2_weight = Parameter(F.pad(
-            vllm_moe.experts.w2_weight, (0, 128), "constant", 0)[..., 0:-128],
+        vllm_moe.experts.w2_weight = Parameter(F.pad(vllm_moe.experts.w2_weight,
+                                                     (0, 128), "constant", 0)[...,
+                                                                              0:-128],
                                                requires_grad=False)
         torch.cuda.empty_cache()
 
@@ -366,8 +351,8 @@ def test_fused_marlin_moe(
             zeros1_l.append(zeros1)
         else:
             test_perm = torch.randperm(k)
-            quant_res = marlin_quantize(w1[i].transpose(1, 0), quant_type,
-                                        group_size, act_order, test_perm)
+            quant_res = marlin_quantize(w1[i].transpose(1, 0), quant_type, group_size,
+                                        act_order, test_perm)
             w_ref1, qweight1, scales1, g_idx1, sort_indices1, _ = quant_res
 
             w_ref1_l.append(w_ref1.T)
@@ -401,8 +386,8 @@ def test_fused_marlin_moe(
             zeros2_l.append(zeros2)
         else:
             test_perm = torch.randperm(n)
-            quant_res = marlin_quantize(w2[i].transpose(1, 0), quant_type,
-                                        group_size, act_order, test_perm)
+            quant_res = marlin_quantize(w2[i].transpose(1, 0), quant_type, group_size,
+                                        act_order, test_perm)
             w_ref2, qweight2, scales2, g_idx2, sort_indices2, _ = quant_res
 
             w_ref2_l.append(w_ref2.T)
@@ -420,30 +405,28 @@ def test_fused_marlin_moe(
 
     score = torch.randn((m, e), device="cuda", dtype=dtype)
 
-    topk_weights, topk_ids, token_expert_indices = fused_topk(
-        a, score, topk, False)
+    topk_weights, topk_ids, token_expert_indices = fused_topk(a, score, topk, False)
 
     torch_output = torch_moe(a, w_ref1, w_ref2, score, topk, e_map)
 
-    marlin_output = torch.ops.vllm.fused_marlin_moe(
-        a,
-        qweight1,
-        qweight2,
-        scales1,
-        scales2,
-        score,
-        topk_weights,
-        topk_ids,
-        global_num_experts=e,
-        expert_map=e_map,
-        g_idx1=g_idx1,
-        g_idx2=g_idx2,
-        sort_indices1=sort_indices1,
-        sort_indices2=sort_indices2,
-        w1_zeros=zeros1,
-        w2_zeros=zeros2,
-        num_bits=num_bits,
-        is_k_full=is_k_full)
+    marlin_output = torch.ops.vllm.fused_marlin_moe(a,
+                                                    qweight1,
+                                                    qweight2,
+                                                    scales1,
+                                                    scales2,
+                                                    score,
+                                                    topk_weights,
+                                                    topk_ids,
+                                                    global_num_experts=e,
+                                                    expert_map=e_map,
+                                                    g_idx1=g_idx1,
+                                                    g_idx2=g_idx2,
+                                                    sort_indices1=sort_indices1,
+                                                    sort_indices2=sort_indices2,
+                                                    w1_zeros=zeros1,
+                                                    w2_zeros=zeros2,
+                                                    num_bits=num_bits,
+                                                    is_k_full=is_k_full)
 
     torch.testing.assert_close(marlin_output, torch_output, atol=2e-2, rtol=0)
 
@@ -463,8 +446,8 @@ def test_fused_marlin_moe(
 @pytest.mark.parametrize("is_k_full", [True, False])
 def test_single_marlin_moe_multiply(m: int, n: int, k: int, e: int, topk: int,
                                     dtype: torch.dtype, group_size: int,
-                                    act_order: bool, num_bits: int,
-                                    has_zp: bool, is_k_full: bool):
+                                    act_order: bool, num_bits: int, has_zp: bool,
+                                    is_k_full: bool):
     # Filter act_order
     if act_order:
         if group_size == -1:
@@ -504,8 +487,7 @@ def test_single_marlin_moe_multiply(m: int, n: int, k: int, e: int, topk: int,
         else:
             test_perm = torch.randperm(k)
             w_ref, qweight, scales, g_idx, sort_indices, _ = marlin_quantize(
-                w[i].transpose(1, 0), quant_type, group_size, act_order,
-                test_perm)
+                w[i].transpose(1, 0), quant_type, group_size, act_order, test_perm)
 
             w_ref_l.append(w_ref.T)
             qweight_l.append(qweight)
@@ -543,10 +525,7 @@ def test_single_marlin_moe_multiply(m: int, n: int, k: int, e: int, topk: int,
 def test_moe_align_block_size_opcheck():
     num_experts = 4
     block_size = 4
-    topk_ids = torch.randint(0,
-                             num_experts, (3, 4),
-                             dtype=torch.int32,
-                             device='cuda')
+    topk_ids = torch.randint(0, num_experts, (3, 4), dtype=torch.int32, device='cuda')
 
     max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
     sorted_ids = torch.empty((max_num_tokens_padded, ),
@@ -557,9 +536,7 @@ def test_moe_align_block_size_opcheck():
     expert_ids = torch.empty((max_num_m_blocks, ),
                              dtype=torch.int32,
                              device=topk_ids.device)
-    num_tokens_post_pad = torch.empty((1),
-                                      dtype=torch.int32,
-                                      device=topk_ids.device)
+    num_tokens_post_pad = torch.empty((1), dtype=torch.int32, device=topk_ids.device)
 
     opcheck(torch.ops._moe_C.moe_align_block_size,
             (topk_ids, num_experts, block_size, sorted_ids, expert_ids,

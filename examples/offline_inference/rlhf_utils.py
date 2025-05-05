@@ -2,8 +2,7 @@
 import torch
 
 
-def stateless_init_process_group(master_address, master_port, rank, world_size,
-                                 device):
+def stateless_init_process_group(master_address, master_port, rank, world_size, device):
     """
     vLLM provides `StatelessProcessGroup` to create a process group
     without considering the global process group in torch.distributed.
@@ -31,8 +30,8 @@ class WorkerExtension:
     should pass the full qualified name as `worker_extension_cls` argument.
     """
 
-    def init_weight_update_group(self, master_address, master_port,
-                                 rank_offset, world_size):
+    def init_weight_update_group(self, master_address, master_port, rank_offset,
+                                 world_size):
         from vllm.distributed.parallel_state import get_world_group
         rank = get_world_group().rank + rank_offset
         self.model_update_group = stateless_init_process_group(
@@ -59,8 +58,7 @@ class WorkerExtension:
         """
         weights_updated = True
         for name, p in self.model_runner.model.named_parameters():
-            weights_updated = weights_updated and torch.allclose(
-                p, torch.zeros_like(p))
+            weights_updated = weights_updated and torch.allclose(p, torch.zeros_like(p))
         return weights_updated
 
 
@@ -100,6 +98,5 @@ class ColocateWorkerExtension:
         """
         weights_updated = True
         for name, p in self.model_runner.model.named_parameters():
-            weights_updated = weights_updated and torch.allclose(
-                p, torch.zeros_like(p))
+            weights_updated = weights_updated and torch.allclose(p, torch.zeros_like(p))
         return weights_updated

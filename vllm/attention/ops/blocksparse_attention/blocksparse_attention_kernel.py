@@ -113,8 +113,7 @@ def blocksparse_flash_attn_varlen_fwd(
         BLOCK_M=q_block_size,
         BLOCK_N=block_size,
         BLOCK_D=block_d,
-        BLOCK_M_LOADING=(16 if decoding_only else
-                         q_block_size),  # smaller for decoding
+        BLOCK_M_LOADING=(16 if decoding_only else q_block_size),  # smaller for decoding
         EVEN_D=block_d == head_size,
         num_warps=1 if decoding_only else 4,
         num_stages=3)
@@ -228,8 +227,7 @@ def _fwd_kernel_inner(
 
 
 @triton.heuristics({
-    "M_LT_N":
-    lambda kwargs: kwargs["BLOCK_M"] < kwargs["BLOCK_N"],
+    "M_LT_N": lambda kwargs: kwargs["BLOCK_M"] < kwargs["BLOCK_N"],
 })
 @triton.jit
 def _fwd_kernel_batch_inference(

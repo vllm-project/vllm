@@ -28,9 +28,7 @@ def run_normal_opt125m():
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
     # Create an LLM without guided decoding as a baseline.
-    llm = LLM(model="facebook/opt-125m",
-              enforce_eager=True,
-              gpu_memory_utilization=0.3)
+    llm = LLM(model="facebook/opt-125m", enforce_eager=True, gpu_memory_utilization=0.3)
     outputs = llm.generate(prompts, sampling_params)
     for output in outputs:
         prompt = output.prompt
@@ -74,9 +72,7 @@ def run_lmfe(sample_regex):
               gpu_memory_utilization=0.3)
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
     outputs = llm.generate(
-        prompts=[
-            f"Give an example IPv4 address with this regex: {sample_regex}"
-        ] * 2,
+        prompts=[f"Give an example IPv4 address with this regex: {sample_regex}"] * 2,
         sampling_params=sampling_params,
         use_tqdm=True,
         guided_options_request=dict(guided_regex=sample_regex))
@@ -98,8 +94,7 @@ def test_lazy_outlines(sample_regex):
     # and help find the root cause.
     # We don't run it in CI by default because it is slow.
     use_blame = False
-    context = blame(
-        lambda: module_name in sys.modules) if use_blame else nullcontext()
+    context = blame(lambda: module_name in sys.modules) if use_blame else nullcontext()
     with context as result:
         run_normal()
         run_lmfe(sample_regex)

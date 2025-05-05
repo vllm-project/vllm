@@ -27,12 +27,11 @@ BITBLAS_SUPPORTED_SYM = [False, True]
 # Determines the supported quantization types for BitBLAS based on the
 # device's capability and whether zero-point (zp) is used.
 def query_bitblas_supported_quant_types(has_zp: bool,
-                                        device_capability: Optional[int] = None
-                                        ):
+                                        device_capability: Optional[int] = None):
     if device_capability is None:
         capability_tuple = current_platform.get_device_capability()
-        device_capability = (-1 if capability_tuple is None else
-                             capability_tuple.to_int())
+        device_capability = (-1
+                             if capability_tuple is None else capability_tuple.to_int())
 
     if device_capability < 70:
         return []
@@ -55,11 +54,10 @@ def _check_bitblas_supported(
 
     if device_capability is None:
         capability_tuple = current_platform.get_device_capability()
-        device_capability = (-1 if capability_tuple is None else
-                             capability_tuple.to_int())
+        device_capability = (-1
+                             if capability_tuple is None else capability_tuple.to_int())
 
-    supported_types = query_bitblas_supported_quant_types(
-        has_zp, device_capability)
+    supported_types = query_bitblas_supported_quant_types(has_zp, device_capability)
 
     if quant_type not in supported_types:
         return (False, f"BitBLAS does not support weight_bits = {quant_type}. "
@@ -102,8 +100,8 @@ def verify_bitblas_supported(quant_type: ScalarType,
 
 
 def verify_bitblas_supports_shape(output_size_per_partition: int,
-                                  input_size_per_partition: int,
-                                  input_size: int, group_size: int) -> None:
+                                  input_size_per_partition: int, input_size: int,
+                                  group_size: int) -> None:
 
     # Validate output_size_per_partition
     if output_size_per_partition % BITBLAS_MIN_WEIGHT_SIZE_N != 0:
@@ -121,13 +119,11 @@ def verify_bitblas_supports_shape(output_size_per_partition: int,
                          "Consider reducing tensor_parallel_size or running "
                          "with --quantization gptq.")
 
-    if (group_size < input_size
-            and input_size_per_partition % group_size != 0):
-        raise ValueError(
-            f"Weight input_size_per_partition = {input_size_per_partition}"
-            f" is not divisible by group_size = {group_size}."
-            "Consider reducing tensor_parallel_size or running "
-            "with --quantization gptq.")
+    if (group_size < input_size and input_size_per_partition % group_size != 0):
+        raise ValueError(f"Weight input_size_per_partition = {input_size_per_partition}"
+                         f" is not divisible by group_size = {group_size}."
+                         "Consider reducing tensor_parallel_size or running "
+                         "with --quantization gptq.")
 
 
 def check_bitblas_supports_shape(output_size_per_partition: int,
@@ -136,8 +132,7 @@ def check_bitblas_supports_shape(output_size_per_partition: int,
                                     -> Tuple[bool, Optional[str]]:
     try:
         verify_bitblas_supports_shape(output_size_per_partition,
-                                      input_size_per_partition, input_size,
-                                      group_size)
+                                      input_size_per_partition, input_size, group_size)
     except ValueError as e:
         return False, e.__str__()
     return True, None
@@ -165,8 +160,7 @@ def bitblas_make_empty_zp(device: torch.device) -> torch.Tensor:
                               requires_grad=False)
 
 
-def bitblas_sort_g_idx(
-        g_idx: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+def bitblas_sort_g_idx(g_idx: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     g_idx_sort_indices = torch.argsort(g_idx).to(torch.int)
     return g_idx[g_idx_sort_indices], g_idx_sort_indices
 
@@ -183,8 +177,7 @@ def unpack_gptq_qzeros(qzeros, bits, is_gptq_v2=False) -> torch.Tensor:
 
     for col in range(unpacked_zeros.shape[1]):
         i = col % elems_per_int32
-        unpacked_zeros[:, col] = (qzeros[:, col // elems_per_int32] >>
-                                  (bits * i)) & 0xF
+        unpacked_zeros[:, col] = (qzeros[:, col // elems_per_int32] >> (bits * i)) & 0xF
     if not is_gptq_v2:
         return unpacked_zeros + 1
     return unpacked_zeros
@@ -201,7 +194,6 @@ def unpack_gptq_qweight(qweight, bits):
     )
     for col in range(unpacked_weight.shape[1]):
         i = col % elems_per_int8
-        unpacked_weight[:, col] = (qweight[:, col // elems_per_int8] >>
-                                   (bits * i))
+        unpacked_weight[:, col] = (qweight[:, col // elems_per_int8] >> (bits * i))
 
     return torch.bitwise_and(unpacked_weight, 2**bits - 1)

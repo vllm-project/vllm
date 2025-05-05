@@ -110,9 +110,8 @@ def on_mi250_mi300() -> bool:
 
 
 @cache
-def use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
-                                    block_size: int, gqa_ratio: int,
-                                    max_seq_len: int,
+def use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int, block_size: int,
+                                    gqa_ratio: int, max_seq_len: int,
                                     sliding_window: int) -> bool:
 
     GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
@@ -121,15 +120,14 @@ def use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
     # rocm custom page attention not support on gfx1*
     # custom paged attn always supported on V0. On V1, requires sliding window
     # disabled due to observed numerical discrepancy.
-    return (ON_GFX9 and (not envs.VLLM_USE_V1 or sliding_window == 0
-                         or sliding_window == (-1, -1))
+    return (ON_GFX9 and
+            (not envs.VLLM_USE_V1 or sliding_window == 0 or sliding_window == (-1, -1))
             and (qtype == torch.half or qtype == torch.bfloat16)
             and (head_size == 64 or head_size == 128)
             and (block_size == 16 or block_size == 32)
             and (gqa_ratio >= 1 and gqa_ratio <= 16) and max_seq_len <= 32768
             and (envs.VLLM_ROCM_CUSTOM_PAGED_ATTN)
-            and not (envs.VLLM_ROCM_USE_AITER_PAGED_ATTN
-                     and envs.VLLM_ROCM_USE_AITER))
+            and not (envs.VLLM_ROCM_USE_AITER_PAGED_ATTN and envs.VLLM_ROCM_USE_AITER))
 
 
 class RocmPlatform(Platform):
@@ -142,44 +140,39 @@ class RocmPlatform(Platform):
     device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
 
     supported_quantization: list[str] = [
-        "awq", "gptq", "fp8", "compressed-tensors", "fbgemm_fp8", "gguf",
-        "quark", "ptpc_fp8"
+        "awq", "gptq", "fp8", "compressed-tensors", "fbgemm_fp8", "gguf", "quark",
+        "ptpc_fp8"
     ]
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
-                             kv_cache_dtype, block_size, use_v1,
-                             use_mla) -> str:
+    def get_attn_backend_cls(cls, selected_backend, head_size, dtype, kv_cache_dtype,
+                             block_size, use_v1, use_mla) -> str:
         if use_mla:
             from vllm.attention.backends.rocm_aiter_mla import (
                 is_aiter_mla_enabled)
 
             if selected_backend is None:
-                selected_backend = (_Backend.ROCM_AITER_MLA if
-                                    is_aiter_mla_enabled() or block_size == 1
-                                    else _Backend.TRITON_MLA)
+                selected_backend = (_Backend.ROCM_AITER_MLA if is_aiter_mla_enabled()
+                                    or block_size == 1 else _Backend.TRITON_MLA)
 
             if selected_backend == _Backend.TRITON_MLA:
                 if block_size != 1:
                     logger.info("Using Triton MLA backend.")
                     return "vllm.attention.backends.triton_mla.TritonMLABackend"  # noqa: E501
                 else:
-                    raise ValueError(
-                        f" The selected backend, {selected_backend.name},"
-                        f"does not support block size {block_size}.")
+                    raise ValueError(f" The selected backend, {selected_backend.name},"
+                                     f"does not support block size {block_size}.")
             elif selected_backend == _Backend.ROCM_AITER_MLA:
                 if block_size == 1:
                     logger.info("Using AITER MLA backend.")
                     return "vllm.attention.backends.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
                 else:
-                    raise ValueError(
-                        f" The selected backend, {selected_backend.name},"
-                        f"does not support block size {block_size}."
-                        "(currently only supports block size 1)")
+                    raise ValueError(f" The selected backend, {selected_backend.name},"
+                                     f"does not support block size {block_size}."
+                                     "(currently only supports block size 1)")
             else:
-                raise ValueError(
-                    f" The selected backend, {selected_backend.name},"
-                    f"is not MLA type while requested for MLA backend.")
+                raise ValueError(f" The selected backend, {selected_backend.name},"
+                                 f"is not MLA type while requested for MLA backend.")
 
         selected_backend = (_Backend.ROCM_FLASH if selected_backend
                             == _Backend.FLASH_ATTN else selected_backend)
@@ -198,9 +191,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     @lru_cache(maxsize=8)
-    def get_device_capability(cls,
-                              device_id: int = 0
-                              ) -> Optional[DeviceCapability]:
+    def get_device_capability(cls, device_id: int = 0) -> Optional[DeviceCapability]:
         major, minor = torch.cuda.get_device_capability(device_id)
         return DeviceCapability(major=major, minor=minor)
 
@@ -210,21 +201,17 @@ class RocmPlatform(Platform):
         """
         Query if the set of gpus are fully connected by xgmi (1 hop)
         """
-        handles = [
-            amdsmi_get_processor_handles()[i] for i in physical_device_ids
-        ]
+        handles = [amdsmi_get_processor_handles()[i] for i in physical_device_ids]
         for i, handle in enumerate(handles):
             for j, peer_handle in enumerate(handles):
                 if i < j:
                     try:
-                        link_type = amdsmi_topo_get_link_type(
-                            handle, peer_handle)
+                        link_type = amdsmi_topo_get_link_type(handle, peer_handle)
                         # type is 2 for XGMI
                         if link_type["hops"] != 1 or link_type["type"] != 2:
                             return False
                     except AmdSmiException as error:
-                        logger.error("AMD 1 hop XGMI detection failed.",
-                                     exc_info=error)
+                        logger.error("AMD 1 hop XGMI detection failed.", exc_info=error)
                         return False
         return True
 
@@ -248,10 +235,9 @@ class RocmPlatform(Platform):
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
         if enforce_eager:
-            logger.warning(
-                "To see benefits of async output processing, enable CUDA "
-                "graph. Since, enforce-eager is enabled, async output "
-                "processor cannot be used")
+            logger.warning("To see benefits of async output processing, enable CUDA "
+                           "graph. Since, enforce-eager is enabled, async output "
+                           "processor cannot be used")
             return False
         return True
 
@@ -276,8 +262,7 @@ class RocmPlatform(Platform):
             elif vllm_config.speculative_config:
                 if envs.VLLM_USE_V1:
                     raise NotImplementedError(
-                        "Speculative decoding is not yet supported on vLLM V1."
-                    )
+                        "Speculative decoding is not yet supported on vLLM V1.")
                 else:
                     parallel_config.worker_cls = \
                         "vllm.spec_decode.spec_decode_worker.create_spec_worker"
@@ -306,9 +291,8 @@ class RocmPlatform(Platform):
     def verify_quantization(cls, quant: str) -> None:
         super().verify_quantization(quant)
         if quant == "awq" and not envs.VLLM_USE_TRITON_AWQ:
-            logger.warning(
-                "Using AWQ quantization with ROCm, but VLLM_USE_TRITON_AWQ"
-                " is not set, enabling VLLM_USE_TRITON_AWQ.")
+            logger.warning("Using AWQ quantization with ROCm, but VLLM_USE_TRITON_AWQ"
+                           " is not set, enabling VLLM_USE_TRITON_AWQ.")
         envs.VLLM_USE_TRITON_AWQ = True
 
     @classmethod
@@ -317,11 +301,9 @@ class RocmPlatform(Platform):
 
     @classmethod
     def get_current_memory_usage(cls,
-                                 device: Optional[torch.types.Device] = None
-                                 ) -> float:
+                                 device: Optional[torch.types.Device] = None) -> float:
         torch.cuda.reset_peak_memory_stats(device)
-        return torch.cuda.mem_get_info(device)[1] - torch.cuda.mem_get_info(
-            device)[0]
+        return torch.cuda.mem_get_info(device)[1] - torch.cuda.mem_get_info(device)[0]
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
@@ -358,5 +340,4 @@ class RocmPlatform(Platform):
 
     @classmethod
     def get_cu_count(cls, device_id: int = 0) -> int:
-        return torch.cuda.get_device_properties(
-            device_id).multi_processor_count
+        return torch.cuda.get_device_properties(device_id).multi_processor_count

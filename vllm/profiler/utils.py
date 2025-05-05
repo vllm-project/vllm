@@ -30,8 +30,8 @@ def trim_string_back(string, width):
 
 class TablePrinter:
 
-    def __init__(self, row_cls: Type[dataclasses.dataclass],
-                 column_widths: Dict[str, int]):
+    def __init__(self, row_cls: Type[dataclasses.dataclass], column_widths: Dict[str,
+                                                                                 int]):
         self.row_cls = row_cls
         self.fieldnames = [x.name for x in dataclasses.fields(row_cls)]
         self.column_widths = column_widths
@@ -110,8 +110,7 @@ def event_arg_repr(arg) -> str:
     elif isinstance(arg, tuple):
         return f"({', '.join([event_arg_repr(x) for x in arg])})"
     else:
-        assert isinstance(arg,
-                          _TensorMetadata), f"Unsupported type: {type(arg)}"
+        assert isinstance(arg, _TensorMetadata), f"Unsupported type: {type(arg)}"
         sizes_str = ', '.join([str(x) for x in arg.sizes])
         return f"{str(arg.dtype).replace('torch.', '')}[{sizes_str}]"
 

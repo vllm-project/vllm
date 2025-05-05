@@ -20,11 +20,10 @@ async def generate(
 
     final_output = None
     count = 0
-    async for out in client.generate(
-            request_id=request_id,
-            prompt="Hello my name is Robert and",
-            sampling_params=SamplingParams(max_tokens=num_tokens,
-                                           temperature=0)):
+    async for out in client.generate(request_id=request_id,
+                                     prompt="Hello my name is Robert and",
+                                     sampling_params=SamplingParams(
+                                         max_tokens=num_tokens, temperature=0)):
 
         count += 1
         final_output = out
@@ -39,10 +38,9 @@ async def generate(
 
 def run_normal(engine_args: AsyncEngineArgs, ipc_path: str):
     # Make engine.
-    engine = MQLLMEngine.from_engine_args(
-        engine_args=engine_args,
-        usage_context=UsageContext.UNKNOWN_CONTEXT,
-        ipc_path=ipc_path)
+    engine = MQLLMEngine.from_engine_args(engine_args=engine_args,
+                                          usage_context=UsageContext.UNKNOWN_CONTEXT,
+                                          ipc_path=ipc_path)
 
     # Run engine.
     engine.start()
@@ -58,8 +56,7 @@ class RemoteMQLLMEngine:
         self.engine_args = engine_args
         self.ipc_path = ipc_path
         context = multiprocessing.get_context("spawn")
-        self.proc = context.Process(target=run_fn,
-                                    args=(engine_args, ipc_path))
+        self.proc = context.Process(target=run_fn, args=(engine_args, ipc_path))
         self.proc.start()
 
     def __enter__(self):

@@ -65,8 +65,7 @@ class CLIPVisionEmbeddings(nn.Module):
 
         self.num_patches = (self.image_size // self.patch_size)**2
         self.num_positions = self.num_patches + 1
-        self.position_embedding = nn.Embedding(self.num_positions,
-                                               self.embed_dim)
+        self.position_embedding = nn.Embedding(self.num_positions, self.embed_dim)
         self.register_buffer("position_ids",
                              torch.arange(self.num_positions).expand((1, -1)),
                              persistent=False)
@@ -74,8 +73,8 @@ class CLIPVisionEmbeddings(nn.Module):
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         batch_size = pixel_values.shape[0]
         target_dtype = self.patch_embedding.weight.dtype
-        patch_embeds = self.patch_embedding(pixel_values.to(
-            dtype=target_dtype))  # shape = [*, width, grid, grid]
+        patch_embeds = self.patch_embedding(
+            pixel_values.to(dtype=target_dtype))  # shape = [*, width, grid, grid]
         patch_embeds = patch_embeds.flatten(2).transpose(1, 2)
 
         class_embeds = self.class_embedding.expand(batch_size, 1, -1)
@@ -100,10 +99,9 @@ class CLIPAttention(nn.Module):
         self.num_heads = config.num_attention_heads
         self.head_dim = self.embed_dim // self.num_heads
         if self.head_dim * self.num_heads != self.embed_dim:
-            raise ValueError(
-                "embed_dim must be divisible by num_heads "
-                f"(got `embed_dim`: {self.embed_dim} and `num_heads`:"
-                f" {self.num_heads}).")
+            raise ValueError("embed_dim must be divisible by num_heads "
+                             f"(got `embed_dim`: {self.embed_dim} and `num_heads`:"
+                             f" {self.num_heads}).")
         self.scale = self.head_dim**-0.5
         self.dropout = config.attention_dropout
 
@@ -125,8 +123,8 @@ class CLIPAttention(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
 
-        self.attn = MultiHeadAttention(self.num_heads_per_partition,
-                                       self.head_dim, self.scale)
+        self.attn = MultiHeadAttention(self.num_heads_per_partition, self.head_dim,
+                                       self.scale)
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads,
@@ -190,13 +188,9 @@ class CLIPEncoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
         )
-        self.layer_norm1 = nn.LayerNorm(config.hidden_size,
-                                        eps=config.layer_norm_eps)
-        self.mlp = CLIPMLP(config,
-                           quant_config=quant_config,
-                           prefix=f"{prefix}.mlp")
-        self.layer_norm2 = nn.LayerNorm(config.hidden_size,
-                                        eps=config.layer_norm_eps)
+        self.layer_norm1 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.mlp = CLIPMLP(config, quant_config=quant_config, prefix=f"{prefix}.mlp")
+        self.layer_norm2 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
 
@@ -246,8 +240,8 @@ class CLIPEncoder(nn.Module):
         ])
 
     def forward(
-        self, inputs_embeds: torch.Tensor, return_all_hidden_states: bool
-    ) -> Union[torch.Tensor, list[torch.Tensor]]:
+            self, inputs_embeds: torch.Tensor,
+            return_all_hidden_states: bool) -> Union[torch.Tensor, list[torch.Tensor]]:
         hidden_states_pool = [inputs_embeds]
         hidden_states = inputs_embeds
 
@@ -295,16 +289,14 @@ class CLIPVisionTransformer(nn.Module):
         if len(self.encoder.layers) > config.num_hidden_layers:
             raise ValueError(
                 f"The original encoder only has {num_hidden_layers} "
-                f"layers, but you requested {len(self.encoder.layers)} layers."
-            )
+                f"layers, but you requested {len(self.encoder.layers)} layers.")
 
         # If possible, skip post_layernorm to conserve memory
         if require_post_norm is None:
             require_post_norm = len(self.encoder.layers) == num_hidden_layers
 
         if require_post_norm:
-            self.post_layernorm = nn.LayerNorm(embed_dim,
-                                               eps=config.layer_norm_eps)
+            self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
         else:
             self.post_layernorm = None
 
@@ -326,9 +318,10 @@ class CLIPVisionTransformer(nn.Module):
             return_all_hidden_states=return_all_hidden_states)
 
         # Handle post-norm (if applicable) and stacks feature layers if needed
-        encoder_outputs = resolve_visual_encoder_outputs(
-            encoder_outputs, feature_sample_layers, self.post_layernorm,
-            self.config.num_hidden_layers)
+        encoder_outputs = resolve_visual_encoder_outputs(encoder_outputs,
+                                                         feature_sample_layers,
+                                                         self.post_layernorm,
+                                                         self.config.num_hidden_layers)
 
         return encoder_outputs
 
@@ -368,8 +361,7 @@ class CLIPVisionModel(nn.Module, SupportsQuant):
 
     # (TODO) Add prefix argument for filtering out weights to be loaded
     #        ref: https://github.com/vllm-project/vllm/pull/7186#discussion_r1734163986
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -403,8 +395,7 @@ class CLIPVisionModel(nn.Module, SupportsQuant):
                 break
             else:
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params

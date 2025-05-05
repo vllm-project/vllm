@@ -11,13 +11,10 @@ def test_aqlm_dequant_opcheck():
                           32767, (22016, 512, 1),
                           device='cuda',
                           dtype=torch.int16)
-    codebooks = torch.rand((2, 65536, 1, 8),
-                           device='cuda',
-                           dtype=torch.float16)
+    codebooks = torch.rand((2, 65536, 1, 8), device='cuda', dtype=torch.float16)
     codebook_partition_sizes = [11008, 11008]
 
-    opcheck(torch.ops._C.aqlm_dequant,
-            (codes, codebooks, codebook_partition_sizes))
+    opcheck(torch.ops._C.aqlm_dequant, (codes, codebooks, codebook_partition_sizes))
 
 
 def test_aqlm_gemm_opcheck():
@@ -26,9 +23,7 @@ def test_aqlm_gemm_opcheck():
                           32767, (12288, 512, 1),
                           device='cuda',
                           dtype=torch.int16)
-    codebooks = torch.rand((3, 65536, 1, 8),
-                           device='cuda',
-                           dtype=torch.float16)
+    codebooks = torch.rand((3, 65536, 1, 8), device='cuda', dtype=torch.float16)
     scales = torch.rand((12288, 1, 1, 1), device='cuda', dtype=torch.float16)
     codebook_partition_sizes = [4096, 4096, 4096]
     bias = None

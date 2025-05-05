@@ -73,8 +73,7 @@ class OpenAIServingModels:
         self.lora_id_counter = AtomicCounter(0)
 
         self.lora_resolvers: list[LoRAResolver] = []
-        for lora_resolver_name in LoRAResolverRegistry.get_supported_resolvers(
-        ):
+        for lora_resolver_name in LoRAResolverRegistry.get_supported_resolvers():
             self.lora_resolvers.append(
                 LoRAResolverRegistry.get_resolver(lora_resolver_name))
         self.lora_resolver_lock: dict[str, Lock] = defaultdict(Lock)
@@ -134,10 +133,9 @@ class OpenAIServingModels:
         lora_cards = [
             ModelCard(id=lora.lora_name,
                       root=lora.local_path,
-                      parent=lora.base_model_name if lora.base_model_name else
-                      self.base_model_paths[0].name,
-                      permission=[ModelPermission()])
-            for lora in self.lora_requests
+                      parent=lora.base_model_name
+                      if lora.base_model_name else self.base_model_paths[0].name,
+                      permission=[ModelPermission()]) for lora in self.lora_requests
         ]
         prompt_adapter_cards = [
             ModelCard(id=prompt_adapter.prompt_adapter_name,
@@ -152,8 +150,7 @@ class OpenAIServingModels:
     async def load_lora_adapter(
             self,
             request: LoadLoRAAdapterRequest,
-            base_model_name: Optional[str] = None
-    ) -> Union[ErrorResponse, str]:
+            base_model_name: Optional[str] = None) -> Union[ErrorResponse, str]:
         error_check_ret = await self._check_load_lora_adapter_request(request)
         if error_check_ret is not None:
             return error_check_ret
@@ -187,10 +184,8 @@ class OpenAIServingModels:
         return f"Success: LoRA adapter '{lora_name}' added successfully."
 
     async def unload_lora_adapter(
-            self,
-            request: UnloadLoRAAdapterRequest) -> Union[ErrorResponse, str]:
-        error_check_ret = await self._check_unload_lora_adapter_request(request
-                                                                        )
+            self, request: UnloadLoRAAdapterRequest) -> Union[ErrorResponse, str]:
+        error_check_ret = await self._check_unload_lora_adapter_request(request)
         if error_check_ret is not None:
             return error_check_ret
 
@@ -215,8 +210,7 @@ class OpenAIServingModels:
         if any(lora_request.lora_name == request.lora_name
                for lora_request in self.lora_requests):
             return create_error_response(
-                message=
-                f"The lora adapter '{request.lora_name}' has already been "
+                message=f"The lora adapter '{request.lora_name}' has already been "
                 "loaded.",
                 err_type="InvalidUserInput",
                 status_code=HTTPStatus.BAD_REQUEST)
@@ -224,13 +218,11 @@ class OpenAIServingModels:
         return None
 
     async def _check_unload_lora_adapter_request(
-            self,
-            request: UnloadLoRAAdapterRequest) -> Optional[ErrorResponse]:
+            self, request: UnloadLoRAAdapterRequest) -> Optional[ErrorResponse]:
         # Check if either 'lora_name' or 'lora_int_id' is provided
         if not request.lora_name and not request.lora_int_id:
             return create_error_response(
-                message=
-                "either 'lora_name' and 'lora_int_id' needs to be provided.",
+                message="either 'lora_name' and 'lora_int_id' needs to be provided.",
                 err_type="InvalidUserInput",
                 status_code=HTTPStatus.BAD_REQUEST)
 
@@ -238,15 +230,13 @@ class OpenAIServingModels:
         if not any(lora_request.lora_name == request.lora_name
                    for lora_request in self.lora_requests):
             return create_error_response(
-                message=
-                f"The lora adapter '{request.lora_name}' cannot be found.",
+                message=f"The lora adapter '{request.lora_name}' cannot be found.",
                 err_type="NotFoundError",
                 status_code=HTTPStatus.NOT_FOUND)
 
         return None
 
-    async def resolve_lora(
-            self, lora_name: str) -> Union[LoRARequest, ErrorResponse]:
+    async def resolve_lora(self, lora_name: str) -> Union[LoRARequest, ErrorResponse]:
         """Attempt to resolve a LoRA adapter using available resolvers.
 
         Args:
@@ -269,8 +259,7 @@ class OpenAIServingModels:
 
             # Try to resolve using available resolvers
             for resolver in self.lora_resolvers:
-                lora_request = await resolver.resolve_lora(
-                    base_model_name, lora_name)
+                lora_request = await resolver.resolve_lora(base_model_name, lora_name)
 
                 if lora_request is not None:
                     found_adapter = True
@@ -279,9 +268,8 @@ class OpenAIServingModels:
                     try:
                         await self.engine_client.add_lora(lora_request)
                         self.lora_requests.append(lora_request)
-                        logger.info(
-                            "Resolved and loaded LoRA adapter '%s' using %s",
-                            lora_name, resolver.__class__.__name__)
+                        logger.info("Resolved and loaded LoRA adapter '%s' using %s",
+                                    lora_name, resolver.__class__.__name__)
                         return lora_request
                     except BaseException as e:
                         logger.warning(
@@ -309,6 +297,4 @@ def create_error_response(
         message: str,
         err_type: str = "BadRequestError",
         status_code: HTTPStatus = HTTPStatus.BAD_REQUEST) -> ErrorResponse:
-    return ErrorResponse(message=message,
-                         type=err_type,
-                         code=status_code.value)
+    return ErrorResponse(message=message, type=err_type, code=status_code.value)

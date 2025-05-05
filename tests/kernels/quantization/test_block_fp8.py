@@ -27,8 +27,7 @@ except ImportError:
     pass
 
 if current_platform.get_device_capability() < (9, 0):
-    pytest.skip("FP8 Triton requires CUDA 9.0 or higher",
-                allow_module_level=True)
+    pytest.skip("FP8 Triton requires CUDA 9.0 or higher", allow_module_level=True)
 
 # Test configurations
 DTYPES = [torch.bfloat16]  # [torch.half, torch.bfloat16, torch.float32]
@@ -66,8 +65,7 @@ def native_per_token_group_quant_fp8(x,
     fp8_max = finfo.max
 
     x_ = x.reshape(x.numel() // group_size, group_size)
-    amax = x_.abs().max(dim=-1,
-                        keepdim=True)[0].clamp(min=eps).to(torch.float32)
+    amax = x_.abs().max(dim=-1, keepdim=True)[0].clamp(min=eps).to(torch.float32)
     x_s = amax / fp8_max
     x_q = (x_ / x_s).clamp(min=fp8_min, max=fp8_max).to(dtype)
     x_q = x_q.reshape(x.shape)
@@ -99,8 +97,7 @@ def torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk, block_shape):
                                                  block_shape,
                                                  output_dtype=a.dtype)
             act_out = SiluAndMul().forward_native(inter_out)
-            act_out_q, act_out_s = native_per_token_group_quant_fp8(
-                act_out, block_k)
+            act_out_q, act_out_s = native_per_token_group_quant_fp8(act_out, block_k)
             act_out = act_out.to(torch.float32)
             out[mask] = native_w8a8_block_matmul(act_out_q,
                                                  w2[i],
@@ -121,9 +118,8 @@ def setup_cuda():
     torch.set_default_device("cuda")
 
 
-@pytest.mark.parametrize(
-    "num_tokens,d,dtype,group_size,seed",
-    itertools.product(NUM_TOKENS, D, DTYPES, GROUP_SIZE, SEEDS))
+@pytest.mark.parametrize("num_tokens,d,dtype,group_size,seed",
+                         itertools.product(NUM_TOKENS, D, DTYPES, GROUP_SIZE, SEEDS))
 @torch.inference_mode()
 def test_per_token_group_quant_fp8(num_tokens, d, dtype, group_size, seed):
     torch.manual_seed(seed)
@@ -132,15 +128,12 @@ def test_per_token_group_quant_fp8(num_tokens, d, dtype, group_size, seed):
     ref_out, ref_scale = native_per_token_group_quant_fp8(x, group_size)
     out, scale = per_token_group_quant_fp8(x, group_size)
 
-    assert torch.allclose(out.to(torch.float32),
-                          ref_out.to(torch.float32),
-                          rtol=0.15)
+    assert torch.allclose(out.to(torch.float32), ref_out.to(torch.float32), rtol=0.15)
     assert torch.allclose(scale, ref_scale)
 
 
-@pytest.mark.parametrize(
-    "M,N,K,block_size,out_dtype,seed",
-    itertools.product(M, N, K, BLOCK_SIZE, OUT_DTYPES, SEEDS))
+@pytest.mark.parametrize("M,N,K,block_size,out_dtype,seed",
+                         itertools.product(M, N, K, BLOCK_SIZE, OUT_DTYPES, SEEDS))
 @torch.inference_mode()
 def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
     torch.manual_seed(seed)
@@ -161,20 +154,18 @@ def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
     As = torch.rand(M, k_tiles, dtype=torch.float32) * factor_for_scale
     Bs = torch.rand(n_tiles, k_tiles, dtype=torch.float32) * factor_for_scale
 
-    ref_out = native_w8a8_block_matmul(A_fp8, B_fp8, As, Bs, block_size,
-                                       out_dtype)
+    ref_out = native_w8a8_block_matmul(A_fp8, B_fp8, As, Bs, block_size, out_dtype)
     out = w8a8_block_fp8_matmul(A_fp8, B_fp8, As, Bs, block_size, out_dtype)
 
-    rel_diff = (torch.mean(
-        torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
-                torch.mean(torch.abs(ref_out.to(torch.float32))))
+    rel_diff = (
+        torch.mean(torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
+        torch.mean(torch.abs(ref_out.to(torch.float32))))
     assert rel_diff < 0.001
 
 
 @pytest.mark.parametrize(
     "M,N,K,E,topk,block_size,dtype,seed",
-    itertools.product(M_moe, N_moe, K_moe, E, TOP_KS, BLOCK_SIZE, DTYPES,
-                      SEEDS))
+    itertools.product(M_moe, N_moe, K_moe, E, TOP_KS, BLOCK_SIZE, DTYPES, SEEDS))
 @torch.inference_mode()
 def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
     if topk > E:
@@ -187,8 +178,7 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
 
     a = torch.randn((M, K), dtype=dtype) / 10
 
-    w1_bf16 = (torch.rand(
-        (E, 2 * N, K), dtype=torch.bfloat16) - 0.5) * 2 * fp8_max
+    w1_bf16 = (torch.rand((E, 2 * N, K), dtype=torch.bfloat16) - 0.5) * 2 * fp8_max
     w1 = w1_bf16.clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
     del w1_bf16
 
@@ -230,22 +220,20 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
     #print(f"{out.sum()=}")
     #print(f"{ref_out.sum()=}")
 
-    rel_diff = (torch.mean(
-        torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
-                torch.mean(torch.abs(ref_out.to(torch.float32))))
+    rel_diff = (
+        torch.mean(torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
+        torch.mean(torch.abs(ref_out.to(torch.float32))))
     assert rel_diff < 0.03
 
 
-def per_block_cast_to_fp8(
-        x: torch.Tensor,
-        block_size_n: int = 128) -> tuple[torch.Tensor, torch.Tensor]:
+def per_block_cast_to_fp8(x: torch.Tensor,
+                          block_size_n: int = 128) -> tuple[torch.Tensor, torch.Tensor]:
     assert x.dim() == 2
     m, n = x.shape
-    x_padded = torch.zeros(
-        (deep_gemm.ceil_div(m, 128) * 128,
-         deep_gemm.ceil_div(n, block_size_n) * block_size_n),
-        dtype=x.dtype,
-        device=x.device)
+    x_padded = torch.zeros((deep_gemm.ceil_div(m, 128) * 128,
+                            deep_gemm.ceil_div(n, block_size_n) * block_size_n),
+                           dtype=x.dtype,
+                           device=x.device)
     x_padded[:m, :n] = x
     x_view = x_padded.view(-1, 128, x_padded.size(1) // 128, block_size_n)
     x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
@@ -255,9 +243,8 @@ def per_block_cast_to_fp8(
     return x_scaled_sub, scales
 
 
-@pytest.mark.parametrize(
-    "M,N,K,block_size,out_dtype,seed",
-    itertools.product(M, N, K, BLOCK_SIZE, OUT_DTYPES, SEEDS))
+@pytest.mark.parametrize("M,N,K,block_size,out_dtype,seed",
+                         itertools.product(M, N, K, BLOCK_SIZE, OUT_DTYPES, SEEDS))
 @torch.inference_mode()
 def test_w8a8_block_fp8_deep_gemm_matmul(M, N, K, block_size, out_dtype, seed):
     # only aligned sizes
@@ -279,8 +266,7 @@ def test_w8a8_block_fp8_deep_gemm_matmul(M, N, K, block_size, out_dtype, seed):
     As = As_fp8.to(torch.float32)
     Bs = Bs_fp8.to(torch.float32)
 
-    ref_out = native_w8a8_block_matmul(A_fp8, B_fp8, As, Bs, block_size,
-                                       out_dtype)
+    ref_out = native_w8a8_block_matmul(A_fp8, B_fp8, As, Bs, block_size, out_dtype)
 
     # Transpose earlier so that the testing will not trigger transposing kernels
     As_fp8 = deep_gemm.get_col_major_tma_aligned_tensor(As_fp8)
@@ -292,9 +278,9 @@ def test_w8a8_block_fp8_deep_gemm_matmul(M, N, K, block_size, out_dtype, seed):
 
     deep_gemm.gemm_fp8_fp8_bf16_nt((A_fp8, As_fp8), (B_fp8, Bs_fp8), out)
 
-    rel_diff = (torch.mean(
-        torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
-                torch.mean(torch.abs(ref_out.to(torch.float32))))
+    rel_diff = (
+        torch.mean(torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
+        torch.mean(torch.abs(ref_out.to(torch.float32))))
     assert rel_diff < 0.001
 
 
@@ -308,8 +294,11 @@ def fp8_perm(m, idx):
 def _moe_permute(a, a_s, topk_ids, num_groups, topk, block_m):
     M, K = a.shape
 
-    sorted_token_ids, m_indices, num_pad = moe_align_block_size(
-        topk_ids, block_m, num_groups, None, pad_sorted_ids=True)
+    sorted_token_ids, m_indices, num_pad = moe_align_block_size(topk_ids,
+                                                                block_m,
+                                                                num_groups,
+                                                                None,
+                                                                pad_sorted_ids=True)
 
     num_tokens = topk * M
 
@@ -331,15 +320,14 @@ def _moe_unpermute(out, inv_perm, topk, K, topk_weight):
     return (tmp_out * topk_weight.view(M, -1, 1).to(out.dtype)).sum(dim=1)
 
 
-def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
-                                 block_shape):
+def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk, block_shape):
     """Fused moe with block-wise quantization using DeepGemm grouped gemm."""
     num_groups = w1.shape[0]
     M, K = a.shape
     N = w2.shape[-1]
 
-    topk_weight, topk_ids, token_expert_indices = fused_topk(
-        a, score.float(), topk, False)
+    topk_weight, topk_ids, token_expert_indices = fused_topk(a, score.float(), topk,
+                                                             False)
 
     block_m = deep_gemm.get_m_alignment_for_contiguous_layout()
 
@@ -347,8 +335,8 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
 
     a_q, a_s = per_token_group_quant_fp8(a, block_m)
 
-    a_q, a_s, m_indices, inv_perm = _moe_permute(a_q, a_s, topk_ids,
-                                                 num_groups, topk, block_m)
+    a_q, a_s, m_indices, inv_perm = _moe_permute(a_q, a_s, topk_ids, num_groups, topk,
+                                                 block_m)
 
     inter_out = torch.zeros((a_q.shape[0], N * 2),
                             dtype=torch.bfloat16,
@@ -362,17 +350,16 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
 
     out = torch.zeros(a_q.shape[0], K, dtype=torch.bfloat16, device=a.device)
 
-    deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
-        (act_out_q, act_out_s), (w2, w2_s), out, m_indices)
+    deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous((act_out_q, act_out_s),
+                                                        (w2, w2_s), out, m_indices)
 
     final_out = _moe_unpermute(out, inv_perm, topk, K, topk_weight)
 
     return final_out
 
 
-@pytest.mark.parametrize(
-    "M,N,K,E,topk,seed",
-    itertools.product(M_moe_dg, N_moe, K_moe, E, TOP_KS, SEEDS))
+@pytest.mark.parametrize("M,N,K,E,topk,seed",
+                         itertools.product(M_moe_dg, N_moe, K_moe, E, TOP_KS, SEEDS))
 @pytest.mark.skipif(not dg_available, reason="DeepGemm kernels not available.")
 @torch.inference_mode()
 def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
@@ -383,8 +370,7 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
 
     # only aligned sizes
     if (N % block_m != 0 or K % block_m != 0 or topk > E):
-        pytest.skip(
-            f"Skipping test; bad size m={M}, n={N}, k={K}, topk={topk}, E={E}")
+        pytest.skip(f"Skipping test; bad size m={M}, n={N}, k={K}, topk={topk}, E={E}")
 
     if N <= 512:
         pytest.skip("Skipping N <= 512 until performance issues solved.")
@@ -397,11 +383,13 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
 
     a = torch.randn((M, K), dtype=dtype) / 10
 
-    w1_bf16 = ((torch.rand((E, 2 * N, K), dtype=torch.bfloat16) - 0.5) * 2 *
-               fp8_max).clamp(min=fp8_min, max=fp8_max)
+    w1_bf16 = ((torch.rand(
+        (E, 2 * N, K), dtype=torch.bfloat16) - 0.5) * 2 * fp8_max).clamp(min=fp8_min,
+                                                                         max=fp8_max)
 
-    w2_bf16 = ((torch.rand((E, K, N), dtype=torch.bfloat16) - 0.5) * 2 *
-               fp8_max).clamp(min=fp8_min, max=fp8_max)
+    w2_bf16 = ((torch.rand(
+        (E, K, N), dtype=torch.bfloat16) - 0.5) * 2 * fp8_max).clamp(min=fp8_min,
+                                                                     max=fp8_max)
 
     score = torch.randn((M, E), dtype=dtype)
 
@@ -430,11 +418,11 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
     # Set the context to avoid lots of warning spam.
     with set_current_vllm_config(vllm_config):
         if M >= 128:
-            ref_out = deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s,
-                                                   score, topk, block_size)
+            ref_out = deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score,
+                                                   topk, block_size)
         else:
-            ref_out = torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score,
-                                               topk, block_size)
+            ref_out = torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk,
+                                               block_size)
 
         topk_weights, topk_ids, token_expert_indices = fused_topk(
             a, score.float(), topk, False)
@@ -444,8 +432,8 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
     #print(f"{out.sum()=}")
     #print(f"{ref_out.sum()=}")
 
-    rel_diff = (torch.mean(
-        torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
-                torch.mean(torch.abs(ref_out.to(torch.float32))))
+    rel_diff = (
+        torch.mean(torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
+        torch.mean(torch.abs(ref_out.to(torch.float32))))
 
     assert rel_diff < 0.03

@@ -50,19 +50,17 @@ def _stop_basic(llm):
 
 
 def _stop_multi_tokens(llm):
-    _test_stopping(
-        llm,
-        stop=["group of peo", "short"],
-        include_in_output=False,
-        expected_output="VLLM is a 100% volunteer organization. We are a ",
-        expected_reason="group of peo")
+    _test_stopping(llm,
+                   stop=["group of peo", "short"],
+                   include_in_output=False,
+                   expected_output="VLLM is a 100% volunteer organization. We are a ",
+                   expected_reason="group of peo")
 
     _test_stopping(
         llm,
         stop=["group of peo", "short"],
         include_in_output=True,
-        expected_output=
-        "VLLM is a 100% volunteer organization. We are a group of peo",
+        expected_output="VLLM is a 100% volunteer organization. We are a group of peo",
         expected_reason="group of peo")
 
 

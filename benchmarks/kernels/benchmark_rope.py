@@ -32,27 +32,22 @@ def benchmark_rope_kernels_multi_lora(
     # silulating serving 4 LoRAs
     scaling_factors = [1, 2, 4, 8]
     # batched RoPE can take multiple scaling factors
-    batched_rope = get_rope(head_size, rotary_dim, max_position, base,
-                            is_neox_style, {
-                                "rope_type": "linear",
-                                "factor": tuple(scaling_factors)
-                            })
+    batched_rope = get_rope(head_size, rotary_dim, max_position, base, is_neox_style, {
+        "rope_type": "linear",
+        "factor": tuple(scaling_factors)
+    })
     # non-batched RoPE takes only one scaling factor, we create multiple
     # instances to simulate the same behavior
     non_batched_ropes: list[RotaryEmbedding] = []
     for scaling_factor in scaling_factors:
         non_batched_ropes.append(
-            get_rope(head_size, rotary_dim, max_position, base, is_neox_style,
-                     {
-                         "rope_type": "linear",
-                         "factor": (scaling_factor, )
-                     }))
+            get_rope(head_size, rotary_dim, max_position, base, is_neox_style, {
+                "rope_type": "linear",
+                "factor": (scaling_factor, )
+            }))
 
     positions = torch.randint(0, max_position, (batch_size, seq_len))
-    query = torch.randn(batch_size,
-                        seq_len,
-                        num_heads * head_size,
-                        dtype=dtype)
+    query = torch.randn(batch_size, seq_len, num_heads * head_size, dtype=dtype)
     key = torch.randn_like(query)
 
     # create query offsets for batched RoPE, we concat multiple kv cache

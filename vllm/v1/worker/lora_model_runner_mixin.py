@@ -25,12 +25,11 @@ class LoRAModelRunnerMixin:
     LORA_WARMUP_RANK = 8
 
     def load_lora_model(self, model: nn.Module, model_config: ModelConfig,
-                        scheduler_config: SchedulerConfig,
-                        lora_config: LoRAConfig, device: str) -> nn.Module:
+                        scheduler_config: SchedulerConfig, lora_config: LoRAConfig,
+                        device: str) -> nn.Module:
 
         if not supports_lora(model):
-            raise ValueError(
-                f"{model.__class__.__name__} does not support LoRA yet.")
+            raise ValueError(f"{model.__class__.__name__} does not support LoRA yet.")
 
         if supports_multimodal(model):
             logger.warning("Regarding multimodal models, vLLM currently "
@@ -71,8 +70,7 @@ class LoRAModelRunnerMixin:
                          num_scheduled_tokens: np.ndarray) -> None:
 
         prompt_lora_mapping: tuple[int, ...]  # of size input_batch.num_reqs
-        token_lora_mapping: tuple[int,
-                                  ...]  # of size np.sum(num_scheduled_tokens)
+        token_lora_mapping: tuple[int, ...]  # of size np.sum(num_scheduled_tokens)
         lora_requests: set[LoRARequest]
         prompt_lora_mapping, token_lora_mapping, lora_requests = \
                             input_batch.make_lora_inputs(num_scheduled_tokens)
@@ -93,12 +91,10 @@ class LoRAModelRunnerMixin:
 
             # Make prompt lora mapping
             # Assign LoRA IDs cyclically to simulate a worst-case scenario.
-            prompt_lora_mapping = (np.arange(num_reqs, dtype=np.int32) %
-                                   num_loras) + 1
+            prompt_lora_mapping = (np.arange(num_reqs, dtype=np.int32) % num_loras) + 1
 
             # Make token lora mapping
-            token_lora_mapping = np.repeat(prompt_lora_mapping,
-                                           num_scheduled_tokens)
+            token_lora_mapping = np.repeat(prompt_lora_mapping, num_scheduled_tokens)
 
             # Make dummy lora requests
             lora_requests: set[LoRARequest] = {
@@ -112,12 +108,10 @@ class LoRAModelRunnerMixin:
                 # Add the dummy LoRAs here so _set_active_loras doesn't try to
                 # load from disk.
                 for lr in lora_requests:
-                    self.lora_manager.add_dummy_lora(
-                        lr, rank=self.LORA_WARMUP_RANK)
+                    self.lora_manager.add_dummy_lora(lr, rank=self.LORA_WARMUP_RANK)
 
                 self._set_active_loras(tuple(prompt_lora_mapping),
-                                       tuple(token_lora_mapping),
-                                       lora_requests)
+                                       tuple(token_lora_mapping), lora_requests)
 
                 yield
 

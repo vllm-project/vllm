@@ -25,8 +25,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int,
     outputs = llm.generate(
         prompts,
         sampling_params,
-        lora_request=LoRARequest(str(lora_id), lora_id, lora_path)
-        if lora_id else None)
+        lora_request=LoRARequest(str(lora_id), lora_id, lora_path) if lora_id else None)
     # Print the outputs.
     generated_texts: list[str] = []
     for output in outputs:

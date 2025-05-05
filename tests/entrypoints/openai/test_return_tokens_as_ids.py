@@ -24,15 +24,13 @@ def server_fixture(request, default_server_args):  # noqa: F811
         with RemoteOpenAIServer(MODEL_NAME, args_with_flag) as remote_server:
             yield (remote_server, True)
     else:
-        with RemoteOpenAIServer(MODEL_NAME,
-                                default_server_args) as remote_server:
+        with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
             yield (remote_server, False)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("server_fixture", [True, False], indirect=True)
-async def test_completion_return_tokens_as_token_ids_completion(
-        server_fixture):
+async def test_completion_return_tokens_as_token_ids_completion(server_fixture):
     server, use_server_flag = server_fixture
     request_args = {}
     if not use_server_flag:
@@ -100,6 +98,5 @@ async def test_chat_return_tokens_as_token_ids_completion(server_fixture):
         tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
         token_ids = []
         for logprob_content in response.choices[0].logprobs.content:
-            token_ids.append(
-                int(logprob_content.token.removeprefix("token_id:")))
+            token_ids.append(int(logprob_content.token.removeprefix("token_id:")))
         assert tokenizer.decode(token_ids, skip_special_tokens=True) == text

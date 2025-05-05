@@ -28,8 +28,7 @@ def producer(batch_src: Sequence[int],
              result_queue,
              cuda_visible_devices: Optional[str] = None):
     if cuda_visible_devices is not None:
-        update_environment_variables(
-            {"CUDA_VISIBLE_DEVICES": cuda_visible_devices})
+        update_environment_variables({"CUDA_VISIBLE_DEVICES": cuda_visible_devices})
 
     lib = CudaRTLibrary()
     for i in batch_src:
@@ -61,8 +60,7 @@ def consumer(batch_tgt: Sequence[int],
              result_queue,
              cuda_visible_devices: Optional[str] = None):
     if cuda_visible_devices is not None:
-        update_environment_variables(
-            {"CUDA_VISIBLE_DEVICES": cuda_visible_devices})
+        update_environment_variables({"CUDA_VISIBLE_DEVICES": cuda_visible_devices})
 
     lib = CudaRTLibrary()
     for j in batch_tgt:
@@ -139,11 +137,11 @@ def can_actually_p2p(
     consumer_queue = smp.Queue()
     result_queue = smp.Queue()
     p_src = smp.Process(target=producer,
-                        args=(batch_src, producer_queue, consumer_queue,
-                              result_queue, cuda_visible_devices))
+                        args=(batch_src, producer_queue, consumer_queue, result_queue,
+                              cuda_visible_devices))
     p_tgt = smp.Process(target=consumer,
-                        args=(batch_tgt, producer_queue, consumer_queue,
-                              result_queue, cuda_visible_devices))
+                        args=(batch_tgt, producer_queue, consumer_queue, result_queue,
+                              cuda_visible_devices))
     p_src.start()
     p_tgt.start()
     p_src.join()
@@ -194,9 +192,8 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
     if cuda_visible_devices is None:
         cuda_visible_devices = ",".join(str(i) for i in range(num_dev))
 
-    path = os.path.join(
-        envs.VLLM_CACHE_ROOT,
-        f"gpu_p2p_access_cache_for_{cuda_visible_devices}.json")
+    path = os.path.join(envs.VLLM_CACHE_ROOT,
+                        f"gpu_p2p_access_cache_for_{cuda_visible_devices}.json")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     from vllm.distributed.parallel_state import get_world_group
     if ((not is_distributed or get_world_group().local_rank == 0)
@@ -219,8 +216,7 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
         # we don't use the output of the subprocess directly,
         # because the subprocess might produce logging output
         with tempfile.NamedTemporaryFile() as output_file:
-            input_bytes = pickle.dumps(
-                (batch_src, batch_tgt, output_file.name))
+            input_bytes = pickle.dumps((batch_src, batch_tgt, output_file.name))
             returned = subprocess.run([sys.executable, __file__],
                                       input=input_bytes,
                                       capture_output=True)

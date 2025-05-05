@@ -72,8 +72,8 @@ def test_models(
                      quantization="gptq",
                      max_model_len=MAX_MODEL_LEN,
                      tensor_parallel_size=1) as gptq_model:
-        gptq_outputs = gptq_model.generate_greedy_logprobs(
-            example_prompts[:-1], max_tokens, num_logprobs)
+        gptq_outputs = gptq_model.generate_greedy_logprobs(example_prompts[:-1],
+                                                           max_tokens, num_logprobs)
 
     check_logprobs_close(
         outputs_0_lst=gptq_outputs,

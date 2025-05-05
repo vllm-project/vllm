@@ -79,8 +79,7 @@ tools = [{
             "type": "object",
             "properties": {
                 "city": {
-                    "type":
-                    "string",
+                    "type": "string",
                     "description":
                     "The city to find the weather for, e.g. 'San Francisco'"
                 },
@@ -121,9 +120,7 @@ messages.append({
 # let's now actually parse and execute the model's output simulating an API call by using the
 # above defined function
 tool_calls = json.loads(output)
-tool_answers = [
-    tool_funtions[call['name']](**call['arguments']) for call in tool_calls
-]
+tool_answers = [tool_funtions[call['name']](**call['arguments']) for call in tool_calls]
 
 # append the answer as a tool message and let the LLM give you an answer
 messages.append({

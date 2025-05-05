@@ -26,8 +26,7 @@ class VocabParallelEmbeddingWithPromptAdapter(nn.Module):
         if 'LoRA' in base_layer.__class__.__name__:
             self.emb_layer = self.base_layer.base_layer
 
-    def create_prompt_adapter_weights(
-            self, prompt_adapter_config: PromptAdapterConfig):
+    def create_prompt_adapter_weights(self, prompt_adapter_config: PromptAdapterConfig):
         self.embeddings_tensors = torch.zeros(
             (
                 prompt_adapter_config.max_prompt_adapters,
@@ -37,10 +36,9 @@ class VocabParallelEmbeddingWithPromptAdapter(nn.Module):
             dtype=self.emb_layer.weight.dtype,
             device=self.emb_layer.weight.device,
         )
-        self.adapter_lengths = torch.zeros(
-            prompt_adapter_config.max_prompt_adapters,
-            dtype=torch.long,
-            device=self.emb_layer.weight.device)
+        self.adapter_lengths = torch.zeros(prompt_adapter_config.max_prompt_adapters,
+                                           dtype=torch.long,
+                                           device=self.emb_layer.weight.device)
 
         self.indices_gpu: torch.Tensor
         self.embedding_indices_gpu: torch.Tensor
@@ -64,8 +62,7 @@ class VocabParallelEmbeddingWithPromptAdapter(nn.Module):
         prompt_indices: torch.Tensor,
         prompt_embedding_indices: torch.Tensor,
     ):
-        self.indices_gpu = prompt_indices.to(
-            device=self.emb_layer.weight.device)
+        self.indices_gpu = prompt_indices.to(device=self.emb_layer.weight.device)
         self.embedding_indices_gpu = prompt_embedding_indices.to(
             device=self.emb_layer.weight.device)
 
@@ -73,9 +70,10 @@ class VocabParallelEmbeddingWithPromptAdapter(nn.Module):
         hidden_states = self.base_layer(x)
         if self.embedding_indices_gpu.ndim > 1:
             valid_mask = self.indices_gpu != -1
-            gathered_embeddings = self.embeddings_tensors[
-                self.embedding_indices_gpu[:, 0],
-                self.embedding_indices_gpu[:, 1]]
+            gathered_embeddings = self.embeddings_tensors[self.embedding_indices_gpu[:,
+                                                                                     0],
+                                                          self.embedding_indices_gpu[:,
+                                                                                     1]]
 
             # Update hidden states
             hidden_states[valid_mask] = gathered_embeddings

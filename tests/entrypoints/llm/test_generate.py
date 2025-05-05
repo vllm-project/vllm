@@ -48,8 +48,7 @@ def assert_outputs_equal(o1: list[RequestOutput], o2: list[RequestOutput]):
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize('prompt_token_ids', TOKEN_IDS)
-def test_v1_v2_api_consistency_single_prompt_tokens(llm: LLM,
-                                                    prompt_token_ids):
+def test_v1_v2_api_consistency_single_prompt_tokens(llm: LLM, prompt_token_ids):
     sampling_params = SamplingParams(temperature=0.0, top_p=1.0)
 
     with pytest.warns(DeprecationWarning, match="'prompt_token_ids'"):

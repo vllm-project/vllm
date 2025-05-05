@@ -48,9 +48,8 @@ class MooncakeStoreConnector(KVConnectorBase):
             else:
                 from vllm.distributed.kv_transfer.kv_lookup_buffer.mooncake_store import (  # noqa: E501
                     MooncakeStore)
-                logger.info(
-                    "Initializing KVStoreConnector under kv_transfer_config %s",
-                    self.config)
+                logger.info("Initializing KVStoreConnector under kv_transfer_config %s",
+                            self.config)
                 self.kv_store = MooncakeStore(config)
         else:
             logger.error("Can not find %s", self.config.kv_connector)
@@ -71,8 +70,7 @@ class MooncakeStoreConnector(KVConnectorBase):
         model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
         kv_caches: List[torch.Tensor],
-        hidden_or_intermediate_states: Union[torch.Tensor,
-                                             IntermediateTensors],
+        hidden_or_intermediate_states: Union[torch.Tensor, IntermediateTensors],
     ) -> None:
         input_tokens_tensor = model_input.input_tokens
         seq_lens = model_input.attn_metadata.seq_lens
@@ -167,12 +165,10 @@ class MooncakeStoreConnector(KVConnectorBase):
                 kv_cache = kv_caches[layer_id - start_layer]
 
                 # get remote kvcache
-                remote_k, remote_v = remote_kv[0][layer_id], remote_kv[1][
-                    layer_id]
+                remote_k, remote_v = remote_kv[0][layer_id], remote_kv[1][layer_id]
 
-                self.kv_helper.put_kv_to_cache(model_executable, remote_k,
-                                               remote_v, layer, kv_cache,
-                                               slot_mapping, start_pos,
+                self.kv_helper.put_kv_to_cache(model_executable, remote_k, remote_v,
+                                               layer, kv_cache, slot_mapping, start_pos,
                                                end_pos)
 
             hidden_or_intermediate_states_for_one_req.append(hidden)

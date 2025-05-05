@@ -27,9 +27,7 @@ from vllm.transformers_utils.tokenizers.mistral import (
             }],
         },
         ChatCompletionRequest(
-            messages=[
-                UserMessage(content="What is the current local date and time?")
-            ],
+            messages=[UserMessage(content="What is the current local date and time?")],
             tools=[
                 Tool(
                     type="function",
@@ -44,8 +42,7 @@ from vllm.transformers_utils.tokenizers.mistral import (
     ),
      (
          {
-             "messages":
-             [{
+             "messages": [{
                  "role": "user",
                  "content": "What is the current local date and time?",
              }],
@@ -59,10 +56,7 @@ from vllm.transformers_utils.tokenizers.mistral import (
              }],
          },
          ChatCompletionRequest(
-             messages=[
-                 UserMessage(
-                     content="What is the current local date and time?")
-             ],
+             messages=[UserMessage(content="What is the current local date and time?")],
              tools=[
                  Tool(
                      type="function",
@@ -76,8 +70,7 @@ from vllm.transformers_utils.tokenizers.mistral import (
          ),
      )],
 )
-def test_make_mistral_chat_completion_request(openai_request,
-                                              expected_mistral_request):
+def test_make_mistral_chat_completion_request(openai_request, expected_mistral_request):
     assert (make_mistral_chat_completion_request(
         openai_request["messages"],
         openai_request["tools"]) == expected_mistral_request)

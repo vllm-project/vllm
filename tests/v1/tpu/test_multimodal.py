@@ -26,11 +26,9 @@ def base64_encoded_image() -> dict[str, str]:
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(not current_platform.is_tpu(),
-                    reason="This test needs a TPU")
+@pytest.mark.skipif(not current_platform.is_tpu(), reason="This test needs a TPU")
 @pytest.mark.parametrize("model_name", ["llava-hf/llava-1.5-7b-hf"])
-async def test_basic_vision(model_name: str, base64_encoded_image: dict[str,
-                                                                        str]):
+async def test_basic_vision(model_name: str, base64_encoded_image: dict[str, str]):
 
     pytest.skip("Skip this test until it's fixed.")
 

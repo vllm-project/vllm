@@ -17,18 +17,16 @@ GGUF_SAMPLE = snapshot_download("Isotr0py/test-gguf-sample")
 GGUF_SAMPLE_MOE = snapshot_download("SzymonOzog/test-gguf-moe-sample")
 
 
-def get_gguf_sample_tensors(
-        hidden_size: int,
-        quant_type: GGMLQuantizationType) -> list[ReaderTensor]:
+def get_gguf_sample_tensors(hidden_size: int,
+                            quant_type: GGMLQuantizationType) -> list[ReaderTensor]:
     sample_dir = GGUF_SAMPLE
     filename = f"Quant_{quant_type.name}_{hidden_size}.gguf"
     sample_file = Path(sample_dir) / filename
     return GGUFReader(sample_file).tensors
 
 
-def get_gguf_MoE_tensors(
-        hidden_size: int,
-        quant_type: GGMLQuantizationType) -> list[ReaderTensor]:
+def get_gguf_MoE_tensors(hidden_size: int,
+                         quant_type: GGMLQuantizationType) -> list[ReaderTensor]:
     sample_dir = GGUF_SAMPLE_MOE
     filename = f"Quant_{quant_type.name}_{hidden_size}.gguf"
     sample_file = Path(sample_dir) / filename
@@ -87,8 +85,7 @@ def test_dequantize(hidden_size: int, dtype: torch.dtype,
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("quant_type", QUANT_TYPES)
 @torch.inference_mode()
-def test_mmvq(hidden_size: int, dtype: torch.dtype,
-              quant_type: GGMLQuantizationType):
+def test_mmvq(hidden_size: int, dtype: torch.dtype, quant_type: GGMLQuantizationType):
     current_platform.seed_everything(0)
 
     tensors = get_gguf_sample_tensors(hidden_size, quant_type)
@@ -184,13 +181,11 @@ def test_moe(num_tokens: int, hidden_size: int, dtype: torch.dtype,
     w13_dequant = torch.tensor(dequantize(w13.data, quant_type),
                                device="cuda").to(dtype)
 
-    w2_dequant = torch.tensor(dequantize(w2.data, quant_type),
-                              device="cuda").to(dtype)
+    w2_dequant = torch.tensor(dequantize(w2.data, quant_type), device="cuda").to(dtype)
     act = SiluAndMul()
 
     output = _fused_moe_gguf(x, torch.tensor(w13.data, device="cuda"),
-                             torch.tensor(w2.data,
-                                          device="cuda"), topk_weights,
+                             torch.tensor(w2.data, device="cuda"), topk_weights,
                              topk_ids, quant_type, quant_type, act)
 
     ref_output = fused_experts(x, w13_dequant, w2_dequant, topk_weights,

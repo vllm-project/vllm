@@ -63,8 +63,8 @@ class ReasoningParser:
 
     @abstractmethod
     def extract_reasoning_content(
-            self, model_output: str, request: ChatCompletionRequest
-    ) -> tuple[Optional[str], Optional[str]]:
+            self, model_output: str,
+            request: ChatCompletionRequest) -> tuple[Optional[str], Optional[str]]:
         """
         Extract reasoning content from a complete model-generated string.
 
@@ -115,8 +115,7 @@ class ReasoningParserManager:
         if name in cls.reasoning_parsers:
             return cls.reasoning_parsers[name]
 
-        raise KeyError(
-            f"reasoning helper: '{name}' not found in reasoning_parsers")
+        raise KeyError(f"reasoning helper: '{name}' not found in reasoning_parsers")
 
     @classmethod
     def _register_module(
@@ -155,8 +154,7 @@ class ReasoningParserManager:
             raise TypeError(f"force must be a boolean, but got {type(force)}")
 
         # raise the error ahead of time
-        if not (name is None or isinstance(name, str)
-                or is_list_of(name, str)):
+        if not (name is None or isinstance(name, str) or is_list_of(name, str)):
             raise TypeError(
                 "name must be None, an instance of str, or a sequence of str, "
                 f"but got {type(name)}")
@@ -184,6 +182,6 @@ class ReasoningParserManager:
         try:
             import_from_path(module_name, plugin_path)
         except Exception:
-            logger.exception("Failed to load module '%s' from %s.",
-                             module_name, plugin_path)
+            logger.exception("Failed to load module '%s' from %s.", module_name,
+                             plugin_path)
             return

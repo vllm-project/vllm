@@ -56,8 +56,7 @@ class KVConnectorBase(ABC):
         model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
         kv_caches: List[torch.Tensor],
-        hidden_or_intermediate_states: Union[torch.Tensor,
-                                             IntermediateTensors],
+        hidden_or_intermediate_states: Union[torch.Tensor, IntermediateTensors],
     ) -> None:
         """
         Send KV caches and hidden states to the connector.

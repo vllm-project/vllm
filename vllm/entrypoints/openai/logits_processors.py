@@ -18,8 +18,7 @@ class AllowedTokenIdsLogitsProcessor:
         self.allowed_ids: Optional[list[int]] = list(allowed_ids)
         self.mask: Optional[torch.Tensor] = None
 
-    def __call__(self, token_ids: list[int],
-                 logits: torch.Tensor) -> torch.Tensor:
+    def __call__(self, token_ids: list[int], logits: torch.Tensor) -> torch.Tensor:
         if self.mask is None:
             self.mask = torch.ones((logits.shape[-1], ),
                                    dtype=torch.bool,
@@ -68,9 +67,8 @@ def get_logits_processors(
                 for token_id, bias in logit_bias.items()
             }
         except ValueError as exc:
-            raise ValueError(
-                "Found token_id in logit_bias that is not "
-                "an integer or string representing an integer") from exc
+            raise ValueError("Found token_id in logit_bias that is not "
+                             "an integer or string representing an integer") from exc
 
         # Check if token_id is within the vocab size
         for token_id, bias in clamped_logit_bias.items():
@@ -83,7 +81,7 @@ def get_logits_processors(
 
     if allowed_token_ids is not None:
         logits_processors.append(
-            _get_allowed_token_ids_logits_processor(
-                frozenset(allowed_token_ids), len(tokenizer)))
+            _get_allowed_token_ids_logits_processor(frozenset(allowed_token_ids),
+                                                    len(tokenizer)))
 
     return logits_processors

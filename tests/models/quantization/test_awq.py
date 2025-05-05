@@ -106,9 +106,8 @@ def run_awq_test(
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
 @torch.inference_mode()
-def test_awq_models(vllm_runner, image_assets, source_model, quant_model,
-                    size_factors, dtype, max_tokens, num_logprobs,
-                    monkeypatch) -> None:
+def test_awq_models(vllm_runner, image_assets, source_model, quant_model, size_factors,
+                    dtype, max_tokens, num_logprobs, monkeypatch) -> None:
 
     # Test V1: this test hangs during setup on single-scale input.
     # TODO: fixure out why and re-enable this on V1.

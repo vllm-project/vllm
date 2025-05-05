@@ -19,12 +19,12 @@ def reset_device(reset_default_device):
 
 
 # Utility shrink and expand operations used as reference implementations.
-def sgmv_shrink_for_nslices(
-        nslices: int, inputs_tensor: torch.Tensor,
-        lora_weights_lst: list[torch.Tensor], out_tensor: torch.Tensor,
-        b_seq_start_loc: torch.Tensor, seq_len_tensor: torch.Tensor,
-        prompt_lora_mapping: torch.Tensor, batches: int, max_seq_length: int,
-        num_tokens: int, scaling: float):
+def sgmv_shrink_for_nslices(nslices: int, inputs_tensor: torch.Tensor,
+                            lora_weights_lst: list[torch.Tensor],
+                            out_tensor: torch.Tensor, b_seq_start_loc: torch.Tensor,
+                            seq_len_tensor: torch.Tensor,
+                            prompt_lora_mapping: torch.Tensor, batches: int,
+                            max_seq_length: int, num_tokens: int, scaling: float):
     """
     Wrapper around torch_ops.sgmv_shrink that handles any nslices.
     """
@@ -43,11 +43,9 @@ def sgmv_shrink_for_nslices(
         )
 
 
-def sgmv_expand_for_nslices(nslices: int, hidden_size: int,
-                            inputs_tensor: torch.Tensor,
+def sgmv_expand_for_nslices(nslices: int, hidden_size: int, inputs_tensor: torch.Tensor,
                             lora_weights_lst: list[torch.Tensor],
-                            out_tensor: torch.Tensor,
-                            b_seq_start_loc: torch.Tensor,
+                            out_tensor: torch.Tensor, b_seq_start_loc: torch.Tensor,
                             seq_len_tensor: torch.Tensor,
                             prompt_lora_mapping: torch.Tensor, batches: int,
                             max_seq_length: int, num_tokens: int,
@@ -93,10 +91,9 @@ def sgmv_expand_for_nslices(nslices: int, hidden_size: int,
 _dict_lock = Lock()
 
 
-def check_lora_shrink_kernel(batches: int, num_loras: int, rank: int,
-                             hidden_size: int, nslices: int,
-                             dtype: torch.dtype, device: str, seq_length: int,
-                             scaling: float):
+def check_lora_shrink_kernel(batches: int, num_loras: int, rank: int, hidden_size: int,
+                             nslices: int, dtype: torch.dtype, device: str,
+                             seq_length: int, scaling: float):
     """
     Compare outputs of torch_ops.sgmv_shrink and triton_ops.lora_shrink
     kernels.
@@ -116,8 +113,7 @@ def check_lora_shrink_kernel(batches: int, num_loras: int, rank: int,
 
     # Setup metadata information for SGMV and reference kernels
     sgmv_meta_args = (data.b_seq_start_loc, data.seq_len_tensor,
-                      data.prompt_lora_mapping, batches, max_seq_length,
-                      token_nums)
+                      data.prompt_lora_mapping, batches, max_seq_length, token_nums)
 
     # Setup metadata information for the LoRA kernel.
     lora_meta = LoRAKernelMeta.make(max_loras=num_loras,
@@ -153,10 +149,9 @@ def check_lora_shrink_kernel(batches: int, num_loras: int, rank: int,
     assert_close(out_tensor, ref_out_tensor)
 
 
-def check_lora_expand_kernel(batches: int, num_loras: int, rank: int,
-                             hidden_size: int, nslices: int,
-                             dtype: torch.dtype, device: str, seq_length: int,
-                             add_inputs: bool):
+def check_lora_expand_kernel(batches: int, num_loras: int, rank: int, hidden_size: int,
+                             nslices: int, dtype: torch.dtype, device: str,
+                             seq_length: int, add_inputs: bool):
     """
     Compare outputs of torch_ops.sgmv_expand and triton_ops.lora_expand
     kernels.
@@ -177,8 +172,7 @@ def check_lora_expand_kernel(batches: int, num_loras: int, rank: int,
 
     # Setup metadata information for SGMV and reference kernels
     sgmv_meta_args = (data.b_seq_start_loc, data.seq_len_tensor,
-                      data.prompt_lora_mapping, batches, max_seq_length,
-                      token_nums)
+                      data.prompt_lora_mapping, batches, max_seq_length, token_nums)
 
     # Setup metadata information for the LoRA kernel.
     lora_meta = LoRAKernelMeta.make(max_loras=num_loras,

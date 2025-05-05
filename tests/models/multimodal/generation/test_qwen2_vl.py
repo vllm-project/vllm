@@ -120,12 +120,10 @@ def batch_make_image_embeddings(
         with torch.no_grad():
             visual = model.visual
 
-            pixel_values_on_device = pixel_values.to(visual.device,
-                                                     dtype=visual.dtype)
+            pixel_values_on_device = pixel_values.to(visual.device, dtype=visual.dtype)
             image_grid_thw_on_device = image_grid_thw.to(visual.device,
                                                          dtype=torch.int64)
-            return visual(pixel_values_on_device,
-                          grid_thw=image_grid_thw_on_device)
+            return visual(pixel_values_on_device, grid_thw=image_grid_thw_on_device)
 
     # V1 Test: this calls a V0 internal.
     image_embeds = torch.concat(llm.apply_model(get_image_embeds))
@@ -146,8 +144,7 @@ def batch_make_image_embeddings(
             "image_embeds":
             image_embeds[embed_counter:embed_counter + cur_batch_embed_len],
             "image_grid_thw":
-            image_grid_thw[image_counter:image_counter +
-                           cur_batch_image_count],
+            image_grid_thw[image_counter:image_counter + cur_batch_image_count],
         })
 
         embed_counter += cur_batch_embed_len
@@ -204,12 +201,10 @@ def batch_make_video_embeddings(
         with torch.no_grad():
             visual = model.visual
 
-            pixel_values_on_device = pixel_values.to(visual.device,
-                                                     dtype=visual.dtype)
+            pixel_values_on_device = pixel_values.to(visual.device, dtype=visual.dtype)
             video_grid_thw_on_device = video_grid_thw.to(visual.device,
                                                          dtype=torch.int64)
-            return visual(pixel_values_on_device,
-                          grid_thw=video_grid_thw_on_device)
+            return visual(pixel_values_on_device, grid_thw=video_grid_thw_on_device)
 
     # V1 Test: this calls a V0 internal.
     video_embeds = torch.concat(llm.apply_model(get_image_embeds))
@@ -230,8 +225,7 @@ def batch_make_video_embeddings(
             "video_embeds":
             video_embeds[embed_counter:embed_counter + cur_batch_embed_len],
             "video_grid_thw":
-            video_grid_thw[video_counter:video_counter +
-                           cur_batch_video_count],
+            video_grid_thw[video_counter:video_counter + cur_batch_video_count],
         })
 
         embed_counter += cur_batch_embed_len
@@ -265,18 +259,18 @@ def run_embedding_input_test(
     processor = AutoProcessor.from_pretrained(model)
 
     # max_model_len should be greater than image_feature_size
-    with vllm_runner(model,
-                     task="generate",
-                     max_model_len=4000,
-                     max_num_seqs=3,
-                     dtype=dtype,
-                     limit_mm_per_prompt={
-                         "image": mm_limit,
-                         "video": mm_limit
-                     },
-                     tensor_parallel_size=tensor_parallel_size,
-                     distributed_executor_backend=distributed_executor_backend
-                     ) as vllm_model:
+    with vllm_runner(
+            model,
+            task="generate",
+            max_model_len=4000,
+            max_num_seqs=3,
+            dtype=dtype,
+            limit_mm_per_prompt={
+                "image": mm_limit,
+                "video": mm_limit
+            },
+            tensor_parallel_size=tensor_parallel_size,
+            distributed_executor_backend=distributed_executor_backend) as vllm_model:
 
         outputs_per_case_for_original_input = [
             vllm_model.generate_greedy_logprobs(prompts,
@@ -292,11 +286,10 @@ def run_embedding_input_test(
                 prompts,
                 max_tokens,
                 num_logprobs=num_logprobs,
-                images=batch_make_image_embeddings(
-                    images, processor, vllm_model) if images else None,
-                videos=batch_make_video_embeddings(
-                    videos, processor, vllm_model) if videos else None)
-            for prompts, images, videos in inputs
+                images=batch_make_image_embeddings(images, processor, vllm_model)
+                if images else None,
+                videos=batch_make_video_embeddings(videos, processor, vllm_model)
+                if videos else None) for prompts, images, videos in inputs
         ]
 
     for outputs_for_original_input, \
@@ -327,18 +320,16 @@ def run_embedding_input_test(
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
-def test_qwen2_vl_image_embeddings_input(vllm_runner, image_assets, model,
-                                         size_factors, dtype: str,
-                                         max_tokens: int,
+def test_qwen2_vl_image_embeddings_input(vllm_runner, image_assets, model, size_factors,
+                                         dtype: str, max_tokens: int,
                                          num_logprobs: int) -> None:
     images = [asset.pil_image for asset in image_assets]
 
-    inputs_per_case: list[tuple[
-        list[str], PromptImageInput, PromptVideoInput]] = [(
-            [prompt for _ in size_factors],
-            [rescale_image_size(image, factor) for factor in size_factors],
-            [],
-        ) for image, prompt in zip(images, IMAGE_PROMPTS)]
+    inputs_per_case: list[tuple[list[str], PromptImageInput, PromptVideoInput]] = [(
+        [prompt for _ in size_factors],
+        [rescale_image_size(image, factor) for factor in size_factors],
+        [],
+    ) for image, prompt in zip(images, IMAGE_PROMPTS)]
 
     run_embedding_input_test(
         vllm_runner,
@@ -369,21 +360,18 @@ def test_qwen2_vl_image_embeddings_input(vllm_runner, image_assets, model,
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
-def test_qwen2_vl_multiple_image_embeddings_input(vllm_runner, image_assets,
-                                                  model, size_factors,
-                                                  dtype: str, max_tokens: int,
+def test_qwen2_vl_multiple_image_embeddings_input(vllm_runner, image_assets, model,
+                                                  size_factors, dtype: str,
+                                                  max_tokens: int,
                                                   num_logprobs: int) -> None:
     images = [asset.pil_image for asset in image_assets]
 
-    inputs_per_case: list[tuple[list[str], PromptImageInput,
-                                PromptVideoInput]] = [(
-                                    [MULTIIMAGE_PROMPT for _ in size_factors],
-                                    [[
-                                        rescale_image_size(image, factor)
-                                        for image in images
-                                    ] for factor in size_factors],
-                                    [],
-                                )]
+    inputs_per_case: list[tuple[list[str], PromptImageInput, PromptVideoInput]] = [(
+        [MULTIIMAGE_PROMPT for _ in size_factors],
+        [[rescale_image_size(image, factor) for image in images]
+         for factor in size_factors],
+        [],
+    )]
 
     run_embedding_input_test(
         vllm_runner,
@@ -413,9 +401,8 @@ def test_qwen2_vl_multiple_image_embeddings_input(vllm_runner, image_assets,
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
-def test_qwen2_vl_video_embeddings_input(vllm_runner, video_assets, model,
-                                         size_factors, dtype: str,
-                                         max_tokens: int,
+def test_qwen2_vl_video_embeddings_input(vllm_runner, video_assets, model, size_factors,
+                                         dtype: str, max_tokens: int,
                                          num_logprobs: int) -> None:
     num_frames = 4
     sampled_vids = [
@@ -423,12 +410,11 @@ def test_qwen2_vl_video_embeddings_input(vllm_runner, video_assets, model,
         for asset in video_assets
     ]
 
-    inputs_per_case: list[tuple[
-        list[str], PromptImageInput, PromptVideoInput]] = [(
-            [prompt for _ in size_factors],
-            [],
-            [rescale_video_size(video, factor) for factor in size_factors],
-        ) for video, prompt in zip(sampled_vids, VIDEO_PROMPTS)]
+    inputs_per_case: list[tuple[list[str], PromptImageInput, PromptVideoInput]] = [(
+        [prompt for _ in size_factors],
+        [],
+        [rescale_video_size(video, factor) for factor in size_factors],
+    ) for video, prompt in zip(sampled_vids, VIDEO_PROMPTS)]
 
     run_embedding_input_test(
         vllm_runner,

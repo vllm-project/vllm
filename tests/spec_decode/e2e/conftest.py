@@ -30,8 +30,8 @@ PROMPTS = [
 
 
 @pytest.fixture
-def test_llm_generator(common_llm_kwargs, per_test_common_llm_kwargs,
-                       test_llm_kwargs, seed):
+def test_llm_generator(common_llm_kwargs, per_test_common_llm_kwargs, test_llm_kwargs,
+                       seed):
 
     def generate():
         kwargs = {
@@ -58,9 +58,8 @@ def maybe_assert_ngram_worker(llm):
     if (llm.llm_engine.speculative_config is not None
             and llm.llm_engine.speculative_config.method == "ngram"):
         from vllm.spec_decode.ngram_worker import NGramWorker
-        assert isinstance(
-            llm.llm_engine.model_executor.driver_worker.proposer_worker,
-            NGramWorker)
+        assert isinstance(llm.llm_engine.model_executor.driver_worker.proposer_worker,
+                          NGramWorker)
 
 
 def get_output_from_llm_generator(
@@ -80,17 +79,16 @@ def get_output_from_llm_generator(
         # Fetch acceptance rate if logging is enabled.
         if stat_loggers := getattr(llm.llm_engine, "stat_loggers", None):
             stat_logger = stat_loggers["prometheus"]
-            acceptance_rate = (stat_logger.metrics.
-                               gauge_spec_decode_draft_acceptance_rate.labels(
-                                   **stat_logger.labels)._value.get())
+            acceptance_rate = (
+                stat_logger.metrics.gauge_spec_decode_draft_acceptance_rate.labels(
+                    **stat_logger.labels)._value.get())
         del llm
 
     return tokens, token_ids, acceptance_rate
 
 
 def check_logprobs_correctness(
-    spec_outputs: Sequence[Union[TokensTextLogprobs,
-                                 TokensTextLogprobsPromptLogprobs]],
+    spec_outputs: Sequence[Union[TokensTextLogprobs, TokensTextLogprobsPromptLogprobs]],
     baseline_outputs: Sequence[Union[TokensTextLogprobs,
                                      TokensTextLogprobsPromptLogprobs]],
     disable_logprobs: bool = False,
@@ -139,8 +137,9 @@ def _check_logprobs_when_output_disabled(
     assert len(spec_logprobs) == len(baseline_logprobs)
 
     # For each generated position of the sequence.
-    for pos, (spec_pos_logprobs, baseline_pos_logprobs) in enumerate(
-            zip(spec_logprobs, baseline_logprobs)):
+    for pos, (spec_pos_logprobs,
+              baseline_pos_logprobs) in enumerate(zip(spec_logprobs,
+                                                      baseline_logprobs)):
 
         # First prompt logprob is expected to be None
         if is_prompt_logprobs and baseline_pos_logprobs is None:
@@ -163,23 +162,22 @@ def _check_logprobs_when_output_disabled(
         assert spec_pos_logprob_token_id in baseline_pos_logprobs
 
 
-def run_equality_correctness_test(
-        vllm_runner,
-        common_llm_kwargs,
-        per_test_common_llm_kwargs,
-        baseline_llm_kwargs,
-        test_llm_kwargs,
-        batch_size: int,
-        max_output_len: int,
-        seed: Optional[int] = 0,
-        temperature: float = 0.0,
-        disable_seed: bool = False,
-        ignore_eos: bool = True,
-        ensure_all_accepted: bool = False,
-        expected_acceptance_rate: Optional[float] = None,
-        logprobs: Optional[int] = None,
-        prompt_logprobs: Optional[int] = None,
-        disable_logprobs: bool = False):
+def run_equality_correctness_test(vllm_runner,
+                                  common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs,
+                                  test_llm_kwargs,
+                                  batch_size: int,
+                                  max_output_len: int,
+                                  seed: Optional[int] = 0,
+                                  temperature: float = 0.0,
+                                  disable_seed: bool = False,
+                                  ignore_eos: bool = True,
+                                  ensure_all_accepted: bool = False,
+                                  expected_acceptance_rate: Optional[float] = None,
+                                  logprobs: Optional[int] = None,
+                                  prompt_logprobs: Optional[int] = None,
+                                  disable_logprobs: bool = False):
 
     org_args = {
         **common_llm_kwargs,
@@ -211,16 +209,15 @@ def run_equality_correctness_test(
     with vllm_runner(**sd_args) as vllm_model:
         if ensure_all_accepted or expected_acceptance_rate is not None:
             # Force log interval to be 0 to catch all metrics.
-            stat_logger = vllm_model.model.llm_engine.stat_loggers[
-                'prometheus']
+            stat_logger = vllm_model.model.llm_engine.stat_loggers['prometheus']
             stat_logger.local_interval = -100
 
         sd_outputs = vllm_model.generate_w_logprobs(prompts, sampling_params)
 
         if ensure_all_accepted or expected_acceptance_rate is not None:
-            acceptance_rate = (stat_logger.metrics.
-                               gauge_spec_decode_draft_acceptance_rate.labels(
-                                   **stat_logger.labels)._value.get())
+            acceptance_rate = (
+                stat_logger.metrics.gauge_spec_decode_draft_acceptance_rate.labels(
+                    **stat_logger.labels)._value.get())
 
             if ensure_all_accepted:
                 assert True

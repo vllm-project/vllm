@@ -17,8 +17,7 @@ from ...utils import check_embeddings_close
         pytest.param("intfloat/multilingual-e5-small"),
         pytest.param("Alibaba-NLP/gte-Qwen2-7B-instruct"),
         # [Decoder-only]
-        pytest.param("BAAI/bge-multilingual-gemma2",
-                     marks=[pytest.mark.core_model]),
+        pytest.param("BAAI/bge-multilingual-gemma2", marks=[pytest.mark.core_model]),
         pytest.param("intfloat/e5-mistral-7b-instruct",
                      marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
         pytest.param("Alibaba-NLP/gte-Qwen2-1.5B-instruct"),
@@ -58,8 +57,7 @@ def test_models(
     # So we need to strip the input texts to avoid test failing.
     example_prompts = [str(s).strip() for s in example_prompts]
 
-    with hf_runner(model, dtype=dtype,
-                   is_sentence_transformer=True) as hf_model:
+    with hf_runner(model, dtype=dtype, is_sentence_transformer=True) as hf_model:
         hf_outputs = hf_model.encode(example_prompts)
 
     with vllm_runner(model,

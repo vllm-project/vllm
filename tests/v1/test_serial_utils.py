@@ -40,10 +40,7 @@ def test_encode_decode():
     """Test encode/decode loop with zero-copy tensors."""
 
     obj = MyType(
-        tensor1=torch.randint(low=0,
-                              high=100,
-                              size=(1024, ),
-                              dtype=torch.int32),
+        tensor1=torch.randint(low=0, high=100, size=(1024, ), dtype=torch.int32),
         a_string="hello",
         list_of_tensors=[
             torch.rand((1, 10), dtype=torch.float32),
@@ -51,8 +48,7 @@ def test_encode_decode():
             torch.tensor(1984),  # test scalar too
             # Make sure to test bf16 which numpy doesn't support.
             torch.rand((3, 5, 1000), dtype=torch.bfloat16),
-            torch.tensor([float("-inf"), float("inf")] * 1024,
-                         dtype=torch.bfloat16),
+            torch.tensor([float("-inf"), float("inf")] * 1024, dtype=torch.bfloat16),
         ],
         numpy_array=np.arange(512),
         unrecognized=UnrecognizedType(33),
@@ -128,8 +124,7 @@ def test_multimodal_kwargs():
 
 
 def test_multimodal_items_by_modality():
-    e1 = MultiModalFieldElem("audio", "a0",
-                             torch.zeros(1000, dtype=torch.bfloat16),
+    e1 = MultiModalFieldElem("audio", "a0", torch.zeros(1000, dtype=torch.bfloat16),
                              MultiModalBatchedField())
     e2 = MultiModalFieldElem(
         "video",
@@ -137,11 +132,9 @@ def test_multimodal_items_by_modality():
         [torch.zeros(1000, dtype=torch.int8) for _ in range(4)],
         MultiModalBatchedField(),
     )
-    e3 = MultiModalFieldElem("image", "i0", torch.zeros(1000,
-                                                        dtype=torch.int32),
+    e3 = MultiModalFieldElem("image", "i0", torch.zeros(1000, dtype=torch.int32),
                              MultiModalSharedField(4))
-    e4 = MultiModalFieldElem("image", "i1", torch.zeros(1000,
-                                                        dtype=torch.int32),
+    e4 = MultiModalFieldElem("image", "i1", torch.zeros(1000, dtype=torch.int32),
                              MultiModalBatchedField())
     audio = MultiModalKwargsItem.from_elems([e1])
     video = MultiModalKwargsItem.from_elems([e2])
@@ -186,16 +179,13 @@ def assert_equal(obj1: MyType, obj2: MyType):
     assert torch.equal(obj1.tensor1, obj2.tensor1)
     assert obj1.a_string == obj2.a_string
     assert all(
-        torch.equal(a, b)
-        for a, b in zip(obj1.list_of_tensors, obj2.list_of_tensors))
+        torch.equal(a, b) for a, b in zip(obj1.list_of_tensors, obj2.list_of_tensors))
     assert np.array_equal(obj1.numpy_array, obj2.numpy_array)
     assert obj1.unrecognized.an_int == obj2.unrecognized.an_int
     assert torch.equal(obj1.small_f_contig_tensor, obj2.small_f_contig_tensor)
     assert torch.equal(obj1.large_f_contig_tensor, obj2.large_f_contig_tensor)
-    assert torch.equal(obj1.small_non_contig_tensor,
-                       obj2.small_non_contig_tensor)
-    assert torch.equal(obj1.large_non_contig_tensor,
-                       obj2.large_non_contig_tensor)
+    assert torch.equal(obj1.small_non_contig_tensor, obj2.small_non_contig_tensor)
+    assert torch.equal(obj1.large_non_contig_tensor, obj2.large_non_contig_tensor)
     assert torch.equal(obj1.empty_tensor, obj2.empty_tensor)
 
 
@@ -234,8 +224,8 @@ def test_tensor_serialization(allow_pickle: bool):
     decoded = decoder.decode(encoded)
 
     # Verify the decoded tensor matches the original
-    assert torch.allclose(
-        tensor, decoded), "Decoded tensor does not match the original tensor."
+    assert torch.allclose(tensor,
+                          decoded), "Decoded tensor does not match the original tensor."
 
 
 @pytest.mark.parametrize("allow_pickle", [True, False])
@@ -255,8 +245,7 @@ def test_numpy_array_serialization(allow_pickle: bool):
 
     # Verify the decoded array matches the original
     assert np.allclose(
-        array,
-        decoded), "Decoded numpy array does not match the original array."
+        array, decoded), "Decoded numpy array does not match the original array."
 
 
 class CustomClass:

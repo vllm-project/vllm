@@ -95,10 +95,7 @@ def check_model_outputs(
 ):
     tokenizer = AutoTokenizer.from_pretrained(model.original_model)
     if tokenizer.chat_template is not None:
-        messages = [[{
-            'role': 'user',
-            'content': prompt
-        }] for prompt in prompts]
+        messages = [[{'role': 'user', 'content': prompt}] for prompt in prompts]
         prompts = tokenizer.apply_chat_template(messages,
                                                 tokenize=False,
                                                 add_generation_prompt=True)
@@ -110,8 +107,8 @@ def check_model_outputs(
                      dtype=dtype,
                      max_model_len=MAX_MODEL_LEN,
                      tensor_parallel_size=tp_size) as gguf_model:
-        gguf_outputs = gguf_model.generate_greedy_logprobs(
-            prompts[:-1], max_tokens, num_logprobs)
+        gguf_outputs = gguf_model.generate_greedy_logprobs(prompts[:-1], max_tokens,
+                                                           num_logprobs)
 
     # Run unquantized model.
     # Should run with tp=1, otherwise the test will stuck at
@@ -135,10 +132,9 @@ def check_model_outputs(
 
 @pytest.mark.skipif(not is_quant_method_supported("gguf"),
                     reason="gguf is not supported on this GPU type.")
-@pytest.mark.parametrize("model", [
-    pytest.param(test_config, marks=test_config.marks)
-    for test_config in MODELS
-])
+@pytest.mark.parametrize(
+    "model",
+    [pytest.param(test_config, marks=test_config.marks) for test_config in MODELS])
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])

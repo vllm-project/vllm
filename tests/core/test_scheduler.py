@@ -36,9 +36,7 @@ def test_scheduler_add_seq_group():
     # Add seq group to scheduler.
     num_seq_group = 4
     for i in range(num_seq_group):
-        _, seq_group = create_dummy_prompt(str(i),
-                                           block_size,
-                                           block_size=block_size)
+        _, seq_group = create_dummy_prompt(str(i), block_size, block_size=block_size)
         scheduler.add_seq_group(seq_group)
         assert scheduler.get_num_unfinished_seq_groups() == i + 1
 
@@ -163,12 +161,8 @@ def test_scheduler_schedule_preempt_abort():
     scheduler = Scheduler(scheduler_config, cache_config, None)
 
     # Add seq groups to scheduler.
-    seq_a, seq_group_a = create_dummy_prompt("1",
-                                             block_size,
-                                             block_size=block_size)
-    seq_b, seq_group_b = create_dummy_prompt("2",
-                                             block_size,
-                                             block_size=block_size)
+    seq_a, seq_group_a = create_dummy_prompt("1", block_size, block_size=block_size)
+    seq_b, seq_group_b = create_dummy_prompt("2", block_size, block_size=block_size)
     scheduler.add_seq_group(seq_group_a)
     scheduler.add_seq_group(seq_group_b)
 
@@ -344,8 +338,7 @@ def add_token_budget(budget: SchedulingBudget,
                      num_batched_tokens: int = 0,
                      num_curr_seqs: int = 0):
     mock_seq_group = create_dummy_prompt('10', prompt_length=60)[1]
-    budget.add_num_batched_tokens(mock_seq_group.request_id,
-                                  num_batched_tokens)
+    budget.add_num_batched_tokens(mock_seq_group.request_id, num_batched_tokens)
     budget.add_num_seqs(mock_seq_group.request_id, num_curr_seqs)
 
 
@@ -355,9 +348,7 @@ def test_prefill_schedule_max_prompt_len():
     """
     block_size = 4
     scheduler = initialize_scheduler(max_model_len=30, block_size=block_size)
-    _, seq_group = create_dummy_prompt("0",
-                                       prompt_length=60,
-                                       block_size=block_size)
+    _, seq_group = create_dummy_prompt("0", prompt_length=60, block_size=block_size)
     scheduler.add_seq_group(seq_group)
     budget = create_token_budget()
     output = scheduler._schedule_prefills(budget, None)
@@ -409,9 +400,7 @@ def test_prefill_schedule_token_budget():
                                      num_gpu_blocks=16)
     budget = create_token_budget(token_budget=60)
     add_token_budget(budget, 30, 0)
-    _, seq_group = create_dummy_prompt(str(i),
-                                       prompt_length=60,
-                                       block_size=block_size)
+    _, seq_group = create_dummy_prompt(str(i), prompt_length=60, block_size=block_size)
     # Cannot schedule a prompt that doesn't fit the budget.
     scheduler.add_seq_group(seq_group)
     output = scheduler._schedule_prefills(budget, None)
@@ -457,9 +446,7 @@ def test_prefill_schedule_max_seqs():
     scheduler.waiting = deque()
     budget = create_token_budget(max_num_seqs=2)
     add_token_budget(budget, 0, 2)
-    _, seq_group = create_dummy_prompt(str(i),
-                                       prompt_length=60,
-                                       block_size=block_size)
+    _, seq_group = create_dummy_prompt(str(i), prompt_length=60, block_size=block_size)
     scheduler.add_seq_group(seq_group)
     output = scheduler._schedule_prefills(budget, None)
     remaining_waiting = scheduler.waiting
@@ -486,10 +473,9 @@ def test_prefill_schedule_max_lora():
         _, seq_group = create_dummy_prompt(str(i),
                                            prompt_length=60,
                                            block_size=block_size,
-                                           lora_request=LoRARequest(
-                                               lora_name=str(i),
-                                               lora_int_id=i + 1,
-                                               lora_path="abc"))
+                                           lora_request=LoRARequest(lora_name=str(i),
+                                                                    lora_int_id=i + 1,
+                                                                    lora_path="abc"))
         scheduler.add_seq_group(seq_group)
     # Add two more requests to verify lora is prioritized.
     # 0: LoRA, 1: LoRA, 2: regular, 3: regular
@@ -586,8 +572,7 @@ def test_decode_schedule_preempted():
     def cannot_append_second_group(seq_group, num_lookahead_slots):
         return seq_group.request_id != "1"
 
-    scheduler.block_manager.can_append_slots.side_effect = (
-        cannot_append_second_group)
+    scheduler.block_manager.can_append_slots.side_effect = (cannot_append_second_group)
 
     # 1 cannot be scheduled, and the lowest priority (request 2)
     # should be preempted. 1 will also be preempted.
@@ -614,12 +599,8 @@ def test_schedule_decode_blocks_to_copy_update():
     Verify blocks_to_copy is updated.
     """
     block_size = 4
-    scheduler = initialize_scheduler(block_size=4,
-                                     num_cpu_blocks=16,
-                                     num_gpu_blocks=16)
-    _, seq_group = create_dummy_prompt("1",
-                                       prompt_length=60,
-                                       block_size=block_size)
+    scheduler = initialize_scheduler(block_size=4, num_cpu_blocks=16, num_gpu_blocks=16)
+    _, seq_group = create_dummy_prompt("1", prompt_length=60, block_size=block_size)
     curr_loras = None
     scheduler._allocate_and_set_running(seq_group)
     append_new_token_seq_group(60, seq_group, 1)
@@ -657,10 +638,9 @@ def test_schedule_swapped_max_loras():
         _, seq_group = create_dummy_prompt(str(i),
                                            prompt_length=60,
                                            block_size=block_size,
-                                           lora_request=LoRARequest(
-                                               lora_name=str(i),
-                                               lora_int_id=i + 1,
-                                               lora_path="abc"))
+                                           lora_request=LoRARequest(lora_name=str(i),
+                                                                    lora_int_id=i + 1,
+                                                                    lora_path="abc"))
         scheduler._allocate_and_set_running(seq_group)
         append_new_token_seq_group(60, seq_group, 1)
         scheduler._swap_out(seq_group, blocks_to_swap_out)
@@ -744,9 +724,7 @@ def test_schedule_swapped_blocks_to_copy():
                                      num_cpu_blocks=32,
                                      num_gpu_blocks=32)
     curr_loras = None
-    _, seq_group = create_dummy_prompt("1",
-                                       prompt_length=60,
-                                       block_size=block_size)
+    _, seq_group = create_dummy_prompt("1", prompt_length=60, block_size=block_size)
     scheduler._allocate_and_set_running(seq_group)
     append_new_token_seq_group(60, seq_group, 1)
     blocks_to_swap_out: list[tuple[int, int]] = []
@@ -883,8 +861,8 @@ def test_prefix_caching_aware_prefills(enable_prefix_caching):
         assert len(metas) == 2
         for meta in metas:
             assert meta.token_chunk_size == 8
-            assert (len(meta.computed_block_nums) == num_shared_tokens //
-                    block_size)  # 1 Block for the 8 tokens.
+            assert (len(meta.computed_block_nums) == num_shared_tokens // block_size
+                    )  # 1 Block for the 8 tokens.
     else:
         assert len(out.scheduled_seq_groups) == 1
         assert len(metas) == 1
@@ -892,8 +870,7 @@ def test_prefix_caching_aware_prefills(enable_prefix_caching):
         assert len(metas[0].computed_block_nums) == 0  # No blocks computed.
 
 
-def test_no_multiple_partial_prefills_with_chunked_prefill_and_prefix_caching(
-):
+def test_no_multiple_partial_prefills_with_chunked_prefill_and_prefix_caching():
     """
     This test verifies that we don't schedule new prefills if there's already
     a continuous prefill in progress even though the new prefills with shared
@@ -963,11 +940,9 @@ def test_no_multiple_partial_prefills_with_chunked_prefill_and_prefix_caching(
 
     metas = {meta.request_id: meta for meta in metas}
     assert metas[seqA_group.request_id].token_chunk_size == 1  # Decode
-    assert (metas[seqB_group.request_id].token_chunk_size == 8
-            )  # Fully cached prefill
-    assert (
-        metas[seqC_group.request_id].token_chunk_size == 6
-    ), "A partial prefix of C (4 tokens) should be prefilled, with the "
+    assert (metas[seqB_group.request_id].token_chunk_size == 8)  # Fully cached prefill
+    assert (metas[seqC_group.request_id].token_chunk_size == 6
+            ), "A partial prefix of C (4 tokens) should be prefilled, with the "
     "remaining tokens fit into 3 token budget (4-1 from the seqA). It will "
     "then be rounded down to 2 tokens on block size, thus 6 tokens in total."
 
@@ -1007,8 +982,7 @@ def test_no_batches_mixed_with_prompt_tokens_and_prompt_embeds():
         create_dummy_prompt(f"{i}",
                             prompt_tokens=seq_tokens[i],
                             prompt_embeds=seq_embeds[i],
-                            block_size=block_size)
-        for i in range(len(seq_tokens))
+                            block_size=block_size) for i in range(len(seq_tokens))
     ]
 
     for _, seq_group in seq_and_seq_groups:
@@ -1029,11 +1003,11 @@ def test_no_batches_mixed_with_prompt_tokens_and_prompt_embeds():
         ]
 
         # We should have as many scheduled groups as possible, without mixing
-        assert len(out.scheduled_seq_groups) == min(
-            max_seq_group, len(expected_scheduled_seq_groups))
-        assert all(scheduled_seq_group.seq_group.uses_prompt_embeds() ==
-                   batch_is_prompt_embeds
-                   for scheduled_seq_group in out.scheduled_seq_groups)
+        assert len(out.scheduled_seq_groups) == min(max_seq_group,
+                                                    len(expected_scheduled_seq_groups))
+        assert all(
+            scheduled_seq_group.seq_group.uses_prompt_embeds() == batch_is_prompt_embeds
+            for scheduled_seq_group in out.scheduled_seq_groups)
 
         # Finish the scheduled groups
         for scheduled_seq_group in out.scheduled_seq_groups:

@@ -85,8 +85,7 @@ def run_test(
             for prompts, audios in inputs
         ]
 
-    with hf_runner(model, dtype=dtype,
-                   auto_cls=AutoModelForSpeechSeq2Seq) as hf_model:
+    with hf_runner(model, dtype=dtype, auto_cls=AutoModelForSpeechSeq2Seq) as hf_model:
 
         hf_processor = hf_model.processor
         eos_token_id = hf_processor.tokenizer.eos_token_id
@@ -100,13 +99,10 @@ def run_test(
             for prompts, audios in inputs
         ]
 
-    for hf_outputs, vllm_outputs in zip(hf_outputs_per_case,
-                                        vllm_outputs_per_case):
+    for hf_outputs, vllm_outputs in zip(hf_outputs_per_case, vllm_outputs_per_case):
         check_logprobs_close(
             outputs_0_lst=hf_outputs,
-            outputs_1_lst=[
-                vllm_to_hf_output(output) for output in vllm_outputs
-            ],
+            outputs_1_lst=[vllm_to_hf_output(output) for output in vllm_outputs],
             name_0="hf",
             name_1="vllm",
         )
@@ -117,9 +113,9 @@ def run_test(
 @pytest.mark.parametrize("max_model_len", [2048])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
-def test_models(hf_runner, vllm_runner, model: str,
-                audio_assets: AudioTestAssets, dtype: str, max_model_len: int,
-                max_tokens: int, num_logprobs: int) -> None:
+def test_models(hf_runner, vllm_runner, model: str, audio_assets: AudioTestAssets,
+                dtype: str, max_model_len: int, max_tokens: int,
+                num_logprobs: int) -> None:
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")

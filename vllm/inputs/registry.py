@@ -200,8 +200,7 @@ class InputRegistry:
 
         # Encoder dummy data does not contain multi-modal data
         if is_encoder_data:
-            enc_data = mm_registry.get_encoder_dummy_data(
-                model_config, seq_len)
+            enc_data = mm_registry.get_encoder_dummy_data(model_config, seq_len)
             seq_data = SequenceData.from_seqs(enc_data.prompt_token_ids)
             return DummyData(seq_data=seq_data)
 

@@ -141,8 +141,7 @@ def run_test(
         "min_length": 0
     }
 
-    with hf_runner(model, dtype=dtype,
-                   auto_cls=AutoModelForSeq2SeqLM) as hf_model:
+    with hf_runner(model, dtype=dtype, auto_cls=AutoModelForSeq2SeqLM) as hf_model:
         hf_outputs = (hf_model.generate_encoder_decoder_greedy_logprobs_limit(
             prompts,
             max_tokens,
@@ -150,8 +149,7 @@ def run_test(
             **hf_kwargs,
         ))
 
-    hf_skip_tokens = (1
-                      if decoder_prompt_type == DecoderPromptType.NONE else 0)
+    hf_skip_tokens = (1 if decoder_prompt_type == DecoderPromptType.NONE else 0)
 
     check_logprobs_close(
         outputs_0_lst=hf_outputs,
@@ -177,8 +175,8 @@ def run_test(
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("decoder_prompt_type", list(DecoderPromptType))
-def test_models(hf_runner, vllm_runner, example_encoder_decoder_prompts, model,
-                dtype, max_tokens, num_logprobs, decoder_prompt_type) -> None:
+def test_models(hf_runner, vllm_runner, example_encoder_decoder_prompts, model, dtype,
+                max_tokens, num_logprobs, decoder_prompt_type) -> None:
 
     run_test(
         hf_runner,
@@ -200,11 +198,9 @@ def test_models(hf_runner, vllm_runner, example_encoder_decoder_prompts, model,
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("decoder_prompt_type", [DecoderPromptType.CUSTOM])
-def test_models_distributed(hf_runner, vllm_runner,
-                            example_encoder_decoder_prompts,
-                            distributed_executor_backend, model, dtype,
-                            max_tokens, num_logprobs,
-                            decoder_prompt_type) -> None:
+def test_models_distributed(hf_runner, vllm_runner, example_encoder_decoder_prompts,
+                            distributed_executor_backend, model, dtype, max_tokens,
+                            num_logprobs, decoder_prompt_type) -> None:
     run_test(
         hf_runner,
         vllm_runner,

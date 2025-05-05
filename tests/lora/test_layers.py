@@ -52,9 +52,8 @@ pytestmark = pytest.mark.skipif(
     not (current_platform.is_cuda_alike() or current_platform.is_cpu()),
     reason="Backend not supported")
 
-DEVICES = ([
-    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
-] if current_platform.is_cuda_alike() else ["cpu"])
+DEVICES = ([f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
+           if current_platform.is_cuda_alike() else ["cpu"])
 
 # prefill stage(True) or decode stage(False)
 STAGES = [True, False]
@@ -83,8 +82,8 @@ def skip_cuda_with_stage_false(request):
     """
     if current_platform.is_cuda_alike():
         try:
-            if hasattr(request.node, "callspec") and hasattr(
-                    request.node.callspec, "params"):
+            if hasattr(request.node, "callspec") and hasattr(request.node.callspec,
+                                                             "params"):
                 params = request.node.callspec.params
                 if "stage" in params and params["stage"] is False:
                     pytest.skip("Skip test when stage=False")
@@ -157,19 +156,17 @@ def populate_loras(
             subloras: list[LoRALayerWeights] = []
             sublora_len = layer_weights.shape[0] // repeats
             for i in range(repeats):
-                sublora = DummyLoRAManager(
-                    layer_weights.device).init_random_lora(
-                        module_name=f"fake_{i}",
-                        weight=layer_weights,
-                        generate_embeddings_tensor=generate_embeddings_tensor,
-                    )
-                sublora.lora_b = sublora.lora_b[:, (sublora_len *
-                                                    i):(sublora_len * (i + 1))]
+                sublora = DummyLoRAManager(layer_weights.device).init_random_lora(
+                    module_name=f"fake_{i}",
+                    weight=layer_weights,
+                    generate_embeddings_tensor=generate_embeddings_tensor,
+                )
+                sublora.lora_b = sublora.lora_b[:, (sublora_len * i):(sublora_len *
+                                                                      (i + 1))]
                 sublora.optimize()
                 subloras.append(sublora)
 
-            lora = PackedLoRALayerWeights.pack(
-                subloras) if repeats > 1 else subloras[0]
+            lora = PackedLoRALayerWeights.pack(subloras) if repeats > 1 else subloras[0]
 
             layer.set_lora(
                 slot_idx,
@@ -185,12 +182,12 @@ def populate_loras(
 
 
 def create_random_inputs(
-    active_lora_ids: list[int],
-    num_inputs: int,
-    input_size: tuple[int, ...],
-    input_range: tuple[float, float],
-    input_type: torch.dtype = torch.int,
-    device: torch.device = "cuda"
+        active_lora_ids: list[int],
+        num_inputs: int,
+        input_size: tuple[int, ...],
+        input_range: tuple[float, float],
+        input_type: torch.dtype = torch.int,
+        device: torch.device = "cuda"
 ) -> tuple[list[torch.Tensor], list[int], list[int]]:
     """Creates random inputs.
 
@@ -218,8 +215,8 @@ def create_random_inputs(
                               device=device))
         else:
             inputs.append(
-                torch.rand(size=input_size, dtype=input_type, device=device) *
-                high + low)
+                torch.rand(size=input_size, dtype=input_type, device=device) * high +
+                low)
 
         lora_id = random.choice(active_lora_ids)
         index_mapping += [lora_id] * input_size[0]
@@ -288,11 +285,8 @@ def test_embeddings(dist_init, num_loras, device, vocab_size, stage) -> None:
             input_size=(200, ),
             input_range=(1, vocab_size),
             device=device)
-        lora_mapping = LoRAMapping(index_mapping,
-                                   prompt_mapping,
-                                   is_prefill=stage)
-        punica_wrapper.update_metadata(lora_mapping, id_to_index, max_loras,
-                                       vocab_size,
+        lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
+        punica_wrapper.update_metadata(lora_mapping, id_to_index, max_loras, vocab_size,
                                        lora_config.lora_extra_vocab_size)
 
         lora_result = lora_embedding(torch.cat(inputs))
@@ -310,10 +304,7 @@ def test_embeddings(dist_init, num_loras, device, vocab_size, stage) -> None:
         expected_result = torch.cat(expected_results)
 
         rtol, atol = TOLERANCES[lora_result.dtype]
-        torch.testing.assert_close(lora_result,
-                                   expected_result,
-                                   rtol=rtol,
-                                   atol=atol)
+        torch.testing.assert_close(lora_result, expected_result, rtol=rtol, atol=atol)
 
         # Check that resetting the lora weights succeeds
 
@@ -326,21 +317,15 @@ def test_embeddings(dist_init, num_loras, device, vocab_size, stage) -> None:
             input_size=(200, ),
             input_range=(1, vocab_size),
             device=device)
-        lora_mapping = LoRAMapping(index_mapping,
-                                   prompt_mapping,
-                                   is_prefill=stage)
-        punica_wrapper.update_metadata(lora_mapping, id_to_index, max_loras,
-                                       vocab_size,
+        lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
+        punica_wrapper.update_metadata(lora_mapping, id_to_index, max_loras, vocab_size,
                                        lora_config.lora_extra_vocab_size)
 
         lora_result = lora_embedding(torch.cat(inputs))
         expected_result = embedding(torch.cat(inputs))
 
         rtol, atol = TOLERANCES[lora_result.dtype]
-        torch.testing.assert_close(lora_result,
-                                   expected_result,
-                                   rtol=rtol,
-                                   atol=atol)
+        torch.testing.assert_close(lora_result, expected_result, rtol=rtol, atol=atol)
 
 
 @torch.inference_mode()
@@ -350,8 +335,8 @@ def test_embeddings(dist_init, num_loras, device, vocab_size, stage) -> None:
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("vocab_size", [512, 32000, 64000, 128000])
 @pytest.mark.parametrize("stage", STAGES)
-def test_embeddings_with_new_embeddings(dist_init, num_loras, device,
-                                        vocab_size, stage) -> None:
+def test_embeddings_with_new_embeddings(dist_init, num_loras, device, vocab_size,
+                                        stage) -> None:
 
     if current_platform.is_cuda_alike():
         torch.cuda.set_device(device)
@@ -376,8 +361,7 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device,
         expanded_embedding.weight.data[:vocab_size, :] = embedding_data
         # We need to deepcopy the embedding as it will be modified
         # in place
-        lora_embedding = VocabParallelEmbeddingWithLoRA(
-            deepcopy(expanded_embedding))
+        lora_embedding = VocabParallelEmbeddingWithLoRA(deepcopy(expanded_embedding))
         lora_embedding.create_lora_weights(max_loras, lora_config)
 
         return expanded_embedding, lora_embedding
@@ -412,11 +396,8 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device,
             input_size=(200, ),
             input_range=(1, vocab_size),
             device=device)
-        lora_mapping = LoRAMapping(index_mapping,
-                                   prompt_mapping,
-                                   is_prefill=stage)
-        punica_wrapper.update_metadata(lora_mapping, id_to_index, max_loras,
-                                       vocab_size,
+        lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
+        punica_wrapper.update_metadata(lora_mapping, id_to_index, max_loras, vocab_size,
                                        lora_config.lora_extra_vocab_size)
         original_inputs = deepcopy(inputs)
 
@@ -427,8 +408,7 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device,
             embedding_id = lora_id - 1
             input_[-1] = vocab_size + (embedding_id * embeddings_tensor_len)
             original_input_[-1] = vocab_size
-            input_[-2] = vocab_size + (
-                (embedding_id + 1) * embeddings_tensor_len - 1)
+            input_[-2] = vocab_size + ((embedding_id + 1) * embeddings_tensor_len - 1)
             original_input_[-2] = vocab_size + embeddings_tensor_len - 1
 
         expanded_embedding.weight[vocab_size:vocab_size +
@@ -451,10 +431,7 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device,
         expected_result = torch.cat(expected_results)
 
         rtol, atol = TOLERANCES[lora_result.dtype]
-        torch.testing.assert_close(lora_result,
-                                   expected_result,
-                                   rtol=rtol,
-                                   atol=atol)
+        torch.testing.assert_close(lora_result, expected_result, rtol=rtol, atol=atol)
 
         # Check that resetting the lora weights succeeds
 
@@ -468,20 +445,14 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device,
             input_range=(1, vocab_size),
             device=device)
         original_inputs = deepcopy(inputs)
-        lora_mapping = LoRAMapping(index_mapping,
-                                   prompt_mapping,
-                                   is_prefill=stage)
-        punica_wrapper.update_metadata(lora_mapping, id_to_index, max_loras,
-                                       vocab_size,
+        lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
+        punica_wrapper.update_metadata(lora_mapping, id_to_index, max_loras, vocab_size,
                                        lora_config.lora_extra_vocab_size)
         lora_result = lora_embedding(torch.cat(original_inputs))
         expected_result = expanded_embedding(torch.cat(inputs))
 
         rtol, atol = TOLERANCES[lora_result.dtype]
-        torch.testing.assert_close(lora_result,
-                                   expected_result,
-                                   rtol=rtol,
-                                   atol=atol)
+        torch.testing.assert_close(lora_result, expected_result, rtol=rtol, atol=atol)
 
 
 @torch.inference_mode()
@@ -512,9 +483,9 @@ def test_lm_head_logits_processor(dist_init, num_loras, device, vocab_size,
         linear.weight.data[:, vocab_size:] = 0
         logits_processor = LogitsProcessor(
             vocab_size + lora_config.lora_extra_vocab_size, vocab_size)
-        lora_logits_processor = LogitsProcessorWithLoRA(
-            logits_processor, 1024, linear.weight.dtype, linear.weight.device,
-            None)
+        lora_logits_processor = LogitsProcessorWithLoRA(logits_processor, 1024,
+                                                        linear.weight.dtype,
+                                                        linear.weight.device, None)
         lora_logits_processor.create_lora_weights(max_loras, lora_config)
 
         return linear, logits_processor, lora_logits_processor
@@ -542,9 +513,7 @@ def test_lm_head_logits_processor(dist_init, num_loras, device, vocab_size,
             input_range=(0, 1),
             input_type=torch.float16,
             device=device)
-        lora_mapping = LoRAMapping(index_mapping,
-                                   prompt_mapping,
-                                   is_prefill=stage)
+        lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
         punica_wrapper.update_metadata(
             lora_mapping,
             id_to_index,
@@ -554,15 +523,13 @@ def test_lm_head_logits_processor(dist_init, num_loras, device, vocab_size,
         )
         input_ = torch.rand(20, 1024)
 
-        lora_result = lora_logits_processor._get_logits(
-            hidden_states=torch.cat(inputs),
-            lm_head=linear,
-            embedding_bias=None)
+        lora_result = lora_logits_processor._get_logits(hidden_states=torch.cat(inputs),
+                                                        lm_head=linear,
+                                                        embedding_bias=None)
 
         original_lm_head = deepcopy(linear)
 
-        linear.weight[logits_processor.
-                      org_vocab_size:logits_processor.org_vocab_size +
+        linear.weight[logits_processor.org_vocab_size:logits_processor.org_vocab_size +
                       embeddings_tensor_len] = embeddings_tensor
 
         logits_processor.org_vocab_size = (vocab_size +
@@ -591,9 +558,7 @@ def test_lm_head_logits_processor(dist_init, num_loras, device, vocab_size,
             input_range=(0, 1),
             input_type=torch.float16,
             device=device)
-        lora_mapping = LoRAMapping(index_mapping,
-                                   prompt_mapping,
-                                   is_prefill=stage)
+        lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
         punica_wrapper.update_metadata(
             lora_mapping,
             id_to_index,
@@ -606,16 +571,12 @@ def test_lm_head_logits_processor(dist_init, num_loras, device, vocab_size,
             hidden_states=torch.cat(inputs),
             lm_head=original_lm_head,
             embedding_bias=None)[:, :vocab_size]
-        expected_result = logits_processor._get_logits(
-            hidden_states=torch.cat(inputs),
-            lm_head=original_lm_head,
-            embedding_bias=None)
+        expected_result = logits_processor._get_logits(hidden_states=torch.cat(inputs),
+                                                       lm_head=original_lm_head,
+                                                       embedding_bias=None)
 
         rtol, atol = TOLERANCES[lora_result.dtype]
-        torch.testing.assert_close(lora_result,
-                                   expected_result,
-                                   rtol=rtol,
-                                   atol=atol)
+        torch.testing.assert_close(lora_result, expected_result, rtol=rtol, atol=atol)
 
 
 @torch.inference_mode()
@@ -623,8 +584,7 @@ def test_lm_head_logits_processor(dist_init, num_loras, device, vocab_size,
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("stage", STAGES)
 @pytest.mark.parametrize("bias_enabled", [True, False])
-def test_linear_replicated(dist_init, num_loras, device, stage,
-                           bias_enabled) -> None:
+def test_linear_replicated(dist_init, num_loras, device, stage, bias_enabled) -> None:
 
     if current_platform.is_cuda_alike():
         torch.cuda.set_device(device)
@@ -640,10 +600,7 @@ def test_linear_replicated(dist_init, num_loras, device, stage,
 
     def create_random_linear_replicated_layer():
 
-        linear = ReplicatedLinear(4096,
-                                  4096,
-                                  bias=False,
-                                  params_dtype=torch.float16)
+        linear = ReplicatedLinear(4096, 4096, bias=False, params_dtype=torch.float16)
         linear.weight.data = torch.rand_like(linear.weight.data)
         lora_linear = ReplicatedLinearWithLoRA(linear)
 
@@ -676,9 +633,7 @@ def test_linear_replicated(dist_init, num_loras, device, stage,
             input_range=(0, 1),
             input_type=torch.float16,
             device=device)
-        lora_mapping = LoRAMapping(index_mapping,
-                                   prompt_mapping,
-                                   is_prefill=stage)
+        lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
         punica_wrapper.update_metadata(
             lora_mapping,
             id_to_index,
@@ -698,10 +653,7 @@ def test_linear_replicated(dist_init, num_loras, device, stage,
         expected_result = torch.cat(expected_results)
 
         rtol, atol = TOLERANCES[lora_result.dtype]
-        torch.testing.assert_close(lora_result,
-                                   expected_result,
-                                   rtol=rtol,
-                                   atol=atol)
+        torch.testing.assert_close(lora_result, expected_result, rtol=rtol, atol=atol)
 
         # Check that resetting the lora weights succeeds
 
@@ -715,21 +667,16 @@ def test_linear_replicated(dist_init, num_loras, device, stage,
             input_range=(0, 1),
             input_type=torch.float16,
             device=device)
-        lora_mapping = LoRAMapping(index_mapping,
-                                   prompt_mapping,
-                                   is_prefill=stage)
+        lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
 
-        punica_wrapper.update_metadata(lora_mapping, id_to_index, max_loras,
-                                       512, lora_config.lora_extra_vocab_size)
+        punica_wrapper.update_metadata(lora_mapping, id_to_index, max_loras, 512,
+                                       lora_config.lora_extra_vocab_size)
 
         lora_result = lora_linear(torch.cat(inputs))[0]
         expected_result = linear(torch.cat(inputs))[0]
 
         rtol, atol = TOLERANCES[lora_result.dtype]
-        torch.testing.assert_close(lora_result,
-                                   expected_result,
-                                   rtol=rtol,
-                                   atol=atol)
+        torch.testing.assert_close(lora_result, expected_result, rtol=rtol, atol=atol)
 
 
 @torch.inference_mode()
@@ -739,8 +686,8 @@ def test_linear_replicated(dist_init, num_loras, device, stage,
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("stage", STAGES)
 @pytest.mark.parametrize("bias_enabled", [True, False])
-def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
-                         device, stage, bias_enabled) -> None:
+def test_linear_parallel(dist_init, num_loras, orientation, fully_shard, device, stage,
+                         bias_enabled) -> None:
 
     if current_platform.is_cuda_alike():
         torch.cuda.set_device(device)
@@ -762,16 +709,15 @@ def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
                                        bias=False,
                                        params_dtype=torch.float16)
             linear.weight.data = torch.rand_like(linear.weight.data)
-            lora_linear = (RowParallelLinearWithLoRA(linear) if not fully_shard
-                           else RowParallelLinearWithShardedLoRA(linear))
+            lora_linear = (RowParallelLinearWithLoRA(linear) if not fully_shard else
+                           RowParallelLinearWithShardedLoRA(linear))
         else:
             linear = ColumnParallelLinear(4096,
                                           4096,
                                           bias=False,
                                           params_dtype=torch.float16)
             linear.weight.data = torch.rand_like(linear.weight.data)
-            lora_linear = (ColumnParallelLinearWithLoRA(linear)
-                           if not fully_shard else
+            lora_linear = (ColumnParallelLinearWithLoRA(linear) if not fully_shard else
                            ColumnParallelLinearWithShardedLoRA(linear))
         lora_linear.create_lora_weights(max_loras, lora_config)
         assert (lora_linear.n_slices == len(lora_linear.lora_a_stacked) == len(
@@ -802,9 +748,7 @@ def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
             input_range=(0, 1),
             input_type=torch.float16,
             device=device)
-        lora_mapping = LoRAMapping(index_mapping,
-                                   prompt_mapping,
-                                   is_prefill=stage)
+        lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
         punica_wrapper.update_metadata(
             lora_mapping,
             id_to_index,
@@ -824,10 +768,7 @@ def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
         expected_result = torch.cat(expected_results)
 
         rtol, atol = TOLERANCES[lora_result.dtype]
-        torch.testing.assert_close(lora_result,
-                                   expected_result,
-                                   rtol=rtol,
-                                   atol=atol)
+        torch.testing.assert_close(lora_result, expected_result, rtol=rtol, atol=atol)
 
         # Check that resetting the lora weights succeeds
 
@@ -841,21 +782,16 @@ def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
             input_range=(0, 1),
             input_type=torch.float16,
             device=device)
-        lora_mapping = LoRAMapping(index_mapping,
-                                   prompt_mapping,
-                                   is_prefill=stage)
+        lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
 
-        punica_wrapper.update_metadata(lora_mapping, id_to_index, max_loras,
-                                       512, lora_config.lora_extra_vocab_size)
+        punica_wrapper.update_metadata(lora_mapping, id_to_index, max_loras, 512,
+                                       lora_config.lora_extra_vocab_size)
 
         lora_result = lora_linear(torch.cat(inputs))[0]
         expected_result = linear(torch.cat(inputs))[0]
 
         rtol, atol = TOLERANCES[lora_result.dtype]
-        torch.testing.assert_close(lora_result,
-                                   expected_result,
-                                   rtol=rtol,
-                                   atol=atol)
+        torch.testing.assert_close(lora_result, expected_result, rtol=rtol, atol=atol)
 
 
 @torch.inference_mode()
@@ -865,8 +801,8 @@ def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("stage", STAGES)
 @pytest.mark.parametrize("bias_enabled", [True, False])
-def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
-                                device, stage, bias_enabled) -> None:
+def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard, device,
+                                stage, bias_enabled) -> None:
 
     if current_platform.is_cuda_alike():
         torch.cuda.set_device(device)
@@ -887,9 +823,8 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
                                                 bias=False,
                                                 params_dtype=torch.float16)
             linear.weight.data = torch.rand_like(linear.weight.data)
-            lora_linear = (MergedColumnParallelLinearWithLoRA(linear)
-                           if not fully_shard else
-                           MergedColumnParallelLinearWithShardedLoRA(linear))
+            lora_linear = (MergedColumnParallelLinearWithLoRA(linear) if not fully_shard
+                           else MergedColumnParallelLinearWithShardedLoRA(linear))
         elif repeats == 3:
             linear = QKVParallelLinear(4096,
                                        64,
@@ -897,9 +832,8 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
                                        bias=False,
                                        params_dtype=torch.float16)
             linear.weight.data = torch.rand_like(linear.weight.data)
-            lora_linear = (MergedQKVParallelLinearWithLoRA(linear)
-                           if not fully_shard else
-                           MergedQKVParallelLinearWithShardedLoRA(linear))
+            lora_linear = (MergedQKVParallelLinearWithLoRA(linear) if not fully_shard
+                           else MergedQKVParallelLinearWithShardedLoRA(linear))
         else:
             linear = QKVParallelLinear(4096,
                                        64,
@@ -908,8 +842,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
                                        params_dtype=torch.float16)
             linear.weight.data = torch.rand_like(linear.weight.data)
             lora_linear = QKVParallelLinearWithLoRA(
-                linear
-            ) if not fully_shard else QKVParallelLinearWithShardedLoRA(linear)
+                linear) if not fully_shard else QKVParallelLinearWithShardedLoRA(linear)
 
         @dataclass
         class FakeConfig:
@@ -951,9 +884,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             input_range=(0, 1),
             input_type=torch.float16,
             device=device)
-        lora_mapping = LoRAMapping(index_mapping,
-                                   prompt_mapping,
-                                   is_prefill=stage)
+        lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
 
         punica_wrapper.update_metadata(
             lora_mapping,
@@ -977,10 +908,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
         expected_result = torch.cat(expected_results)
 
         rtol, atol = TOLERANCES[lora_result.dtype]
-        torch.testing.assert_close(lora_result,
-                                   expected_result,
-                                   rtol=rtol,
-                                   atol=atol)
+        torch.testing.assert_close(lora_result, expected_result, rtol=rtol, atol=atol)
 
         for slot_idx in range(max_loras):
             lora_linear.reset_lora(slot_idx)
@@ -992,9 +920,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             input_range=(0, 1),
             input_type=torch.float16,
             device=device)
-        lora_mapping = LoRAMapping(index_mapping,
-                                   prompt_mapping,
-                                   is_prefill=stage)
+        lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
 
         punica_wrapper.update_metadata(
             lora_mapping,
@@ -1008,15 +934,12 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
         expected_result = linear(torch.cat(inputs))[0]
 
         rtol, atol = TOLERANCES[lora_result.dtype]
-        torch.testing.assert_close(lora_result,
-                                   expected_result,
-                                   rtol=rtol,
-                                   atol=atol)
+        torch.testing.assert_close(lora_result, expected_result, rtol=rtol, atol=atol)
 
 
 @pytest.mark.parametrize("tp_size", [1, 2, 4, 8])
-@pytest.mark.parametrize(
-    "seed", list(range(VOCAB_PARALLEL_EMBEDDING_TEST_NUM_RANDOM_SEEDS)))
+@pytest.mark.parametrize("seed",
+                         list(range(VOCAB_PARALLEL_EMBEDDING_TEST_NUM_RANDOM_SEEDS)))
 def test_vocab_parallel_embedding_indices(tp_size, seed):
     random.seed(seed)
     vocab_size = random.randint(4000, 64000)
@@ -1040,14 +963,14 @@ def test_vocab_parallel_embedding_indices(tp_size, seed):
         ), patch(
                 "vllm.model_executor.layers.vocab_parallel_embedding.get_tensor_model_parallel_world_size",
                 return_value=tp_size):
-            vocab_embedding = VocabParallelEmbedding(
-                vocab_size, 1, org_num_embeddings=org_vocab_size)
+            vocab_embedding = VocabParallelEmbedding(vocab_size,
+                                                     1,
+                                                     org_num_embeddings=org_vocab_size)
         vocab_size_padded = vocab_embedding.num_embeddings_padded
         shard_indices = vocab_embedding.shard_indices
         # Assert that the ranges are contiguous
         assert shard_indices.org_vocab_start_index == last_org_vocab_end_index
-        assert (shard_indices.added_vocab_start_index ==
-                last_added_vocab_end_index)
+        assert (shard_indices.added_vocab_start_index == last_added_vocab_end_index)
 
         # Ensure that we are not exceeding the vocab size
         computed_vocab_size += shard_indices.num_elements_padded
@@ -1065,8 +988,9 @@ def test_vocab_parallel_embedding_indices(tp_size, seed):
         token_ids.extend(
             range(shard_indices.org_vocab_start_index,
                   shard_indices.org_vocab_end_index))
-        token_ids.extend([-1] * (shard_indices.num_org_elements_padded -
-                                 shard_indices.num_org_elements))
+        token_ids.extend(
+            [-1] *
+            (shard_indices.num_org_elements_padded - shard_indices.num_org_elements))
         token_ids.extend(
             range(shard_indices.added_vocab_start_index,
                   shard_indices.added_vocab_end_index))
@@ -1114,13 +1038,12 @@ def test_get_masked_input_and_mask():
                                                      added_vocab_start_index=8,
                                                      added_vocab_end_index=10,
                                                      num_org_vocab_padding=0)
-    modified_x_rank_1, _ = get_masked_input_and_mask(
-        x,
-        org_vocab_start_index=4,
-        org_vocab_end_index=8,
-        added_vocab_start_index=10,
-        added_vocab_end_index=12,
-        num_org_vocab_padding=0)
+    modified_x_rank_1, _ = get_masked_input_and_mask(x,
+                                                     org_vocab_start_index=4,
+                                                     org_vocab_end_index=8,
+                                                     added_vocab_start_index=10,
+                                                     added_vocab_end_index=12,
+                                                     num_org_vocab_padding=0)
     assert torch.equal(modified_x_rank_0,
                        torch.tensor([0, 1, 2, 3, 0, 0, 0, 0, 4, 5, 0, 0]))
     assert torch.equal(modified_x_rank_1,
@@ -1139,20 +1062,18 @@ def test_get_masked_input_and_mask():
                                                      added_vocab_start_index=9,
                                                      added_vocab_end_index=10,
                                                      num_org_vocab_padding=0)
-    modified_x_rank_2, _ = get_masked_input_and_mask(
-        x,
-        org_vocab_start_index=4,
-        org_vocab_end_index=6,
-        added_vocab_start_index=10,
-        added_vocab_end_index=11,
-        num_org_vocab_padding=0)
-    modified_x_rank_3, _ = get_masked_input_and_mask(
-        x,
-        org_vocab_start_index=6,
-        org_vocab_end_index=8,
-        added_vocab_start_index=11,
-        added_vocab_end_index=12,
-        num_org_vocab_padding=0)
+    modified_x_rank_2, _ = get_masked_input_and_mask(x,
+                                                     org_vocab_start_index=4,
+                                                     org_vocab_end_index=6,
+                                                     added_vocab_start_index=10,
+                                                     added_vocab_end_index=11,
+                                                     num_org_vocab_padding=0)
+    modified_x_rank_3, _ = get_masked_input_and_mask(x,
+                                                     org_vocab_start_index=6,
+                                                     org_vocab_end_index=8,
+                                                     added_vocab_start_index=11,
+                                                     added_vocab_end_index=12,
+                                                     num_org_vocab_padding=0)
     assert torch.equal(modified_x_rank_0,
                        torch.tensor([0, 1, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0]))
     assert torch.equal(modified_x_rank_1,
@@ -1179,13 +1100,12 @@ def test_get_masked_input_and_mask():
                                                      added_vocab_start_index=8,
                                                      added_vocab_end_index=10,
                                                      num_org_vocab_padding=2)
-    modified_x_rank_1, _ = get_masked_input_and_mask(
-        x,
-        org_vocab_start_index=4,
-        org_vocab_end_index=8,
-        added_vocab_start_index=10,
-        added_vocab_end_index=12,
-        num_org_vocab_padding=2)
+    modified_x_rank_1, _ = get_masked_input_and_mask(x,
+                                                     org_vocab_start_index=4,
+                                                     org_vocab_end_index=8,
+                                                     added_vocab_start_index=10,
+                                                     added_vocab_end_index=12,
+                                                     num_org_vocab_padding=2)
     assert torch.equal(modified_x_rank_0,
                        torch.tensor([0, 1, 2, 3, 0, 0, 0, 0, 6, 7, 0, 0]))
     assert torch.equal(modified_x_rank_1,
@@ -1204,20 +1124,18 @@ def test_get_masked_input_and_mask():
                                                      added_vocab_start_index=9,
                                                      added_vocab_end_index=10,
                                                      num_org_vocab_padding=2)
-    modified_x_rank_2, _ = get_masked_input_and_mask(
-        x,
-        org_vocab_start_index=4,
-        org_vocab_end_index=6,
-        added_vocab_start_index=10,
-        added_vocab_end_index=11,
-        num_org_vocab_padding=2)
-    modified_x_rank_3, _ = get_masked_input_and_mask(
-        x,
-        org_vocab_start_index=6,
-        org_vocab_end_index=8,
-        added_vocab_start_index=11,
-        added_vocab_end_index=12,
-        num_org_vocab_padding=2)
+    modified_x_rank_2, _ = get_masked_input_and_mask(x,
+                                                     org_vocab_start_index=4,
+                                                     org_vocab_end_index=6,
+                                                     added_vocab_start_index=10,
+                                                     added_vocab_end_index=11,
+                                                     num_org_vocab_padding=2)
+    modified_x_rank_3, _ = get_masked_input_and_mask(x,
+                                                     org_vocab_start_index=6,
+                                                     org_vocab_end_index=8,
+                                                     added_vocab_start_index=11,
+                                                     added_vocab_end_index=12,
+                                                     num_org_vocab_padding=2)
     assert torch.equal(modified_x_rank_0,
                        torch.tensor([0, 1, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0]))
     assert torch.equal(modified_x_rank_1,

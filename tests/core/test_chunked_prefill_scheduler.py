@@ -461,9 +461,7 @@ def test_maximal_decoding():
     append_new_token(running[0], 1)
 
     # Create one more seq_group.
-    _, seq_group = create_dummy_prompt("3",
-                                       prompt_length=2,
-                                       block_size=block_size)
+    _, seq_group = create_dummy_prompt("3", prompt_length=2, block_size=block_size)
     scheduler.add_seq_group(seq_group)
     running.append(seq_group)
     assert seq_group.is_prefill()
@@ -534,9 +532,7 @@ def test_prompt_limit():
     scheduler = Scheduler(scheduler_config, cache_config, None)
     running: list[SequenceGroup] = []
 
-    _, seq_group = create_dummy_prompt("1",
-                                       prompt_length=48,
-                                       block_size=block_size)
+    _, seq_group = create_dummy_prompt("1", prompt_length=48, block_size=block_size)
     scheduler.add_seq_group(seq_group)
     running.append(seq_group)
     assert seq_group.is_prefill()
@@ -565,9 +561,7 @@ def test_prompt_limit_exceed():
     cache_config.num_gpu_blocks = 16
     scheduler = Scheduler(scheduler_config, cache_config, None)
     running: list[SequenceGroup] = []
-    _, seq_group = create_dummy_prompt("2",
-                                       prompt_length=48,
-                                       block_size=block_size)
+    _, seq_group = create_dummy_prompt("2", prompt_length=48, block_size=block_size)
     scheduler.add_seq_group(seq_group)
     running.append(seq_group)
     assert seq_group.is_prefill()
@@ -594,9 +588,7 @@ def test_chunked_prefill_preempt():
     cache_config.num_gpu_blocks = 16
     scheduler = Scheduler(scheduler_config, cache_config, None)
 
-    _, seq_group = create_dummy_prompt("1",
-                                       prompt_length=60,
-                                       block_size=block_size)
+    _, seq_group = create_dummy_prompt("1", prompt_length=60, block_size=block_size)
     scheduler.add_seq_group(seq_group)
     _, out = schedule_and_update_computed_tokens(scheduler)
     # The request is chunked.
@@ -612,8 +604,7 @@ def test_chunked_prefill_preempt():
     def cannot_append_second_group1(seq_group, num_lookahead_slots):
         return seq_group.request_id != "1"
 
-    scheduler.block_manager.can_append_slots.side_effect = (
-        cannot_append_second_group1)
+    scheduler.block_manager.can_append_slots.side_effect = (cannot_append_second_group1)
 
     # The running prefill is now preempted.
     _, out = schedule_and_update_computed_tokens(scheduler)
@@ -634,8 +625,7 @@ def test_chunked_prefill_preempt():
     def cannot_append_second_group2(seq_group, num_lookahead_slots):
         return True
 
-    scheduler.block_manager.can_append_slots.side_effect = (
-        cannot_append_second_group2)
+    scheduler.block_manager.can_append_slots.side_effect = (cannot_append_second_group2)
     _, out = schedule_and_update_computed_tokens(scheduler)
     assert len(out.scheduled_seq_groups) == 1
     assert out.num_prefill_groups == 1
@@ -667,9 +657,7 @@ def test_chunked_prefill_spec_prefill(num_scheduler_steps):
     cache_config.num_gpu_blocks = 16
     scheduler = Scheduler(scheduler_config, cache_config, None)
 
-    _, seq_group = create_dummy_prompt("1",
-                                       prompt_length=30,
-                                       block_size=block_size)
+    _, seq_group = create_dummy_prompt("1", prompt_length=30, block_size=block_size)
     scheduler.add_seq_group(seq_group)
     _, out = schedule_and_update_computed_tokens(scheduler)
     # The request is chunked.
@@ -700,9 +688,7 @@ def test_chunked_prefill_max_seqs():
     scheduler = Scheduler(scheduler_config, cache_config, None)
     running: list[SequenceGroup] = []
 
-    _, seq_group = create_dummy_prompt("1",
-                                       prompt_length=65,
-                                       block_size=block_size)
+    _, seq_group = create_dummy_prompt("1", prompt_length=65, block_size=block_size)
     scheduler.add_seq_group(seq_group)
     running.append(seq_group)
     # The first prefill is chunked.
@@ -749,11 +735,7 @@ def test_prefix_caching():
         max_model_len,
         enable_chunked_prefill=True,
     )
-    cache_config = CacheConfig(block_size,
-                               1.0,
-                               1,
-                               "auto",
-                               enable_prefix_caching=True)
+    cache_config = CacheConfig(block_size, 1.0, 1, "auto", enable_prefix_caching=True)
     cache_config.num_cpu_blocks = 0
     cache_config.num_gpu_blocks = 32
     scheduler = Scheduler(scheduler_config, cache_config, None)
@@ -791,11 +773,7 @@ def test_prefix_caching_with_concurrent_partial_prefills():
                                        max_model_len,
                                        enable_chunked_prefill=True,
                                        max_num_partial_prefills=2)
-    cache_config = CacheConfig(block_size,
-                               1.0,
-                               1,
-                               "auto",
-                               enable_prefix_caching=True)
+    cache_config = CacheConfig(block_size, 1.0, 1, "auto", enable_prefix_caching=True)
     cache_config.num_cpu_blocks = 0
     cache_config.num_gpu_blocks = 32
     scheduler = Scheduler(scheduler_config, cache_config, None)
@@ -832,8 +810,7 @@ def test_prefix_caching_with_concurrent_partial_prefills():
 
 @pytest.mark.parametrize("model", ["facebook/opt-125m"])
 @pytest.mark.parametrize("max_num_partial_prefills", [2, 4, 8])
-def test_chunked_prefill_with_actual_engine(model: str,
-                                            max_num_partial_prefills: int):
+def test_chunked_prefill_with_actual_engine(model: str, max_num_partial_prefills: int):
     """Make sure the model can actually sample with concurrent 
     partial prefills
     """

@@ -155,16 +155,15 @@ class InternLM2Attention(nn.Module):
             qkv = qkv[::3] + qkv[1::3] + qkv[2::3]
             qkv = torch.cat(qkv, dim=-1)
 
-        qkv = qkv.view(seq_len, self.total_num_kv_heads,
-                       self.key_value_groups + 2, self.head_dim)
+        qkv = qkv.view(seq_len, self.total_num_kv_heads, self.key_value_groups + 2,
+                       self.head_dim)
         q, k, v = torch.split(qkv, [self.key_value_groups, 1, 1], dim=-2)
         q = q.reshape(seq_len, self.q_size * self.tp_size)
         k = k.reshape(seq_len, self.kv_size * self.tp_size)
         v = v.reshape(seq_len, self.kv_size * self.tp_size)
 
         if self.tp_size > 1:
-            splitter = partial(split_tensor_along_last_dim,
-                               num_partitions=self.tp_size)
+            splitter = partial(split_tensor_along_last_dim, num_partitions=self.tp_size)
             q = splitter(q)[self.tp_rank]
             k = splitter(k)[self.tp_rank]
             v = splitter(v)[self.tp_rank]
@@ -196,8 +195,7 @@ class InternLMDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
-        max_position_embeddings = getattr(config, "max_position_embeddings",
-                                          8192)
+        max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.attention = InternLM2Attention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -216,8 +214,7 @@ class InternLMDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.feed_forward",
         )
-        self.attention_norm = RMSNorm(config.hidden_size,
-                                      eps=config.rms_norm_eps)
+        self.attention_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.ffn_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
@@ -231,8 +228,7 @@ class InternLMDecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.attention_norm(hidden_states)
         else:
-            hidden_states, residual = self.attention_norm(
-                hidden_states, residual)
+            hidden_states, residual = self.attention_norm(hidden_states, residual)
         hidden_states = self.attention(
             positions=positions,
             hidden_states=hidden_states,
@@ -247,12 +243,11 @@ class InternLMDecoderLayer(nn.Module):
 @support_torch_compile
 class InternLM2Model(nn.Module):
 
-    def __init__(
-            self,
-            *,
-            vllm_config: VllmConfig,
-            prefix: str = "",
-            layer_type: Type[InternLMDecoderLayer] = InternLMDecoderLayer):
+    def __init__(self,
+                 *,
+                 vllm_config: VllmConfig,
+                 prefix: str = "",
+                 layer_type: Type[InternLMDecoderLayer] = InternLMDecoderLayer):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
@@ -267,13 +262,12 @@ class InternLM2Model(nn.Module):
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: layer_type(
-                config, cache_config, quant_config, prefix=prefix),
+            lambda prefix: layer_type(config, cache_config, quant_config, prefix=prefix
+                                      ),
             prefix=f"{prefix}.layers")
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size))
+        self.make_empty_intermediate_tensors = (make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.tok_embeddings(input_ids)
@@ -357,12 +351,10 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.output, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.output, hidden_states, sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "w1", 0),
@@ -393,8 +385,7 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
                 if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
@@ -409,9 +400,7 @@ class InternLM2ForRewardModel(InternLM2ForCausalLM):
         prefix: str = "",
         model_type: Type[InternLM2Model] = InternLM2Model,
     ):
-        super().__init__(vllm_config=vllm_config,
-                         prefix=prefix,
-                         model_type=model_type)
+        super().__init__(vllm_config=vllm_config, prefix=prefix, model_type=model_type)
 
         for attr in ("output", "logits_processor"):
             delattr(self, attr)

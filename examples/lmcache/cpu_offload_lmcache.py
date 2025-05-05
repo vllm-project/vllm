@@ -47,8 +47,7 @@ def setup_environment_variables():
 
 
 @contextlib.contextmanager
-def build_llm_with_lmcache(lmcache_connector: str, model: str,
-                           vllm_version: str):
+def build_llm_with_lmcache(lmcache_connector: str, model: str, vllm_version: str):
     ktc = KVTransferConfig(
         kv_connector=lmcache_connector,
         kv_role="kv_both",
@@ -134,9 +133,7 @@ def main():
             shared_prompt + "Tell me a very long story",
         ]
 
-        sampling_params = SamplingParams(temperature=0,
-                                         top_p=0.95,
-                                         max_tokens=10)
+        sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=10)
 
         # Print the first output
         print_output(llm, first_prompt, sampling_params, "first")

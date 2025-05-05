@@ -129,8 +129,7 @@ class Worker(WorkerBase):
             torch.cuda.empty_cache()
             self.init_gpu_memory = torch.cuda.mem_get_info()[0]
         else:
-            raise RuntimeError(
-                f"Not support device type: {self.device_config.device}")
+            raise RuntimeError(f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
         init_worker_distributed_environment(self.vllm_config, self.rank,
                                             self.distributed_init_method,
@@ -139,8 +138,8 @@ class Worker(WorkerBase):
         set_random_seed(self.model_config.seed)
 
         # Construct the model runner
-        self.model_runner: GPUModelRunner = GPUModelRunner(
-            self.vllm_config, self.device)
+        self.model_runner: GPUModelRunner = GPUModelRunner(self.vllm_config,
+                                                           self.device)
 
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
@@ -199,16 +198,14 @@ class Worker(WorkerBase):
         # gpu outside of `torch`. NCCL operations, for example, can use a few
         # GB during a forward pass
         torch.cuda.empty_cache()
-        torch_allocated_bytes = torch.cuda.memory_stats(
-        )["allocated_bytes.all.current"]
-        total_allocated_bytes = torch.cuda.mem_get_info(
-        )[1] - torch.cuda.mem_get_info()[0]
+        torch_allocated_bytes = torch.cuda.memory_stats()["allocated_bytes.all.current"]
+        total_allocated_bytes = torch.cuda.mem_get_info()[1] - torch.cuda.mem_get_info(
+        )[0]
         non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
         if non_torch_allocations > 0:
             peak_memory += non_torch_allocations
         available_kv_cache_memory = (
-            total_gpu_memory * self.cache_config.gpu_memory_utilization -
-            peak_memory)
+            total_gpu_memory * self.cache_config.gpu_memory_utilization - peak_memory)
 
         return int(available_kv_cache_memory)
 
@@ -233,8 +230,8 @@ class Worker(WorkerBase):
         warmup_sizes = self.vllm_config.compilation_config.compile_sizes.copy()
         if not self.model_config.enforce_eager:
             warmup_sizes = [
-                x for x in warmup_sizes if x not in
-                self.vllm_config.compilation_config.cudagraph_capture_sizes
+                x for x in warmup_sizes
+                if x not in self.vllm_config.compilation_config.cudagraph_capture_sizes
             ]
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
@@ -251,8 +248,7 @@ class Worker(WorkerBase):
             max_num_reqs = min(self.scheduler_config.max_num_seqs,
                                self.scheduler_config.max_num_batched_tokens)
             self.model_runner._dummy_sampler_run(
-                hidden_states=self.model_runner._dummy_run(
-                    num_tokens=max_num_reqs))
+                hidden_states=self.model_runner._dummy_run(num_tokens=max_num_reqs))
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.

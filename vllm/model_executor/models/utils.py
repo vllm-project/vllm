@@ -58,8 +58,9 @@ class WeightsMapper:
         return key
 
     def apply(
-        self, weights: Iterable[Tuple[str, torch.Tensor]]
-    ) -> Iterable[Tuple[str, torch.Tensor]]:
+        self,
+        weights: Iterable[Tuple[str,
+                                torch.Tensor]]) -> Iterable[Tuple[str, torch.Tensor]]:
         return ((out_name, data) for name, data in weights
                 if (out_name := self._map_name(name)) is not None)
 
@@ -100,8 +101,7 @@ class AutoWeightsLoader:
         weights_by_parts = ((weight_name.split(".", 1), weight_data)
                             for weight_name, weight_data in weights)
 
-        for prefix, group in itertools.groupby(weights_by_parts,
-                                               key=lambda x: x[0][0]):
+        for prefix, group in itertools.groupby(weights_by_parts, key=lambda x: x[0][0]):
             yield (
                 prefix,
                 # Because maxsplit=1 in weight_name.split(...),
@@ -122,8 +122,7 @@ class AutoWeightsLoader:
         return any(qualname.startswith(p) for p in self.skip_prefixes)
 
     def _can_ignore_unexpected(self, qualname: str) -> bool:
-        return any(
-            qualname.startswith(p) for p in self.ignore_unexpected_prefixes)
+        return any(qualname.startswith(p) for p in self.ignore_unexpected_prefixes)
 
     def _load_param(
         self,
@@ -145,16 +144,13 @@ class AutoWeightsLoader:
 
                     continue
 
-                raise ValueError(
-                    f"Attempted to load nested weight '{weight_qualname}' "
-                    f"into a single parameter '{base_prefix}'")
+                raise ValueError(f"Attempted to load nested weight '{weight_qualname}' "
+                                 f"into a single parameter '{base_prefix}'")
 
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, weight_data)
 
-            logger.debug("Loaded weight %s with shape %s", weight_qualname,
-                         param.shape)
+            logger.debug("Loaded weight %s with shape %s", weight_qualname, param.shape)
 
             yield weight_qualname
 
@@ -174,8 +170,7 @@ class AutoWeightsLoader:
                 nn.SyncBatchNorm,
         )):
             module_state_dict = module.state_dict()
-            for stat_name in ("running_mean", "running_var",
-                              "num_batches_tracked"):
+            for stat_name in ("running_mean", "running_var", "num_batches_tracked"):
                 child_params[stat_name] = module_state_dict[stat_name]
 
     def _load_module(
@@ -219,8 +214,7 @@ class AutoWeightsLoader:
 
                     continue
 
-                yield from self._load_module(prefix,
-                                             child_modules[child_prefix],
+                yield from self._load_module(prefix, child_modules[child_prefix],
                                              child_weights)
             elif child_prefix in child_params:
                 if self._can_skip(prefix):
@@ -280,8 +274,7 @@ def init_vllm_registered_model(
         hf_config = vllm_config.model_config.hf_config
 
     if hf_config is not None:
-        vllm_config = vllm_config.with_hf_config(hf_config,
-                                                 architectures=architectures)
+        vllm_config = vllm_config.with_hf_config(hf_config, architectures=architectures)
 
     return _initialize_model(vllm_config=vllm_config, prefix=prefix)
 
@@ -355,8 +348,7 @@ def _embedding_count_expression(embeddings: NestedTensors) -> str:
     if isinstance(embeddings, torch.Tensor):
         return " x ".join([str(dim) for dim in embeddings.shape[:-1]])
 
-    return " + ".join(
-        _embedding_count_expression(inner) for inner in embeddings)
+    return " + ".join(_embedding_count_expression(inner) for inner in embeddings)
 
 
 def merge_multimodal_embeddings_from_map(
@@ -370,8 +362,7 @@ def merge_multimodal_embeddings_from_map(
         This updates ``inputs_embeds`` in place.
     """
     flattened_embeddings = _flatten_embeddings(multimodal_embeddings)
-    inputs_embeds[placeholder_map.dest] = flattened_embeddings[
-        placeholder_map.src]
+    inputs_embeds[placeholder_map.dest] = flattened_embeddings[placeholder_map.src]
     return inputs_embeds
 
 
@@ -394,9 +385,8 @@ def _merge_multimodal_embeddings(
     flattened = _flatten_embeddings(multimodal_embeddings)
     if flattened.shape[0] != num_expected_tokens:
         expr = _embedding_count_expression(multimodal_embeddings)
-        raise ValueError(
-            f"Attempted to assign {expr} = {flattened.shape[0]} "
-            f"multimodal tokens to {num_expected_tokens} placeholders")
+        raise ValueError(f"Attempted to assign {expr} = {flattened.shape[0]} "
+                         f"multimodal tokens to {num_expected_tokens} placeholders")
 
     inputs_embeds[is_multimodal] = flattened
     return inputs_embeds
@@ -580,10 +570,7 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
                 k: v.to(device, non_blocking=True)
                 for k, v in module.state_dict().items()
             }
-            output = functional_call(module,
-                                     device_state,
-                                     args=args,
-                                     kwargs=kwargs)
+            output = functional_call(module, device_state, args=args, kwargs=kwargs)
             module.forward = forward
             return output
 
@@ -605,11 +592,10 @@ def make_layers(
     start_layer, end_layer = get_pp_indices(num_hidden_layers,
                                             get_pp_group().rank_in_group,
                                             get_pp_group().world_size)
-    modules = torch.nn.ModuleList(
-        [PPMissingLayer() for _ in range(start_layer)] + [
-            maybe_offload_to_cpu(layer_fn(prefix=f"{prefix}.{idx}"))
-            for idx in range(start_layer, end_layer)
-        ] + [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)])
+    modules = torch.nn.ModuleList([PPMissingLayer() for _ in range(start_layer)] + [
+        maybe_offload_to_cpu(layer_fn(prefix=f"{prefix}.{idx}"))
+        for idx in range(start_layer, end_layer)
+    ] + [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)])
     return start_layer, end_layer, modules
 
 

@@ -33,15 +33,12 @@ class TpuPlatform(Platform):
 
     supported_quantization: list[str] = ["tpu_int8", "compressed-tensors"]
 
-    additional_env_vars: list[str] = [
-        "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS"
-    ]
+    additional_env_vars: list[str] = ["TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS"]
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
-                             block_size: int, use_v1: bool,
-                             use_mla: bool) -> str:
+                             block_size: int, use_v1: bool, use_mla: bool) -> str:
         if (selected_backend != _Backend.PALLAS
                 and selected_backend != _Backend.PALLAS_VLLM_V1):
             logger.info("Cannot use %s backend on TPU.", selected_backend)
@@ -100,8 +97,7 @@ class TpuPlatform(Platform):
         if envs.VLLM_USE_V1:
             from vllm.v1.attention.backends.pallas import (
                 PallasAttentionBackend)
-            min_page_size = PallasAttentionBackend.get_min_page_size(
-                vllm_config)
+            min_page_size = PallasAttentionBackend.get_min_page_size(vllm_config)
             if min_page_size > vllm_config.cache_config.block_size:
                 logger.warning(
                     "Increase the page size from %s to %s to make sure there's"
@@ -172,5 +168,4 @@ class TpuPlatform(Platform):
                 raise ValueError("Structured output is not supported on "
                                  f"{cls.device_name} V0.")
             if params.sampling_type == SamplingType.RANDOM_SEED:
-                raise ValueError(
-                    "Torch XLA does not support per-request seed.")
+                raise ValueError("Torch XLA does not support per-request seed.")

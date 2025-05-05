@@ -98,8 +98,8 @@ def _get_lora_b_ptr(lora_weights: List[torch.Tensor], offset_start: int,
 
     # If each lora has the same stride, there's no need to use a
     # tensor for storage.
-    if (len(set(lora_strides_d0)) == 1 and len(set(lora_strides_d1)) == 1 and
-            len(set(lora_strides_d2)) == 1) and len(set(hidden_sizes)) == 1:
+    if (len(set(lora_strides_d0)) == 1 and len(set(lora_strides_d1)) == 1
+            and len(set(lora_strides_d2)) == 1) and len(set(hidden_sizes)) == 1:
         lora_strides_d0_tensor = lora_strides_d0[0]
         lora_strides_d1_tensor = lora_strides_d1[0]
         lora_strides_d2_tensor = lora_strides_d2[0]
@@ -116,6 +116,6 @@ def _get_lora_b_ptr(lora_weights: List[torch.Tensor], offset_start: int,
     MAX_N = max(hidden_sizes)
     _LORA_B_PTR_DICT[key] = (slice_start_tensor, lora_ptr_tensor,
                              lora_strides_d0_tensor, lora_strides_d1_tensor,
-                             lora_strides_d2_tensor, hidden_sizes_tensor,
-                             same_stride, MAX_N)
+                             lora_strides_d2_tensor, hidden_sizes_tensor, same_stride,
+                             MAX_N)
     return _LORA_B_PTR_DICT.get(key)

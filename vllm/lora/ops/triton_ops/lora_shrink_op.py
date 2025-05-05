@@ -20,10 +20,9 @@ from vllm.utils import direct_register_custom_op
 @triton.jit
 def _lora_shrink_kernel(input_ptr, lora_ptr, out_ptr, M, N, K,
                         token_indices_sorted_by_lora_ids, num_tokens_per_lora,
-                        lora_token_start_loc, lora_ids, scaling,
-                        input_d0_stride, input_d1_stride, lora_d0_stride,
-                        lora_d1_stride, lora_d2_stride, output_d0_stride,
-                        output_d1_stride, output_d2_stride,
+                        lora_token_start_loc, lora_ids, scaling, input_d0_stride,
+                        input_d1_stride, lora_d0_stride, lora_d1_stride, lora_d2_stride,
+                        output_d0_stride, output_d1_stride, output_d2_stride,
                         BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
                         BLOCK_K: tl.constexpr, EVEN_K: tl.constexpr,
                         SPLIT_K: tl.constexpr, SLICE_NUM: tl.constexpr):
@@ -56,8 +55,8 @@ def _lora_shrink_kernel(input_ptr, lora_ptr, out_ptr, M, N, K,
 
     # Identify all rows that this CTA should process.
     lora_m_indices_start = tl.load(lora_token_start_loc + lora_idx)
-    cta_lora_seq_indices = (token_indices_sorted_by_lora_ids +
-                            lora_m_indices_start + cta_m_offset)
+    cta_lora_seq_indices = (token_indices_sorted_by_lora_ids + lora_m_indices_start +
+                            cta_m_offset)
 
     # Load all relevant row indices.
     offset_m = tl.arange(0, BLOCK_M) % cta_m_len
@@ -98,8 +97,7 @@ def _lora_shrink_kernel(input_ptr, lora_ptr, out_ptr, M, N, K,
 @torch.inference_mode()
 def _lora_shrink(
     inputs: torch.Tensor,  #  shape [num_tokens, hidden_size]
-    lora_a_weights: List[
-        torch.Tensor],  # shape [num_loras, lora_rank, hidden_size]
+    lora_a_weights: List[torch.Tensor],  # shape [num_loras, lora_rank, hidden_size]
     output_tensor: torch.Tensor,  # shape [num_slices, num_tokens, lora_rank]
     token_lora_mapping: torch.Tensor,  # shape [num_tokens]
     token_indices_sorted_by_lora_ids: torch.Tensor,  # shape [num_tokens] 
@@ -149,8 +147,7 @@ def _lora_shrink(
     # metadata sanity check
     M = inputs.size(0)
     assert token_lora_mapping.size(0) == M
-    assert token_lora_mapping.size(0) == token_indices_sorted_by_lora_ids.size(
-        0)
+    assert token_lora_mapping.size(0) == token_indices_sorted_by_lora_ids.size(0)
     assert lora_ids.size(0) == num_tokens_per_lora.size(0)
     assert lora_token_start_loc.size(0) == lora_ids.size(0) + 1
 

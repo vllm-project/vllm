@@ -96,8 +96,10 @@ def run_test(
 
         for prompts, media in vllm_inputs:
             vllm_kwargs[runner_mm_key] = media
-            vllm_output = vllm_model.generate_greedy_logprobs(
-                prompts, max_tokens, num_logprobs=num_logprobs, **vllm_kwargs)
+            vllm_output = vllm_model.generate_greedy_logprobs(prompts,
+                                                              max_tokens,
+                                                              num_logprobs=num_logprobs,
+                                                              **vllm_kwargs)
             vllm_outputs_per_mm.append(vllm_output)
 
     hf_model = hf_runner(model,
@@ -141,8 +143,7 @@ def run_test(
         second_runner_processor=vllm_output_post_proc,
     )
 
-    for hf_outputs, vllm_outputs in zip(hf_outputs_per_mm,
-                                        vllm_outputs_per_mm):
+    for hf_outputs, vllm_outputs in zip(hf_outputs_per_mm, vllm_outputs_per_mm):
         # This is usually check_logprobs_close, but it's passed through to
         # allow things like check_outputs_equal where needed
         comparator(

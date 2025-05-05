@@ -49,8 +49,7 @@ def _run_test(
 
     # use eager mode for hf runner, since phi3_v didn't work with flash_attn
     hf_model_kwargs = {"_attn_implementation": "eager"}
-    with hf_runner(model, dtype=dtype,
-                   model_kwargs=hf_model_kwargs) as hf_model:
+    with hf_runner(model, dtype=dtype, model_kwargs=hf_model_kwargs) as hf_model:
         all_inputs = hf_model.get_inputs(input_texts, images=input_images)
 
         all_outputs = []
@@ -112,10 +111,8 @@ def test_models_image(
     model: str,
     dtype: str,
 ) -> None:
-    input_texts_images = [
-        (text, asset.pil_image)
-        for text, asset in zip(HF_IMAGE_PROMPTS, image_assets)
-    ]
+    input_texts_images = [(text, asset.pil_image)
+                          for text, asset in zip(HF_IMAGE_PROMPTS, image_assets)]
     # add cases for special_tokens
     input_texts_images.append((
         "\n<s><|user|>\n <|image_1|>\n\t <s>"

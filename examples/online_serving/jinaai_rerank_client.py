@@ -19,8 +19,8 @@ data = {
     "query":
     "What is the capital of France?",
     "documents": [
-        "The capital of Brazil is Brasilia.",
-        "The capital of France is Paris.", "Horses and cows are both animals"
+        "The capital of Brazil is Brasilia.", "The capital of France is Paris.",
+        "Horses and cows are both animals"
     ]
 }
 

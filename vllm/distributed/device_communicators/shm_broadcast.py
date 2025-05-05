@@ -32,8 +32,7 @@ logger = init_logger(__name__)
 # measured to be around 3e-7 seconds. However on earlier versions of Python
 # os.sched_yield() does not release the GIL, so we fall back to time.sleep(0)
 USE_SCHED_YIELD = ((sys.version_info[:3] >= (3, 11, 1))
-                   or (sys.version_info[:2] == (3, 10)
-                       and sys.version_info[2] >= 8))
+                   or (sys.version_info[:2] == (3, 10) and sys.version_info[2] >= 8))
 
 
 def sched_yield():
@@ -114,8 +113,8 @@ class ShmRingBuffer:
             self.shared_memory = shared_memory.SharedMemory(
                 create=True, size=self.total_bytes_of_buffer)
             # initialize the metadata section to 0
-            with memoryview(self.shared_memory.buf[self.metadata_offset:]
-                            ) as metadata_buffer:
+            with memoryview(
+                    self.shared_memory.buf[self.metadata_offset:]) as metadata_buffer:
                 torch.frombuffer(metadata_buffer, dtype=torch.uint8).fill_(0)
         else:
             # we are opening an existing buffer
@@ -132,8 +131,7 @@ class ShmRingBuffer:
                     # so the shared memory block size may be larger or equal
                     # to the requested size. The size parameter is ignored
                     # when attaching to an existing block.
-                    assert (self.shared_memory.size
-                            >= self.total_bytes_of_buffer)
+                    assert (self.shared_memory.size >= self.total_bytes_of_buffer)
                 except FileNotFoundError:
                     # we might deserialize the object in a different node
                     # in this case, this object is not used,
@@ -206,8 +204,7 @@ class MessageQueue:
             # for local readers, we will:
             # 1. create a shared memory ring buffer to communicate small data
             # 2. create a publish-subscribe socket to communicate large data
-            self.buffer = ShmRingBuffer(n_local_reader, max_chunk_bytes,
-                                        max_chunks)
+            self.buffer = ShmRingBuffer(n_local_reader, max_chunk_bytes, max_chunks)
 
             # XPUB is very similar to PUB,
             # except that it can receive subscription messages
@@ -256,8 +253,7 @@ class MessageQueue:
 
         self.handle = Handle(
             local_reader_ranks=local_reader_ranks,
-            buffer_handle=self.buffer.handle()
-            if self.buffer is not None else None,
+            buffer_handle=self.buffer.handle() if self.buffer is not None else None,
             local_subscribe_addr=local_subscribe_addr,
             remote_subscribe_addr=remote_subscribe_addr,
             remote_addr_ipv6=remote_addr_ipv6,
@@ -397,8 +393,7 @@ class MessageQueue:
                     metadata_buffer[i] = 0
                 # mark the block as written
                 metadata_buffer[0] = 1
-                self.current_idx = (self.current_idx +
-                                    1) % self.buffer.max_chunks
+                self.current_idx = (self.current_idx + 1) % self.buffer.max_chunks
                 break
 
     @contextmanager
@@ -451,8 +446,7 @@ class MessageQueue:
                 # caller has read from the buffer
                 # set the read flag
                 metadata_buffer[self.local_reader_rank + 1] = 1
-                self.current_idx = (self.current_idx +
-                                    1) % self.buffer.max_chunks
+                self.current_idx = (self.current_idx + 1) % self.buffer.max_chunks
                 break
 
     def enqueue(self, obj, timeout: Optional[float] = None):
@@ -471,9 +465,7 @@ class MessageQueue:
         if self.n_remote_reader > 0:
             self.remote_socket.send(serialized_obj)
 
-    def dequeue(self,
-                timeout: Optional[float] = None,
-                cancel: Optional[Event] = None):
+    def dequeue(self, timeout: Optional[float] = None, cancel: Optional[Event] = None):
         """ Read from message queue with optional timeout (in seconds) """
         if self._is_local_reader:
             with self.acquire_read(timeout, cancel) as buf:
@@ -507,8 +499,7 @@ class MessageQueue:
             return self.dequeue()
 
     @staticmethod
-    def create_from_process_group(pg: Union[ProcessGroup,
-                                            StatelessProcessGroup],
+    def create_from_process_group(pg: Union[ProcessGroup, StatelessProcessGroup],
                                   max_chunk_bytes,
                                   max_chunks,
                                   writer_rank=0) -> "MessageQueue":

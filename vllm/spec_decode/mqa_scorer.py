@@ -35,8 +35,7 @@ class MQAScorer(SpeculativeScorer):
             seq_data: SequenceData = seq_data_dict[seq_id]
             prompt_token_ids = seq_data.get_prompt_token_ids()
             output_token_ids = seq_data.get_output_token_ids()
-            proposal_token_ids = all_proposal_tokens[
-                i][:all_proposal_lengths[i]]
+            proposal_token_ids = all_proposal_tokens[i][:all_proposal_lengths[i]]
             new_output_token_ids = [*output_token_ids, *proposal_token_ids]
 
             target_seq_id = target_seq_id_start + i
@@ -80,8 +79,7 @@ class MQAScorer(SpeculativeScorer):
         # the for loop to build output for better performance.
         if min(all_proposal_lengths) == k:
             # Regular decodes only.
-            assert all(not sg.is_prompt
-                       for sg in target_seq_group_metadata_list
+            assert all(not sg.is_prompt for sg in target_seq_group_metadata_list
                        if sg.is_prompt)
             bs, _ = proposals.proposal_token_ids.shape
             all_tokens = target_token_ids.reshape(bs, k + 1)
@@ -89,10 +87,8 @@ class MQAScorer(SpeculativeScorer):
             all_logprobs = target_logprobs.reshape(bs, k + 1, self._vocab_size)
         else:
             # We either have decodes with different lens or prefill+decodes.
-            all_tokens = target_token_ids.new_full(size=(bs, k + 1),
-                                                   fill_value=-1)
-            all_probs = target_probs.new_zeros(*all_tokens.shape,
-                                               self._vocab_size)
+            all_tokens = target_token_ids.new_full(size=(bs, k + 1), fill_value=-1)
+            all_probs = target_probs.new_zeros(*all_tokens.shape, self._vocab_size)
             all_logprobs = target_logprobs.new_full(size=all_probs.shape,
                                                     fill_value=-float("inf"))
             target_token_ids = target_token_ids.flatten()
@@ -139,18 +135,15 @@ class MQAScorer(SpeculativeScorer):
                     i], target_seq_group_metadata_list[i]
                 output_len = proposed_len + 1
                 end_loc = start_loc + output_len
-                all_tokens[
-                    i, :output_len] = target_token_ids[start_loc:end_loc]
+                all_tokens[i, :output_len] = target_token_ids[start_loc:end_loc]
                 all_probs[i, :output_len] = target_probs[start_loc:end_loc]
-                all_logprobs[
-                    i, :output_len] = target_logprobs[start_loc:end_loc]
+                all_logprobs[i, :output_len] = target_logprobs[start_loc:end_loc]
                 start_loc = end_loc
                 i += 1
 
         hidden_states = None
         if target_sampler_output.hidden_states is not None:
-            hidden_states = target_sampler_output.hidden_states.reshape(
-                bs, (k + 1), -1)
+            hidden_states = target_sampler_output.hidden_states.reshape(bs, (k + 1), -1)
 
         return SpeculativeScores(probs=all_probs,
                                  token_ids=all_tokens,

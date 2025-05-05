@@ -115,18 +115,18 @@ async def test_multi_step(
         # Default `max_wait_seconds` is 240 but was empirically
         # was raised 5x to 1200 *just for this test* due to
         # observed timeouts in GHA CI
-        ref_completions = await completions_with_server_args(
-            prompts,
-            model,
-            server_args + distributed_args,
-            num_logprobs,
-            max_wait_seconds=5 * 240)
-        test_completions = await completions_with_server_args(
-            prompts,
-            model,
-            ms_server_args + distributed_args,
-            num_logprobs,
-            max_wait_seconds=5 * 240)
+        ref_completions = await completions_with_server_args(prompts,
+                                                             model,
+                                                             server_args +
+                                                             distributed_args,
+                                                             num_logprobs,
+                                                             max_wait_seconds=5 * 240)
+        test_completions = await completions_with_server_args(prompts,
+                                                              model,
+                                                              ms_server_args +
+                                                              distributed_args,
+                                                              num_logprobs,
+                                                              max_wait_seconds=5 * 240)
 
         # Assert multi-step scheduling produces identical tokens
         # to single-step scheduling.
@@ -136,10 +136,8 @@ async def test_multi_step(
 
         # Assert multi-step scheduling produces nearly-identical logprobs
         # to single-step scheduling.
-        ref_text_logprobs = get_client_text_logprob_generations(
-            ref_completions)
-        test_text_logprobs = get_client_text_logprob_generations(
-            test_completions)
+        ref_text_logprobs = get_client_text_logprob_generations(ref_completions)
+        test_text_logprobs = get_client_text_logprob_generations(test_completions)
         check_logprobs_close(
             outputs_0_lst=ref_text_logprobs,
             outputs_1_lst=test_text_logprobs,

@@ -73,8 +73,7 @@ class OPTAttention(nn.Module):
     ) -> None:
         super().__init__()
         self.embed_dim = embed_dim
-        tensor_model_parallel_world_size = (
-            get_tensor_model_parallel_world_size())
+        tensor_model_parallel_world_size = (get_tensor_model_parallel_world_size())
         total_num_heads = num_heads
         assert num_heads % tensor_model_parallel_world_size == 0
         self.num_heads = total_num_heads // tensor_model_parallel_world_size
@@ -137,8 +136,7 @@ class OPTDecoderLayer(nn.Module):
         self.do_layer_norm_before = config.do_layer_norm_before
 
         self.self_attn_layer_norm = nn.LayerNorm(
-            self.embed_dim,
-            elementwise_affine=config.layer_norm_elementwise_affine)
+            self.embed_dim, elementwise_affine=config.layer_norm_elementwise_affine)
         self.fc1 = ColumnParallelLinear(
             self.embed_dim,
             config.ffn_dim,
@@ -155,8 +153,7 @@ class OPTDecoderLayer(nn.Module):
             prefix=f"{prefix}.fc2",
         )
         self.final_layer_norm = nn.LayerNorm(
-            self.embed_dim,
-            elementwise_affine=config.layer_norm_elementwise_affine)
+            self.embed_dim, elementwise_affine=config.layer_norm_elementwise_affine)
 
     def forward(
         self,
@@ -293,9 +290,8 @@ class OPTModel(nn.Module):
                                   cache_config,
                                   quant_config,
                                   prefix=f"{prefix}.decoder")
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(["hidden_states"],
-                                                    config.hidden_size))
+        self.make_empty_intermediate_tensors = (make_empty_intermediate_tensors_factory(
+            ["hidden_states"], config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.decoder.get_input_embeddings(input_ids)
@@ -312,8 +308,7 @@ class OPTModel(nn.Module):
                             intermediate_tensors,
                             inputs_embeds=inputs_embeds)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -343,8 +338,7 @@ class OPTModel(nn.Module):
                 if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
@@ -371,8 +365,7 @@ class OPTForCausalLM(nn.Module, SupportsPP):
         if self.config.tie_word_embeddings:
             self.lm_head = self.model.decoder.embed_tokens
         else:
-            self.lm_head = ParallelLMHead(config.vocab_size,
-                                          config.word_embed_proj_dim)
+            self.lm_head = ParallelLMHead(config.vocab_size, config.word_embed_proj_dim)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
@@ -396,12 +389,10 @@ class OPTForCausalLM(nn.Module, SupportsPP):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head.weight"]

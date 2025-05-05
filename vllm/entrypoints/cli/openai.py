@@ -41,8 +41,7 @@ def _interactive_cli(args: argparse.Namespace) -> tuple[str, OpenAI]:
     return model_name, openai_client
 
 
-def chat(system_prompt: Optional[str], model_name: str,
-         client: OpenAI) -> None:
+def chat(system_prompt: Optional[str], model_name: str, client: OpenAI) -> None:
     conversation: list[ChatCompletionMessageParam] = []
     if system_prompt is not None:
         conversation.append({"role": "system", "content": system_prompt})
@@ -65,27 +64,22 @@ def chat(system_prompt: Optional[str], model_name: str,
         print(output)
 
 
-def _add_query_options(
-        parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
-    parser.add_argument(
-        "--url",
-        type=str,
-        default="http://localhost:8000/v1",
-        help="url of the running OpenAI-Compatible RESTful API server")
-    parser.add_argument(
-        "--model-name",
-        type=str,
-        default=None,
-        help=("The model name used in prompt completion, default to "
-              "the first model in list models API call."))
+def _add_query_options(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
+    parser.add_argument("--url",
+                        type=str,
+                        default="http://localhost:8000/v1",
+                        help="url of the running OpenAI-Compatible RESTful API server")
+    parser.add_argument("--model-name",
+                        type=str,
+                        default=None,
+                        help=("The model name used in prompt completion, default to "
+                              "the first model in list models API call."))
     parser.add_argument(
         "--api-key",
         type=str,
         default=None,
-        help=(
-            "API key for OpenAI services. If provided, this api key "
-            "will overwrite the api key obtained through environment variables."
-        ))
+        help=("API key for OpenAI services. If provided, this api key "
+              "will overwrite the api key obtained through environment variables."))
     return parser
 
 
@@ -112,8 +106,8 @@ class ChatCommand(CLISubcommand):
                 return
             conversation.append({"role": "user", "content": input_message})
 
-            chat_completion = client.chat.completions.create(
-                model=model_name, messages=conversation)
+            chat_completion = client.chat.completions.create(model=model_name,
+                                                             messages=conversation)
 
             response_message = chat_completion.choices[0].message
             output = response_message.content
@@ -122,8 +116,7 @@ class ChatCommand(CLISubcommand):
             print(output)
 
     def subparser_init(
-            self,
-            subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
+            self, subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
         chat_parser = subparsers.add_parser(
             "chat",
             help="Generate chat completions via the running API server.",
@@ -158,8 +151,7 @@ class CompleteCommand(CLISubcommand):
             print(output)
 
     def subparser_init(
-            self,
-            subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
+            self, subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
         complete_parser = subparsers.add_parser(
             "complete",
             help=("Generate text completions based on the given prompt "

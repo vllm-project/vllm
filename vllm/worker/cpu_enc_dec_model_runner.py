@@ -40,8 +40,7 @@ class EncoderDecoderModelInputForCPU(ModelInputForCPUWithSamplingMetadata):
             "multi_modal_kwargs": self.multi_modal_kwargs,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
-        _add_sampling_metadata_broadcastable_dict(tensor_dict,
-                                                  self.sampling_metadata)
+        _add_sampling_metadata_broadcastable_dict(tensor_dict, self.sampling_metadata)
         return tensor_dict
 
     @classmethod
@@ -50,13 +49,11 @@ class EncoderDecoderModelInputForCPU(ModelInputForCPUWithSamplingMetadata):
         tensor_dict: Dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None,
     ) -> "EncoderDecoderModelInputForCPU":
-        return cast(
-            EncoderDecoderModelInputForCPU,
-            super().from_broadcasted_tensor_dict(tensor_dict, attn_backend))
+        return cast(EncoderDecoderModelInputForCPU,
+                    super().from_broadcasted_tensor_dict(tensor_dict, attn_backend))
 
 
-class CPUEncoderDecoderModelRunner(
-        CPUModelRunnerBase[EncoderDecoderModelInputForCPU]):
+class CPUEncoderDecoderModelRunner(CPUModelRunnerBase[EncoderDecoderModelInputForCPU]):
     _model_input_cls: Type[EncoderDecoderModelInputForCPU] = (
         EncoderDecoderModelInputForCPU)
     _builder_cls: Type[ModelInputForCPUBuilder] = ModelInputForCPUBuilder
@@ -80,8 +77,7 @@ class CPUEncoderDecoderModelRunner(
         return self._list_to_long_tensor([])
 
     def make_model_input_from_broadcasted_tensor_dict(
-            self, tensor_dict: Dict[str,
-                                    Any]) -> EncoderDecoderModelInputForCPU:
+            self, tensor_dict: Dict[str, Any]) -> EncoderDecoderModelInputForCPU:
         return EncoderDecoderModelInputForCPU.from_broadcasted_tensor_dict(
             tensor_dict,
             attn_backend=self.attn_backend,
@@ -93,8 +89,8 @@ class CPUEncoderDecoderModelRunner(
         virtual_engine: int = 0,
         finished_requests_ids: Optional[List[str]] = None
     ) -> EncoderDecoderModelInputForCPU:
-        model_input = self._prepare_model_input_tensors(
-            seq_group_metadata_list, finished_requests_ids)
+        model_input = self._prepare_model_input_tensors(seq_group_metadata_list,
+                                                        finished_requests_ids)
         (
             attn_metadata,
             encoder_input_tokens_tensor,
@@ -122,8 +118,7 @@ class CPUEncoderDecoderModelRunner(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         model_input: EncoderDecoderModelInputForCPU,
-    ) -> Tuple[AttentionMetadata, Optional[torch.Tensor],
-               Optional[torch.Tensor]]:
+    ) -> Tuple[AttentionMetadata, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Helper method to prepare the encoder- and cross-attn-related
         model inputs based on a given sequence group. These additional inputs
         are used to augment an already-computed `EncoderDecoderModelInput`
@@ -192,8 +187,8 @@ class CPUEncoderDecoderModelRunner(
 
                 # Build slot mapping
                 for i in range(0, seq_len):
-                    block_number = seq_group_metadata.cross_block_table[
-                        i // self.block_size]
+                    block_number = seq_group_metadata.cross_block_table[i //
+                                                                        self.block_size]
                     block_offset = i % self.block_size
                     slot = block_number * self.block_size + block_offset
                     cross_slot_mapping.append(slot)
@@ -208,8 +203,7 @@ class CPUEncoderDecoderModelRunner(
                 encoder_input_tokens)
             encoder_input_positions_tensor = self._list_to_long_tensor(
                 encoder_input_positions)
-            cross_slot_mapping_tensor = self._list_to_long_tensor(
-                cross_slot_mapping)
+            cross_slot_mapping_tensor = self._list_to_long_tensor(cross_slot_mapping)
 
         else:
             # Decode phase.
@@ -244,8 +238,7 @@ class CPUEncoderDecoderModelRunner(
         # sequence starting offset tensors
         max_encoder_seq_len = max(encoder_seq_lens, default=0)
         encoder_seq_lens_tensor = self._list_to_int32_tensor(encoder_seq_lens)
-        encoder_seq_start_loc = torch.zeros(encoder_seq_lens_tensor.shape[0] +
-                                            1,
+        encoder_seq_start_loc = torch.zeros(encoder_seq_lens_tensor.shape[0] + 1,
                                             dtype=torch.int32,
                                             device=self.device)
         torch.cumsum(encoder_seq_lens_tensor,
@@ -284,8 +277,7 @@ class CPUEncoderDecoderModelRunner(
         num_steps: int = 1,
     ) -> Optional[List[SamplerOutput]]:
         if num_steps > 1:
-            raise ValueError(
-                "CPU worker does not support multi-step execution.")
+            raise ValueError("CPU worker does not support multi-step execution.")
 
         model_executable = self.model
         execute_model_kwargs = {
@@ -308,8 +300,7 @@ class CPUEncoderDecoderModelRunner(
             hidden_states = model_executable(**execute_model_kwargs)
 
         # Compute the logits.
-        logits = self.model.compute_logits(hidden_states,
-                                           model_input.sampling_metadata)
+        logits = self.model.compute_logits(hidden_states, model_input.sampling_metadata)
 
         # Only perform sampling in the driver worker.
         if not self.is_driver_worker:

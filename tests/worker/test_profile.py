@@ -23,8 +23,7 @@ def test_gpu_memory_profiling():
     engine_config.cache_config.num_cpu_blocks = 1000
 
     # Create the worker.
-    distributed_init_method = get_distributed_init_method(
-        get_ip(), get_open_port())
+    distributed_init_method = get_distributed_init_method(get_ip(), get_open_port())
     worker = Worker(
         vllm_config=engine_config,
         local_rank=0,
@@ -35,8 +34,7 @@ def test_gpu_memory_profiling():
 
     # Set 10GiB as the total gpu ram to be device-agnostic
     def mock_mem_info():
-        current_usage = torch.cuda.memory_stats(
-        )["allocated_bytes.all.current"]
+        current_usage = torch.cuda.memory_stats()["allocated_bytes.all.current"]
         mock_total_bytes = 10 * 1024**3
         free = mock_total_bytes - current_usage
 
@@ -54,9 +52,9 @@ def test_gpu_memory_profiling():
     # No memory should be allocated outside of torch
     # 9.0 GiB should be the utilization target
     # 8.28 GiB should be available for the KV cache
-    block_size = CacheEngine.get_cache_block_size(
-        engine_config.cache_config, engine_config.model_config,
-        engine_config.parallel_config)
+    block_size = CacheEngine.get_cache_block_size(engine_config.cache_config,
+                                                  engine_config.model_config,
+                                                  engine_config.parallel_config)
 
     expected_blocks = (8.28 * 1024**3) // block_size
 

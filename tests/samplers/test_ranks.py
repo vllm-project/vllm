@@ -25,16 +25,14 @@ def test_ranks(
     num_top_logprobs = 5
     num_prompt_logprobs = 5
 
-    with vllm_runner(model, dtype=dtype,
-                     max_logprobs=num_top_logprobs) as vllm_model:
+    with vllm_runner(model, dtype=dtype, max_logprobs=num_top_logprobs) as vllm_model:
 
         ## Test greedy logprobs ranks
-        vllm_sampling_params = SamplingParams(
-            temperature=0.0,
-            top_p=1.0,
-            max_tokens=max_tokens,
-            logprobs=num_top_logprobs,
-            prompt_logprobs=num_prompt_logprobs)
+        vllm_sampling_params = SamplingParams(temperature=0.0,
+                                              top_p=1.0,
+                                              max_tokens=max_tokens,
+                                              logprobs=num_top_logprobs,
+                                              prompt_logprobs=num_prompt_logprobs)
         vllm_results = vllm_model.generate_w_logprobs(example_prompts,
                                                       vllm_sampling_params)
 

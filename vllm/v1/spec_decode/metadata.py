@@ -39,15 +39,12 @@ class SpecDecodeMetadata:
                                               dtype=torch.int32,
                                               device=device)
         cu_num_draft_tokens = np.cumsum(num_draft_tokens, dtype=np.int32)
-        cu_num_draft_tokens_tensor = torch.from_numpy(cu_num_draft_tokens).to(
-            device)
+        cu_num_draft_tokens_tensor = torch.from_numpy(cu_num_draft_tokens).to(device)
 
         target_logits_indices = torch.zeros(num_tokens,
                                             dtype=torch.int32,
                                             device=device)
-        bonus_logits_indices = torch.zeros(batch_size,
-                                           dtype=torch.int32,
-                                           device=device)
+        bonus_logits_indices = torch.zeros(batch_size, dtype=torch.int32, device=device)
         logits_indices = torch.zeros(num_tokens + batch_size,
                                      dtype=torch.int32,
                                      device=device)

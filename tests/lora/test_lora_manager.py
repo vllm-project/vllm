@@ -27,9 +27,8 @@ EMBEDDING_MODULES = {
 
 EMBEDDING_PADDING_MODULES = ["lm_head"]
 
-DEVICES = ([
-    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
-] if current_platform.is_cuda_alike() else ["cpu"])
+DEVICES = ([f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
+           if current_platform.is_cuda_alike() else ["cpu"])
 
 DEFAULT_DTYPE = torch.get_default_dtype()
 
@@ -47,8 +46,7 @@ def use_v0_only(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.mark.parametrize("device", DEVICES)
 def test_from_lora_tensors(sql_lora_files, device):
-    tensors = load_file(
-        os.path.join(sql_lora_files, "adapter_model.safetensors"))
+    tensors = load_file(os.path.join(sql_lora_files, "adapter_model.safetensors"))
     new_embeddings = load_file(
         os.path.join(sql_lora_files, "new_embeddings.safetensors"))
 
@@ -73,8 +71,8 @@ def test_from_lora_tensors(sql_lora_files, device):
         assert (lora.lora_a.shape[1] == lora.lora_b.shape[0]
                 ), f"{lora.lora_a.shape=}, {lora.lora_b.shape=}"
         assert lora.lora_a.shape[1] == 8
-        embeddings_module = next(
-            (k for k in EMBEDDING_MODULES if k in module_name), None)
+        embeddings_module = next((k for k in EMBEDDING_MODULES if k in module_name),
+                                 None)
         if embeddings_module:
             assert torch.equal(
                 lora.embeddings_tensor,
@@ -117,8 +115,7 @@ def create_packed_lora(
             8,
             16,
             torch.rand([w.shape[1], 8], device=device),
-            torch.rand([8, w.shape[0] // len(replaced_module_names)],
-                       device=device),
+            torch.rand([8, w.shape[0] // len(replaced_module_names)], device=device),
         )
     return LoRAModel(lora_id, 8, loras)
 
@@ -132,13 +129,11 @@ def test_replace_submodules(dist_init, dummy_model):
                    max_loras=8,
                    lora_dtype=DEFAULT_DTYPE), torch.device(DEVICES[0]))
     model = manager.model
-    assert isinstance(model.get_submodule("dense1"),
-                      ColumnParallelLinearWithLoRA)
+    assert isinstance(model.get_submodule("dense1"), ColumnParallelLinearWithLoRA)
     assert isinstance(model.get_submodule("layer1.dense1"),
                       ColumnParallelLinearWithLoRA)
     assert isinstance(model.get_submodule("dense2"), RowParallelLinearWithLoRA)
-    assert isinstance(model.get_submodule("layer1.dense2"),
-                      RowParallelLinearWithLoRA)
+    assert isinstance(model.get_submodule("layer1.dense2"), RowParallelLinearWithLoRA)
 
 
 @pytest.mark.parametrize("device", DEVICES)
@@ -147,12 +142,8 @@ def test_lora_model_manager(dist_init, dummy_model, device):
     model_lora1 = create_lora(1,
                               model, ["layer1.dense1", "dense2", "lm_head"],
                               device=device)
-    model_lora2 = create_lora(2,
-                              model, ["dense1", "dense2", "lm_head"],
-                              device=device)
-    model_lora3 = create_lora(3,
-                              model, ["dense1", "dense2", "lm_head"],
-                              device=device)
+    model_lora2 = create_lora(2, model, ["dense1", "dense2", "lm_head"], device=device)
+    model_lora3 = create_lora(3, model, ["dense1", "dense2", "lm_head"], device=device)
     manager = LoRAModelManager(model,
                                2,
                                2,
@@ -214,12 +205,8 @@ def test_lora_lru_cache_model_manager(dist_init, dummy_model, device):
     model_lora1 = create_lora(1,
                               model, ["layer1.dense1", "dense2", "lm_head"],
                               device=device)
-    model_lora2 = create_lora(2,
-                              model, ["dense1", "dense2", "lm_head"],
-                              device=device)
-    model_lora3 = create_lora(3,
-                              model, ["dense1", "dense2", "lm_head"],
-                              device=device)
+    model_lora2 = create_lora(2, model, ["dense1", "dense2", "lm_head"], device=device)
+    model_lora3 = create_lora(3, model, ["dense1", "dense2", "lm_head"], device=device)
     manager = LRUCacheLoRAModelManager(model,
                                        2,
                                        2,
@@ -307,15 +294,9 @@ def test_lru_lora_model_manager(dist_init, dummy_model, device):
     model_lora1 = create_lora(1,
                               model, ["layer1.dense1", "dense2", "lm_head"],
                               device=device)
-    model_lora2 = create_lora(2,
-                              model, ["dense1", "dense2", "lm_head"],
-                              device=device)
-    model_lora3 = create_lora(3,
-                              model, ["dense1", "dense2", "lm_head"],
-                              device=device)
-    model_lora4 = create_lora(4,
-                              model, ["dense1", "dense2", "lm_head"],
-                              device=device)
+    model_lora2 = create_lora(2, model, ["dense1", "dense2", "lm_head"], device=device)
+    model_lora3 = create_lora(3, model, ["dense1", "dense2", "lm_head"], device=device)
+    model_lora4 = create_lora(4, model, ["dense1", "dense2", "lm_head"], device=device)
     manager = LRUCacheLoRAModelManager(model,
                                        2,
                                        2,
@@ -437,16 +418,14 @@ def test_lru_cache_worker_adapter_manager(llama_2_7b_model_extra_embeddings,
                              lora_dtype=DEFAULT_DTYPE)
     worker_adapter_manager = LRUCacheWorkerLoRAManager(
         4, 2, llama_2_7b_model_extra_embeddings.unpadded_vocab_size -
-        lora_config.lora_extra_vocab_size, lora_config, device,
-        EMBEDDING_MODULES, EMBEDDING_PADDING_MODULES)
-    worker_adapter_manager.create_lora_manager(
-        llama_2_7b_model_extra_embeddings)
+        lora_config.lora_extra_vocab_size, lora_config, device, EMBEDDING_MODULES,
+        EMBEDDING_PADDING_MODULES)
+    worker_adapter_manager.create_lora_manager(llama_2_7b_model_extra_embeddings)
 
     mapping = LoRAMapping([], [])
-    worker_adapter_manager.set_active_adapters([
-        LoRARequest("1", 1, sql_lora_files),
-        LoRARequest("2", 2, sql_lora_files)
-    ], mapping)
+    worker_adapter_manager.set_active_adapters(
+        [LoRARequest("1", 1, sql_lora_files),
+         LoRARequest("2", 2, sql_lora_files)], mapping)
     assert worker_adapter_manager.list_adapters() == {1, 2}
     assert worker_adapter_manager._adapter_manager.lora_index_to_id[0] == 1
     assert worker_adapter_manager._adapter_manager.lora_index_to_id[1] == 2
@@ -506,13 +485,12 @@ def test_lru_cache_worker_adapter_manager(llama_2_7b_model_extra_embeddings,
         ], mapping)
 
     assert worker_adapter_manager.device == device
-    assert (worker_adapter_manager._adapter_manager.punica_wrapper.device ==
-            device)
+    assert (worker_adapter_manager._adapter_manager.punica_wrapper.device == device)
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_worker_adapter_manager(llama_2_7b_model_extra_embeddings,
-                                sql_lora_files, device):
+def test_worker_adapter_manager(llama_2_7b_model_extra_embeddings, sql_lora_files,
+                                device):
     # Should remove every LoRA not specified in the request.
     lora_config = LoRAConfig(max_lora_rank=8,
                              max_cpu_loras=4,
@@ -520,16 +498,14 @@ def test_worker_adapter_manager(llama_2_7b_model_extra_embeddings,
                              lora_dtype=DEFAULT_DTYPE)
     worker_adapter_manager = WorkerLoRAManager(
         4, 2, llama_2_7b_model_extra_embeddings.unpadded_vocab_size -
-        lora_config.lora_extra_vocab_size, lora_config, device,
-        EMBEDDING_MODULES, EMBEDDING_PADDING_MODULES)
-    worker_adapter_manager.create_lora_manager(
-        llama_2_7b_model_extra_embeddings)
+        lora_config.lora_extra_vocab_size, lora_config, device, EMBEDDING_MODULES,
+        EMBEDDING_PADDING_MODULES)
+    worker_adapter_manager.create_lora_manager(llama_2_7b_model_extra_embeddings)
 
     mapping = LoRAMapping([], [])
-    worker_adapter_manager.set_active_adapters([
-        LoRARequest("1", 1, sql_lora_files),
-        LoRARequest("2", 2, sql_lora_files)
-    ], mapping)
+    worker_adapter_manager.set_active_adapters(
+        [LoRARequest("1", 1, sql_lora_files),
+         LoRARequest("2", 2, sql_lora_files)], mapping)
     assert worker_adapter_manager.list_adapters() == {1, 2}
     assert worker_adapter_manager._adapter_manager.lora_index_to_id[0] == 1
     assert worker_adapter_manager._adapter_manager.lora_index_to_id[1] == 2
@@ -585,19 +561,17 @@ def test_worker_adapter_manager(llama_2_7b_model_extra_embeddings,
         ], mapping)
 
     assert worker_adapter_manager.device == device
-    assert (worker_adapter_manager._adapter_manager.punica_wrapper.device ==
-            device)
+    assert (worker_adapter_manager._adapter_manager.punica_wrapper.device == device)
 
 
 @pytest.mark.parametrize("device", DEVICES)
 def test_packed_loras(dist_init, dummy_model_gate_up, device):
     model = dummy_model_gate_up
-    model_lora = create_packed_lora(
-        1,
-        model,
-        module_name="gate_up_proj",
-        replaced_module_names=["gate_proj", "up_proj"],
-        device=device)
+    model_lora = create_packed_lora(1,
+                                    model,
+                                    module_name="gate_up_proj",
+                                    replaced_module_names=["gate_proj", "up_proj"],
+                                    device=device)
     model_lora1 = create_packed_lora(
         2,
         model,

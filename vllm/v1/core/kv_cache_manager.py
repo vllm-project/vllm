@@ -58,14 +58,13 @@ class KVCacheManager:
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
         # is finished.
-        self.req_to_blocks: defaultdict[str,
-                                        list[KVCacheBlock]] = defaultdict(list)
+        self.req_to_blocks: defaultdict[str, list[KVCacheBlock]] = defaultdict(list)
 
         # Mapping from request ID to kv block hashes.
         # This is to avoid recomputing the block hashes for each call of
         # `get_computed_blocks` or `allocate_slots`.
-        self.req_to_block_hashes: defaultdict[
-            str, list[BlockHashType]] = defaultdict(list)
+        self.req_to_block_hashes: defaultdict[str,
+                                              list[BlockHashType]] = defaultdict(list)
 
         # {req_id: The number of cached blocks for this given request}
         # This is used to track the number of cached blocks for each request.
@@ -94,8 +93,7 @@ class KVCacheManager:
         self.prefix_cache_stats = PrefixCacheStats()
         return stats
 
-    def get_computed_blocks(
-            self, request: Request) -> tuple[list[KVCacheBlock], int]:
+    def get_computed_blocks(self, request: Request) -> tuple[list[KVCacheBlock], int]:
         """Get the computed (cached) blocks for the request.
         Note that the computed blocks must be full.
 
@@ -115,8 +113,8 @@ class KVCacheManager:
         # if the scheduler has tried to schedule the request before.
         block_hashes = self.req_to_block_hashes[request.request_id]
         if not block_hashes:
-            block_hashes = hash_request_tokens(self.caching_hash_fn,
-                                               self.block_size, request)
+            block_hashes = hash_request_tokens(self.caching_hash_fn, self.block_size,
+                                               request)
             self.req_to_block_hashes[request.request_id] = block_hashes
 
         if self.log_stats:
@@ -218,8 +216,7 @@ class KVCacheManager:
         num_computed_tokens = (request.num_computed_tokens +
                                len(new_computed_blocks) * self.block_size)
         num_required_blocks = cdiv(
-            num_computed_tokens + num_tokens + num_lookahead_tokens,
-            self.block_size)
+            num_computed_tokens + num_tokens + num_lookahead_tokens, self.block_size)
         num_new_blocks = (num_required_blocks - len(req_blocks) -
                           len(new_computed_blocks))
 
@@ -237,9 +234,8 @@ class KVCacheManager:
         if self.enable_caching:
             self.block_pool.touch(new_computed_blocks)
         else:
-            assert not new_computed_blocks, (
-                "Computed blocks should be empty when "
-                "prefix caching is disabled")
+            assert not new_computed_blocks, ("Computed blocks should be empty when "
+                                             "prefix caching is disabled")
 
         # Append the new computed blocks to the request blocks until now to
         # avoid the case where the new blocks cannot be allocated.
@@ -276,8 +272,8 @@ class KVCacheManager:
         # Speculated tokens might be rejected in the future, so we does
         # not cache any speculated tokens. We only cache blocks with
         # generated (accepted) tokens.
-        num_full_blocks_after_append = (num_computed_tokens + num_tokens - len(
-            request.spec_token_ids)) // self.block_size
+        num_full_blocks_after_append = (num_computed_tokens + num_tokens -
+                                        len(request.spec_token_ids)) // self.block_size
 
         self.block_pool.cache_full_blocks(
             request=request,
@@ -289,8 +285,7 @@ class KVCacheManager:
             hash_fn=self.caching_hash_fn,
         )
 
-        self.num_cached_block[
-            request.request_id] = num_full_blocks_after_append
+        self.num_cached_block[request.request_id] = num_full_blocks_after_append
         return new_blocks
 
     def free(self, request: Request) -> None:

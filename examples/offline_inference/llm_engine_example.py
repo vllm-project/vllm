@@ -17,15 +17,11 @@ def create_test_prompts() -> list[tuple[str, SamplingParams]]:
         ("To be or not to be,",
          SamplingParams(temperature=0.8, top_k=5, presence_penalty=0.2)),
         ("What is the meaning of life?",
-         SamplingParams(n=2,
-                        temperature=0.8,
-                        top_p=0.95,
-                        frequency_penalty=0.1)),
+         SamplingParams(n=2, temperature=0.8, top_p=0.95, frequency_penalty=0.1)),
     ]
 
 
-def process_requests(engine: LLMEngine,
-                     test_prompts: list[tuple[str, SamplingParams]]):
+def process_requests(engine: LLMEngine, test_prompts: list[tuple[str, SamplingParams]]):
     """Continuously process a list of prompts and handle the outputs."""
     request_id = 0
 

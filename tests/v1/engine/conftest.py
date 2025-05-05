@@ -31,9 +31,7 @@ def _build_test_vectors_no_logprobs() -> DummyOutputProcessorTestVectors:
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME)
     vllm_config = EngineArgs(model=TOKENIZER_NAME).create_engine_config()
     # Tokenize prompts under test & create dummy generated tokens
-    prompt_tokens = [
-        tokenizer(text).input_ids[:PROMPT_LEN] for text in FULL_STRINGS
-    ]
+    prompt_tokens = [tokenizer(text).input_ids[:PROMPT_LEN] for text in FULL_STRINGS]
     generation_tokens = [
         tokenizer(text).input_ids[PROMPT_LEN:] for text in FULL_STRINGS
     ]
@@ -42,14 +40,12 @@ def _build_test_vectors_no_logprobs() -> DummyOutputProcessorTestVectors:
         tokenizer.decode(prompt_tokens, skip_special_tokens=True)
         for prompt_tokens in prompt_tokens
     ]
-    prompt_strings_len = [
-        len(prompt_string) for prompt_string in prompt_strings
-    ]
+    prompt_strings_len = [len(prompt_string) for prompt_string in prompt_strings]
     return DummyOutputProcessorTestVectors(
         tokenizer=tokenizer,
-        tokenizer_group=init_tokenizer_from_configs(
-            vllm_config.model_config, vllm_config.scheduler_config,
-            vllm_config.lora_config),
+        tokenizer_group=init_tokenizer_from_configs(vllm_config.model_config,
+                                                    vllm_config.scheduler_config,
+                                                    vllm_config.lora_config),
         vllm_config=vllm_config,
         full_tokens=[tokenizer(text).input_ids for text in FULL_STRINGS],
         prompt_tokens=prompt_tokens,
@@ -76,10 +72,10 @@ def dummy_test_vectors() -> DummyOutputProcessorTestVectors:
     # Inject logprobs into dummy test vectors
     # data structure
     dtv.generation_logprobs = [
-        generate_dummy_sample_logprobs(
-            sampled_tokens_list=tokens_list,
-            num_logprobs=NUM_SAMPLE_LOGPROBS_UNDER_TEST,
-            tokenizer=dtv.tokenizer) for tokens_list in dtv.generation_tokens
+        generate_dummy_sample_logprobs(sampled_tokens_list=tokens_list,
+                                       num_logprobs=NUM_SAMPLE_LOGPROBS_UNDER_TEST,
+                                       tokenizer=dtv.tokenizer)
+        for tokens_list in dtv.generation_tokens
     ]
     dtv.prompt_logprobs = [
         generate_dummy_prompt_logprobs_tensors(

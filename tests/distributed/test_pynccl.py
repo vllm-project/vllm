@@ -58,8 +58,7 @@ def worker_fn_wrapper(fn):
 def worker_fn():
     pynccl_comm = PyNcclCommunicator(get_world_group().cpu_group,
                                      device=get_world_group().device)
-    tensor = torch.ones(16, 1024, 1024,
-                        dtype=torch.float32).cuda(pynccl_comm.rank)
+    tensor = torch.ones(16, 1024, 1024, dtype=torch.float32).cuda(pynccl_comm.rank)
     tensor = pynccl_comm.all_reduce(tensor)
     torch.cuda.synchronize()
     assert torch.all(tensor == pynccl_comm.world_size).cpu().item()
@@ -156,9 +155,7 @@ def all_gather_worker_fn():
     num_elems = 1000
     tensor = torch.arange(num_elems, dtype=torch.float32,
                           device=device) + rank * num_elems
-    result = torch.zeros(num_elems * world_size,
-                         dtype=torch.float32,
-                         device=device)
+    result = torch.zeros(num_elems * world_size, dtype=torch.float32, device=device)
 
     expected = torch.cat([
         torch.arange(num_elems, dtype=torch.float32) + r * num_elems
@@ -189,9 +186,7 @@ def reduce_scatter_worker_fn():
     tensor = torch.arange(num_elems, dtype=torch.float32,
                           device=device) + rank * num_elems
     assert (num_elems % world_size == 0)
-    result = torch.zeros(num_elems // world_size,
-                         dtype=torch.float32,
-                         device=device)
+    result = torch.zeros(num_elems // world_size, dtype=torch.float32, device=device)
 
     # Calculate expected result for this rank's chunk
     scattered_size = num_elems // world_size
@@ -224,18 +219,14 @@ def send_recv_worker_fn():
     pynccl_comm = PyNcclCommunicator(get_world_group().cpu_group,
                                      device=get_world_group().device)
     if pynccl_comm.rank == 0:
-        tensor = torch.ones(16, 1024, 1024,
-                            dtype=torch.float32).cuda(pynccl_comm.rank)
+        tensor = torch.ones(16, 1024, 1024, dtype=torch.float32).cuda(pynccl_comm.rank)
     else:
-        tensor = torch.empty(16, 1024, 1024,
-                             dtype=torch.float32).cuda(pynccl_comm.rank)
+        tensor = torch.empty(16, 1024, 1024, dtype=torch.float32).cuda(pynccl_comm.rank)
 
     if pynccl_comm.rank == 0:
-        pynccl_comm.send(tensor,
-                         dst=(pynccl_comm.rank + 1) % pynccl_comm.world_size)
+        pynccl_comm.send(tensor, dst=(pynccl_comm.rank + 1) % pynccl_comm.world_size)
     else:
-        pynccl_comm.recv(tensor,
-                         src=(pynccl_comm.rank - 1) % pynccl_comm.world_size)
+        pynccl_comm.recv(tensor, src=(pynccl_comm.rank - 1) % pynccl_comm.world_size)
     torch.cuda.synchronize()
     assert torch.all(tensor == 1).cpu().item()
 
@@ -258,20 +249,13 @@ def multiple_send_recv_worker_fn():
     if torch.distributed.get_rank() == 0:
         tensor = torch.ones(16, 1024, 1024, dtype=torch.float32, device=device)
     elif torch.distributed.get_rank() == 1:
-        tensor = 2 * torch.ones(
-            16, 1024, 1024, dtype=torch.float32, device=device)
+        tensor = 2 * torch.ones(16, 1024, 1024, dtype=torch.float32, device=device)
     else:
-        tensor = torch.empty(16,
-                             1024,
-                             1024,
-                             dtype=torch.float32,
-                             device=device)
+        tensor = torch.empty(16, 1024, 1024, dtype=torch.float32, device=device)
     if torch.distributed.get_rank() in [0, 1]:
-        pynccl_comm.send(tensor,
-                         dst=(pynccl_comm.rank + 1) % pynccl_comm.world_size)
+        pynccl_comm.send(tensor, dst=(pynccl_comm.rank + 1) % pynccl_comm.world_size)
     else:
-        pynccl_comm.recv(tensor,
-                         src=(pynccl_comm.rank - 1) % pynccl_comm.world_size)
+        pynccl_comm.recv(tensor, src=(pynccl_comm.rank - 1) % pynccl_comm.world_size)
     torch.cuda.synchronize()
     if torch.distributed.get_rank() in [0, 2]:
         assert torch.all(tensor == 1).cpu().item()
@@ -298,11 +282,7 @@ def broadcast_worker_fn():
     pynccl_comm = PyNcclCommunicator(get_world_group().cpu_group,
                                      device=get_world_group().device)
     recv_tensors = [
-        torch.empty(16,
-                    1024,
-                    1024,
-                    dtype=torch.float32,
-                    device=pynccl_comm.device)
+        torch.empty(16, 1024, 1024, dtype=torch.float32, device=pynccl_comm.device)
         for i in range(pynccl_comm.world_size)
     ]
     recv_tensors[pynccl_comm.rank] = torch.ones(

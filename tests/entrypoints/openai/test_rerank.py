@@ -46,8 +46,8 @@ def test_rerank_texts(server: RemoteOpenAIServer, model_name: str):
 def test_top_n(server: RemoteOpenAIServer, model_name: str):
     query = "What is the capital of France?"
     documents = [
-        "The capital of Brazil is Brasilia.",
-        "The capital of France is Paris.", "Cross-encoder models are neat"
+        "The capital of Brazil is Brasilia.", "The capital of France is Paris.",
+        "Cross-encoder models are neat"
     ]
 
     rerank_response = requests.post(server.url_for("rerank"),

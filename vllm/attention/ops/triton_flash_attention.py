@@ -149,14 +149,12 @@ class MetaData:
         self.num_contexts = len(cu_seqlens_q) - 1
         for i in range(0, self.num_contexts):
             self.max_seqlens_q = max(
-                cu_seqlens_q[i + 1].item() - cu_seqlens_q[i].item(),
-                self.max_seqlens_q)
+                cu_seqlens_q[i + 1].item() - cu_seqlens_q[i].item(), self.max_seqlens_q)
             self.max_seqlens_k = max(
-                cu_seqlens_k[i + 1].item() - cu_seqlens_k[i].item(),
-                self.max_seqlens_k)
+                cu_seqlens_k[i + 1].item() - cu_seqlens_k[i].item(), self.max_seqlens_k)
 
-    def set_eight_bit_params(self, q_descale, k_descale, v_descale, p_scale,
-                             p_descale, o_scale):
+    def set_eight_bit_params(self, q_descale, k_descale, v_descale, p_scale, p_descale,
+                             o_scale):
         self.eight_bit = True
         self.q_descale = q_descale
         self.k_descale = k_descale
@@ -164,8 +162,9 @@ class MetaData:
         self.p_scale = p_scale
         self.p_descale = p_descale
         self.o_scale = o_scale
-        self.use_p_scale = (p_scale is not None) and (
-            p_descale is not None) and (v_descale is not None)
+        self.use_p_scale = (p_scale is not None) and (p_descale
+                                                      is not None) and (v_descale
+                                                                        is not None)
         self.eight_bit_kv = ((q_descale is None) and (k_descale is not None)
                              and (v_descale is not None))
         self.eight_bit_dtype_torch = default_eight_bit_dtype_torch
@@ -191,8 +190,7 @@ class MetaData:
     def check_args(self, q, k, v, o):
         assert q.dim() == k.dim() and q.dim() == v.dim()
 
-        batch, nheads_q, nheads_k, head_size = get_shape_from_layout(
-            q, k, self)
+        batch, nheads_q, nheads_k, head_size = get_shape_from_layout(q, k, self)
         if self.varlen:
             assert q.dim() == 3
             assert self.cu_seqlens_q is not None
@@ -210,21 +208,17 @@ class MetaData:
         # TODO: Change assert if we support qkl f8 and v f16
         if self.eight_bit:
             if self.eight_bit_kv:
-                assert (v.dtype == k.dtype
-                        and k.dtype == self.eight_bit_dtype_torch)
+                assert (v.dtype == k.dtype and k.dtype == self.eight_bit_dtype_torch)
                 assert q.dtype != k.dtype
-                assert (self.v_descale is not None) and (self.k_descale
-                                                         is not None)
+                assert (self.v_descale is not None) and (self.k_descale is not None)
             else:
                 assert (q.dtype == k.dtype and q.dtype == v.dtype
                         and q.dtype == self.eight_bit_dtype_torch)
                 assert (self.q_descale
                         is not None) and (self.k_descale
-                                          is not None) and (self.v_descale
-                                                            is not None)
+                                          is not None) and (self.v_descale is not None)
                 if self.use_p_scale:
-                    assert (self.p_scale is not None) and (self.p_descale
-                                                           is not None)
+                    assert (self.p_scale is not None) and (self.p_descale is not None)
         else:
             assert (q.dtype == k.dtype) and (q.dtype == v.dtype)
         assert head_size <= 256
@@ -247,8 +241,7 @@ def max_fn(x, y):
 # Convenience function to load with optional boundary checks.
 # "First" is the major dim, "second" is the minor dim.
 @triton.jit
-def masked_load(ptrs, offset_first, offset_second, boundary_first,
-                boundary_second):
+def masked_load(ptrs, offset_first, offset_second, boundary_first, boundary_second):
     if offset_first is not None and offset_second is not None:
         mask = (offset_first[:, None] < boundary_first) & \
                (offset_second[None, :] < boundary_second)
@@ -298,8 +291,7 @@ def compute_alibi_block(alibi_slope,
     # [[3], - [[0, 1, 2, 3, 4]] =  [[ 3, 2, 1, 0,-1], [4], [ 4, 3, 2, 1, 0]]
     # 5. -1 * alibi_slope * tl.abs(relative_pos_block) = [[ -3, -2, -1, 0,-1],
     #                                                    [ -4, -3, -2, -1, 0]],
-    relative_pos_block = (offs_m[:, None] + seqlen_k - seqlen_q -
-                          offs_n[None, :])
+    relative_pos_block = (offs_m[:, None] + seqlen_k - seqlen_q - offs_n[None, :])
     alibi_block = -1 * alibi_slope * tl.abs(relative_pos_block)
     if transpose:
         return alibi_block.T
@@ -312,8 +304,7 @@ def compute_alibi_tensor(alibi_slopes, seqlen_q, seqlen_k):
                          device="cuda").unsqueeze(-1)  # (N_CTX_Q, 1)
     k_idx = torch.arange(seqlen_k, dtype=torch.int32,
                          device="cuda").unsqueeze(0)  # (1, N_CTX_K)
-    relative_pos = torch.abs(q_idx + seqlen_k - seqlen_q -
-                             k_idx)  # (N_CTX_Q, N_CTX_K)
+    relative_pos = torch.abs(q_idx + seqlen_k - seqlen_q - k_idx)  # (N_CTX_Q, N_CTX_K)
     return -1 * alibi_slopes.unsqueeze(-1).unsqueeze(
         -1) * relative_pos  # (Z, H, N_CTX_Q, N_CTX_K)
 
@@ -375,8 +366,7 @@ def _attn_fwd_inner(
     for start_n in range(block_min, block_max, BLOCK_N):
         # For padded blocks, we will overrun the tensor size if
         # we load all BLOCK_N. For others, the blocks are all within range.
-        k_offs_n = start_n + tl.arange(0,
-                                       BLOCK_N) if SHOULD_MASK_STEPS else None
+        k_offs_n = start_n + tl.arange(0, BLOCK_N) if SHOULD_MASK_STEPS else None
         k_offs_k = None if not USE_PADDED_HEAD else tl.arange(0, BLOCK_DMODEL)
         k = masked_load(k_ptrs, k_offs_k, k_offs_n, IS_ACTUAL_BLOCK_DMODEL,
                         actual_seqlen_k)
@@ -395,9 +385,7 @@ def _attn_fwd_inner(
             # is_modulo_mn. last step might get wasted but that is okay.
             # check if this masking works for that case.
             if (start_n + BLOCK_N == block_max) and (n_extra_tokens != 0):
-                boundary_m = tl.full([BLOCK_M],
-                                     actual_seqlen_k,
-                                     dtype=tl.int32)
+                boundary_m = tl.full([BLOCK_M], actual_seqlen_k, dtype=tl.int32)
                 size_n = start_n + OFFS_N[None, :]
                 mask = size_n < boundary_m[:, None]
                 qk = tl.where(mask, qk, float("-inf"))
@@ -408,16 +396,14 @@ def _attn_fwd_inner(
 
         # -- compute qk ----
         if IS_EIGHT_BIT_GEMM:
-            qk += ((((tl.dot(q, k).to(tl.float32) * q_descale)) * k_descale) *
-                   QK_SCALE)
+            qk += ((((tl.dot(q, k).to(tl.float32) * q_descale)) * k_descale) * QK_SCALE)
         else:
             if IS_EIGHT_BIT_KV:
                 k = (k * k_descale).to(q.type.element_ty)
             qk += (tl.dot(q, k) * QK_SCALE)
 
         if bias_ptrs is not None:
-            bias_offs_n = start_n + tl.arange(
-                0, BLOCK_N) if SHOULD_MASK_STEPS else None
+            bias_offs_n = start_n + tl.arange(0, BLOCK_N) if SHOULD_MASK_STEPS else None
             bias = masked_load(bias_ptrs, OFFS_M, bias_offs_n, actual_seqlen_q,
                                actual_seqlen_k)
             # While bias is added after multiplying qk with sm_scale,
@@ -431,8 +417,7 @@ def _attn_fwd_inner(
             global_m_positions = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
             global_n_positions = start_n + tl.arange(0, BLOCK_N)
             alibi_block = compute_alibi_block(alibi_slope, actual_seqlen_q,
-                                              actual_seqlen_k,
-                                              global_m_positions,
+                                              actual_seqlen_k, global_m_positions,
                                               global_n_positions)
             qk += (alibi_block * 1.44269504089)  # scale factor of log2(e)
 
@@ -530,8 +515,8 @@ def get_cdna_autotune_configs():
             num_stages=1,
             num_warps=4),
     ], [
-        'IS_CAUSAL', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K',
-        'IS_ACTUAL_BLOCK_DMODEL', 'VARLEN', 'HQ', 'HK'
+        'IS_CAUSAL', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K', 'IS_ACTUAL_BLOCK_DMODEL',
+        'VARLEN', 'HQ', 'HK'
     ]
 
 
@@ -609,8 +594,8 @@ def get_rdna_autotune_configs():
             num_stages=1,
             num_warps=2),
     ], [
-        'IS_CAUSAL', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K',
-        'IS_ACTUAL_BLOCK_DMODEL', 'VARLEN', 'HQ', 'HK'
+        'IS_CAUSAL', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K', 'IS_ACTUAL_BLOCK_DMODEL',
+        'VARLEN', 'HQ', 'HK'
     ]
 
 
@@ -644,15 +629,14 @@ def get_general_autotune_configs():
             num_stages=1,
             num_warps=4),
     ], [
-        'IS_CAUSAL', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K',
-        'IS_ACTUAL_BLOCK_DMODEL', 'VARLEN', 'HQ', 'HK'
+        'IS_CAUSAL', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K', 'IS_ACTUAL_BLOCK_DMODEL',
+        'VARLEN', 'HQ', 'HK'
     ]
 
 
 def has_cdna_target():
     ROCM_CDNA_TARGETS = ["gfx942", "gfx90a", "gfx908"]
-    return triton.runtime.driver.active.get_current_target(
-    ).arch in ROCM_CDNA_TARGETS
+    return triton.runtime.driver.active.get_current_target().arch in ROCM_CDNA_TARGETS
 
 
 def is_rocm_cdna():
@@ -793,8 +777,8 @@ def attn_fwd(
             # ends at either the top edge (seqlen_q < seqlen_k) or left
             # edge. This captures the decrease in n_blocks if we have a
             # rectangular attn matrix
-            n_blocks_seqlen = cdiv_fn(
-                (start_m + 1) * BLOCK_M + seqlen_k - seqlen_q, BLOCK_N)
+            n_blocks_seqlen = cdiv_fn((start_m + 1) * BLOCK_M + seqlen_k - seqlen_q,
+                                      BLOCK_N)
             # This is what adjusts the block_max for the current WG, only
             # if IS_CAUSAL. Otherwise we want to always iterate through all
             # n_blocks
@@ -807,20 +791,18 @@ def attn_fwd(
                 o_ptrs = (o_offset + offs_m[:, None] * stride_om +
                           offs_d[None, :] * stride_on)
                 acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
-                o_ptrs_mask = (offs_m[:, None] < seqlen_q).broadcast_to(
-                    [BLOCK_M, BLOCK_DMODEL])
+                o_ptrs_mask = (offs_m[:, None]
+                               < seqlen_q).broadcast_to([BLOCK_M, BLOCK_DMODEL])
                 # We still need to write 0s to the result
                 tl.store(o_ptrs, acc, mask=o_ptrs_mask)
                 # The tensor allocated for L is based on MAX_SEQLENS_Q as
                 # that is statically known.
-                l_ptrs = (L + off_z * HQ * MAX_SEQLENS_Q +
-                          off_h_q * MAX_SEQLENS_Q + offs_m)
+                l_ptrs = (L + off_z * HQ * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q +
+                          offs_m)
                 # We store inf to LSE, not -inf because in the bwd pass,
                 # we subtract this from qk which makes it -inf, such that
                 # exp(qk - inf) = 0 for these masked blocks.
-                l_value = tl.full([BLOCK_M],
-                                  value=float("inf"),
-                                  dtype=tl.float32)
+                l_value = tl.full([BLOCK_M], value=float("inf"), dtype=tl.float32)
                 l_ptrs_mask = offs_m < MAX_SEQLENS_Q
                 tl.store(l_ptrs, l_value, mask=l_ptrs_mask)
                 # TODO: Should dropout and return encoded softmax be
@@ -837,8 +819,7 @@ def attn_fwd(
                 n_extra_tokens = BLOCK_N - seqlen_k
             elif seqlen_k % BLOCK_N:
                 n_extra_tokens = seqlen_k % BLOCK_N
-            USE_PADDED_HEAD: tl.constexpr = (IS_ACTUAL_BLOCK_DMODEL
-                                             != BLOCK_DMODEL)
+            USE_PADDED_HEAD: tl.constexpr = (IS_ACTUAL_BLOCK_DMODEL != BLOCK_DMODEL)
 
             # Compute pointers for all the tensors used in this kernel.
             q_offset = (Q + off_z * stride_qz + off_h_q * stride_qh +
@@ -855,8 +836,7 @@ def attn_fwd(
                       offs_d[None, :] * stride_vn)
             # Compute pointers for all scale tensors used in this kernel.
 
-            IS_EIGHT_BIT_GEMM: tl.constexpr = IS_EIGHT_BIT & (
-                not IS_EIGHT_BIT_KV)
+            IS_EIGHT_BIT_GEMM: tl.constexpr = IS_EIGHT_BIT & (not IS_EIGHT_BIT_KV)
             if IS_EIGHT_BIT:
                 if k_descale_has_singleton:
                     k_descale_ptrs = k_descale_ptr
@@ -899,10 +879,8 @@ def attn_fwd(
             # dropout. In this case, we return an invalid pointer so
             # indicate the mask is not valid.
             if SHOULD_RETURN_ENCODED_SOFTMAX:
-                encoded_sm_base = (encoded_softmax +
-                                   off_h_q * seqlen_q * seqlen_k)
-                encoded_sm_ptrs = (encoded_sm_base +
-                                   offs_m[:, None] * seqlen_k +
+                encoded_sm_base = (encoded_softmax + off_h_q * seqlen_q * seqlen_k)
+                encoded_sm_ptrs = (encoded_sm_base + offs_m[:, None] * seqlen_k +
                                    offs_n[None, :])
             else:
                 encoded_sm_ptrs = None
@@ -916,15 +894,13 @@ def attn_fwd(
             # Q is loaded once at the beginning and shared by all N blocks.
             q_ptrs_mask = offs_m[:, None] < seqlen_q
             if USE_PADDED_HEAD:
-                q_ptrs_mask = q_ptrs_mask & (offs_d[None, :]
-                                             < IS_ACTUAL_BLOCK_DMODEL)
+                q_ptrs_mask = q_ptrs_mask & (offs_d[None, :] < IS_ACTUAL_BLOCK_DMODEL)
             q = tl.load(q_ptrs, mask=q_ptrs_mask, other=0.0)
 
             if IS_EIGHT_BIT:
                 k_descale = tl.load(k_descale_ptrs)
                 v_descale = tl.load(v_descale_ptrs)
-                q_descale = None if IS_EIGHT_BIT_KV else tl.load(
-                    q_descale_ptrs)
+                q_descale = None if IS_EIGHT_BIT_KV else tl.load(q_descale_ptrs)
                 if USE_P_SCALE:
                     p_scale = tl.load(p_scale_ptrs)
                     p_descale = tl.load(p_descale_ptrs)
@@ -1089,8 +1065,7 @@ def attn_fwd(
 
             acc = acc.to(Out.type.element_ty)
             if IS_CAUSAL:  # noqa: SIM102
-                if (causal_start_idx > start_m_idx
-                        and causal_start_idx < end_m_idx):
+                if (causal_start_idx > start_m_idx and causal_start_idx < end_m_idx):
                     out_mask_boundary = tl.full((BLOCK_DMODEL, ),
                                                 causal_start_idx,
                                                 dtype=tl.int32)
@@ -1098,19 +1073,15 @@ def attn_fwd(
                     out_ptrs_mask = (mask_m_offsets[:, None]
                                      >= out_mask_boundary[None, :])
                     z = tl.zeros((1, ), tl.float32)
-                    acc = tl.where(out_ptrs_mask, acc,
-                                   z.to(acc.type.element_ty))
+                    acc = tl.where(out_ptrs_mask, acc, z.to(acc.type.element_ty))
             # write back LSE
-            l_ptrs = (L + off_z * HQ * MAX_SEQLENS_Q +
-                      off_h_q * MAX_SEQLENS_Q + offs_m)
+            l_ptrs = (L + off_z * HQ * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q + offs_m)
             # If seqlen_q not multiple of BLOCK_M, we need to mask out the
             # last few rows. This is only true for the last M block.
             # For others, overflow_size will be -ve
             overflow_size = end_m_idx - seqlen_q
             if overflow_size > 0:
-                boundary = tl.full((BLOCK_M, ),
-                                   BLOCK_M - overflow_size,
-                                   dtype=tl.int32)
+                boundary = tl.full((BLOCK_M, ), BLOCK_M - overflow_size, dtype=tl.int32)
                 l_ptrs_mask = tl.arange(0, BLOCK_M) < boundary
                 tl.store(l_ptrs, m_i + tl.math.log2(l_i), mask=l_ptrs_mask)
             else:
@@ -1125,8 +1096,7 @@ def attn_fwd(
             if overflow_size > 0:
                 o_ptrs_mask = o_ptrs_mask & (offs_m[:, None] < seqlen_q)
             if USE_PADDED_HEAD:
-                o_ptrs_mask = o_ptrs_mask & (offs_d[None, :]
-                                             < IS_ACTUAL_BLOCK_DMODEL)
+                o_ptrs_mask = o_ptrs_mask & (offs_d[None, :] < IS_ACTUAL_BLOCK_DMODEL)
             tl.store(o_ptrs, acc.to(Out.dtype.element_ty), mask=o_ptrs_mask)
 
 
@@ -1174,15 +1144,14 @@ class _attention(torch.autograd.Function):
             if metadata.eight_bit:
                 o = torch.empty_like(
                     q,
-                    dtype=metadata.output_dtype if metadata.output_dtype
-                    is not None else metadata.eight_bit_dtype_torch)
+                    dtype=metadata.output_dtype if metadata.output_dtype is not None
+                    else metadata.eight_bit_dtype_torch)
             else:
                 o = torch.empty_like(q, dtype=q.dtype)
 
         metadata.check_args(q, k, v, o)
 
-        batch, nheads_q, nheads_k, head_size = get_shape_from_layout(
-            q, k, metadata)
+        batch, nheads_q, nheads_k, head_size = get_shape_from_layout(q, k, metadata)
         q_strides, k_strides, v_strides, o_strides = get_strides_from_layout(
             q, k, v, o, metadata)
 
@@ -1239,56 +1208,55 @@ class _attention(torch.autograd.Function):
         # number of compute units available
         NUM_CU = torch.cuda.get_device_properties("cuda").multi_processor_count
 
-        grid = lambda META: (triton.cdiv(metadata.max_seqlens_q, META[
-            'BLOCK_M']), nheads_q, batch)
+        grid = lambda META: (triton.cdiv(metadata.max_seqlens_q, META['BLOCK_M']),
+                             nheads_q, batch)
 
-        attn_fwd[grid](
-            q,
-            k,
-            v,
-            metadata.bias,
-            metadata.sm_scale,
-            M,
-            o,
-            *q_strides,
-            *k_strides,
-            *v_strides,
-            *o_strides,
-            *bias_strides,
-            *alibi_strides,
-            q_descale,
-            k_descale,
-            p_scale,
-            p_descale,
-            o_descale,
-            v_descale,
-            q_descale.numel() == 1 if q_descale is not None else False,
-            k_descale.numel() == 1 if k_descale is not None else False,
-            p_descale.numel() == 1 if p_descale is not None else False,
-            v_descale.numel() == 1 if v_descale is not None else False,
-            metadata.cu_seqlens_q,
-            metadata.cu_seqlens_k,
-            philox_seed=philox_seed,
-            philox_offset_base=philox_offset,
-            encoded_softmax=encoded_softmax,
-            alibi_slopes=metadata.alibi_slopes,
-            HQ=nheads_q,
-            HK=nheads_k,
-            IS_ACTUAL_BLOCK_DMODEL=head_size,
-            MAX_SEQLENS_Q=metadata.max_seqlens_q,
-            MAX_SEQLENS_K=metadata.max_seqlens_k,
-            IS_CAUSAL=metadata.causal,
-            VARLEN=metadata.varlen,
-            BLOCK_DMODEL=padded_d_model,
-            USE_BIAS=metadata.bias is not None,
-            USE_ALIBI=metadata.alibi_slopes is not None,
-            SHOULD_RETURN_ENCODED_SOFTMAX=metadata.return_encoded_softmax,
-            IS_EIGHT_BIT=metadata.eight_bit,
-            USE_P_SCALE=metadata.eight_bit and metadata.use_p_scale,
-            IS_EIGHT_BIT_KV=metadata.eight_bit and metadata.eight_bit_kv,
-            NUM_CU=NUM_CU,
-            B=batch,
-            QUANT_DTYPE=metadata.eight_bit_dtype_triton)
+        attn_fwd[grid](q,
+                       k,
+                       v,
+                       metadata.bias,
+                       metadata.sm_scale,
+                       M,
+                       o,
+                       *q_strides,
+                       *k_strides,
+                       *v_strides,
+                       *o_strides,
+                       *bias_strides,
+                       *alibi_strides,
+                       q_descale,
+                       k_descale,
+                       p_scale,
+                       p_descale,
+                       o_descale,
+                       v_descale,
+                       q_descale.numel() == 1 if q_descale is not None else False,
+                       k_descale.numel() == 1 if k_descale is not None else False,
+                       p_descale.numel() == 1 if p_descale is not None else False,
+                       v_descale.numel() == 1 if v_descale is not None else False,
+                       metadata.cu_seqlens_q,
+                       metadata.cu_seqlens_k,
+                       philox_seed=philox_seed,
+                       philox_offset_base=philox_offset,
+                       encoded_softmax=encoded_softmax,
+                       alibi_slopes=metadata.alibi_slopes,
+                       HQ=nheads_q,
+                       HK=nheads_k,
+                       IS_ACTUAL_BLOCK_DMODEL=head_size,
+                       MAX_SEQLENS_Q=metadata.max_seqlens_q,
+                       MAX_SEQLENS_K=metadata.max_seqlens_k,
+                       IS_CAUSAL=metadata.causal,
+                       VARLEN=metadata.varlen,
+                       BLOCK_DMODEL=padded_d_model,
+                       USE_BIAS=metadata.bias is not None,
+                       USE_ALIBI=metadata.alibi_slopes is not None,
+                       SHOULD_RETURN_ENCODED_SOFTMAX=metadata.return_encoded_softmax,
+                       IS_EIGHT_BIT=metadata.eight_bit,
+                       USE_P_SCALE=metadata.eight_bit and metadata.use_p_scale,
+                       IS_EIGHT_BIT_KV=metadata.eight_bit and metadata.eight_bit_kv,
+                       NUM_CU=NUM_CU,
+                       B=batch,
+                       QUANT_DTYPE=metadata.eight_bit_dtype_triton)
 
         ctx.grid = grid
         ctx.sm_scale = metadata.sm_scale
@@ -1306,8 +1274,7 @@ triton_attention_rocm = _attention.apply
 
 
 def scale_fp8(t, scale=None):
-    t_scaled, scale_out = ops.scaled_fp8_quant(t.reshape(-1, t.shape[-1]),
-                                               scale)
+    t_scaled, scale_out = ops.scaled_fp8_quant(t.reshape(-1, t.shape[-1]), scale)
     return t_scaled.reshape(t.shape), scale_out
 
 

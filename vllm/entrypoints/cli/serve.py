@@ -30,8 +30,7 @@ class ServeSubcommand(CLISubcommand):
         validate_parsed_serve_args(args)
 
     def subparser_init(
-            self,
-            subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
+            self, subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
         serve_parser = subparsers.add_parser(
             "serve",
             help="Start the vLLM OpenAI Compatible API server.",

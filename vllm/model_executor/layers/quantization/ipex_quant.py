@@ -82,24 +82,22 @@ class IPEXConfig(QuantizationConfig):
         method = cls.get_from_keys(config, ["quant_method"]).lower()
         if method == "awq":
             weight_bits = cls.get_from_keys(config, ["w_bit", "bits"])
-            group_size = cls.get_from_keys(config,
-                                           ["q_group_size", "group_size"])
-            modules_to_not_convert = cls.get_from_keys_or(
-                config, ["modules_to_not_convert"], None)
-            return cls(method, weight_bits, group_size, modules_to_not_convert,
-                       False, False)
+            group_size = cls.get_from_keys(config, ["q_group_size", "group_size"])
+            modules_to_not_convert = cls.get_from_keys_or(config,
+                                                          ["modules_to_not_convert"],
+                                                          None)
+            return cls(method, weight_bits, group_size, modules_to_not_convert, False,
+                       False)
         # otherwise for gptq
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
-        lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"],
-                                                 default=False)
+        lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"], default=False)
         desc_act = cls.get_from_keys_or(config, ["desc_act"], default=False)
-        return cls(method, weight_bits, group_size, [], desc_act,
-                   lm_head_quantized)
+        return cls(method, weight_bits, group_size, [], desc_act, lm_head_quantized)
 
     @classmethod
-    def override_quantization_method(
-            cls, hf_quant_cfg, user_quant) -> Optional[QuantizationMethods]:
+    def override_quantization_method(cls, hf_quant_cfg,
+                                     user_quant) -> Optional[QuantizationMethods]:
         if not current_platform.is_cpu() and not current_platform.is_xpu():
             return None
 
@@ -135,10 +133,9 @@ class IPEXGPTQLinearMethod(GPTQLinearMethod):
         try:
             import intel_extension_for_pytorch as ipex
             if ipex.__version__ < MIN_IPEX_VERSION:
-                raise ImportError(
-                    "intel_extension_for_pytorch version is "
-                    "wrong. Please install "
-                    f"intel_extension_for_pytorch>={MIN_IPEX_VERSION}.")
+                raise ImportError("intel_extension_for_pytorch version is "
+                                  "wrong. Please install "
+                                  f"intel_extension_for_pytorch>={MIN_IPEX_VERSION}.")
         except ImportError as err:
             raise ImportError(
                 "Please install "
@@ -201,10 +198,9 @@ class IPEXAWQLinearMethod(AWQLinearMethod):
         try:
             import intel_extension_for_pytorch as ipex
             if ipex.__version__ < MIN_IPEX_VERSION:
-                raise ImportError(
-                    "intel_extension_for_pytorch version is "
-                    "wrong. Please install "
-                    f"intel_extension_for_pytorch>={MIN_IPEX_VERSION}.")
+                raise ImportError("intel_extension_for_pytorch version is "
+                                  "wrong. Please install "
+                                  f"intel_extension_for_pytorch>={MIN_IPEX_VERSION}.")
         except ImportError as err:
             raise ImportError(
                 "Please install "
@@ -227,8 +223,7 @@ class IPEXAWQLinearMethod(AWQLinearMethod):
             group_size=self.quant_config.group_size,
         )
 
-        layer.ipex_output_size = layer.qweight.size(
-            1) * self.quant_config.pack_factor
+        layer.ipex_output_size = layer.qweight.size(1) * self.quant_config.pack_factor
         layer.ipex_qlinear = ipex.llm.quantization.woq_linear. \
             IPEXWeightOnlyQuantizedLinear.from_weight(
             layer.qweight,

@@ -36,10 +36,8 @@ def merge_attn_states_torch(
         output_lse = torch.log(out_se) + max_lse
     p_scale = p_lse_exp / out_se  # [NUM_HEADS, NUM_TOKENS]
     s_scale = s_lse_exp / out_se  # [NUM_HEADS, NUM_TOKENS]
-    p_scale = torch.transpose(p_scale, 0,
-                              1).unsqueeze(2)  # [NUM_TOKENS, NUM_HEADS, 1]
-    s_scale = torch.transpose(s_scale, 0,
-                              1).unsqueeze(2)  # [NUM_TOKENS, NUM_HEADS, 1]
+    p_scale = torch.transpose(p_scale, 0, 1).unsqueeze(2)  # [NUM_TOKENS, NUM_HEADS, 1]
+    s_scale = torch.transpose(s_scale, 0, 1).unsqueeze(2)  # [NUM_TOKENS, NUM_HEADS, 1]
     output = prefix_output * p_scale + suffix_output * s_scale
     return output, output_lse
 
@@ -67,9 +65,8 @@ def generate_markdown_table():
     print(table_header)
     print(table_separator)
     for info in all_case_info:
-        (num_tokens, num_heads, head_size, dtype, device,
-         avg_time_torch_kernel, avg_time_triton_kernel, avg_time_cuda_kernel,
-         performance_improved) = info
+        (num_tokens, num_heads, head_size, dtype, device, avg_time_torch_kernel,
+         avg_time_triton_kernel, avg_time_cuda_kernel, performance_improved) = info
         dtype = shortly_dtype(dtype)
         device = shortly_device(device)
         print(f"| {num_tokens} | {num_heads} | {head_size} "
@@ -84,8 +81,8 @@ def generate_markdown_table():
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("output_dtype", DTYPES)
 @torch.inference_mode()
-def test_merge_attn_states(num_tokens: int, num_query_heads: int,
-                           head_size: int, output_dtype: torch.dtype):
+def test_merge_attn_states(num_tokens: int, num_query_heads: int, head_size: int,
+                           output_dtype: torch.dtype):
     if not current_platform.is_cuda():
         pytest.skip('Currently only support compare triton merge_attn_states '
                     'with custom cuda merge_attn_states kernel')
@@ -99,14 +96,8 @@ def test_merge_attn_states(num_tokens: int, num_query_heads: int,
           f"Device: {current_platform.get_device_name()}")
 
     # prefix_lse and suffix_lse contain inf and normal values
-    prefix_lse = torch.randn(NUM_HEADS,
-                             NUM_TOKENS,
-                             dtype=torch.float32,
-                             device="cuda")
-    suffix_lse = torch.randn(NUM_HEADS,
-                             NUM_TOKENS,
-                             dtype=torch.float32,
-                             device="cuda")
+    prefix_lse = torch.randn(NUM_HEADS, NUM_TOKENS, dtype=torch.float32, device="cuda")
+    suffix_lse = torch.randn(NUM_HEADS, NUM_TOKENS, dtype=torch.float32, device="cuda")
 
     # Generate boolean masks
     mask_prefix = torch.rand(NUM_HEADS, NUM_TOKENS) < 0.1
@@ -173,15 +164,13 @@ def test_merge_attn_states(num_tokens: int, num_query_heads: int,
 
     for _ in range(warmup_times):
         merge_attn_states_triton(output_ref_triton, prefix_output, prefix_lse,
-                                 suffix_output, suffix_lse,
-                                 output_lse_ref_triton)
+                                 suffix_output, suffix_lse, output_lse_ref_triton)
     torch.cuda.synchronize()
 
     for _ in range(repeat_times):
         start.record()
         merge_attn_states_triton(output_ref_triton, prefix_output, prefix_lse,
-                                 suffix_output, suffix_lse,
-                                 output_lse_ref_triton)
+                                 suffix_output, suffix_lse, output_lse_ref_triton)
         end.record()
         torch.cuda.synchronize()
         total_time_triton_kernel += start.elapsed_time(end)
@@ -194,14 +183,14 @@ def test_merge_attn_states(num_tokens: int, num_query_heads: int,
     output_lse_cuda = output_lse.clone()
 
     for _ in range(warmup_times):
-        merge_attn_states_cuda(output_cuda, prefix_output, prefix_lse,
-                               suffix_output, suffix_lse, output_lse_cuda)
+        merge_attn_states_cuda(output_cuda, prefix_output, prefix_lse, suffix_output,
+                               suffix_lse, output_lse_cuda)
     torch.cuda.synchronize()
 
     for _ in range(repeat_times):
         start.record()
-        merge_attn_states_cuda(output_cuda, prefix_output, prefix_lse,
-                               suffix_output, suffix_lse, output_lse_cuda)
+        merge_attn_states_cuda(output_cuda, prefix_output, prefix_lse, suffix_output,
+                               suffix_lse, output_lse_cuda)
         end.record()
         torch.cuda.synchronize()
         total_time_cuda_kernel += start.elapsed_time(end)
@@ -257,9 +246,8 @@ def test_merge_attn_states(num_tokens: int, num_query_heads: int,
 
     device = current_platform.get_device_name()
     all_case_info.append(
-        (NUM_TOKENS, NUM_HEADS, HEAD_SIZE, output_dtype, device,
-         avg_time_torch_kernel, avg_time_triton_kernel, avg_time_cuda_kernel,
-         performance_improved))
+        (NUM_TOKENS, NUM_HEADS, HEAD_SIZE, output_dtype, device, avg_time_torch_kernel,
+         avg_time_triton_kernel, avg_time_cuda_kernel, performance_improved))
     if len(all_case_info) == (len(NUM_BATCH_TOKENS) * len(HEAD_SIZES) *
                               len(NUM_QUERY_HEADS) * len(DTYPES)):
         generate_markdown_table()

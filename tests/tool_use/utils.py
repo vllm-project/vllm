@@ -41,8 +41,7 @@ def ensure_system_prompt(messages: list[dict[str, Any]],
 # universal args for all models go here. also good if you need to test locally
 # and change type or KV cache quantization or something.
 ARGS: list[str] = [
-    "--enable-auto-tool-choice", "--max-model-len", "1024", "--max-num-seqs",
-    "256"
+    "--enable-auto-tool-choice", "--max-model-len", "1024", "--max-num-seqs", "256"
 ]
 
 CONFIGS: dict[str, ServerConfig] = {
@@ -50,8 +49,8 @@ CONFIGS: dict[str, ServerConfig] = {
         "model":
         "NousResearch/Hermes-3-Llama-3.1-8B",
         "arguments": [
-            "--enforce-eager", "--no-enable-prefix-caching",
-            "--tool-call-parser", "hermes", "--chat-template",
+            "--enforce-eager", "--no-enable-prefix-caching", "--tool-call-parser",
+            "hermes", "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_hermes.jinja")
         ],
         "system_prompt":
@@ -65,8 +64,8 @@ CONFIGS: dict[str, ServerConfig] = {
         "model":
         "meta-llama/Meta-Llama-3.1-8B-Instruct",
         "arguments": [
-            "--enforce-eager", "--no-enable-prefix-caching",
-            "--tool-call-parser", "llama3_json", "--chat-template",
+            "--enforce-eager", "--no-enable-prefix-caching", "--tool-call-parser",
+            "llama3_json", "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_llama3.1_json.jinja")
         ],
         "supports_parallel":
@@ -76,8 +75,8 @@ CONFIGS: dict[str, ServerConfig] = {
         "model":
         "meta-llama/Llama-3.2-3B-Instruct",
         "arguments": [
-            "--enforce-eager", "--no-enable-prefix-caching",
-            "--tool-call-parser", "llama3_json", "--chat-template",
+            "--enforce-eager", "--no-enable-prefix-caching", "--tool-call-parser",
+            "llama3_json", "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_llama3.2_json.jinja")
         ],
         "supports_parallel":
@@ -87,10 +86,9 @@ CONFIGS: dict[str, ServerConfig] = {
         "model":
         "meta-llama/Llama-4-Scout-17B-16E-Instruct",
         "arguments": [
-            "--enforce-eager", "--no-enable-prefix-caching",
-            "--tool-call-parser", "pythonic", "--chat-template",
-            str(VLLM_PATH /
-                "examples/tool_chat_template_llama4_pythonic.jinja"), "-tp",
+            "--enforce-eager", "--no-enable-prefix-caching", "--tool-call-parser",
+            "pythonic", "--chat-template",
+            str(VLLM_PATH / "examples/tool_chat_template_llama4_pythonic.jinja"), "-tp",
             "4"
         ],
         "supports_parallel":
@@ -103,8 +101,8 @@ CONFIGS: dict[str, ServerConfig] = {
         "meta-llama/Llama-4-Scout-17B-16E-Instruct",
         "arguments": [
             "--enforce-eager", "--no-enable-prefix-caching", "-tp", "4",
-            "--distributed-executor-backend", "mp", "--tool-call-parser",
-            "llama4_json", "--chat-template",
+            "--distributed-executor-backend", "mp", "--tool-call-parser", "llama4_json",
+            "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_llama4_json.jinja")
         ],
         "supports_parallel":
@@ -116,8 +114,8 @@ CONFIGS: dict[str, ServerConfig] = {
         "model":
         "mistralai/Mistral-7B-Instruct-v0.3",
         "arguments": [
-            "--enforce-eager", "--no-enable-prefix-caching",
-            "--tool-call-parser", "mistral", "--chat-template",
+            "--enforce-eager", "--no-enable-prefix-caching", "--tool-call-parser",
+            "mistral", "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_mistral.jinja"),
             "--ignore-patterns=\"consolidated.safetensors\""
         ],
@@ -148,8 +146,8 @@ CONFIGS: dict[str, ServerConfig] = {
         "model":
         "ibm-granite/granite-3.0-8b-instruct",
         "arguments": [
-            "--enforce-eager", "--no-enable-prefix-caching",
-            "--tool-call-parser", "granite", "--chat-template",
+            "--enforce-eager", "--no-enable-prefix-caching", "--tool-call-parser",
+            "granite", "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_granite.jinja")
         ],
     },
@@ -169,10 +167,9 @@ CONFIGS: dict[str, ServerConfig] = {
         "model":
         "internlm/internlm2_5-7b-chat",
         "arguments": [
-            "--enforce-eager", "--no-enable-prefix-caching",
-            "--tool-call-parser", "internlm", "--chat-template",
-            str(VLLM_PATH /
-                "examples/tool_chat_template_internlm2_tool.jinja"),
+            "--enforce-eager", "--no-enable-prefix-caching", "--tool-call-parser",
+            "internlm", "--chat-template",
+            str(VLLM_PATH / "examples/tool_chat_template_internlm2_tool.jinja"),
             "--trust_remote_code"
         ],
         "supports_parallel":
@@ -182,8 +179,8 @@ CONFIGS: dict[str, ServerConfig] = {
         "model":
         "Team-ACE/ToolACE-8B",
         "arguments": [
-            "--enforce-eager", "--no-enable-prefix-caching",
-            "--tool-call-parser", "pythonic", "--chat-template",
+            "--enforce-eager", "--no-enable-prefix-caching", "--tool-call-parser",
+            "pythonic", "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_toolace.jinja")
         ],
         "supports_parallel":
@@ -287,10 +284,8 @@ MESSAGES_WITH_TOOL_RESPONSE: list[ChatCompletionMessageParam] = [{
         "id": "chatcmpl-tool-03e6481b146e408e9523d9c956696295",
         "type": "function",
         "function": {
-            "name":
-            WEATHER_TOOL["function"]["name"],
-            "arguments":
-            '{"city": "Dallas", "state": "TX", '
+            "name": WEATHER_TOOL["function"]["name"],
+            "arguments": '{"city": "Dallas", "state": "TX", '
             '"unit": "fahrenheit"}'
         }
     }]
@@ -325,20 +320,16 @@ MESSAGES_WITH_PARALLEL_TOOL_RESPONSE: list[ChatCompletionMessageParam] = [{
         "id": "chatcmpl-tool-03e6481b146e408e9523d9c956696295",
         "type": "function",
         "function": {
-            "name":
-            WEATHER_TOOL["function"]["name"],
-            "arguments":
-            '{"city": "Dallas", "state": "TX", '
+            "name": WEATHER_TOOL["function"]["name"],
+            "arguments": '{"city": "Dallas", "state": "TX", '
             '"unit": "fahrenheit"}'
         }
     }, {
         "id": "chatcmpl-tool-d027061e1bd21cda48bee7da829c1f5b",
         "type": "function",
         "function": {
-            "name":
-            WEATHER_TOOL["function"]["name"],
-            "arguments":
-            '{"city": "Orlando", "state": "Fl", '
+            "name": WEATHER_TOOL["function"]["name"],
+            "arguments": '{"city": "Orlando", "state": "Fl", '
             '"unit": "fahrenheit"}'
         }
     }]

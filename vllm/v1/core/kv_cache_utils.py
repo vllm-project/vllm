@@ -42,8 +42,9 @@ class BlockHashType(NamedTuple):
 # variable if set such that processes can share the seed if needed.
 # This aligns with the behavior of Python's hash() function, which also uses
 # a random seed if PYTHONHASHSEED is not set.
-NONE_HASH = int.from_bytes(os.urandom(32), byteorder="big") if os.getenv(
-    'PYTHONHASHSEED') is None else sha256(os.getenv('PYTHONHASHSEED'))
+NONE_HASH = int.from_bytes(
+    os.urandom(32), byteorder="big") if os.getenv('PYTHONHASHSEED') is None else sha256(
+        os.getenv('PYTHONHASHSEED'))
 
 
 class PrefixCachingMetrics:
@@ -281,8 +282,7 @@ def need_extra_keys(request: Request) -> bool:
                                                            is not None)
 
 
-def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
-                            end_token_idx: int,
+def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int, end_token_idx: int,
                             start_mm_idx: int) -> tuple[list[Any], int]:
     """Generate extra keys related to MultiModal request for block hash
     computation. For multi-modal inputs, the extra keys are
@@ -394,11 +394,10 @@ def generate_block_hash_extra_keys(
     return tuple(extra_keys), new_start_mm_idx
 
 
-def hash_block_tokens(
-        hash_function: Callable,
-        parent_block_hash: Optional[int],
-        curr_block_token_ids: Sequence[int],
-        extra_keys: Optional[tuple[Any, ...]] = None) -> BlockHashType:
+def hash_block_tokens(hash_function: Callable,
+                      parent_block_hash: Optional[int],
+                      curr_block_token_ids: Sequence[int],
+                      extra_keys: Optional[tuple[Any, ...]] = None) -> BlockHashType:
     """Computes a hash value corresponding to the contents of a block and
     the contents of the preceding block(s). The hash value is used for
     prefix caching. We use LRU cache for this function to avoid recomputing
@@ -420,8 +419,7 @@ def hash_block_tokens(
 
     curr_block_token_ids_tuple = tuple(curr_block_token_ids)
     return BlockHashType(
-        hash_function(
-            (parent_block_hash, curr_block_token_ids_tuple, extra_keys)),
+        hash_function((parent_block_hash, curr_block_token_ids_tuple, extra_keys)),
         curr_block_token_ids_tuple, extra_keys)
 
 
@@ -464,8 +462,8 @@ def hash_request_tokens(hash_function: Any, block_size: int,
     return ret
 
 
-def estimate_max_model_len(vllm_config: VllmConfig,
-                           kv_cache_spec: dict[str, KVCacheSpec],
+def estimate_max_model_len(vllm_config: VllmConfig, kv_cache_spec: dict[str,
+                                                                        KVCacheSpec],
                            available_memory: int) -> int:
     """
     Estimates the maximum model length that can fit in the available memory
@@ -578,13 +576,11 @@ def create_kv_cache_group_specs(
     kv_cache_groups = []
     for layer_names_one_group in grouped_layer_names:
         layer_spec = kv_cache_spec[layer_names_one_group[0]]
-        assert all(
-            kv_cache_spec[layer_name] == layer_spec
-            for layer_name in layer_names_one_group[1:]), (
-                "All layers in the same KV cache group must share the same "
-                "KVCacheSpec.")
-        kv_cache_groups.append(
-            KVCacheGroupSpec(layer_names_one_group, layer_spec))
+        assert all(kv_cache_spec[layer_name] == layer_spec
+                   for layer_name in layer_names_one_group[1:]), (
+                       "All layers in the same KV cache group must share the same "
+                       "KVCacheSpec.")
+        kv_cache_groups.append(KVCacheGroupSpec(layer_names_one_group, layer_spec))
     return kv_cache_groups
 
 
@@ -629,9 +625,8 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
     if vllm_config.cache_config.num_gpu_blocks_override is not None:
         num_gpu_blocks_override = \
             vllm_config.cache_config.num_gpu_blocks_override
-        logger.info(
-            "Overriding num_gpu_blocks=%d with "
-            "num_gpu_blocks_override=%d", num_blocks, num_gpu_blocks_override)
+        logger.info("Overriding num_gpu_blocks=%d with "
+                    "num_gpu_blocks_override=%d", num_blocks, num_gpu_blocks_override)
         num_blocks = num_gpu_blocks_override
 
     num_tokens = num_blocks * vllm_config.cache_config.block_size
@@ -653,8 +648,7 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
             layer_name: KVCacheTensor(size=per_layer_size)
             for layer_name in kv_cache_spec
         },
-        kv_cache_groups=create_kv_cache_group_specs(kv_cache_spec,
-                                                    grouped_layer_names),
+        kv_cache_groups=create_kv_cache_group_specs(kv_cache_spec, grouped_layer_names),
     )
     return kv_cache_config
 
@@ -686,8 +680,7 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
                 )
 
 
-def get_kv_cache_config(vllm_config: VllmConfig,
-                        kv_cache_spec: dict[str, KVCacheSpec],
+def get_kv_cache_config(vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec],
                         available_memory: int) -> KVCacheConfig:
     """
     Generates the KV cache configuration for a model
@@ -728,14 +721,12 @@ def unify_kv_cache_configs(kv_cache_configs: list[KVCacheConfig]):
     # Sort the kv cache groups by the type_id of their KV cache spec.
     # This can avoid the inconsistency caused by the order of groups.
     for kv_cache_config in kv_cache_configs:
-        kv_cache_config.kv_cache_groups.sort(
-            key=lambda x: x.kv_cache_spec.type_id)
+        kv_cache_config.kv_cache_groups.sort(key=lambda x: x.kv_cache_spec.type_id)
 
     # Verify that the groups of each rank are the same.
     for kv_cache_config in kv_cache_configs[1:]:
-        for group_rank_0, group_rank_i in zip(
-                kv_cache_configs[0].kv_cache_groups,
-                kv_cache_config.kv_cache_groups):
+        for group_rank_0, group_rank_i in zip(kv_cache_configs[0].kv_cache_groups,
+                                              kv_cache_config.kv_cache_groups):
             assert group_rank_0.kv_cache_spec == group_rank_i.kv_cache_spec
 
     # Change the num_blocks of each rank to the smallest among all ranks. We

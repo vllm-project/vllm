@@ -161,17 +161,15 @@ class OpenAIServingTranscription(OpenAIServing):
                          request_logger=request_logger,
                          return_tokens_as_token_ids=return_tokens_as_token_ids)
 
-        self.default_sampling_params = (
-            self.model_config.get_diff_sampling_param())
+        self.default_sampling_params = (self.model_config.get_diff_sampling_param())
         processor = cached_get_processor(model_config.model)
         self.max_audio_clip_s = processor.feature_extractor.chunk_length
         self.model_sr = processor.feature_extractor.sampling_rate
         self.hop_length = processor.feature_extractor.hop_length
 
         if self.default_sampling_params:
-            logger.info(
-                "Overwriting default completion sampling param with: %s",
-                self.default_sampling_params)
+            logger.info("Overwriting default completion sampling param with: %s",
+                        self.default_sampling_params)
 
     async def _preprocess_transcription(
         self,
@@ -192,11 +190,10 @@ class OpenAIServingTranscription(OpenAIServing):
                     " reported WER>=0.5. Results may be less accurate "
                     "for this choice.", request.language)
             else:
-                raise ValueError(
-                    f"Unsupported language: {request.language}."
-                    "Language should be one of:" +
-                    f" {list(ISO639_1_SUPPORTED_LANGS.values())}" +
-                    f"or {list(ISO639_1_OTHER_LANGS.values())}")
+                raise ValueError(f"Unsupported language: {request.language}."
+                                 "Language should be one of:" +
+                                 f" {list(ISO639_1_SUPPORTED_LANGS.values())}" +
+                                 f"or {list(ISO639_1_OTHER_LANGS.values())}")
 
         if len(audio_data) / 1024**2 > MAX_AUDIO_CLIP_FILESIZE_MB:
             raise ValueError("Maximum file size exceeded.")
@@ -206,9 +203,8 @@ class OpenAIServingTranscription(OpenAIServing):
 
         duration = librosa.get_duration(y=y, sr=sr)
         if duration > self.max_audio_clip_s:
-            raise ValueError(
-                f"Maximum clip duration ({self.max_audio_clip_s}s) "
-                "exceeded.")
+            raise ValueError(f"Maximum clip duration ({self.max_audio_clip_s}s) "
+                             "exceeded.")
 
         prompt = {
             "encoder_prompt": {
@@ -224,10 +220,8 @@ class OpenAIServingTranscription(OpenAIServing):
 
     # TODO (varun) : Make verbose response work !
     async def create_transcription(
-        self, audio_data: bytes, request: TranscriptionRequest,
-        raw_request: Request
-    ) -> Union[TranscriptionResponse, AsyncGenerator[str, None],
-               ErrorResponse]:
+        self, audio_data: bytes, request: TranscriptionRequest, raw_request: Request
+    ) -> Union[TranscriptionResponse, AsyncGenerator[str, None], ErrorResponse]:
         """Transcription API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/audio/createTranscription
@@ -264,8 +258,7 @@ class OpenAIServingTranscription(OpenAIServing):
                     "Currently do not support LoRA for Transcription.")
             if prompt_adapter_request:
                 return self.create_error_response(
-                    "Currently do not support PromptAdapter for Transcription."
-                )
+                    "Currently do not support PromptAdapter for Transcription.")
 
             prompt, duration_s = await self._preprocess_transcription(
                 request=request,
@@ -280,8 +273,8 @@ class OpenAIServingTranscription(OpenAIServing):
         try:
             # TODO(rob): subtract len of tokenized prompt.
             default_max_tokens = self.model_config.max_model_len
-            sampling_params = request.to_sampling_params(
-                default_max_tokens, self.default_sampling_params)
+            sampling_params = request.to_sampling_params(default_max_tokens,
+                                                         self.default_sampling_params)
 
             self._log_inputs(
                 request_id,
@@ -300,10 +293,8 @@ class OpenAIServingTranscription(OpenAIServing):
             return self.create_error_response(str(e))
 
         if request.stream:
-            return self.transcription_stream_generator(request,
-                                                       result_generator,
-                                                       request_id,
-                                                       request_metadata,
+            return self.transcription_stream_generator(request, result_generator,
+                                                       request_id, request_metadata,
                                                        duration_s)
         # Non-streaming response.
         try:
@@ -319,8 +310,8 @@ class OpenAIServingTranscription(OpenAIServing):
 
     async def transcription_stream_generator(
             self, request: TranscriptionRequest,
-            result_generator: AsyncGenerator[RequestOutput, None],
-            request_id: str, request_metadata: RequestResponseMetadata,
+            result_generator: AsyncGenerator[RequestOutput, None], request_id: str,
+            request_metadata: RequestResponseMetadata,
             audio_duration_s: float) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
         model_name = request.model
@@ -345,8 +336,8 @@ class OpenAIServingTranscription(OpenAIServing):
                     # NOTE(NickLucche) user can't pass encoder prompts directly
                     # at least not to Whisper. One indicator of the encoder
                     # amount of processing is the log-mel spectogram length.
-                    num_prompt_tokens += ceil(audio_duration_s *
-                                              self.model_sr / self.hop_length)
+                    num_prompt_tokens += ceil(audio_duration_s * self.model_sr /
+                                              self.hop_length)
 
                 # We need to do it here, because if there are exceptions in
                 # the result_generator, it needs to be sent as the FIRST
@@ -361,8 +352,7 @@ class OpenAIServingTranscription(OpenAIServing):
 
                 if output.finish_reason is None:
                     # Still generating, send delta update.
-                    choice_data = TranscriptionResponseStreamChoice(
-                        delta=delta_message)
+                    choice_data = TranscriptionResponseStreamChoice(delta=delta_message)
                 else:
                     # Model is finished generating.
                     choice_data = TranscriptionResponseStreamChoice(

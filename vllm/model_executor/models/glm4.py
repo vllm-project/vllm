@@ -169,14 +169,12 @@ class Glm4DecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
-        self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
         self.post_self_attn_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
-        self.post_mlp_layernorm = RMSNorm(config.hidden_size,
-                                          eps=config.rms_norm_eps)
+        self.post_mlp_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -189,8 +187,7 @@ class Glm4DecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(
-                hidden_states, residual)
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
@@ -199,8 +196,7 @@ class Glm4DecoderLayer(nn.Module):
         hidden_states = self.post_self_attn_layernorm(hidden_states)
 
         # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual)
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         hidden_states = self.post_mlp_layernorm(hidden_states)
 
@@ -212,13 +208,12 @@ ALL_DECODER_LAYER_TYPES = {
 }
 
 
-@support_torch_compile(
-    dynamic_arg_dims={
-        "input_ids": 0,
-        "positions": -1,
-        "intermediate_tensors": 0,
-        "inputs_embeds": 0,
-    })
+@support_torch_compile(dynamic_arg_dims={
+    "input_ids": 0,
+    "positions": -1,
+    "intermediate_tensors": 0,
+    "inputs_embeds": 0,
+})
 class Glm4Model(LlamaModel):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -260,8 +255,7 @@ class Glm4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 self.lm_head = ParallelLMHead(config.vocab_size,
                                               config.hidden_size,
                                               quant_config=quant_config,
-                                              prefix=maybe_prefix(
-                                                  prefix, "lm_head"))
+                                              prefix=maybe_prefix(prefix, "lm_head"))
         else:
             self.lm_head = PPMissingLayer()
 
@@ -289,15 +283,12 @@ class Glm4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(
             self,
-            skip_prefixes=(["lm_head."]
-                           if self.config.tie_word_embeddings else None),
+            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)

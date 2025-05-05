@@ -33,8 +33,7 @@ HF_TEXT_PROMPTS = [
         "The label of the object is stop sign\nSummary above sentence in one word: "  # noqa: E501
     ),
     # T -> X
-    llama3_template.format(
-        "cherry blossom\nSummary above sentence in one word: "),
+    llama3_template.format("cherry blossom\nSummary above sentence in one word: "),
 ]
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
@@ -90,8 +89,7 @@ def _run_test(
                 return_dict=True,
                 output_hidden_states=True,
             )
-            pooled_output = F.normalize(outputs.hidden_states[-1][0, -1, :],
-                                        dim=-1)
+            pooled_output = F.normalize(outputs.hidden_states[-1][0, -1, :], dim=-1)
 
             all_outputs.append(pooled_output.tolist())
 
@@ -140,10 +138,8 @@ def test_models_image(
     model: str,
     dtype: str,
 ) -> None:
-    input_texts_images = [
-        (text, asset.pil_image)
-        for text, asset in zip(HF_IMAGE_PROMPTS, image_assets)
-    ]
+    input_texts_images = [(text, asset.pil_image)
+                          for text, asset in zip(HF_IMAGE_PROMPTS, image_assets)]
     input_texts = [text for text, _ in input_texts_images]
     input_images = [image for _, image in input_texts_images]
 

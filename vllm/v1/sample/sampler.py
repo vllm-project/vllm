@@ -93,8 +93,7 @@ class Sampler(nn.Module):
         may update the logits tensor in-place.
         """
 
-        assert not (sampling_metadata.all_greedy
-                    and sampling_metadata.all_random)
+        assert not (sampling_metadata.all_greedy and sampling_metadata.all_random)
         if sampling_metadata.all_random:
             greedy_sampled = None
         else:
@@ -159,9 +158,7 @@ class Sampler(nn.Module):
         """
         assert token_ids.dtype == torch.int64
         # Find the topK values.
-        topk_logprobs, topk_indices = torch.topk(logprobs,
-                                                 num_logprobs,
-                                                 dim=-1)
+        topk_logprobs, topk_indices = torch.topk(logprobs, num_logprobs, dim=-1)
 
         # Get with the logprob of the prompt or sampled token.
         token_ids = token_ids.unsqueeze(-1)
@@ -185,8 +182,7 @@ class Sampler(nn.Module):
         sampling_metadata: SamplingMetadata,
     ) -> torch.Tensor:
         if sampling_metadata.min_tokens:
-            apply_min_token_penalties(logits,
-                                      sampling_metadata.output_token_ids,
+            apply_min_token_penalties(logits, sampling_metadata.output_token_ids,
                                       sampling_metadata.min_tokens)
         if not sampling_metadata.no_penalties:
             assert sampling_metadata.prompt_token_ids is not None
@@ -211,9 +207,7 @@ class Sampler(nn.Module):
         # Convert logits to probability distribution
         probability_values = torch.nn.functional.softmax(logits, dim=-1)
         # Calculate maximum probabilities per sequence
-        max_probabilities = torch.amax(probability_values,
-                                       dim=-1,
-                                       keepdim=True)
+        max_probabilities = torch.amax(probability_values, dim=-1, keepdim=True)
         # Reshape min_p for broadcasting
         adjusted_min_p = min_p.unsqueeze(1) * max_probabilities
         # Identify valid tokens using threshold comparison
@@ -239,10 +233,9 @@ class Sampler(nn.Module):
                 for token_id, bias in logit_bias.items():
                     # Check token_id bounds to ensure within vocabulary
                     if token_id < 0 or token_id >= vocab_size:
-                        raise ValueError(
-                            f"token_id {token_id} in logit_bias contains "
-                            f"out-of-vocab token id. Vocabulary size: "
-                            f"{vocab_size}")
+                        raise ValueError(f"token_id {token_id} in logit_bias contains "
+                                         f"out-of-vocab token id. Vocabulary size: "
+                                         f"{vocab_size}")
                     logits[i, token_id] += bias
         return logits
 
@@ -252,8 +245,7 @@ class Sampler(nn.Module):
         sampling_metadata: SamplingMetadata,
     ) -> torch.Tensor:
         if sampling_metadata.allowed_token_ids_mask is not None:
-            logits.masked_fill_(sampling_metadata.allowed_token_ids_mask,
-                                float("-inf"))
+            logits.masked_fill_(sampling_metadata.allowed_token_ids_mask, float("-inf"))
         return logits
 
     def apply_bad_words(

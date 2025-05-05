@@ -45,8 +45,7 @@ class Mixer2RMSNormGated(CustomOp):
 
         self.variance_epsilon = eps
         self.weight = nn.Parameter(torch.ones(self.per_rank_hidden_size))
-        set_weight_attrs(self.weight,
-                         {"weight_loader": sharded_weight_loader(0)})
+        set_weight_attrs(self.weight, {"weight_loader": sharded_weight_loader(0)})
         assert self.full_hidden_size % self.tp_size== 0,\
             "Tensor parallel world size must divide hidden size."
 
@@ -89,8 +88,7 @@ class Mixer2RMSNormGated(CustomOp):
             group_count = hidden_dim // self.group_size
             x_grouped = x.view(*prefix_dims, group_count, self.group_size)
             variance = x_grouped.pow(2).mean(-1, keepdim=True)
-            x_grouped = x_grouped * torch.rsqrt(variance +
-                                                self.variance_epsilon)
+            x_grouped = x_grouped * torch.rsqrt(variance + self.variance_epsilon)
             x = x_grouped.view(*prefix_dims, hidden_dim)
 
             if redundant_tp:
@@ -265,8 +263,7 @@ class MambaMixer2(CustomOp):
             self.n_groups = n_groups + extra_groups_for_head_shards(
                 n_groups, self.tp_size)
 
-        self.conv_dim = (intermediate_size +
-                         2 * self.n_groups * ssm_state_size)
+        self.conv_dim = (intermediate_size + 2 * self.n_groups * ssm_state_size)
         self.conv1d = ColumnParallelLinear(
             input_size=conv_kernel_size,
             output_size=self.conv_dim,
@@ -292,8 +289,7 @@ class MambaMixer2(CustomOp):
         # - need to set these settings, to assign the groups to the head shards
         group_shard_settings = (
             self.n_groups * self.ssm_state_size,  # expected model size
-            (self.n_groups - n_groups) *
-            self.ssm_state_size,  # extra dims assigned
+            (self.n_groups - n_groups) * self.ssm_state_size,  # extra dims assigned
             n_groups == 1,  # if there was only one group
         )
         intermediate_settings = (intermediate_size, 0, False)
@@ -359,11 +355,10 @@ class MambaMixer2(CustomOp):
         self.dt_bias = nn.Parameter(torch.ones(num_heads // self.tp_size))
 
         set_weight_attrs(self.D, {"weight_loader": sharded_weight_loader(0)})
-        a_weight_loader = composed_weight_loader(
-            sharded_weight_loader(0), lambda x: -torch.exp(x.float()))
+        a_weight_loader = composed_weight_loader(sharded_weight_loader(0),
+                                                 lambda x: -torch.exp(x.float()))
         set_weight_attrs(self.A, {"weight_loader": a_weight_loader})
-        set_weight_attrs(self.dt_bias,
-                         {"weight_loader": sharded_weight_loader(0)})
+        set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
 
         self.out_proj = RowParallelLinear(intermediate_size,
                                           hidden_size,
@@ -371,12 +366,10 @@ class MambaMixer2(CustomOp):
                                           input_is_parallel=True,
                                           quant_config=quant_config)
 
-        self.norm = Mixer2RMSNormGated(intermediate_size,
-                                       n_groups,
-                                       eps=rms_norm_eps)
+        self.norm = Mixer2RMSNormGated(intermediate_size, n_groups, eps=rms_norm_eps)
 
-    def forward_native(self, hidden_states: torch.Tensor,
-                       conv_state: torch.Tensor, ssm_state: torch.Tensor):
+    def forward_native(self, hidden_states: torch.Tensor, conv_state: torch.Tensor,
+                       ssm_state: torch.Tensor):
         pass
 
     def forward_cuda(
@@ -428,8 +421,7 @@ class MambaMixer2(CustomOp):
                 conv_states=mamba_cache_params.conv_state,
                 has_initial_state=mamba2_metadata.has_initial_states,
                 cache_indices=mamba_cache_params.state_indices_tensor,
-                query_start_loc=attn_metadata.query_start_loc).transpose(
-                    0, 1)[:seq_len]
+                query_start_loc=attn_metadata.query_start_loc).transpose(0, 1)[:seq_len]
 
             # TODO: Why is this needed?
             hidden_states_B_C = hidden_states_B_C.contiguous()
@@ -496,15 +488,18 @@ class MambaMixer2(CustomOp):
         else:
 
             n_groups = self.n_groups // self.tp_size
-            A = self.A[:, None, ...][:, :, None].expand(
-                -1, self.head_dim, self.ssm_state_size).to(dtype=torch.float32)
+            A = self.A[:, None,
+                       ...][:, :,
+                            None].expand(-1, self.head_dim,
+                                         self.ssm_state_size).to(dtype=torch.float32)
             dt = dt[:, :, None].expand(-1, -1, self.head_dim)
             dt_bias = self.dt_bias[:, None, ...].expand(-1, self.head_dim)
             D = self.D[:, None, ...].expand(-1, self.head_dim)
             B = B.view(-1, n_groups, B.shape[1] // n_groups)
             C = C.view(-1, n_groups, C.shape[1] // n_groups)
-            hidden_states_reshaped = hidden_states.view(
-                -1, self.num_heads // self.tp_size, self.head_dim)
+            hidden_states_reshaped = hidden_states.view(-1,
+                                                        self.num_heads // self.tp_size,
+                                                        self.head_dim)
 
             # - the hidden is reshaped into number of current batches
             # - in this case there is no more prefill, so the batches gen
@@ -527,8 +522,8 @@ class MambaMixer2(CustomOp):
                 dt_softplus=True,
                 state_batch_indices=mamba_cache_params.state_indices_tensor,
             )
-            hidden_states = hidden_states.view(
-                -1, (self.num_heads // self.tp_size) * self.head_dim)
+            hidden_states = hidden_states.view(-1, (self.num_heads // self.tp_size) *
+                                               self.head_dim)
 
         # # 4. gated MLP
         hidden_states = self.norm(hidden_states, gate)

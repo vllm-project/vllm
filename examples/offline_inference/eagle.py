@@ -20,9 +20,7 @@ def load_prompts(dataset_path, num_prompts):
             print(f"Error reading dataset: {e}")
             return []
     else:
-        prompts = [
-            "The future of AI is", "The president of the United States is"
-        ]
+        prompts = ["The future of AI is", "The president of the United States is"]
 
     return prompts[:num_prompts]
 
@@ -76,8 +74,7 @@ def main():
             "role": "user",
             "content": prompt
         }],
-                                      add_generation_prompt=True)
-        for prompt in prompts
+                                      add_generation_prompt=True) for prompt in prompts
     ]
 
     llm = LLM(
@@ -102,8 +99,7 @@ def main():
 
     sampling_params = SamplingParams(temperature=args.temp, max_tokens=256)
 
-    outputs = llm.generate(prompt_token_ids=prompt_ids,
-                           sampling_params=sampling_params)
+    outputs = llm.generate(prompt_token_ids=prompt_ids, sampling_params=sampling_params)
 
     if not hasattr(outputs, "metrics") or outputs.metrics is None:
         return
@@ -113,8 +109,7 @@ def main():
     # accepted
     acceptance_counts = [0] * (args.num_spec_tokens + 1)
     for output in outputs:
-        for step, count in enumerate(
-                output.metrics.spec_token_acceptance_counts):
+        for step, count in enumerate(output.metrics.spec_token_acceptance_counts):
             acceptance_counts[step] += count
 
     print("-" * 50)

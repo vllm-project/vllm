@@ -47,8 +47,7 @@ class MockEngine:
     async def step_async(self, virtual_engine):
         # PP size is 1, ignore virtual engine
         self.step_calls += 1
-        return [RequestOutput(
-            request_id=self.request_id)] if self.request_id else []
+        return [RequestOutput(request_id=self.request_id)] if self.request_id else []
 
     async def process_model_inputs_async(self, *args, **kwargs):
         pass
@@ -245,17 +244,14 @@ async def test_output_kinds(async_engine, stop):
 
         output_count = 0
         final_output = None
-        async for output in async_engine.generate(prompt,
-                                                  params,
-                                                  request_id=uid()):
+        async for output in async_engine.generate(prompt, params, request_id=uid()):
             output_count += 1
             final_output = output
 
         assert final_output is not None
         assert final_output.finished
 
-        return (final_output.prompt_token_ids,
-                final_output.outputs[0].token_ids,
+        return (final_output.prompt_token_ids, final_output.outputs[0].token_ids,
                 final_output.outputs[0].text, output_count)
 
     async def run_deltas(prompt: str):
@@ -267,9 +263,7 @@ async def test_output_kinds(async_engine, stop):
         output_text = ""
         output_count = 0
         final_output = None
-        async for output in async_engine.generate(prompt,
-                                                  params,
-                                                  request_id=uid()):
+        async for output in async_engine.generate(prompt, params, request_id=uid()):
             token_ids = output.outputs[0].token_ids
             text = output.outputs[0].text
             final_output = output

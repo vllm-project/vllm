@@ -356,20 +356,11 @@ class WhisperEncoder(nn.Module):
         embed_dim = config.d_model
         self.num_mel_bins = config.num_mel_bins
         self.max_source_positions = config.max_source_positions
-        self.embed_scale = (math.sqrt(embed_dim)
-                            if config.scale_embedding else 1.0)
+        self.embed_scale = (math.sqrt(embed_dim) if config.scale_embedding else 1.0)
 
-        self.conv1 = nn.Conv1d(self.num_mel_bins,
-                               embed_dim,
-                               kernel_size=3,
-                               padding=1)
-        self.conv2 = nn.Conv1d(embed_dim,
-                               embed_dim,
-                               kernel_size=3,
-                               stride=2,
-                               padding=1)
-        self.embed_positions = nn.Embedding(self.max_source_positions,
-                                            embed_dim)
+        self.conv1 = nn.Conv1d(self.num_mel_bins, embed_dim, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv1d(embed_dim, embed_dim, kernel_size=3, stride=2, padding=1)
+        self.embed_positions = nn.Embedding(self.max_source_positions, embed_dim)
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.encoder_layers,
             lambda prefix: WhisperEncoderLayer(vllm_config=vllm_config,
@@ -413,8 +404,8 @@ class WhisperDecoder(nn.Module):
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.d_model,
                                          self.padding_idx)
-        self.embed_positions = WhisperPositionalEmbedding(
-            self.max_target_positions, config.d_model)
+        self.embed_positions = WhisperPositionalEmbedding(self.max_target_positions,
+                                                          config.d_model)
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.decoder_layers,
             lambda prefix: WhisperDecoderLayer(vllm_config=vllm_config,
@@ -480,8 +471,7 @@ class WhisperModel(nn.Module):
             return None
         return self.encoder(input_features)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".self_attn.qkv_proj", ".self_attn.q_proj", "q"),
@@ -511,8 +501,7 @@ class WhisperModel(nn.Module):
                     continue
 
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
@@ -523,9 +512,7 @@ class WhisperProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self) -> WhisperConfig:
         return self.ctx.get_hf_config(WhisperConfig)
 
-    def get_hf_processor(self,
-                         sampling_rate: Optional[int] = None
-                         ) -> WhisperProcessor:
+    def get_hf_processor(self, sampling_rate: Optional[int] = None) -> WhisperProcessor:
         return self.ctx.get_hf_processor(WhisperProcessor)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
@@ -560,13 +547,11 @@ class WhisperDummyInputsBuilder(BaseDummyInputsBuilder[WhisperProcessingInfo]):
         num_audios = mm_counts.get("audio", 0)
 
         return {
-            "audio":
-            self._get_dummy_audios(length=audio_len, num_audios=num_audios)
+            "audio": self._get_dummy_audios(length=audio_len, num_audios=num_audios)
         }
 
 
-class WhisperMultiModalProcessor(
-        EncDecMultiModalProcessor[WhisperProcessingInfo]):
+class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo]):
 
     def _get_data_parser(self) -> MultiModalDataParser:
         feature_extractor = self.info.get_feature_extractor()
@@ -663,8 +648,7 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
         self.proj_out = ParallelLMHead(config.vocab_size,
                                        config.d_model,
                                        quant_config=quant_config)
-        self.proj_out = self.proj_out.tie_weights(
-            self.model.decoder.embed_tokens)
+        self.proj_out = self.proj_out.tie_weights(self.model.decoder.embed_tokens)
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size, logit_scale)
@@ -686,8 +670,8 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
     def get_language_model(self) -> torch.nn.Module:
         return self.model.decoder
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> Optional[MultiModalEmbeddings]:
         # TODO: This method does not obey the interface for SupportsMultiModal.
         # Refactor this once encoder/decoder support is implemented in V1.
         audio_input = self._parse_and_validate_audio_input(**kwargs)
@@ -703,27 +687,23 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
         # encoder/decoder support is implemented in V1.
         return self.model.decoder.get_input_embeddings(input_ids)
 
-    def _parse_and_validate_audio_input(
-            self, **kwargs: object) -> WhisperAudioInputs:
+    def _parse_and_validate_audio_input(self, **kwargs: object) -> WhisperAudioInputs:
         input_features = kwargs.pop("input_features", None)
 
         if input_features is not None:
             if not isinstance(input_features, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of audio features. "
                                  f"Got type: {type(input_features)}")
-            input_features = torch.cat(
-                [feat.to(self.dtype) for feat in input_features])
+            input_features = torch.cat([feat.to(self.dtype) for feat in input_features])
 
         return WhisperAudioInputs(input_features=input_features)
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.proj_out, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.proj_out, hidden_states, sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self, skip_prefixes=["proj_out."])
 
         # add fake zeros bias for k_proj to state_dict
@@ -732,8 +712,8 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
 
 
 def _create_fake_bias_for_k_proj(
-    weights: Iterable[Tuple[str, torch.Tensor]]
-) -> Iterable[Tuple[str, torch.Tensor]]:
+        weights: Iterable[Tuple[str,
+                                torch.Tensor]]) -> Iterable[Tuple[str, torch.Tensor]]:
     """
     Create full zeros bias for k_proj weight in self-attn and x-attn layers.
     So that the bias for k_proj in qkv_proj can be initialized with zeros.

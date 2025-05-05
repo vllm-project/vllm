@@ -22,8 +22,7 @@ async def lifespan(app: FastAPI):
 
     app.state.prefill_client = httpx.AsyncClient(timeout=None,
                                                  base_url=prefiller_base_url)
-    app.state.decode_client = httpx.AsyncClient(timeout=None,
-                                                base_url=decoder_base_url)
+    app.state.decode_client = httpx.AsyncClient(timeout=None, base_url=decoder_base_url)
 
     yield
 
@@ -130,12 +129,10 @@ async def handle_completions(request: Request):
         # Stream response from decode service
         async def generate_stream():
             async for chunk in stream_service_response(app.state.decode_client,
-                                                       "/completions",
-                                                       req_data):
+                                                       "/completions", req_data):
                 yield chunk
 
-        return StreamingResponse(generate_stream(),
-                                 media_type="application/json")
+        return StreamingResponse(generate_stream(), media_type="application/json")
 
     except Exception as e:
         import sys
@@ -158,8 +155,8 @@ async def handle_chat_completions(request: Request):
         req_data = await request.json()
 
         # Send request to prefill service, ignore the response
-        await send_request_to_service(app.state.prefill_client,
-                                      "/chat/completions", req_data)
+        await send_request_to_service(app.state.prefill_client, "/chat/completions",
+                                      req_data)
 
         et = time.time()
         stats_calculator.add(et - st)
@@ -167,12 +164,10 @@ async def handle_chat_completions(request: Request):
         # Stream response from decode service
         async def generate_stream():
             async for chunk in stream_service_response(app.state.decode_client,
-                                                       "/chat/completions",
-                                                       req_data):
+                                                       "/chat/completions", req_data):
                 yield chunk
 
-        return StreamingResponse(generate_stream(),
-                                 media_type="application/json")
+        return StreamingResponse(generate_stream(), media_type="application/json")
 
     except Exception as e:
         import sys

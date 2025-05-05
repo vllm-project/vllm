@@ -5,8 +5,8 @@ from vllm.utils import (STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE,
                         STR_NOT_IMPL_ENC_DEC_SWA)
 
 
-def check_no_caching_or_swa_for_blockmgr_encdec(
-        block_mgr, seq_group: SequenceGroup) -> None:
+def check_no_caching_or_swa_for_blockmgr_encdec(block_mgr,
+                                                seq_group: SequenceGroup) -> None:
     '''
     Enforce that prefix caching & sliding-window attention (SWA)
     are currently unsupported *specifically* for encoder/decoder models.

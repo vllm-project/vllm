@@ -84,42 +84,36 @@ class BitsAndBytesConfig(QuantizationConfig):
             except ValueError:
                 return default_value
 
-        load_in_8bit = get_safe_value(config, ["load_in_8bit"],
-                                      default_value=False)
-        load_in_4bit = get_safe_value(config, ["load_in_4bit"],
-                                      default_value=True)
-        bnb_4bit_compute_dtype = get_safe_value(config,
-                                                ["bnb_4bit_compute_dtype"],
+        load_in_8bit = get_safe_value(config, ["load_in_8bit"], default_value=False)
+        load_in_4bit = get_safe_value(config, ["load_in_4bit"], default_value=True)
+        bnb_4bit_compute_dtype = get_safe_value(config, ["bnb_4bit_compute_dtype"],
                                                 default_value="float32")
-        bnb_4bit_quant_storage = get_safe_value(config,
-                                                ["bnb_4bit_quant_storage"],
+        bnb_4bit_quant_storage = get_safe_value(config, ["bnb_4bit_quant_storage"],
                                                 default_value="uint8")
         bnb_4bit_quant_type = get_safe_value(config, ["bnb_4bit_quant_type"],
                                              default_value="fp4")
-        bnb_4bit_use_double_quant = get_safe_value(
-            config, ["bnb_4bit_use_double_quant"], default_value=False)
+        bnb_4bit_use_double_quant = get_safe_value(config,
+                                                   ["bnb_4bit_use_double_quant"],
+                                                   default_value=False)
         llm_int8_enable_fp32_cpu_offload = get_safe_value(
             config, ["llm_int8_enable_fp32_cpu_offload"], default_value=False)
-        llm_int8_has_fp16_weight = get_safe_value(config,
-                                                  ["llm_int8_has_fp16_weight"],
+        llm_int8_has_fp16_weight = get_safe_value(config, ["llm_int8_has_fp16_weight"],
                                                   default_value=False)
-        llm_int8_skip_modules = get_safe_value(config,
-                                               ["llm_int8_skip_modules"],
+        llm_int8_skip_modules = get_safe_value(config, ["llm_int8_skip_modules"],
                                                default_value=[])
         llm_int8_threshold = get_safe_value(config, ["llm_int8_threshold"],
                                             default_value=6.0)
 
-        return cls(
-            load_in_8bit=load_in_8bit,
-            load_in_4bit=load_in_4bit,
-            bnb_4bit_compute_dtype=bnb_4bit_compute_dtype,
-            bnb_4bit_quant_storage=bnb_4bit_quant_storage,
-            bnb_4bit_quant_type=bnb_4bit_quant_type,
-            bnb_4bit_use_double_quant=bnb_4bit_use_double_quant,
-            llm_int8_enable_fp32_cpu_offload=llm_int8_enable_fp32_cpu_offload,
-            llm_int8_has_fp16_weight=llm_int8_has_fp16_weight,
-            llm_int8_skip_modules=llm_int8_skip_modules,
-            llm_int8_threshold=llm_int8_threshold)
+        return cls(load_in_8bit=load_in_8bit,
+                   load_in_4bit=load_in_4bit,
+                   bnb_4bit_compute_dtype=bnb_4bit_compute_dtype,
+                   bnb_4bit_quant_storage=bnb_4bit_quant_storage,
+                   bnb_4bit_quant_type=bnb_4bit_quant_type,
+                   bnb_4bit_use_double_quant=bnb_4bit_use_double_quant,
+                   llm_int8_enable_fp32_cpu_offload=llm_int8_enable_fp32_cpu_offload,
+                   llm_int8_has_fp16_weight=llm_int8_has_fp16_weight,
+                   llm_int8_skip_modules=llm_int8_skip_modules,
+                   llm_int8_threshold=llm_int8_threshold)
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["LinearMethodBase"]:
@@ -139,8 +133,7 @@ def is_layer_skipped_bnb(prefix: str, llm_int8_skip_modules: List[str]):
                        for module_name in llm_int8_skip_modules)
 
     # Allow certain layers to not be quantized
-    set_components = set(".".join(components[:i + 1])
-                         for i in range(len(components)))
+    set_components = set(".".join(components[:i + 1]) for i in range(len(components)))
     set_llm_int8_skip_modules = set(llm_int8_skip_modules)
     prefix_check = len(set_llm_int8_skip_modules & set_components) != 0
 
@@ -167,8 +160,7 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
 
         self.quant_config = quant_config
 
-    def create_weights(self, layer: torch.nn.Module,
-                       input_size_per_partition: int,
+    def create_weights(self, layer: torch.nn.Module, input_size_per_partition: int,
                        output_partition_sizes: List[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
@@ -202,9 +194,8 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
 
             total_size = input_size_per_partition * sum(output_partition_sizes)
             if total_size % quant_ratio != 0:
-                raise ValueError(
-                    "The input size is not aligned with the quantized "
-                    "weight shape.")
+                raise ValueError("The input size is not aligned with the quantized "
+                                 "weight shape.")
 
             qweight = torch.nn.Parameter(torch.empty(total_size // quant_ratio,
                                                      1,
@@ -238,11 +229,10 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
         else:
             return self._apply_4bit_weight(layer, x, bias)
 
-    def _apply_8bit_weight(
-            self,
-            layer: torch.nn.Module,
-            x: torch.Tensor,
-            bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def _apply_8bit_weight(self,
+                           layer: torch.nn.Module,
+                           x: torch.Tensor,
+                           bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
         # only load the bitsandbytes module when needed
         from bitsandbytes import MatmulLtState, matmul
@@ -264,10 +254,7 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
         out_dim_0 = x.shape[0]
         out_dim_1 = sum(
             [quant_state[1].shape[0] for quant_state in quant_states.items()])
-        out = torch.empty(out_dim_0,
-                          out_dim_1,
-                          dtype=torch.float16,
-                          device=x.device)
+        out = torch.empty(out_dim_0, out_dim_1, dtype=torch.float16, device=x.device)
 
         current_index = 0
         for i in range(len(quant_states)):
@@ -279,27 +266,23 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
                 matmul_states[i] = MatmulLtState()
                 matmul_states[i].CB = qweight[offsets[i]:offsets[i + 1]]
                 matmul_states[i].SCB = quant_states[i].to(x.device)
-                matmul_states[i].threshold = (
-                    self.quant_config.llm_int8_threshold)
+                matmul_states[i].threshold = (self.quant_config.llm_int8_threshold)
                 matmul_states[i].has_fp16_weights = (
                     self.quant_config.llm_int8_has_fp16_weight)
                 matmul_states[i].is_training = False
-                if matmul_states[i].threshold > 0.0 and not matmul_states[
-                        i].has_fp16_weights:
+                if matmul_states[
+                        i].threshold > 0.0 and not matmul_states[i].has_fp16_weights:
                     matmul_states[i].use_pool = True
 
             new_x = bf_x.unsqueeze(0)
 
             out[:, current_index:current_index + output_size] = matmul(
-                new_x,
-                qweight[offsets[i]:offsets[i + 1]],
-                state=matmul_states[i])
+                new_x, qweight[offsets[i]:offsets[i + 1]], state=matmul_states[i])
 
             current_index += output_size
 
             # only update the matmul_states if it is not profile_run
-            if (generation > 0
-                    and not self.quant_config.llm_int8_has_fp16_weight
+            if (generation > 0 and not self.quant_config.llm_int8_has_fp16_weight
                     and matmul_states[i].CB is not None
                     and matmul_states[i].CxB is not None):
                 del matmul_states[i].CB
@@ -317,11 +300,10 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
 
         return out
 
-    def _apply_4bit_weight(
-            self,
-            layer: torch.nn.Module,
-            x: torch.Tensor,
-            bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def _apply_4bit_weight(self,
+                           layer: torch.nn.Module,
+                           x: torch.Tensor,
+                           bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
         original_type = x.dtype
         original_shape = x.shape
@@ -338,10 +320,7 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
         out_dim_0 = x.shape[0]
         out_dim_1 = sum(
             [quant_state[1].shape[0] for quant_state in quant_states.items()])
-        out = torch.empty(out_dim_0,
-                          out_dim_1,
-                          dtype=torch.bfloat16,
-                          device=x.device)
+        out = torch.empty(out_dim_0, out_dim_1, dtype=torch.bfloat16, device=x.device)
         apply_bnb_4bit(bf_x, qweight, offsets, out)
         out = out.to(original_type)
 

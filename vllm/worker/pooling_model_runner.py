@@ -28,8 +28,7 @@ class ModelInputForGPUWithPoolingMetadata(ModelInputForGPU):
     pooling_metadata: Optional["PoolingMetadata"] = None
 
 
-class PoolingModelRunner(
-        GPUModelRunnerBase[ModelInputForGPUWithPoolingMetadata]):
+class PoolingModelRunner(GPUModelRunnerBase[ModelInputForGPUWithPoolingMetadata]):
     _model_input_cls: Type[ModelInputForGPUWithPoolingMetadata] = (
         ModelInputForGPUWithPoolingMetadata)
     _builder_cls: Type[ModelInputForGPUBuilder] = ModelInputForGPUBuilder
@@ -59,15 +58,13 @@ class PoolingModelRunner(
         if self.lora_config:
             assert model_input.lora_requests is not None
             assert model_input.lora_mapping is not None
-            self.set_active_loras(model_input.lora_requests,
-                                  model_input.lora_mapping)
+            self.set_active_loras(model_input.lora_requests, model_input.lora_mapping)
 
         if self.prompt_adapter_config:
             assert model_input.prompt_adapter_requests is not None
             assert model_input.prompt_adapter_mapping is not None
-            self.set_active_prompt_adapters(
-                model_input.prompt_adapter_requests,
-                model_input.prompt_adapter_mapping)
+            self.set_active_prompt_adapters(model_input.prompt_adapter_requests,
+                                            model_input.prompt_adapter_mapping)
 
         # Currently cuda graph is only supported by the decode phase.
         assert model_input.attn_metadata is not None
@@ -87,14 +84,12 @@ class PoolingModelRunner(
             if model_input.inputs_embeds is None:
                 assert model_input.input_tokens is not None
                 graph_batch_size = model_input.input_tokens.shape[0]
-                model_executable = (
-                    self.graph_runners[model_input.virtual_engine][(
-                        graph_batch_size, False)])
+                model_executable = (self.graph_runners[model_input.virtual_engine][(
+                    graph_batch_size, False)])
             else:
                 graph_batch_size = model_input.inputs_embeds.shape[0]
-                model_executable = (
-                    self.graph_runners[model_input.virtual_engine][(
-                        graph_batch_size, True)])
+                model_executable = (self.graph_runners[model_input.virtual_engine][(
+                    graph_batch_size, True)])
         else:
             model_executable = self.model
 
@@ -119,8 +114,7 @@ class PoolingModelRunner(
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
                 intermediate_tensors=intermediate_tensors,
-                **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
-                                             device=self.device),
+                **MultiModalKwargs.as_kwargs(multi_modal_kwargs, device=self.device),
                 **cross_enc_kwargs,
                 **seqlen_agnostic_kwargs)
 
@@ -130,15 +124,12 @@ class PoolingModelRunner(
 
         # Only perform pooling in the last pipeline stage.
         if not get_pp_group().is_last_rank:
-            if (self.is_driver_worker
-                    and hidden_or_intermediate_states is not None
-                    and isinstance(hidden_or_intermediate_states,
-                                   IntermediateTensors)
+            if (self.is_driver_worker and hidden_or_intermediate_states is not None
+                    and isinstance(hidden_or_intermediate_states, IntermediateTensors)
                     and self.observability_config is not None
                     and self.observability_config.collect_model_forward_time):
                 model_forward_end.synchronize()
-                model_forward_time = model_forward_start.elapsed_time(
-                    model_forward_end)
+                model_forward_time = model_forward_start.elapsed_time(model_forward_end)
                 orig_model_forward_time = 0.0
                 if intermediate_tensors is not None:
                     orig_model_forward_time = intermediate_tensors.tensors.get(
@@ -157,9 +148,7 @@ class PoolingModelRunner(
         ]
 
     def make_model_input_from_broadcasted_tensor_dict(
-            self,
-            tensor_dict: Dict[str,
-                              Any]) -> ModelInputForGPUWithPoolingMetadata:
+            self, tensor_dict: Dict[str, Any]) -> ModelInputForGPUWithPoolingMetadata:
         return ModelInputForGPUWithPoolingMetadata.from_broadcasted_tensor_dict(
             tensor_dict,
             attn_backend=self.attn_backend,
@@ -172,15 +161,14 @@ class PoolingModelRunner(
         finished_requests_ids: Optional[List[str]] = None
     ) -> ModelInputForGPUWithPoolingMetadata:
         assert seq_group_metadata_list is not None
-        model_input = self._prepare_model_input_tensors(
-            seq_group_metadata_list, finished_requests_ids)
+        model_input = self._prepare_model_input_tensors(seq_group_metadata_list,
+                                                        finished_requests_ids)
         # Prepare PoolingMetadata.
         assert model_input.seq_lens is not None
         pooling_metadata = self._prepare_pooling(seq_group_metadata_list,
                                                  model_input.seq_lens)
 
-        return dataclasses.replace(model_input,
-                                   pooling_metadata=pooling_metadata)
+        return dataclasses.replace(model_input, pooling_metadata=pooling_metadata)
 
     def _prepare_pooling(
         self,

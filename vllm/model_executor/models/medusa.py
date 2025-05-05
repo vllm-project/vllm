@@ -16,8 +16,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 
 class ResidualBlock(nn.Module):
 
-    def __init__(self, config: VllmConfig, hidden_size: int,
-                 num_layers: int) -> None:
+    def __init__(self, config: VllmConfig, hidden_size: int, num_layers: int) -> None:
         super().__init__()
 
         self.layers = nn.ModuleList([
@@ -70,9 +69,7 @@ class Medusa(nn.Module):
                 org_num_embeddings=self.truncated_vocab_size,
                 padding_size=DEFAULT_VOCAB_PADDING_SIZE,
             )
-            self.lm_heads = [
-                self.lm_head for _ in range(self.config.num_heads)
-            ]
+            self.lm_heads = [self.lm_head for _ in range(self.config.num_heads)]
         else:
             self.lm_heads = nn.ModuleList([
                 ParallelLMHead(
@@ -85,8 +82,7 @@ class Medusa(nn.Module):
 
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                self.truncated_vocab_size,
-                                                logit_scale)
+                                                self.truncated_vocab_size, logit_scale)
 
         # Token map is a idx to token mapping to reduce the vocab size for
         # the draft model. Using smaller vocab size for draft, containing
@@ -99,9 +95,8 @@ class Medusa(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> List[torch.Tensor]:
         return [block(hidden_states) for block in self.blocks]
 
-    def compute_logits(
-            self, hidden_states: List[torch.Tensor],
-            sampling_metadata: SamplingMetadata) -> List[torch.Tensor]:
+    def compute_logits(self, hidden_states: List[torch.Tensor],
+                       sampling_metadata: SamplingMetadata) -> List[torch.Tensor]:
         logits_lst: List[torch.Tensor] = []
 
         for hs, lm_head in zip(hidden_states, self.lm_heads):
@@ -116,10 +111,11 @@ class Medusa(nn.Module):
             if self.token_map is None:
                 logits_lst.append(_logits)
             else:
-                logits_lst.append(-torch.inf * torch.ones(
-                    size=(*_logits.shape[:-1], self.orig_vocab_size),
-                    device=_logits.device,
-                    dtype=_logits.dtype))
+                logits_lst.append(
+                    -torch.inf *
+                    torch.ones(size=(*_logits.shape[:-1], self.orig_vocab_size),
+                               device=_logits.device,
+                               dtype=_logits.dtype))
 
                 logits_lst[-1][..., self.token_map] = _logits
 
@@ -169,8 +165,7 @@ class Medusa(nn.Module):
             sampling_metadata=sampling_metadata,
         )
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
 
@@ -181,8 +176,7 @@ class Medusa(nn.Module):
 
             if name == "token_map":
                 if self.truncated_vocab_size < self.orig_vocab_size:
-                    self.token_map = nn.Parameter(loaded_weight,
-                                                  requires_grad=False)
+                    self.token_map = nn.Parameter(loaded_weight, requires_grad=False)
             elif name in params_dict:
                 weights_map[name] = loaded_weight
             elif (getattr(self.config, "original_lm_head", False)
@@ -196,15 +190,14 @@ class Medusa(nn.Module):
                 loaded_weight = loaded_weight[self.token_map]
 
             param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, loaded_weight)
             loaded_params.add(name)
 
         if self.token_map is not None:
             self.token_map.to(device=self.lm_heads[0].weight.device)
 
-        assert (self.truncated_vocab_size
-                == self.orig_vocab_size) or (self.token_map is not None)
+        assert (self.truncated_vocab_size == self.orig_vocab_size) or (self.token_map
+                                                                       is not None)
 
         return loaded_params

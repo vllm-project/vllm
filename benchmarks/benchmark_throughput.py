@@ -39,8 +39,8 @@ def run_vllm(
     from vllm import LLM, SamplingParams
     llm = LLM(**dataclasses.asdict(engine_args))
     assert all(
-        llm.llm_engine.model_config.max_model_len >= (
-            request.prompt_len + request.expected_output_len)
+        llm.llm_engine.model_config.max_model_len >= (request.prompt_len +
+                                                      request.expected_output_len)
         for request in requests), (
             "Please ensure that max_model_len is greater than the sum of"
             " prompt_len and expected_output_len for all requests.")
@@ -110,8 +110,8 @@ def run_vllm_chat(
     llm = LLM(**dataclasses.asdict(engine_args))
 
     assert all(
-        llm.llm_engine.model_config.max_model_len >= (
-            request.prompt_len + request.expected_output_len)
+        llm.llm_engine.model_config.max_model_len >= (request.prompt_len +
+                                                      request.expected_output_len)
         for request in requests), (
             "Please ensure that max_model_len is greater than the sum of "
             "prompt_len and expected_output_len for all requests.")
@@ -146,12 +146,11 @@ async def run_vllm_async(
 
     async with build_async_engine_client_from_engine_args(
             engine_args, disable_frontend_multiprocessing) as llm:
-        assert all(
-            llm.model_config.max_model_len >= (request.prompt_len +
-                                               request.expected_output_len)
-            for request in requests), (
-                "Please ensure that max_model_len is greater than the sum of"
-                " prompt_len and expected_output_len for all requests.")
+        assert all(llm.model_config.max_model_len >= (request.prompt_len +
+                                                      request.expected_output_len)
+                   for request in requests), (
+                       "Please ensure that max_model_len is greater than the sum of"
+                       " prompt_len and expected_output_len for all requests.")
 
         # Add the requests to the engine.
         prompts: list[Union[TextPrompt, TokensPrompt]] = []
@@ -179,10 +178,7 @@ async def run_vllm_async(
         start = time.perf_counter()
         for i, (prompt, sp,
                 lr) in enumerate(zip(prompts, sampling_params, lora_requests)):
-            generator = llm.generate(prompt,
-                                     sp,
-                                     lora_request=lr,
-                                     request_id=f"test{i}")
+            generator = llm.generate(prompt, sp, lora_request=lr, request_id=f"test{i}")
             generators.append(generator)
         all_gens = merge_async_iterators(*generators)
         async for i, res in all_gens:
@@ -200,8 +196,9 @@ def run_hf(
     trust_remote_code: bool,
     disable_detokenize: bool = False,
 ) -> float:
-    llm = AutoModelForCausalLM.from_pretrained(
-        model, torch_dtype=torch.float16, trust_remote_code=trust_remote_code)
+    llm = AutoModelForCausalLM.from_pretrained(model,
+                                               torch_dtype=torch.float16,
+                                               trust_remote_code=trust_remote_code)
     if llm.config.model_type == "llama":
         # To enable padding in the HF backend.
         tokenizer.pad_token = tokenizer.eos_token
@@ -230,8 +227,7 @@ def run_hf(
                 continue
 
         # Generate the sequences.
-        input_ids = tokenizer(batch, return_tensors="pt",
-                              padding=True).input_ids
+        input_ids = tokenizer(batch, return_tensors="pt", padding=True).input_ids
         llm_outputs = llm.generate(
             input_ids=input_ids.cuda(),
             do_sample=True,
@@ -352,11 +348,10 @@ def main(args: argparse.Namespace):
     print(args)
     random.seed(args.seed)
     # Sample the requests.
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.tokenizer, trust_remote_code=args.trust_remote_code)
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer,
+                                              trust_remote_code=args.trust_remote_code)
     requests = get_requests(args, tokenizer)
-    is_multi_modal = any(request.multi_modal_data is not None
-                         for request in requests)
+    is_multi_modal = any(request.multi_modal_data is not None for request in requests)
     request_outputs: Optional[list[RequestOutput]] = None
     if args.backend == "vllm":
         if args.async_engine:
@@ -369,9 +364,9 @@ def main(args: argparse.Namespace):
                     args.disable_detokenize,
                 ))
         else:
-            elapsed_time, request_outputs = run_vllm(
-                requests, args.n, EngineArgs.from_cli_args(args),
-                args.disable_detokenize)
+            elapsed_time, request_outputs = run_vllm(requests, args.n,
+                                                     EngineArgs.from_cli_args(args),
+                                                     args.disable_detokenize)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
@@ -381,9 +376,9 @@ def main(args: argparse.Namespace):
         elapsed_time = run_mii(requests, args.model, args.tensor_parallel_size,
                                args.output_len)
     elif args.backend == "vllm-chat":
-        elapsed_time, request_outputs = run_vllm_chat(
-            requests, args.n, EngineArgs.from_cli_args(args),
-            args.disable_detokenize)
+        elapsed_time, request_outputs = run_vllm_chat(requests, args.n,
+                                                      EngineArgs.from_cli_args(args),
+                                                      args.disable_detokenize)
     else:
         raise ValueError(f"Unknown backend: {args.backend}")
 
@@ -397,12 +392,10 @@ def main(args: argparse.Namespace):
                 continue
             total_prompt_tokens += len(
                 ro.prompt_token_ids) if ro.prompt_token_ids else 0
-            total_output_tokens += sum(
-                len(o.token_ids) for o in ro.outputs if o)
+            total_output_tokens += sum(len(o.token_ids) for o in ro.outputs if o)
         total_num_tokens = total_prompt_tokens + total_output_tokens
     else:
-        total_num_tokens = sum(r.prompt_len + r.expected_output_len
-                               for r in requests)
+        total_num_tokens = sum(r.prompt_len + r.expected_output_len for r in requests)
         total_output_tokens = sum(r.expected_output_len for r in requests)
         total_prompt_tokens = total_num_tokens - total_output_tokens
 
@@ -457,8 +450,7 @@ def validate_args(args):
 
     # === Dataset Configuration ===
     if not args.dataset and not args.dataset_path:
-        print(
-            "When dataset path is not set, it will default to random dataset")
+        print("When dataset path is not set, it will default to random dataset")
         args.dataset_name = 'random'
         if args.input_len is None:
             raise ValueError("input_len must be provided for a random dataset")
@@ -466,23 +458,20 @@ def validate_args(args):
     # === Dataset Name Specific Checks ===
     # --hf-subset and --hf-split: only used
     # when dataset_name is 'hf'
-    if args.dataset_name != "hf" and (
-            getattr(args, "hf_subset", None) is not None
-            or getattr(args, "hf_split", None) is not None):
+    if args.dataset_name != "hf" and (getattr(args, "hf_subset", None) is not None
+                                      or getattr(args, "hf_split", None) is not None):
         warnings.warn("--hf-subset and --hf-split will be ignored \
                 since --dataset-name is not 'hf'.",
                       stacklevel=2)
     elif args.dataset_name == "hf":
-        if args.dataset_path in (
-                VisionArenaDataset.SUPPORTED_DATASET_PATHS.keys()
-                | ConversationDataset.SUPPORTED_DATASET_PATHS):
+        if args.dataset_path in (VisionArenaDataset.SUPPORTED_DATASET_PATHS.keys()
+                                 | ConversationDataset.SUPPORTED_DATASET_PATHS):
             assert args.backend == "vllm-chat", f"{args.dataset_path} needs to use vllm-chat as the backend."  #noqa: E501
         elif args.dataset_path in (InstructCoderDataset.SUPPORTED_DATASET_PATHS
                                    | AIMODataset.SUPPORTED_DATASET_PATHS):
             assert args.backend == "vllm", f"{args.dataset_path} needs to use vllm as the backend."  #noqa: E501
         else:
-            raise ValueError(
-                f"{args.dataset_path} is not supported by hf dataset.")
+            raise ValueError(f"{args.dataset_path} is not supported by hf dataset.")
 
     # --random-range-ratio: only used when dataset_name is 'random'
     if args.dataset_name != 'random' and args.random_range_ratio is not None:
@@ -500,8 +489,7 @@ def validate_args(args):
 
     # === LoRA Settings ===
     if getattr(args, "enable_lora", False) and args.backend != "vllm":
-        raise ValueError(
-            "LoRA benchmarking is only supported for vLLM backend")
+        raise ValueError("LoRA benchmarking is only supported for vLLM backend")
     if getattr(args, "enable_lora", False) and args.lora_path is None:
         raise ValueError("LoRA path must be provided when enable_lora is True")
 
@@ -520,14 +508,12 @@ def validate_args(args):
     if args.backend == "mii" and args.n != 1:
         raise ValueError("n must be 1 for MII backend.")
     if args.backend == "mii" and args.tokenizer != args.model:
-        raise ValueError(
-            "Tokenizer must be the same as the model for MII backend.")
+        raise ValueError("Tokenizer must be the same as the model for MII backend.")
 
     # --data-parallel is not supported currently.
     # https://github.com/vllm-project/vllm/issues/16222
     if args.data_parallel_size > 1:
-        raise ValueError(
-            "Data parallel is not supported in offline benchmark, \
+        raise ValueError("Data parallel is not supported in offline benchmark, \
             please use benchmark serving instead")
 
 
@@ -537,20 +523,18 @@ if __name__ == "__main__":
                         type=str,
                         choices=["vllm", "hf", "mii", "vllm-chat"],
                         default="vllm")
-    parser.add_argument(
-        "--dataset-name",
-        type=str,
-        choices=["sharegpt", "random", "sonnet", "burstgpt", "hf"],
-        help="Name of the dataset to benchmark on.",
-        default="sharegpt")
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        default=None,
-        help="Path to the ShareGPT dataset, will be deprecated in\
+    parser.add_argument("--dataset-name",
+                        type=str,
+                        choices=["sharegpt", "random", "sonnet", "burstgpt", "hf"],
+                        help="Name of the dataset to benchmark on.",
+                        default="sharegpt")
+    parser.add_argument("--dataset",
+                        type=str,
+                        default=None,
+                        help="Path to the ShareGPT dataset, will be deprecated in\
             the next release. The dataset is expected to "
-        "be a json in form of list[dict[..., conversations: "
-        "list[dict[..., value: <prompt_or_response>]]]]")
+                        "be a json in form of list[dict[..., conversations: "
+                        "list[dict[..., value: <prompt_or_response>]]]]")
     parser.add_argument("--dataset-path",
                         type=str,
                         default=None,
@@ -576,11 +560,10 @@ if __name__ == "__main__":
                         type=int,
                         default=None,
                         help="Maximum batch size for HF backend.")
-    parser.add_argument(
-        '--output-json',
-        type=str,
-        default=None,
-        help='Path to save the throughput results in JSON format.')
+    parser.add_argument('--output-json',
+                        type=str,
+                        default=None,
+                        help='Path to save the throughput results in JSON format.')
     parser.add_argument("--async-engine",
                         action='store_true',
                         default=False,
@@ -589,11 +572,10 @@ if __name__ == "__main__":
                         action='store_true',
                         default=False,
                         help="Disable decoupled async engine frontend.")
-    parser.add_argument(
-        "--disable-detokenize",
-        action="store_true",
-        help=("Do not detokenize the response (i.e. do not include "
-              "detokenization time in the measurement)"))
+    parser.add_argument("--disable-detokenize",
+                        action="store_true",
+                        help=("Do not detokenize the response (i.e. do not include "
+                              "detokenization time in the measurement)"))
     # LoRA
     parser.add_argument(
         "--lora-path",

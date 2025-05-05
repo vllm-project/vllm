@@ -21,8 +21,7 @@ class AllSparkLinearKernel(MPLinearKernel):
         return 80
 
     @classmethod
-    def can_implement(cls,
-                      c: MPLinearLayerConfig) -> Tuple[bool, Optional[str]]:
+    def can_implement(cls, c: MPLinearLayerConfig) -> Tuple[bool, Optional[str]]:
         if c.has_g_idx:
             return False, "Act reordering currently not supported by AllSpark"
 
@@ -58,10 +57,7 @@ class AllSparkLinearKernel(MPLinearKernel):
         old_scale_param = getattr(layer, self.w_s_name)
 
         assert isinstance(old_weight_param, BasevLLMParameter)
-        permute_param_layout_(old_weight_param,
-                              input_dim=0,
-                              output_dim=1,
-                              packed_dim=0)
+        permute_param_layout_(old_weight_param, input_dim=0, output_dim=1, packed_dim=0)
 
         assert isinstance(old_scale_param, BasevLLMParameter)
         permute_param_layout_(old_scale_param, input_dim=0, output_dim=1)
@@ -73,8 +69,7 @@ class AllSparkLinearKernel(MPLinearKernel):
             dtype=torch.uint8)
         new_weight_param.data = new_weight_param.data.t().contiguous()
 
-        new_scale_param = torch.nn.Parameter(old_scale_param.data,
-                                             requires_grad=False)
+        new_scale_param = torch.nn.Parameter(old_scale_param.data, requires_grad=False)
 
         # reorder K x N weight as N32K16 format for Ampere W8A16
         new_weight_param.data, new_scale_param.data, _ = \

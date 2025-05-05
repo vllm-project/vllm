@@ -45,8 +45,8 @@ def should_ignore_layer(
         # Layer should be ignored if shards are ignored.
         should_ignore_layer = None
         for shard_name in shard_names:
-            should_ignore_shard = check_equal_or_regex_match(
-                layer_name=shard_name, targets=ignore)
+            should_ignore_shard = check_equal_or_regex_match(layer_name=shard_name,
+                                                             targets=ignore)
 
             # If shard_idx=0, set layer ignore to match shard.
             if should_ignore_layer is None:
@@ -68,8 +68,7 @@ def should_ignore_layer(
     return should_ignore_layer
 
 
-def check_equal_or_regex_match(layer_name: str,
-                               targets: Iterable[str]) -> bool:
+def check_equal_or_regex_match(layer_name: str, targets: Iterable[str]) -> bool:
     """
     Checks whether a layer_name is exactly equal or a regex match for
     if target starts with 're:' to any target in list.
@@ -111,15 +110,13 @@ def find_matched_target(
     if layer_name is None:
         layer_name = ""
 
-    matched_target = (
-        _find_first_match(layer_name, targets)
-        or _find_first_match(module.__class__.__name__, targets, True)
-        or _match_fused_layer(layer_name, targets, fused_mapping))
+    matched_target = (_find_first_match(layer_name, targets)
+                      or _find_first_match(module.__class__.__name__, targets, True)
+                      or _match_fused_layer(layer_name, targets, fused_mapping))
 
     if matched_target is None:
-        raise ValueError(
-            f"Unable to find matching target for {layer_name} in the "
-            "compressed-tensors config.")
+        raise ValueError(f"Unable to find matching target for {layer_name} in the "
+                         "compressed-tensors config.")
 
     return matched_target
 
@@ -138,9 +135,7 @@ def _find_first_match(value: str,
     """
 
     for target in targets:
-        if _is_equal_or_regex_match(value,
-                                    target,
-                                    check_contains=check_contains):
+        if _is_equal_or_regex_match(value, target, check_contains=check_contains):
             return target
     return None
 
@@ -166,9 +161,8 @@ def _is_equal_or_regex_match(value: str,
     return False
 
 
-def _match_fused_layer(
-        layer_name: str, target_layers: Iterable[str],
-        fused_mapping: Mapping[str, List[str]]) -> Optional[str]:
+def _match_fused_layer(layer_name: str, target_layers: Iterable[str],
+                       fused_mapping: Mapping[str, List[str]]) -> Optional[str]:
     """
     Match a fused layer name to its corresponding individual layer in 
     target_layers. Returns first value in fused_mapping which matches targets
@@ -187,8 +181,7 @@ def _match_fused_layer(
                         "model.layers.0.self_attn.v_proj"]
     """
     # find layer_name in mapping
-    fused = next((key for key in fused_mapping if layer_name.endswith(key)),
-                 None)
+    fused = next((key for key in fused_mapping if layer_name.endswith(key)), None)
     if fused is None:
         return None
 

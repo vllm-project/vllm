@@ -88,8 +88,7 @@ def moe_align_block_size_stage4(
     start_idx = pid * tokens_per_thread
     off_t = pid * num_experts
 
-    for i in range(start_idx, tl.minimum(start_idx + tokens_per_thread,
-                                         numel)):
+    for i in range(start_idx, tl.minimum(start_idx + tokens_per_thread, numel)):
         expert_id = tl.load(topk_ids_ptr + i)
         token_cnt = tl.load(tokens_cnts_ptr + off_t + expert_id)
         rank_post_pad = token_cnt + tl.load(cumsum_ptr + expert_id)
@@ -112,9 +111,7 @@ def moe_align_block_size_triton(
     tokens_cnts = torch.zeros((num_experts + 1, num_experts),
                               dtype=torch.int32,
                               device=topk_ids.device)
-    cumsum = torch.zeros((num_experts + 1, ),
-                         dtype=torch.int32,
-                         device=topk_ids.device)
+    cumsum = torch.zeros((num_experts + 1, ), dtype=torch.int32, device=topk_ids.device)
     tokens_per_thread = ceil_div(numel, num_experts)
 
     moe_align_block_size_stage1[grid](
@@ -149,11 +146,11 @@ def moe_align_block_size_triton(
 
 
 def moe_align_block_size(
-    topk_ids: torch.Tensor,
-    block_size: int,
-    num_experts: int,
-    expert_map: Optional[torch.Tensor] = None,
-    pad_sorted_ids: bool = False
+        topk_ids: torch.Tensor,
+        block_size: int,
+        num_experts: int,
+        expert_map: Optional[torch.Tensor] = None,
+        pad_sorted_ids: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Aligns the token distribution across experts to be compatible with block
@@ -211,9 +208,7 @@ def moe_align_block_size(
     expert_ids = torch.zeros((max_num_m_blocks, ),
                              dtype=torch.int32,
                              device=topk_ids.device)
-    num_tokens_post_pad = torch.empty((1),
-                                      dtype=torch.int32,
-                                      device=topk_ids.device)
+    num_tokens_post_pad = torch.empty((1), dtype=torch.int32, device=topk_ids.device)
     if num_experts >= 224:
         if envs.VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON or num_experts != 256:
             moe_align_block_size_triton(

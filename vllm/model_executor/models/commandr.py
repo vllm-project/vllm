@@ -60,8 +60,7 @@ def layer_norm_func(hidden_states, weight, variance_epsilon):
     hidden_states = hidden_states.to(torch.float32)
     mean = hidden_states.mean(-1, keepdim=True)
     variance = (hidden_states - mean).pow(2).mean(-1, keepdim=True)
-    hidden_states = (hidden_states - mean) * torch.rsqrt(variance +
-                                                         variance_epsilon)
+    hidden_states = (hidden_states - mean) * torch.rsqrt(variance + variance_epsilon)
     hidden_states = weight.to(torch.float32) * hidden_states
     return hidden_states.to(input_dtype)
 
@@ -72,8 +71,7 @@ class LayerNorm(nn.Module):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(param_shape))
         self.variance_epsilon = eps
-        set_weight_attrs(self.weight,
-                         {"weight_loader": row_parallel_weight_loader})
+        set_weight_attrs(self.weight, {"weight_loader": row_parallel_weight_loader})
 
     def forward(self, hidden_states, residuals=None):
         hidden_states = layer_norm_func(hidden_states, self.weight,
@@ -179,15 +177,13 @@ class CohereAttention(nn.Module):
         )
 
         # Model v2 has interleaved sliding windows, v1 does not
-        interleaved_sliding_window = getattr(config,
-                                             "interleaved_sliding_window",
-                                             None)
+        interleaved_sliding_window = getattr(config, "interleaved_sliding_window", None)
         self.v1 = interleaved_sliding_window is None
 
         layer_idx = extract_layer_index(prefix)
-        layer_has_sliding_window = (
-            getattr(config, "sliding_window_pattern", False)
-            and (layer_idx + 1) % self.config.sliding_window_pattern != 0)
+        layer_has_sliding_window = (getattr(config, "sliding_window_pattern", False) and
+                                    (layer_idx + 1) % self.config.sliding_window_pattern
+                                    != 0)
 
         self.sliding_window = (interleaved_sliding_window
                                if layer_has_sliding_window else None)
@@ -201,11 +197,9 @@ class CohereAttention(nn.Module):
                               per_layer_sliding_window=self.sliding_window,
                               prefix=f"{prefix}.attn")
         if self.use_qk_norm:
-            self.q_norm = LayerNorm(param_shape=(self.num_heads,
-                                                 self.head_dim),
+            self.q_norm = LayerNorm(param_shape=(self.num_heads, self.head_dim),
                                     eps=config.layer_norm_eps)
-            self.k_norm = LayerNorm(param_shape=(self.num_kv_heads,
-                                                 self.head_dim),
+            self.k_norm = LayerNorm(param_shape=(self.num_kv_heads, self.head_dim),
                                     eps=config.layer_norm_eps)
 
     def _apply_qk_norm(self, q, k):
@@ -248,9 +242,7 @@ class CohereDecoderLayer(nn.Module):
                                          quant_config=quant_config,
                                          prefix=f"{prefix}.self_attn")
 
-        self.mlp = CohereMLP(config,
-                             quant_config=quant_config,
-                             prefix=f"{prefix}.mlp")
+        self.mlp = CohereMLP(config, quant_config=quant_config, prefix=f"{prefix}.mlp")
         self.input_layernorm = LayerNorm(param_shape=(config.hidden_size),
                                          eps=config.layer_norm_eps)
 
@@ -299,9 +291,8 @@ class CohereModel(nn.Module):
             prefix=f"{prefix}.layers")
         self.norm = LayerNorm(param_shape=(config.hidden_size),
                               eps=config.layer_norm_eps)
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size))
+        self.make_empty_intermediate_tensors = (make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -396,16 +387,15 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
     ) -> Optional[torch.Tensor]:
         is_not_lora = hasattr(self.model.embed_tokens, 'weight')
         if is_not_lora:
-            logits = self.logits_processor(self.model.embed_tokens,
-                                           hidden_states, sampling_metadata)
+            logits = self.logits_processor(self.model.embed_tokens, hidden_states,
+                                           sampling_metadata)
         else:
             logits = self.logits_processor(self.model.embed_tokens.base_layer,
                                            hidden_states, sampling_metadata)
 
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -422,14 +412,13 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
             if "rotary_emb.inv_freq" in name:
                 continue
 
-            if (self.quant_config is not None and
-                (scale_name := self.quant_config.get_cache_scale(name))):
+            if (self.quant_config is not None
+                    and (scale_name := self.quant_config.get_cache_scale(name))):
                 # Loading kv cache quantization scales
                 param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
-                                 loaded_weight[0])
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                loaded_weight = (loaded_weight
+                                 if loaded_weight.dim() == 0 else loaded_weight[0])
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
@@ -463,8 +452,7 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
                 if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params

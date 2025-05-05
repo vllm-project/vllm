@@ -53,8 +53,7 @@ def stress_test(my_rank, pipe):
         mean = torch.rand(1).item() * 100
         std = torch.rand(1).item() * 100
         size = torch.randint(900, 1000, (2, ))
-        x = torch.normal(mean * 1.0, std * 1.0,
-                         size=size.tolist()).to(pipe.device)
+        x = torch.normal(mean * 1.0, std * 1.0, size=size.tolist()).to(pipe.device)
 
         # 5% probability of sending a None
         if torch.rand(1).item() < 0.05:
@@ -100,15 +99,12 @@ def latency_test(my_rank, pipe, nelement, ntensor):
 
         if my_rank == 0:
             # create tensor
-            tensors = [
-                torch.rand(nelement).to(pipe.device) for _ in range(ntensor)
-            ]
+            tensors = [torch.rand(nelement).to(pipe.device) for _ in range(ntensor)]
 
         torch.distributed.barrier()
 
         if my_rank == 0:
-            t = torch.tensor([time.time()],
-                             dtype=torch.float64).to(pipe.device)
+            t = torch.tensor([time.time()], dtype=torch.float64).to(pipe.device)
             for tensor in tensors:
                 pipe.send_tensor(tensor)
             pipe.send_tensor(t)

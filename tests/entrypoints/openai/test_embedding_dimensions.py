@@ -52,8 +52,7 @@ def server(model_info, dtype: str):
     if model_info.name == "Snowflake/snowflake-arctic-embed-m-v1.5":
         # Manually enable Matryoshka Embeddings
         args.extend([
-            "--trust_remote_code", "--hf_overrides",
-            '{"matryoshka_dimensions":[256]}'
+            "--trust_remote_code", "--hf_overrides", '{"matryoshka_dimensions":[256]}'
         ])
 
     with RemoteOpenAIServer(model_info.name, args) as remote_server:
@@ -68,8 +67,8 @@ def hf_model(hf_runner, model_info, dtype: str):
 
 
 @pytest.mark.asyncio
-async def test_matryoshka(model_info: EmbedModelInfo,
-                          server: RemoteOpenAIServer, hf_model: HfRunner):
+async def test_matryoshka(model_info: EmbedModelInfo, server: RemoteOpenAIServer,
+                          hf_model: HfRunner):
     client = server.get_async_client()
 
     async def make_request_and_correctness_test(dimensions):
@@ -95,8 +94,7 @@ async def test_matryoshka(model_info: EmbedModelInfo,
             assert len(embeddings.data[0].embedding) == dimensions
 
         vllm_outputs = [d.embedding for d in embeddings.data]
-        run_embedding_correctness_test(hf_model, prompts, vllm_outputs,
-                                       dimensions)
+        run_embedding_correctness_test(hf_model, prompts, vllm_outputs, dimensions)
 
     if model_info.is_matryoshka:
         valid_dimensions: list[Optional[int]] = [None]

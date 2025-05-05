@@ -7,8 +7,7 @@ from vllm import LLM, SamplingParams
 from vllm.utils import FlexibleArgumentParser
 
 # A very long prompt, total number of tokens is about 15k.
-LONG_PROMPT = ["You are an expert in large language models, aren't you?"
-               ] * 1000
+LONG_PROMPT = ["You are an expert in large language models, aren't you?"] * 1000
 LONG_PROMPT = ' '.join(LONG_PROMPT)
 
 
@@ -30,8 +29,8 @@ def main(args):
 
     print("------start generating------")
     for i in range(3):
-        profiler.runctx('llm.generate(LONG_PROMPT, sampling_params)',
-                        globals(), locals())
+        profiler.runctx('llm.generate(LONG_PROMPT, sampling_params)', globals(),
+                        locals())
 
     # analyze the runtime of hashing function
     stats = pstats.Stats(profiler)

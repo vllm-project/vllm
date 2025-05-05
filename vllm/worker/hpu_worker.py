@@ -114,8 +114,7 @@ class HPUWorker(LocalOrDistributedWorkerBase):
             self.device = torch.device("hpu")
             torch.hpu.set_device(self.device)
         else:
-            raise RuntimeError(
-                f"Not support device type: {self.device_config.device}")
+            raise RuntimeError(f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
         if self.model_config.quantization == 'inc':
             self._set_env_vars()
@@ -138,11 +137,10 @@ class HPUWorker(LocalOrDistributedWorkerBase):
         # VLLM_HPU_LOG_STEP_CPU_FALLBACKS_ALL     - will log cpu fallbacks per engine step, always, even if there were none # noqa:E501
         log_graph_compilation_all = os.environ.get(
             'VLLM_HPU_LOG_STEP_GRAPH_COMPILATION_ALL', '0') != '0'
-        log_graph_compilation = os.environ.get(
-            'VLLM_HPU_LOG_STEP_GRAPH_COMPILATION',
-            '0') != '0' or log_graph_compilation_all
-        log_cpu_fallbacks_all = os.environ.get(
-            'VLLM_HPU_LOG_STEP_CPU_FALLBACKS_ALL', '0') != '0'
+        log_graph_compilation = os.environ.get('VLLM_HPU_LOG_STEP_GRAPH_COMPILATION',
+                                               '0') != '0' or log_graph_compilation_all
+        log_cpu_fallbacks_all = os.environ.get('VLLM_HPU_LOG_STEP_CPU_FALLBACKS_ALL',
+                                               '0') != '0'
         log_cpu_fallbacks = os.environ.get('VLLM_HPU_LOG_STEP_CPU_FALLBACKS',
                                            '0') != '0' or log_cpu_fallbacks_all
         if (log_graph_compilation or log_cpu_fallbacks) and \
@@ -159,8 +157,7 @@ class HPUWorker(LocalOrDistributedWorkerBase):
                     for v in seq_group_metadata.seq_data.values()
                 ]) for seq_group_metadata in seq_group_metadata_list
             ])  # whoa, that's some spicy stuff right here
-            max_num_blocks = (
-                (max_context_len - 1) // self.cache_config.block_size) + 1
+            max_num_blocks = ((max_context_len - 1) // self.cache_config.block_size) + 1
             input_stats = (f'is_prompt: {is_prompt}, '
                            f'num_seqs: {len(seq_group_metadata_list)}, '
                            f'max_context_len: {max_context_len}, '
@@ -169,14 +166,13 @@ class HPUWorker(LocalOrDistributedWorkerBase):
                 "graph_compilation"
             ) if log_graph_compilation else contextlib.nullcontext()
             cpu_fallback_ctx = metric_localcontext(
-                "cpu_fallback"
-            ) if log_cpu_fallbacks else contextlib.nullcontext()
+                "cpu_fallback") if log_cpu_fallbacks else contextlib.nullcontext()
             with gc_ctx as gc_local_metric, \
                 cpu_fallback_ctx as cpu_fallback_local_metric:
                 output = LocalOrDistributedWorkerBase.execute_model(
                     self, execute_model_req)
-            if (log_graph_compilation and gc_local_metric.stats()[0][1]
-                    > 0) or log_graph_compilation_all:
+            if (log_graph_compilation
+                    and gc_local_metric.stats()[0][1] > 0) or log_graph_compilation_all:
                 msg = ("VLLM_HPU_STEP_GRAPH_COMPILATION: "
                        f"{gc_local_metric.stats()}, {input_stats}")
                 logger.warning(msg)
@@ -188,8 +184,7 @@ class HPUWorker(LocalOrDistributedWorkerBase):
 
             return output
 
-        output = LocalOrDistributedWorkerBase.execute_model(
-            self, execute_model_req)
+        output = LocalOrDistributedWorkerBase.execute_model(self, execute_model_req)
         return output
 
     @torch.inference_mode()
@@ -222,28 +217,25 @@ class HPUWorker(LocalOrDistributedWorkerBase):
         free_hpu_memory = torch.hpu.mem_get_info()[0]
 
         cache_block_size = self.get_cache_block_size_bytes()
-        graph_reserved_mem = (float(
-            os.environ.get('VLLM_GRAPH_RESERVED_MEM', '0.1'))
+        graph_reserved_mem = (float(os.environ.get('VLLM_GRAPH_RESERVED_MEM', '0.1'))
                               if not self.model_config.enforce_eager else 0)
         graph_headroom = 1 - graph_reserved_mem
         available_hpu_memory = free_hpu_memory * \
             self.cache_config.gpu_memory_utilization
-        hpu_memory_margin = free_hpu_memory * (
-            1 - self.cache_config.gpu_memory_utilization)
+        hpu_memory_margin = free_hpu_memory * (1 -
+                                               self.cache_config.gpu_memory_utilization)
         self.model_runner.mem_margin = hpu_memory_margin
         cache_size_bytes = available_hpu_memory * graph_headroom
         graph_headroom_bytes = available_hpu_memory * (1 - graph_headroom)
-        msg = (
-            f"Free device memory: {format_bytes(free_hpu_memory)}, "
-            f"{format_bytes(available_hpu_memory)} usable "
-            f"(gpu_memory_utilization={self.cache_config.gpu_memory_utilization}),"
-            f" {format_bytes(graph_headroom_bytes)} reserved for HPUGraphs "
-            f"(VLLM_GRAPH_RESERVED_MEM={graph_reserved_mem}), "
-            f"{format_bytes(cache_size_bytes)} reserved for KV cache")
+        msg = (f"Free device memory: {format_bytes(free_hpu_memory)}, "
+               f"{format_bytes(available_hpu_memory)} usable "
+               f"(gpu_memory_utilization={self.cache_config.gpu_memory_utilization}),"
+               f" {format_bytes(graph_headroom_bytes)} reserved for HPUGraphs "
+               f"(VLLM_GRAPH_RESERVED_MEM={graph_reserved_mem}), "
+               f"{format_bytes(cache_size_bytes)} reserved for KV cache")
         logger.info(msg)
         num_hpu_blocks = int(cache_size_bytes // cache_block_size)
-        num_cpu_blocks = int(self.cache_config.swap_space_bytes //
-                             cache_block_size)
+        num_cpu_blocks = int(self.cache_config.swap_space_bytes // cache_block_size)
         num_hpu_blocks = max(num_hpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
         self.model_runner.bucketing_ctx.num_hpu_blocks = num_hpu_blocks
@@ -254,16 +246,14 @@ class HPUWorker(LocalOrDistributedWorkerBase):
         gc.collect()
         return num_hpu_blocks, num_cpu_blocks
 
-    def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
+    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         """Allocate GPU and CPU KV cache with the specified number of blocks.
 
         This also warms up the model, which may record CUDA graphs.
         """
-        raise_if_cache_size_invalid(
-            num_gpu_blocks, self.cache_config.block_size,
-            self.model_config.max_model_len,
-            self.parallel_config.pipeline_parallel_size)
+        raise_if_cache_size_invalid(num_gpu_blocks, self.cache_config.block_size,
+                                    self.model_config.max_model_len,
+                                    self.parallel_config.pipeline_parallel_size)
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
@@ -279,16 +269,15 @@ class HPUWorker(LocalOrDistributedWorkerBase):
     def _init_cache_engine(self):
         assert self.cache_config.num_gpu_blocks is not None
         self.cache_engine = [
-            HPUCacheEngine(self.cache_config, self.model_config,
-                           self.parallel_config, self.device_config)
+            HPUCacheEngine(self.cache_config, self.model_config, self.parallel_config,
+                           self.device_config)
             for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
         self.hpu_cache = [
             self.cache_engine[ve].gpu_cache
             for ve in range(self.parallel_config.pipeline_parallel_size)
         ]
-        bind_kv_cache(self.compilation_config.static_forward_context,
-                      self.hpu_cache)
+        bind_kv_cache(self.compilation_config.static_forward_context, self.hpu_cache)
 
     def _warm_up_model(self) -> None:
         # NOTE(kzawora): We should use virtual engine index here
@@ -311,8 +300,8 @@ class HPUWorker(LocalOrDistributedWorkerBase):
         return self.hpu_cache
 
     @torch.inference_mode()
-    def prepare_worker_input(
-            self, execute_model_req: ExecuteModelRequest) -> WorkerInput:
+    def prepare_worker_input(self,
+                             execute_model_req: ExecuteModelRequest) -> WorkerInput:
         virtual_engine = execute_model_req.virtual_engine
         num_seq_groups = len(execute_model_req.seq_group_metadata_list)
         # `blocks_to_swap_in` and `blocks_to_swap_out` are cpu tensors.
@@ -344,12 +333,10 @@ class HPUWorker(LocalOrDistributedWorkerBase):
         # Issue cache operations.
         if (worker_input.blocks_to_swap_in is not None
                 and worker_input.blocks_to_swap_in.numel() > 0):
-            self.cache_engine[virtual_engine].swap_in(
-                worker_input.blocks_to_swap_in)
+            self.cache_engine[virtual_engine].swap_in(worker_input.blocks_to_swap_in)
         if (worker_input.blocks_to_swap_out is not None
                 and worker_input.blocks_to_swap_out.numel() > 0):
-            self.cache_engine[virtual_engine].swap_out(
-                worker_input.blocks_to_swap_out)
+            self.cache_engine[virtual_engine].swap_out(worker_input.blocks_to_swap_out)
         if (worker_input.blocks_to_copy is not None
                 and worker_input.blocks_to_copy.numel() > 0):
             self.cache_engine[virtual_engine].copy(worker_input.blocks_to_copy)
@@ -366,22 +353,17 @@ class HPUWorker(LocalOrDistributedWorkerBase):
     def list_loras(self) -> Set[int]:
         return self.model_runner.list_loras()
 
-    def add_prompt_adapter(
-            self, prompt_adapter_request: PromptAdapterRequest) -> bool:
-        raise NotImplementedError(
-            "Prompt Adapter is not implemented for HPU backend.")
+    def add_prompt_adapter(self, prompt_adapter_request: PromptAdapterRequest) -> bool:
+        raise NotImplementedError("Prompt Adapter is not implemented for HPU backend.")
 
     def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
-        raise NotImplementedError(
-            "Prompt Adapter is not implemented for HPU backend.")
+        raise NotImplementedError("Prompt Adapter is not implemented for HPU backend.")
 
     def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
-        raise NotImplementedError(
-            "Prompt Adapter is not implemented for HPU backend.")
+        raise NotImplementedError("Prompt Adapter is not implemented for HPU backend.")
 
     def list_prompt_adapters(self) -> Set[int]:
-        raise NotImplementedError(
-            "Prompt Adapter is not implemented for HPU backend.")
+        raise NotImplementedError("Prompt Adapter is not implemented for HPU backend.")
 
     def shutdown_inc(self):
         self.model_runner.shutdown_inc()
@@ -397,8 +379,7 @@ class HPUWorker(LocalOrDistributedWorkerBase):
     def get_cache_block_size_bytes(self) -> int:
         """Get the size of the KV cache block size in bytes.
         """
-        return HPUCacheEngine.get_cache_block_size(self.cache_config,
-                                                   self.model_config,
+        return HPUCacheEngine.get_cache_block_size(self.cache_config, self.model_config,
                                                    self.parallel_config)
 
 
@@ -426,9 +407,8 @@ def init_worker_distributed_environment(
                 "size does not match parallel_config.world_size "
                 f"({torch_world_size} vs. {parallel_config.world_size}).")
     elif not distributed_init_method:
-        raise ValueError(
-            "distributed_init_method must be set if torch.distributed "
-            "is not already initialized")
+        raise ValueError("distributed_init_method must be set if torch.distributed "
+                         "is not already initialized")
     else:
         torch.distributed.init_process_group(
             backend="hccl",
@@ -453,12 +433,11 @@ def raise_if_cache_size_invalid(num_gpu_blocks, block_size, max_model_len,
                          "initializing the engine.")
     max_seq_len = block_size * (num_gpu_blocks // pipeline_parallel_size)
     if max_model_len > max_seq_len:
-        raise ValueError(
-            f"The model's max seq len ({max_model_len}) "
-            "is larger than the maximum number of tokens that can be "
-            f"stored in KV cache ({max_seq_len}). Try increasing "
-            "`gpu_memory_utilization` or decreasing `max_model_len` when "
-            "initializing the engine.")
+        raise ValueError(f"The model's max seq len ({max_model_len}) "
+                         "is larger than the maximum number of tokens that can be "
+                         f"stored in KV cache ({max_seq_len}). Try increasing "
+                         "`gpu_memory_utilization` or decreasing `max_model_len` when "
+                         "initializing the engine.")
 
 
 class HPUCacheEngine(CacheEngine):
@@ -473,12 +452,8 @@ class HPUCacheEngine(CacheEngine):
             num_blocks, self.block_size, self.num_kv_heads, self.head_size)
         kv_cache: List[Tuple[torch.Tensor, torch.Tensor]] = []
         for _ in range(self.num_attention_layers):
-            key_cache = torch.zeros(kv_cache_shape,
-                                    dtype=self.dtype,
-                                    device=device)
-            value_cache = torch.zeros(kv_cache_shape,
-                                      dtype=self.dtype,
-                                      device=device)
+            key_cache = torch.zeros(kv_cache_shape, dtype=self.dtype, device=device)
+            value_cache = torch.zeros(kv_cache_shape, dtype=self.dtype, device=device)
             kv_layer = (key_cache, value_cache)
             kv_cache.append(kv_layer)
         return kv_cache

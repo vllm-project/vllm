@@ -45,8 +45,7 @@ class PaliGemmaImageEmbeddingInputs(TypedDict):
     """
 
 
-PaliGemmaImageInputs = Union[PaliGemmaImagePixelInputs,
-                             PaliGemmaImageEmbeddingInputs]
+PaliGemmaImageInputs = Union[PaliGemmaImagePixelInputs, PaliGemmaImageEmbeddingInputs]
 
 
 class PaliGemmaMultiModalProjector(nn.Module):
@@ -86,8 +85,7 @@ class PaliGemmaProcessingInfo(BaseProcessingInfo):
         )
 
 
-class PaliGemmaDummyInputsBuilder(
-        BaseDummyInputsBuilder[PaliGemmaProcessingInfo]):
+class PaliGemmaDummyInputsBuilder(BaseDummyInputsBuilder[PaliGemmaProcessingInfo]):
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         return ""
@@ -111,8 +109,7 @@ class PaliGemmaDummyInputsBuilder(
         }
 
 
-class PaliGemmaMultiModalProcessor(
-        BaseMultiModalProcessor[PaliGemmaProcessingInfo]):
+class PaliGemmaMultiModalProcessor(BaseMultiModalProcessor[PaliGemmaProcessingInfo]):
 
     def _call_hf_processor(
         self,
@@ -153,8 +150,8 @@ class PaliGemmaMultiModalProcessor(
         assert isinstance(bos_token_id, int)
 
         def get_insertion(item_idx: int):
-            images = mm_items.get_items(
-                "image", (ImageEmbeddingItems, ImageProcessorItems))
+            images = mm_items.get_items("image",
+                                        (ImageEmbeddingItems, ImageProcessorItems))
 
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
@@ -208,12 +205,10 @@ class PaliGemmaMultiModalProcessor(
         return mm_inputs
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    PaliGemmaMultiModalProcessor,
-    info=PaliGemmaProcessingInfo,
-    dummy_inputs=PaliGemmaDummyInputsBuilder)
-class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                        SupportsPP):
+@MULTIMODAL_REGISTRY.register_processor(PaliGemmaMultiModalProcessor,
+                                        info=PaliGemmaProcessingInfo,
+                                        dummy_inputs=PaliGemmaDummyInputsBuilder)
+class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -266,9 +261,8 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         if actual_dims != expected_dims:
             expected_expr = ("batch_size", *map(str, expected_dims))
-            raise ValueError(
-                f"The expected shape of pixel values is {expected_expr}. "
-                f"You supplied {tuple(data.shape)}.")
+            raise ValueError(f"The expected shape of pixel values is {expected_expr}. "
+                             f"You supplied {tuple(data.shape)}.")
 
         return data
 
@@ -337,8 +331,8 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
@@ -354,9 +348,9 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                self.config.image_token_index)
+            inputs_embeds = merge_multimodal_embeddings(input_ids, inputs_embeds,
+                                                        multimodal_embeddings,
+                                                        self.config.image_token_index)
         return inputs_embeds
 
     def forward(self,
@@ -372,8 +366,7 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
         # condition is for v0 compatibility.
         elif inputs_embeds is None:
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
+            inputs_embeds = self.get_input_embeddings(input_ids, vision_embeddings)
             input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
@@ -388,10 +381,8 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states, sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

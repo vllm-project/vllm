@@ -34,15 +34,13 @@ from vllm.version import __version__ as VLLM_VERSION
 
 
 def parse_args():
-    parser = FlexibleArgumentParser(
-        description="vLLM OpenAI-Compatible batch runner.")
+    parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible batch runner.")
     parser.add_argument(
         "-i",
         "--input-file",
         required=True,
         type=str,
-        help=
-        "The path or url to a single input file. Currently supports local file "
+        help="The path or url to a single input file. Currently supports local file "
         "paths, or the http protocol (http or https). If a URL is specified, "
         "the file should be available via HTTP GET.")
     parser.add_argument(
@@ -92,11 +90,10 @@ def parse_args():
         help="Port number for the Prometheus metrics server "
         "(only needed if enable-metrics is set).",
     )
-    parser.add_argument(
-        "--enable-prompt-tokens-details",
-        action='store_true',
-        default=False,
-        help="If set to True, enable prompt_tokens_details in usage.")
+    parser.add_argument("--enable-prompt-tokens-details",
+                        action='store_true',
+                        default=False,
+                        help="If set to True, enable prompt_tokens_details in usage.")
 
     return parser.parse_args()
 
@@ -157,8 +154,7 @@ async def write_local_file(output_path: str,
             print(o.model_dump_json(), file=f)
 
 
-async def upload_data(output_url: str, data_or_file: str,
-                      from_file: bool) -> None:
+async def upload_data(output_url: str, data_or_file: str, from_file: bool) -> None:
     """
     Upload a local file to a URL.
     output_url: The URL to upload the file to.
@@ -179,15 +175,13 @@ async def upload_data(output_url: str, data_or_file: str,
                     total=1000)) as session:
                 if from_file:
                     with open(data_or_file, "rb") as file:
-                        async with session.put(output_url,
-                                               data=file) as response:
+                        async with session.put(output_url, data=file) as response:
                             if response.status != 200:
                                 raise Exception(f"Failed to upload file.\n"
                                                 f"Status: {response.status}\n"
                                                 f"Response: {response.text()}")
                 else:
-                    async with session.put(output_url,
-                                           data=data_or_file) as response:
+                    async with session.put(output_url, data=data_or_file) as response:
                         if response.status != 200:
                             raise Exception(f"Failed to upload data.\n"
                                             f"Status: {response.status}\n"
@@ -197,8 +191,7 @@ async def upload_data(output_url: str, data_or_file: str,
             if attempt < max_retries:
                 logger.error(
                     f"Failed to upload data (attempt {attempt}). "
-                    f"Error message: {str(e)}.\nRetrying in {delay} seconds..."
-                )
+                    f"Error message: {str(e)}.\nRetrying in {delay} seconds...")
                 await asyncio.sleep(delay)
             else:
                 raise Exception(f"Failed to upload data (attempt {attempt}). "
@@ -236,8 +229,7 @@ async def write_file(path_or_url: str, batch_outputs: list[BatchRequestOutput],
                     prefix="tmp_batch_output_",
                     suffix=".jsonl",
             ) as f:
-                logger.info("Writing outputs to temporary local file %s",
-                            f.name)
+                logger.info("Writing outputs to temporary local file %s", f.name)
                 await write_local_file(f.name, batch_outputs)
                 logger.info("Uploading outputs to %s", path_or_url)
                 await upload_data(path_or_url, f.name, from_file=True)
@@ -260,32 +252,29 @@ def make_error_request_output(request: BatchRequestInput,
     return batch_output
 
 
-async def make_async_error_request_output(
-        request: BatchRequestInput, error_msg: str) -> BatchRequestOutput:
+async def make_async_error_request_output(request: BatchRequestInput,
+                                          error_msg: str) -> BatchRequestOutput:
     return make_error_request_output(request, error_msg)
 
 
-async def run_request(serving_engine_func: Callable,
-                      request: BatchRequestInput,
+async def run_request(serving_engine_func: Callable, request: BatchRequestInput,
                       tracker: BatchProgressTracker) -> BatchRequestOutput:
     response = await serving_engine_func(request.body)
 
-    if isinstance(response,
-                  (ChatCompletionResponse, EmbeddingResponse, ScoreResponse)):
+    if isinstance(response, (ChatCompletionResponse, EmbeddingResponse, ScoreResponse)):
         batch_output = BatchRequestOutput(
             id=f"vllm-{random_uuid()}",
             custom_id=request.custom_id,
-            response=BatchResponseData(
-                body=response, request_id=f"vllm-batch-{random_uuid()}"),
+            response=BatchResponseData(body=response,
+                                       request_id=f"vllm-batch-{random_uuid()}"),
             error=None,
         )
     elif isinstance(response, ErrorResponse):
         batch_output = BatchRequestOutput(
             id=f"vllm-{random_uuid()}",
             custom_id=request.custom_id,
-            response=BatchResponseData(
-                status_code=response.code,
-                request_id=f"vllm-batch-{random_uuid()}"),
+            response=BatchResponseData(status_code=response.code,
+                                       request_id=f"vllm-batch-{random_uuid()}"),
             error=response,
         )
     else:
@@ -308,8 +297,7 @@ async def main(args):
 
     model_config = await engine.get_model_config()
     base_model_paths = [
-        BaseModelPath(name=name, model_path=args.model)
-        for name in served_model_names
+        BaseModelPath(name=name, model_path=args.model) for name in served_model_names
     ]
 
     if args.disable_log_requests:
@@ -371,13 +359,11 @@ async def main(args):
                 response_futures.append(
                     make_async_error_request_output(
                         request,
-                        error_msg=
-                        "The model does not support Chat Completions API",
+                        error_msg="The model does not support Chat Completions API",
                     ))
                 continue
 
-            response_futures.append(
-                run_request(chat_handler_fn, request, tracker))
+            response_futures.append(run_request(chat_handler_fn, request, tracker))
             tracker.submitted()
         elif request.url == "/v1/embeddings":
             embed_handler_fn = (None if openai_serving_embedding is None else
@@ -390,8 +376,7 @@ async def main(args):
                     ))
                 continue
 
-            response_futures.append(
-                run_request(embed_handler_fn, request, tracker))
+            response_futures.append(run_request(embed_handler_fn, request, tracker))
             tracker.submitted()
         elif request.url == "/v1/score":
             score_handler_fn = (None if openai_serving_scores is None else
@@ -404,15 +389,13 @@ async def main(args):
                     ))
                 continue
 
-            response_futures.append(
-                run_request(score_handler_fn, request, tracker))
+            response_futures.append(run_request(score_handler_fn, request, tracker))
             tracker.submitted()
         else:
             response_futures.append(
                 make_async_error_request_output(
                     request,
-                    error_msg=
-                    "Only /v1/chat/completions, /v1/embeddings, and /v1/score "
+                    error_msg="Only /v1/chat/completions, /v1/embeddings, and /v1/score "
                     "are supported in the batch endpoint.",
                 ))
 

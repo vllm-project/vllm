@@ -42,9 +42,8 @@ class SimpleConnector(KVConnectorBase):
         if self.config.kv_connector == "PyNcclConnector":
             from vllm.distributed.kv_transfer.kv_pipe.pynccl_pipe import (
                 PyNcclPipe)
-            logger.info(
-                "Initializing PyNcclConfig under kv_transfer_config %s",
-                self.config)
+            logger.info("Initializing PyNcclConfig under kv_transfer_config %s",
+                        self.config)
         elif self.config.kv_connector == "MooncakeConnector":
             # Check if MOONCAKE_CONFIG_PATH is set
             import os
@@ -58,9 +57,8 @@ class SimpleConnector(KVConnectorBase):
             else:
                 from vllm.distributed.kv_transfer.kv_pipe.mooncake_pipe import (  # noqa: E501
                     MooncakePipe)
-                logger.info(
-                    "Initializing MooncakeConfig under kv_transfer_config %s",
-                    self.config)
+                logger.info("Initializing MooncakeConfig under kv_transfer_config %s",
+                            self.config)
 
         self.lookup_buffer_size = self.config.kv_buffer_size
 
@@ -139,9 +137,8 @@ class SimpleConnector(KVConnectorBase):
             "consumer buffer before calling select."
         return self.consumer_buffer.drop_select(input_tokens, roi)
 
-    def insert(self, input_tokens: torch.Tensor, roi: torch.Tensor,
-               key: torch.Tensor, value: torch.Tensor,
-               hidden: torch.Tensor) -> None:
+    def insert(self, input_tokens: torch.Tensor, roi: torch.Tensor, key: torch.Tensor,
+               value: torch.Tensor, hidden: torch.Tensor) -> None:
 
         assert self.producer_buffer is not None, "Please initialize the "\
             "producer buffer before calling insert."
@@ -153,8 +150,7 @@ class SimpleConnector(KVConnectorBase):
         model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
         kv_caches: List[torch.Tensor],
-        hidden_or_intermediate_states: Union[torch.Tensor,
-                                             IntermediateTensors],
+        hidden_or_intermediate_states: Union[torch.Tensor, IntermediateTensors],
     ) -> None:
 
         input_tokens_tensor = model_input.input_tokens
@@ -197,10 +193,8 @@ class SimpleConnector(KVConnectorBase):
             keys = torch.cat(keys, dim=0)
             values = torch.cat(values, dim=0)
 
-            self.insert(current_tokens,
-                        torch.ones_like(current_tokens,
-                                        dtype=bool), keys, values,
-                        hidden_or_intermediate_states[start_pos:end_pos])
+            self.insert(current_tokens, torch.ones_like(current_tokens, dtype=bool),
+                        keys, values, hidden_or_intermediate_states[start_pos:end_pos])
 
         logger.debug("[rank%d]: KV send DONE.", torch.distributed.get_rank())
 
@@ -255,8 +249,8 @@ class SimpleConnector(KVConnectorBase):
             input_tokens_list.append(current_tokens)
             start_pos_list.append(start_pos)
 
-            ret = self.select(current_tokens,
-                              torch.ones_like(current_tokens, dtype=bool))
+            ret = self.select(current_tokens, torch.ones_like(current_tokens,
+                                                              dtype=bool))
             if ret[0] is None:
                 # didn't find any match.
                 bypass_model_exec = False
@@ -273,8 +267,7 @@ class SimpleConnector(KVConnectorBase):
 
             # check if both KV cache and the hidden states are received
             # If not, need to redo the forwarding to compute missing states
-            if not all([(num_computed_tokens == num_tokens), hidden is not None
-                        ]):
+            if not all([(num_computed_tokens == num_tokens), hidden is not None]):
                 bypass_model_exec = False
 
             # update the end position based on how many tokens are cached.
@@ -290,9 +283,8 @@ class SimpleConnector(KVConnectorBase):
                 # get remote kvcache
                 remote_k, remote_v = keys[layer_id], values[layer_id]
 
-                self.kv_helper.put_kv_to_cache(model_executable, remote_k,
-                                               remote_v, layer, kv_cache,
-                                               slot_mapping, start_pos,
+                self.kv_helper.put_kv_to_cache(model_executable, remote_k, remote_v,
+                                               layer, kv_cache, slot_mapping, start_pos,
                                                end_pos)
 
             hidden_or_intermediate_states_for_one_req.append(hidden)

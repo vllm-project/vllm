@@ -55,8 +55,7 @@ WEIGHT_LOADER_V2_SUPPORTED = [
 def adjust_bitblas_shard(param, shard_size, shard_offset):
     bitblas_tile_size = getattr(param, "bitblas_tile_size", None)
     if bitblas_tile_size is not None:
-        return (shard_size // bitblas_tile_size,
-                shard_offset // bitblas_tile_size)
+        return (shard_size // bitblas_tile_size, shard_offset // bitblas_tile_size)
 
     return shard_size, shard_offset
 
@@ -148,8 +147,7 @@ class LinearMethodBase(QuantizeMethodBase):
     """Base class for different (maybe quantized) linear methods."""
 
     @abstractmethod
-    def create_weights(self, layer: torch.nn.Module,
-                       input_size_per_partition: int,
+    def create_weights(self, layer: torch.nn.Module, input_size_per_partition: int,
                        output_partition_sizes: list[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
@@ -181,8 +179,7 @@ class LinearMethodBase(QuantizeMethodBase):
 class UnquantizedLinearMethod(LinearMethodBase):
     """Linear method without quantization."""
 
-    def create_weights(self, layer: torch.nn.Module,
-                       input_size_per_partition: int,
+    def create_weights(self, layer: torch.nn.Module, input_size_per_partition: int,
                        output_partition_sizes: list[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
@@ -236,11 +233,9 @@ class LinearBase(torch.nn.Module):
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
         if quant_config is None:
-            self.quant_method: Optional[
-                QuantizeMethodBase] = UnquantizedLinearMethod()
+            self.quant_method: Optional[QuantizeMethodBase] = UnquantizedLinearMethod()
         else:
-            self.quant_method = quant_config.get_quant_method(self,
-                                                              prefix=prefix)
+            self.quant_method = quant_config.get_quant_method(self, prefix=prefix)
         self.return_bias = return_bias
 
     def forward(
@@ -293,8 +288,8 @@ class ReplicatedLinear(LinearBase):
                                          weight_loader=self.weight_loader)
 
         if bias:
-            self.bias = Parameter(
-                torch.empty(self.output_size, dtype=self.params_dtype))
+            self.bias = Parameter(torch.empty(self.output_size,
+                                              dtype=self.params_dtype))
             set_weight_attrs(self.bias, {
                 "output_dim": 0,
                 "weight_loader": self.weight_loader,
@@ -388,8 +383,7 @@ class ColumnParallelLinear(LinearBase):
         # If QKV or MergedColumn, use output size of each partition.
         if hasattr(self, "output_sizes"):
             self.output_partition_sizes = [
-                divide(output_size, self.tp_size)
-                for output_size in self.output_sizes
+                divide(output_size, self.tp_size) for output_size in self.output_sizes
             ]
 
         super().__init__(input_size,
@@ -413,13 +407,11 @@ class ColumnParallelLinear(LinearBase):
             input_size=self.input_size,
             output_size=self.output_size,
             params_dtype=self.params_dtype,
-            weight_loader=(
-                self.weight_loader_v2 if self.quant_method.__class__.__name__
-                in WEIGHT_LOADER_V2_SUPPORTED else self.weight_loader))
+            weight_loader=(self.weight_loader_v2 if self.quant_method.__class__.__name__
+                           in WEIGHT_LOADER_V2_SUPPORTED else self.weight_loader))
         if bias:
             self.bias = Parameter(
-                torch.empty(self.output_size_per_partition,
-                            dtype=params_dtype))
+                torch.empty(self.output_size_per_partition, dtype=params_dtype))
             set_weight_attrs(self.bias, {
                 "output_dim": 0,
                 "weight_loader": self.weight_loader,
@@ -456,8 +448,7 @@ class ColumnParallelLinear(LinearBase):
         if output_dim is not None and not is_sharded_weight:
             shard_size = param_data.shape[output_dim]
             start_idx = tp_rank * shard_size
-            loaded_weight = loaded_weight.narrow(output_dim, start_idx,
-                                                 shard_size)
+            loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
 
         # Special case for loading scales off disk, which often do not
         # have a shape (such as in the case of AutoFP8).
@@ -476,8 +467,8 @@ class ColumnParallelLinear(LinearBase):
         param.load_column_parallel_weight(loaded_weight=loaded_weight)
 
     def forward(
-        self, input_
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+            self,
+            input_) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         bias = self.bias if not self.skip_bias_add else None
 
         # Matrix multiply.
@@ -580,8 +571,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             start_idx = tp_rank * shard_size
 
             if loaded_shard_id is not None:
-                loaded_weight = loaded_weight.narrow(output_dim, start_idx,
-                                                     shard_size)
+                loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
                 param.shard_id.append(loaded_shard_id)
                 param.shard_id_map[loaded_shard_id] = len(param.data_container)
                 param.data_container.append(loaded_weight)
@@ -608,8 +598,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 param_data.copy_(loaded_weight)
                 return
             current_shard_offset = 0
-            use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit",
-                                            False)
+            use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
             shard_offsets: list[tuple[int, int, int]] = []
             for i, output_size in enumerate(self.output_sizes):
                 shard_offsets.append((i, current_shard_offset, output_size))
@@ -639,8 +628,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     shard_size, shard_offset = adjust_bitsandbytes_4bit_shard(
                         param, orig_offsets, str(shard_id))
 
-                loaded_weight_shard = loaded_weight.narrow(
-                    output_dim, shard_offset, shard_size)
+                loaded_weight_shard = loaded_weight.narrow(output_dim, shard_offset,
+                                                           shard_size)
                 self.weight_loader(param, loaded_weight_shard, shard_id)
             return
 
@@ -660,11 +649,10 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 # Special case for Marlin.
                 shard_size, shard_offset = adjust_marlin_shard(
                     param, shard_size, shard_offset)
-            shard_size, shard_offset = adjust_bitblas_shard(
-                param, shard_size, shard_offset)
+            shard_size, shard_offset = adjust_bitblas_shard(param, shard_size,
+                                                            shard_offset)
 
-            use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit",
-                                            False)
+            use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
             is_sharded_weight = getattr(param, "is_sharded_weight", False)
             # bitsandbytes loads the weights of the specific portion
             # no need to narrow
@@ -675,12 +663,10 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 shard_offset = loaded_weight.shape[output_dim] * \
                     loaded_shard_id
 
-            param_data = param_data.narrow(output_dim, shard_offset,
-                                           shard_size)
+            param_data = param_data.narrow(output_dim, shard_offset, shard_size)
             start_idx = tp_rank * shard_size
             if not is_sharded_weight:
-                loaded_weight = loaded_weight.narrow(output_dim, start_idx,
-                                                     shard_size)
+                loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
         # Special case for AQLM codebooks.
         elif is_metadata:
             # metadata indicates fixed size concatenated along dim 0
@@ -696,10 +682,9 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         else:
             ignore_warning = getattr(param, "ignore_warning", False)
             if not ignore_warning:
-                logger.warning(
-                    "Loading a weight without `output_dim` attribute in "
-                    "MergedColumnParallelLinear, assume the weight is "
-                    "the same for all partitions.")
+                logger.warning("Loading a weight without `output_dim` attribute in "
+                               "MergedColumnParallelLinear, assume the weight is "
+                               "the same for all partitions.")
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
@@ -726,14 +711,15 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             # Special case for Quantization.
             # If quantized, we need to adjust the offset and size to account
             # for the packing.
-            if isinstance(param, (PackedColumnParameter, PackedvLLMParameter
-                                  )) and param.packed_dim == param.output_dim:
+            if isinstance(
+                    param,
+                (PackedColumnParameter,
+                 PackedvLLMParameter)) and param.packed_dim == param.output_dim:
                 shard_size, shard_offset = \
                     param.adjust_shard_indexes_for_packing(
                     shard_size=shard_size, shard_offset=shard_offset)
 
-            loaded_weight_shard = loaded_weight.narrow(param.output_dim,
-                                                       shard_offset,
+            loaded_weight_shard = loaded_weight.narrow(param.output_dim, shard_offset,
                                                        shard_size)
             self.weight_loader_v2(param, loaded_weight_shard, shard_id)
 
@@ -743,8 +729,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                          loaded_shard_id: Optional[int] = None):
         if loaded_shard_id is None:
             if isinstance(param, PerTensorScaleParameter):
-                param.load_merged_column_weight(loaded_weight=loaded_weight,
-                                                shard_id=0)
+                param.load_merged_column_weight(loaded_weight=loaded_weight, shard_id=0)
                 return
             elif type(param) in (RowvLLMParameter, BasevLLMParameter):
                 param.load_merged_column_weight(loaded_weight=loaded_weight)
@@ -761,14 +746,12 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             from vllm.model_executor.layers.quantization.fp8 import (
                 Fp8LinearMethod, Fp8MoEMethod)
             assert self.quant_method is not None
-            assert isinstance(self.quant_method,
-                              (Fp8LinearMethod, Fp8MoEMethod))
+            assert isinstance(self.quant_method, (Fp8LinearMethod, Fp8MoEMethod))
             weight_block_size = self.quant_method.quant_config.weight_block_size
             assert weight_block_size is not None
             block_n, _ = weight_block_size[0], weight_block_size[1]
-            shard_offset = (
-                (sum(self.output_sizes[:loaded_shard_id]) + block_n - 1) //
-                block_n) // tp_size
+            shard_offset = ((sum(self.output_sizes[:loaded_shard_id]) + block_n - 1) //
+                            block_n) // tp_size
             shard_size = ((self.output_sizes[loaded_shard_id] + block_n - 1) //
                           block_n // tp_size)
         else:
@@ -832,8 +815,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         self.num_heads = divide(self.total_num_heads, tp_size)
         if tp_size >= self.total_num_kv_heads:
             self.num_kv_heads = 1
-            self.num_kv_head_replicas = divide(tp_size,
-                                               self.total_num_kv_heads)
+            self.num_kv_head_replicas = divide(tp_size, self.total_num_kv_heads)
         else:
             self.num_kv_heads = divide(self.total_num_kv_heads, tp_size)
             self.num_kv_head_replicas = 1
@@ -889,8 +871,7 @@ class QKVParallelLinear(ColumnParallelLinear):
             ("q", 0, self.total_num_heads * self.head_size),
             ("k", self.total_num_heads * self.head_size,
              self.total_num_kv_heads * self.head_size),
-            ("v",
-             (self.total_num_heads + self.total_num_kv_heads) * self.head_size,
+            ("v", (self.total_num_heads + self.total_num_kv_heads) * self.head_size,
              self.total_num_kv_heads * self.head_size),
         ]
 
@@ -898,14 +879,15 @@ class QKVParallelLinear(ColumnParallelLinear):
             # Special case for Quantization.
             # If quantized, we need to adjust the offset and size to account
             # for the packing.
-            if isinstance(param, (PackedColumnParameter, PackedvLLMParameter
-                                  )) and param.packed_dim == param.output_dim:
+            if isinstance(
+                    param,
+                (PackedColumnParameter,
+                 PackedvLLMParameter)) and param.packed_dim == param.output_dim:
                 shard_size, shard_offset = \
                     param.adjust_shard_indexes_for_packing(
                     shard_size=shard_size, shard_offset=shard_offset)
 
-            loaded_weight_shard = loaded_weight.narrow(param.output_dim,
-                                                       shard_offset,
+            loaded_weight_shard = loaded_weight.narrow(param.output_dim, shard_offset,
                                                        shard_size)
             self.weight_loader_v2(param, loaded_weight_shard, shard_id)
 
@@ -959,10 +941,7 @@ class QKVParallelLinear(ColumnParallelLinear):
                 param.data[idx_map[loaded_shard_id]].copy_(loaded_weight)
                 param.shard_weight_type[loaded_shard_id] = loaded_weight.item()
             else:
-                param.shard_weight_type = {
-                    k: loaded_weight.item()
-                    for k in idx_map
-                }
+                param.shard_weight_type = {k: loaded_weight.item() for k in idx_map}
             return
 
         if is_gguf_weight:
@@ -974,8 +953,7 @@ class QKVParallelLinear(ColumnParallelLinear):
             start_idx = tp_rank * shard_size
 
             if loaded_shard_id is not None:
-                loaded_weight = loaded_weight.narrow(output_dim, start_idx,
-                                                     shard_size)
+                loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
                 param.shard_id.append(loaded_shard_id)
                 param.shard_id_map[loaded_shard_id] = len(param.data_container)
                 param.data_container.append(loaded_weight)
@@ -1007,11 +985,10 @@ class QKVParallelLinear(ColumnParallelLinear):
                 ("q", 0, self.total_num_heads * self.head_size),
                 ("k", self.total_num_heads * self.head_size,
                  self.total_num_kv_heads * self.head_size),
-                ("v", (self.total_num_heads + self.total_num_kv_heads) *
-                 self.head_size, self.total_num_kv_heads * self.head_size),
+                ("v", (self.total_num_heads + self.total_num_kv_heads) * self.head_size,
+                 self.total_num_kv_heads * self.head_size),
             ]
-            use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit",
-                                            False)
+            use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
 
             packed_dim = getattr(param, "packed_dim", None)
             for shard_id, shard_offset, shard_size in shard_offsets:
@@ -1031,20 +1008,17 @@ class QKVParallelLinear(ColumnParallelLinear):
                         "q": (0, self.total_num_heads * self.head_size),
                         "k": (self.total_num_heads * self.head_size,
                               self.total_num_kv_heads * self.head_size),
-                        "v":
-                        ((self.total_num_heads + self.total_num_kv_heads) *
-                         self.head_size,
-                         self.total_num_kv_heads * self.head_size),
-                        "total":
-                        ((self.total_num_heads + 2 * self.total_num_kv_heads) *
-                         self.head_size, 0)
+                        "v": ((self.total_num_heads + self.total_num_kv_heads) *
+                              self.head_size, self.total_num_kv_heads * self.head_size),
+                        "total": ((self.total_num_heads + 2 * self.total_num_kv_heads) *
+                                  self.head_size, 0)
                     }
 
                     shard_size, shard_offset = adjust_bitsandbytes_4bit_shard(
                         param, orig_qkv_offsets, shard_id)
 
-                loaded_weight_shard = loaded_weight.narrow(
-                    output_dim, shard_offset, shard_size)
+                loaded_weight_shard = loaded_weight.narrow(output_dim, shard_offset,
+                                                           shard_size)
                 self.weight_loader(param, loaded_weight_shard, shard_id)
             return
 
@@ -1060,8 +1034,7 @@ class QKVParallelLinear(ColumnParallelLinear):
                 shard_offset = self.num_heads * self.head_size
                 shard_size = self.num_kv_heads * self.head_size
             elif loaded_shard_id == "v":
-                shard_offset = (self.num_heads +
-                                self.num_kv_heads) * self.head_size
+                shard_offset = (self.num_heads + self.num_kv_heads) * self.head_size
                 shard_size = self.num_kv_heads * self.head_size
             # Special case for Quantized Weights.
             # If quantized, we need to adjust the offset and size to account
@@ -1075,8 +1048,7 @@ class QKVParallelLinear(ColumnParallelLinear):
                 shard_size, shard_offset = adjust_marlin_shard(
                     param, shard_size, shard_offset)
 
-            use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit",
-                                            False)
+            use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
             is_sharded_weight = getattr(param, "is_sharded_weight", False)
             # bitsandbytes loads the weights of the specific portion
             # no need to narrow
@@ -1087,18 +1059,15 @@ class QKVParallelLinear(ColumnParallelLinear):
                     "q": (0, self.num_heads * self.head_size),
                     "k": (self.num_heads * self.head_size,
                           self.num_kv_heads * self.head_size),
-                    "v":
-                    ((self.num_heads + self.num_kv_heads) * self.head_size,
-                     self.num_kv_heads * self.head_size),
+                    "v": ((self.num_heads + self.num_kv_heads) * self.head_size,
+                          self.num_kv_heads * self.head_size),
                     "total":
-                    ((self.num_heads + 2 * self.num_kv_heads) * self.head_size,
-                     0)
+                    ((self.num_heads + 2 * self.num_kv_heads) * self.head_size, 0)
                 }
                 shard_size, shard_offset = adjust_bitsandbytes_4bit_shard(
                     param, orig_qkv_offsets, loaded_shard_id)
 
-            param_data = param_data.narrow(output_dim, shard_offset,
-                                           shard_size)
+            param_data = param_data.narrow(output_dim, shard_offset, shard_size)
             if loaded_shard_id == "q":
                 shard_id = tp_rank
             else:
@@ -1106,16 +1075,14 @@ class QKVParallelLinear(ColumnParallelLinear):
             start_idx = shard_id * shard_size
 
             if not is_sharded_weight:
-                loaded_weight = loaded_weight.narrow(output_dim, start_idx,
-                                                     shard_size)
+                loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
 
         # Special case for for AQLM codebooks.
         elif is_metadata:
             # metadata indicates fixed size concatenated along dim 0
             shard_size = loaded_weight.shape[0]
             shard_index = ["q", "k", "v"].index(loaded_shard_id)
-            param_data = param_data.narrow(0, shard_index * shard_size,
-                                           shard_size)
+            param_data = param_data.narrow(0, shard_index * shard_size, shard_size)
         # Special case for per-tensor scales in fused case.
         elif needs_scalar_to_array:
             param_data, loaded_weight = adjust_scalar_to_fused_array(
@@ -1123,10 +1090,9 @@ class QKVParallelLinear(ColumnParallelLinear):
         else:
             ignore_warning = getattr(param, "ignore_warning", False)
             if not ignore_warning:
-                logger.warning(
-                    "Loading a weight without `output_dim` attribute in "
-                    "QKVParallelLinear, assume the weight is the same "
-                    "for all partitions.")
+                logger.warning("Loading a weight without `output_dim` attribute in "
+                               "QKVParallelLinear, assume the weight is the same "
+                               "for all partitions.")
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
@@ -1198,16 +1164,14 @@ class RowParallelLinear(LinearBase):
             input_size=self.input_size,
             output_size=self.output_size,
             params_dtype=self.params_dtype,
-            weight_loader=(
-                self.weight_loader_v2 if self.quant_method.__class__.__name__
-                in WEIGHT_LOADER_V2_SUPPORTED else self.weight_loader))
+            weight_loader=(self.weight_loader_v2 if self.quant_method.__class__.__name__
+                           in WEIGHT_LOADER_V2_SUPPORTED else self.weight_loader))
         if not reduce_results and (bias and not skip_bias_add):
             raise ValueError("When not reduce the results, adding bias to the "
                              "results can lead to incorrect results")
 
         if bias:
-            self.bias = Parameter(
-                torch.empty(self.output_size, dtype=params_dtype))
+            self.bias = Parameter(torch.empty(self.output_size, dtype=params_dtype))
             set_weight_attrs(self.bias, {
                 "output_dim": 0,
                 "weight_loader": self.weight_loader,
@@ -1242,8 +1206,7 @@ class RowParallelLinear(LinearBase):
         if input_dim is not None and not is_sharded_weight:
             shard_size = param_data.shape[input_dim]
             start_idx = tp_rank * shard_size
-            loaded_weight = loaded_weight.narrow(input_dim, start_idx,
-                                                 shard_size)
+            loaded_weight = loaded_weight.narrow(input_dim, start_idx, shard_size)
 
         # Special case for loading scales off disk, which often do not
         # have a shape (such as in the case of AutoFP8).
@@ -1253,8 +1216,7 @@ class RowParallelLinear(LinearBase):
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
-    def weight_loader_v2(self, param: BasevLLMParameter,
-                         loaded_weight: torch.Tensor):
+    def weight_loader_v2(self, param: BasevLLMParameter, loaded_weight: torch.Tensor):
 
         # Special case for loading scales off disk, which often do not
         # have a shape (such as in the case of AutoFP8).
@@ -1265,14 +1227,14 @@ class RowParallelLinear(LinearBase):
         param.load_row_parallel_weight(loaded_weight=loaded_weight)
 
     def forward(
-        self, input_
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+            self,
+            input_) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         if self.input_is_parallel:
             input_parallel = input_
         else:
             tp_rank = get_tensor_model_parallel_rank()
-            splitted_input = split_tensor_along_last_dim(
-                input_, num_partitions=self.tp_size)
+            splitted_input = split_tensor_along_last_dim(input_,
+                                                         num_partitions=self.tp_size)
             input_parallel = splitted_input[tp_rank].contiguous()
 
         # Matrix multiply.
@@ -1280,9 +1242,7 @@ class RowParallelLinear(LinearBase):
         # Only fuse bias add into GEMM for rank 0 (this ensures that
         # bias will not get added more than once in TP>1 case)
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
-        output_parallel = self.quant_method.apply(self,
-                                                  input_parallel,
-                                                  bias=bias_)
+        output_parallel = self.quant_method.apply(self, input_parallel, bias=bias_)
         if self.reduce_results and self.tp_size > 1:
             output = tensor_model_parallel_all_reduce(output_parallel)
         else:
@@ -1401,9 +1361,7 @@ class QKVCrossParallelLinear(LinearBase):
         for name, param in self.named_parameters():
             target_param = getattr(layer, name, None)
             if target_param is not None:
-                self.sync_weight_attrs(param,
-                                       target_param,
-                                       mode="q_proj_decoder")
+                self.sync_weight_attrs(param, target_param, mode="q_proj_decoder")
         return layer
 
     @property
@@ -1412,9 +1370,7 @@ class QKVCrossParallelLinear(LinearBase):
         for name, param in self.named_parameters():
             target_param = getattr(layer, name, None)
             if target_param is not None:
-                self.sync_weight_attrs(param,
-                                       target_param,
-                                       mode="kv_proj_encoder")
+                self.sync_weight_attrs(param, target_param, mode="kv_proj_encoder")
         return layer
 
     def sync_weight_attrs(
@@ -1425,12 +1381,10 @@ class QKVCrossParallelLinear(LinearBase):
     ):
         missing_attrs_dict = {
             k: getattr(src_param, k)
-            for k in (set(src_param.__dict__.keys()) -
-                      set(tgt_param.__dict__.keys()))
+            for k in (set(src_param.__dict__.keys()) - set(tgt_param.__dict__.keys()))
         }
         # TODO(Isotr0py): handle bitsandbytes 8bit
-        use_bitsandbytes_4bit = getattr(src_param, "use_bitsandbytes_4bit",
-                                        False)
+        use_bitsandbytes_4bit = getattr(src_param, "use_bitsandbytes_4bit", False)
         if (missing_attrs_dict and use_bitsandbytes_4bit):
             q_proj_attrs, kv_proj_attrs = left_shift_bitsandbytes_4bit_shard(
                 missing_attrs_dict)
@@ -1471,8 +1425,7 @@ class QKVCrossParallelLinear(LinearBase):
         return the corresponding param in the proj layers.
         """
         target_param_list = [
-            v for _, v in layer.named_parameters()
-            if self._is_same_param(param, v)
+            v for _, v in layer.named_parameters() if self._is_same_param(param, v)
         ]
         assert len(target_param_list) == 1
         target_param = target_param_list[0]

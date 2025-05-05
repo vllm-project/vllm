@@ -46,10 +46,7 @@ def benchmark_permute(num_tokens: int,
         align_block_size = None
         qhidden_states = hidden_states
 
-    gating_output = torch.randn(num_iters,
-                                num_tokens,
-                                num_experts,
-                                dtype=torch.float32)
+    gating_output = torch.randn(num_iters, num_tokens, num_experts, dtype=torch.float32)
 
     input_gating = torch.randn(num_tokens, num_experts, dtype=torch.float32)
     topk_weights, topk_ids, token_expert_indices = fused_topk(
@@ -74,8 +71,8 @@ def benchmark_permute(num_tokens: int,
              )
         else:
             (permuted_hidden_states, a1q_scale, sorted_token_ids, expert_ids,
-             inv_perm) = _moe_permute(qhidden_states, None, topk_ids,
-                                      num_experts, None, align_block_size)
+             inv_perm) = _moe_permute(qhidden_states, None, topk_ids, num_experts, None,
+                                      align_block_size)
 
     # JIT compilation & warmup
     run()
@@ -150,29 +147,26 @@ def benchmark_unpermute(num_tokens: int,
                  align_block_size=align_block_size,
              )
             # convert to fp16/bf16 as gemm output
-            return (permuted_hidden_states.to(dtype), first_token_off,
-                    inv_perm_idx, m_indices)
+            return (permuted_hidden_states.to(dtype), first_token_off, inv_perm_idx,
+                    m_indices)
         else:
             (permuted_qhidden_states, a1q_scale, sorted_token_ids, expert_ids,
-             inv_perm) = _moe_permute(qhidden_states, None, topk_ids,
-                                      num_experts, None, align_block_size)
+             inv_perm) = _moe_permute(qhidden_states, None, topk_ids, num_experts, None,
+                                      align_block_size)
             # convert to fp16/bf16 as gemm output
-            return (permuted_qhidden_states.to(dtype), a1q_scale,
-                    sorted_token_ids, expert_ids, inv_perm)
+            return (permuted_qhidden_states.to(dtype), a1q_scale, sorted_token_ids,
+                    expert_ids, inv_perm)
 
     def run(input: tuple):
         if use_customized_permute:
-            (permuted_hidden_states, first_token_off, inv_perm_idx,
-             m_indices) = input
-            moe_unpermute(permuted_hidden_states, topk_weights, topk_ids,
-                          inv_perm_idx, first_token_off, topk, num_experts,
-                          num_experts)
+            (permuted_hidden_states, first_token_off, inv_perm_idx, m_indices) = input
+            moe_unpermute(permuted_hidden_states, topk_weights, topk_ids, inv_perm_idx,
+                          first_token_off, topk, num_experts, num_experts)
         else:
             (permuted_hidden_states, a1q_scale, sorted_token_ids, expert_ids,
              inv_perm) = input
-            _moe_unpermute_and_reduce(output_hidden_states,
-                                      permuted_hidden_states, inv_perm,
-                                      topk_weights)
+            _moe_unpermute_and_reduce(output_hidden_states, permuted_hidden_states,
+                                      inv_perm, topk_weights)
 
     # JIT compilation & warmup
     input = prepare()
@@ -232,16 +226,15 @@ class BenchmarkWorker:
     ) -> tuple[dict[str, int], float]:
         current_platform.seed_everything(self.seed)
 
-        permute_time = benchmark_permute(
-            num_tokens,
-            num_experts,
-            hidden_size,
-            topk,
-            dtype,
-            use_fp8_w8a8,
-            use_int8_w8a16,
-            num_iters=100,
-            use_customized_permute=use_customized_permute)
+        permute_time = benchmark_permute(num_tokens,
+                                         num_experts,
+                                         hidden_size,
+                                         topk,
+                                         dtype,
+                                         use_fp8_w8a8,
+                                         use_int8_w8a16,
+                                         num_iters=100,
+                                         use_customized_permute=use_customized_permute)
         unpermute_time = benchmark_unpermute(
             num_tokens,
             num_experts,
@@ -266,8 +259,8 @@ def get_weight_block_size_safety(config, default_value=None):
 def main(args: argparse.Namespace):
     print(args)
 
-    config = AutoConfig.from_pretrained(
-        args.model, trust_remote_code=args.trust_remote_code)
+    config = AutoConfig.from_pretrained(args.model,
+                                        trust_remote_code=args.trust_remote_code)
     if config.architectures[0] == "DbrxForCausalLM":
         E = config.ffn_config.moe_num_experts
         topk = config.ffn_config.moe_top_k
@@ -278,9 +271,7 @@ def main(args: argparse.Namespace):
           or config.architectures[0] == "DeepseekV2ForCausalLM"):
         E = config.n_routed_experts
         topk = config.num_experts_per_tok
-    elif config.architectures[0] in [
-            "Qwen2MoeForCausalLM", "Qwen3MoeForCausalLM"
-    ]:
+    elif config.architectures[0] in ["Qwen2MoeForCausalLM", "Qwen3MoeForCausalLM"]:
         E = config.num_experts
         topk = config.num_experts_per_tok
 
@@ -299,8 +290,8 @@ def main(args: argparse.Namespace):
 
     if args.batch_size is None:
         batch_sizes = [
-            1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 256, 512, 1024, 1536,
-            2048, 3072, 4096
+            1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 256, 512, 1024, 1536, 2048, 3072,
+            4096
         ]
     else:
         batch_sizes = [args.batch_size]
@@ -320,10 +311,10 @@ def main(args: argparse.Namespace):
             worker_idx = (worker_idx + 1) % num_gpus
         return ray.get(outputs)
 
-    outputs = _distribute(
-        "benchmark", [(batch_size, E, hidden_size, topk, dtype, use_fp8_w8a8,
-                       use_int8_w8a16, use_customized_permute)
-                      for batch_size in batch_sizes])
+    outputs = _distribute("benchmark",
+                          [(batch_size, E, hidden_size, topk, dtype, use_fp8_w8a8,
+                            use_int8_w8a16, use_customized_permute)
+                           for batch_size in batch_sizes])
 
     for batch_size, (permute, unpermute) in zip(batch_sizes, outputs):
         print(f"Batch size: {batch_size}")

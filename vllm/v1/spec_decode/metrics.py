@@ -61,8 +61,7 @@ class SpecDecodingLogging:
     def observe(self, spec_decoding_stats: SpecDecodingStats):
         self.num_drafts.append(spec_decoding_stats.num_drafts)
         self.num_draft_tokens.append(spec_decoding_stats.num_draft_tokens)
-        self.num_accepted_tokens.append(
-            spec_decoding_stats.num_accepted_tokens)
+        self.num_accepted_tokens.append(spec_decoding_stats.num_accepted_tokens)
         self.accepted_tokens_per_pos_lists.append(
             spec_decoding_stats.num_accepted_tokens_per_pos)
 

@@ -37,8 +37,7 @@ class ToolParser:
         # whereas all tokenizers have .get_vocab()
         return self.model_tokenizer.get_vocab()
 
-    def adjust_request(
-            self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+    def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
         """
         Static method that used to adjust the request parameters.
         """
@@ -101,8 +100,7 @@ class ToolParserManager:
                          force: bool = True) -> None:
         if not issubclass(module, ToolParser):
             raise TypeError(
-                f'module must be subclass of ToolParser, but got {type(module)}'
-            )
+                f'module must be subclass of ToolParser, but got {type(module)}')
         if module_name is None:
             module_name = module.__name__
         if isinstance(module_name, str):
@@ -115,11 +113,10 @@ class ToolParserManager:
             cls.tool_parsers[name] = module
 
     @classmethod
-    def register_module(
-            cls,
-            name: Optional[Union[str, list[str]]] = None,
-            force: bool = True,
-            module: Union[type, None] = None) -> Union[type, Callable]:
+    def register_module(cls,
+                        name: Optional[Union[str, list[str]]] = None,
+                        force: bool = True,
+                        module: Union[type, None] = None) -> Union[type, Callable]:
         """
         Register module with the given name or name list. it can be used as a
         decoder(with module as None) or normal function(with module as not 
@@ -129,8 +126,7 @@ class ToolParserManager:
             raise TypeError(f'force must be a boolean, but got {type(force)}')
 
         # raise the error ahead of time
-        if not (name is None or isinstance(name, str)
-                or is_list_of(name, str)):
+        if not (name is None or isinstance(name, str) or is_list_of(name, str)):
             raise TypeError(
                 'name must be None, an instance of str, or a sequence of str, '
                 f'but got {type(name)}')
@@ -158,6 +154,6 @@ class ToolParserManager:
         try:
             import_from_path(module_name, plugin_path)
         except Exception:
-            logger.exception("Failed to load module '%s' from %s.",
-                             module_name, plugin_path)
+            logger.exception("Failed to load module '%s' from %s.", module_name,
+                             plugin_path)
             return

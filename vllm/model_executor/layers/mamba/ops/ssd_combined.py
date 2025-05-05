@@ -65,8 +65,8 @@ def _mamba_chunk_scan_combined_fwd(x,
         if cu_seqlens is None:
             assert initial_states.shape == (batch, nheads, headdim, dstate)
         else:
-            assert initial_states.shape == (len(cu_seqlens) - 1, nheads,
-                                            headdim, dstate)
+            assert initial_states.shape == (len(cu_seqlens) - 1, nheads, headdim,
+                                            dstate)
 
     # This function executes 5 sub-functions for computing mamba
     # - a good resource is the blog https://goombalab.github.io/blog/2024/mamba2-part3-algorithm/
@@ -88,12 +88,7 @@ def _mamba_chunk_scan_combined_fwd(x,
 
     # 2. Compute the state for each intra-chunk
     # (right term of low-rank factorization of off-diagonal blocks; B terms)
-    states = _chunk_state_fwd(B,
-                              x,
-                              dt,
-                              dA_cumsum,
-                              seq_idx=seq_idx,
-                              states_in_fp32=True)
+    states = _chunk_state_fwd(B, x, dt, dA_cumsum, seq_idx=seq_idx, states_in_fp32=True)
 
     # 3. Compute the inter-chunk SSM recurrence; produces correct SSM states at chunk boundaries
     # (middle term of factorization of off-diag blocks; A terms)
@@ -117,11 +112,7 @@ def _mamba_chunk_scan_combined_fwd(x,
                             for t in [states, final_states])
 
     # 4. Compute batched matrix multiply for C_j^T B_i terms
-    CB = _bmm_chunk_fwd(C,
-                        B,
-                        chunk_size,
-                        seq_idx=seq_idx,
-                        output_dtype=torch.float32)
+    CB = _bmm_chunk_fwd(C, B, chunk_size, seq_idx=seq_idx, output_dtype=torch.float32)
 
     # 5. Scan and compute the diagonal blocks, taking into
     #    account past causal states.
@@ -225,7 +216,5 @@ def mamba_chunk_scan_combined(x,
         return out if not return_final_states else (out, final_states)
     else:
         varlen_states = rest[0]
-        return (out,
-                varlen_states) if not return_final_states else (out,
-                                                                final_states,
-                                                                varlen_states)
+        return (out, varlen_states) if not return_final_states else (out, final_states,
+                                                                     varlen_states)

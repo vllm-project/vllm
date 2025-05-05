@@ -133,8 +133,8 @@ def _compute_encoder_budget_multimodal(
     _, max_tokens_per_mm_item = max(max_tokens_by_modality_dict.items(),
                                     key=lambda item: item[1])
 
-    if (scheduler_config.disable_chunked_mm_input and max_tokens_per_mm_item
-            > scheduler_config.max_num_batched_tokens):
+    if (scheduler_config.disable_chunked_mm_input
+            and max_tokens_per_mm_item > scheduler_config.max_num_batched_tokens):
         raise ValueError(
             "Chunked MM input disabled but max_tokens_per_mm_item "
             f"({max_tokens_per_mm_item}) is larger than max_num_batched_tokens"

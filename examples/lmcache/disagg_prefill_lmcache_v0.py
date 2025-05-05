@@ -103,10 +103,9 @@ def run_decode(prefill_done, prompts, timeout=1):
 
 
 def run_lmcache_server(port):
-    server_proc = subprocess.Popen([
-        "python", "-m", "lmcache.experimental.server", "localhost",
-        str(port)
-    ])
+    server_proc = subprocess.Popen(
+        ["python", "-m", "lmcache.experimental.server", "localhost",
+         str(port)])
     return server_proc
 
 

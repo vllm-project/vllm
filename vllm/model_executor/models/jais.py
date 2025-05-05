@@ -66,8 +66,9 @@ def _get_alibi_slopes(n):
         return get_slopes_power_of_2(n)
     else:
         closest_power_of_2 = 2**math.floor(math.log2(n))
-        return (get_slopes_power_of_2(closest_power_of_2) + _get_alibi_slopes(
-            2 * closest_power_of_2)[0::2][:n - closest_power_of_2])
+        return (
+            get_slopes_power_of_2(closest_power_of_2) +
+            _get_alibi_slopes(2 * closest_power_of_2)[0::2][:n - closest_power_of_2])
 
 
 class JAISAttention(nn.Module):
@@ -82,8 +83,7 @@ class JAISAttention(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
         total_num_heads = config.num_attention_heads
-        tensor_model_parallel_world_size = (
-            get_tensor_model_parallel_world_size())
+        tensor_model_parallel_world_size = (get_tensor_model_parallel_world_size())
         assert total_num_heads % tensor_model_parallel_world_size == 0
         self.num_heads = total_num_heads // tensor_model_parallel_world_size
         self.head_dim = self.hidden_size // total_num_heads
@@ -183,8 +183,7 @@ class JAISBlock(nn.Module):
     ):
         super().__init__()
         hidden_size = config.hidden_size
-        inner_dim = (config.n_inner if config.n_inner is not None else 4 *
-                     hidden_size)
+        inner_dim = (config.n_inner if config.n_inner is not None else 4 * hidden_size)
 
         self.ln_1 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
         self.attn = JAISAttention(config,
@@ -228,8 +227,7 @@ class JAISModel(nn.Module):
         assert not config.reorder_and_upcast_attn
         self.embed_dim = config.hidden_size
         self.wte = VocabParallelEmbedding(config.vocab_size, self.embed_dim)
-        self.wpe = (nn.Embedding(config.max_position_embeddings,
-                                 self.embed_dim)
+        self.wpe = (nn.Embedding(config.max_position_embeddings, self.embed_dim)
                     if config.position_embedding_type != "alibi" else None)
         if hasattr(config, "embeddings_scale"):
             self.embeddings_scale = config.embeddings_scale
@@ -246,9 +244,8 @@ class JAISModel(nn.Module):
         )
 
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(["hidden_states"],
-                                                    config.n_embd))
+        self.make_empty_intermediate_tensors = (make_empty_intermediate_tensors_factory(
+            ["hidden_states"], config.n_embd))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.wte(input_ids)
@@ -293,8 +290,7 @@ class JAISLMHeadModel(nn.Module, SupportsPP):
         self.config = config
         self.quant_config = quant_config
         self.transformer = JAISModel(vllm_config=vllm_config,
-                                     prefix=maybe_prefix(
-                                         prefix, "transformer"))
+                                     prefix=maybe_prefix(prefix, "transformer"))
         if self.config.tie_word_embeddings:
             self.lm_head = self.transformer.wte
         else:
@@ -320,8 +316,8 @@ class JAISLMHeadModel(nn.Module, SupportsPP):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[IntermediateTensors, torch.Tensor]:
-        hidden_states = self.transformer(input_ids, positions,
-                                         intermediate_tensors, inputs_embeds)
+        hidden_states = self.transformer(input_ids, positions, intermediate_tensors,
+                                         inputs_embeds)
         return hidden_states
 
     def compute_logits(
@@ -329,12 +325,10 @@ class JAISLMHeadModel(nn.Module, SupportsPP):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
@@ -364,8 +358,7 @@ class JAISLMHeadModel(nn.Module, SupportsPP):
                 if not name.endswith(".weight"):
                     continue
                 loaded_weight = loaded_weight.t()
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params

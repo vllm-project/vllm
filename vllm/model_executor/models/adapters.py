@@ -194,8 +194,7 @@ def as_classification_model(cls: _T) -> _T:
                                            quant_config=quant_config,
                                            input_is_parallel=False,
                                            bias=False,
-                                           prefix=maybe_prefix(
-                                               prefix, "score"))
+                                           prefix=maybe_prefix(prefix, "score"))
 
         def forward(
             self,
@@ -204,8 +203,7 @@ def as_classification_model(cls: _T) -> _T:
             intermediate_tensors: Optional[IntermediateTensors] = None,
             inputs_embeds: Optional[torch.Tensor] = None,
         ) -> torch.Tensor:
-            hidden_states = super().forward(input_ids, positions,
-                                            intermediate_tensors,
+            hidden_states = super().forward(input_ids, positions, intermediate_tensors,
                                             inputs_embeds)
             logits, _ = self.score(hidden_states)
             return logits

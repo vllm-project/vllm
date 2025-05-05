@@ -56,8 +56,7 @@ def test_processor_override(
     # Ensure the placeholders format are correct
     hf_processor = processor.info.get_hf_processor(**hf_processor_mm_kwargs)
     hf_processed_inputs = hf_processor(text=prompt, images=mm_data["image"])
-    assert processed_inputs["prompt_token_ids"] == hf_processed_inputs[
-        "input_ids"][0]
+    assert processed_inputs["prompt_token_ids"] == hf_processed_inputs["input_ids"][0]
 
     # Ensure we have the right number of placeholders per num_crops size
     image_token_id = ctx.get_hf_config().image_token_id

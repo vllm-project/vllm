@@ -21,8 +21,7 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
         return 75
 
     @classmethod
-    def can_implement(
-            cls, c: ScaledMMLinearLayerConfig) -> Tuple[bool, Optional[str]]:
+    def can_implement(cls, c: ScaledMMLinearLayerConfig) -> Tuple[bool, Optional[str]]:
 
         if (not current_platform.is_cuda() and not current_platform.is_cpu()):
             return False, "CutlassScaledMM requires running on CUDA or CPU."
@@ -33,9 +32,8 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
         # WEIGHT
         # Cutlass kernels need transposed weight.
         weight = getattr(layer, self.w_q_name)
-        replace_parameter(
-            layer, self.w_q_name,
-            torch.nn.Parameter(weight.t().data, requires_grad=False))
+        replace_parameter(layer, self.w_q_name,
+                          torch.nn.Parameter(weight.t().data, requires_grad=False))
 
         # WEIGHT SCALE
         # Cutlass kernels support only per-tensor and per-channel.
@@ -44,11 +42,9 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
         is_fused_module = len(layer.logical_widths) > 1
         weight_scale = getattr(layer, self.w_s_name)
         if is_fused_module and not self.config.is_channelwise:
-            weight_scale = convert_to_channelwise(weight_scale,
-                                                  layer.logical_widths)
-        replace_parameter(
-            layer, self.w_s_name,
-            torch.nn.Parameter(weight_scale.data, requires_grad=False))
+            weight_scale = convert_to_channelwise(weight_scale, layer.logical_widths)
+        replace_parameter(layer, self.w_s_name,
+                          torch.nn.Parameter(weight_scale.data, requires_grad=False))
 
         # INPUT SCALE
         if self.config.is_static_input_scheme:
@@ -68,15 +64,12 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
                 range_max = (input_scale * (int8_traits.max - azps)).max()
                 range_min = (input_scale * (int8_traits.min - azps)).min()
 
-                scale = (range_max - range_min) / (int8_traits.max -
-                                                   int8_traits.min)
-                replace_parameter(
-                    layer, self.i_s_name,
-                    torch.nn.Parameter(scale, requires_grad=False))
+                scale = (range_max - range_min) / (int8_traits.max - int8_traits.min)
+                replace_parameter(layer, self.i_s_name,
+                                  torch.nn.Parameter(scale, requires_grad=False))
 
                 # AZP loaded as int8 but used as int32
-                azp = (int8_traits.min -
-                       range_min / scale).to(dtype=torch.int32)
+                azp = (int8_traits.min - range_min / scale).to(dtype=torch.int32)
                 replace_parameter(layer, self.i_zp_name,
                                   torch.nn.Parameter(azp, requires_grad=False))
 

@@ -52,8 +52,7 @@ def test_can_initialize(model_arch):
         # gpu_blocks (> 0), cpu_blocks, scheduler_kv_cache_config
         return 1, 0, scheduler_kv_cache_config
 
-    with (patch.object(V0LLMEngine, "_initialize_kv_caches",
-                       _initialize_kv_caches_v0),
+    with (patch.object(V0LLMEngine, "_initialize_kv_caches", _initialize_kv_caches_v0),
           patch.object(V1EngineCore, "_initialize_kv_caches",
                        _initialize_kv_caches_v1)):
         LLM(

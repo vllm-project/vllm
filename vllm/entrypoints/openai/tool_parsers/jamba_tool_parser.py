@@ -32,8 +32,7 @@ class JambaToolParser(ToolParser):
 
         if isinstance(self.model_tokenizer, MistralTokenizer):
             raise ValueError(
-                "Detected a MistralTokenizer tokenizer when using a Jamba model"
-            )
+                "Detected a MistralTokenizer tokenizer when using a Jamba model")
 
         self.current_tool_name_sent: bool = False
         self.prev_tool_call_arr: list[dict] = []
@@ -49,21 +48,17 @@ class JambaToolParser(ToolParser):
             re.DOTALL)
 
         if not self.model_tokenizer:
-            raise ValueError(
-                "The model tokenizer must be passed to the ToolParser "
-                "constructor during construction.")
-        self.tool_calls_start_token_id = self.vocab.get(
-            self.tool_calls_start_token)
-        self.tool_calls_end_token_id = self.vocab.get(
-            self.tool_calls_end_token)
+            raise ValueError("The model tokenizer must be passed to the ToolParser "
+                             "constructor during construction.")
+        self.tool_calls_start_token_id = self.vocab.get(self.tool_calls_start_token)
+        self.tool_calls_end_token_id = self.vocab.get(self.tool_calls_end_token)
         if (self.tool_calls_start_token_id is None
                 or self.tool_calls_end_token_id is None):
             raise RuntimeError(
                 "Jamba Tool parser could not locate tool calls start/end "
                 "tokens in the tokenizer!")
 
-    def adjust_request(
-            self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+    def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
         if request.tools and request.tool_choice != 'none':
             # do not skip special tokens because jamba use the special
             # tokens to indicate the start and end of the tool calls
@@ -100,17 +95,14 @@ class JambaToolParser(ToolParser):
                     for function_call in raw_function_calls
                 ]
 
-                content = model_output[:model_output.
-                                       find(self.tool_calls_start_token)]
+                content = model_output[:model_output.find(self.tool_calls_start_token)]
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=tool_calls,
-                    content=content if
-                    (len(content) > 0 and content != " ") else None)
+                    content=content if (len(content) > 0 and content != " ") else None)
 
             except Exception:
-                logger.exception(
-                    "Error in extracting tool call from response.")
+                logger.exception("Error in extracting tool call from response.")
                 return ExtractedToolCallInformation(tools_called=False,
                                                     tool_calls=[],
                                                     content=model_output)
@@ -151,9 +143,8 @@ class JambaToolParser(ToolParser):
         try:
 
             # Extract the tool calls between the special tool call tokens
-            parsable_arr = current_text.split(
-                self.tool_calls_start_token)[-1].split(
-                    self.tool_calls_end_token)[0]
+            parsable_arr = current_text.split(self.tool_calls_start_token)[-1].split(
+                self.tool_calls_end_token)[0]
 
             # tool calls are generated in an array, so do partial JSON
             # parsing on the entire array
@@ -188,16 +179,14 @@ class JambaToolParser(ToolParser):
 
                     if diff:
                         diff = json.dumps(diff).replace(
-                            self.streamed_args_for_tool[self.current_tool_id],
-                            "")
+                            self.streamed_args_for_tool[self.current_tool_id], "")
                         delta = DeltaMessage(tool_calls=[
                             DeltaToolCall(index=self.current_tool_id,
                                           function=DeltaFunctionCall(
                                               arguments=diff).model_dump(
                                                   exclude_none=True))
                         ])
-                        self.streamed_args_for_tool[
-                            self.current_tool_id] += diff
+                        self.streamed_args_for_tool[self.current_tool_id] += diff
                     else:
                         delta = None
                 else:
@@ -233,8 +222,8 @@ class JambaToolParser(ToolParser):
             # arguments
             else:
 
-                prev_arguments = self.prev_tool_call_arr[
-                    self.current_tool_id].get("arguments")
+                prev_arguments = self.prev_tool_call_arr[self.current_tool_id].get(
+                    "arguments")
                 cur_arguments = current_tool_call.get("arguments")
 
                 new_text = delta_text.replace("\'", "\"")
@@ -243,14 +232,12 @@ class JambaToolParser(ToolParser):
 
                     delta = None
                 elif not cur_arguments and prev_arguments:
-                    logger.error(
-                        "INVARIANT - impossible to have arguments reset "
-                        "mid-arguments")
+                    logger.error("INVARIANT - impossible to have arguments reset "
+                                 "mid-arguments")
                     delta = None
                 elif cur_arguments and not prev_arguments:
                     cur_arguments_json = json.dumps(cur_arguments)
-                    logger.debug("finding %s in %s", new_text,
-                                 cur_arguments_json)
+                    logger.debug("finding %s in %s", new_text, cur_arguments_json)
 
                     arguments_delta = cur_arguments_json[:cur_arguments_json.
                                                          index(new_text) +
@@ -260,17 +247,16 @@ class JambaToolParser(ToolParser):
                     delta = DeltaMessage(tool_calls=[
                         DeltaToolCall(index=self.current_tool_id,
                                       function=DeltaFunctionCall(
-                                          arguments=arguments_delta).
-                                      model_dump(exclude_none=True))
+                                          arguments=arguments_delta).model_dump(
+                                              exclude_none=True))
                     ])
-                    self.streamed_args_for_tool[
-                        self.current_tool_id] += arguments_delta
+                    self.streamed_args_for_tool[self.current_tool_id] += arguments_delta
 
                 elif cur_arguments and prev_arguments:
                     cur_args_json = json.dumps(cur_arguments)
                     prev_args_json = json.dumps(prev_arguments)
-                    logger.debug("Searching for diff between \n%s\n%s",
-                                 cur_args_json, prev_args_json)
+                    logger.debug("Searching for diff between \n%s\n%s", cur_args_json,
+                                 prev_args_json)
 
                     argument_diff = extract_intermediate_diff(
                         cur_args_json, prev_args_json)
@@ -281,8 +267,7 @@ class JambaToolParser(ToolParser):
                                           arguments=argument_diff).model_dump(
                                               exclude_none=True))
                     ])
-                    self.streamed_args_for_tool[
-                        self.current_tool_id] += argument_diff
+                    self.streamed_args_for_tool[self.current_tool_id] += argument_diff
                 else:
                     # try parsing it with regular JSON - if it works we're
                     # at the end, and we need to send the difference between
@@ -297,7 +282,6 @@ class JambaToolParser(ToolParser):
 
         except Exception:
             logger.exception("Error trying to handle streaming tool call.")
-            logger.debug(
-                "Skipping chunk as a result of tool streaming extraction "
-                "error")
+            logger.debug("Skipping chunk as a result of tool streaming extraction "
+                         "error")
             return None

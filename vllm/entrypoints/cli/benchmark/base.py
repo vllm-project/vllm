@@ -27,12 +27,10 @@ class BenchmarkSubcommandBase(CLISubcommand):
         raise NotImplementedError
 
     def subparser_init(
-            self,
-            subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
-        parser = subparsers.add_parser(
-            self.name,
-            help=self.help,
-            description=self.help,
-            usage=f"vllm bench {self.name} [options]")
+            self, subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
+        parser = subparsers.add_parser(self.name,
+                                       help=self.help,
+                                       description=self.help,
+                                       usage=f"vllm bench {self.name} [options]")
         self.add_cli_args(parser)
         return parser

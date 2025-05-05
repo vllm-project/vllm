@@ -55,9 +55,8 @@ class KVConnectorMetadata:
 class KVConnectorBase_V1(ABC):
 
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
-        logger.warning(
-            "Initializing KVConnectorBase_V1. This API is experimental and "
-            "subject to change in the future as we iterate the design.")
+        logger.warning("Initializing KVConnectorBase_V1. This API is experimental and "
+                       "subject to change in the future as we iterate the design.")
         self._connector_metadata = KVConnectorMetadata()
         self._vllm_config = vllm_config
         self._role = role
@@ -66,8 +65,7 @@ class KVConnectorBase_V1(ABC):
     def role(self) -> KVConnectorRole:
         return self._role
 
-    def bind_connector_metadata(
-            self, connector_metadata: KVConnectorMetadata) -> None:
+    def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
         """Set the connector metadata from the scheduler.
 
         This function should be called by the model runner every time 
@@ -102,8 +100,7 @@ class KVConnectorBase_V1(ABC):
     # ==============================
 
     @abstractmethod
-    def start_load_kv(self, forward_context: "ForwardContext",
-                      **kwargs) -> None:
+    def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         """
         Start loading the KV cache from the connector to vLLM's paged
         KV buffer. This is called from the forward context before the
@@ -187,16 +184,15 @@ class KVConnectorBase_V1(ABC):
         pass
 
     @abstractmethod
-    def update_state_after_alloc(self, request: "Request",
-                                 num_external_tokens: int):
+    def update_state_after_alloc(self, request: "Request", num_external_tokens: int):
         """
         Update KVConnector state after block allocation.
         """
         pass
 
     @abstractmethod
-    def build_connector_meta(
-            self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
+    def build_connector_meta(self,
+                             scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
         """
         Build the connector metadata for this step.
 

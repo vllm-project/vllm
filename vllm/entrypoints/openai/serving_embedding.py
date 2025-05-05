@@ -119,8 +119,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                     tokenizer,
                     request.messages,
                     chat_template=request.chat_template or self.chat_template,
-                    chat_template_content_format=self.
-                    chat_template_content_format,
+                    chat_template_content_format=self.chat_template_content_format,
                     # In embedding requests, we are not generating tokens,
                     # so there is no need to append extra tokens to the input
                     add_generation_prompt=False,
@@ -129,14 +128,13 @@ class OpenAIServingEmbedding(OpenAIServing):
                     add_special_tokens=request.add_special_tokens,
                 )
             else:
-                (request_prompts,
-                 engine_prompts) = await self._preprocess_completion(
-                     request,
-                     tokenizer,
-                     request.input,
-                     truncate_prompt_tokens=truncate_prompt_tokens,
-                     add_special_tokens=request.add_special_tokens,
-                 )
+                (request_prompts, engine_prompts) = await self._preprocess_completion(
+                    request,
+                    tokenizer,
+                    request.input,
+                    truncate_prompt_tokens=truncate_prompt_tokens,
+                    add_special_tokens=request.add_special_tokens,
+                )
         except (ValueError, TypeError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
@@ -183,8 +181,7 @@ class OpenAIServingEmbedding(OpenAIServing):
 
             assert all(final_res is not None for final_res in final_res_batch)
 
-            final_res_batch_checked = cast(list[PoolingRequestOutput],
-                                           final_res_batch)
+            final_res_batch_checked = cast(list[PoolingRequestOutput], final_res_batch)
 
             response = self.request_output_to_embedding_response(
                 final_res_batch_checked,
@@ -217,8 +214,7 @@ class OpenAIServingEmbedding(OpenAIServing):
 
             item = EmbeddingResponseData(
                 index=idx,
-                embedding=_get_embedding(embedding_res.outputs,
-                                         encoding_format),
+                embedding=_get_embedding(embedding_res.outputs, encoding_format),
             )
             prompt_token_ids = final_res.prompt_token_ids
 

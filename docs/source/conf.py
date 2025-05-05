@@ -112,14 +112,12 @@ myst_url_schemes = {
     'mailto': None,
     'ftp': None,
     "gh-issue": {
-        "url":
-        "https://github.com/vllm-project/vllm/issues/{{path}}#{{fragment}}",
+        "url": "https://github.com/vllm-project/vllm/issues/{{path}}#{{fragment}}",
         "title": "Issue #{{path}}",
         "classes": ["github"],
     },
     "gh-pr": {
-        "url":
-        "https://github.com/vllm-project/vllm/pull/{{path}}#{{fragment}}",
+        "url": "https://github.com/vllm-project/vllm/pull/{{path}}#{{fragment}}",
         "title": "Pull Request #{{path}}",
         "classes": ["github"],
     },
@@ -249,13 +247,11 @@ for mock_target in autodoc_mock_imports:
         logger.info(
             "Potentially problematic mock target (%s) found; "
             "autodoc_mock_imports cannot mock modules that have already "
-            "been loaded into sys.modules when the sphinx build starts.",
-            mock_target)
+            "been loaded into sys.modules when the sphinx build starts.", mock_target)
 
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),
-    "typing_extensions":
-    ("https://typing-extensions.readthedocs.io/en/latest", None),
+    "typing_extensions": ("https://typing-extensions.readthedocs.io/en/latest", None),
     "aiohttp": ("https://docs.aiohttp.org/en/stable", None),
     "pillow": ("https://pillow.readthedocs.io/en/stable", None),
     "numpy": ("https://numpy.org/doc/stable", None),

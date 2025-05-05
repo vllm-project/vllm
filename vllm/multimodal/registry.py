@@ -83,8 +83,7 @@ class MultiModalRegistry:
     """
 
     def __init__(self) -> None:
-        self._processor_factories = ClassRegistry[nn.Module,
-                                                  _ProcessorFactories]()
+        self._processor_factories = ClassRegistry[nn.Module, _ProcessorFactories]()
 
         self._processing_cache = ProcessingCache(VLLM_MM_INPUT_CACHE_GIB)
 
@@ -137,9 +136,8 @@ class MultiModalRegistry:
 
         return {
             key: max_tokens_per_mm_item
-            for key, max_tokens_per_mm_item in
-            self.get_max_tokens_per_item_by_modality(model_config).items()
-            if mm_limits[key] > 0
+            for key, max_tokens_per_mm_item in self.get_max_tokens_per_item_by_modality(
+                model_config).items() if mm_limits[key] > 0
         }
 
     def get_max_tokens_by_modality(
@@ -156,8 +154,8 @@ class MultiModalRegistry:
 
         return {
             key: mm_limits[key] * max_tokens_per_mm_item
-            for key, max_tokens_per_mm_item in
-            self.get_max_tokens_per_item_by_modality(model_config).items()
+            for key, max_tokens_per_mm_item in self.get_max_tokens_per_item_by_modality(
+                model_config).items()
         }
 
     def get_max_multimodal_tokens(self, model_config: "ModelConfig") -> int:
@@ -217,8 +215,8 @@ class MultiModalRegistry:
             if self._processor_factories.contains(model_cls, strict=True):
                 logger.warning(
                     "Model class %s already has a multi-modal processor "
-                    "registered to %s. It is overwritten by the new one.",
-                    model_cls, self)
+                    "registered to %s. It is overwritten by the new one.", model_cls,
+                    self)
 
             self._processor_factories[model_cls] = _ProcessorFactories(
                 info=info,

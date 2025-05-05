@@ -67,8 +67,7 @@ def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
                                     end=1 + 2 * num_remaining_heads,
                                     step=2,
                                     dtype=torch.int32)
-        slopes = torch.cat(
-            [slopes, torch.pow(extra_base, extra_powers)], dim=0)
+        slopes = torch.cat([slopes, torch.pow(extra_base, extra_powers)], dim=0)
     return slopes
 
 
@@ -174,14 +173,13 @@ class BloomBlock(nn.Module):
         super().__init__()
         hidden_size = config.hidden_size
 
-        self.input_layernorm = nn.LayerNorm(hidden_size,
-                                            eps=config.layer_norm_epsilon)
+        self.input_layernorm = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
         self.self_attention = BloomAttention(config,
                                              cache_config,
                                              quant_config,
                                              prefix=f"{prefix}.self_attention")
-        self.post_attention_layernorm = nn.LayerNorm(
-            hidden_size, eps=config.layer_norm_epsilon)
+        self.post_attention_layernorm = nn.LayerNorm(hidden_size,
+                                                     eps=config.layer_norm_epsilon)
         self.mlp = BloomMLP(config, quant_config)
         self.apply_residual_connection_post_layernorm = (
             config.apply_residual_connection_post_layernorm)
@@ -236,21 +234,20 @@ class BloomModel(nn.Module):
             config.vocab_size,
             self.embed_dim,
         )
-        self.word_embeddings_layernorm = nn.LayerNorm(
-            self.embed_dim, eps=config.layer_norm_epsilon)
+        self.word_embeddings_layernorm = nn.LayerNorm(self.embed_dim,
+                                                      eps=config.layer_norm_epsilon)
 
         # Transformer blocks
         self.start_layer, self.end_layer, self.h = make_layers(
             config.num_hidden_layers,
-            lambda prefix: BloomBlock(
-                config, cache_config, quant_config, prefix=prefix),
+            lambda prefix: BloomBlock(config, cache_config, quant_config, prefix=prefix
+                                      ),
             prefix=f"{prefix}.h")
 
         # Final Layer Norm
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(["hidden_states"],
-                                                    config.hidden_size))
+        self.make_empty_intermediate_tensors = (make_empty_intermediate_tensors_factory(
+            ["hidden_states"], config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.word_embeddings_layernorm(self.word_embeddings(input_ids))
@@ -287,8 +284,7 @@ class BloomForCausalLM(nn.Module, SupportsPP, SupportsV0Only, SupportsQuant):
         self.config = config
         self.quant_config = quant_config
         self.transformer = BloomModel(vllm_config=vllm_config,
-                                      prefix=maybe_prefix(
-                                          prefix, "transformer"))
+                                      prefix=maybe_prefix(prefix, "transformer"))
         if self.config.tie_word_embeddings:
             self.lm_head = self.transformer.word_embeddings
         else:
@@ -309,8 +305,8 @@ class BloomForCausalLM(nn.Module, SupportsPP, SupportsV0Only, SupportsQuant):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.transformer(input_ids, positions,
-                                         intermediate_tensors, inputs_embeds)
+        hidden_states = self.transformer(input_ids, positions, intermediate_tensors,
+                                         inputs_embeds)
         return hidden_states
 
     def compute_logits(
@@ -318,12 +314,10 @@ class BloomForCausalLM(nn.Module, SupportsPP, SupportsV0Only, SupportsQuant):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
@@ -347,12 +341,10 @@ class BloomForCausalLM(nn.Module, SupportsPP, SupportsV0Only, SupportsQuant):
                     loaded_weight = loaded_weight.view(
                         loaded_weight_shape[:output_dim] + (num_heads, 3, -1) +
                         loaded_weight_shape[output_dim + 1:])
-                    loaded_weight = loaded_weight.transpose(
-                        output_dim, output_dim + 1)
+                    loaded_weight = loaded_weight.transpose(output_dim, output_dim + 1)
                     loaded_weight = loaded_weight.reshape(loaded_weight_shape)
 
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params

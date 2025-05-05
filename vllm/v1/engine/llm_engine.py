@@ -49,11 +49,10 @@ class LLMEngine:
         multiprocess_mode: bool = False,
     ) -> None:
         if not envs.VLLM_USE_V1:
-            raise ValueError(
-                "Using V1 LLMEngine, but envs.VLLM_USE_V1=False. "
-                "This should not happen. As a workaround, try using "
-                "LLMEngine.from_vllm_config(...) or explicitly set "
-                "VLLM_USE_V1=0 or 1 and report this issue on Github.")
+            raise ValueError("Using V1 LLMEngine, but envs.VLLM_USE_V1=False. "
+                             "This should not happen. As a workaround, try using "
+                             "LLMEngine.from_vllm_config(...) or explicitly set "
+                             "VLLM_USE_V1=0 or 1 and report this issue on Github.")
 
         if stat_loggers is not None:
             raise NotImplementedError(
@@ -85,8 +84,7 @@ class LLMEngine:
                                    mm_registry=mm_registry)
 
         # OutputProcessor (convert EngineCoreOutputs --> RequestOutput).
-        self.output_processor = OutputProcessor(self.tokenizer,
-                                                log_stats=False)
+        self.output_processor = OutputProcessor(self.tokenizer, log_stats=False)
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
         self.engine_core = EngineCoreClient.make_client(
@@ -182,9 +180,8 @@ class LLMEngine:
     ) -> None:
         # Process raw inputs into the request.
         prompt_str, request = self.processor.process_inputs(
-            request_id, prompt, params, arrival_time, lora_request,
-            tokenization_kwargs, trace_headers, prompt_adapter_request,
-            priority)
+            request_id, prompt, params, arrival_time, lora_request, tokenization_kwargs,
+            trace_headers, prompt_adapter_request, priority)
 
         n = params.n if isinstance(params, SamplingParams) else 1
 
@@ -204,8 +201,8 @@ class LLMEngine:
             child_request.sampling_params = params
 
             # Make a new RequestState and queue.
-            self.output_processor.add_request(child_request, prompt_str,
-                                              parent_req, idx)
+            self.output_processor.add_request(child_request, prompt_str, parent_req,
+                                              idx)
             # Add the request to EngineCore.
             self.engine_core.add_request(child_request)
 
@@ -220,8 +217,7 @@ class LLMEngine:
         outputs = self.engine_core.get_output()
 
         # 2) Process EngineCoreOutputs.
-        processed_outputs = self.output_processor.process_outputs(
-            outputs.outputs)
+        processed_outputs = self.output_processor.process_outputs(outputs.outputs)
 
         # 3) Abort any reqs that finished due to stop strings.
         self.engine_core.abort_requests(processed_outputs.reqs_to_abort)

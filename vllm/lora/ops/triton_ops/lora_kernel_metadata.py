@@ -43,9 +43,7 @@ class LoRAKernelMeta:
         # +1 because "no-lora" is also a possibility
         # example: let max_loras be 3, active_lora_ids of [-1, 0, 2, 1]
         # is a possibility.
-        active_lora_ids = torch.empty(max_loras + 1,
-                                      dtype=torch.int32,
-                                      device=device)
+        active_lora_ids = torch.empty(max_loras + 1, dtype=torch.int32, device=device)
 
         # using running example, [3, 10, 5, 2] is a possibility.
         num_tokens_per_lora = torch.zeros(max_loras + 1,
@@ -59,9 +57,7 @@ class LoRAKernelMeta:
                                            dtype=torch.int32,
                                            device=device)
 
-        no_lora_flag_cpu = torch.tensor([False],
-                                        dtype=torch.bool,
-                                        device='cpu')
+        no_lora_flag_cpu = torch.tensor([False], dtype=torch.bool, device='cpu')
 
         return LoRAKernelMeta(
             token_lora_mapping=token_lora_mapping,
@@ -113,8 +109,7 @@ class LoRAKernelMeta:
         lora_ids, num_tokens_per_lora = torch.unique(token_lora_mapping,
                                                      sorted=True,
                                                      return_counts=True)
-        self.active_lora_ids[:lora_ids.size(0)].copy_(lora_ids,
-                                                      non_blocking=True)
+        self.active_lora_ids[:lora_ids.size(0)].copy_(lora_ids, non_blocking=True)
         self.num_tokens_per_lora[:num_tokens_per_lora.size(0)].copy_(
             num_tokens_per_lora, non_blocking=True)
 
@@ -125,8 +120,8 @@ class LoRAKernelMeta:
 
     def meta_args(
         self, token_nums: int
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
-               torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+               torch.Tensor]:
         """
         This function returns the kernel metadata required for the current
         forward pass execution of the kernel. The function returns all the

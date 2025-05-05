@@ -39,11 +39,10 @@ class PoolingParams(
             mds = model_config.matryoshka_dimensions
             if mds is not None:
                 if self.dimensions not in mds:
-                    raise ValueError(
-                        f'Model "{model_config.served_model_name}" '
-                        f'only supports {str(mds)} matryoshka dimensions, '
-                        f'use other output dimensions will '
-                        f'lead to poor results.')
+                    raise ValueError(f'Model "{model_config.served_model_name}" '
+                                     f'only supports {str(mds)} matryoshka dimensions, '
+                                     f'use other output dimensions will '
+                                     f'lead to poor results.')
             elif self.dimensions < 1:
                 raise ValueError("Dimensions must be greater than 0")
 

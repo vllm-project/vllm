@@ -101,8 +101,8 @@ def support_torch_compile(
             inferred_dynamic_arg_dims = {}
             for k, v in sig.parameters.items():
                 if v.annotation in [
-                        torch.Tensor, Optional[torch.Tensor],
-                        IntermediateTensors, Optional[IntermediateTensors]
+                        torch.Tensor, Optional[torch.Tensor], IntermediateTensors,
+                        Optional[IntermediateTensors]
                 ]:
                     inferred_dynamic_arg_dims[k] = 0
 
@@ -111,9 +111,8 @@ def support_torch_compile(
                          list(inferred_dynamic_arg_dims.keys()))
 
         if len(inferred_dynamic_arg_dims) == 0:
-            raise ValueError(
-                "No dynamic dimensions found in the forward method of "
-                f"{cls}. Please provide dynamic_arg_dims explicitly.")
+            raise ValueError("No dynamic dimensions found in the forward method of "
+                             f"{cls}. Please provide dynamic_arg_dims explicitly.")
 
         for k in inferred_dynamic_arg_dims:
             if k not in sig.parameters:
@@ -182,16 +181,13 @@ def _support_torch_compile(
                     dims = [dims] if isinstance(dims, int) else dims
                     if isinstance(arg, torch.Tensor):
                         # In case dims is specified with negative indexing
-                        dims = [
-                            arg.ndim + dim if dim < 0 else dim for dim in dims
-                        ]
+                        dims = [arg.ndim + dim if dim < 0 else dim for dim in dims]
                         torch._dynamo.mark_dynamic(arg, dims)
                     elif isinstance(arg, IntermediateTensors):
                         for tensor in arg.tensors.values():
                             # In case dims is specified with negative indexing
                             dims = [
-                                tensor.ndim + dim if dim < 0 else dim
-                                for dim in dims
+                                tensor.ndim + dim if dim < 0 else dim for dim in dims
                             ]
                             torch._dynamo.mark_dynamic(tensor, dims)
                     else:
@@ -200,8 +196,7 @@ def _support_torch_compile(
                             f" {dims} for argument {k} with type {type(arg)}.")
             # here, it is the starting point of the `torch.compile` process
             start_monitoring_torch_compile(self.vllm_config)
-            logger.debug("Start compiling function %s",
-                         self.original_code_object)
+            logger.debug("Start compiling function %s", self.original_code_object)
 
         # if we don't use custom dispatcher, we can directly call the
         # compiled function and let torch.compile handle the dispatching,
@@ -210,8 +205,7 @@ def _support_torch_compile(
             # it seems Dynamo reuse the compilation across instances,
             # while we need to make sure the compiled code is not reused.
             # we need to control all the compilation of the model.
-            torch._dynamo.eval_frame.remove_from_cache(
-                self.original_code_object)
+            torch._dynamo.eval_frame.remove_from_cache(self.original_code_object)
 
             # collect all relevant files traced by Dynamo,
             # so that the compilation cache can trigger re-compilation
@@ -229,8 +223,7 @@ def _support_torch_compile(
 
             def patched_inline_call(parent, func, args, kwargs):
                 code = func.get_code()
-                self.vllm_config.compilation_config.traced_files.add(
-                    code.co_filename)
+                self.vllm_config.compilation_config.traced_files.add(code.co_filename)
                 return inline_call(parent, func, args, kwargs)
 
             with patch.object(InliningInstructionTranslator, 'inline_call',

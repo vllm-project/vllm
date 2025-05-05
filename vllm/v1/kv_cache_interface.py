@@ -94,8 +94,7 @@ class SlidingWindowSpec(AttentionSpec):
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_model_len = vllm_config.model_config.max_model_len
-        max_num_batched_tokens = (
-            vllm_config.scheduler_config.max_num_batched_tokens)
+        max_num_batched_tokens = (vllm_config.scheduler_config.max_num_batched_tokens)
 
         # During chunked prefill, we allocate KV cache for the last
         # `self.sliding_window-1` computed tokens plus the newly scheduled

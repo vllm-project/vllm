@@ -101,8 +101,7 @@ class RequestState:
         self.is_prefilling = True
         self.queue = queue
 
-        self.stats = RequestStateStats(
-            arrival_time=arrival_time) if log_stats else None
+        self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
 
     @classmethod
     def from_new_request(
@@ -134,8 +133,8 @@ class RequestState:
                 tokenizer=tokenizer,
                 request=request,
             ),
-            max_tokens_param=(request.sampling_params.max_tokens if
-                              request.sampling_params is not None else None),
+            max_tokens_param=(request.sampling_params.max_tokens
+                              if request.sampling_params is not None else None),
             arrival_time=request.arrival_time,
             queue=queue,
             log_stats=log_stats,
@@ -155,8 +154,8 @@ class RequestState:
             # Only the final output is required in FINAL_ONLY mode.
             return None
 
-        completion_output = self._new_completion_output(
-            new_token_ids, finish_reason, stop_reason)
+        completion_output = self._new_completion_output(new_token_ids, finish_reason,
+                                                        stop_reason)
 
         request_id = self.request_id
         if self.parent_req is None:
@@ -329,8 +328,7 @@ class OutputProcessor:
 
             # 1) Compute stats for this iteration.
             self._update_stats_from_output(req_state, engine_core_output,
-                                           engine_core_timestamp,
-                                           iteration_stats)
+                                           engine_core_timestamp, iteration_stats)
 
             new_token_ids = engine_core_output.new_token_ids
             finish_reason = engine_core_output.finish_reason
@@ -392,11 +390,10 @@ class OutputProcessor:
 
         assert engine_core_timestamp is not None
         assert req_state.stats is not None
-        iteration_stats.update_from_output(engine_core_output,
-                                           engine_core_timestamp,
+        iteration_stats.update_from_output(engine_core_output, engine_core_timestamp,
                                            req_state.is_prefilling,
-                                           req_state.prompt_len,
-                                           req_state.stats, lora_stats)
+                                           req_state.prompt_len, req_state.stats,
+                                           lora_stats)
 
     def _update_stats_from_finished(self, req_state: RequestState,
                                     finish_reason: Optional[FinishReason],
@@ -413,6 +410,5 @@ class OutputProcessor:
             req_stats=req_state.stats)
         self.lora_states.finish_request(req_state)
 
-        ParentRequest.observe_finished_request(
-            req_state.parent_req, iteration_stats,
-            req_state.stats.num_generation_tokens)
+        ParentRequest.observe_finished_request(req_state.parent_req, iteration_stats,
+                                               req_state.stats.num_generation_tokens)

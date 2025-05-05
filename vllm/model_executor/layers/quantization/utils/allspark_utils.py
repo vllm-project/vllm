@@ -13,12 +13,10 @@ ALLSPARK_AMPERE_K_ALIGN = 16
 
 def check_allspark_supported_dtype_shape(input_size_per_partition: int,
                                          output_size_per_partition: int,
-                                         group_size: int,
-                                         weight_dtype: ScalarType,
+                                         group_size: int, weight_dtype: ScalarType,
                                          act_dtype: torch.dtype):
     capability_tuple = current_platform.get_device_capability()
-    device_capability = (-1 if capability_tuple is None else
-                         capability_tuple.to_int())
+    device_capability = (-1 if capability_tuple is None else capability_tuple.to_int())
 
     # For Ampere GPU
     if device_capability >= 80 and device_capability < 90:

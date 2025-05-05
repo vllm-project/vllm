@@ -22,8 +22,8 @@ class Detokenizer:
         return self.tokenizer_group.get_lora_tokenizer(sequence.lora_request)
 
     def decode_prompt_logprobs_inplace(self, seq_group: SequenceGroup,
-                                       prompt_logprobs: List[Optional[Dict[
-                                           int, Logprob]]],
+                                       prompt_logprobs: List[Optional[Dict[int,
+                                                                           Logprob]]],
                                        position_offset: int) -> None:
         """Decodes the logprobs for the prompt of a sequence group.
 
@@ -64,8 +64,8 @@ class Detokenizer:
             for token_id, sample_logprob in prompt_logprobs_for_token.items():
                 if (sample_logprob.decoded_token is None
                         and token_id != VLLM_INVALID_TOKEN_ID):
-                    prompt_token_ids_with_token = (
-                        prompt_token_ids[:token_position] + [token_id])
+                    prompt_token_ids_with_token = (prompt_token_ids[:token_position] +
+                                                   [token_id])
                     (new_tokens, new_text, new_prefix_offset,
                      new_read_offset) = detokenize_incrementally(
                          tokenizer=tokenizer,
@@ -96,8 +96,7 @@ class Detokenizer:
             else:
                 prev_tokens.extend(next_iter_tokens)
 
-    def decode_sequence_inplace(self, seq: Sequence,
-                                prms: SamplingParams) -> int:
+    def decode_sequence_inplace(self, seq: Sequence, prms: SamplingParams) -> int:
         """Decodes the new token for a sequence. In-place operation.
 
         Args:

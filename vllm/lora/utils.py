@@ -67,8 +67,7 @@ def from_layer(layer: nn.Module,
                                       packed_modules_list=packed_modules_list,
                                       model_config=model_config):
             instance_layer = lora_cls(layer)
-            instance_layer.create_lora_weights(max_loras, lora_config,
-                                               model_config)
+            instance_layer.create_lora_weights(max_loras, lora_config, model_config)
             return instance_layer
     return layer
 
@@ -80,8 +79,8 @@ def from_layer_logits_processor(
     lora_config: LoRAConfig,
     model_config: Optional[PretrainedConfig] = None,
 ) -> LogitsProcessorWithLoRA:
-    ret = LogitsProcessorWithLoRA(layer, lm_head.embedding_dim,
-                                  lm_head.weight.dtype, lm_head.weight.device,
+    ret = LogitsProcessorWithLoRA(layer, lm_head.embedding_dim, lm_head.weight.dtype,
+                                  lm_head.weight.device,
                                   lm_head.get_sharded_to_full_mapping())
     ret.create_lora_weights(max_loras, lora_config, model_config)
     return ret
@@ -98,8 +97,7 @@ def replace_submodule(model: nn.Module, module_name: str,
 
 def parse_fine_tuned_lora_name(
         name: str,
-        weights_mapper: Optional[WeightsMapper] = None
-) -> Tuple[str, bool, bool]:
+        weights_mapper: Optional[WeightsMapper] = None) -> Tuple[str, bool, bool]:
     """Parse the name of lora weights.
 
     args:
@@ -129,8 +127,7 @@ def parse_fine_tuned_lora_name(
     start_index = 2 if "base_model.model." in name else 0
 
     parts = name.split(".")
-    if parts[-1] == "weight" and (parts[-2] == "lora_A"
-                                  or parts[-2] == "lora_B"):
+    if parts[-1] == "weight" and (parts[-2] == "lora_A" or parts[-2] == "lora_B"):
         new_name = ".".join(parts[start_index:-2])
         return new_name, parts[-2] == "lora_A", False
 
@@ -225,8 +222,7 @@ def get_adapter_absolute_path(lora_path: str) -> str:
 
     # If the path does not exist locally, assume it's a Hugging Face repo.
     try:
-        local_snapshot_path = huggingface_hub.snapshot_download(
-            repo_id=lora_path)
+        local_snapshot_path = huggingface_hub.snapshot_download(repo_id=lora_path)
     except (HfHubHTTPError, RepositoryNotFoundError, EntryNotFoundError,
             HFValidationError):
         # Handle errors that may occur during the download

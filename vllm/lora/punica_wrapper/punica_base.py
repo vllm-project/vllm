@@ -152,12 +152,8 @@ class PunicaWrapperBase(PunicaWrapperABC):
         # embeddings_indices,long_lora_indices
         self.indices_len: List[Optional[int]] = [None] * 5
         # these attributes are the information required for sgmv kernel
-        self._seq_start_locs = torch.empty(max_batches,
-                                           dtype=torch.long,
-                                           device=device)
-        self._seq_lengths = torch.empty(max_batches,
-                                        dtype=torch.long,
-                                        device=device)
+        self._seq_start_locs = torch.empty(max_batches, dtype=torch.long, device=device)
+        self._seq_lengths = torch.empty(max_batches, dtype=torch.long, device=device)
         self._lora_indices_per_batch = torch.empty(max_batches,
                                                    dtype=torch.long,
                                                    device=device)
@@ -197,9 +193,8 @@ class PunicaWrapperBase(PunicaWrapperABC):
         self._sampler_indices[:sampler_indices.shape[0]].copy_(sampler_indices)
         self._sampler_indices_padded[:sampler_indices_padded.shape[0]].copy_(
             sampler_indices_padded)
-        self._embeddings_indices[:embeddings_indices.
-                                 shape[0], :embeddings_indices.shape[1]].copy_(
-                                     embeddings_indices)
+        self._embeddings_indices[:embeddings_indices.shape[0], :embeddings_indices.
+                                 shape[1]].copy_(embeddings_indices)
         if long_lora_offsets_tensor is not None:
             self._long_lora_indices[:long_lora_offsets_tensor.shape[0]].copy_(
                 long_lora_offsets_tensor)
@@ -209,12 +204,10 @@ class PunicaWrapperBase(PunicaWrapperABC):
 
     def _update_prefill_metada(self, token_lora_tensor: torch.Tensor) -> None:
 
-        (b_seq_start_tensor, seq_length_tensor, lora_indices_tensor,
-         batch_size, max_length, token_nums,
-         no_lora) = compute_meta(token_lora_tensor)
+        (b_seq_start_tensor, seq_length_tensor, lora_indices_tensor, batch_size,
+         max_length, token_nums, no_lora) = compute_meta(token_lora_tensor)
 
-        self._seq_start_locs[:b_seq_start_tensor.shape[0]].copy_(
-            b_seq_start_tensor)
+        self._seq_start_locs[:b_seq_start_tensor.shape[0]].copy_(b_seq_start_tensor)
         self._seq_lengths[:seq_length_tensor.shape[0]].copy_(seq_length_tensor)
         self._lora_indices_per_batch[:lora_indices_tensor.shape[0]].copy_(
             lora_indices_tensor)
@@ -257,8 +250,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
 
     @property
     def prefill_metadata(
-        self
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, int]:
+            self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, int]:
         """
         This property provides a convenient way to access the necessary 
         metadata for prefill-related  kernel computations.
@@ -272,8 +264,8 @@ class PunicaWrapperBase(PunicaWrapperABC):
         """
         return (self._seq_start_locs[:self.batch_size],
                 self._seq_lengths[:self.batch_size],
-                self._lora_indices_per_batch[:self.batch_size],
-                self.batch_size, self.max_length, self.token_nums)
+                self._lora_indices_per_batch[:self.batch_size], self.batch_size,
+                self.max_length, self.token_nums)
 
     @property
     def token_lora_indices(self) -> torch.Tensor:
@@ -319,19 +311,17 @@ class PunicaWrapperBase(PunicaWrapperABC):
         long_lora_len = self.indices_len[4]
         return self._long_lora_indices[:long_lora_len]
 
-    def update_metadata(
-            self,
-            mapping: "LoRAMapping",
-            lora_index_to_id: List[Optional[int]],
-            max_loras: int,
-            vocab_size: int,
-            extra_vocab_size: int,
-            long_lora_context: Optional["LongContextLoRAContext"] = None,
-            **kwargs):
+    def update_metadata(self,
+                        mapping: "LoRAMapping",
+                        lora_index_to_id: List[Optional[int]],
+                        max_loras: int,
+                        vocab_size: int,
+                        extra_vocab_size: int,
+                        long_lora_context: Optional["LongContextLoRAContext"] = None,
+                        **kwargs):
 
-        self._update_base_metadata(mapping, lora_index_to_id, max_loras,
-                                   vocab_size, extra_vocab_size,
-                                   long_lora_context)
+        self._update_base_metadata(mapping, lora_index_to_id, max_loras, vocab_size,
+                                   extra_vocab_size, long_lora_context)
         if mapping.is_prefill:
             # Update metadata required for prefill-related operators.
             self._update_prefill_metada(self.token_lora_indices)

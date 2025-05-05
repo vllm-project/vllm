@@ -116,10 +116,7 @@ class CPUMLAMetadataBuilder(AttentionMetadataBuilder[CPUMLAMetadata]):
                          dim=0,
                          dtype=torch.int32,
                          out=query_start_loc[1:])
-            torch.cumsum(kv_lens_tensor,
-                         dim=0,
-                         dtype=torch.int32,
-                         out=kv_start_loc[1:])
+            torch.cumsum(kv_lens_tensor, dim=0, dtype=torch.int32, out=kv_start_loc[1:])
             max_query_len = max(prefill_query_lens)
             max_kv_len = max(prefill_seq_lens)
 
@@ -171,24 +168,24 @@ class CPUMLAMetadataBuilder(AttentionMetadataBuilder[CPUMLAMetadata]):
                 input_data.multi_modal_placeholder_maps.items()
             }
 
-        return CPUMLAMetadata(
-            chunked_prefill=self.chunked_prefill,
-            seq_lens=prefill_seq_lens,
-            seq_lens_tensor=seq_lens_tensor,
-            max_query_len=max_query_len,
-            max_kv_len=max_kv_len,
-            query_start_loc=query_start_loc,
-            kv_start_loc=kv_start_loc,
-            max_decode_seq_len=input_data.max_decode_seq_len,
-            num_prefills=input_data.num_prefills,
-            num_prefill_tokens=input_data.num_prefill_tokens,
-            num_decode_tokens=input_data.num_decode_tokens,
-            block_tables=block_tables,
-            prefill_block_tables=prefill_block_tables,
-            slot_mapping=slot_mapping,
-            multi_modal_placeholder_index_maps=placeholder_index_maps,
-            enable_kv_scales_calculation=False,
-            input_positions=torch.tensor([self.input_data.input_positions]))
+        return CPUMLAMetadata(chunked_prefill=self.chunked_prefill,
+                              seq_lens=prefill_seq_lens,
+                              seq_lens_tensor=seq_lens_tensor,
+                              max_query_len=max_query_len,
+                              max_kv_len=max_kv_len,
+                              query_start_loc=query_start_loc,
+                              kv_start_loc=kv_start_loc,
+                              max_decode_seq_len=input_data.max_decode_seq_len,
+                              num_prefills=input_data.num_prefills,
+                              num_prefill_tokens=input_data.num_prefill_tokens,
+                              num_decode_tokens=input_data.num_decode_tokens,
+                              block_tables=block_tables,
+                              prefill_block_tables=prefill_block_tables,
+                              slot_mapping=slot_mapping,
+                              multi_modal_placeholder_index_maps=placeholder_index_maps,
+                              enable_kv_scales_calculation=False,
+                              input_positions=torch.tensor(
+                                  [self.input_data.input_positions]))
 
 
 class CPUMLAImpl(MLACommonImpl[CPUMLAMetadata]):
@@ -207,10 +204,9 @@ class CPUMLAImpl(MLACommonImpl[CPUMLAMetadata]):
             attn_type: str,
             # MLA Specific Arguments
             **mla_args) -> None:
-        super().__init__(num_heads, head_size, scale, num_kv_heads,
-                         alibi_slopes, sliding_window, kv_cache_dtype,
-                         blocksparse_params, logits_soft_cap, attn_type,
-                         **mla_args)
+        super().__init__(num_heads, head_size, scale, num_kv_heads, alibi_slopes,
+                         sliding_window, kv_cache_dtype, blocksparse_params,
+                         logits_soft_cap, attn_type, **mla_args)
 
         unsupported_features = [
             alibi_slopes, sliding_window, blocksparse_params, logits_soft_cap
@@ -229,8 +225,7 @@ class CPUMLAImpl(MLACommonImpl[CPUMLAMetadata]):
 
         # states is implemented.
         if is_quantized_kv_cache(self.kv_cache_dtype):
-            raise NotImplementedError(
-                "CPUMLAImpl with FP8 KV cache not yet supported")
+            raise NotImplementedError("CPUMLAImpl with FP8 KV cache not yet supported")
 
     def _forward_prefill(
             self,
@@ -253,8 +248,7 @@ class CPUMLAImpl(MLACommonImpl[CPUMLAMetadata]):
 
         # For MLA the v head dim is smaller than qk head dim so we pad out
         # v with 0s to match the qk head dim
-        v_padded = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]],
-                                           value=0)
+        v_padded = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]], value=0)
 
         output = torch.empty_like(q)
         ipex_ops.varlen_attention(
@@ -279,8 +273,7 @@ class CPUMLAImpl(MLACommonImpl[CPUMLAMetadata]):
         )
 
         # remove padding
-        output = output.view(-1, self.num_heads,
-                             q.shape[-1])[..., :v.shape[-1]]
+        output = output.view(-1, self.num_heads, q.shape[-1])[..., :v.shape[-1]]
         return output.reshape(-1, self.num_heads * v.shape[-1])
 
     def _forward_decode(

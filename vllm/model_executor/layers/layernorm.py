@@ -29,9 +29,8 @@ def rms_norm(x: torch.Tensor, weight: torch.Tensor,
     return out
 
 
-def fused_add_rms_norm(
-        x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
-        variance_epsilon: float) -> Tuple[torch.Tensor, torch.Tensor]:
+def fused_add_rms_norm(x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
+                       variance_epsilon: float) -> Tuple[torch.Tensor, torch.Tensor]:
     from vllm import _custom_ops as ops
     ops.fused_add_rms_norm(
         x,
@@ -98,8 +97,8 @@ class RMSNorm(CustomOp):
 
         self.hidden_size = hidden_size
         self.variance_epsilon = eps
-        self.variance_size_override = (None if var_hidden_size == hidden_size
-                                       else var_hidden_size)
+        self.variance_size_override = (None if var_hidden_size == hidden_size else
+                                       var_hidden_size)
         self.has_weight = has_weight
         if dtype is not None:
             self.weight = torch.ones(hidden_size, dtype=dtype)
@@ -158,8 +157,7 @@ class RMSNorm(CustomOp):
         norm_func = dispatch_cuda_rmsnorm_func(add_residual)
 
         if add_residual:
-            return norm_func(x, residual, self.weight.data,
-                             self.variance_epsilon)
+            return norm_func(x, residual, self.weight.data, self.variance_epsilon)
         else:
             return norm_func(x, self.weight.data, self.variance_epsilon)
 
@@ -176,8 +174,7 @@ class RMSNorm(CustomOp):
             orig_shape = x.shape
             residual += x.view(residual.shape)
             # Note: HPUFusedRMSNorm requires 3D tensors as inputs
-            x = HPUFusedRMSNorm.apply(residual, self.weight,
-                                      self.variance_epsilon)
+            x = HPUFusedRMSNorm.apply(residual, self.weight, self.variance_epsilon)
             return x.view(orig_shape), residual
 
         x = HPUFusedRMSNorm.apply(x, self.weight, self.variance_epsilon)
@@ -259,8 +256,7 @@ class GemmaRMSNorm(CustomOp):
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """PyTorch-native implementation equivalent to forward()."""
-        return self.forward_static(self.weight.data, self.variance_epsilon, x,
-                                   residual)
+        return self.forward_static(self.weight.data, self.variance_epsilon, x, residual)
 
     def forward_cuda(
         self,

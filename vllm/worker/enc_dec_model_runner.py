@@ -59,8 +59,7 @@ class EncoderDecoderModelInput(ModelInputForGPUWithSamplingMetadata):
             "multi_modal_kwargs": self.multi_modal_kwargs,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
-        _add_sampling_metadata_broadcastable_dict(tensor_dict,
-                                                  self.sampling_metadata)
+        _add_sampling_metadata_broadcastable_dict(tensor_dict, self.sampling_metadata)
         return tensor_dict
 
     @classmethod
@@ -69,14 +68,12 @@ class EncoderDecoderModelInput(ModelInputForGPUWithSamplingMetadata):
         tensor_dict: Dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None,
     ) -> "EncoderDecoderModelInput":
-        return cast(
-            EncoderDecoderModelInput,
-            super().from_broadcasted_tensor_dict(tensor_dict, attn_backend))
+        return cast(EncoderDecoderModelInput,
+                    super().from_broadcasted_tensor_dict(tensor_dict, attn_backend))
 
 
 class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
-    _model_input_cls: Type[EncoderDecoderModelInput] = (
-        EncoderDecoderModelInput)
+    _model_input_cls: Type[EncoderDecoderModelInput] = (EncoderDecoderModelInput)
     _builder_cls: Type[ModelInputForGPUBuilder] = (ModelInputForGPUBuilder)
 
     def __init__(
@@ -168,22 +165,19 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         if self.lora_config:
             assert model_input.lora_requests is not None
             assert model_input.lora_mapping is not None
-            self.set_active_loras(model_input.lora_requests,
-                                  model_input.lora_mapping)
+            self.set_active_loras(model_input.lora_requests, model_input.lora_mapping)
         if (model_input.attn_metadata is not None
                 and model_input.attn_metadata.prefill_metadata is None
                 and model_input.attn_metadata.decode_metadata.use_cuda_graph):
             if model_input.inputs_embeds is None:
                 assert model_input.input_tokens is not None
                 graph_batch_size = model_input.input_tokens.shape[0]
-                model_executable = (
-                    self.graph_runners[model_input.virtual_engine][(
-                        graph_batch_size, False)])
+                model_executable = (self.graph_runners[model_input.virtual_engine][(
+                    graph_batch_size, False)])
             else:
                 graph_batch_size = model_input.inputs_embeds.shape[0]
-                model_executable = (
-                    self.graph_runners[model_input.virtual_engine][(
-                        graph_batch_size, True)])
+                model_executable = (self.graph_runners[model_input.virtual_engine][(
+                    graph_batch_size, True)])
         else:
             model_executable = self.model
 
@@ -202,8 +196,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 encoder_input_ids=model_input.encoder_input_tokens,
                 encoder_positions=model_input.encoder_input_positions,
                 intermediate_tensors=intermediate_tensors,
-                **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
-                                             device=self.device),
+                **MultiModalKwargs.as_kwargs(multi_modal_kwargs, device=self.device),
                 **seqlen_agnostic_kwargs)
 
         logits = self.model.compute_logits(hidden_or_intermediate_states,
@@ -231,10 +224,10 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         )
 
     def prepare_model_input(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        virtual_engine: int = 0,
-        finished_requests_ids: Optional[List[str]] = None
+            self,
+            seq_group_metadata_list: List[SequenceGroupMetadata],
+            virtual_engine: int = 0,
+            finished_requests_ids: Optional[List[str]] = None
     ) -> EncoderDecoderModelInput:
         """Prepare the model input based on a given sequence group, including
         metadata for the sampling step.
@@ -244,8 +237,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         entirely decode tokens.
 
         """
-        model_input = self._prepare_model_input_tensors(
-            seq_group_metadata_list, finished_requests_ids)
+        model_input = self._prepare_model_input_tensors(seq_group_metadata_list,
+                                                        finished_requests_ids)
         (
             attn_metadata,
             encoder_input_tokens_tensor,
@@ -293,8 +286,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         dummy_lora_requests: List[LoRARequest] = []
         dummy_lora_requests_per_seq: List[LoRARequest] = []
         if self.lora_config:
-            dummy_lora_requests = self._add_dummy_loras(
-                self.lora_config.max_loras)
+            dummy_lora_requests = self._add_dummy_loras(self.lora_config.max_loras)
             assert len(dummy_lora_requests) == self.lora_config.max_loras
             dummy_lora_requests_per_seq = [
                 dummy_lora_requests[idx % len(dummy_lora_requests)]
@@ -305,8 +297,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         # number of tokens equal to max_num_batched_tokens.
         seqs: List[SequenceGroupMetadata] = []
 
-        max_mm_tokens = self.mm_registry.get_max_multimodal_tokens(
-            self.model_config)
+        max_mm_tokens = self.mm_registry.get_max_multimodal_tokens(self.model_config)
         if max_mm_tokens > 0:
             logger.info("Starting profile run for multi-modal models.")
 
@@ -328,12 +319,9 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                                           is_encoder_data=True)
 
             # Having more tokens is over-conservative but otherwise fine
-            assert len(
-                decoder_dummy_data.seq_data.prompt_token_ids
-            ) >= seq_len, (
+            assert len(decoder_dummy_data.seq_data.prompt_token_ids) >= seq_len, (
                 f"Expected at least {seq_len} dummy tokens for profiling, "
-                f"but got: {len(decoder_dummy_data.seq_data.prompt_token_ids)}"
-            )
+                f"but got: {len(decoder_dummy_data.seq_data.prompt_token_ids)}")
 
             assert decoder_dummy_data.multi_modal_data is None or \
             encoder_dummy_data.multi_modal_data is None, (
@@ -352,8 +340,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 if dummy_lora_requests_per_seq else None,
                 multi_modal_data=decoder_dummy_data.multi_modal_data
                 or encoder_dummy_data.multi_modal_data,
-                multi_modal_placeholders=decoder_dummy_data.
-                multi_modal_placeholders
+                multi_modal_placeholders=decoder_dummy_data.multi_modal_placeholders
                 or encoder_dummy_data.multi_modal_placeholders)
             seqs.append(seq)
 
@@ -369,8 +356,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         model_input: EncoderDecoderModelInput,
-    ) -> Tuple[AttentionMetadata, Optional[torch.Tensor],
-               Optional[torch.Tensor]]:
+    ) -> Tuple[AttentionMetadata, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Helper method to prepare the encoder- and cross-attn-related
         model inputs based on a given sequence group. These additional inputs
         are used to augment an already-computed `EncoderDecoderModelInput`
@@ -463,8 +449,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 encoder_input_tokens)
             encoder_input_positions_tensor = self._list_to_long_tensor(
                 encoder_input_positions)
-            cross_slot_mapping_tensor = self._list_to_long_tensor(
-                cross_slot_mapping)
+            cross_slot_mapping_tensor = self._list_to_long_tensor(cross_slot_mapping)
 
         else:
             # Decode phase.
@@ -489,17 +474,13 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 # We will be using CUDA graph replay for this decode.
                 max_len_of_block_table = self.get_max_block_per_batch()
                 batch_size = len(encoder_seq_lens)
-                graph_batch_size = self.vllm_config.pad_for_cudagraph(
-                    batch_size)
+                graph_batch_size = self.vllm_config.pad_for_cudagraph(batch_size)
                 assert graph_batch_size >= batch_size
                 cuda_graph_pad_size = graph_batch_size - batch_size
                 # extend the cross_block_tables and encoder_seq_lens to match
                 # the graph_batch_size.
-                cross_block_tables.extend([[]
-                                           for _ in range(cuda_graph_pad_size)
-                                           ])
-                encoder_seq_lens.extend(
-                    itertools.repeat(1, cuda_graph_pad_size))
+                cross_block_tables.extend([[] for _ in range(cuda_graph_pad_size)])
+                encoder_seq_lens.extend(itertools.repeat(1, cuda_graph_pad_size))
 
             else:
                 max_len_of_block_table = max(
@@ -517,8 +498,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         # sequence starting offset tensors
         max_encoder_seq_len = max(encoder_seq_lens, default=0)
         encoder_seq_lens_tensor = self._list_to_int32_tensor(encoder_seq_lens)
-        encoder_seq_start_loc = torch.zeros(encoder_seq_lens_tensor.shape[0] +
-                                            1,
+        encoder_seq_start_loc = torch.zeros(encoder_seq_lens_tensor.shape[0] + 1,
                                             dtype=torch.int32,
                                             device=self.device)
         torch.cumsum(encoder_seq_lens_tensor,

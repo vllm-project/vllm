@@ -80,9 +80,7 @@ class TestTokenizer(TokenizerBase):
     ) -> list[int]:
         raise NotImplementedError()
 
-    def encode(self,
-               text: str,
-               add_special_tokens: Optional[bool] = None) -> list[int]:
+    def encode(self, text: str, add_special_tokens: Optional[bool] = None) -> list[int]:
         raise NotImplementedError()
 
     def apply_chat_template(self,

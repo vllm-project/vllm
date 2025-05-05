@@ -23,8 +23,8 @@ MODELS = [
                     reason="FP8 is not supported on this GPU type.")
 @pytest.mark.parametrize("model_id", MODELS)
 @pytest.mark.parametrize("force_marlin", [False, True])
-@pytest.mark.parametrize(
-    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False])
+@pytest.mark.parametrize("use_rocm_aiter",
+                         [True, False] if current_platform.is_rocm() else [False])
 def test_model_load_and_run(vllm_runner, model_id: str, force_marlin: bool,
                             use_rocm_aiter: bool, monkeypatch) -> None:
 
@@ -37,8 +37,7 @@ def test_model_load_and_run(vllm_runner, model_id: str, force_marlin: bool,
     with vllm_runner(model_id) as llm:
         # note: this does not test accuracy, just that we can run through
         # see lm-eval tests for accuracy
-        outputs = llm.generate_greedy(prompts=["Hello my name is"],
-                                      max_tokens=10)
+        outputs = llm.generate_greedy(prompts=["Hello my name is"], max_tokens=10)
         print(outputs[0][1])
 
 
@@ -53,10 +52,10 @@ KV_CACHE_MODELS = [
 @pytest.mark.skipif(not is_quant_method_supported("fp8"),
                     reason="FP8 is not supported on this GPU type.")
 @pytest.mark.parametrize("model_id", KV_CACHE_MODELS)
-@pytest.mark.parametrize(
-    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False])
-def test_kv_cache_model_load_and_run(vllm_runner, model_id: str,
-                                     use_rocm_aiter: bool, monkeypatch):
+@pytest.mark.parametrize("use_rocm_aiter",
+                         [True, False] if current_platform.is_rocm() else [False])
+def test_kv_cache_model_load_and_run(vllm_runner, model_id: str, use_rocm_aiter: bool,
+                                     monkeypatch):
     if use_rocm_aiter:
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
@@ -89,8 +88,7 @@ def test_kv_cache_model_load_and_run(vllm_runner, model_id: str,
 
         # note: this does not test accuracy, just that we can run through
         # see lm-eval tests for accuracy
-        outputs = llm.generate_greedy(prompts=["Hello my name is"],
-                                      max_tokens=10)
+        outputs = llm.generate_greedy(prompts=["Hello my name is"], max_tokens=10)
         print(outputs[0][1])
 
 
@@ -98,8 +96,8 @@ def test_kv_cache_model_load_and_run(vllm_runner, model_id: str,
                     reason="FP8 is not supported on this GPU type.")
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 @pytest.mark.parametrize("force_marlin", [False, True])
-@pytest.mark.parametrize(
-    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False])
+@pytest.mark.parametrize("use_rocm_aiter",
+                         [True, False] if current_platform.is_rocm() else [False])
 def test_load_fp16_model(vllm_runner, kv_cache_dtype: str, force_marlin: bool,
                          use_rocm_aiter: bool, monkeypatch) -> None:
     if use_rocm_aiter:
@@ -137,10 +135,9 @@ def test_load_fp16_model(vllm_runner, kv_cache_dtype: str, force_marlin: bool,
                     # For GPUs with hardware support, we keep weights in fp8
                     assert fc1.weight.dtype == current_platform.fp8_dtype()
                 else:  # unsupported ROCm platform
-                    pytest.skip(
-                        "Skip `test_load_fp16_model`. "
-                        "It only runs on ROCm platform with FP8 compute."
-                        " e.g. MI300X and above.")
+                    pytest.skip("Skip `test_load_fp16_model`. "
+                                "It only runs on ROCm platform with FP8 compute."
+                                " e.g. MI300X and above.")
             else:  # unsupported platform
                 pytest.skip("Skip `test_load_fp16_model`. "
                             "It only runs on CUDA and ROCm platform.")
@@ -158,8 +155,7 @@ def test_scaled_fp8_quant(dtype) -> None:
         # the kernel being tested.
         finfo = torch.finfo(torch.float8_e4m3fn)
         scale = inv_scale.reciprocal()
-        qweight = (tensor.to(torch.float32) * scale).clamp(min=finfo.min,
-                                                           max=finfo.max)
+        qweight = (tensor.to(torch.float32) * scale).clamp(min=finfo.min, max=finfo.max)
         qweight = qweight.to(torch.float8_e4m3fn)
         return qweight
 
@@ -178,18 +174,15 @@ def test_scaled_fp8_quant(dtype) -> None:
 
     # Reference dynamic quantizaton
     y = quantize_ref(x, inv_scale)
-    torch.testing.assert_close(ref_y,
-                               per_tensor_dequantize(y, inv_scale, dtype))
+    torch.testing.assert_close(ref_y, per_tensor_dequantize(y, inv_scale, dtype))
 
     # Static quantization
     y, _ = ops.scaled_fp8_quant(x, inv_scale)
-    torch.testing.assert_close(ref_y,
-                               per_tensor_dequantize(y, inv_scale, dtype))
+    torch.testing.assert_close(ref_y, per_tensor_dequantize(y, inv_scale, dtype))
 
     # Padding
     y, _ = ops.scaled_fp8_quant(x, inv_scale, num_token_padding=17)
     assert y.shape[0] == 17
     torch.testing.assert_close(
-        ref_y,
-        per_tensor_dequantize(torch.narrow(y, 0, 0, x.shape[0]), inv_scale,
-                              dtype))
+        ref_y, per_tensor_dequantize(torch.narrow(y, 0, 0, x.shape[0]), inv_scale,
+                                     dtype))

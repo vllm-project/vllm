@@ -97,11 +97,9 @@ class GraniteToolParser(ToolParser):
 
         start_idx = consume_space(0, current_text)
         if current_text[start_idx:].startswith(self.bot_token):
-            start_idx = consume_space(start_idx + len(self.bot_token),
-                                      current_text)
+            start_idx = consume_space(start_idx + len(self.bot_token), current_text)
         if current_text[start_idx:].startswith(self.bot_string):
-            start_idx = consume_space(start_idx + len(self.bot_string),
-                                      current_text)
+            start_idx = consume_space(start_idx + len(self.bot_string), current_text)
         if not current_text or start_idx >= len(current_text)\
             or current_text[start_idx] != '[':
             return DeltaMessage(content=delta_text)
@@ -116,16 +114,15 @@ class GraniteToolParser(ToolParser):
             tool_call_arr = None
             is_complete = None
             try:
-                tool_calls, end_idx = partial_json_loads(
-                    current_text[start_idx:], flags)
+                tool_calls, end_idx = partial_json_loads(current_text[start_idx:],
+                                                         flags)
                 if type(tool_calls) is list:
                     tool_call_arr = tool_calls
                 else:
                     return DeltaMessage(content=delta_text)
 
                 is_complete = [True] * len(tool_calls)
-                if not is_complete_json(
-                        current_text[start_idx:start_idx + end_idx]):
+                if not is_complete_json(current_text[start_idx:start_idx + end_idx]):
                     is_complete[-1] = False
             except partial_json_parser.core.exceptions.MalformedJSON:
                 logger.debug('not enough tokens to parse into JSON yet')
@@ -152,16 +149,15 @@ class GraniteToolParser(ToolParser):
                     cur_arguments = current_tool_call.get("arguments")
                     if cur_arguments:
                         cur_args_json = json.dumps(cur_arguments)
-                        sent = len(
-                            self.streamed_args_for_tool[self.current_tool_id])
+                        sent = len(self.streamed_args_for_tool[self.current_tool_id])
                         argument_diff = cur_args_json[sent:]
 
                         logger.debug("got arguments diff: %s", argument_diff)
                         delta = DeltaMessage(tool_calls=[
                             DeltaToolCall(index=self.current_tool_id,
                                           function=DeltaFunctionCall(
-                                              arguments=argument_diff).
-                                          model_dump(exclude_none=True))
+                                              arguments=argument_diff).model_dump(
+                                                  exclude_none=True))
                         ])
                         self.streamed_args_for_tool[
                             self.current_tool_id] += argument_diff
@@ -195,11 +191,10 @@ class GraniteToolParser(ToolParser):
                 cur_arguments = current_tool_call.get("arguments")
 
                 if cur_arguments:
-                    sent = len(
-                        self.streamed_args_for_tool[self.current_tool_id])
+                    sent = len(self.streamed_args_for_tool[self.current_tool_id])
                     cur_args_json = json.dumps(cur_arguments)
-                    prev_arguments = self.prev_tool_call_arr[
-                        self.current_tool_id].get("arguments")
+                    prev_arguments = self.prev_tool_call_arr[self.current_tool_id].get(
+                        "arguments")
 
                     argument_diff = None
                     if is_complete[self.current_tool_id]:
@@ -207,16 +202,15 @@ class GraniteToolParser(ToolParser):
                     elif prev_arguments:
                         prev_args_json = json.dumps(prev_arguments)
                         if cur_args_json != prev_args_json:
-                            prefix = find_common_prefix(
-                                prev_args_json, cur_args_json)
+                            prefix = find_common_prefix(prev_args_json, cur_args_json)
                             argument_diff = prefix[sent:]
 
                     if argument_diff is not None:
                         delta = DeltaMessage(tool_calls=[
                             DeltaToolCall(index=self.current_tool_id,
                                           function=DeltaFunctionCall(
-                                              arguments=argument_diff).
-                                          model_dump(exclude_none=True))
+                                              arguments=argument_diff).model_dump(
+                                                  exclude_none=True))
                         ])
                         self.streamed_args_for_tool[
                             self.current_tool_id] += argument_diff
@@ -226,7 +220,6 @@ class GraniteToolParser(ToolParser):
 
         except Exception as e:
             logger.error("Error trying to handle streaming tool call: %s", e)
-            logger.debug(
-                "Skipping chunk as a result of tool streaming extraction "
-                "error")
+            logger.debug("Skipping chunk as a result of tool streaming extraction "
+                         "error")
             return None

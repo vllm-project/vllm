@@ -83,8 +83,8 @@ def _lora_expand_kernel(
 
     # Identify all rows that this CTA should process.
     lora_m_indices_start = tl.load(lora_token_start_loc + lora_idx)
-    cta_lora_seq_indices = (token_indices_sorted_by_lora_ids +
-                            lora_m_indices_start + cta_m_offset)
+    cta_lora_seq_indices = (token_indices_sorted_by_lora_ids + lora_m_indices_start +
+                            cta_m_offset)
 
     # Load all relevant row indices.
     offset_m = tl.arange(0, BLOCK_M) % cta_m_len
@@ -127,10 +127,8 @@ def _lora_expand_kernel(
 @torch.inference_mode()
 def _lora_expand(
     inputs: torch.Tensor,  # shape [num_slices, num_tokens, lora_rank]
-    lora_b_weights: List[
-        torch.Tensor],  # shape [num_lora, hidden_size, lora_rank]
-    output_tensor: torch.
-    Tensor,  # shape [num_tokens, hidden_size * num_slices]
+    lora_b_weights: List[torch.Tensor],  # shape [num_lora, hidden_size, lora_rank]
+    output_tensor: torch.Tensor,  # shape [num_tokens, hidden_size * num_slices]
     token_lora_mapping: torch.Tensor,  # shape [num_tokens]
     token_indices_sorted_by_lora_ids: torch.Tensor,  # shape [num_tokens]
     num_tokens_per_lora: torch.Tensor,  # shape [max-loras + 1]
@@ -181,15 +179,13 @@ def _lora_expand(
     # metadata sanity check.
     M = inputs.size(1)
     assert token_lora_mapping.size(0) == M
-    assert token_lora_mapping.size(0) == token_indices_sorted_by_lora_ids.size(
-        0)
+    assert token_lora_mapping.size(0) == token_indices_sorted_by_lora_ids.size(0)
     assert lora_ids.size(0) == num_tokens_per_lora.size(0)
     assert lora_token_start_loc.size(0) == lora_ids.size(0) + 1
 
     (slice_start_tensor, lora_ptr_tensor, lora_strides_d0_tensor,
-     lora_strides_d1_tensor, lora_strides_d2_tensor, hidden_sizes_tensor,
-     same_stride, MAX_N) = _get_lora_b_ptr(lora_b_weights, offset_start,
-                                           inputs.device)
+     lora_strides_d1_tensor, lora_strides_d2_tensor, hidden_sizes_tensor, same_stride,
+     MAX_N) = _get_lora_b_ptr(lora_b_weights, offset_start, inputs.device)
 
     K = lora_b_weights[0].shape[-1]  # K= rank
     ADD_INPUTS = add_inputs

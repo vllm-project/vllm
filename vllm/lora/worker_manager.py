@@ -84,23 +84,20 @@ class WorkerLoRAManager(AbstractWorkerManager):
 
     def _load_adapter(self, lora_request: LoRARequest) -> LoRAModel:
         try:
-            supported_lora_modules = (
-                self._adapter_manager.supported_lora_modules)
-            packed_modules_mapping = (
-                self._adapter_manager.packed_modules_mapping)
+            supported_lora_modules = (self._adapter_manager.supported_lora_modules)
+            packed_modules_mapping = (self._adapter_manager.packed_modules_mapping)
             expected_lora_modules: List[str] = []
             for module in supported_lora_modules:
                 if module in packed_modules_mapping:
-                    expected_lora_modules.extend(
-                        packed_modules_mapping[module])
+                    expected_lora_modules.extend(packed_modules_mapping[module])
                 else:
                     expected_lora_modules.append(module)
 
             expected_lora_modules = list(set(expected_lora_modules))
             lora_path = get_adapter_absolute_path(lora_request.lora_path)
 
-            peft_helper = PEFTHelper.from_local_dir(
-                lora_path, self.max_position_embeddings)
+            peft_helper = PEFTHelper.from_local_dir(lora_path,
+                                                    self.max_position_embeddings)
 
             # Validates the LoRA configuration against requirements before
             # loading weights, throwing an exception if validation fails.
@@ -150,8 +147,7 @@ class WorkerLoRAManager(AbstractWorkerManager):
         if lora_request.lora_int_id in self.list_adapters():
             return False
         if isinstance(self._cached_dummy_lora, LoRAModel):
-            dummy_lora = self._cached_dummy_lora.clone(
-                lora_request.lora_int_id)
+            dummy_lora = self._cached_dummy_lora.clone(lora_request.lora_int_id)
         else:
             dummy_lora = self._adapter_manager.create_dummy_lora(
                 lora_request.lora_int_id, rank, 1, self.embedding_modules)
@@ -162,20 +158,18 @@ class WorkerLoRAManager(AbstractWorkerManager):
     def pin_adapter(self, adapter_id: int) -> bool:
         return self._adapter_manager.pin_adapter(adapter_id)
 
-    def set_active_adapters(self, requests: Set[Any],
-                            mapping: Optional[Any]) -> None:
+    def set_active_adapters(self, requests: Set[Any], mapping: Optional[Any]) -> None:
         set_active_adapters_worker(requests, mapping, self._apply_adapters,
                                    self._adapter_manager.set_adapter_mapping)
 
     def _apply_adapters(self, adapter_requests: Set[Any]) -> None:
         apply_adapters_worker(adapter_requests, self.list_adapters,
-                              self._adapter_manager.adapter_slots,
-                              self.remove_adapter, self.add_adapter)
+                              self._adapter_manager.adapter_slots, self.remove_adapter,
+                              self.add_adapter)
 
     def add_adapter(self, adapter_request: Any) -> bool:
         return add_adapter_worker(adapter_request, self.list_adapters,
-                                  self._load_adapter,
-                                  self._adapter_manager.add_adapter,
+                                  self._load_adapter, self._adapter_manager.add_adapter,
                                   self._adapter_manager.activate_adapter)
 
     def remove_adapter(self, adapter_id: int) -> bool:
@@ -237,8 +231,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             # Loading succeeded, now check if we will exceed cache capacity and
             # evict if the oldest adapter if so
             if len(self._adapter_manager) + 1 > self._adapter_manager.capacity:
-                assert isinstance(self._adapter_manager,
-                                  LRUCacheLoRAModelManager)
+                assert isinstance(self._adapter_manager, LRUCacheLoRAModelManager)
                 self._adapter_manager.remove_oldest_adapter()
             # Then add the new adapter to the cache
             loaded = self._adapter_manager.add_adapter(lora)

@@ -43,16 +43,13 @@ EXAMPLE_TOOLS = [
                 "type": "object",
                 "properties": {
                     "city": {
-                        "type":
-                        "string",
+                        "type": "string",
                         "description":
                         "The city to get the forecast for, e.g. 'New York'",
                     },
                     "days": {
-                        "type":
-                        "integer",
-                        "description":
-                        "Number of days to get the forecast for (1-7)",
+                        "type": "integer",
+                        "description": "Number of days to get the forecast for (1-7)",
                     },
                 },
                 "required": ["city", "days"],
@@ -224,8 +221,7 @@ def test_guided_json(sample_output, should_match):
                        should_match=should_match)
 
 
-def update_parameters_none(
-        tool: ChatCompletionToolsParam) -> ChatCompletionToolsParam:
+def update_parameters_none(tool: ChatCompletionToolsParam) -> ChatCompletionToolsParam:
     tool.function.parameters = None
     return tool
 
@@ -269,14 +265,11 @@ def update_parameters_empty_dict(
             }],
             True),
     ])
-@pytest.mark.parametrize(
-    "update_parameters",
-    [update_parameters_none, update_parameters_empty_dict])
-def test_guided_json_without_parameters(sample_output, should_match,
-                                        update_parameters):
+@pytest.mark.parametrize("update_parameters",
+                         [update_parameters_none, update_parameters_empty_dict])
+def test_guided_json_without_parameters(sample_output, should_match, update_parameters):
     updated_tools = [deepcopy(EXAMPLE_TOOLS[0])]
-    tools = TypeAdapter(
-        list[ChatCompletionToolsParam]).validate_python(updated_tools)
+    tools = TypeAdapter(list[ChatCompletionToolsParam]).validate_python(updated_tools)
     tools = list(map(update_parameters, tools))
     assert all([
         tool.function.parameters is None or tool.function.parameters == {}

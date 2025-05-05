@@ -58,8 +58,7 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         self.num_q_heads = self.runner.model_config.get_num_attention_heads(
             self.runner.parallel_config)
 
-    def _build_decode(self, input_positions: torch.Tensor,
-                      block_table: torch.Tensor,
+    def _build_decode(self, input_positions: torch.Tensor, block_table: torch.Tensor,
                       seq_lens: torch.Tensor) -> FlashMLADecodeMetadata:
         tile_scheduler_metadata, num_splits = \
             get_mla_metadata(
@@ -93,10 +92,9 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             attn_type: str,
             # MLA Specific Arguments
             **mla_args) -> None:
-        super().__init__(num_heads, head_size, scale, num_kv_heads,
-                         alibi_slopes, sliding_window, kv_cache_dtype,
-                         blocksparse_params, logits_soft_cap, attn_type,
-                         **mla_args)
+        super().__init__(num_heads, head_size, scale, num_kv_heads, alibi_slopes,
+                         sliding_window, kv_cache_dtype, blocksparse_params,
+                         logits_soft_cap, attn_type, **mla_args)
 
         assert is_flashmla_supported(), \
             "FlashMLA is not supported on this device"
@@ -117,8 +115,7 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
                                       "FlashMLAImpl")
 
         if is_quantized_kv_cache(self.kv_cache_dtype):
-            raise NotImplementedError(
-                "FlashMLA V1 with FP8 KV cache not yet supported")
+            raise NotImplementedError("FlashMLA V1 with FP8 KV cache not yet supported")
 
     def _forward_decode(
         self,
@@ -139,8 +136,7 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             block_table=attn_metadata.decode.block_table,
             cache_seqlens=attn_metadata.decode.seq_lens,
             head_dim_v=self.kv_lora_rank,
-            tile_scheduler_metadata=attn_metadata.decode.
-            tile_scheduler_metadata,
+            tile_scheduler_metadata=attn_metadata.decode.tile_scheduler_metadata,
             num_splits=attn_metadata.decode.num_splits,
             softmax_scale=self.scale,
             causal=True,

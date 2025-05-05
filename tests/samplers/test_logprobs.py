@@ -20,8 +20,7 @@ def use_v0_only(monkeypatch):
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype",
-                         ["float"])  # needed for comparing logprobs with HF
+@pytest.mark.parametrize("dtype", ["float"])  # needed for comparing logprobs with HF
 @pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16, -1])
 @pytest.mark.parametrize("num_top_logprobs", [0, 6])  # 32000 == vocab_size
 @pytest.mark.parametrize("detokenize", [True, False])
@@ -63,8 +62,8 @@ def test_get_prompt_logprobs(
                                               prompt_logprobs=num_top_logprobs,
                                               temperature=0.0,
                                               detokenize=detokenize)
-        vllm_results = vllm_model.model.generate(
-            example_prompts, sampling_params=vllm_sampling_params)
+        vllm_results = vllm_model.model.generate(example_prompts,
+                                                 sampling_params=vllm_sampling_params)
 
     # Test whether logprobs are included in the results.
     for result in vllm_results:
@@ -80,8 +79,7 @@ def test_get_prompt_logprobs(
         output_string_from_most_likely_tokens_lst: list[str] = []
         for top_logprobs in result.outputs[0].logprobs:
             top_logprob = next(iter(top_logprobs.values()))
-            output_string_from_most_likely_tokens_lst.append(
-                top_logprob.decoded_token)
+            output_string_from_most_likely_tokens_lst.append(top_logprob.decoded_token)
 
         if detokenize:
             output_string_from_most_likely_tokens = "".join(
@@ -91,8 +89,7 @@ def test_get_prompt_logprobs(
                 "should be the same as the output text in the result.")
         else:
             assert output_text == ''
-            assert output_string_from_most_likely_tokens_lst == ([None] *
-                                                                 max_tokens)
+            assert output_string_from_most_likely_tokens_lst == ([None] * max_tokens)
 
         # The first prompt logprob is always None
         assert result.prompt_logprobs[0] is None
@@ -122,9 +119,10 @@ def test_get_prompt_logprobs(
                                            atol=1e-2,
                                            rtol=1e-2)
                 if detokenize:
-                    assert isinstance(sample_logprob.decoded_token, str), (
-                        "The token should be decoded by the time it is returned"
-                        " to the user.")
+                    assert isinstance(
+                        sample_logprob.decoded_token,
+                        str), ("The token should be decoded by the time it is returned"
+                               " to the user.")
 
     # Test if prompt logprobs are correctly set.
     for vllm_result in vllm_results:

@@ -86,25 +86,20 @@ def test_mixed_requests(
                 block_size=block_size,
         ) as vllm_model:
             # Run the first prompt so the cache is populated
-            vllm_outputs = vllm_model.generate_greedy([cached_prompt],
-                                                      max_tokens)
+            vllm_outputs = vllm_model.generate_greedy([cached_prompt], max_tokens)
 
             # Run all the promopts
-            greedy_params = SamplingParams(temperature=0.0,
-                                           max_tokens=max_tokens)
-            req_outputs = vllm_model.model.generate(example_prompts,
-                                                    greedy_params)
+            greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
+            req_outputs = vllm_model.model.generate(example_prompts, greedy_params)
 
             # Verify number of cached tokens
             for i in range(len(req_outputs)):
                 if i == cached_position:
                     expected_num_cached_tokens = (
-                        len(req_outputs[i].prompt_token_ids) //
-                        block_size) * block_size
+                        len(req_outputs[i].prompt_token_ids) // block_size) * block_size
                 else:
                     expected_num_cached_tokens = 0
-                assert (req_outputs[i].num_cached_tokens ==
-                        expected_num_cached_tokens)
+                assert (req_outputs[i].num_cached_tokens == expected_num_cached_tokens)
 
             vllm_outputs = [(
                 output.prompt_token_ids + list(output.outputs[0].token_ids),
@@ -208,10 +203,10 @@ def test_fully_cached_prefill_needs_uncached_token(model):
 
     sched_metas, sched_out, _ = scheduler.last_schedule_ret()
     assert len(sched_out.scheduled_seq_groups) == 1
-    assert (sched_out.scheduled_seq_groups[0].seq_group.request_id ==
-            seq_groupB.request_id)
-    assert (sched_out.scheduled_seq_groups[0].token_chunk_size ==
-            max_num_batched_tokens)
+    assert (
+        sched_out.scheduled_seq_groups[0].seq_group.request_id == seq_groupB.request_id)
+    assert (
+        sched_out.scheduled_seq_groups[0].token_chunk_size == max_num_batched_tokens)
 
     # When seqB is finished, seqC could be prefilled.
     while not seqB.is_finished():
@@ -224,7 +219,6 @@ def test_fully_cached_prefill_needs_uncached_token(model):
     engine.step()
     sched_metas, sched_out, _ = scheduler.last_schedule_ret()
     assert len(sched_out.scheduled_seq_groups) == 1
-    assert (sched_out.scheduled_seq_groups[0].seq_group.request_id ==
-            seq_groupC.request_id)
-    assert sched_out.scheduled_seq_groups[0].token_chunk_size == len(
-        seqA_tokens)
+    assert (
+        sched_out.scheduled_seq_groups[0].seq_group.request_id == seq_groupC.request_id)
+    assert sched_out.scheduled_seq_groups[0].token_chunk_size == len(seqA_tokens)

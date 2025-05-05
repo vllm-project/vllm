@@ -246,13 +246,12 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal):
             config=config.visual_tokenizer_config,
             quant_config=quant_config,
             prefix=f"{prefix}.visual_tokenizer",
-            image_processor_name_or_path=config.visual_tokenizer_config.
-            backbone_config.name_or_path,
+            image_processor_name_or_path=config.visual_tokenizer_config.backbone_config.
+            name_or_path,
         )
 
-        self.vte = VisualEmbedding(
-            self.config.visual_tokenizer_config.vocab_size,
-            self.config.hidden_size)
+        self.vte = VisualEmbedding(self.config.visual_tokenizer_config.vocab_size,
+                                   self.config.hidden_size)
 
         # TODO(Isotr0py): PP support
         # self.make_empty_intermediate_tensors = (
@@ -278,11 +277,8 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal):
             return Ovis2ImagePatchInputs(
                 type="image_patches",
                 flat_data=flatten_bn(flatten_bn(pixel_values), concat=True),
-                patches_per_image=[
-                    x.shape[0] for x in flatten_bn(pixel_values)
-                ],
-                indicator_tokens=flatten_bn(flatten_bn(indicator_tokens),
-                                            concat=True),
+                patches_per_image=[x.shape[0] for x in flatten_bn(pixel_values)],
+                indicator_tokens=flatten_bn(flatten_bn(indicator_tokens), concat=True),
             )
 
         raise AssertionError("This line should be unreachable.")
@@ -297,13 +293,11 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal):
             map(lambda x: x + 1 if x > 1 else x + 2, patches_per_image))
 
         target_dtype = self.visual_tokenizer.dtype
-        visual_tokens = self.visual_tokenizer(
-            image_patches_flat.to(target_dtype))
+        visual_tokens = self.visual_tokenizer(image_patches_flat.to(target_dtype))
         visual_embeds = self.vte(visual_tokens)  # 1:1 numeric eq.
 
         indicator_embeds = self.vte(indicator_tokens)
-        indicator_embeds_per_image = indicator_embeds.split(
-            indicator_per_image)
+        indicator_embeds_per_image = indicator_embeds.split(indicator_per_image)
 
         visual_embeds_per_image = visual_embeds.split(patches_per_image, dim=0)
         vision_embeddings = []
@@ -314,13 +308,12 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal):
                 vision_embeddings_per_image.append(
                     torch.cat([indicator[i:i + 1], visual[i]], dim=0))
             vision_embeddings_per_image.append(indicator[i + 1:])
-            vision_embeddings.append(
-                torch.cat(vision_embeddings_per_image, dim=0))
+            vision_embeddings.append(torch.cat(vision_embeddings_per_image, dim=0))
 
         return tuple(vision_embeddings)
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
@@ -336,9 +329,9 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal):
     ) -> torch.Tensor:
         inputs_embeds = self.llm.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                [IMAGE_PAD_TOKEN_ID])
+            inputs_embeds = merge_multimodal_embeddings(input_ids, inputs_embeds,
+                                                        multimodal_embeddings,
+                                                        [IMAGE_PAD_TOKEN_ID])
         return inputs_embeds
 
     def forward(
@@ -356,8 +349,7 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal):
         # condition is for v0 compatibility.
         elif inputs_embeds is None:
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
+            inputs_embeds = self.get_input_embeddings(input_ids, vision_embeddings)
             input_ids = None
 
         # up until here we have a inputs_embeds 100% numerical identity
@@ -379,8 +371,7 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal):
                                            sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 

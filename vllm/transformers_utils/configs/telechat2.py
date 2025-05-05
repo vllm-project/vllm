@@ -58,6 +58,4 @@ class Telechat2Config(PretrainedConfig):
         self.num_key_value_heads = kwargs.pop("num_key_value_heads", None)
         self.ffn_hidden_size = ffn_hidden_size
         self.hidden_act = hidden_act
-        super().__init__(bos_token_id=bos_token_id,
-                         eos_token_id=eos_token_id,
-                         **kwargs)
+        super().__init__(bos_token_id=bos_token_id, eos_token_id=eos_token_id, **kwargs)

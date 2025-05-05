@@ -52,8 +52,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
     outputs = llm.generate(
         prompts,
         sampling_params,
-        lora_request=LoRARequest(str(lora_id), lora_id, lora_path)
-        if lora_id else None)
+        lora_request=LoRARequest(str(lora_id), lora_id, lora_path) if lora_id else None)
     # Print the outputs.
     generated_texts: list[str] = []
     for output in outputs:
@@ -110,13 +109,11 @@ def test_llama_lora_warmup(sql_lora_files):
     @ray.remote(num_gpus=1)
     def get_num_gpu_blocks_no_lora():
         llm = vllm.LLM(MODEL_PATH, max_num_seqs=16)
-        num_gpu_blocks_no_lora_warmup = (
-            llm.llm_engine.cache_config.num_gpu_blocks)
+        num_gpu_blocks_no_lora_warmup = (llm.llm_engine.cache_config.num_gpu_blocks)
         return num_gpu_blocks_no_lora_warmup
 
     num_gpu_blocks_lora_warmup = ray.get(get_num_gpu_blocks_lora.remote())
-    num_gpu_blocks_no_lora_warmup = ray.get(
-        get_num_gpu_blocks_no_lora.remote())
+    num_gpu_blocks_no_lora_warmup = ray.get(get_num_gpu_blocks_no_lora.remote())
     assert num_gpu_blocks_lora_warmup < num_gpu_blocks_no_lora_warmup, (
         "The warmup with lora should be more "
         "conservative than without lora, therefore the number of "

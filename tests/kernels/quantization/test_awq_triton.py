@@ -33,8 +33,7 @@ def reverse_awq_order(t: torch.Tensor):
 # scales   - [R // G, C     ], float16
 # zeros    - [R // G, C // 8], int32
 def awq_dequantize_torch(qweight: torch.Tensor, scales: torch.Tensor,
-                         qzeros: torch.Tensor,
-                         group_size: int) -> torch.Tensor:
+                         qzeros: torch.Tensor, group_size: int) -> torch.Tensor:
 
     if group_size == -1:
         group_size = qweight.shape[0]
@@ -84,17 +83,12 @@ def test_dequantize(qweight_rows, qweight_cols, group_size):
     current_platform.seed_everything(0)
 
     qweight = torch.randint(0,
-                            torch.iinfo(torch.int32).max,
-                            (qweight_rows, qweight_cols),
+                            torch.iinfo(torch.int32).max, (qweight_rows, qweight_cols),
                             dtype=qweight_dtype,
                             device=device)
-    scales = torch.rand(scales_rows,
-                        scales_cols,
-                        dtype=scales_dtype,
-                        device=device)
+    scales = torch.rand(scales_rows, scales_cols, dtype=scales_dtype, device=device)
     zeros = torch.randint(0,
-                          torch.iinfo(torch.int32).max,
-                          (zeros_rows, zeros_cols),
+                          torch.iinfo(torch.int32).max, (zeros_rows, zeros_cols),
                           dtype=zeros_dtype,
                           device=device)
 
@@ -137,23 +131,16 @@ def test_gemm(N, K, M, splitK, group_size):
 
     current_platform.seed_everything(0)
 
-    input = torch.rand((input_rows, input_cols),
-                       dtype=input_dtype,
-                       device=device)
+    input = torch.rand((input_rows, input_cols), dtype=input_dtype, device=device)
     qweight = torch.randint(0,
-                            torch.iinfo(torch.int32).max,
-                            (qweight_rows, qweight_cols),
+                            torch.iinfo(torch.int32).max, (qweight_rows, qweight_cols),
                             device=device)
     qzeros = torch.randint(0,
-                           torch.iinfo(torch.int32).max,
-                           (qzeros_rows, qzeros_cols),
+                           torch.iinfo(torch.int32).max, (qzeros_rows, qzeros_cols),
                            device=device)
-    scales = torch.rand((scales_rows, scales_cols),
-                        dtype=scales_dtype,
-                        device=device)
+    scales = torch.rand((scales_rows, scales_cols), dtype=scales_dtype, device=device)
 
-    output_triton = awq_gemm_triton(input, qweight, scales, qzeros,
-                                    split_k_iters)
+    output_triton = awq_gemm_triton(input, qweight, scales, qzeros, split_k_iters)
 
     assert (not torch.any(torch.isinf(output_triton))
             and not torch.any(torch.isnan(output_triton)))

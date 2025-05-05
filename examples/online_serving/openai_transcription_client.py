@@ -66,8 +66,7 @@ async def stream_openai_response():
                         # Parse the JSON response
                         chunk = json.loads(line)
                         # Extract and print the content
-                        content = chunk['choices'][0].get('delta',
-                                                          {}).get('content')
+                        content = chunk['choices'][0].get('delta', {}).get('content')
                         print(content, end='')
 
 

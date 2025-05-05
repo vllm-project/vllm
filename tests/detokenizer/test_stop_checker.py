@@ -11,8 +11,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import Logprob, Sequence, SequenceStatus
 
 
-def sequence_with_eos(text: str, eos_token: str,
-                      eos_token_id: int) -> Sequence:
+def sequence_with_eos(text: str, eos_token: str, eos_token_id: int) -> Sequence:
     """
     Create a Sequence that ends with an EOS token.
     """
@@ -27,8 +26,7 @@ def sequence_with_eos(text: str, eos_token: str,
     offset = eos_token_id + 1
     for i in range(offset, len(text) + offset):
         seq.append_token_id(token_id=i, logprobs={i: Logprob(0.0)})
-    seq.append_token_id(token_id=eos_token_id,
-                        logprobs={eos_token_id: Logprob(0.0)})
+    seq.append_token_id(token_id=eos_token_id, logprobs={eos_token_id: Logprob(0.0)})
 
     seq.status = SequenceStatus.RUNNING
 

@@ -64,8 +64,8 @@ if __name__ == '__main__':
         s_abs = os.path.abspath(source)
         hipified_s_abs = (hipify_result[s_abs].hipified_path if
                           (s_abs in hipify_result
-                           and hipify_result[s_abs].hipified_path is not None)
-                          else s_abs)
+                           and hipify_result[s_abs].hipified_path is not None) else
+                          s_abs)
         hipified_sources.append(hipified_s_abs)
 
     assert (len(hipified_sources) == len(args.sources))

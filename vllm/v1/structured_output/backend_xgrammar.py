@@ -67,10 +67,9 @@ class XgrammarBackend(StructuredOutputBackend):
                 ) and tokenizer.eos_token_id is not None:
                     stop_token_ids = [tokenizer.eos_token_id]
             except AttributeError as e:
-                raise ValueError(
-                    f"Cannot get the vocabulary of the tokenizer "
-                    f"{type(tokenizer)}. The tokenizer should have a "
-                    "get_vocab method.") from e
+                raise ValueError(f"Cannot get the vocabulary of the tokenizer "
+                                 f"{type(tokenizer)}. The tokenizer should have a "
+                                 "get_vocab method.") from e
             tokenizer_info = xgr.TokenizerInfo(  # type: ignore
                 encoded_vocab=encoded_vocab,
                 # NOTE: https://github.com/mlc-ai/xgrammar/blob/5e141f6ff1ca02bc31f9e512e68b61f2a8ae88e5/tests/python/test_tokenizer_info.py#L43 # noqa: E501
@@ -99,8 +98,7 @@ class XgrammarBackend(StructuredOutputBackend):
                 grammar_spec, any_whitespace=not self.disable_any_whitespace)
         elif request_type == StructuredOutputOptions.JSON_OBJECT:
             ctx = self.compiler.compile_json_schema(
-                '{"type": "object"}',
-                any_whitespace=not self.disable_any_whitespace)
+                '{"type": "object"}', any_whitespace=not self.disable_any_whitespace)
         elif request_type == StructuredOutputOptions.GRAMMAR:
             ctx = self.compiler.compile_grammar(grammar_spec)
         elif request_type == StructuredOutputOptions.REGEX:
@@ -117,8 +115,7 @@ class XgrammarBackend(StructuredOutputBackend):
             ctx = self.compiler.compile_structural_tag(tags, s_tag["triggers"])
         else:
             logger.error(
-                "Validation should have already occurred. Please file an issue."
-            )
+                "Validation should have already occurred. Please file an issue.")
             raise ValueError(
                 f"grammar is not of valid supported types. ({request_type!s})")
 
@@ -215,9 +212,8 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
 
         # Check for array unsupported keywords
         if obj.get("type") == "array" and any(
-                key in obj
-                for key in ("uniqueItems", "contains", "minContains",
-                            "maxContains", "minItems", "maxItems")):
+                key in obj for key in ("uniqueItems", "contains", "minContains",
+                                       "maxContains", "minItems", "maxItems")):
             return True
 
         # Unsupported keywords for strings

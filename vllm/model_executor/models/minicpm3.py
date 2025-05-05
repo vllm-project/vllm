@@ -97,13 +97,12 @@ class MiniCPM3Attention(nn.Module):
                                                    self.qk_rope_head_dim,
                                                    bias=False,
                                                    quant_config=quant_config)
-        self.kv_a_layernorm = RMSNorm(self.kv_lora_rank,
-                                      eps=config.rms_norm_eps)
-        self.kv_b_proj = ColumnParallelLinear(
-            self.kv_lora_rank,
-            self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
-            bias=False,
-            quant_config=quant_config)
+        self.kv_a_layernorm = RMSNorm(self.kv_lora_rank, eps=config.rms_norm_eps)
+        self.kv_b_proj = ColumnParallelLinear(self.kv_lora_rank,
+                                              self.num_heads *
+                                              (self.qk_nope_head_dim + self.v_head_dim),
+                                              bias=False,
+                                              quant_config=quant_config)
         # O projection.
         self.o_proj = RowParallelLinear(self.num_heads * self.v_head_dim,
                                         self.hidden_size,
@@ -134,23 +133,19 @@ class MiniCPM3Attention(nn.Module):
         q = self.q_a_layernorm(q)
         q, _ = self.q_b_proj(q)
         q = q.view(-1, self.num_local_heads, self.qk_head_dim)
-        _, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim],
-                          dim=-1)
+        _, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         latent_cache, _ = self.kv_a_proj_with_mqa(hidden_states)
-        kv_a, _ = latent_cache.split(
-            [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        kv_a, _ = latent_cache.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         latent_cache = latent_cache.unsqueeze(1)
         kv_a = self.kv_a_layernorm(kv_a.contiguous())
         kv, _ = self.kv_b_proj(kv_a)
-        kv = kv.view(-1, self.num_local_heads,
-                     self.qk_nope_head_dim + self.v_head_dim)
+        kv = kv.view(-1, self.num_local_heads, self.qk_nope_head_dim + self.v_head_dim)
         k_nope, v = kv.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
         k_pe = latent_cache[:, :, self.kv_lora_rank:]
 
         q_pe, k_pe = self.rotary_emb(
-            positions,
-            q_pe.reshape(-1, self.num_local_heads * self.qk_rope_head_dim),
+            positions, q_pe.reshape(-1, self.num_local_heads * self.qk_rope_head_dim),
             k_pe.reshape(-1, self.qk_rope_head_dim))
         q_pe = q_pe.view(-1, self.num_local_heads, self.qk_rope_head_dim)
         k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
@@ -164,15 +159,14 @@ class MiniCPM3Attention(nn.Module):
 
         q = q.reshape(-1, self.num_local_heads * self.qk_head_dim)
         k = k.view(-1, self.num_local_heads * self.qk_head_dim)
-        v = torch.nn.functional.pad(
-            v, [0, self.qk_head_dim - self.v_head_dim],
-            value=0).view(-1, self.num_local_heads * self.qk_head_dim)
+        v = torch.nn.functional.pad(v, [0, self.qk_head_dim - self.v_head_dim],
+                                    value=0).view(
+                                        -1, self.num_local_heads * self.qk_head_dim)
 
         attn_output = self.attn(q, k, v)
-        attn_output = attn_output.view(
-            -1, self.num_local_heads,
-            self.qk_head_dim)[..., :self.v_head_dim].reshape(
-                -1, self.num_local_heads * self.v_head_dim)
+        attn_output = attn_output.view(-1, self.num_local_heads,
+                                       self.qk_head_dim)[..., :self.v_head_dim].reshape(
+                                           -1, self.num_local_heads * self.v_head_dim)
 
         output, _ = self.o_proj(attn_output)
         return output

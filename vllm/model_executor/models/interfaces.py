@@ -43,8 +43,8 @@ class SupportsMultiModal(Protocol):
         MRO of your model class.
     """
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> Optional[MultiModalEmbeddings]:
         """
         Returns multimodal embeddings generated from multimodal kwargs 
         to be merged with text embeddings.
@@ -101,8 +101,7 @@ class _SupportsMultiModalType(Protocol):
 
 
 @overload
-def supports_multimodal(
-        model: Type[object]) -> TypeIs[Type[SupportsMultiModal]]:
+def supports_multimodal(model: Type[object]) -> TypeIs[Type[SupportsMultiModal]]:
     ...
 
 
@@ -171,8 +170,7 @@ def supports_lora(
             "embedding_modules",
             "embedding_padding_modules",
         )
-        missing_attrs = tuple(attr for attr in lora_attrs
-                              if not hasattr(model, attr))
+        missing_attrs = tuple(attr for attr in lora_attrs if not hasattr(model, attr))
 
         if getattr(model, "supports_lora", False):
             if missing_attrs:
@@ -278,8 +276,7 @@ def supports_pp(
 
     if not supports_attributes:
         pp_attrs = ("make_empty_intermediate_tensors", )
-        missing_attrs = tuple(attr for attr in pp_attrs
-                              if not hasattr(model, attr))
+        missing_attrs = tuple(attr for attr in pp_attrs if not hasattr(model, attr))
 
         if getattr(model, "supports_pp", False):
             if missing_attrs:
@@ -415,8 +412,8 @@ def is_hybrid(model: Type[object]) -> TypeIs[Type[IsHybrid]]:
 
 
 def is_hybrid(
-    model: Union[Type[object], object]
-) -> Union[TypeIs[Type[IsHybrid]], TypeIs[IsHybrid]]:
+    model: Union[Type[object],
+                 object]) -> Union[TypeIs[Type[IsHybrid]], TypeIs[IsHybrid]]:
     if isinstance(model, type):
         return isinstance(model, _IsHybridType)
 
@@ -444,8 +441,8 @@ def has_noops(model: Type[object]) -> TypeIs[Type[HasNoOps]]:
 
 
 def has_noops(
-    model: Union[Type[object], object]
-) -> Union[TypeIs[Type[HasNoOps]], TypeIs[HasNoOps]]:
+    model: Union[Type[object],
+                 object]) -> Union[TypeIs[Type[HasNoOps]], TypeIs[HasNoOps]]:
     if isinstance(model, type):
         return isinstance(model, _HasNoOpsType)
 
@@ -460,8 +457,7 @@ class SupportsCrossEncoding(Protocol):
 
 
 @overload
-def supports_cross_encoding(
-        model: Type[object]) -> TypeIs[Type[SupportsCrossEncoding]]:
+def supports_cross_encoding(model: Type[object]) -> TypeIs[Type[SupportsCrossEncoding]]:
     ...
 
 
@@ -524,8 +520,7 @@ class SupportsTranscription(Protocol):
 
 
 @overload
-def supports_transcription(
-        model: Type[object]) -> TypeIs[Type[SupportsTranscription]]:
+def supports_transcription(model: Type[object]) -> TypeIs[Type[SupportsTranscription]]:
     ...
 
 

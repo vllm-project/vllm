@@ -138,8 +138,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
 
         self.megacore_mode = None
         tpu_env = torch_xla.tpu.get_tpu_env()
-        tpu_type = (tpu_env.get("ACCELERATOR_TYPE", None)
-                    or tpu_env.get("TYPE", None)
+        tpu_type = (tpu_env.get("ACCELERATOR_TYPE", None) or tpu_env.get("TYPE", None)
                     or tpu_env.get("TPU_ACCELERATOR_TYPE", None))
         assert tpu_type is not None
         tpu_type = tpu_type.lower()
@@ -186,8 +185,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         batch_size, seq_len, hidden_size = query.shape
         query = query.view(batch_size, seq_len, self.num_heads, self.head_size)
         key = key.view(batch_size, seq_len, self.num_kv_heads, self.head_size)
-        value = value.view(batch_size, seq_len, self.num_kv_heads,
-                           self.head_size)
+        value = value.view(batch_size, seq_len, self.num_kv_heads, self.head_size)
 
         if kv_cache[0].numel() > 0:
             slot_mapping = attn_metadata.slot_mapping
@@ -204,12 +202,9 @@ class PallasAttentionBackendImpl(AttentionImpl):
 
                 # Handle GQA/MQA.
                 if self.num_kv_heads != self.num_heads:
-                    key = key.repeat_interleave(self.num_queries_per_kv,
-                                                dim=-2)
-                    key = key.view(batch_size, seq_len, self.num_heads,
-                                   self.head_size)
-                    value = value.repeat_interleave(self.num_queries_per_kv,
-                                                    dim=-2)
+                    key = key.repeat_interleave(self.num_queries_per_kv, dim=-2)
+                    key = key.view(batch_size, seq_len, self.num_heads, self.head_size)
+                    value = value.repeat_interleave(self.num_queries_per_kv, dim=-2)
                     value = value.view(batch_size, seq_len, self.num_heads,
                                        self.head_size)
                 # FlashAttention kernel requires the input shape to be

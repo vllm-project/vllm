@@ -38,10 +38,9 @@ def server(zephyr_lora_added_tokens_files: str):  # noqa: F811
 
 
 @pytest.fixture(scope="module")
-def tokenizer_name(model_name: str,
-                   zephyr_lora_added_tokens_files: str):  # noqa: F811
-    return zephyr_lora_added_tokens_files if (
-        model_name == "zephyr-lora2") else model_name
+def tokenizer_name(model_name: str, zephyr_lora_added_tokens_files: str):  # noqa: F811
+    return zephyr_lora_added_tokens_files if (model_name
+                                              == "zephyr-lora2") else model_name
 
 
 @pytest_asyncio.fixture
@@ -61,8 +60,7 @@ async def test_tokenize_completions(
     model_name: str,
     tokenizer_name: str,
 ):
-    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name,
-                              tokenizer_mode="fast")
+    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name, tokenizer_mode="fast")
 
     for add_special in [False, True]:
         prompt = "vllm1 This is a test prompt."
@@ -94,8 +92,7 @@ async def test_tokenize_chat(
     model_name: str,
     tokenizer_name: str,
 ):
-    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name,
-                              tokenizer_mode="fast")
+    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name, tokenizer_mode="fast")
 
     for add_generation in [False, True]:
         for add_special in [False, True]:
@@ -113,25 +110,19 @@ async def test_tokenize_chat(
                 if add_generation and continue_final:
                     continue
                 if continue_final:
-                    conversation.append({
-                        "role": "assistant",
-                        "content": "Sure,"
-                    })
+                    conversation.append({"role": "assistant", "content": "Sure,"})
 
                 prompt = tokenizer.apply_chat_template(
                     add_generation_prompt=add_generation,
                     continue_final_message=continue_final,
                     conversation=conversation,
                     tokenize=False)
-                tokens = tokenizer.encode(prompt,
-                                          add_special_tokens=add_special)
+                tokens = tokenizer.encode(prompt, add_special_tokens=add_special)
 
                 response = requests.post(server.url_for("tokenize"),
                                          json={
-                                             "add_generation_prompt":
-                                             add_generation,
-                                             "continue_final_message":
-                                             continue_final,
+                                             "add_generation_prompt": add_generation,
+                                             "continue_final_message": continue_final,
                                              "add_special_tokens": add_special,
                                              "messages": conversation,
                                              "model": model_name
@@ -156,8 +147,7 @@ async def test_detokenize(
     model_name: str,
     tokenizer_name: str,
 ):
-    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name,
-                              tokenizer_mode="fast")
+    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name, tokenizer_mode="fast")
 
     prompt = "This is a test prompt. vllm1"
     tokens = tokenizer.encode(prompt, add_special_tokens=False)

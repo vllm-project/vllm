@@ -103,9 +103,8 @@ def _configure_vllm_root_logger() -> None:
 
     if VLLM_LOGGING_CONFIG_PATH:
         if not path.exists(VLLM_LOGGING_CONFIG_PATH):
-            raise RuntimeError(
-                "Could not load logging config. File does not exist: %s",
-                VLLM_LOGGING_CONFIG_PATH)
+            raise RuntimeError("Could not load logging config. File does not exist: %s",
+                               VLLM_LOGGING_CONFIG_PATH)
         with open(VLLM_LOGGING_CONFIG_PATH, encoding="utf-8") as file:
             custom_config = json.loads(file.read())
 
@@ -188,8 +187,7 @@ def _trace_calls(log_path, root_dir, frame, event, arg=None):
     return partial(_trace_calls, log_path, root_dir)
 
 
-def enable_trace_function_call(log_file_path: str,
-                               root_dir: Optional[str] = None):
+def enable_trace_function_call(log_file_path: str, root_dir: Optional[str] = None):
     """
     Enable tracing of every function call in code under `root_dir`.
     This is useful for debugging hangs or crashes.
@@ -200,10 +198,9 @@ def enable_trace_function_call(log_file_path: str,
     Note that this call is thread-level, any threads calling this function
     will have the trace enabled. Other threads will not be affected.
     """
-    logger.warning(
-        "VLLM_TRACE_FUNCTION is enabled. It will record every"
-        " function executed by Python. This will slow down the code. It "
-        "is suggested to be used for debugging hang or crashes only.")
+    logger.warning("VLLM_TRACE_FUNCTION is enabled. It will record every"
+                   " function executed by Python. This will slow down the code. It "
+                   "is suggested to be used for debugging hang or crashes only.")
     logger.info("Trace frame log is saved to %s", log_file_path)
     if root_dir is None:
         # by default, this is the vllm root directory

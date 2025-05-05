@@ -33,8 +33,8 @@ def sample_requests(
     # Filter out the conversations with less than 2 turns.
     dataset = [data for data in dataset if len(data["conversations"]) >= 2]
     # Only keep the first two turns of each conversation.
-    dataset = [(data["conversations"][0]["value"],
-                data["conversations"][1]["value"]) for data in dataset]
+    dataset = [(data["conversations"][0]["value"], data["conversations"][1]["value"])
+               for data in dataset]
 
     # Shuffle the dataset.
     random.shuffle(dataset)
@@ -51,8 +51,8 @@ def sample_requests(
         completion = dataset[i][1]
         completion_token_ids = tokenizer(completion).input_ids
         prompt_len = len(prompt_token_ids)
-        output_len = len(completion_token_ids
-                         ) if fixed_output_len is None else fixed_output_len
+        output_len = len(
+            completion_token_ids) if fixed_output_len is None else fixed_output_len
         if prompt_len < 4 or output_len < 4:
             # Prune too short sequences.
             continue
@@ -76,11 +76,10 @@ def run_vllm(
     from vllm import LLM, SamplingParams
     llm = LLM(**dataclasses.asdict(engine_args))
 
-    assert all(
-        llm.llm_engine.model_config.max_model_len >= (request[1] + request[2])
-        for request in requests), (
-            "Please ensure that max_model_len is greater than the sum of"
-            " input_len and output_len for all requests.")
+    assert all(llm.llm_engine.model_config.max_model_len >= (request[1] + request[2])
+               for request in requests), (
+                   "Please ensure that max_model_len is greater than the sum of"
+                   " input_len and output_len for all requests.")
 
     # Add the requests to the engine.
     prompts = []
@@ -110,20 +109,19 @@ def main(args: argparse.Namespace):
     random.seed(args.seed)
 
     # Sample the requests.
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.tokenizer, trust_remote_code=args.trust_remote_code)
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer,
+                                              trust_remote_code=args.trust_remote_code)
     if args.dataset is None:
         # Synthesize a prompt with the given input length.
         prompt = "hi" * (args.input_len - 1)
-        requests = [(prompt, args.input_len, args.output_len,
-                     get_random_flag()) for _ in range(args.num_prompts)]
+        requests = [(prompt, args.input_len, args.output_len, get_random_flag())
+                    for _ in range(args.num_prompts)]
     else:
         requests = sample_requests(args.dataset, args.num_prompts, tokenizer,
                                    args.output_len)
 
     if args.backend == "vllm":
-        elapsed_time = run_vllm(requests, args.n,
-                                EngineArgs.from_cli_args(args),
+        elapsed_time = run_vllm(requests, args.n, EngineArgs.from_cli_args(args),
                                 args.disable_detokenize)
     else:
         raise ValueError(f"Unknown backend: {args.backend}")
@@ -172,11 +170,10 @@ if __name__ == "__main__":
                         type=int,
                         default=200,
                         help="Number of prompts to process.")
-    parser.add_argument(
-        '--output-json',
-        type=str,
-        default=None,
-        help='Path to save the throughput results in JSON format.')
+    parser.add_argument('--output-json',
+                        type=str,
+                        default=None,
+                        help='Path to save the throughput results in JSON format.')
     parser.add_argument(
         '--disable-detokenize',
         action='store_true',

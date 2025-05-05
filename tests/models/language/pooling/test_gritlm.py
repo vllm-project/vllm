@@ -117,8 +117,7 @@ def validate_embed_output(q_rep: list[list[float]], d_rep: list[list[float]]):
     assert math.isclose(cosine_sim_q1_d1, 0.534, abs_tol=0.001)
 
 
-def test_gritlm_offline_embedding(monkeypatch: pytest.MonkeyPatch,
-                                  vllm_runner):
+def test_gritlm_offline_embedding(monkeypatch: pytest.MonkeyPatch, vllm_runner):
     # GritLM embedding implementation is only supported by XFormers backend.
     with monkeypatch.context() as m:
         m.setenv(STR_BACKEND_ENV_VAR, "XFORMERS")

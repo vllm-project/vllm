@@ -67,13 +67,9 @@ def video_to_ndarrays(path: str, num_frames: int = -1) -> npt.NDArray:
     return frames
 
 
-def video_to_pil_images_list(path: str,
-                             num_frames: int = -1) -> list[Image.Image]:
+def video_to_pil_images_list(path: str, num_frames: int = -1) -> list[Image.Image]:
     frames = video_to_ndarrays(path, num_frames)
-    return [
-        Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        for frame in frames
-    ]
+    return [Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)) for frame in frames]
 
 
 VideoAssetName = Literal["baby_reading"]

@@ -87,9 +87,7 @@ class RemoteOpenAIServer:
                                  "when `auto_port=True`.")
 
             # Don't mutate the input args
-            vllm_serve_args = vllm_serve_args + [
-                "--port", str(get_open_port())
-            ]
+            vllm_serve_args = vllm_serve_args + ["--port", str(get_open_port())]
         if seed is not None:
             if "--seed" in vllm_serve_args:
                 raise ValueError("You have manually specified the seed "
@@ -97,8 +95,7 @@ class RemoteOpenAIServer:
 
             vllm_serve_args = vllm_serve_args + ["--seed", str(seed)]
 
-        parser = FlexibleArgumentParser(
-            description="vLLM's remote OpenAI server.")
+        parser = FlexibleArgumentParser(description="vLLM's remote OpenAI server.")
         parser = make_arg_parser(parser)
         args = parser.parse_args(["--model", model, *vllm_serve_args])
         self.host = str(args.host or 'localhost')
@@ -130,8 +127,7 @@ class RemoteOpenAIServer:
             stderr=sys.stderr,
         )
         max_wait_seconds = max_wait_seconds or 240
-        self._wait_for_server(url=self.url_for("health"),
-                              timeout=max_wait_seconds)
+        self._wait_for_server(url=self.url_for("health"), timeout=max_wait_seconds)
 
     def __enter__(self):
         return self
@@ -162,8 +158,7 @@ class RemoteOpenAIServer:
 
                 time.sleep(0.5)
                 if time.time() - start > timeout:
-                    raise RuntimeError(
-                        "Server failed to start in time.") from None
+                    raise RuntimeError("Server failed to start in time.") from None
 
     @property
     def url_root(self) -> str:
@@ -252,8 +247,7 @@ def _test_completion(
         "test":
         "seeded_sampling",
         "text": [choice.text for choice in completion.choices],
-        "finish_reason":
-        [choice.finish_reason for choice in completion.choices],
+        "finish_reason": [choice.finish_reason for choice in completion.choices],
         "usage":
         completion.usage,
     })
@@ -327,13 +321,7 @@ def _test_chat(
 ):
     results = []
 
-    messages = [{
-        "role": "user",
-        "content": [{
-            "type": "text",
-            "text": prompt
-        }]
-    }]
+    messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
 
     # test with text prompt
     chat_response = client.chat.completions.create(model=model,
@@ -383,8 +371,7 @@ def _test_image_text(
 
     # test pure text input
     messages = [{
-        "role":
-        "user",
+        "role": "user",
         "content": [
             {
                 "type": "text",
@@ -551,8 +538,7 @@ def compare_all_settings(model: str,
             elif method == "generate_with_image":
                 results += _test_image_text(
                     client, model,
-                    "https://upload.wikimedia.org/wikipedia/commons/0/0b/RGBA_comp.png"
-                )
+                    "https://upload.wikimedia.org/wikipedia/commons/0/0b/RGBA_comp.png")
             elif method == "encode":
                 results += _test_embeddings(client, model, prompt)
             else:
@@ -564,8 +550,7 @@ def compare_all_settings(model: str,
                 ref_envs = all_envs[0]
                 compare_args = all_args[i]
                 compare_envs = all_envs[i]
-                for ref_result, compare_result in zip(ref_results,
-                                                      compare_results):
+                for ref_result, compare_result in zip(ref_results, compare_results):
                     ref_result = copy.deepcopy(ref_result)
                     compare_result = copy.deepcopy(compare_result)
                     if "embedding" in ref_result and method == "encode":
@@ -595,11 +580,10 @@ def init_test_distributed_environment(
     local_rank: int = -1,
 ) -> None:
     distributed_init_method = f"tcp://localhost:{distributed_init_port}"
-    init_distributed_environment(
-        world_size=pp_size * tp_size,
-        rank=rank,
-        distributed_init_method=distributed_init_method,
-        local_rank=local_rank)
+    init_distributed_environment(world_size=pp_size * tp_size,
+                                 rank=rank,
+                                 distributed_init_method=distributed_init_method,
+                                 local_rank=local_rank)
     ensure_model_parallel_initialized(tp_size, pp_size)
 
 
@@ -622,8 +606,7 @@ def multi_process_parallel(
     ray.init(
         runtime_env={
             "working_dir": VLLM_PATH,
-            "excludes":
-            ["build", ".git", "cmake-build-*", "shellcheck", "dist"]
+            "excludes": ["build", ".git", "cmake-build-*", "shellcheck", "dist"]
         })
 
     distributed_init_port = get_open_port()
@@ -708,8 +691,7 @@ def wait_for_gpu_memory_to_clear(devices: list[int],
 _P = ParamSpec("_P")
 
 
-def fork_new_process_for_each_test(
-        f: Callable[_P, None]) -> Callable[_P, None]:
+def fork_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]:
     """Decorator to fork a new process for each test function.
     See https://github.com/vllm-project/vllm/issues/7053 for more details.
     """
@@ -750,8 +732,7 @@ def fork_new_process_for_each_test(
     return wrapper
 
 
-def spawn_new_process_for_each_test(
-        f: Callable[_P, None]) -> Callable[_P, None]:
+def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]:
     """Decorator to spawn a new process for each test function.
     """
 
@@ -813,8 +794,7 @@ def create_new_process_for_each_test(
     if method is None:
         method = "spawn" if current_platform.is_rocm() else "fork"
 
-    assert method in ["spawn",
-                      "fork"], "Method must be either 'spawn' or 'fork'"
+    assert method in ["spawn", "fork"], "Method must be either 'spawn' or 'fork'"
 
     if method == "fork":
         return fork_new_process_for_each_test

@@ -78,8 +78,8 @@ class SimplePooler(nn.Module):
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
     ) -> torch.Tensor:
-        return PoolingTensors.from_pooling_metadata(
-            pooling_metadata, hidden_states.device).prompt_lens
+        return PoolingTensors.from_pooling_metadata(pooling_metadata,
+                                                    hidden_states.device).prompt_lens
 
     def extract_states(
         self,
@@ -221,8 +221,7 @@ class PoolerHead(nn.Module):
                 pooling_metadata: PoolingMetadata):
 
         dimensions_list = [
-            pooling_param.dimensions
-            for _, pooling_param in pooling_metadata.seq_groups
+            pooling_param.dimensions for _, pooling_param in pooling_metadata.seq_groups
         ]
         if any(d is not None for d in dimensions_list):
             # change the output dimension
@@ -234,9 +233,7 @@ class PoolerHead(nn.Module):
 
         if self.normalize:
             if isinstance(pooled_data, list):
-                pooled_data = [
-                    F.normalize(data, p=2, dim=-1) for data in pooled_data
-                ]
+                pooled_data = [F.normalize(data, p=2, dim=-1) for data in pooled_data]
             else:
                 pooled_data = F.normalize(pooled_data, p=2, dim=-1)
 
@@ -271,8 +268,7 @@ class Pooler(nn.Module):
             step_tag_id=pooler_config.step_tag_id
             if pooler_config.step_tag_id is not None else step_tag_id,
             returned_token_ids=pooler_config.returned_token_ids
-            if pooler_config.returned_token_ids is not None else
-            returned_token_ids,
+            if pooler_config.returned_token_ids is not None else returned_token_ids,
         )
 
 

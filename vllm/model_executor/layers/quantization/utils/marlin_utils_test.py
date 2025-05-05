@@ -23,9 +23,7 @@ class MarlinWorkspace:
 
         max_workspace_size = ((out_features // min_thread_n) * max_parallel)
 
-        self.scratch = torch.zeros(max_workspace_size,
-                                   dtype=torch.int,
-                                   device="cuda")
+        self.scratch = torch.zeros(max_workspace_size, dtype=torch.int, device="cuda")
 
 
 def marlin_permute_weights(q_w, size_k, size_n, perm, tile=GPTQ_MARLIN_TILE):
@@ -53,8 +51,7 @@ def marlin_weights(q_w, size_k, size_n, num_bits, perm):
 
     q_w = q_w.cpu().numpy().astype(np.uint32)
 
-    q_packed = np.zeros((q_w.shape[0], q_w.shape[1] // pack_factor),
-                        dtype=np.uint32)
+    q_packed = np.zeros((q_w.shape[0], q_w.shape[1] // pack_factor), dtype=np.uint32)
     for i in range(pack_factor):
         q_packed |= q_w[:, i::pack_factor] << num_bits * i
 
@@ -107,8 +104,8 @@ def marlin_quantize(w: torch.Tensor,
     assert group_size <= size_k
 
     # Quantize (and apply act_order if provided)
-    w_ref, q_w, s, g_idx, rand_perm = gptq_quantize_weights(
-        w, quant_type, group_size, act_order, test_perm)
+    w_ref, q_w, s, g_idx, rand_perm = gptq_quantize_weights(w, quant_type, group_size,
+                                                            act_order, test_perm)
 
     # For act_order, sort the "weights" and "g_idx" so that group ids are
     # increasing
@@ -129,8 +126,7 @@ def marlin_quantize(w: torch.Tensor,
     return res_list
 
 
-def awq_marlin_quantize(w: torch.Tensor, quant_type: ScalarType,
-                        group_size: int):
+def awq_marlin_quantize(w: torch.Tensor, quant_type: ScalarType, group_size: int):
     size_k, size_n = w.shape
 
     # Normalize group_size
@@ -143,18 +139,13 @@ def awq_marlin_quantize(w: torch.Tensor, quant_type: ScalarType,
     num_groups = size_k // group_size
 
     # Quantize with zp
-    w_ref, q_w, s, zp = quantize_weights(w,
-                                         quant_type,
-                                         group_size,
-                                         zero_points=True)
+    w_ref, q_w, s, zp = quantize_weights(w, quant_type, group_size, zero_points=True)
 
     # Reformat to marlin
     weight_perm = get_weight_perm(quant_type.size_bits)
-    marlin_q_w = marlin_weights(q_w, size_k, size_n, quant_type.size_bits,
-                                weight_perm)
+    marlin_q_w = marlin_weights(q_w, size_k, size_n, quant_type.size_bits, weight_perm)
     marlin_s = marlin_permute_scales(s, size_k, size_n, group_size)
-    marlin_zp = marlin_zero_points(zp, num_groups, size_n,
-                                   quant_type.size_bits)
+    marlin_zp = marlin_zero_points(zp, num_groups, size_n, quant_type.size_bits)
 
     # Create result
     res_list = [w_ref, marlin_q_w, marlin_s, marlin_zp]

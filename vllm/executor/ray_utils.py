@@ -59,14 +59,12 @@ try:
             if not device_key:
                 raise RuntimeError("current platform %s does not support ray.",
                                    vllm.platforms.current_platform.device_name)
-            gpu_ids = ray.get_runtime_context().get_accelerator_ids(
-            )[device_key]
+            gpu_ids = ray.get_runtime_context().get_accelerator_ids()[device_key]
             return node_id, gpu_ids
 
         def execute_model_spmd(
-            self, req_or_tuple: Union[bytes,
-                                      Tuple[bytes,
-                                            Optional[IntermediateTensors]]]
+            self, req_or_tuple: Union[bytes, Tuple[bytes,
+                                                   Optional[IntermediateTensors]]]
         ) -> bytes:
             """Execute model in SPMD fashion: used only when SPMD worker and
             compiled DAG are both enabled.
@@ -120,9 +118,8 @@ try:
 
         def execute_model_ray(
             self,
-            scheduler_output: Union["SchedulerOutput",
-                                    Tuple["SchedulerOutput",
-                                          "IntermediateTensors"]],
+            scheduler_output: Union["SchedulerOutput", Tuple["SchedulerOutput",
+                                                             "IntermediateTensors"]],
         ) -> Union["ModelRunnerOutput", Tuple["SchedulerOutput",
                                               "IntermediateTensors"]]:
             # This method is used by Ray Compiled Graph to execute the model,
@@ -133,8 +130,8 @@ try:
                 scheduler_output, intermediate_tensors = scheduler_output
             else:
                 scheduler_output, intermediate_tensors = scheduler_output, None
-            output = self.worker.model_runner.execute_model(
-                scheduler_output, intermediate_tensors)
+            output = self.worker.model_runner.execute_model(scheduler_output,
+                                                            intermediate_tensors)
             if isinstance(output, IntermediateTensors):
                 output = scheduler_output, output
             return output
@@ -162,8 +159,8 @@ def assert_ray_available():
                          "`pip install ray`.") from ray_import_err
 
 
-def _verify_bundles(placement_group: "PlacementGroup",
-                    parallel_config: ParallelConfig, device_str: str):
+def _verify_bundles(placement_group: "PlacementGroup", parallel_config: ParallelConfig,
+                    device_str: str):
     """Verify a given placement group has bundles located in the right place.
 
     There are 2 rules.
@@ -191,8 +188,7 @@ def _verify_bundles(placement_group: "PlacementGroup",
             f"{node_id_to_bundle}. "
             "You don't have enough GPUs available in a current node. Check "
             "`ray status` and `ray list nodes` to see if you have available "
-            "GPUs in a node `{driver_node_id}` before starting an vLLM engine."
-        )
+            "GPUs in a node `{driver_node_id}` before starting an vLLM engine.")
 
     for node_id, bundles in node_id_to_bundle.items():
         if len(bundles) < parallel_config.tensor_parallel_size:
@@ -300,9 +296,8 @@ def initialize_ray_cluster(
 
     device_str = current_platform.ray_device_key
     if not device_str:
-        raise ValueError(
-            f"current platform {current_platform.device_name} does not "
-            "support ray.")
+        raise ValueError(f"current platform {current_platform.device_name} does not "
+                         "support ray.")
 
     # Create or get the placement group for worker processes
     if parallel_config.placement_group:
@@ -320,9 +315,8 @@ def initialize_ray_cluster(
         for bundle in bundles:
             bundle_devices = bundle.get(device_str, 0)
             if bundle_devices > 1:
-                raise ValueError(
-                    "Placement group bundle cannot have more than 1 "
-                    f"{device_str}.")
+                raise ValueError("Placement group bundle cannot have more than 1 "
+                                 f"{device_str}.")
             if bundle_devices:
                 device_bundles += 1
         if parallel_config.world_size > device_bundles:
@@ -365,8 +359,8 @@ def initialize_ray_cluster(
         placement_group_specs[0][f"node:{current_ip}"] = 0.001
 
         # By default, Ray packs resources as much as possible.
-        current_placement_group = ray.util.placement_group(
-            placement_group_specs, strategy="PACK")
+        current_placement_group = ray.util.placement_group(placement_group_specs,
+                                                           strategy="PACK")
         _wait_until_pg_ready(current_placement_group)
 
     assert current_placement_group is not None

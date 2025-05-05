@@ -45,12 +45,10 @@ class GritLMPooler(nn.Module):
         def tokens_to_ids(tokens: list[str]) -> array:
             return array("i", [self.token_ids[token] for token in tokens])
 
-        self.user_pattern_ids = tokens_to_ids(
-            ["▁<", "|", "user", "|", ">", "<0x0A>"])
+        self.user_pattern_ids = tokens_to_ids(["▁<", "|", "user", "|", ">", "<0x0A>"])
         self.embed_newline_pattern_ids = tokens_to_ids(
             ["<0x0A>", "<", "|", "embed", "|", ">", "<0x0A>"])
-        self.embed_pattern_ids = tokens_to_ids(
-            ["▁<", "|", "embed", "|", ">", "<0x0A>"])
+        self.embed_pattern_ids = tokens_to_ids(["▁<", "|", "embed", "|", ">", "<0x0A>"])
 
         self.head = PoolerHead(normalize=True, softmax=False)
 
@@ -100,9 +98,7 @@ class GritLMPooler(nn.Module):
         # If user pattern is found in the prompt, that means there should be
         # a newline token before the embed pattern.
         embed_pattern_ids = self.embed_pattern_ids
-        if self._find_array(prompt_token_ids,
-                            self.user_pattern_ids,
-                            start_idx=1) == 1:
+        if self._find_array(prompt_token_ids, self.user_pattern_ids, start_idx=1) == 1:
             embed_pattern_ids = self.embed_newline_pattern_ids
 
         # Find the embed pattern in the prompt.
@@ -162,20 +158,15 @@ class GritLMPooler(nn.Module):
         start_idx = 0
         for i, prompt_len in enumerate(prompt_lens):
             end_idx = start_idx + prompt_len
-            sum_embeddings[i] = masked_hidden_states[start_idx:end_idx].sum(
-                dim=0)
+            sum_embeddings[i] = masked_hidden_states[start_idx:end_idx].sum(dim=0)
             start_idx = end_idx
 
         num_non_instruction_tokens = prompt_lens - instruction_lens
-        mean_embeddings = sum_embeddings / num_non_instruction_tokens.unsqueeze(
-            1)
+        mean_embeddings = sum_embeddings / num_non_instruction_tokens.unsqueeze(1)
 
-        pooled_data = self.head(mean_embeddings,
-                                pooling_metadata=pooling_metadata)
+        pooled_data = self.head(mean_embeddings, pooling_metadata=pooling_metadata)
 
-        pooled_outputs = [
-            PoolingSequenceGroupOutput(data) for data in pooled_data
-        ]
+        pooled_outputs = [PoolingSequenceGroupOutput(data) for data in pooled_data]
 
         return PoolerOutput(outputs=pooled_outputs)
 

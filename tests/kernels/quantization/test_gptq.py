@@ -27,5 +27,4 @@ def test_gptq_gemm_opcheck():
     idx = torch.empty((0, ), device='cuda', dtype=torch.int32)
     use_exllama = True
     bit = 4
-    opcheck(torch.ops._C.gptq_gemm,
-            (a, weight, zeros, scales, idx, use_exllama, bit))
+    opcheck(torch.ops._C.gptq_gemm, (a, weight, zeros, scales, idx, use_exllama, bit))

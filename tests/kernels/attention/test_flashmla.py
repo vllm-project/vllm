@@ -14,16 +14,14 @@ from vllm.attention.ops.flashmla import (flash_mla_with_kvcache,
 
 def cal_diff(x: torch.Tensor, y: torch.Tensor, name: str) -> None:
     x, y = x.double(), y.double()
-    cos_diff = 1 - 2 * (x * y).sum().item() / max(
-        (x * x + y * y).sum().item(), 1e-12)
+    cos_diff = 1 - 2 * (x * y).sum().item() / max((x * x + y * y).sum().item(), 1e-12)
     assert cos_diff < 1e-5
 
 FLASH_MLA_UNSUPPORTED_REASON = is_flashmla_supported()[1] \
     if not is_flashmla_supported()[0] else "FlashMLA is supported"
 
 
-@pytest.mark.skipif(not is_flashmla_supported()[0],
-                    reason=FLASH_MLA_UNSUPPORTED_REASON)
+@pytest.mark.skipif(not is_flashmla_supported()[0], reason=FLASH_MLA_UNSUPPORTED_REASON)
 @pytest.mark.parametrize("b", [128])
 @pytest.mark.parametrize("s_q", [1, 2])
 @pytest.mark.parametrize("mean_sk", [4096, 8192])
@@ -35,8 +33,7 @@ FLASH_MLA_UNSUPPORTED_REASON = is_flashmla_supported()[1] \
 @pytest.mark.parametrize("causal", [True])
 @pytest.mark.parametrize("varlen", [False, True])
 @torch.inference_mode()
-def test_flash_mla(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size, causal,
-                   varlen):
+def test_flash_mla(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size, causal, varlen):
     # TODO: parametrize using pytest
     dtype = torch.bfloat16
     device = torch.device("cuda:0")
@@ -52,24 +49,22 @@ def test_flash_mla(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size, causal,
     cache_seqlens = torch.full((b, ), mean_sk, dtype=torch.int32)
     if varlen:
         for i in range(b):
-            cache_seqlens[i] = max(random.normalvariate(mean_sk, mean_sk / 2),
-                                   s_q)
+            cache_seqlens[i] = max(random.normalvariate(mean_sk, mean_sk / 2), s_q)
     total_seqlens = cache_seqlens.sum().item()
     max_seqlen = cache_seqlens.max().item()
     max_seqlen_pad = triton.cdiv(max_seqlen, 256) * 256
 
     q = torch.randn(b, s_q, h_q, d)
     block_table = torch.arange(b * max_seqlen_pad // block_size,
-                               dtype=torch.int32).view(
-                                   b, max_seqlen_pad // block_size)
+                               dtype=torch.int32).view(b, max_seqlen_pad // block_size)
     blocked_k = torch.randn(block_table.numel(), block_size, h_kv, d)
     for i in range(b):
         blocked_k.view(b, max_seqlen_pad, h_kv,
                        d)[i, cache_seqlens[i].item():] = float("nan")
     blocked_v = blocked_k[..., :dv]
 
-    tile_scheduler_metadata, num_splits = get_mla_metadata(
-        cache_seqlens, s_q * h_q // h_kv, h_kv)
+    tile_scheduler_metadata, num_splits = get_mla_metadata(cache_seqlens,
+                                                           s_q * h_q // h_kv, h_kv)
 
     def flash_mla():
         return flash_mla_with_kvcache(
@@ -94,8 +89,7 @@ def test_flash_mla(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size, causal,
             s_q = query.shape[-2]
             s_k = key.shape[-2]
             attn_bias = torch.zeros(s_q, s_k, dtype=query.dtype)
-            temp_mask = torch.ones(s_q, s_k,
-                                   dtype=torch.bool).tril(diagonal=s_k - s_q)
+            temp_mask = torch.ones(s_q, s_k, dtype=torch.bool).tril(diagonal=s_k - s_q)
             attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
             attn_bias.to(query.dtype)
             attn_weight += attn_bias

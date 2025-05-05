@@ -94,9 +94,8 @@ def test_multi_step_llm(
                                 prompts, max_tokens, num_logprobs))
 
         with hf_runner(model, dtype=dtype) as hf_model:
-            hf_outputs = (hf_model.generate_greedy(prompts, max_tokens)
-                          if num_logprobs is None else
-                          hf_model.generate_greedy_logprobs_limit(
+            hf_outputs = (hf_model.generate_greedy(prompts, max_tokens) if num_logprobs
+                          is None else hf_model.generate_greedy_logprobs_limit(
                               prompts, max_tokens, num_logprobs))
 
         if num_logprobs is None:
@@ -300,13 +299,11 @@ def test_multi_step_llm_chunked_prefill_prefix_cache(
 
         assert len(example_prompts) >= 2
         challenge_prompts = copy.deepcopy(example_prompts)
-        challenge_prompts[0] = (
-            'vLLM is a high-throughput and memory-efficient '
-            'inference and serving engine for LLMs.\n')  # 24 tok
+        challenge_prompts[0] = ('vLLM is a high-throughput and memory-efficient '
+                                'inference and serving engine for LLMs.\n')  # 24 tok
         challenge_prompts[1] = (
             'Briefly describe the major milestones in the '
-            'development of artificial intelligence from 1950 to 2020.\n'
-        )  # 30 tok
+            'development of artificial intelligence from 1950 to 2020.\n')  # 30 tok
 
         # If necessary, adjust the length of `challenge_prompts` to match
         # `num_prompts`
@@ -329,10 +326,10 @@ def test_multi_step_llm_chunked_prefill_prefix_cache(
                 max_num_seqs=4,
                 block_size=16,
         ) as vllm_model:
-            outputs_baseline = (
-                vllm_model.generate_greedy(challenge_prompts, max_tokens) if
-                num_logprobs is None else vllm_model.generate_greedy_logprobs(
-                    challenge_prompts, max_tokens, num_logprobs))
+            outputs_baseline = (vllm_model.generate_greedy(
+                challenge_prompts, max_tokens) if num_logprobs is None else
+                                vllm_model.generate_greedy_logprobs(
+                                    challenge_prompts, max_tokens, num_logprobs))
 
         # multi-step+"single-step chunked prefill"+APC
         with vllm_runner(
@@ -349,10 +346,10 @@ def test_multi_step_llm_chunked_prefill_prefix_cache(
                 max_num_seqs=4,
                 block_size=16,
         ) as vllm_model:
-            outputs_w_features = (
-                vllm_model.generate_greedy(challenge_prompts, max_tokens) if
-                num_logprobs is None else vllm_model.generate_greedy_logprobs(
-                    challenge_prompts, max_tokens, num_logprobs))
+            outputs_w_features = (vllm_model.generate_greedy(
+                challenge_prompts, max_tokens) if num_logprobs is None else
+                                  vllm_model.generate_greedy_logprobs(
+                                      challenge_prompts, max_tokens, num_logprobs))
 
         if num_logprobs is None:
             # No-logprobs test

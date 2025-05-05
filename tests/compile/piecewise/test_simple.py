@@ -46,11 +46,7 @@ direct_register_custom_op(
 @support_torch_compile
 class SillyModel(nn.Module):
 
-    def __init__(self,
-                 *,
-                 vllm_config: VllmConfig,
-                 prefix: str = '',
-                 **kwargs) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = '', **kwargs) -> None:
         super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

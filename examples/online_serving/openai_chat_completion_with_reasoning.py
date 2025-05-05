@@ -46,10 +46,8 @@ def main():
     # Round 2
     messages.append({"role": "assistant", "content": content})
     messages.append({
-        "role":
-        "user",
-        "content":
-        "How many Rs are there in the word 'strawberry'?",
+        "role": "user",
+        "content": "How many Rs are there in the word 'strawberry'?",
     })
     response = client.chat.completions.create(model=model, messages=messages)
 

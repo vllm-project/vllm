@@ -182,14 +182,14 @@ def marlin_create_bench_fn(bt: BenchmarkTensors) -> Callable:
     if bt.w_g_zp is None:
         w_zp = torch.empty(0, dtype=torch.int, device=device)
     else:
-        w_zp = marlin_zero_points(bt.w_g_zp, bt.w_ref.shape[0],
-                                  bt.w_ref.shape[1], bt.wtype.size_bits)
+        w_zp = marlin_zero_points(bt.w_g_zp, bt.w_ref.shape[0], bt.w_ref.shape[1],
+                                  bt.wtype.size_bits)
 
     if bt.group_size is None:
         w_s = torch.tensor([], device="cuda", dtype=torch.half)
     else:
-        w_s = marlin_permute_scales(bt.w_g_s, bt.w_ref.shape[0],
-                                    bt.w_ref.shape[1], bt.group_size)
+        w_s = marlin_permute_scales(bt.w_g_s, bt.w_ref.shape[0], bt.w_ref.shape[1],
+                                    bt.group_size)
 
     sort_indices = torch.empty(0, dtype=torch.int, device=device)
     g_idx = torch.empty(0, dtype=torch.int, device=device)
@@ -221,16 +221,12 @@ def marlin_create_bench_fn(bt: BenchmarkTensors) -> Callable:
         if bt.w_ch_s is not None:
             s_ch = bt.w_ch_s.to(torch.float32)
         else:
-            s_ch = torch.ones(bt.w_ref.shape[1],
-                              dtype=torch.float32,
-                              device=device)
+            s_ch = torch.ones(bt.w_ref.shape[1], dtype=torch.float32, device=device)
 
         if bt.w_tok_s is not None:
             s_tok = bt.w_tok_s.to(torch.float32)
         else:
-            s_tok = torch.ones(bt.a.shape[0],
-                               dtype=torch.float32,
-                               device=device)
+            s_tok = torch.ones(bt.a.shape[0], dtype=torch.float32, device=device)
 
         fn = lambda: ops.marlin_qqq_gemm(a=bt.a,
                                          b_q_weight=w_q,
@@ -275,8 +271,7 @@ def machete_create_bench_fn(bt: BenchmarkTensors,
 # bench
 
 
-def bench_fns(label: str, sub_label: str, description: str,
-              fns: list[Callable]):
+def bench_fns(label: str, sub_label: str, description: str, fns: list[Callable]):
 
     min_run_time = 1 if not NVTX_PROFILE else 0.1
     res = TBenchmark.Timer(
@@ -331,25 +326,20 @@ def bench(types: TypeConfig,
     timers = []
     # pytorch impl
     timers.append(
-        bench_fns(
-            label, sub_label, "torch.matmul (fp16)",
-            [torch_matmul_f16_create_bench_fn(bt)
-             for bt in benchmark_tensors]))
+        bench_fns(label, sub_label, "torch.matmul (fp16)",
+                  [torch_matmul_f16_create_bench_fn(bt) for bt in benchmark_tensors]))
 
     if types.act_type == torch.int8 or types.act_type == torch.float8_e4m3fn:
         timers.append(
             bench_fns(
                 label, sub_label,
-                f"cutlass_scaled_mm ({terse_type_name(types.act_type)})", [
-                    cutlass_scaled_mm_create_bench_fn(bt)
-                    for bt in benchmark_tensors
-                ]))
+                f"cutlass_scaled_mm ({terse_type_name(types.act_type)})",
+                [cutlass_scaled_mm_create_bench_fn(bt) for bt in benchmark_tensors]))
 
     if types.act_type != torch.float8_e4m3fn:
         timers.append(
             bench_fns(label, sub_label, f"marlin ({name_type_string})",
-                      [marlin_create_bench_fn(bt)
-                       for bt in benchmark_tensors]))
+                      [marlin_create_bench_fn(bt) for bt in benchmark_tensors]))
 
     # machete
     timers.append(
@@ -398,8 +388,7 @@ def bench(types: TypeConfig,
                 "median": res.median,
             }
             if _SWEEP_SCHEDULES_RESULTS is None:
-                _SWEEP_SCHEDULES_RESULTS = pd.DataFrame(
-                    columns=results_row.keys())
+                _SWEEP_SCHEDULES_RESULTS = pd.DataFrame(columns=results_row.keys())
             _SWEEP_SCHEDULES_RESULTS.\
                 loc[len(_SWEEP_SCHEDULES_RESULTS)] = results_row
 
@@ -468,8 +457,7 @@ def make_output(
 
 
 def run_square_bench(args):
-    dim_sizes = list(
-        range(args.dim_start, args.dim_end + 1, args.dim_increment))
+    dim_sizes = list(range(args.dim_start, args.dim_end + 1, args.dim_increment))
     MKNs = list(zip(dim_sizes, dim_sizes, dim_sizes))
     data = run(args.dtype, args.sweep_schedules, MKNs)
 
@@ -630,21 +618,19 @@ Benchmark Machete GEMM.
     square_parser.set_defaults(func=run_square_bench)
 
     range_parser = subparsers.add_parser("range_bench")
-    range_parser.add_argument(
-        "--dim-start",
-        type=str,
-        required=True,
-        help="Start value for M,K,N as common separated list")
+    range_parser.add_argument("--dim-start",
+                              type=str,
+                              required=True,
+                              help="Start value for M,K,N as common separated list")
     range_parser.add_argument(
         "--dim-end",
         type=str,
         required=True,
         help="End value (inclusive) for M,K,N as common separated list")
-    range_parser.add_argument(
-        "--dim-increment",
-        type=str,
-        required=True,
-        help="Increment value for M,K,N as common separated list")
+    range_parser.add_argument("--dim-increment",
+                              type=str,
+                              required=True,
+                              help="Increment value for M,K,N as common separated list")
     range_parser.set_defaults(func=run_range_bench)
 
     model_parser = subparsers.add_parser("model_bench")

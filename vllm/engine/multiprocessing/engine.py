@@ -115,8 +115,7 @@ class MQLLMEngine:
             return ENGINE_DEAD_ERROR()
 
     @classmethod
-    def from_vllm_config(cls, vllm_config: VllmConfig,
-                         usage_context: UsageContext,
+    def from_vllm_config(cls, vllm_config: VllmConfig, usage_context: UsageContext,
                          disable_log_requests: bool, disable_log_stats: bool,
                          ipc_path: str) -> "MQLLMEngine":
         # Setup plugins for each process
@@ -136,8 +135,8 @@ class MQLLMEngine:
         )
 
     @staticmethod
-    def from_engine_args(engine_args: AsyncEngineArgs,
-                         usage_context: UsageContext, ipc_path: str):
+    def from_engine_args(engine_args: AsyncEngineArgs, usage_context: UsageContext,
+                         ipc_path: str):
         """Creates an MQLLMEngine from the engine arguments."""
 
         vllm_config = engine_args.create_engine_config(usage_context)
@@ -171,8 +170,7 @@ class MQLLMEngine:
         del self.engine
 
     @contextmanager
-    def make_data_socket(
-            self) -> Iterator[zmq.Socket]:  # type: ignore[name-defined]
+    def make_data_socket(self) -> Iterator[zmq.Socket]:  # type: ignore[name-defined]
         socket = self.ctx.socket(zmq.constants.ROUTER)
         try:
             socket.bind(self.data_ipc_path)
@@ -192,14 +190,12 @@ class MQLLMEngine:
                 # Handle the query from the Client.
                 if request == RPCStartupRequest.IS_SERVER_READY:
                     tracing_enabled = self.engine.is_tracing_enabled()
-                    response = RPCStartupResponse(
-                        tracing_enabled=tracing_enabled)
+                    response = RPCStartupResponse(tracing_enabled=tracing_enabled)
 
             except Exception as e:
                 response = e
 
-            socket.send_multipart((identity, pickle.dumps(response)),
-                                  copy=False)
+            socket.send_multipart((identity, pickle.dumps(response)), copy=False)
 
     def run_engine_loop(self):
         """Core busy loop of the LLMEngine."""
@@ -240,9 +236,7 @@ class MQLLMEngine:
             return []
         except BaseException as e:
             self._set_errored(e)
-            rpc_err = RPCError(request_id=None,
-                               is_engine_errored=True,
-                               exception=e)
+            rpc_err = RPCError(request_id=None, is_engine_errored=True, exception=e)
             self._send_outputs(rpc_err)
             raise e
 
@@ -313,8 +307,8 @@ class MQLLMEngine:
             # We do not set self._errored = True here, since the error
             # is due to an issue adding this request to the engine,
             # rather than an issue with the engine itself.
-            logger.debug("Failed to add request %s to engine. %s",
-                         request.request_id, e)
+            logger.debug("Failed to add request %s to engine. %s", request.request_id,
+                         e)
             is_errored = self._errored_with is not None
             rpc_err = RPCError(request_id=request_id,
                                is_engine_errored=is_errored,
@@ -340,8 +334,7 @@ class MQLLMEngine:
             self._send_outputs(rpc_err)
             return
         # Otherwise, send back the successful load message
-        self._send_outputs(
-            RPCAdapterLoadedResponse(request_id=request.request_id))
+        self._send_outputs(RPCAdapterLoadedResponse(request_id=request.request_id))
 
     def _handle_is_sleeping_request(self, request: RPCIsSleepingRequest):
         is_sleeping = self.is_sleeping()
@@ -392,8 +385,7 @@ class MQLLMEngine:
             error_bytes = pickle.dumps(error)
             self.heartbeat_socket.send_multipart((error_bytes, ), copy=False)
 
-    def _async_socket_engine_callback(self,
-                                      request_outputs: REQUEST_OUTPUTS_T):
+    def _async_socket_engine_callback(self, request_outputs: REQUEST_OUTPUTS_T):
         """Callback used by engine to make socket handling async with GPU."""
         self._send_outputs(request_outputs)
         self.handle_new_input()
@@ -426,19 +418,17 @@ def signal_handler(*_) -> None:
     raise KeyboardInterrupt("MQLLMEngine terminated")
 
 
-def run_mp_engine(vllm_config: VllmConfig, usage_context: UsageContext,
-                  ipc_path: str, disable_log_stats: bool,
-                  disable_log_requests: bool, engine_alive):
+def run_mp_engine(vllm_config: VllmConfig, usage_context: UsageContext, ipc_path: str,
+                  disable_log_stats: bool, disable_log_requests: bool, engine_alive):
     try:
         # Ensure we can serialize transformer config before spawning
         maybe_register_config_serialize_by_value()
 
-        engine = MQLLMEngine.from_vllm_config(
-            vllm_config=vllm_config,
-            usage_context=usage_context,
-            disable_log_stats=disable_log_stats,
-            disable_log_requests=disable_log_requests,
-            ipc_path=ipc_path)
+        engine = MQLLMEngine.from_vllm_config(vllm_config=vllm_config,
+                                              usage_context=usage_context,
+                                              disable_log_stats=disable_log_stats,
+                                              disable_log_requests=disable_log_requests,
+                                              ipc_path=ipc_path)
 
         signal.signal(signal.SIGTERM, signal_handler)
 

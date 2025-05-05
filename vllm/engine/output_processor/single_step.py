@@ -16,9 +16,9 @@ from vllm.utils import Counter
 logger = init_logger(__name__)
 
 
-def single_step_process_prompt_logprob(
-        sg_output_proc: SequenceGroupOutputProcessor, seq_group: SequenceGroup,
-        output: CompletionSequenceGroupOutput) -> None:
+def single_step_process_prompt_logprob(sg_output_proc: SequenceGroupOutputProcessor,
+                                       seq_group: SequenceGroup,
+                                       output: CompletionSequenceGroupOutput) -> None:
     """Process prompt logprobs associated with the {class}`SequenceGroupOutput`
     for a given step.
 
@@ -44,8 +44,7 @@ def single_step_process_prompt_logprob(
             seq_group.prompt_logprobs = []
 
         assert hasattr(sg_output_proc, 'detokenizer')
-        if (seq_group.sampling_params.detokenize
-                and sg_output_proc.detokenizer):
+        if (seq_group.sampling_params.detokenize and sg_output_proc.detokenizer):
             sg_output_proc.detokenizer.decode_prompt_logprobs_inplace(
                 seq_group,
                 prompt_logprobs,
@@ -68,9 +67,9 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
     that is currently difficult to schedule multiple steps ahead of time.
     """
 
-    def __init__(self, scheduler_config: SchedulerConfig,
-                 detokenizer: Detokenizer, scheduler: List[Scheduler],
-                 seq_counter: Counter, stop_checker: StopChecker):
+    def __init__(self, scheduler_config: SchedulerConfig, detokenizer: Detokenizer,
+                 scheduler: List[Scheduler], seq_counter: Counter,
+                 stop_checker: StopChecker):
         self.scheduler_config = scheduler_config
         self.detokenizer = detokenizer
         self.scheduler = scheduler
@@ -78,8 +77,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         self.stop_checker = stop_checker
 
     def process_outputs(self, sequence_group: SequenceGroup,
-                        outputs: List[SequenceGroupOutput],
-                        is_async: bool) -> None:
+                        outputs: List[SequenceGroupOutput], is_async: bool) -> None:
         """Append all new tokens to sequences in the sequence group. Fork any
         surviving beam candidates; free any unsurviving ones.
 

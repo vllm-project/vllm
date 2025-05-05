@@ -165,8 +165,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to force using nightly wheel in python build.
     # This is used for testing the nightly wheel in python build.
     "VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL":
-    lambda: bool(int(os.getenv("VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL", "0"))
-                 ),
+    lambda: bool(int(os.getenv("VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL", "0"))),
 
     # CMake build type
     # If not set, defaults to "Debug" or "RelWithDebInfo"
@@ -214,8 +213,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # by incrementing the VLLM_PORT value.
     # '0' is used to make mypy happy
     'VLLM_PORT':
-    lambda: int(os.getenv('VLLM_PORT', '0'))
-    if 'VLLM_PORT' in os.environ else None,
+    lambda: int(os.getenv('VLLM_PORT', '0')) if 'VLLM_PORT' in os.environ else None,
 
     # path used for ipc when the frontend api server is running in
     # multi-processing mode to communicate with the backend engine process.
@@ -258,8 +256,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Internal flag to enable Dynamo fullgraph capture
     "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE":
-    lambda: bool(
-        os.environ.get("VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE", "1") != "0"),
+    lambda: bool(os.environ.get("VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE", "1") != "0"),
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
@@ -280,8 +277,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Whether to log responses from API Server for debugging
     "VLLM_DEBUG_LOG_API_SERVER_RESPONSE":
-    lambda: os.environ.get("VLLM_DEBUG_LOG_API_SERVER_RESPONSE", "False").
-    lower() == "true",
+    lambda: os.environ.get("VLLM_DEBUG_LOG_API_SERVER_RESPONSE", "False").lower() ==
+    "true",
 
     # S3 access information, used for tensorizer to load model from S3
     "S3_ACCESS_KEY_ID":
@@ -405,8 +402,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # (experimental feature) in Ray's Compiled Graph. This flag is ignored if
     # VLLM_USE_RAY_COMPILED_DAG is not set.
     "VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM":
-    lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM", "0"))
-                 ),
+    lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM", "0"))),
 
     # Use dedicated multiprocess context for workers.
     # Both spawn and fork work
@@ -470,16 +466,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # the max length derived from the model's config.json.
     # To enable this, set VLLM_ALLOW_LONG_MAX_MODEL_LEN=1.
     "VLLM_ALLOW_LONG_MAX_MODEL_LEN":
-    lambda:
-    (os.environ.get("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "0").strip().lower() in
-     ("1", "true")),
+    lambda: (os.environ.get("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "0").strip().lower() in
+             ("1", "true")),
 
     # If set, forces FP8 Marlin to be used for FP8 quantization regardless
     # of the hardware support for FP8 compute.
     "VLLM_TEST_FORCE_FP8_MARLIN":
-    lambda:
-    (os.environ.get("VLLM_TEST_FORCE_FP8_MARLIN", "0").strip().lower() in
-     ("1", "true")),
+    lambda: (os.environ.get("VLLM_TEST_FORCE_FP8_MARLIN", "0").strip().lower() in
+             ("1", "true")),
     "VLLM_TEST_FORCE_LOAD_FORMAT":
     lambda: os.getenv("VLLM_TEST_FORCE_LOAD_FORMAT", "dummy"),
 
@@ -492,14 +486,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # if this is not set, it means all plugins will be loaded
     # if this is set to an empty string, no plugins will be loaded
     "VLLM_PLUGINS":
-    lambda: None if "VLLM_PLUGINS" not in os.environ else os.environ[
-        "VLLM_PLUGINS"].split(","),
+    lambda: None
+    if "VLLM_PLUGINS" not in os.environ else os.environ["VLLM_PLUGINS"].split(","),
 
     # Enables torch profiler if set. Path to the directory where torch profiler
     # traces are saved. Note that it must be an absolute path.
     "VLLM_TORCH_PROFILER_DIR":
-    lambda: (None if os.getenv("VLLM_TORCH_PROFILER_DIR", None) is None else os
-             .path.expanduser(os.getenv("VLLM_TORCH_PROFILER_DIR", "."))),
+    lambda: (None if os.getenv("VLLM_TORCH_PROFILER_DIR", None) is None else os.path.
+             expanduser(os.getenv("VLLM_TORCH_PROFILER_DIR", "."))),
 
     # If set, vLLM will use Triton implementations of AWQ.
     "VLLM_USE_TRITON_AWQ":
@@ -507,9 +501,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # If set, allow loading or unloading lora adapters in runtime,
     "VLLM_ALLOW_RUNTIME_LORA_UPDATING":
-    lambda:
-    (os.environ.get("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "0").strip().lower() in
-     ("1", "true")),
+    lambda: (os.environ.get("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "0").strip().lower() in
+             ("1", "true")),
 
     # By default, vLLM will check the peer-to-peer capability itself,
     # in case of broken drivers. See https://github.com/vllm-project/vllm/blob/a9b15c606fea67a072416ea0ea115261a2756058/vllm/distributed/device_communicators/custom_all_reduce_utils.py#L101-L108 for details. # noqa
@@ -533,8 +526,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disable aiter ops unless specifically enabled.
     # Acts as a parent switch to enable the rest of the other operations.
     "VLLM_ROCM_USE_AITER":
-    lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
-             ("true", "1")),
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in ("true", "1")),
 
     # Whether to use aiter paged attention.
     # By default is disabled.
@@ -546,29 +538,24 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # The following list of related ops
     # - scaled_mm (per-tensor / rowwise)
     "VLLM_ROCM_USE_AITER_LINEAR":
-    lambda: (os.getenv("VLLM_ROCM_USE_AITER_LINEAR", "True").lower() in
-             ("true", "1")),
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_LINEAR", "True").lower() in ("true", "1")),
 
     # Whether to use aiter moe ops.
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MOE":
-    lambda: (os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in
-             ("true", "1")),
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in ("true", "1")),
 
     # use aiter rms norm op if aiter ops are enabled.
     "VLLM_ROCM_USE_AITER_RMSNORM":
-    lambda: (os.getenv("VLLM_ROCM_USE_AITER_RMSNORM", "True").lower() in
-             ("true", "1")),
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_RMSNORM", "True").lower() in ("true", "1")),
 
     # Whether to use aiter mla ops.
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MLA":
-    lambda: (os.getenv("VLLM_ROCM_USE_AITER_MLA", "True").lower() in
-             ("true", "1")),
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_MLA", "True").lower() in ("true", "1")),
     # use rocm skinny gemms
     "VLLM_ROCM_USE_SKINNY_GEMM":
-    lambda: (os.getenv("VLLM_ROCM_USE_SKINNY_GEMM", "True").lower() in
-             ("true", "1")),
+    lambda: (os.getenv("VLLM_ROCM_USE_SKINNY_GEMM", "True").lower() in ("true", "1")),
 
     # Pad the fp8 weights to 256 bytes for ROCm
     "VLLM_ROCM_FP8_PADDING":
@@ -580,8 +567,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # custom paged attention kernel for MI3* cards
     "VLLM_ROCM_CUSTOM_PAGED_ATTN":
-    lambda: (os.getenv("VLLM_ROCM_CUSTOM_PAGED_ATTN", "True").lower() in
-             ("true", "1")),
+    lambda: (os.getenv("VLLM_ROCM_CUSTOM_PAGED_ATTN", "True").lower() in ("true", "1")),
 
     # Divisor for dynamic query scale factor calculation for FP8 KV Cache
     "Q_SCALE_CONSTANT":
@@ -624,8 +610,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set, vLLM will use the Triton implementation of moe_align_block_size,
     # i.e. moe_align_block_size_triton in fused_moe.py.
     "VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON":
-    lambda: bool(int(os.getenv("VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON", "0"))
-                 ),
+    lambda: bool(int(os.getenv("VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON", "0"))),
 
     # Number of GPUs per worker in Ray, if it is set to be a fraction,
     # it allows ray to schedule multiple actors on a single GPU,
@@ -648,14 +633,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Gaudi3. This is only applicable to HPU contiguous cache. If set to true,
     # contiguous cache fetch will be used.
     "VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH":
-    lambda: os.environ.get("VLLM_CONTIGUOUS_PA", "true").lower() in
-    ("1", "true"),
+    lambda: os.environ.get("VLLM_CONTIGUOUS_PA", "true").lower() in ("1", "true"),
 
     # Use delayed sampling for HPU to reduce host cpu overhead
     # between each step.
     "VLLM_HPU_USE_DELAYED_SAMPLING":
-    lambda: os.environ.get("VLLM_DELAYED_SAMPLING", "false").lower() in
-    ("1", "true"),
+    lambda: os.environ.get("VLLM_DELAYED_SAMPLING", "false").lower() in ("1", "true"),
 
     # Rank of the process in the data parallel setting
     "VLLM_DP_RANK":
@@ -664,8 +647,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Rank of the process in the data parallel setting.
     # Defaults to VLLM_DP_RANK when not set.
     "VLLM_DP_RANK_LOCAL":
-    lambda: int(
-        os.getenv("VLLM_DP_RANK_LOCAL", sys.modules[__name__].VLLM_DP_RANK)),
+    lambda: int(os.getenv("VLLM_DP_RANK_LOCAL", sys.modules[__name__].VLLM_DP_RANK)),
 
     # World size of the data parallel setting
     "VLLM_DP_SIZE":
@@ -752,10 +734,9 @@ def is_set(name: str):
 
 def set_vllm_use_v1(use_v1: bool):
     if is_set("VLLM_USE_V1"):
-        raise ValueError(
-            "Should not call set_vllm_use_v1() if VLLM_USE_V1 is set "
-            "explicitly by the user. Please raise this as a Github "
-            "Issue and explicitly set VLLM_USE_V1=0 or 1.")
+        raise ValueError("Should not call set_vllm_use_v1() if VLLM_USE_V1 is set "
+                         "explicitly by the user. Please raise this as a Github "
+                         "Issue and explicitly set VLLM_USE_V1=0 or 1.")
     os.environ["VLLM_USE_V1"] = "1" if use_v1 else "0"
 
 
@@ -794,7 +775,6 @@ def compute_hash() -> str:
         if key in environment_variables:
             factorize(key)
 
-    hash_str = hashlib.md5(str(factors).encode(),
-                           usedforsecurity=False).hexdigest()
+    hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
 
     return hash_str

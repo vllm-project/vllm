@@ -35,16 +35,14 @@ class PTPCFp8Config(Fp8Config):
         ignored_layers: Optional[List[str]] = None,
     ) -> None:
         if not current_platform.is_rocm():
-            raise ValueError(
-                "ptpc_fp8 quantization is supported only on ROCm.")
+            raise ValueError("ptpc_fp8 quantization is supported only on ROCm.")
 
         if not current_platform.has_device_capability(94):
             raise ValueError(
                 "ptpc_fp8 quantization is supported only on AMD Instinct MI300 GPUs and newer."  # noqa: E501
             )
         if activation_scheme == "static":
-            raise ValueError(
-                "ptpc_fp8 as of now only support dynamic quantization.")
+            raise ValueError("ptpc_fp8 as of now only support dynamic quantization.")
 
         super().__init__(is_checkpoint_fp8_serialized=False,
                          activation_scheme=activation_scheme,
@@ -58,8 +56,7 @@ class PTPCFp8Config(Fp8Config):
     def from_config(cls, config: Dict[str, Any]) -> "PTPCFp8Config":
         activation_scheme = cls.get_from_keys(config, ["activation_scheme"])
         ignored_layers = cls.get_from_keys_or(config, ["ignored_layers"], None)
-        return cls(activation_scheme=activation_scheme,
-                   ignored_layers=ignored_layers)
+        return cls(activation_scheme=activation_scheme, ignored_layers=ignored_layers)
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
@@ -98,18 +95,18 @@ class PTPCFp8LinearMethod(Fp8LinearMethod):
                                       use_per_token_if_dynamic=True)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.weight = torch.nn.Parameter(layer.weight.data,
-                                          requires_grad=False)
+        layer.weight = torch.nn.Parameter(layer.weight.data, requires_grad=False)
 
         assert layer.weight.data.dtype == torch.bfloat16, \
             f"Currently torch._scaled_mm (hipBLASLt) rowwise gemm only support output dtype of bfloat16. {str(layer.weight.data.dtype)} is specified." # noqa: E501
         # Quantize the weights.
-        qweight, weight_scale = ops.scaled_fp8_quant(
-            layer.weight, scale=None, use_per_token_if_dynamic=True)
+        qweight, weight_scale = ops.scaled_fp8_quant(layer.weight,
+                                                     scale=None,
+                                                     use_per_token_if_dynamic=True)
 
         # Update the layer with the new values.
-        layer.weight = Parameter(
-            qweight.t(), requires_grad=False)  # Pretranspose the weight
+        layer.weight = Parameter(qweight.t(),
+                                 requires_grad=False)  # Pretranspose the weight
         layer.weight_scale = Parameter(weight_scale, requires_grad=False)
         layer.input_scale = None
 

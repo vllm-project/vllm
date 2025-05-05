@@ -16,15 +16,14 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.transformers_utils.configs.ovis2 import (AIMv2Config,
                                                    Aimv2VisualTokenizerConfig)
 
-IMAGE_INDICATOR_IDS = [-301, -302, -303, -304,
-                       -305]  # kept for vocab prefixed tokens
+IMAGE_INDICATOR_IDS = [-301, -302, -303, -304, -305]  # kept for vocab prefixed tokens
 
 
 def st_argmax(y_soft: torch.Tensor, dim: int):  # straight-through softmax
     index = y_soft.max(dim, keepdim=True)[1]
-    y_hard = torch.zeros_like(
-        y_soft, memory_format=torch.legacy_contiguous_format).scatter_(
-            dim, index, 1.0)
+    y_hard = torch.zeros_like(y_soft,
+                              memory_format=torch.legacy_contiguous_format).scatter_(
+                                  dim, index, 1.0)
     ret = y_hard - y_soft.detach() + y_soft
     return ret
 
@@ -68,9 +67,8 @@ class Aimv2VisualTokenizer(torch.nn.Module):
         elif self.config.tokenize_function == 'st_argmax':
             tokens = st_argmax(logits, dim=-1)
         else:
-            raise ValueError(
-                'Invalid `max_type`, expected softmax or gumbel_argmax '
-                f'or st_argmax, but got {self.config.tokenize_function}')
+            raise ValueError('Invalid `max_type`, expected softmax or gumbel_argmax '
+                             f'or st_argmax, but got {self.config.tokenize_function}')
         return tokens
 
     def encode(self, pixel_values):
@@ -90,8 +88,7 @@ class Aimv2VisualTokenizer(torch.nn.Module):
                 "The token sequence length should be a perfect square.")
             features = features.reshape(n, sqrt_l, sqrt_l, d)
             pl = (self.config.hidden_stride -
-                  (sqrt_l %
-                   self.config.hidden_stride)) % self.config.hidden_stride
+                  (sqrt_l % self.config.hidden_stride)) % self.config.hidden_stride
             features = pad(features, (0, 0, 0, pl, 0, pl), "constant", 0)
             sqrt_l += pl
             features = features.reshape(n, sqrt_l // self.config.hidden_stride,
@@ -104,8 +101,7 @@ class Aimv2VisualTokenizer(torch.nn.Module):
             features = features.flatten(3)
             # [n, sqrt_l/hs*sqrt_l/hs, hs*hs*d]
             features = features.reshape(
-                n, -1,
-                self.config.hidden_stride * self.config.hidden_stride * d)
+                n, -1, self.config.hidden_stride * self.config.hidden_stride * d)
 
         return features
 
@@ -189,8 +185,7 @@ class AIMv2ViTPreprocessor(nn.Module):
         num_patches = (config.image_size // config.patch_size)**2
 
         self.patchifier = AIMv2PatchEmbed(config)
-        self.pos_embed = nn.Parameter(
-            torch.zeros((1, num_patches, config.hidden_size)))
+        self.pos_embed = nn.Parameter(torch.zeros((1, num_patches, config.hidden_size)))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         tokens = self.patchifier(x)
@@ -274,8 +269,7 @@ class AIMv2Transformer(nn.Module):
             AIMv2Block(config, quant_config, prefix=f"{prefix}.blocks.{i}")
             for i in range(config.num_hidden_layers)
         ])
-        self.post_trunk_norm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
+        self.post_trunk_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,

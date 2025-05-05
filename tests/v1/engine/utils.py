@@ -163,10 +163,9 @@ def _create_random_top_token_test_matrix(
     """
     num_elements = shape[0] * shape[1]
     choice_tensor = torch.randperm(upper - lower)[:num_elements] + lower
-    matrix = torch.cat(
-        (torch.tensor(tokens_list, dtype=torch.int).unsqueeze(-1),
-         choice_tensor.view(shape)),
-        dim=1)
+    matrix = torch.cat((torch.tensor(
+        tokens_list, dtype=torch.int).unsqueeze(-1), choice_tensor.view(shape)),
+                       dim=1)
 
     # Initialize the tensor for storing the ranks
     prompt_token_ranks = torch.empty(shape[0], dtype=torch.int)
@@ -174,8 +173,7 @@ def _create_random_top_token_test_matrix(
     # Iterate over each row to check presence of
     # tokens_list[rdx] and determine its index
     for rdx in range(shape[0]):
-        row = matrix[rdx,
-                     1:]  # Skip the first column as it contains the token list
+        row = matrix[rdx, 1:]  # Skip the first column as it contains the token list
         token_index = (row == tokens_list[rdx]).nonzero(as_tuple=True)[0]
         if token_index.numel() > 0:
             prompt_token_ranks[rdx] = token_index.item()
@@ -233,15 +231,13 @@ def generate_dummy_sample_logprobs(
                                                  len(tokenizer.vocab) - 1,
                                                  sampled_token_id)
 
-        res.append(
-            (token_vector,
-             _create_random_top_logprob_test_vector(num_logprobs + 1, -100,
-                                                    0), sampled_token_rank))
+        res.append((token_vector,
+                    _create_random_top_logprob_test_vector(num_logprobs + 1, -100,
+                                                           0), sampled_token_rank))
 
     # Convert tensors in the list tuples to Python lists
     res_list_format = [
-        (log_probs_tensor.tolist(), token_ids_tensor.tolist(),
-         sampled_token_rank)
+        (log_probs_tensor.tolist(), token_ids_tensor.tolist(), sampled_token_rank)
         for log_probs_tensor, token_ids_tensor, sampled_token_rank in res
     ]
 
@@ -281,14 +277,13 @@ def generate_dummy_prompt_logprobs_tensors(
     (
         token_vector,
         prompt_token_ranks,
-    ) = _create_random_top_token_test_matrix(
-        (num_prompt_logprobs, num_logprobs), 0,
-        len(tokenizer.vocab) - 1, prompt_tokens_list[1:])
+    ) = _create_random_top_token_test_matrix((num_prompt_logprobs, num_logprobs), 0,
+                                             len(tokenizer.vocab) - 1,
+                                             prompt_tokens_list[1:])
     return LogprobsTensors(
         token_vector,
-        _create_random_top_logprob_test_matrix(
-            (num_prompt_logprobs, num_logprobs + 1), -100, 0),
-        prompt_token_ranks)
+        _create_random_top_logprob_test_matrix((num_prompt_logprobs, num_logprobs + 1),
+                                               -100, 0), prompt_token_ranks)
 
 
 @dataclass
@@ -321,8 +316,7 @@ class MockEngineCore:
         # For each request, for each sampled token offset,
         # a tuple of
         # (list of topk token ids, list of sample logprob vals, rank)
-        generated_logprobs_raw: Optional[list[list[tuple[list[int],
-                                                         list[float],
+        generated_logprobs_raw: Optional[list[list[tuple[list[int], list[float],
                                                          int]]]] = None,
         # For each request, a tuple of
         # (prompt logprob val matrix, prompt logprob tok id matrix);

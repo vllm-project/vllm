@@ -93,8 +93,8 @@ class EngineClient(ABC):
 
         tokenized_length = len(prompt_token_ids)
 
-        sort_beams_key = create_sort_beams_key_function(
-            tokenizer.eos_token_id, length_penalty)
+        sort_beams_key = create_sort_beams_key_function(tokenizer.eos_token_id,
+                                                        length_penalty)
 
         beam_search_params = SamplingParams(
             logprobs=2 * beam_width,
@@ -144,11 +144,9 @@ class EngineClient(ABC):
                             not ignore_eos:
                             completed.append(
                                 BeamSearchSequence(
-                                    tokens=current_beam.tokens +
-                                    [token_id] if include_stop_str_in_output
-                                    else current_beam.tokens,
-                                    logprobs=current_beam.logprobs +
-                                    [logprobs],
+                                    tokens=current_beam.tokens + [token_id] if
+                                    include_stop_str_in_output else current_beam.tokens,
+                                    logprobs=current_beam.logprobs + [logprobs],
                                     cum_logprob=current_beam.cum_logprob +
                                     logprob_obj.logprob,
                                     finish_reason="stop",
@@ -157,14 +155,12 @@ class EngineClient(ABC):
                             new_beams.append(
                                 BeamSearchSequence(
                                     tokens=current_beam.tokens + [token_id],
-                                    logprobs=current_beam.logprobs +
-                                    [logprobs],
+                                    logprobs=current_beam.logprobs + [logprobs],
                                     cum_logprob=current_beam.cum_logprob +
                                     logprob_obj.logprob,
-                                    multi_modal_data=current_beam.
-                                    multi_modal_data,
-                                    mm_processor_kwargs=current_beam.
-                                    mm_processor_kwargs))
+                                    multi_modal_data=current_beam.multi_modal_data,
+                                    mm_processor_kwargs=current_beam.mm_processor_kwargs
+                                ))
 
             sorted_beams = sorted(new_beams, key=sort_beams_key, reverse=True)
             all_beams = sorted_beams[:beam_width]
@@ -190,8 +186,8 @@ class EngineClient(ABC):
                                  token_ids=beam.tokens[tokenized_length:],
                                  index=i,
                                  logprobs=beam.logprobs,
-                                 finish_reason=beam.finish_reason if
-                                 beam.finish_reason is not None else "length",
+                                 finish_reason=beam.finish_reason
+                                 if beam.finish_reason is not None else "length",
                                  stop_reason=beam.stop_reason)
                 for (i, beam) in enumerate(best_beams)
             ],
@@ -279,8 +275,7 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def reset_prefix_cache(self,
-                                 device: Optional[Device] = None) -> None:
+    async def reset_prefix_cache(self, device: Optional[Device] = None) -> None:
         """Reset the prefix cache"""
         ...
 

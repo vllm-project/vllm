@@ -17,9 +17,7 @@ from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
 
 __all__ = ["CompressedTensorsW8A16Fp8"]
 
-SUPPORTED_STRATEGIES = [
-    QuantizationStrategy.CHANNEL, QuantizationStrategy.TENSOR
-]
+SUPPORTED_STRATEGIES = [QuantizationStrategy.CHANNEL, QuantizationStrategy.TENSOR]
 
 
 class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
@@ -40,16 +38,14 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
         if self.strategy == QuantizationStrategy.TENSOR:
             ws_channelwise = convert_to_channelwise(layer.weight_scale,
                                                     layer.logical_widths)
-            layer.weight_scale = torch.nn.Parameter(ws_channelwise,
-                                                    requires_grad=False)
+            layer.weight_scale = torch.nn.Parameter(ws_channelwise, requires_grad=False)
         else:
             # required by torch.compile to be torch.nn.Parameter
             layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data,
                                                     requires_grad=False)
 
         # Weights must be transposed for marlin
-        layer.weight = torch.nn.Parameter(layer.weight.t(),
-                                          requires_grad=False)
+        layer.weight = torch.nn.Parameter(layer.weight.t(), requires_grad=False)
 
         if self.is_static_input_scheme:
             # required by torch.compile to be torch.nn.Parameter
@@ -58,10 +54,8 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
         prepare_fp8_layer_for_marlin(layer, strategy="channel")
 
     def create_weights(self, layer: torch.nn.Module, input_size: int,
-                       output_partition_sizes: List[int],
-                       input_size_per_partition: int,
-                       params_dtype: torch.dtype, weight_loader: Callable,
-                       **kwargs):
+                       output_partition_sizes: List[int], input_size_per_partition: int,
+                       params_dtype: torch.dtype, weight_loader: Callable, **kwargs):
 
         output_size_per_partition = sum(output_partition_sizes)
         layer.logical_widths = output_partition_sizes
@@ -70,10 +64,9 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
         layer.orig_dtype = params_dtype
 
         # WEIGHT
-        weight = ModelWeightParameter(data=torch.empty(
-            output_size_per_partition,
-            input_size_per_partition,
-            dtype=torch.float8_e4m3fn),
+        weight = ModelWeightParameter(data=torch.empty(output_size_per_partition,
+                                                       input_size_per_partition,
+                                                       dtype=torch.float8_e4m3fn),
                                       input_dim=1,
                                       output_dim=0,
                                       weight_loader=weight_loader)
@@ -81,19 +74,17 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
 
         # WEIGHT SCALE
         if self.strategy == QuantizationStrategy.CHANNEL:
-            weight_scale = ChannelQuantScaleParameter(
-                data=torch.empty((sum(output_partition_sizes), 1),
-                                 dtype=torch.float32),
-                output_dim=0,
-                weight_loader=weight_loader)
+            weight_scale = ChannelQuantScaleParameter(data=torch.empty(
+                (sum(output_partition_sizes), 1), dtype=torch.float32),
+                                                      output_dim=0,
+                                                      weight_loader=weight_loader)
         elif self.strategy == QuantizationStrategy.TENSOR:
             weight_scale = PerTensorScaleParameter(data=torch.empty(
                 len(output_partition_sizes), dtype=torch.float32),
                                                    weight_loader=weight_loader)
         else:
-            raise ValueError(
-                f"Unsupported weight strategy={self.strategy}, "
-                f"supported strategies are {SUPPORTED_STRATEGIES}")
+            raise ValueError(f"Unsupported weight strategy={self.strategy}, "
+                             f"supported strategies are {SUPPORTED_STRATEGIES}")
 
         weight_scale[:] = torch.finfo(torch.float32).min
         layer.register_parameter("weight_scale", weight_scale)

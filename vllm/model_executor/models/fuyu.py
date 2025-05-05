@@ -172,8 +172,7 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
 
             # Original output: (1, num_images, Pn, Px * Py * C)
             # New output: (num_images, Pn, Px * Py * C)
-            assert (isinstance(image_patches, list)
-                    and len(image_patches) == 1)
+            assert (isinstance(image_patches, list) and len(image_patches) == 1)
             assert (isinstance(image_patches[0], torch.Tensor)
                     and len(image_patches[0]) == len(images))
 
@@ -222,8 +221,7 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
                 image_width=image_size.width,
                 image_height=image_size.height,
             )
-            image_tokens = ([_IMAGE_TOKEN_ID] * ncols +
-                            [_NEWLINE_TOKEN_ID]) * nrows
+            image_tokens = ([_IMAGE_TOKEN_ID] * ncols + [_NEWLINE_TOKEN_ID]) * nrows
 
             return PromptUpdateDetails.select_token_id(
                 image_tokens + [bos_token_id],
@@ -309,22 +307,21 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         return None
 
-    def _process_image_input(
-            self, image_input: FuyuImagePatchInputs) -> MultiModalEmbeddings:
+    def _process_image_input(self,
+                             image_input: FuyuImagePatchInputs) -> MultiModalEmbeddings:
         image_patches_flat = image_input["flat_data"]
         patches_per_image = image_input["patches_per_image"]
 
         assert self.vision_embed_tokens is not None
-        vision_embeddings_flat, _ = self.vision_embed_tokens(
-            image_patches_flat)
+        vision_embeddings_flat, _ = self.vision_embed_tokens(image_patches_flat)
 
         return vision_embeddings_flat.split(patches_per_image, dim=0)
 
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
@@ -361,8 +358,7 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         # condition is for v0 compatibility.
         elif inputs_embeds is None:
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
+            inputs_embeds = self.get_input_embeddings(input_ids, vision_embeddings)
             input_ids = None
 
         hidden_states = self.language_model(
@@ -378,11 +374,10 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.language_model.logits_processor(
-            self.language_model.lm_head, hidden_states, sampling_metadata)
+        logits = self.language_model.logits_processor(self.language_model.lm_head,
+                                                      hidden_states, sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

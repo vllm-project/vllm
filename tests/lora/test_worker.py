@@ -65,8 +65,7 @@ def test_worker_apply_lora(sql_lora_files):
                                  gpu_memory_utilization=1.,
                                  swap_space=0,
                                  cache_dtype="auto"),
-        lora_config=LoRAConfig(max_lora_rank=8, max_cpu_loras=32,
-                               max_loras=32),
+        lora_config=LoRAConfig(max_lora_rank=8, max_cpu_loras=32, max_loras=32),
     )
     worker = worker_cls(
         vllm_config=vllm_config,
@@ -94,8 +93,7 @@ def test_worker_apply_lora(sql_lora_files):
 
     for i in range(32):
         random.seed(i)
-        iter_lora_requests = random.choices(lora_requests,
-                                            k=random.randint(1, n_loras))
+        iter_lora_requests = random.choices(lora_requests, k=random.randint(1, n_loras))
         random.shuffle(iter_lora_requests)
         iter_lora_requests = iter_lora_requests[:-random.randint(0, n_loras)]
         set_active_loras(worker, lora_requests)

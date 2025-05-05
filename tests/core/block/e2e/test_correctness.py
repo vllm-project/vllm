@@ -31,8 +31,8 @@ from .conftest import get_token_ids_from_llm_generator
 }])
 @pytest.mark.parametrize("batch_size", [10])
 @pytest.mark.parametrize("seed", [1])
-def test_block_manager_with_preemption(baseline_llm_generator,
-                                       test_llm_generator, batch_size):
+def test_block_manager_with_preemption(baseline_llm_generator, test_llm_generator,
+                                       batch_size):
     """Verify block manager produces same outputs even when there is preemption.
 
     This constructs two LLM, each with limited number of GPU blocks. The limit
@@ -72,14 +72,13 @@ def test_block_manager_with_preemption(baseline_llm_generator,
         temperature=temperature,
     )
 
-    baseline_token_ids = get_token_ids_from_llm_generator(
-        baseline_llm_generator, prompts, sampling_params)
+    baseline_token_ids = get_token_ids_from_llm_generator(baseline_llm_generator,
+                                                          prompts, sampling_params)
 
-    test_token_ids = get_token_ids_from_llm_generator(test_llm_generator,
-                                                      prompts, sampling_params)
+    test_token_ids = get_token_ids_from_llm_generator(test_llm_generator, prompts,
+                                                      sampling_params)
 
-    for expected_token_ids, actual_token_ids in zip(baseline_token_ids,
-                                                    test_token_ids):
+    for expected_token_ids, actual_token_ids in zip(baseline_token_ids, test_token_ids):
         assert expected_token_ids == actual_token_ids
 
     assert baseline_token_ids == test_token_ids
@@ -136,8 +135,7 @@ def test_block_manager_with_preemption(baseline_llm_generator,
 @pytest.mark.parametrize("batch_size", [4])
 @pytest.mark.parametrize("seed", [1])
 def test_lookahead_greedy_equality_with_preemption(baseline_llm_generator,
-                                                   test_llm_generator,
-                                                   batch_size):
+                                                   test_llm_generator, batch_size):
     """Verify vLLM produces the same output with greedy sampling, when lookahead
     scheduling is used vs. not.
 
@@ -167,15 +165,14 @@ def test_lookahead_greedy_equality_with_preemption(baseline_llm_generator,
     )
 
     print('Getting token ids without lookahead scheduling')
-    baseline_token_ids = get_token_ids_from_llm_generator(
-        baseline_llm_generator, prompts, sampling_params)
+    baseline_token_ids = get_token_ids_from_llm_generator(baseline_llm_generator,
+                                                          prompts, sampling_params)
 
     print('Getting token ids with lookahead scheduling')
-    test_token_ids = get_token_ids_from_llm_generator(test_llm_generator,
-                                                      prompts, sampling_params)
+    test_token_ids = get_token_ids_from_llm_generator(test_llm_generator, prompts,
+                                                      sampling_params)
 
-    for expected_token_ids, actual_token_ids in zip(baseline_token_ids,
-                                                    test_token_ids):
+    for expected_token_ids, actual_token_ids in zip(baseline_token_ids, test_token_ids):
         assert expected_token_ids == actual_token_ids
 
     assert baseline_token_ids == test_token_ids
@@ -193,20 +190,19 @@ def test_lookahead_greedy_equality_with_preemption(baseline_llm_generator,
             "enable_chunked_prefill": True,
         },
     ])
-@pytest.mark.parametrize("per_test_common_llm_kwargs",
-                         [{
-                             "block_size": 16,
-                             "max_num_batched_tokens": 2,
-                             "max_num_seqs": 2,
-                         }, {
-                             "block_size": 16,
-                             "max_num_batched_tokens": 3,
-                             "max_num_seqs": 2,
-                         }, {
-                             "block_size": 16,
-                             "max_num_batched_tokens": 256,
-                             "max_num_seqs": 10,
-                         }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [{
+    "block_size": 16,
+    "max_num_batched_tokens": 2,
+    "max_num_seqs": 2,
+}, {
+    "block_size": 16,
+    "max_num_batched_tokens": 3,
+    "max_num_seqs": 2,
+}, {
+    "block_size": 16,
+    "max_num_batched_tokens": 256,
+    "max_num_seqs": 10,
+}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [
     {},
 ])
@@ -220,8 +216,8 @@ def test_lookahead_greedy_equality_with_preemption(baseline_llm_generator,
 ])
 @pytest.mark.parametrize("batch_size", [4])
 @pytest.mark.parametrize("seed", [1])
-def test_chunked_prefill_block_manager(baseline_llm_generator,
-                                       test_llm_generator, batch_size):
+def test_chunked_prefill_block_manager(baseline_llm_generator, test_llm_generator,
+                                       batch_size):
     """Verify that chunked prefill works with SelfAttnBlockSpaceManager, 
     with and without lookahead scheduling.
     """
@@ -245,15 +241,14 @@ def test_chunked_prefill_block_manager(baseline_llm_generator,
     )
 
     print('Getting token ids with BlockManager')
-    baseline_token_ids = get_token_ids_from_llm_generator(
-        baseline_llm_generator, prompts, sampling_params)
+    baseline_token_ids = get_token_ids_from_llm_generator(baseline_llm_generator,
+                                                          prompts, sampling_params)
 
     print('Getting token ids with BlockManager, with lookahead slots.')
-    test_token_ids = get_token_ids_from_llm_generator(test_llm_generator,
-                                                      prompts, sampling_params)
+    test_token_ids = get_token_ids_from_llm_generator(test_llm_generator, prompts,
+                                                      sampling_params)
 
-    for expected_token_ids, actual_token_ids in zip(baseline_token_ids,
-                                                    test_token_ids):
+    for expected_token_ids, actual_token_ids in zip(baseline_token_ids, test_token_ids):
         assert expected_token_ids == actual_token_ids
 
     assert baseline_token_ids == test_token_ids
@@ -326,15 +321,14 @@ def test_block_manager_prefix_caching_enabled_with_preemption(
     )
 
     print('Getting token ids from block manager')
-    baseline_token_ids = get_token_ids_from_llm_generator(
-        baseline_llm_generator, prompts, sampling_params)
+    baseline_token_ids = get_token_ids_from_llm_generator(baseline_llm_generator,
+                                                          prompts, sampling_params)
 
     print('Getting token ids from block manager, with preemption')
-    test_token_ids = get_token_ids_from_llm_generator(test_llm_generator,
-                                                      prompts, sampling_params)
+    test_token_ids = get_token_ids_from_llm_generator(test_llm_generator, prompts,
+                                                      sampling_params)
 
-    for expected_token_ids, actual_token_ids in zip(baseline_token_ids,
-                                                    test_token_ids):
+    for expected_token_ids, actual_token_ids in zip(baseline_token_ids, test_token_ids):
         assert expected_token_ids == actual_token_ids
 
     assert baseline_token_ids == test_token_ids
@@ -354,9 +348,7 @@ def test_block_manager_prefix_caching_enabled_with_preemption(
         "num_gpu_blocks_override": 5 * (64 + 1),
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
-@pytest.mark.parametrize("baseline_llm_kwargs", [{
-    "enable_prefix_caching": False
-}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{"enable_prefix_caching": False}])
 @pytest.mark.parametrize("test_llm_kwargs", [{
     "enable_prefix_caching": True,
     "preemption_mode": "swap"
@@ -366,8 +358,8 @@ def test_block_manager_prefix_caching_enabled_with_preemption(
 }])
 @pytest.mark.parametrize("batch_size", [10])
 @pytest.mark.parametrize("seed", [1])
-def test_auto_prefix_caching_with_preemption(baseline_llm_generator,
-                                             test_llm_generator, batch_size):
+def test_auto_prefix_caching_with_preemption(baseline_llm_generator, test_llm_generator,
+                                             batch_size):
     """Verify block manager v2 with auto prefix caching enabled produces same
     outputs as auto prefix caching disabled, even when there is preemption.
 
@@ -400,15 +392,14 @@ def test_auto_prefix_caching_with_preemption(baseline_llm_generator,
     )
 
     print('Getting token ids with APC disabled')
-    baseline_token_ids = get_token_ids_from_llm_generator(
-        baseline_llm_generator, prompts, sampling_params)
+    baseline_token_ids = get_token_ids_from_llm_generator(baseline_llm_generator,
+                                                          prompts, sampling_params)
 
     print('Getting token ids with APC enabled')
-    test_token_ids = get_token_ids_from_llm_generator(test_llm_generator,
-                                                      prompts, sampling_params)
+    test_token_ids = get_token_ids_from_llm_generator(test_llm_generator, prompts,
+                                                      sampling_params)
 
-    for expected_token_ids, actual_token_ids in zip(baseline_token_ids,
-                                                    test_token_ids):
+    for expected_token_ids, actual_token_ids in zip(baseline_token_ids, test_token_ids):
         assert expected_token_ids == actual_token_ids
 
     assert baseline_token_ids == test_token_ids
@@ -429,9 +420,7 @@ def test_auto_prefix_caching_with_preemption(baseline_llm_generator,
         "num_gpu_blocks_override": 3,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
-@pytest.mark.parametrize("baseline_llm_kwargs", [{
-    "enable_prefix_caching": False
-}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{"enable_prefix_caching": False}])
 @pytest.mark.parametrize("test_llm_kwargs", [{
     "enable_prefix_caching": True,
 }])
@@ -464,15 +453,14 @@ def test_auto_prefix_caching_after_evition_start(baseline_llm_generator,
     )
 
     print('Getting token ids with APC disabled')
-    baseline_token_ids = get_token_ids_from_llm_generator(
-        baseline_llm_generator, prompts, sampling_params)
+    baseline_token_ids = get_token_ids_from_llm_generator(baseline_llm_generator,
+                                                          prompts, sampling_params)
 
     print('Getting token ids with APC enabled')
-    test_token_ids = get_token_ids_from_llm_generator(test_llm_generator,
-                                                      prompts, sampling_params)
+    test_token_ids = get_token_ids_from_llm_generator(test_llm_generator, prompts,
+                                                      sampling_params)
 
-    for expected_token_ids, actual_token_ids in zip(baseline_token_ids,
-                                                    test_token_ids):
+    for expected_token_ids, actual_token_ids in zip(baseline_token_ids, test_token_ids):
         assert expected_token_ids == actual_token_ids
 
     assert baseline_token_ids == test_token_ids

@@ -41,8 +41,7 @@ class _PagedAttention:
         num_blocks = kv_cache.shape[1]
 
         key_cache = kv_cache[0]
-        key_cache = key_cache.view(num_blocks, num_kv_heads, head_size // x,
-                                   -1, x)
+        key_cache = key_cache.view(num_blocks, num_kv_heads, head_size // x, -1, x)
         value_cache = kv_cache[1]
         value_cache = value_cache.view(num_blocks, num_kv_heads, head_size, -1)
         return key_cache, value_cache
@@ -156,9 +155,9 @@ class _IPEXPagedAttention(_PagedAttention):
         v_scale: torch.Tensor,
         *args,
     ) -> None:
-        ipex_modules.PagedAttention.reshape_and_cache(
-            key, value, key_cache, value_cache,
-            slot_mapping.flatten().int())
+        ipex_modules.PagedAttention.reshape_and_cache(key, value, key_cache,
+                                                      value_cache,
+                                                      slot_mapping.flatten().int())
 
     @staticmethod
     def forward_decode(
@@ -186,9 +185,8 @@ class _IPEXPagedAttention(_PagedAttention):
         ).view(num_kv_heads,
                1).repeat_interleave(query.size(1) // num_kv_heads).flatten()
         ipex_modules.PagedAttention.single_query_cached_kv_attention(
-            output, query.contiguous(), key_cache, value_cache, head_mapping,
-            scale, block_tables, context_lens, block_size, max_context_len,
-            alibi_slopes)
+            output, query.contiguous(), key_cache, value_cache, head_mapping, scale,
+            block_tables, context_lens, block_size, max_context_len, alibi_slopes)
 
 
 PagedAttention = _IPEXPagedAttention if _use_ipex else _PagedAttention

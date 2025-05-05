@@ -69,8 +69,7 @@ class InternVLImageEmbeddingInputs(TypedDict):
     """
 
 
-InternVLImageInputs = Union[InternVLImagePixelInputs,
-                            InternVLImageEmbeddingInputs]
+InternVLImageInputs = Union[InternVLImagePixelInputs, InternVLImageEmbeddingInputs]
 
 
 # adapted from https://huggingface.co/OpenGVLab/InternVL2-1B
@@ -78,8 +77,7 @@ def build_transform(input_size: int):
     MEAN, STD = IMAGENET_MEAN, IMAGENET_STD
     return T.Compose([
         T.Lambda(lambda img: img.convert('RGB') if img.mode != 'RGB' else img),
-        T.Resize((input_size, input_size),
-                 interpolation=T.InterpolationMode.BICUBIC),
+        T.Resize((input_size, input_size), interpolation=T.InterpolationMode.BICUBIC),
         T.ToTensor(),
         T.Normalize(mean=MEAN, std=STD)
     ])
@@ -297,14 +295,13 @@ class BaseInternVLProcessor(ABC):
         dynamic_image_size: Optional[bool] = None,
         use_thumbnail: Optional[bool] = None,
     ) -> tuple[int, int]:
-        min_dynamic_patch = (self.min_dynamic_patch if min_dynamic_patch
-                             is None else min_dynamic_patch)
-        max_dynamic_patch = (self.max_dynamic_patch if max_dynamic_patch
-                             is None else max_dynamic_patch)
-        dynamic_image_size = (self.dynamic_image_size if dynamic_image_size
-                              is None else dynamic_image_size)
-        use_thumbnail = (self.use_thumbnail
-                         if use_thumbnail is None else use_thumbnail)
+        min_dynamic_patch = (self.min_dynamic_patch
+                             if min_dynamic_patch is None else min_dynamic_patch)
+        max_dynamic_patch = (self.max_dynamic_patch
+                             if max_dynamic_patch is None else max_dynamic_patch)
+        dynamic_image_size = (self.dynamic_image_size
+                              if dynamic_image_size is None else dynamic_image_size)
+        use_thumbnail = (self.use_thumbnail if use_thumbnail is None else use_thumbnail)
 
         return resolve_internvl_min_max_num(
             min_dynamic_patch=min_dynamic_patch,
@@ -402,8 +399,7 @@ class BaseInternVLProcessor(ABC):
                 dynamic_image_size=dynamic_image_size,
             )
             image_inputs: dict[str, NestedTensors] = {
-                "pixel_values_flat":
-                torch.cat(pixel_values_lst),
+                "pixel_values_flat": torch.cat(pixel_values_lst),
                 "image_num_patches":
                 torch.tensor([len(item) for item in pixel_values_lst]),
             }
@@ -488,8 +484,7 @@ class BaseInternVLProcessingInfo(BaseProcessingInfo):
             )
             if feat_size > largest_feature_size:
                 largest_feature_size = feat_size
-                largest_feature_pinpoint = ImageSize(width=width,
-                                                     height=height)
+                largest_feature_pinpoint = ImageSize(width=width, height=height)
 
         if largest_feature_size == 0 or largest_feature_pinpoint is None:
             raise ValueError("Cannot have a largest feature size of 0!")
@@ -584,8 +579,8 @@ class InternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
             image_num_patches = []
 
         def get_replacement_internvl(item_idx: int):
-            images = mm_items.get_items(
-                "image", (ImageEmbeddingItems, ImageProcessorItems))
+            images = mm_items.get_items("image",
+                                        (ImageEmbeddingItems, ImageProcessorItems))
 
             if isinstance(images, ImageEmbeddingItems):
                 feature_size = images.get_feature_size(item_idx)
@@ -637,10 +632,9 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
         )
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    InternVLMultiModalProcessor,
-    info=InternVLProcessingInfo,
-    dummy_inputs=InternVLDummyInputsBuilder)
+@MULTIMODAL_REGISTRY.register_processor(InternVLMultiModalProcessor,
+                                        info=InternVLProcessingInfo,
+                                        dummy_inputs=InternVLDummyInputsBuilder)
 class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
@@ -690,8 +684,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         # patch the quant_config to add `modules_to_not_convert` back
         if isinstance(quant_config, AWQConfig):
             text_config = config.text_config
-            llm_quant_config = getattr(text_config, "quantization_config",
-                                       None)
+            llm_quant_config = getattr(text_config, "quantization_config", None)
             if (not quant_config.modules_to_not_convert) and \
                 (llm_quant_config is not None):
                 quant_config.modules_to_not_convert.append("vision_model")
@@ -753,10 +746,8 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
         h = w = int(vit_embeds.shape[1]**0.5)
         vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)
-        vit_embeds = self.pixel_shuffle(vit_embeds,
-                                        scale_factor=self.downsample_ratio)
-        vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], -1,
-                                        vit_embeds.shape[-1])
+        vit_embeds = self.pixel_shuffle(vit_embeds, scale_factor=self.downsample_ratio)
+        vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], -1, vit_embeds.shape[-1])
         vit_embeds = self.mlp1(vit_embeds)
         return vit_embeds
 
@@ -817,8 +808,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
             return InternVLImagePixelInputs(
                 type="pixel_values",
-                pixel_values_flat=self._validate_pixel_values(
-                    pixel_values_flat),
+                pixel_values_flat=self._validate_pixel_values(pixel_values_flat),
                 num_patches=image_num_patches,
             )
 
@@ -839,14 +829,13 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
         # Only one image in the current batch
         if len(num_patches) == 1:
-            return image_embeds.view(
-                -1, self.config.text_config.hidden_size).unsqueeze(0)
+            return image_embeds.view(-1,
+                                     self.config.text_config.hidden_size).unsqueeze(0)
 
         # NOTE: Image embeddings are split into separate tensors for each image
         # by the size of each embedding.
         feature_size = image_embeds.shape[1]
-        image_embeds = image_embeds.view(-1,
-                                         self.config.text_config.hidden_size)
+        image_embeds = image_embeds.view(-1, self.config.text_config.hidden_size)
         image_feature_sizes = [
             num_patches * feature_size for num_patches in num_patches
         ]
@@ -854,16 +843,16 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def _set_visual_token_mask(self, input_ids: torch.Tensor) -> None:
         if self.is_mono:
-            self.visual_token_mask = (
-                input_ids == self.img_context_token_id).reshape(-1, 1)
+            self.visual_token_mask = (input_ids == self.img_context_token_id).reshape(
+                -1, 1)
         else:
             self.visual_token_mask = None
 
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
@@ -904,8 +893,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         # condition is for v0 compatibility.
         elif inputs_embeds is None:
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
+            inputs_embeds = self.get_input_embeddings(input_ids, vision_embeddings)
             input_ids = None
 
         forward_kwargs = {
@@ -917,8 +905,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
         # Only required if the model is mono-architecture
         if self.visual_token_mask is not None:
-            forward_kwargs.update(
-                {"visual_token_mask": self.visual_token_mask})
+            forward_kwargs.update({"visual_token_mask": self.visual_token_mask})
             self.visual_token_mask = None
 
         hidden_states = self.language_model.model(**forward_kwargs)
@@ -929,17 +916,14 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states, sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         # unused modules appear in OpenGVLab/InternVideo2_5_Chat_8B
         skip_prefixes = [
-            "action_embed", "temporal_embed", "track_embed",
-            "track_embed_decoder", "box_token", "cg_criterion", "cg_model",
-            "loc_encoder", "loc_decoder", "sam", "temporal_token",
-            "track_token"
+            "action_embed", "temporal_embed", "track_embed", "track_embed_decoder",
+            "box_token", "cg_criterion", "cg_model", "loc_encoder", "loc_decoder",
+            "sam", "temporal_token", "track_token"
         ]
         loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
         return loader.load_weights(weights)

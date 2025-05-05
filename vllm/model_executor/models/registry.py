@@ -240,9 +240,7 @@ _VLLM_MODELS = {
 # can modify  this variable to alter the args if needed. e.g.
 # when we use par format to pack things together, sys.executable
 # might not be the target we want to run.
-_SUBPROCESS_COMMAND = [
-    sys.executable, "-m", "vllm.model_executor.models.registry"
-]
+_SUBPROCESS_COMMAND = [sys.executable, "-m", "vllm.model_executor.models.registry"]
 
 
 @dataclass(frozen=True)
@@ -340,8 +338,7 @@ def _try_load_model_cls(
     try:
         return model.load_model_cls()
     except Exception:
-        logger.exception("Error in loading model architecture '%s'",
-                         model_arch)
+        logger.exception("Error in loading model architecture '%s'", model_arch)
         return None
 
 
@@ -353,8 +350,7 @@ def _try_inspect_model_cls(
     try:
         return model.inspect_model_cls()
     except Exception:
-        logger.exception("Error in inspecting model architecture '%s'",
-                         model_arch)
+        logger.exception("Error in inspecting model architecture '%s'", model_arch)
         return None
 
 
@@ -389,8 +385,7 @@ class _ModelRegistry:
         if model_arch in self.models:
             logger.warning(
                 "Model architecture %s is already registered, and will be "
-                "overwritten by the new model class %s.", model_arch,
-                model_cls)
+                "overwritten by the new model class %s.", model_arch, model_cls)
 
         if isinstance(model_cls, str):
             split_str = model_cls.split(":")
@@ -412,16 +407,14 @@ class _ModelRegistry:
         all_supported_archs = self.get_supported_archs()
 
         if any(arch in all_supported_archs for arch in architectures):
-            raise ValueError(
-                f"Model architectures {architectures} failed "
-                "to be inspected. Please check the logs for more details.")
+            raise ValueError(f"Model architectures {architectures} failed "
+                             "to be inspected. Please check the logs for more details.")
 
         raise ValueError(
             f"Model architectures {architectures} are not supported for now. "
             f"Supported architectures: {all_supported_archs}")
 
-    def _try_load_model_cls(self,
-                            model_arch: str) -> Optional[Type[nn.Module]]:
+    def _try_load_model_cls(self, model_arch: str) -> Optional[Type[nn.Module]]:
         if model_arch not in self.models:
             return None
 
@@ -443,8 +436,8 @@ class _ModelRegistry:
             logger.warning("No model architectures are specified")
 
         # filter out support architectures
-        normalized_arch = list(
-            filter(lambda model: model in self.models, architectures))
+        normalized_arch = list(filter(lambda model: model in self.models,
+                                      architectures))
 
         # make sure Transformers backend is put at the last as a fallback
         if len(normalized_arch) != len(architectures):

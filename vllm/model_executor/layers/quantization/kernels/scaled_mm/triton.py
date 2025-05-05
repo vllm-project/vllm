@@ -17,16 +17,12 @@ class TritonScaledMMLinearKernel(CutlassScaledMMLinearKernel):
         return 75
 
     @classmethod
-    def can_implement(
-            cls, c: ScaledMMLinearLayerConfig) -> Tuple[bool, Optional[str]]:
+    def can_implement(cls, c: ScaledMMLinearLayerConfig) -> Tuple[bool, Optional[str]]:
         if current_platform.is_cpu():
-            return (
-                False,
-                "TritonScaledMMLinearKernel requires Triton which is not " +
-                "currently supported on CPU.")
+            return (False, "TritonScaledMMLinearKernel requires Triton which is not " +
+                    "currently supported on CPU.")
         if not c.input_symmetric:
-            return (False,
-                    "TritonScaledMMLinearKernel only supports symmetric " +
+            return (False, "TritonScaledMMLinearKernel only supports symmetric " +
                     "quantization.")
         return True, None
 

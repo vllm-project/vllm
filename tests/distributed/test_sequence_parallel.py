@@ -51,10 +51,9 @@ class SPTestSettings:
 
     def __post_init__(self):
         if len(self.distributed_backends) != len(self.vllm_major_versions):
-            raise ValueError(
-                f"Length mismatch: distributed_backends "
-                f"({len(self.distributed_backends)}) != "
-                f"vllm_major_versions ({len(self.vllm_major_versions)})")
+            raise ValueError(f"Length mismatch: distributed_backends "
+                             f"({len(self.distributed_backends)}) != "
+                             f"vllm_major_versions ({len(self.vllm_major_versions)})")
 
     @staticmethod
     def detailed(
@@ -118,8 +117,8 @@ class SPTestSettings:
         for parallel_setup in self.parallel_setups:
             for backend, vllm_major_version in zip(self.distributed_backends,
                                                    self.vllm_major_versions):
-                yield (model_id, parallel_setup, backend, vllm_major_version,
-                       self.task, opts)
+                yield (model_id, parallel_setup, backend, vllm_major_version, self.task,
+                       opts)
 
 
 def _compare_sp(
@@ -267,12 +266,11 @@ SP_TEST_MODELS = [
 
 
 @pytest.mark.parametrize(
-    ("model_id", "parallel_setup", "distributed_backend", "vllm_major_version",
-     "task", "test_options"),
+    ("model_id", "parallel_setup", "distributed_backend", "vllm_major_version", "task",
+     "test_options"),
     [
         params for model_id, settings in SP_TEXT_GENERATION_MODELS.items()
-        for params in settings.iter_params(model_id)
-        if model_id in SP_TEST_MODELS
+        for params in settings.iter_params(model_id) if model_id in SP_TEST_MODELS
     ],
 )
 @create_new_process_for_each_test()

@@ -75,8 +75,7 @@ class MooncakeTransferEngine:
             logger.error(e)
             raise
         except Exception as exc:
-            logger.error(
-                "An error occurred while loading the configuration: %s", exc)
+            logger.error("An error occurred while loading the configuration: %s", exc)
             raise
         prefill_host, base_prefill_port = self.config.prefill_url.split(':')
         decode_host, base_decode_port = self.config.decode_url.split(':')
@@ -95,8 +94,7 @@ class MooncakeTransferEngine:
                         self.config.metadata_server, self.config.protocol,
                         self.config.device_name, self.config.metadata_backend)
 
-        self.remote_url = (self.decode_url
-                           if kv_rank == 0 else self.prefill_url)
+        self.remote_url = (self.decode_url if kv_rank == 0 else self.prefill_url)
 
         # Initialize ZeroMQ context and sockets
         self.context = zmq.Context()  # type: ignore[attr-defined]
@@ -126,9 +124,8 @@ class MooncakeTransferEngine:
             self.receiver_ack.bind(f"tcp://{d_host}:{d_rank_offset + 2}")
             self.sender_ack.connect(f"tcp://{p_host}:{p_rank_offset + 2}")
 
-    def initialize(self, local_hostname: str, metadata_server: str,
-                   protocol: str, device_name: str,
-                   metadata_backend: Union[str, None]) -> None:
+    def initialize(self, local_hostname: str, metadata_server: str, protocol: str,
+                   device_name: str, metadata_backend: Union[str, None]) -> None:
         """Initialize the mooncake instance."""
         if metadata_backend is None:
             self.engine.initialize(local_hostname, metadata_server, protocol,
@@ -137,12 +134,11 @@ class MooncakeTransferEngine:
             supported_backend = ["etcd", "redis"]
             metadata_backend = metadata_backend.lower()
             if metadata_backend not in supported_backend:
-                raise ValueError(
-                    "Mooncake Configuration error. `metadata_backend`"
-                    f" should be one of {supported_backend}.")
+                raise ValueError("Mooncake Configuration error. `metadata_backend`"
+                                 f" should be one of {supported_backend}.")
 
-            self.engine.initialize_ext(local_hostname, metadata_server,
-                                       protocol, device_name, metadata_backend)
+            self.engine.initialize_ext(local_hostname, metadata_server, protocol,
+                                       device_name, metadata_backend)
 
     def allocate_managed_buffer(self, length: int) -> int:
         """Allocate a managed buffer of the specified length."""
@@ -156,8 +152,7 @@ class MooncakeTransferEngine:
         """Free a previously allocated managed buffer."""
         return self.engine.free_managed_buffer(buffer, length)
 
-    def transfer_sync(self, buffer: int, peer_buffer_address: int,
-                      length: int) -> int:
+    def transfer_sync(self, buffer: int, peer_buffer_address: int, length: int) -> int:
         """Synchronously transfer data to the specified address."""
         ret = self.engine.transfer_sync_read(self.remote_url, buffer,
                                              peer_buffer_address, length)
@@ -166,8 +161,7 @@ class MooncakeTransferEngine:
             raise Exception("Transfer Return Error")
         return ret
 
-    def write_bytes_to_buffer(self, buffer: int, user_data: bytes,
-                              length: int) -> int:
+    def write_bytes_to_buffer(self, buffer: int, user_data: bytes, length: int) -> int:
         """Write bytes to the allocated buffer."""
         return self.engine.write_bytes_to_buffer(buffer, user_data, length)
 
@@ -225,8 +219,7 @@ class MooncakePipe(KVPipeBase):
         else:
             self.device = self._select_device(device)
 
-        self.transfer_engine = MooncakeTransferEngine(self.kv_rank,
-                                                      self.local_rank)
+        self.transfer_engine = MooncakeTransferEngine(self.kv_rank, self.local_rank)
         self.transport_thread: Optional[ThreadPoolExecutor] = None
         self.none_tensor = torch.tensor([NONE_INT], device=self.device)
 

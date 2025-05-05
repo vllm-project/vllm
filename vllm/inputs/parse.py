@@ -22,8 +22,7 @@ class ParsedTokens(TypedDict):
 
 
 @overload
-def parse_and_batch_prompt(
-        prompt: Union[str, list[str]]) -> Sequence[ParsedText]:
+def parse_and_batch_prompt(prompt: Union[str, list[str]]) -> Sequence[ParsedText]:
     ...
 
 
@@ -47,9 +46,7 @@ def parse_and_batch_prompt(
         if is_list_of(prompt, str):
             # case 2: array of strings
             prompt = cast(list[str], prompt)
-            return [
-                ParsedText(content=elem, is_tokens=False) for elem in prompt
-            ]
+            return [ParsedText(content=elem, is_tokens=False) for elem in prompt]
         if is_list_of(prompt, int):
             # case 3: array of tokens
             prompt = cast(list[int], prompt)
@@ -61,10 +58,7 @@ def parse_and_batch_prompt(
 
             if is_list_of(prompt[0], int):
                 # case 4: array of token arrays
-                return [
-                    ParsedTokens(content=elem, is_tokens=True)
-                    for elem in prompt
-                ]
+                return [ParsedTokens(content=elem, is_tokens=True) for elem in prompt]
 
     raise TypeError("prompt must be a string, array of strings, "
                     "array of tokens, or array of token arrays")
@@ -90,8 +84,8 @@ class ParsedEmbedsPrompt(TypedDict):
     content: EmbedsPrompt
 
 
-ParsedSingletonPrompt = Union[ParsedStrPrompt, ParsedTextPrompt,
-                              ParsedTokensPrompt, ParsedEmbedsPrompt]
+ParsedSingletonPrompt = Union[ParsedStrPrompt, ParsedTextPrompt, ParsedTokensPrompt,
+                              ParsedEmbedsPrompt]
 
 
 @overload
@@ -121,11 +115,11 @@ def parse_singleton_prompt(prompt: SingletonPrompt) -> ParsedSingletonPrompt:
         # Type ignores are because mypy does not correctly infer the TypedDicts
         # Pyright does succeed.
         if "prompt_embeds" in prompt:
-            return ParsedEmbedsPrompt(
-                type="embeds", content=prompt)  # type: ignore[typeddict-item]
+            return ParsedEmbedsPrompt(type="embeds",
+                                      content=prompt)  # type: ignore[typeddict-item]
         elif "prompt_token_ids" in prompt:
-            return ParsedTokensPrompt(
-                type="tokens", content=prompt)  # type: ignore[typeddict-item]
+            return ParsedTokensPrompt(type="tokens",
+                                      content=prompt)  # type: ignore[typeddict-item]
         elif "prompt" in prompt:
             return ParsedTextPrompt(type="text", content=prompt)
     raise TypeError(
@@ -138,8 +132,7 @@ def is_explicit_encoder_decoder_prompt(
 
 
 def split_enc_dec_inputs(
-    inputs: ProcessorInputs,
-) -> tuple[Optional[SingletonInputs], SingletonInputs]:
+    inputs: ProcessorInputs, ) -> tuple[Optional[SingletonInputs], SingletonInputs]:
     if "encoder" in inputs and "decoder" in inputs:
         # NOTE: This passes pyright but not mypy
         return (

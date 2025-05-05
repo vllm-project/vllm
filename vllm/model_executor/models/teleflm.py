@@ -40,9 +40,7 @@ class TeleFLMModel(LlamaModel):
         prefix: str = "",
         layer_type: type[nn.Module] = LlamaDecoderLayer,
     ):
-        super().__init__(vllm_config=vllm_config,
-                         prefix=prefix,
-                         layer_type=layer_type)
+        super().__init__(vllm_config=vllm_config, prefix=prefix, layer_type=layer_type)
         """
         This implementation is based on the µScaling paper presented at  
         the ICLR 2025 Workshop:  
@@ -74,5 +72,4 @@ class TeleFLMForCausalLM(LlamaForCausalLM):
             self.output_mult = self.config.output_mult / self.mup_scale_factor
             logit_scale = self.output_mult
             self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                    self.config.vocab_size,
-                                                    logit_scale)
+                                                    self.config.vocab_size, logit_scale)

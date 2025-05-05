@@ -68,16 +68,14 @@ class XPUWorker(LoRANotSupportedWorkerBase, Worker):
         self.gpu_cache: Optional[List[List[torch.Tensor]]]
 
     def init_device(self) -> None:
-        if self.device_config.device.type == "xpu" and current_platform.is_xpu(
-        ):
+        if self.device_config.device.type == "xpu" and current_platform.is_xpu():
             self.device = torch.device(f"xpu:{self.local_rank}")
             torch.xpu.set_device(self.device)
             torch.xpu.empty_cache()
             self.init_gpu_memory = torch.xpu.get_device_properties(
                 self.local_rank).total_memory
         else:
-            raise RuntimeError(
-                f"Not support device type: {self.device_config.device}")
+            raise RuntimeError(f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
         self.init_worker_distributed_environment()
         # Initialize the model.
@@ -110,8 +108,7 @@ class XPUWorker(LoRANotSupportedWorkerBase, Worker):
         # profiled peak memory.
         torch.xpu.synchronize()
         used_memory = torch.xpu.memory_allocated()
-        total_gpu_memory = torch.xpu.get_device_properties(
-            self.local_rank).total_memory
+        total_gpu_memory = torch.xpu.get_device_properties(self.local_rank).total_memory
         free_gpu_memory = total_gpu_memory - used_memory
 
         # NOTE(woosuk): Here we assume that the other processes using the same
@@ -125,10 +122,9 @@ class XPUWorker(LoRANotSupportedWorkerBase, Worker):
 
         cache_block_size = self.get_cache_block_size_bytes()
         num_gpu_blocks = int(
-            (total_gpu_memory * self.cache_config.gpu_memory_utilization -
-             peak_memory) // cache_block_size)
-        num_cpu_blocks = int(self.cache_config.swap_space_bytes //
-                             cache_block_size)
+            (total_gpu_memory * self.cache_config.gpu_memory_utilization - peak_memory)
+            // cache_block_size)
+        num_cpu_blocks = int(self.cache_config.swap_space_bytes // cache_block_size)
         num_gpu_blocks = max(num_gpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
         gc.collect()
@@ -154,9 +150,8 @@ class XPUWorker(LoRANotSupportedWorkerBase, Worker):
                     "world size does not match parallel_config.world_size "
                     f"({torch_world_size} vs. {parallel_config.world_size}).")
         elif not distributed_init_method:
-            raise ValueError(
-                "distributed_init_method must be set if torch.distributed "
-                "is not already initialized")
+            raise ValueError("distributed_init_method must be set if torch.distributed "
+                             "is not already initialized")
         else:
             # use sockets as default Level zero IPC exchange backend. By
             # default oneccl will use `drmfd` as mechanism which need extra
@@ -174,9 +169,8 @@ class XPUWorker(LoRANotSupportedWorkerBase, Worker):
                 local_rank=self.local_rank,
                 backend="ccl")
 
-        ensure_model_parallel_initialized(
-            parallel_config.tensor_parallel_size,
-            parallel_config.pipeline_parallel_size)
+        ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
+                                          parallel_config.pipeline_parallel_size)
         # global all_reduce needed for overall oneccl warm up
         torch.distributed.all_reduce(torch.zeros(1).xpu())
 

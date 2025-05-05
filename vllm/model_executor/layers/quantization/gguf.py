@@ -101,10 +101,7 @@ def _fuse_mul_mat(x: torch.Tensor, qweight: torch.Tensor,
     # HACK: when doing chunked prefill we don't generate output tokens
     # so input to logits generator is empty which causes invalid parameter
     if x.shape[0] == 0:
-        return torch.empty(x.shape[0],
-                           qweight.shape[0],
-                           dtype=x.dtype,
-                           device=x.device)
+        return torch.empty(x.shape[0], qweight.shape[0], dtype=x.dtype, device=x.device)
     # there is no need to call any kernel for fp16/bf16
     if qweight_type in UNQUANTIZED_TYPES:
         return x @ qweight.T
@@ -125,8 +122,7 @@ def _fuse_mul_mat(x: torch.Tensor, qweight: torch.Tensor,
         # Might be useful if llama.cpp adds a new quantization type.
         # Wrap to GGMLQuantizationType IntEnum to make sure it's a valid type.
         qweight_type = WeightType(qweight_type)
-        raise NotImplementedError(
-            f"Unsupported GGUF quantization type: {qweight_type}")
+        raise NotImplementedError(f"Unsupported GGUF quantization type: {qweight_type}")
     return y
 
 
@@ -158,10 +154,10 @@ def _fused_moe_gguf(
                               num_tokens)
         out = act(out)
         out = ops.ggml_moe_a8(out, w2, sorted_token_ids, expert_ids,
-                              num_tokens_post_padded, qweight_type2,
-                              w2.shape[1], 1, num_tokens * top_k)
-        out = out.reshape(num_tokens, top_k, w2.shape[1]).mul_(
-            topk_weights.view(num_tokens, top_k, 1))
+                              num_tokens_post_padded, qweight_type2, w2.shape[1], 1,
+                              num_tokens * top_k)
+        out = out.reshape(num_tokens, top_k,
+                          w2.shape[1]).mul_(topk_weights.view(num_tokens, top_k, 1))
         ops.moe_sum(out, out_hidden_states)
     else:
         logger.warning_once("There is no support for fast MoE kernel "
@@ -177,8 +173,7 @@ def _fused_moe_gguf(
                 out = act(out)
 
                 expert_down = w2[ii]
-                current_state = _fuse_mul_mat(out, expert_down,
-                                              qweight_type2).mul_(ww)
+                current_state = _fuse_mul_mat(out, expert_down, qweight_type2).mul_(ww)
                 if current_hidden_state is None:
                     current_hidden_state = current_state
                 else:
@@ -197,8 +192,7 @@ class GGUFLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: GGUFConfig):
         self.quant_config = quant_config
 
-    def create_weights(self, layer: torch.nn.Module,
-                       input_size_per_partition: int,
+    def create_weights(self, layer: torch.nn.Module, input_size_per_partition: int,
                        output_partition_sizes: List[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
@@ -268,12 +262,11 @@ class GGUFMoEMethod(FusedMoEMethodBase):
     def __init__(self, quant_config: GGUFConfig):
         self.quant_config = quant_config
 
-    def create_weights(self, layer: torch.nn.Module, num_experts: int,
-                       hidden_size: int, intermediate_size_per_partition: int,
-                       params_dtype: torch.dtype, **extra_weight_attrs):
+    def create_weights(self, layer: torch.nn.Module, num_experts: int, hidden_size: int,
+                       intermediate_size_per_partition: int, params_dtype: torch.dtype,
+                       **extra_weight_attrs):
 
-        tensor_shape = (num_experts, 2 * intermediate_size_per_partition,
-                        hidden_size)
+        tensor_shape = (num_experts, 2 * intermediate_size_per_partition, hidden_size)
         #gate up proj
         w13_qweight = GGUFUninitializedParameter(requires_grad=False)
         set_weight_attrs(
@@ -297,8 +290,7 @@ class GGUFMoEMethod(FusedMoEMethodBase):
         set_weight_attrs(w13_qweight_type, extra_weight_attrs)
         layer.register_parameter("w13_qweight_type", w13_qweight_type)
 
-        tensor_shape = (num_experts, intermediate_size_per_partition,
-                        hidden_size)
+        tensor_shape = (num_experts, intermediate_size_per_partition, hidden_size)
         #gate down proj
         w2_qweight = GGUFUninitializedParameter(requires_grad=False)
         set_weight_attrs(
@@ -359,9 +351,8 @@ class GGUFMoEMethod(FusedMoEMethodBase):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
-        return _fused_moe_gguf(x, layer.w13_qweight, layer.w2_qweight,
-                               topk_weights, topk_ids,
-                               layer.w13_qweight_type.weight_type,
+        return _fused_moe_gguf(x, layer.w13_qweight, layer.w2_qweight, topk_weights,
+                               topk_ids, layer.w13_qweight_type.weight_type,
                                layer.w2_qweight_type.weight_type, self.act)
 
 
@@ -372,8 +363,7 @@ class GGUFEmbeddingMethod(GGUFLinearMethod):
         quant_config: The GGUF quantization config.
     """
 
-    def embedding(self, layer: torch.nn.Module,
-                  x: torch.Tensor) -> torch.Tensor:
+    def embedding(self, layer: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
         qweight = layer.qweight
         qweight_type = layer.qweight_type.weight_type
 
@@ -383,8 +373,8 @@ class GGUFEmbeddingMethod(GGUFLinearMethod):
             return torch.embedding(qweight, x)
         x_flat = x.flatten()
         quant = torch.index_select(qweight, dim=0, index=x_flat)
-        dequant = ops.ggml_dequantize(quant, qweight_type, hidden_size,
-                                      x_flat.shape[0], self.params_dtype)
+        dequant = ops.ggml_dequantize(quant, qweight_type, hidden_size, x_flat.shape[0],
+                                      self.params_dtype)
         return dequant.view(*x.shape, hidden_size)
 
 
@@ -394,8 +384,7 @@ class GGUFUninitializedParameter(UninitializedParameter):
 
     def materialize_nested(self) -> Parameter:
         dtype = {data.dtype for data in self.data_container}
-        assert len(dtype) == 1, ValueError(
-            f"Data container has mixed dtypes: {dtype}")
+        assert len(dtype) == 1, ValueError(f"Data container has mixed dtypes: {dtype}")
         dtype = next(iter(dtype))
         nested_data = torch.nested.nested_tensor(self.data_container,
                                                  device=self.device,

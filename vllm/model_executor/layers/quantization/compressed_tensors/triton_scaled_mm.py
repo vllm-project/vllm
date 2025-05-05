@@ -16,11 +16,10 @@ def is_weak_contiguous(x: torch.Tensor):
 
 
 @triton.jit
-def scaled_mm_kernel(a_ptr, b_ptr, scale_a_ptr, scale_b_ptr, c_ptr, bias_ptr,
-                     M, N, K, stride_am, stride_ak, stride_bk, stride_bn,
-                     stride_cm, stride_cn, ACCUMULATOR_DTYPE: tl.constexpr,
-                     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr,
-                     BLOCK_SIZE_K: tl.constexpr,
+def scaled_mm_kernel(a_ptr, b_ptr, scale_a_ptr, scale_b_ptr, c_ptr, bias_ptr, M, N, K,
+                     stride_am, stride_ak, stride_bk, stride_bn, stride_cm, stride_cn,
+                     ACCUMULATOR_DTYPE: tl.constexpr, BLOCK_SIZE_M: tl.constexpr,
+                     BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
                      BLOCK_SIZE_SCALE_A: tl.constexpr,
                      BLOCK_SIZE_SCALE_B: tl.constexpr):
     pid = tl.program_id(axis=0)
@@ -31,8 +30,7 @@ def scaled_mm_kernel(a_ptr, b_ptr, scale_a_ptr, scale_b_ptr, c_ptr, bias_ptr,
     pid_n = pid % num_pid_n
 
     accumulator_dtype = ACCUMULATOR_DTYPE
-    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N),
-                           dtype=accumulator_dtype)
+    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=accumulator_dtype)
 
     # NOTE: Some tensor inputs are so large, they will cause int32 overflow
     # so it is necessary to use tl.int64 for all the offsets, else SEGV will
@@ -46,10 +44,8 @@ def scaled_mm_kernel(a_ptr, b_ptr, scale_a_ptr, scale_b_ptr, c_ptr, bias_ptr,
     masks_bn = offsets_bn < N
 
     offsets_k = tl.arange(0, BLOCK_SIZE_K).to(tl.int64)
-    offsets_a = (stride_am * offsets_am[:, None] +
-                 stride_ak * offsets_k[None, :])
-    offsets_b = (stride_bk * offsets_k[:, None] +
-                 stride_bn * offsets_bn[None, :])
+    offsets_a = (stride_am * offsets_am[:, None] + stride_ak * offsets_k[None, :])
+    offsets_b = (stride_bk * offsets_k[:, None] + stride_bn * offsets_bn[None, :])
 
     # NOTE: BLOCK_SIZE_SCALE_A could be 1 or BLOCK_SIZE_M, so need to create
     # appropriate offsets and masks for each case. Same goes for
@@ -113,8 +109,7 @@ def scaled_mm_kernel(a_ptr, b_ptr, scale_a_ptr, scale_b_ptr, c_ptr, bias_ptr,
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)
     offs_cm = offs_cm.to(tl.int64)
     offs_cn = offs_cn.to(tl.int64)
-    c_ptrs = (c_ptr + stride_cm * offs_cm[:, None] +
-              stride_cn * offs_cn[None, :])
+    c_ptrs = (c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :])
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
 
     tl.store(c_ptrs, c, mask=c_mask)
@@ -143,10 +138,8 @@ def triton_scaled_mm(input: torch.Tensor,
     scale_b = scale_b.reshape(-1, 1) if scale_b.dim() <= 1 else scale_b
 
     assert scale_a.dtype == scale_b.dtype and scale_a.is_floating_point()
-    assert scale_a.shape == torch.Size([1, 1]) or scale_a.shape == torch.Size(
-        [M, 1])
-    assert scale_b.shape == torch.Size([1, 1]) or scale_b.shape == torch.Size(
-        [N, 1])
+    assert scale_a.shape == torch.Size([1, 1]) or scale_a.shape == torch.Size([M, 1])
+    assert scale_b.shape == torch.Size([1, 1]) or scale_b.shape == torch.Size([N, 1])
     assert out_dtype.is_floating_point
     assert bias is None or bias.is_floating_point()
     assert is_weak_contiguous(input)

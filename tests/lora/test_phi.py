@@ -21,8 +21,7 @@ def v1(run_with_both_engines_lora):
 def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
     prompts = [
         PROMPT_TEMPLATE.format(
-            sql_prompt=
-            "Which catalog publisher has published the most catalogs?",
+            sql_prompt="Which catalog publisher has published the most catalogs?",
             context="CREATE TABLE catalogs (catalog_publisher VARCHAR);"),
         PROMPT_TEMPLATE.format(
             sql_prompt=
@@ -37,14 +36,11 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
             "CREATE TABLE marine_species (name VARCHAR(50), common_name VARCHAR(50), location VARCHAR(50));"  # noqa: E501
         ),
     ]
-    sampling_params = vllm.SamplingParams(temperature=0,
-                                          max_tokens=64,
-                                          stop="### End")
+    sampling_params = vllm.SamplingParams(temperature=0, max_tokens=64, stop="### End")
     outputs = llm.generate(
         prompts,
         sampling_params,
-        lora_request=LoRARequest(str(lora_id), lora_id, lora_path)
-        if lora_id else None,
+        lora_request=LoRARequest(str(lora_id), lora_id, lora_path) if lora_id else None,
     )
     # Print the outputs.
     generated_texts: list[str] = []

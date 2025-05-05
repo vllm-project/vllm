@@ -52,10 +52,7 @@ TEST_MESSAGES = [
         'content': 'What is the capital of'
     },
 ]
-ASSISTANT_MESSAGE_TO_CONTINUE = {
-    'role': 'assistant',
-    'content': 'The capital of'
-}
+ASSISTANT_MESSAGE_TO_CONTINUE = {'role': 'assistant', 'content': 'The capital of'}
 
 
 def test_load_chat_template():
@@ -89,8 +86,8 @@ def test_no_load_chat_template_literallike():
 @pytest.mark.parametrize(
     "model,template,add_generation_prompt,continue_final_message,expected_output",
     MODEL_TEMPLATE_GENERATON_OUTPUT)
-def test_get_gen_prompt(model, template, add_generation_prompt,
-                        continue_final_message, expected_output):
+def test_get_gen_prompt(model, template, add_generation_prompt, continue_final_message,
+                        expected_output):
     # Initialize the tokenizer
     tokenizer = get_tokenizer(tokenizer_name=model)
     template_content = load_chat_template(chat_template=template)
@@ -98,8 +95,8 @@ def test_get_gen_prompt(model, template, add_generation_prompt,
     # Create a mock request object using keyword arguments
     mock_request = ChatCompletionRequest(
         model=model,
-        messages=TEST_MESSAGES + [ASSISTANT_MESSAGE_TO_CONTINUE]
-        if continue_final_message else TEST_MESSAGES,
+        messages=TEST_MESSAGES +
+        [ASSISTANT_MESSAGE_TO_CONTINUE] if continue_final_message else TEST_MESSAGES,
         add_generation_prompt=add_generation_prompt,
         continue_final_message=continue_final_message,
     )

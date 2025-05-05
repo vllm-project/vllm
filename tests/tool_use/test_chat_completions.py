@@ -31,8 +31,7 @@ async def test_chat_completion_without_tools(client: openai.AsyncOpenAI,
     assert stop_reason != "tool_calls"
 
     # check to make sure no tool calls were returned
-    assert (choice.message.tool_calls is None
-            or len(choice.message.tool_calls) == 0)
+    assert (choice.message.tool_calls is None or len(choice.message.tool_calls) == 0)
 
     # make the same request, streaming
     stream = await client.chat.completions.create(
@@ -100,8 +99,7 @@ async def test_chat_completion_with_tools(client: openai.AsyncOpenAI,
     assert len(output_text) > 0
 
     # check to make sure no tool calls were returned
-    assert (choice.message.tool_calls is None
-            or len(choice.message.tool_calls) == 0)
+    assert (choice.message.tool_calls is None or len(choice.message.tool_calls) == 0)
 
     # make the same request, streaming
     stream = await client.chat.completions.create(

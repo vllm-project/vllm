@@ -29,8 +29,7 @@ class InternLM2VEDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
-        max_position_embeddings = getattr(config, "max_position_embeddings",
-                                          8192)
+        max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.attention = InternLM2Attention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -56,8 +55,7 @@ class InternLM2VEDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.feed_forward_ve",
         )
-        self.attention_norm = RMSNorm(config.hidden_size,
-                                      eps=config.rms_norm_eps)
+        self.attention_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.ffn_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
@@ -72,8 +70,7 @@ class InternLM2VEDecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.attention_norm(hidden_states)
         else:
-            hidden_states, residual = self.attention_norm(
-                hidden_states, residual)
+            hidden_states, residual = self.attention_norm(hidden_states, residual)
         hidden_states = self.attention(
             positions=positions,
             hidden_states=hidden_states,
@@ -82,16 +79,15 @@ class InternLM2VEDecoderLayer(nn.Module):
         # Fully Connected
         hidden_states, residual = self.ffn_norm(hidden_states, residual)
         if visual_token_mask is not None and visual_token_mask.any():
-            visual_token_mask = visual_token_mask.repeat(
-                1, self.hidden_size).bool()
+            visual_token_mask = visual_token_mask.repeat(1, self.hidden_size).bool()
             text_token_mask = ~visual_token_mask
             hidden_states[visual_token_mask] = self.feed_forward_ve(
-                hidden_states[visual_token_mask].reshape(
-                    -1, self.hidden_size)).flatten()
+                hidden_states[visual_token_mask].reshape(-1,
+                                                         self.hidden_size)).flatten()
             if text_token_mask.any():
                 hidden_states[text_token_mask] = self.feed_forward(
-                    hidden_states[text_token_mask].reshape(
-                        -1, self.hidden_size)).flatten()
+                    hidden_states[text_token_mask].reshape(-1,
+                                                           self.hidden_size)).flatten()
         else:
             hidden_states = self.feed_forward(hidden_states)
         return hidden_states, residual

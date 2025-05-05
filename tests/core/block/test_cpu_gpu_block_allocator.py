@@ -58,8 +58,7 @@ def test_allocate_immutable_block(num_cpu_blocks: int, num_gpu_blocks: int,
         block_size=block_size,
     )
 
-    unique_token_ids = list(
-        range((num_cpu_blocks + num_gpu_blocks) * block_size))
+    unique_token_ids = list(range((num_cpu_blocks + num_gpu_blocks) * block_size))
     gpu_token_ids = list(
         chunk_list(unique_token_ids[:num_gpu_blocks * block_size], block_size))
     cpu_token_ids = list(

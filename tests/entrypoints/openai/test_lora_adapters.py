@@ -61,8 +61,7 @@ def monkeypatch_module():
 
 
 @pytest.fixture(scope="module", params=[False, True])
-def server_with_lora_modules_json(request, monkeypatch_module,
-                                  zephyr_lora_files):
+def server_with_lora_modules_json(request, monkeypatch_module, zephyr_lora_files):
 
     use_v1 = request.param
     monkeypatch_module.setenv('VLLM_USE_V1', '1' if use_v1 else '0')
@@ -109,14 +108,12 @@ def server_with_lora_modules_json(request, monkeypatch_module,
 
 @pytest_asyncio.fixture
 async def client(server_with_lora_modules_json):
-    async with server_with_lora_modules_json.get_async_client(
-    ) as async_client:
+    async with server_with_lora_modules_json.get_async_client() as async_client:
         yield async_client
 
 
 @pytest.mark.asyncio
-async def test_static_lora_lineage(client: openai.AsyncOpenAI,
-                                   zephyr_lora_files):
+async def test_static_lora_lineage(client: openai.AsyncOpenAI, zephyr_lora_files):
     models = await client.models.list()
     models = models.data
     served_model = models[0]
@@ -124,16 +121,14 @@ async def test_static_lora_lineage(client: openai.AsyncOpenAI,
     assert served_model.id == MODEL_NAME
     assert served_model.root == MODEL_NAME
     assert served_model.parent is None
-    assert all(lora_model.root == zephyr_lora_files
-               for lora_model in lora_models)
+    assert all(lora_model.root == zephyr_lora_files for lora_model in lora_models)
     assert all(lora_model.parent == MODEL_NAME for lora_model in lora_models)
     assert lora_models[0].id == "zephyr-lora"
     assert lora_models[1].id == "zephyr-lora2"
 
 
 @pytest.mark.asyncio
-async def test_dynamic_lora_lineage(client: openai.AsyncOpenAI,
-                                    zephyr_lora_files):
+async def test_dynamic_lora_lineage(client: openai.AsyncOpenAI, zephyr_lora_files):
 
     response = await client.post("load_lora_adapter",
                                  cast_to=str,
@@ -164,8 +159,7 @@ async def test_dynamic_lora_not_found(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
-async def test_dynamic_lora_invalid_files(client: openai.AsyncOpenAI,
-                                          tmp_path):
+async def test_dynamic_lora_invalid_files(client: openai.AsyncOpenAI, tmp_path):
     invalid_files = tmp_path / "invalid_files"
     invalid_files.mkdir()
     (invalid_files / "adapter_config.json").write_text("this is not json")
@@ -180,12 +174,10 @@ async def test_dynamic_lora_invalid_files(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("test_name,config_change,expected_error",
-                         BADREQUEST_CASES)
+@pytest.mark.parametrize("test_name,config_change,expected_error", BADREQUEST_CASES)
 async def test_dynamic_lora_badrequests(client: openai.AsyncOpenAI, tmp_path,
                                         zephyr_lora_files, test_name: str,
-                                        config_change: dict,
-                                        expected_error: str):
+                                        config_change: dict, expected_error: str):
     # Create test directory
     test_dir = tmp_path / test_name
 
@@ -237,8 +229,7 @@ async def test_multiple_lora_adapters(client: openai.AsyncOpenAI, tmp_path,
 
     lora_tasks = []
     for i in range(10):
-        lora_tasks.append(
-            asyncio.create_task(load_and_run_adapter(f"adapter_{i}")))
+        lora_tasks.append(asyncio.create_task(load_and_run_adapter(f"adapter_{i}")))
 
     results, _ = await asyncio.wait(lora_tasks)
 

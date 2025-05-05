@@ -30,12 +30,10 @@ def load_block_tables(block_tables_hbm, num_tiles, num_blocks_per_tile):
     assert len(block_tables_hbm.shape) == 1
     (num_total_blocks, ) = block_tables_hbm.shape
     assert num_blocks_per_tile * num_tiles == num_total_blocks
-    block_tables_hbm = block_tables_hbm.reshape(
-        (num_tiles, num_blocks_per_tile))
+    block_tables_hbm = block_tables_hbm.reshape((num_tiles, num_blocks_per_tile))
 
     block_tables_sbuf = nl.zeros(
-        (ceil_div(num_tiles,
-                  B_P_SIZE), par_dim(B_P_SIZE), num_blocks_per_tile),
+        (ceil_div(num_tiles, B_P_SIZE), par_dim(B_P_SIZE), num_blocks_per_tile),
         dtype=nl.int32,
     )
     for i in nl.affine_range(ceil_div(num_tiles, B_P_SIZE)):
@@ -76,8 +74,7 @@ def transform_block_tables_for_indirect_load(
     We don't further tile D dimension as small DMA size also hurts performance.
     """
     B_P_SIZE = 128
-    num_partitions, num_tiles_per_partition, num_blocks_per_tile = (
-        block_tables.shape)
+    num_partitions, num_tiles_per_partition, num_blocks_per_tile = (block_tables.shape)
     assert num_tiles_per_partition == B_P_SIZE
     assert is_power_of_2(
         num_blocks_per_tile), f"{num_blocks_per_tile=} is not power of 2"
@@ -95,8 +92,7 @@ def transform_block_tables_for_indirect_load(
     # prepare iota ahead of time to avoid repeatedly using Gpsimd
     if num_head > 1:
         head_id = nisa.iota(head_id, dtype=nl.int32).reshape((1, 1))
-        head_id = nl.transpose(
-            head_id.broadcast_to((1, num_tiles_per_partition)))
+        head_id = nl.transpose(head_id.broadcast_to((1, num_tiles_per_partition)))
         if num_blocks_per_tile > 1:
             head_id = head_id.broadcast_to(
                 (num_tiles_per_partition, num_blocks_per_tile))
@@ -168,8 +164,8 @@ def load_kv_tile_from_cache(
     for load_idx in nl.affine_range(num_loads):
         i_p = nl.arange(B_P_SIZE)[:, None]
         i_f = nl.arange(tiled_block_size * B_D_SIZE)[None, :]
-        loaded = nl.load(kv_cache[0, block_tables[load_idx, i_p,
-                                                  large_k_tile_idx], i_f])
+        loaded = nl.load(kv_cache[0, block_tables[load_idx, i_p, large_k_tile_idx],
+                                  i_f])
         if cur_k_tile.dtype != loaded.dtype:
             loaded = nl.copy(loaded, dtype=cur_k_tile.dtype)
         # Transpose SBUF tensor using PE
@@ -184,8 +180,8 @@ def load_kv_tile_from_cache(
 
     # load value cache
     for load_idx in nl.affine_range(num_loads):
-        loaded = nl.load(kv_cache[1, block_tables[load_idx, i_p,
-                                                  large_k_tile_idx], i_f])
+        loaded = nl.load(kv_cache[1, block_tables[load_idx, i_p, large_k_tile_idx],
+                                  i_f])
         if cur_v_tile.dtype != loaded.dtype:
             loaded = nl.copy(loaded, dtype=cur_v_tile.dtype)
         i_p = nl.arange(B_P_SIZE)[:, None]
@@ -200,10 +196,7 @@ def load_kv_tile_from_cache(
 
 
 @nki.jit
-def transpose_p_local(p_local_transposed,
-                      p_local,
-                      LARGE_TILE_SZ,
-                      B_F_SIZE=512):
+def transpose_p_local(p_local_transposed, p_local, LARGE_TILE_SZ, B_F_SIZE=512):
     for i in nl.affine_range(LARGE_TILE_SZ // B_F_SIZE):
         if nisa.get_nc_version() == nisa.nc_version.gen3:
             p_local_t_tmp = nl.ndarray((par_dim(128), B_F_SIZE),
@@ -219,11 +212,13 @@ def transpose_p_local(p_local_transposed,
             i_j_128_slice = nl.ds(i * B_F_SIZE + j * 128, 128)
 
             if nisa.get_nc_version() == nisa.nc_version.gen3:
-                p_local_t_tmp[:, j_128_slice] = nisa.dma_transpose(
-                    p_local[:, i_j_128_slice])
+                p_local_t_tmp[:,
+                              j_128_slice] = nisa.dma_transpose(p_local[:,
+                                                                        i_j_128_slice])
             else:
-                p_local_t_tmp[:, j_128_slice] = nisa.nc_transpose(
-                    p_local[:, i_j_128_slice])
+                p_local_t_tmp[:,
+                              j_128_slice] = nisa.nc_transpose(p_local[:,
+                                                                       i_j_128_slice])
 
         p_local_transposed[:, nl.ds(i * B_F_SIZE, B_F_SIZE)] = nl.copy(
             p_local_t_tmp, dtype=p_local_transposed.dtype)
@@ -317,8 +312,7 @@ def _flash_attention_core(
         negate=False,
     )
 
-    o_previous_scaled = nl.ndarray((par_dim(B_P_SIZE), B_D_SIZE),
-                                   dtype=o_buffer.dtype)
+    o_previous_scaled = nl.ndarray((par_dim(B_P_SIZE), B_D_SIZE), dtype=o_buffer.dtype)
 
     if initialize:
         m_buffer[:, 0] = nl.copy(max_)
@@ -337,8 +331,7 @@ def _flash_attention_core(
         )
         o_previous_scaled[...] = nl.multiply(o_buffer[:, :], alpha)
 
-    p_local = nl.ndarray((par_dim(B_P_SIZE), LARGE_TILE_SZ),
-                         dtype=kernel_dtype)
+    p_local = nl.ndarray((par_dim(B_P_SIZE), LARGE_TILE_SZ), dtype=kernel_dtype)
     REDUCTION_TILE = min(2048, LARGE_TILE_SZ // 2)
 
     p_partial_sum = nl.ndarray(
@@ -492,42 +485,36 @@ def flash_paged_attention(
         d,
     ), f"value shape {value.shape} mismatch!"
 
-    assert (
-        nl.program_ndim() == 2
-    ), f"Expect spmd grid with 2 dimensions, got {nl.program_ndim()} instead!"
+    assert (nl.program_ndim() == 2
+            ), f"Expect spmd grid with 2 dimensions, got {nl.program_ndim()} instead!"
     batch_id = nl.program_id(axis=0)
     head_id = nl.program_id(axis=1)
 
     (num_active_blocks, ) = block_tables.shape
     context_kv_len = num_active_blocks * block_size
-    assert (
-        LARGE_TILE_SZ % B_F_SIZE == 0
-    ), f"Need {LARGE_TILE_SZ=} to be divisible by {B_F_SIZE=} in transpose_p"
+    assert (LARGE_TILE_SZ % B_F_SIZE == 0
+            ), f"Need {LARGE_TILE_SZ=} to be divisible by {B_F_SIZE=} in transpose_p"
     assert (context_kv_len % LARGE_TILE_SZ == 0
             ), f"Need {context_kv_len=} to be divisible by {LARGE_TILE_SZ=}"
 
     num_blocks_per_large_tile = LARGE_TILE_SZ // block_size
-    assert is_power_of_2(
-        num_blocks_per_large_tile
-    ), f"{num_blocks_per_large_tile=} is expected of be power of 2"
+    assert is_power_of_2(num_blocks_per_large_tile
+                         ), f"{num_blocks_per_large_tile=} is expected of be power of 2"
     if seqlen_q > B_F_SIZE:
         MAX_REDUCTION_TILE = 2048
         if seqlen_q // 2 > MAX_REDUCTION_TILE:
-            assert (
-                seqlen_q % MAX_REDUCTION_TILE == 0
-            ), f"{seqlen_q=} should be divisible by {MAX_REDUCTION_TILE=}"
+            assert (seqlen_q % MAX_REDUCTION_TILE == 0
+                    ), f"{seqlen_q=} should be divisible by {MAX_REDUCTION_TILE=}"
         else:
-            assert (seqlen_q % B_F_SIZE == 0
-                    ), f"{seqlen_q=} should be divisible by {B_F_SIZE=})"
+            assert (seqlen_q %
+                    B_F_SIZE == 0), f"{seqlen_q=} should be divisible by {B_F_SIZE=})"
 
     kernel_dtype = nl.bfloat16 if mixed_precision else query.dtype
     acc_type = np.dtype(np.float32) if mixed_precision else kernel_dtype
     softmax_scale = softmax_scale or (1.0 / (d**0.5))
     num_large_k_tile = context_kv_len // LARGE_TILE_SZ
 
-    o = nl.ndarray((b, h, seqlen_q, d),
-                   dtype=query.dtype,
-                   buffer=nl.shared_hbm)
+    o = nl.ndarray((b, h, seqlen_q, d), dtype=query.dtype, buffer=nl.shared_hbm)
     hbm_l_buffer, hbm_m_buffer, hbm_qk_res, qk_res_buffer = (
         None,
         None,
@@ -633,9 +620,7 @@ def flash_paged_attention(
             for i_q_h in nl.affine_range(q_h_per_k_h):
                 q_tile = nl.ndarray((B_D_SIZE, B_P_SIZE), dtype=kernel_dtype)
                 q_hbm_tile = query[batch_id, head_id * q_h_per_k_h + i_q_h]
-                q_sbuf_tile = nl.load(q_hbm_tile[:,
-                                                 nl.ds(i *
-                                                       B_P_SIZE, B_P_SIZE)])
+                q_sbuf_tile = nl.load(q_hbm_tile[:, nl.ds(i * B_P_SIZE, B_P_SIZE)])
                 if q_sbuf_tile.dtype != kernel_dtype:
                     q_sbuf_tile = nl.copy(q_sbuf_tile, dtype=kernel_dtype)
                 q_tile[:, :] = q_sbuf_tile * softmax_scale
@@ -664,8 +649,7 @@ def flash_paged_attention(
         B_F_SIZE = min(seqlen_q, B_F_SIZE)
         LARGE_TILE_SZ = seqlen_q
 
-        cur_k_tile = nl.ndarray((par_dim(B_D_SIZE), LARGE_TILE_SZ),
-                                dtype=kernel_dtype)
+        cur_k_tile = nl.ndarray((par_dim(B_D_SIZE), LARGE_TILE_SZ), dtype=kernel_dtype)
         cur_v_tile = nl.ndarray(
             (par_dim(B_P_SIZE), LARGE_TILE_SZ // B_P_SIZE * B_D_SIZE),
             dtype=kernel_dtype,
@@ -695,9 +679,7 @@ def flash_paged_attention(
 
                 q_tile = nl.ndarray((B_D_SIZE, B_P_SIZE), dtype=kernel_dtype)
                 q_hbm_tile = query[batch_id, head_id * q_h_per_k_h + i_q_h]
-                q_sbuf_tile = nl.load(q_hbm_tile[:,
-                                                 nl.ds(i *
-                                                       B_P_SIZE, B_P_SIZE)])
+                q_sbuf_tile = nl.load(q_hbm_tile[:, nl.ds(i * B_P_SIZE, B_P_SIZE)])
                 if q_sbuf_tile.dtype != kernel_dtype:
                     q_sbuf_tile = nl.copy(q_sbuf_tile, dtype=kernel_dtype)
                 q_tile[:, :] = q_sbuf_tile * softmax_scale
@@ -803,8 +785,8 @@ def reorder_context_mask(mask, LARGE_TILE_SZ, block_size):
             B_P_SIZE,
             tiled_block_size,
         )
-        context_mask = context_mask.transpose(3, 4).reshape(
-            total_query_len, context_kv_len)
+        context_mask = context_mask.transpose(3, 4).reshape(total_query_len,
+                                                            context_kv_len)
         new_mask = mask[:, context_kv_len:]
         return torch.concat([context_mask, new_mask], dim=1).to(device)
     else:
@@ -896,10 +878,8 @@ def reshape_and_cache(
     head_indices = torch.arange(n_kv_head, device=key.device)
 
     # Update caches using index_put_
-    kv_cache.index_put_(
-        (torch.tensor([0], device=key.device), block_indices[:, None],
-         head_indices[None, :], block_offsets[:, None]), key)
+    kv_cache.index_put_((torch.tensor([0], device=key.device), block_indices[:, None],
+                         head_indices[None, :], block_offsets[:, None]), key)
 
-    kv_cache.index_put_(
-        (torch.tensor([1], device=key.device), block_indices[:, None],
-         head_indices[None, :], block_offsets[:, None]), value)
+    kv_cache.index_put_((torch.tensor([1], device=key.device), block_indices[:, None],
+                         head_indices[None, :], block_offsets[:, None]), value)

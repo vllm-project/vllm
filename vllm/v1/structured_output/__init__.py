@@ -55,8 +55,7 @@ class StructuredOutputManager:
             elif backend == "guidance":
                 self.backend = GuidanceBackend(self.vllm_config)
             else:
-                raise ValueError(
-                    f"Unsupported structured output backend: {backend}")
+                raise ValueError(f"Unsupported structured output backend: {backend}")
 
         grammar = self.executor.submit(self._async_create_grammar, request)
         request.structured_output_request.grammar = grammar  # type: ignore[assignment]
@@ -108,8 +107,7 @@ class StructuredOutputManager:
         # masks for each request, one for each possible bonus token position.
         # These are stored inline in the tensor and unpacked by the gpu runner.
         cumulative_index = 0
-        ordered_seq = sorted(structured_output_request_ids.items(),
-                             key=lambda x: x[1])
+        ordered_seq = sorted(structured_output_request_ids.items(), key=lambda x: x[1])
         # NOTE: This outer loop can likely be parallelized to improve
         # performance of bitmask generation for large batches.
         for req_id, _ in ordered_seq:

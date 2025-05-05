@@ -46,8 +46,7 @@ class FlashMLABackend(MLACommonBackend):
 
 @dataclass
 class FlashMLAMetadata(MLACommonMetadata):
-    decode_tile_scheduler_metadata: Optional[Tuple[torch.Tensor,
-                                                   torch.Tensor]] = None
+    decode_tile_scheduler_metadata: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
     decode_num_splits: Optional[torch.Tensor] = None
 
     @property
@@ -68,8 +67,7 @@ class FlashMLAMetadata(MLACommonMetadata):
                      num_seqs: int,
                      num_queries: int,
                      turn_prefills_into_decodes: bool = False):
-        raise NotImplementedError(
-            "advance_step is not implemented for FlashMLA")
+        raise NotImplementedError("advance_step is not implemented for FlashMLA")
 
 
 class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
@@ -82,8 +80,7 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
 
     def build(self, seq_lens: List[int], query_lens: List[int],
               cuda_graph_pad_size: int, batch_size: int):
-        m = super().build(seq_lens, query_lens, cuda_graph_pad_size,
-                          batch_size)
+        m = super().build(seq_lens, query_lens, cuda_graph_pad_size, batch_size)
 
         if m.num_decode_tokens > 0:
             m.decode_tile_scheduler_metadata, m.decode_num_splits = \
@@ -121,8 +118,9 @@ class FlashMLAState(MLACommonState[FlashMLAMetadata]):
         del self._graph_decoder_tile_scheduler_metadata
         del self._graph_decode_num_splits
 
-    def graph_capture_get_metadata_for_batch(
-            self, batch_size: int, is_encoder_decoder_model: bool = False):
+    def graph_capture_get_metadata_for_batch(self,
+                                             batch_size: int,
+                                             is_encoder_decoder_model: bool = False):
         metadata = super().graph_capture_get_metadata_for_batch(
             batch_size, is_encoder_decoder_model)
         assert metadata.num_decode_tokens > 0
@@ -147,8 +145,8 @@ class FlashMLAState(MLACommonState[FlashMLAMetadata]):
     def get_graph_input_buffers(self,
                                 attn_metadata,
                                 is_encoder_decoder_model: bool = False):
-        input_buffers = super().get_graph_input_buffers(
-            attn_metadata, is_encoder_decoder_model)
+        input_buffers = super().get_graph_input_buffers(attn_metadata,
+                                                        is_encoder_decoder_model)
         input_buffers["decode_tile_scheduler_metadata"] = \
                 attn_metadata.decode_metadata.decode_tile_scheduler_metadata
         input_buffers["decode_num_splits"] = \
@@ -185,10 +183,9 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             attn_type: str,
             # MLA Specific Arguments
             **mla_args) -> None:
-        super().__init__(num_heads, head_size, scale, num_kv_heads,
-                         alibi_slopes, sliding_window, kv_cache_dtype,
-                         blocksparse_params, logits_soft_cap, attn_type,
-                         **mla_args)
+        super().__init__(num_heads, head_size, scale, num_kv_heads, alibi_slopes,
+                         sliding_window, kv_cache_dtype, blocksparse_params,
+                         logits_soft_cap, attn_type, **mla_args)
 
         assert is_flashmla_supported(), \
             "FlashMLA is not supported on this device"
@@ -209,8 +206,7 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
                                       "FlashMLAImpl")
 
         if is_quantized_kv_cache(self.kv_cache_dtype):
-            raise NotImplementedError(
-                "FlashMLA with FP8 KV cache not yet supported")
+            raise NotImplementedError("FlashMLA with FP8 KV cache not yet supported")
 
     def _forward_decode(
         self,

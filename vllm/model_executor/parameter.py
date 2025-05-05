@@ -12,8 +12,8 @@ from vllm.model_executor.utils import _make_synced_weight_loader
 
 __all__ = [
     "BasevLLMParameter", "PackedvLLMParameter", "PerTensorScaleParameter",
-    "ModelWeightParameter", "ChannelQuantScaleParameter",
-    "GroupQuantScaleParameter", "PackedColumnParameter", "RowvLLMParameter"
+    "ModelWeightParameter", "ChannelQuantScaleParameter", "GroupQuantScaleParameter",
+    "PackedColumnParameter", "RowvLLMParameter"
 ]
 
 logger = init_logger(__name__)
@@ -103,8 +103,8 @@ class _ColumnvLLMParameter(BasevLLMParameter):
     def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
         tp_rank = get_tensor_model_parallel_rank()
         shard_size = self.data.shape[self.output_dim]
-        loaded_weight = loaded_weight.narrow(self.output_dim,
-                                             tp_rank * shard_size, shard_size)
+        loaded_weight = loaded_weight.narrow(self.output_dim, tp_rank * shard_size,
+                                             shard_size)
         assert self.data.shape == loaded_weight.shape
         self.data.copy_(loaded_weight)
 
@@ -112,20 +112,18 @@ class _ColumnvLLMParameter(BasevLLMParameter):
 
         shard_offset = kwargs.get("shard_offset")
         shard_size = kwargs.get("shard_size")
-        if isinstance(
-                self,
-            (PackedColumnParameter,
-             PackedvLLMParameter)) and self.packed_dim == self.output_dim:
+        if isinstance(self,
+                      (PackedColumnParameter,
+                       PackedvLLMParameter)) and self.packed_dim == self.output_dim:
             shard_size, shard_offset = self.adjust_shard_indexes_for_packing(
                 shard_offset=shard_offset, shard_size=shard_size)
 
         param_data = self.data
 
         tp_rank = get_tensor_model_parallel_rank()
-        param_data = param_data.narrow(self.output_dim, shard_offset,
-                                       shard_size)
-        loaded_weight = loaded_weight.narrow(self.output_dim,
-                                             tp_rank * shard_size, shard_size)
+        param_data = param_data.narrow(self.output_dim, shard_offset, shard_size)
+        loaded_weight = loaded_weight.narrow(self.output_dim, tp_rank * shard_size,
+                                             shard_size)
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
@@ -136,20 +134,18 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         shard_id = kwargs.get("shard_id")
         num_heads = kwargs.get("num_heads")
 
-        if isinstance(
-                self,
-            (PackedColumnParameter,
-             PackedvLLMParameter)) and self.output_dim == self.packed_dim:
+        if isinstance(self,
+                      (PackedColumnParameter,
+                       PackedvLLMParameter)) and self.output_dim == self.packed_dim:
             shard_size, shard_offset = self.adjust_shard_indexes_for_packing(
                 shard_offset=shard_offset, shard_size=shard_size)
 
         param_data = self.data
         tp_rank = get_tensor_model_parallel_rank()
         shard_id = tp_rank if shard_id == "q" else tp_rank // num_heads
-        param_data = param_data.narrow(self.output_dim, shard_offset,
-                                       shard_size)
-        loaded_weight = loaded_weight.narrow(self.output_dim,
-                                             shard_id * shard_size, shard_size)
+        param_data = param_data.narrow(self.output_dim, shard_offset, shard_size)
+        loaded_weight = loaded_weight.narrow(self.output_dim, shard_id * shard_size,
+                                             shard_size)
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
@@ -174,8 +170,8 @@ class RowvLLMParameter(BasevLLMParameter):
     def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
         tp_rank = get_tensor_model_parallel_rank()
         shard_size = self.data.shape[self.input_dim]
-        loaded_weight = loaded_weight.narrow(self.input_dim,
-                                             tp_rank * shard_size, shard_size)
+        loaded_weight = loaded_weight.narrow(self.input_dim, tp_rank * shard_size,
+                                             shard_size)
 
         if len(loaded_weight.shape) == 0:
             loaded_weight = loaded_weight.reshape(1)
@@ -372,8 +368,8 @@ class BlockQuantScaleParameter(_ColumnvLLMParameter, RowvLLMParameter):
     pass
 
 
-def permute_param_layout_(param: BasevLLMParameter, input_dim: int,
-                          output_dim: int, **kwargs) -> BasevLLMParameter:
+def permute_param_layout_(param: BasevLLMParameter, input_dim: int, output_dim: int,
+                          **kwargs) -> BasevLLMParameter:
     """
     Permute a parameter's layout to the specified input and output dimensions, 
     useful for forcing the parameter into a known layout, for example, if I need
@@ -430,13 +426,11 @@ def permute_param_layout_(param: BasevLLMParameter, input_dim: int,
     return param
 
 
-def _adjust_shard_indexes_for_marlin(shard_size, shard_offset,
-                                     marlin_tile_size):
+def _adjust_shard_indexes_for_marlin(shard_size, shard_offset, marlin_tile_size):
     return shard_size * marlin_tile_size, shard_offset * marlin_tile_size
 
 
-def _adjust_shard_indexes_for_bitblas(shard_size, shard_offset,
-                                      bitblas_tile_size):
+def _adjust_shard_indexes_for_bitblas(shard_size, shard_offset, bitblas_tile_size):
     return shard_size // bitblas_tile_size, shard_offset // bitblas_tile_size
 
 
@@ -445,14 +439,12 @@ def _adjust_shard_indexes_for_packing(shard_size, shard_offset, packed_factor,
     shard_size = shard_size // packed_factor
     shard_offset = shard_offset // packed_factor
     if marlin_tile_size is not None:
-        return _adjust_shard_indexes_for_marlin(
-            shard_size=shard_size,
-            shard_offset=shard_offset,
-            marlin_tile_size=marlin_tile_size)
+        return _adjust_shard_indexes_for_marlin(shard_size=shard_size,
+                                                shard_offset=shard_offset,
+                                                marlin_tile_size=marlin_tile_size)
     elif bitblas_tile_size is not None:
-        return _adjust_shard_indexes_for_bitblas(
-            shard_size=shard_size,
-            shard_offset=shard_offset,
-            bitblas_tile_size=bitblas_tile_size)
+        return _adjust_shard_indexes_for_bitblas(shard_size=shard_size,
+                                                 shard_offset=shard_offset,
+                                                 bitblas_tile_size=bitblas_tile_size)
 
     return shard_size, shard_offset

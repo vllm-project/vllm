@@ -95,8 +95,7 @@ class MiniMaxVL01ProcessingInfo(LlavaNextProcessingInfo):
     def get_hf_processor(self, **kwargs: object):
         hf_processor = self.ctx.get_hf_processor(**kwargs)
         image_processor = hf_processor.image_processor
-        image_processor.anyres_preprocess = (
-            image_processor.anyres_for_vllm_preprocess)
+        image_processor.anyres_preprocess = (image_processor.anyres_for_vllm_preprocess)
 
         return hf_processor
 
@@ -143,12 +142,10 @@ class MiniMaxVL01MultiModalProcessor(
         }
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    MiniMaxVL01MultiModalProcessor,
-    info=MiniMaxVL01ProcessingInfo,
-    dummy_inputs=MiniMaxVL01DummyInputsBuilder)
-class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                          SupportsPP):
+@MULTIMODAL_REGISTRY.register_processor(MiniMaxVL01MultiModalProcessor,
+                                        info=MiniMaxVL01ProcessingInfo,
+                                        dummy_inputs=MiniMaxVL01DummyInputsBuilder)
+class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -166,11 +163,11 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.multimodal_config = multimodal_config
 
         # TODO: Optionally initializes this for supporting embeddings.
-        self.vision_tower = init_vision_tower_for_llava(
-            config,
-            quant_config,
-            require_post_norm=False,
-            prefix=maybe_prefix(prefix, "vision_tower"))
+        self.vision_tower = init_vision_tower_for_llava(config,
+                                                        quant_config,
+                                                        require_post_norm=False,
+                                                        prefix=maybe_prefix(
+                                                            prefix, "vision_tower"))
         self.multi_modal_projector = MiniMaxVL01MultiModalProjector(
             vision_hidden_size=config.vision_config.hidden_size,
             text_hidden_size=config.text_config.hidden_size,
@@ -178,8 +175,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             multimodal_projector_bias=True,
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "multi_modal_projector"))
-        self.image_newline = nn.Parameter(
-            torch.empty(config.text_config.hidden_size))
+        self.image_newline = nn.Parameter(torch.empty(config.text_config.hidden_size))
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
             hf_config=config.text_config,
@@ -223,8 +219,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     def _image_pixels_to_features(
         self,
-        vision_tower: Union[CLIPVisionModel, SiglipVisionModel,
-                            PixtralHFVisionModel],
+        vision_tower: Union[CLIPVisionModel, SiglipVisionModel, PixtralHFVisionModel],
         pixel_values: Union[torch.Tensor, list[torch.Tensor]],
     ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
         # NOTE: we skip the step to select the vision feature layer since
@@ -265,9 +260,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
         if isinstance(image_features, torch.Tensor):
             return self.multi_modal_projector(image_features)
 
-        feature_sizes = [
-            image_feature.shape[0] for image_feature in image_features
-        ]
+        feature_sizes = [image_feature.shape[0] for image_feature in image_features]
 
         image_embeds = self.multi_modal_projector(torch.cat(image_features))
         image_embeds = torch.split(image_embeds, feature_sizes)
@@ -280,9 +273,8 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         if actual_dims != expected_dims:
             expected_expr = ("batch_size", *map(str, expected_dims))
-            raise ValueError(
-                f"The expected shape of pixel values is {expected_expr}. "
-                f"You supplied {tuple(data.shape)}.")
+            raise ValueError(f"The expected shape of pixel values is {expected_expr}. "
+                             f"You supplied {tuple(data.shape)}.")
 
         return data
 
@@ -317,8 +309,8 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         raise AssertionError("This line should be unreachable.")
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
@@ -338,8 +330,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             inputs_embeds = None
         elif inputs_embeds is None:
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
+            inputs_embeds = self.get_input_embeddings(input_ids, vision_embeddings)
             input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
@@ -354,10 +345,8 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states, sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

@@ -13,18 +13,17 @@ from .types import (EMBEDDING_SIZE_FACTORS, ExpandableVLMTestArgs,
                     ImageSizeWrapper, SizeType, VLMTestInfo, VLMTestType)
 
 
-def get_filtered_test_settings(
-        test_settings: dict[str, VLMTestInfo], test_type: VLMTestType,
-        new_proc_per_test: bool) -> dict[str, VLMTestInfo]:
+def get_filtered_test_settings(test_settings: dict[str,
+                                                   VLMTestInfo], test_type: VLMTestType,
+                               new_proc_per_test: bool) -> dict[str, VLMTestInfo]:
     """Given the dict of potential test settings to run, return a subdict
     of tests who have the current test type enabled with the matching val for
     fork_per_test.
     """
 
     def matches_test_type(test_info: VLMTestInfo, test_type: VLMTestType):
-        return test_info.test_type == test_type or (
-            isinstance(test_info.test_type, Iterable)
-            and test_type in test_info.test_type)
+        return test_info.test_type == test_type or (isinstance(
+            test_info.test_type, Iterable) and test_type in test_info.test_type)
 
     matching_tests = {}
     for test_name, test_info in test_settings.items():
@@ -49,16 +48,16 @@ def get_filtered_test_settings(
     return matching_tests
 
 
-def get_parametrized_options(test_settings: dict[str, VLMTestInfo],
-                             test_type: VLMTestType,
+def get_parametrized_options(test_settings: dict[str,
+                                                 VLMTestInfo], test_type: VLMTestType,
                              create_new_process_for_each_test: bool):
     """Converts all of our VLMTestInfo into an expanded list of parameters.
     This is similar to nesting pytest parametrize calls, but done directly
     through an itertools product so that each test can set things like
     size factors etc, while still running in isolated test cases.
     """
-    matching_tests = get_filtered_test_settings(
-        test_settings, test_type, create_new_process_for_each_test)
+    matching_tests = get_filtered_test_settings(test_settings, test_type,
+                                                create_new_process_for_each_test)
 
     # Ensure that something is wrapped as an iterable it's not already
     ensure_wrapped = lambda e: e if isinstance(e, (list, tuple)) else (e, )
@@ -79,15 +78,13 @@ def get_parametrized_options(test_settings: dict[str, VLMTestInfo],
 
         # num_frames is video only
         if test_type == VLMTestType.VIDEO:
-            iter_kwargs["num_video_frames"] = ensure_wrapped(
-                test_info.num_video_frames)
+            iter_kwargs["num_video_frames"] = ensure_wrapped(test_info.num_video_frames)
 
         # No sizes passed for custom inputs, since inputs are directly provided
         if test_type != VLMTestType.CUSTOM_INPUTS:
             wrapped_sizes = get_wrapped_test_sizes(test_info, test_type)
             if wrapped_sizes is None:
-                raise ValueError(
-                    f"Sizes must be set for test type {test_type}")
+                raise ValueError(f"Sizes must be set for test type {test_type}")
             iter_kwargs["size_wrapper"] = wrapped_sizes
 
         #Otherwise expand the custom test options instead
@@ -119,9 +116,8 @@ def get_parametrized_options(test_settings: dict[str, VLMTestInfo],
     return list(itertools.chain(*cases_by_model_type))
 
 
-def get_wrapped_test_sizes(
-        test_info: VLMTestInfo,
-        test_type: VLMTestType) -> tuple[ImageSizeWrapper, ...]:
+def get_wrapped_test_sizes(test_info: VLMTestInfo,
+                           test_type: VLMTestType) -> tuple[ImageSizeWrapper, ...]:
     """Given a test info which may have size factors or fixed sizes, wrap them
     and combine them into an iterable, each of which will be used in parameter
     expansion.
@@ -151,8 +147,7 @@ def get_wrapped_test_sizes(
     ]
 
     wrapped_sizes = [
-        ImageSizeWrapper(type=SizeType.FIXED_SIZE, data=size)
-        for size in fixed_sizes
+        ImageSizeWrapper(type=SizeType.FIXED_SIZE, data=size) for size in fixed_sizes
     ]
 
     return tuple(wrapped_factors + wrapped_sizes)

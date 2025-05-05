@@ -106,8 +106,7 @@ def test_enable_by_default_fallback(monkeypatch):
         m.delenv("VLLM_USE_V1")
 
         # Should fall back to V0 for supported model.
-        _ = AsyncEngineArgs(
-            model=UNSUPPORTED_MODELS_V1[0]).create_engine_config()
+        _ = AsyncEngineArgs(model=UNSUPPORTED_MODELS_V1[0]).create_engine_config()
         assert not envs.VLLM_USE_V1
         m.delenv("VLLM_USE_V1")
 

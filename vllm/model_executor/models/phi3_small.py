@@ -30,8 +30,7 @@ from .utils import (AutoWeightsLoader, WeightsMapper, is_pp_missing_parameter,
                     maybe_prefix)
 
 
-def load_column_parallel_weight(param: torch.nn.Parameter,
-                                loaded_weight: torch.Tensor):
+def load_column_parallel_weight(param: torch.nn.Parameter, loaded_weight: torch.Tensor):
     tp = get_tensor_model_parallel_world_size()
     rk = get_tensor_model_parallel_rank()
     assert param.size(0) * tp == loaded_weight.size(0)
@@ -44,15 +43,13 @@ def load_column_parallel_weight(param: torch.nn.Parameter,
 
 class HeadMajorQKVParallelLinear(QKVParallelLinear):
 
-    def weight_loader(self, param: torch.nn.Parameter,
-                      loaded_weight: torch.Tensor):
+    def weight_loader(self, param: torch.nn.Parameter, loaded_weight: torch.Tensor):
         return load_column_parallel_weight(param, loaded_weight)
 
 
 class HeadMajorColumnParallelLinear(MergedColumnParallelLinear):
 
-    def weight_loader(self, param: torch.nn.Parameter,
-                      loaded_weight: torch.Tensor):
+    def weight_loader(self, param: torch.nn.Parameter, loaded_weight: torch.Tensor):
         return load_column_parallel_weight(param, loaded_weight)
 
 
@@ -143,8 +140,7 @@ class Phi3SmallSelfAttention(nn.Module):
         self.num_q_per_kv = self.num_heads // self.num_key_value_heads
         if self.tp_size > 1:
             assert self.num_key_value_heads % self.tp_size == 0
-        self.num_kv_heads_per_partion = max(
-            1, self.num_key_value_heads // self.tp_size)
+        self.num_kv_heads_per_partion = max(1, self.num_key_value_heads // self.tp_size)
         self.num_heads_per_partition = self.num_heads // self.tp_size
 
         self.max_position_embeddings = config.max_position_embeddings
@@ -200,8 +196,7 @@ class Phi3SmallSelfAttention(nn.Module):
         self.blocksparse_num_local_blocks = config.blocksparse_num_local_blocks
         self.blocksparse_vert_stride = config.blocksparse_vert_stride
 
-        use_dense_attn = (getattr(self.config,
-                                  "dense_attention_every_n_layers", None)
+        use_dense_attn = (getattr(self.config, "dense_attention_every_n_layers", None)
                           and (self.layer_idx + 1) %
                           self.config.dense_attention_every_n_layers == 0)
 
@@ -230,12 +225,10 @@ class Phi3SmallSelfAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor],
-               Optional[Tuple[torch.Tensor]]]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         qkv, _ = self.query_key_value(hidden_states)
 
-        qkv = qkv.view(qkv.shape[:-1] +
-                       (-1, (self.num_q_per_kv + 2), self.head_dim))
+        qkv = qkv.view(qkv.shape[:-1] + (-1, (self.num_q_per_kv + 2), self.head_dim))
         q, k, v = qkv.split([self.num_q_per_kv, 1, 1], dim=-2)
 
         # NOTE: this is required by RotaryEmbed, which indeed does not have to
@@ -272,8 +265,8 @@ class Phi3SmallDecoderLayer(nn.Module):
 
         self.input_layernorm = nn.LayerNorm(config.hidden_size,
                                             eps=config.layer_norm_epsilon)
-        self.post_attention_layernorm = nn.LayerNorm(
-            config.hidden_size, eps=config.layer_norm_epsilon)
+        self.post_attention_layernorm = nn.LayerNorm(config.hidden_size,
+                                                     eps=config.layer_norm_epsilon)
 
     def forward(
         self,
@@ -320,9 +313,8 @@ class Phi3SmallModel(nn.Module):
 
         self.final_layernorm = nn.LayerNorm(config.hidden_size,
                                             eps=config.layer_norm_epsilon)
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(["hidden_states"],
-                                                    config.hidden_size))
+        self.make_empty_intermediate_tensors = (make_empty_intermediate_tensors_factory(
+            ["hidden_states"], config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -352,8 +344,7 @@ class Phi3SmallModel(nn.Module):
         hidden_states = self.final_layernorm(hidden_states)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
@@ -362,8 +353,7 @@ class Phi3SmallModel(nn.Module):
             if is_pp_missing_parameter(name, self):
                 continue
             param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
@@ -372,8 +362,7 @@ class Phi3SmallModel(nn.Module):
 class Phi3SmallForCausalLM(nn.Module, SupportsPP):
     _tied_weights_keys = ["lm_head.weight"]
 
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_suffix={"rotary_emb.inv_freq": None})
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_suffix={"rotary_emb.inv_freq": None})
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -431,8 +420,7 @@ class Phi3SmallForCausalLM(nn.Module, SupportsPP):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
         if self.dummy_token_indices is not None and logits is not None:
             logits.index_fill_(-1, self.dummy_token_indices, -torch.inf)
         logits = logits / self.mup_width_multiplier
@@ -454,8 +442,7 @@ class Phi3SmallForCausalLM(nn.Module, SupportsPP):
         output_hidden_states = output_hidden_states
         return output_hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head.weight"]

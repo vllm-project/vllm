@@ -18,14 +18,12 @@ MODELS = [
 DTYPE = ["bfloat16"]
 
 
-@pytest.mark.skipif(not current_platform.is_cpu()
-                    and not current_platform.is_xpu(),
+@pytest.mark.skipif(not current_platform.is_cpu() and not current_platform.is_xpu(),
                     reason="only supports Intel CPU/XPU backend.")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", DTYPE)
 def test_ipex_quant(vllm_runner, model, dtype):
     with vllm_runner(model, dtype=dtype) as llm:
-        output = llm.generate_greedy(["The capital of France is"],
-                                     max_tokens=32)
+        output = llm.generate_greedy(["The capital of France is"], max_tokens=32)
     assert output
     print(output)

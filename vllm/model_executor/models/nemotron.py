@@ -62,8 +62,9 @@ def _cast_if_autocast_enabled(*args):
     if not torch.is_autocast_enabled():
         return args
     else:
-        return torch.amp.autocast_mode._cast(
-            args, device_type="cuda", dtype=torch.get_autocast_gpu_dtype())
+        return torch.amp.autocast_mode._cast(args,
+                                             device_type="cuda",
+                                             dtype=torch.get_autocast_gpu_dtype())
 
 
 class NemotronLayerNorm1P(nn.LayerNorm):
@@ -75,8 +76,7 @@ class NemotronLayerNorm1P(nn.LayerNorm):
                  bias: bool = True,
                  device=None,
                  dtype=None):
-        super().__init__(normalized_shape, eps, elementwise_affine, bias,
-                         device, dtype)
+        super().__init__(normalized_shape, eps, elementwise_affine, bias, device, dtype)
 
     def forward(
         self,
@@ -86,8 +86,8 @@ class NemotronLayerNorm1P(nn.LayerNorm):
         if residual is not None:
             x = x + residual
             residual = x
-        args = _cast_if_autocast_enabled(x, self.normalized_shape,
-                                         self.weight + 1, self.bias, self.eps)
+        args = _cast_if_autocast_enabled(x, self.normalized_shape, self.weight + 1,
+                                         self.bias, self.eps)
         with torch.amp.autocast("cuda", enabled=False):
             x = torch.nn.functional.layer_norm(*args)
             return x if residual is None else (x, residual)
@@ -229,8 +229,7 @@ class NemotronDecoderLayer(nn.Module):
                 config, "original_max_position_embeddings", None):
             rope_scaling["original_max_position_embeddings"] = (
                 config.original_max_position_embeddings)
-        max_position_embeddings = getattr(config, "max_position_embeddings",
-                                          8192)
+        max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         # Support abacusai/Smaug-72B-v0.1 with attention_bias
         # Support internlm/internlm-7b with bias
         attention_bias = getattr(config, "attention_bias", False) or getattr(
@@ -259,8 +258,8 @@ class NemotronDecoderLayer(nn.Module):
         )
         self.input_layernorm = NemotronLayerNorm1P(config.hidden_size,
                                                    eps=config.norm_eps)
-        self.post_attention_layernorm = NemotronLayerNorm1P(
-            config.hidden_size, eps=config.norm_eps)
+        self.post_attention_layernorm = NemotronLayerNorm1P(config.hidden_size,
+                                                            eps=config.norm_eps)
 
     def forward(
         self,
@@ -273,16 +272,14 @@ class NemotronDecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(
-                hidden_states, residual)
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
 
         # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual)
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
@@ -320,13 +317,11 @@ class NemotronModel(nn.Module):
                                                 prefix=prefix),
             prefix=f"{prefix}.layers")
         if get_pp_group().is_last_rank:
-            self.norm = NemotronLayerNorm1P(config.hidden_size,
-                                            eps=config.norm_eps)
+            self.norm = NemotronLayerNorm1P(config.hidden_size, eps=config.norm_eps)
         else:
             self.norm = PPMissingLayer()
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size))
+        self.make_empty_intermediate_tensors = (make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -410,8 +405,7 @@ class NemotronForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
             logit_scale = getattr(config, "logit_scale", 1.0)
             self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                    config.vocab_size,
-                                                    logit_scale)
+                                                    config.vocab_size, logit_scale)
         else:
             self.lm_head = PPMissingLayer()
 
@@ -437,12 +431,10 @@ class NemotronForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -454,19 +446,17 @@ class NemotronForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
-            if ("rotary_emb.cos_cached" in name
-                    or "rotary_emb.sin_cached" in name):
+            if ("rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
-            if (self.quant_config is not None and
-                (scale_name := self.quant_config.get_cache_scale(name))):
+            if (self.quant_config is not None
+                    and (scale_name := self.quant_config.get_cache_scale(name))):
                 # Loading kv cache quantization scales
                 param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
-                                 loaded_weight[0])
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                loaded_weight = (loaded_weight
+                                 if loaded_weight.dim() == 0 else loaded_weight[0])
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
@@ -499,8 +489,7 @@ class NemotronForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                     continue
 
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params

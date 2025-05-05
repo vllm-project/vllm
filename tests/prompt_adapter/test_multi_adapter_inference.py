@@ -49,7 +49,5 @@ def test_multi_prompt_adapters():
                              enable_prompt_adapter=True,
                              max_prompt_adapter_token=8)
     engine = LLMEngine.from_engine_args(engine_args)
-    expected_output = {
-        ' quot;I', 'hate speech', 'no complaint', 'not hate speech'
-    }
+    expected_output = {' quot;I', 'hate speech', 'no complaint', 'not hate speech'}
     assert do_sample(engine) == expected_output

@@ -19,8 +19,7 @@ SEEDS = [0]
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("rows_per_block", [2, 4, 8, 16])
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.skipif(not current_platform.is_rocm(),
-                    reason="only test for rocm")
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
 @torch.inference_mode()
 def test_rocm_llmm1_kernel(n, k, m, dtype, rows_per_block, seed):
     torch.manual_seed(seed)
@@ -38,8 +37,7 @@ def test_rocm_llmm1_kernel(n, k, m, dtype, rows_per_block, seed):
 @pytest.mark.parametrize("m", [8] + M)  # m >= 8
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.skipif(not current_platform.is_rocm(),
-                    reason="only test for rocm")
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
 def test_rocm_wvsplitk_kernel(n, k, m, dtype, seed):
     torch.manual_seed(seed)
     cu_count = current_platform.get_cu_count()
@@ -58,8 +56,7 @@ def test_rocm_wvsplitk_kernel(n, k, m, dtype, seed):
 @pytest.mark.parametrize("m", M + [28672])  # m >= 16
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.skipif(not current_platform.is_rocm(),
-                    reason="only test for rocm")
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
 def test_rocm_wvsplitk_fp8_kernel(n, k, m, dtype, seed):
     torch.manual_seed(seed)
 
@@ -74,7 +71,6 @@ def test_rocm_wvsplitk_fp8_kernel(n, k, m, dtype, seed):
                                out_dtype=dtype,
                                scale_a=scale_a,
                                scale_b=scale_b)
-    out = ops.wvSplitKQ(B, A, dtype, scale_a, scale_b,
-                        current_platform.get_cu_count())
+    out = ops.wvSplitKQ(B, A, dtype, scale_a, scale_b, current_platform.get_cu_count())
 
     assert torch.allclose(out, ref_out, rtol=0.01)

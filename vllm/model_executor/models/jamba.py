@@ -134,10 +134,8 @@ class JambaMambaDecoderLayer(nn.Module):
         self.feed_forward = ffn_layer_class(config,
                                             quant_config=quant_config,
                                             prefix=f"{prefix}.feed_forward")
-        self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
-        self.pre_ff_layernorm = RMSNorm(config.hidden_size,
-                                        eps=config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.pre_ff_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -150,13 +148,11 @@ class JambaMambaDecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(
-                hidden_states, residual)
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         hidden_states = self.mamba(hidden_states, mamba_cache_params)
         # Fully Connected
-        hidden_states, residual = self.pre_ff_layernorm(
-            hidden_states, residual)
+        hidden_states, residual = self.pre_ff_layernorm(hidden_states, residual)
         hidden_states = self.feed_forward(hidden_states)
         return hidden_states, residual
 
@@ -218,10 +214,8 @@ class JambaAttentionDecoderLayer(nn.Module):
         self.feed_forward = ffn_layer_class(config,
                                             quant_config=quant_config,
                                             prefix=f"{prefix}.feed_forward")
-        self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
-        self.pre_ff_layernorm = RMSNorm(config.hidden_size,
-                                        eps=config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.pre_ff_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def self_attention(
         self,
@@ -246,16 +240,14 @@ class JambaAttentionDecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(
-                hidden_states, residual)
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         hidden_states = self.self_attention(
             positions=positions,
             hidden_states=hidden_states,
         )
         # Fully Connected
-        hidden_states, residual = self.pre_ff_layernorm(
-            hidden_states, residual)
+        hidden_states, residual = self.pre_ff_layernorm(hidden_states, residual)
         hidden_states = self.feed_forward(hidden_states)
         return hidden_states, residual
 
@@ -292,8 +284,7 @@ class JambaModel(nn.Module):
 
         def get_layer(prefix: str):
             layer_idx = int(prefix.rsplit(".", 1)[1])
-            layer_class = ALL_DECODER_LAYER_TYPES[
-                config.layers_block_type[layer_idx]]
+            layer_class = ALL_DECODER_LAYER_TYPES[config.layers_block_type[layer_idx]]
             return layer_class(config,
                                layer_idx,
                                cache_config,
@@ -303,12 +294,10 @@ class JambaModel(nn.Module):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers")
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size))
+        self.make_empty_intermediate_tensors = (make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size))
 
-        self.final_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
+        self.final_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -344,11 +333,10 @@ class JambaModel(nn.Module):
                     current_state_layer)
                 mamba_cache_index += 1
 
-            hidden_states, residual = layer(
-                positions=positions,
-                hidden_states=hidden_states,
-                residual=residual,
-                mamba_cache_params=layer_mamba_cache_params)
+            hidden_states, residual = layer(positions=positions,
+                                            hidden_states=hidden_states,
+                                            residual=residual,
+                                            mamba_cache_params=layer_mamba_cache_params)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
@@ -358,8 +346,8 @@ class JambaModel(nn.Module):
         return hidden_states
 
 
-class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
-                       IsHybrid, SupportsV0Only):
+class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP, IsHybrid,
+                       SupportsV0Only):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -424,9 +412,10 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         if self.mamba_cache is None:
             num_mamba_layers = self.model_config.get_num_layers_by_block_type(
                 self.vllm_config.parallel_config, LayerBlockType.mamba)
-            self.mamba_cache = MambaCacheManager(
-                self.vllm_config, self.lm_head.weight.dtype, num_mamba_layers,
-                *self._get_mamba_cache_shape())
+            self.mamba_cache = MambaCacheManager(self.vllm_config,
+                                                 self.lm_head.weight.dtype,
+                                                 num_mamba_layers,
+                                                 *self._get_mamba_cache_shape())
 
         mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
 
@@ -435,14 +424,12 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         return hidden_states
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
-        return self.mamba_cache.copy_inputs_before_cuda_graphs(
-            input_buffers, **kwargs)
+        return self.mamba_cache.copy_inputs_before_cuda_graphs(input_buffers, **kwargs)
 
     def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
         return self.mamba_cache.get_seqlen_agnostic_capture_inputs(batch_size)
 
-    def _get_mamba_cache_shape(
-            self) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+    def _get_mamba_cache_shape(self) -> Tuple[Tuple[int, int], Tuple[int, int]]:
         world_size = get_tensor_model_parallel_world_size()
         hidden_size = self.config.hidden_size
         conv_state_shape = (
@@ -460,12 +447,10 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -551,11 +536,10 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
 
 
 def _is_moe_layer(name: str):
-    return any(
-        [experts_name in name for experts_name in [
-            "experts",
-            "router",
-        ]])
+    return any([experts_name in name for experts_name in [
+        "experts",
+        "router",
+    ]])
 
 
 class JambaForSequenceClassification(JambaForCausalLM):
@@ -568,11 +552,10 @@ class JambaForSequenceClassification(JambaForCausalLM):
         self.score = nn.Linear(config.hidden_size, num_labels, bias=score_bias)
 
         pooler_config = vllm_config.model_config.pooler_config
-        self._pooler = Pooler.from_config_with_defaults(
-            pooler_config,
-            pooling_type=PoolingType.LAST,
-            normalize=False,
-            softmax=False)
+        self._pooler = Pooler.from_config_with_defaults(pooler_config,
+                                                        pooling_type=PoolingType.LAST,
+                                                        normalize=False,
+                                                        softmax=False)
 
     def pooler(
         self,

@@ -110,9 +110,7 @@ class NGramWorker(NonLLMProposerWorkerBase):
                     # Do not match itself and do not use unfold and all
                     matches = (input_ids[:-1] == ngram_tensor)
                 else:
-                    windows = input_ids.unfold(dimension=0,
-                                               size=ngram_size,
-                                               step=1)
+                    windows = input_ids.unfold(dimension=0, size=ngram_size, step=1)
                     # Do not match itself
                     matches = (windows[:-1] == ngram_tensor).all(dim=-1)
 
@@ -122,17 +120,14 @@ class NGramWorker(NonLLMProposerWorkerBase):
                 first_match = matches.max(dim=-1)
                 if first_match.values.item():
                     proposal_start_idx = first_match.indices.add_(ngram_size)
-                    spec_indices = (
-                        proposal_start_idx).repeat(sample_len) + torch.arange(
-                            sample_len, device=cur_device)
+                    spec_indices = (proposal_start_idx).repeat(
+                        sample_len) + torch.arange(sample_len, device=cur_device)
                     spec_indices.clamp_(max=input_ids.shape[-1] - 1)
-                    res = input_ids.gather(dim=-1,
-                                           index=spec_indices).to(self.device)
+                    res = input_ids.gather(dim=-1, index=spec_indices).to(self.device)
                     token_id_list.append(res)
                     token_prob_list.append(
                         torch.nn.functional.one_hot(
-                            res,
-                            num_classes=self.vocab_size).to(torch.float32))
+                            res, num_classes=self.vocab_size).to(torch.float32))
                     has_spec_out = True
                     break
             else:
@@ -169,8 +164,8 @@ class NGramWorker(NonLLMProposerWorkerBase):
         """Produce speculations given an input batch of sequences. The number of
         speculative tokens per sequence is determined by max_proposal_len.
         """
-        return self._proposer.get_spec_proposals(
-            execute_model_req, seq_ids_with_bonus_token_in_last_step)
+        return self._proposer.get_spec_proposals(execute_model_req,
+                                                 seq_ids_with_bonus_token_in_last_step)
 
     def _raise_if_unsupported(
         self,
@@ -181,15 +176,11 @@ class NGramWorker(NonLLMProposerWorkerBase):
         """
         if any([
                 execute_model_req.blocks_to_swap_in,
-                execute_model_req.blocks_to_swap_out,
-                execute_model_req.blocks_to_copy
+                execute_model_req.blocks_to_swap_out, execute_model_req.blocks_to_copy
         ]):
-            raise NotImplementedError(
-                "NGramWorker does not support cache operations")
+            raise NotImplementedError("NGramWorker does not support cache operations")
 
         if any(
                 len(seq_group_metadata.seq_data.keys()) != 1
-                for seq_group_metadata in
-                execute_model_req.seq_group_metadata_list):
-            raise NotImplementedError(
-                "NGramWorker does not support beam search.")
+                for seq_group_metadata in execute_model_req.seq_group_metadata_list):
+            raise NotImplementedError("NGramWorker does not support beam search.")

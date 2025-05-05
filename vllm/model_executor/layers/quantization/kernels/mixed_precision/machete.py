@@ -24,8 +24,7 @@ class MacheteLinearKernel(MPLinearKernel):
         return 90
 
     @classmethod
-    def can_implement(cls,
-                      c: MPLinearLayerConfig) -> Tuple[bool, Optional[str]]:
+    def can_implement(cls, c: MPLinearLayerConfig) -> Tuple[bool, Optional[str]]:
 
         if c.has_g_idx and\
             c.partition_weight_shape[0] != c.full_weight_shape[0]:
@@ -35,8 +34,7 @@ class MacheteLinearKernel(MPLinearKernel):
         if c.zero_points:
             return False, "Zero points currently not supported by Machete"
 
-        if c.weight_type not in query_machete_supported_quant_types(
-                c.zero_points):
+        if c.weight_type not in query_machete_supported_quant_types(c.zero_points):
             return False, f"Quant type ({c.weight_type}) not supported by "\
                            "Machete, supported types are: "\
                            f"{query_machete_supported_quant_types(c.zero_points)}"

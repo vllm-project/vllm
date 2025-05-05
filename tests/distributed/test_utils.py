@@ -22,8 +22,7 @@ class _CUDADeviceCountStatelessTestActor:
         return cuda_device_count_stateless()
 
     def set_cuda_visible_devices(self, cuda_visible_devices: str):
-        update_environment_variables(
-            {"CUDA_VISIBLE_DEVICES": cuda_visible_devices})
+        update_environment_variables({"CUDA_VISIBLE_DEVICES": cuda_visible_devices})
 
     def get_cuda_visible_devices(self):
         return envs.CUDA_VISIBLE_DEVICES
@@ -34,9 +33,7 @@ def test_cuda_device_count_stateless():
     CUDA_VISIBLE_DEVICES is changed."""
     actor = _CUDADeviceCountStatelessTestActor.options(  # type: ignore
         num_gpus=2).remote()
-    assert len(
-        sorted(ray.get(
-            actor.get_cuda_visible_devices.remote()).split(","))) == 2
+    assert len(sorted(ray.get(actor.get_cuda_visible_devices.remote()).split(","))) == 2
     assert ray.get(actor.get_count.remote()) == 2
     ray.get(actor.set_cuda_visible_devices.remote("0"))
     assert ray.get(actor.get_count.remote()) == 1
@@ -119,8 +116,8 @@ def allgather_worker(rank, WORLD_SIZE, port1, port2):
 
 @pytest.mark.skip(reason="This test is flaky and prone to hang.")
 @multi_gpu_test(num_gpus=4)
-@pytest.mark.parametrize(
-    "worker", [cpu_worker, gpu_worker, broadcast_worker, allgather_worker])
+@pytest.mark.parametrize("worker",
+                         [cpu_worker, gpu_worker, broadcast_worker, allgather_worker])
 def test_stateless_process_group(worker):
     port1 = get_open_port()
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:

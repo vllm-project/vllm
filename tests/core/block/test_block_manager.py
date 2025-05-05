@@ -63,8 +63,7 @@ def test_can_allocate_seq_group(block_size: int, num_seqs_per_group: int,
 @pytest.mark.parametrize("watermark", [0.0, 0.5])
 def test_can_allocate_seq_group_encoder_decoder(block_size: int,
                                                 num_seqs_per_group: int,
-                                                num_gpu_blocks: int,
-                                                watermark: float):
+                                                num_gpu_blocks: int, watermark: float):
     block_manager = SelfAttnBlockSpaceManager(
         block_size=block_size,
         num_gpu_blocks=num_gpu_blocks,
@@ -80,8 +79,8 @@ def test_can_allocate_seq_group_encoder_decoder(block_size: int,
     # different output lens.
     num_output_blocks = num_output_blocks_per_seq
 
-    for bdx, num_prompt_blocks in enumerate(
-            range(1, num_gpu_blocks - num_output_blocks)):
+    for bdx, num_prompt_blocks in enumerate(range(1,
+                                                  num_gpu_blocks - num_output_blocks)):
         num_cross_blocks_per_seq = num_prompt_blocks
 
         seq_group = create_seq_group_encoder_decoder(
@@ -193,8 +192,7 @@ def test_can_allocate_encoder_decoder_fails_with_prefix_cache(
     seq_group = create_seq_group_encoder_decoder(
         seq_prompt_len=block_size * num_prompt_blocks,
         seq_output_lens=[
-            block_size * num_output_blocks_per_seq
-            for _ in range(num_seqs_per_group)
+            block_size * num_output_blocks_per_seq for _ in range(num_seqs_per_group)
         ],
         request_id="0")
 
@@ -211,8 +209,7 @@ def test_can_allocate_encoder_decoder_fails_with_prefix_cache(
 @pytest.mark.parametrize("prompt_len", [1, 7, 8])
 @pytest.mark.parametrize("num_slots_to_append", [1, 8, 129])
 @pytest.mark.parametrize("num_lookahead_slots", [0, 10])
-def test_append_slots(block_size, prompt_len, num_slots_to_append,
-                      num_lookahead_slots):
+def test_append_slots(block_size, prompt_len, num_slots_to_append, num_lookahead_slots):
     """Verify append_slots consumes the correct number of blocks from the block
     table.
     """
@@ -253,9 +250,7 @@ def test_append_slots(block_size, prompt_len, num_slots_to_append,
     expected_consumed_blocks = len(
         list(
             chunk_list(
-                list(
-                    range(prompt_len + num_slots_to_append +
-                          num_lookahead_slots)),
+                list(range(prompt_len + num_slots_to_append + num_lookahead_slots)),
                 block_size))) - len(
                     list(chunk_list(list(range(prompt_len)), block_size)))
     assert num_consumed_blocks == expected_consumed_blocks
@@ -318,8 +313,7 @@ def test_swap(block_size, num_cpu_blocks, num_gpu_blocks, num_lookahead_slots,
 @pytest.mark.parametrize("num_gpu_blocks", [4])
 @pytest.mark.parametrize("num_lookahead_slots", [3, 8, 10])
 @pytest.mark.parametrize("enable_caching", [True, False])
-def test_can_swap(block_size, num_gpu_blocks, num_lookahead_slots,
-                  enable_caching):
+def test_can_swap(block_size, num_gpu_blocks, num_lookahead_slots, enable_caching):
     """ Verify the block manager can correctly determine if a sequence group
         can be swapped in/out.
     """
@@ -354,8 +348,8 @@ def test_can_swap(block_size, num_gpu_blocks, num_lookahead_slots,
         assert block_manager.can_swap_in(seq_group,
                                          num_lookahead_slots) == AllocStatus.OK
     else:
-        assert block_manager.can_swap_in(
-            seq_group, num_lookahead_slots) == AllocStatus.NEVER
+        assert block_manager.can_swap_in(seq_group,
+                                         num_lookahead_slots) == AllocStatus.NEVER
 
     # During Swapped out, 2 cached blocks were evicted from the GPU,
     # so the prompt1 can't be swapped in
@@ -369,11 +363,11 @@ def test_can_swap(block_size, num_gpu_blocks, num_lookahead_slots,
 
     # Swap seq group from CPU -> GPU.
     if num_lookahead_slots <= block_size:
-        assert block_manager.can_swap_in(
-            seq_group, num_lookahead_slots) == AllocStatus.LATER
+        assert block_manager.can_swap_in(seq_group,
+                                         num_lookahead_slots) == AllocStatus.LATER
     else:
-        assert block_manager.can_swap_in(
-            seq_group, num_lookahead_slots) == AllocStatus.NEVER
+        assert block_manager.can_swap_in(seq_group,
+                                         num_lookahead_slots) == AllocStatus.NEVER
 
 
 @pytest.mark.parametrize("num_lookahead_slots", [0, 2, 10])
@@ -413,13 +407,13 @@ def test_swap_in_infeasible(num_lookahead_slots, enable_caching):
     # the total number of available GPU blocks then the swap
     # should fail.
     num_unseen_tokens = 1
-    if (num_lookahead_slots + num_unseen_tokens +
-            prompt_length) <= (block_size * num_gpu_blocks):
+    if (num_lookahead_slots + num_unseen_tokens + prompt_length) <= (block_size *
+                                                                     num_gpu_blocks):
         assert block_manager.can_swap_in(seq_group,
                                          num_lookahead_slots) == AllocStatus.OK
     else:
-        assert block_manager.can_swap_in(
-            seq_group, num_lookahead_slots) == AllocStatus.NEVER
+        assert block_manager.can_swap_in(seq_group,
+                                         num_lookahead_slots) == AllocStatus.NEVER
 
 
 # TODO(cade/kaiyang): add comprehensive tests for swapping at allocator level.
@@ -429,8 +423,7 @@ def test_swap_in_infeasible(num_lookahead_slots, enable_caching):
 @pytest.mark.parametrize("prompt_len", [10, 300, 1000])
 @pytest.mark.parametrize("num_slots_to_append", [50])
 @pytest.mark.parametrize("sliding_window", [20, 32, 200, 512])
-def test_sliding_window(block_size, prompt_len, num_slots_to_append,
-                        sliding_window):
+def test_sliding_window(block_size, prompt_len, num_slots_to_append, sliding_window):
     """Verify append_slots consumes the correct number of blocks from the block
     table.
     """

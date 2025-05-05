@@ -99,13 +99,9 @@ def test_embedding_1_to_1(vllm_runner, hf_runner, emb_model_name):
     with hf_runner(emb_model_name, dtype=DTYPE,
                    is_sentence_transformer=True) as hf_model:
         hf_embeddings = hf_model.encode(text_pair)
-        hf_outputs = [
-            F.cosine_similarity(*map(torch.tensor, hf_embeddings), dim=0)
-        ]
+        hf_outputs = [F.cosine_similarity(*map(torch.tensor, hf_embeddings), dim=0)]
 
-    with vllm_runner(emb_model_name,
-                     task="embed",
-                     dtype=DTYPE,
+    with vllm_runner(emb_model_name, task="embed", dtype=DTYPE,
                      max_model_len=None) as vllm_model:
         vllm_outputs = vllm_model.score(text_pair[0], text_pair[1])
 
@@ -123,17 +119,13 @@ def test_embedding_1_to_N(vllm_runner, hf_runner, emb_model_name):
 
     with hf_runner(emb_model_name, dtype=DTYPE,
                    is_sentence_transformer=True) as hf_model:
-        hf_embeddings = [
-            hf_model.encode(text_pair) for text_pair in text_pairs
-        ]
+        hf_embeddings = [hf_model.encode(text_pair) for text_pair in text_pairs]
         hf_outputs = [
             F.cosine_similarity(*map(torch.tensor, pair), dim=0)
             for pair in hf_embeddings
         ]
 
-    with vllm_runner(emb_model_name,
-                     task="embed",
-                     dtype=DTYPE,
+    with vllm_runner(emb_model_name, task="embed", dtype=DTYPE,
                      max_model_len=None) as vllm_model:
         vllm_outputs = vllm_model.score(TEXTS_1[0], TEXTS_2)
 
@@ -152,17 +144,13 @@ def test_embedding_N_to_N(vllm_runner, hf_runner, emb_model_name):
 
     with hf_runner(emb_model_name, dtype=DTYPE,
                    is_sentence_transformer=True) as hf_model:
-        hf_embeddings = [
-            hf_model.encode(text_pair) for text_pair in text_pairs
-        ]
+        hf_embeddings = [hf_model.encode(text_pair) for text_pair in text_pairs]
         hf_outputs = [
             F.cosine_similarity(*map(torch.tensor, pair), dim=0)
             for pair in hf_embeddings
         ]
 
-    with vllm_runner(emb_model_name,
-                     task="embed",
-                     dtype=DTYPE,
+    with vllm_runner(emb_model_name, task="embed", dtype=DTYPE,
                      max_model_len=None) as vllm_model:
         vllm_outputs = vllm_model.score(TEXTS_1, TEXTS_2)
 

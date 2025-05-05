@@ -101,14 +101,10 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner, model_args):
             assert zp_valid(gate_up_proj.input_zero_point)
             assert zp_valid(down_proj.input_zero_point)
 
-            assert isinstance(qkv_proj.quant_method,
-                              CompressedTensorsLinearMethod)
-            assert isinstance(o_proj.quant_method,
-                              CompressedTensorsLinearMethod)
-            assert isinstance(gate_up_proj.quant_method,
-                              CompressedTensorsLinearMethod)
-            assert isinstance(down_proj.quant_method,
-                              CompressedTensorsLinearMethod)
+            assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
+            assert isinstance(o_proj.quant_method, CompressedTensorsLinearMethod)
+            assert isinstance(gate_up_proj.quant_method, CompressedTensorsLinearMethod)
+            assert isinstance(down_proj.quant_method, CompressedTensorsLinearMethod)
             assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8Int8)
 
             assert qkv_proj.scheme.strategy == strategy
@@ -145,8 +141,8 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner, model_args):
 )
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [10])
-@pytest.mark.parametrize(
-    "use_aiter", [True, False] if current_platform.is_rocm() else [False])
+@pytest.mark.parametrize("use_aiter",
+                         [True, False] if current_platform.is_rocm() else [False])
 def test_compressed_tensors_w8a8_logprobs(
     hf_runner,
     vllm_runner,
@@ -164,26 +160,24 @@ def test_compressed_tensors_w8a8_logprobs(
 
     if use_aiter:
         if model_path not in ROCM_AITER_SUPPORTED_INT8_MODEL:
-            pytest.skip(
-                f"Skip model {model_path} as it is not support by aiter.")
+            pytest.skip(f"Skip model {model_path} as it is not support by aiter.")
         # this will enable VLLM_ROCM_USE_AITER_LINEAR
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
     dtype = "bfloat16"
 
     # skip language translation prompt for the static per tensor asym model
-    if (model_path ==
-            "nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Static-Per-Tensor-Asym"
+    if (model_path == "nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Static-Per-Tensor-Asym"
         ):  # noqa: E501
         example_prompts = example_prompts[0:-1]
 
     with hf_runner(model_path, dtype=dtype) as hf_model:
-        hf_outputs = hf_model.generate_greedy_logprobs_limit(
-            example_prompts, max_tokens, num_logprobs)
+        hf_outputs = hf_model.generate_greedy_logprobs_limit(example_prompts,
+                                                             max_tokens, num_logprobs)
 
     with vllm_runner(model_path, dtype=dtype) as vllm_model:
-        vllm_outputs = vllm_model.generate_greedy_logprobs(
-            example_prompts, max_tokens, num_logprobs)
+        vllm_outputs = vllm_model.generate_greedy_logprobs(example_prompts, max_tokens,
+                                                           num_logprobs)
 
     check_logprobs_close(
         outputs_0_lst=hf_outputs,
@@ -218,8 +212,8 @@ def test_compressed_tensors_no_enforce_eager(vllm_runner):
         ),
     ],
 )
-@pytest.mark.parametrize(
-    "use_aiter", [True, False] if current_platform.is_rocm() else [False])
+@pytest.mark.parametrize("use_aiter",
+                         [True, False] if current_platform.is_rocm() else [False])
 def test_compressed_tensors_w8a8_dynamic_per_token(
     vllm_runner,
     model_args,
@@ -234,8 +228,7 @@ def test_compressed_tensors_w8a8_dynamic_per_token(
 
     if use_aiter:
         if model_path not in ROCM_AITER_SUPPORTED_INT8_MODEL:
-            pytest.skip(
-                f"Skip model {model_path} as it is not support by aiter.")
+            pytest.skip(f"Skip model {model_path} as it is not support by aiter.")
         # this will enable VLLM_ROCM_USE_AITER_LINEAR
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
@@ -246,8 +239,7 @@ def test_compressed_tensors_w8a8_dynamic_per_token(
 
             qkv_proj = layer.self_attn.qkv_proj
 
-            assert isinstance(qkv_proj.quant_method,
-                              CompressedTensorsLinearMethod)
+            assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
             assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8Int8)
             assert not qkv_proj.scheme.is_static_input_scheme
             assert qkv_proj.scheme.strategy == strategy
@@ -261,18 +253,16 @@ def test_compressed_tensors_w8a8_dynamic_per_token(
 
 @pytest.mark.parametrize(
     "wNa16_args",
-    [("nm-testing/tinyllama-oneshot-w4a16-channel-v2", "channel", None, 8,
-      True, False),
-     ("nm-testing/tinyllama-oneshot-w4a16-group128-v2", "group", 128, 8, True,
+    [("nm-testing/tinyllama-oneshot-w4a16-channel-v2", "channel", None, 8, True, False),
+     ("nm-testing/tinyllama-oneshot-w4a16-group128-v2", "group", 128, 8, True, False),
+     ("nm-testing/tinyllama-oneshot-w8a16-per-channel", "channel", None, 4, True,
       False),
-     ("nm-testing/tinyllama-oneshot-w8a16-per-channel", "channel", None, 4,
-      True, False),
-     ("nm-testing/TinyLlama-1.1B-Chat-v1.0-awq-group128-asym256", "group", 128,
-      8, False, False),
-     ("nm-testing/TinyLlama-1.1B-Chat-v1.0-W4A16-G128-Asym-Updated-Channel",
-      "channel", None, 8, False, False),
-     ("nm-testing/TinyLlama-1.1B-Chat-v1.0-W4A16-G128-Asym-Updated-ActOrder",
-      "group", 128, 8, False, True)],
+     ("nm-testing/TinyLlama-1.1B-Chat-v1.0-awq-group128-asym256", "group", 128, 8,
+      False, False),
+     ("nm-testing/TinyLlama-1.1B-Chat-v1.0-W4A16-G128-Asym-Updated-Channel", "channel",
+      None, 8, False, False),
+     ("nm-testing/TinyLlama-1.1B-Chat-v1.0-W4A16-G128-Asym-Updated-ActOrder", "group",
+      128, 8, False, True)],
 )
 @pytest.mark.skipif(not current_platform.is_cuda(),
                     reason="The tests are skipped on non-CUDA platform.")
@@ -284,13 +274,11 @@ def test_compressed_tensors_wNa16(vllm_runner, wNa16_args):
             layer = model.model.layers[0]
 
             qkv_proj = layer.self_attn.qkv_proj
-            assert isinstance(qkv_proj.quant_method,
-                              CompressedTensorsLinearMethod)
+            assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
             assert isinstance(qkv_proj.scheme, CompressedTensorsWNA16)
 
             assert qkv_proj.scheme.strategy == strategy
-            assert qkv_proj.scheme.group_size == (-1
-                                                  if group is None else group)
+            assert qkv_proj.scheme.group_size == (-1 if group is None else group)
 
             assert qkv_proj.scheme.pack_factor == pack_factor
             assert qkv_proj.scheme.symmetric == symmetric
@@ -313,8 +301,7 @@ def test_compressed_tensors_w4a16_marlin24(vllm_runner):
 
             qkv_proj = layer.self_attn.qkv_proj
 
-            assert isinstance(qkv_proj.quant_method,
-                              CompressedTensorsLinearMethod)
+            assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
             assert isinstance(qkv_proj.scheme, CompressedTensorsW4A16Sparse24)
             assert qkv_proj.weight_packed.dtype is torch.int32
 
@@ -333,8 +320,7 @@ def test_compressed_tensors_fp8(vllm_runner):
 
             qkv_proj = layer.self_attn.qkv_proj
 
-            assert isinstance(qkv_proj.quant_method,
-                              CompressedTensorsLinearMethod)
+            assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
             assert isinstance(
                 qkv_proj.scheme,
                 (CompressedTensorsW8A8Fp8, CompressedTensorsW8A16Fp8),
@@ -367,10 +353,7 @@ def test_compressed_tensors_kv_cache(vllm_runner):
     not sparse_cutlass_supported(),
     reason="Sparse FP8 is not yet supported on this GPU type.",
 )
-def _test_2of4_quant_models(qkv_proj,
-                            weight_strategy,
-                            input_strategy,
-                            format="dense"):
+def _test_2of4_quant_models(qkv_proj, weight_strategy, input_strategy, format="dense"):
     assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
     assert isinstance(qkv_proj.scheme, CompressedTensors24)
 
@@ -384,8 +367,7 @@ def _test_2of4_quant_models(qkv_proj,
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda()
-    or not current_platform.has_device_capability(90),
+    not current_platform.is_cuda() or not current_platform.has_device_capability(90),
     reason="Sparse FP8 is not yet supported on this GPU type.",
 )
 @pytest.mark.parametrize(
@@ -432,8 +414,7 @@ def test_compressed_tensors_2of4_quant_fp8(vllm_runner, args_2of4):
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda()
-    or not current_platform.has_device_capability(90),
+    not current_platform.is_cuda() or not current_platform.has_device_capability(90),
     reason="Sparse FP8 is not yet supported on this GPU type.",
 )
 @pytest.mark.parametrize(
@@ -594,8 +575,7 @@ def test_compressed_tensors_2of4_sparse(vllm_runner, args_2of4):
             layer = model.model.layers[0]
 
             qkv_proj = layer.self_attn.qkv_proj
-            assert isinstance(qkv_proj.quant_method,
-                              CompressedTensorsLinearMethod)
+            assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
             assert isinstance(qkv_proj.scheme, CompressedTensors24)
 
             assert qkv_proj.scheme.weight_quant is None
@@ -619,8 +599,8 @@ def test_compressed_tensors_2of4_sparse(vllm_runner, args_2of4):
     not sparse_cutlass_supported(),
     reason="Cutlass is not yet supported on this GPU type.",
 )
-@pytest.mark.parametrize(
-    "args_2of4", [("nm-testing/llama2.c-stories42M-pruned2.4-compressed")])
+@pytest.mark.parametrize("args_2of4",
+                         [("nm-testing/llama2.c-stories42M-pruned2.4-compressed")])
 def test_compressed_tensors_2of4_sparse_compressed(vllm_runner, args_2of4):
     model = args_2of4
     with vllm_runner(model) as llm:
@@ -629,8 +609,7 @@ def test_compressed_tensors_2of4_sparse_compressed(vllm_runner, args_2of4):
             layer = model.model.layers[0]
 
             qkv_proj = layer.self_attn.qkv_proj
-            assert isinstance(qkv_proj.quant_method,
-                              CompressedTensorsLinearMethod)
+            assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
             assert isinstance(qkv_proj.scheme, CompressedTensors24)
 
             assert qkv_proj.scheme.weight_quant is None

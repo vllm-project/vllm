@@ -57,8 +57,7 @@ if __name__ == "__main__":
 
     if not serving_results.empty:
         serving_results = serving_results[list(
-            serving_column_mapping.keys())].rename(
-                columns=serving_column_mapping)
+            serving_column_mapping.keys())].rename(columns=serving_column_mapping)
 
     serving_md_table_with_headers = tabulate(serving_results,
                                              headers='keys',

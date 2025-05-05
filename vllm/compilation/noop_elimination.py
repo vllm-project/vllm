@@ -104,8 +104,7 @@ class NoOpEliminationPass(VllmInductorPass):
 
     def all_dims_equivalent(self, dims: Iterable[Union[int, torch.fx.Node]],
                             i_dims: Iterable[Union[int, SymInt]]):
-        return all(
-            self.dims_equivalent(s, i_s) for s, i_s in zip(dims, i_dims))
+        return all(self.dims_equivalent(s, i_s) for s, i_s in zip(dims, i_dims))
 
     def dims_equivalent(self, dim: Union[int, torch.fx.Node],
                         i_dim: Union[int, SymInt]) -> bool:

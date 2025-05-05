@@ -59,11 +59,9 @@ def _check_vllm_model_forward(model: Union[Type[object], object]) -> bool:
         return False
 
     vllm_kws = ("input_ids", "positions")
-    missing_kws = tuple(kw for kw in vllm_kws
-                        if not supports_kw(model_forward, kw))
+    missing_kws = tuple(kw for kw in vllm_kws if not supports_kw(model_forward, kw))
 
-    if missing_kws and (isinstance(model, type)
-                        and issubclass(model, nn.Module)):
+    if missing_kws and (isinstance(model, type) and issubclass(model, nn.Module)):
         logger.warning(
             "The model (%s) is missing "
             "vLLM-specific keywords from its `forward` method: %s",
@@ -110,8 +108,7 @@ def is_text_generation_model(
 
 
 @overload
-def is_text_generation_model(
-        model: object) -> TypeIs[VllmModelForTextGeneration]:
+def is_text_generation_model(model: object) -> TypeIs[VllmModelForTextGeneration]:
     ...
 
 

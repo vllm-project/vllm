@@ -159,8 +159,8 @@ class SamplingMetadata:
             selected_token_indices,
             categorized_sample_indices,
             num_prompts,
-        ) = _prepare_seq_groups(seq_group_metadata_list, seq_lens, query_lens,
-                                device, generators, cache)
+        ) = _prepare_seq_groups(seq_group_metadata_list, seq_lens, query_lens, device,
+                                generators, cache)
         selected_token_indices = async_tensor_h2d(
             selected_token_indices,
             dtype=torch.long,
@@ -187,11 +187,10 @@ class SamplingMetadata:
         return sampling_metadata
 
     def __repr__(self) -> str:
-        return (
-            "SamplingMetadata("
-            f"seq_groups={self.seq_groups}, "
-            f"selected_token_indices={self.selected_token_indices}, "
-            f"categorized_sample_indices={self.categorized_sample_indices})")
+        return ("SamplingMetadata("
+                f"seq_groups={self.seq_groups}, "
+                f"selected_token_indices={self.selected_token_indices}, "
+                f"categorized_sample_indices={self.categorized_sample_indices})")
 
 
 def _prepare_seq_groups(
@@ -285,8 +284,8 @@ def _prepare_seq_groups(
             query_len, seq_len = query_lens[i], seq_lens[i]
             # If we need sampling, exclude num_prefill_sample tokens from
             # prompt logprob.
-            prompt_logprob_len = (query_len - num_prefill_sample
-                                  if do_sample else query_len)
+            prompt_logprob_len = (query_len -
+                                  num_prefill_sample if do_sample else query_len)
             sample_len = num_prefill_sample if do_sample else 0
         else:
             # Decode
@@ -364,8 +363,7 @@ def _prepare_seq_groups(
     if cache is not None:
         cache.reset()
 
-    return (seq_groups, selected_token_indices, categorized_sample_indices,
-            num_prompts)
+    return (seq_groups, selected_token_indices, categorized_sample_indices, num_prompts)
 
 
 @dataclass
@@ -427,8 +425,7 @@ class SamplingTensors:
                 do_top_p_top_k = True
             if not do_min_p and min_p > _SAMPLING_EPS:
                 do_min_p = True
-            if not do_penalties and (abs(p) >= _SAMPLING_EPS
-                                     or abs(f) >= _SAMPLING_EPS
+            if not do_penalties and (abs(p) >= _SAMPLING_EPS or abs(f) >= _SAMPLING_EPS
                                      or abs(r - 1.0) >= _SAMPLING_EPS):
                 do_penalties = True
 
@@ -466,11 +463,9 @@ class SamplingTensors:
                         and sampling_params.prompt_logprobs is not None):
                     prefill_len = len(seq_group.prompt_logprob_indices)
                     prompt_tokens.extend(
-                        array(VLLM_TOKEN_ID_ARRAY_TYPE)
-                        for _ in range(prefill_len))
+                        array(VLLM_TOKEN_ID_ARRAY_TYPE) for _ in range(prefill_len))
                     output_tokens.extend(
-                        array(VLLM_TOKEN_ID_ARRAY_TYPE)
-                        for _ in range(prefill_len))
+                        array(VLLM_TOKEN_ID_ARRAY_TYPE) for _ in range(prefill_len))
                 if seq_group.do_sample:
                     for seq_id in seq_ids:
                         seq_data = seq_group.seq_data[seq_id]

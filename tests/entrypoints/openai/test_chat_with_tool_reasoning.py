@@ -14,8 +14,7 @@ MODEL_NAME = "Qwen/QwQ-32B"
 def server():  # noqa: F811
     args = [
         "--max-model-len", "8192", "--enforce-eager", "--reasoning-parser",
-        "deepseek_r1", "--enable-auto-tool-choice", "--tool-call-parser",
-        "hermes"
+        "deepseek_r1", "--enable-auto-tool-choice", "--tool-call-parser", "hermes"
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
@@ -37,8 +36,7 @@ TOOLS = [{
             "type": "object",
             "properties": {
                 "city": {
-                    "type":
-                    "string",
+                    "type": "string",
                     "description":
                     "The city to find the weather for, e.g. 'San Francisco'"
                 },
@@ -104,8 +102,7 @@ def extract_reasoning_and_calls(chunks: list):
 
 # test streaming
 @pytest.mark.asyncio
-async def test_chat_streaming_of_tool_and_reasoning(
-        client: openai.AsyncOpenAI):
+async def test_chat_streaming_of_tool_and_reasoning(client: openai.AsyncOpenAI):
 
     stream = await client.chat.completions.create(
         model=MODEL_NAME,
@@ -119,8 +116,7 @@ async def test_chat_streaming_of_tool_and_reasoning(
     async for chunk in stream:
         chunks.append(chunk)
 
-    reasoning_content, arguments, function_names = extract_reasoning_and_calls(
-        chunks)
+    reasoning_content, arguments, function_names = extract_reasoning_and_calls(chunks)
     assert len(reasoning_content) > 0
     assert len(function_names) > 0 and function_names[0] == FUNC_NAME
     assert len(arguments) > 0 and arguments[0] == FUNC_ARGS

@@ -21,9 +21,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--model",
-                        type=str,
-                        default="jason9693/Qwen2.5-1.5B-apeach")
+    parser.add_argument("--model", type=str, default="jason9693/Qwen2.5-1.5B-apeach")
 
     return parser.parse_args()
 

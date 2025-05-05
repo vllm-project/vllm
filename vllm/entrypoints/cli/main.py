@@ -42,8 +42,7 @@ def main():
     for cmd_module in CMD_MODULES:
         new_cmds = cmd_module.cmd_init()
         for cmd in new_cmds:
-            cmd.subparser_init(subparsers).set_defaults(
-                dispatch_function=cmd.cmd)
+            cmd.subparser_init(subparsers).set_defaults(dispatch_function=cmd.cmd)
             cmds[cmd.name] = cmd
     args = parser.parse_args()
     if args.subparser in cmds:

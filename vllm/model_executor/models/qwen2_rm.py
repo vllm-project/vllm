@@ -33,8 +33,7 @@ class ReLU(nn.Module):
         return self.activation(input)
 
 
-class Qwen2RewardBaseModel(nn.Module, SupportsLoRA, SupportsPP,
-                           SupportsV0Only):
+class Qwen2RewardBaseModel(nn.Module, SupportsLoRA, SupportsPP, SupportsV0Only):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -95,10 +94,8 @@ class Qwen2RewardBaseModel(nn.Module, SupportsLoRA, SupportsPP,
     ) -> Optional[PoolerOutput]:
         return self._pooler(hidden_states, pooling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
-        loader = AutoWeightsLoader(self,
-                                   ignore_unexpected_prefixes=["lm_head."])
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
+        loader = AutoWeightsLoader(self, ignore_unexpected_prefixes=["lm_head."])
         return loader.load_weights(weights)
 
 
@@ -108,11 +105,10 @@ class Qwen2ForRewardModel(Qwen2RewardBaseModel):
         vllm_config.model_config.hf_config.num_labels = 1
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         pooler_config = vllm_config.model_config.pooler_config
-        self._pooler = Pooler.from_config_with_defaults(
-            pooler_config,
-            pooling_type=PoolingType.ALL,
-            normalize=False,
-            softmax=False)
+        self._pooler = Pooler.from_config_with_defaults(pooler_config,
+                                                        pooling_type=PoolingType.ALL,
+                                                        normalize=False,
+                                                        softmax=False)
 
 
 class Qwen2ForProcessRewardModel(Qwen2RewardBaseModel):

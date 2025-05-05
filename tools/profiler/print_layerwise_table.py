@@ -56,15 +56,12 @@ if __name__ == "__main__":
         f'{[x for x in profile_data.keys() if "prefill" in x or "decode" in x]}') #noqa
 
     if args.table == "summary":
-        entries_and_depths = flatten_entries(
-            SummaryStatsEntry, profile_data[args.phase]["summary_stats"])
-        column_widths = dict(name=80,
-                             cuda_time_us=12,
-                             pct_cuda_time=12,
-                             invocations=15)
+        entries_and_depths = flatten_entries(SummaryStatsEntry,
+                                             profile_data[args.phase]["summary_stats"])
+        column_widths = dict(name=80, cuda_time_us=12, pct_cuda_time=12, invocations=15)
     elif args.table == "model":
-        entries_and_depths = flatten_entries(
-            ModelStatsEntry, profile_data[args.phase]["model_stats"])
+        entries_and_depths = flatten_entries(ModelStatsEntry,
+                                             profile_data[args.phase]["model_stats"])
         column_widths = dict(name=60,
                              cpu_time_us=12,
                              cuda_time_us=12,
@@ -74,10 +71,9 @@ if __name__ == "__main__":
     # indent entry names based on the depth
     entries = []
     for entry, depth in entries_and_depths:
-        entry.name = indent_string(
-            entry.name,
-            indent=depth,
-            indent_style=lambda indent: "|" + "-" * indent + " ")
+        entry.name = indent_string(entry.name,
+                                   indent=depth,
+                                   indent_style=lambda indent: "|" + "-" * indent + " ")
         entries.append(entry)
 
     TablePrinter(type(entries[0]), column_widths).print_table(entries)

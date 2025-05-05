@@ -47,12 +47,9 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                 input_scale = getattr(layer, 'input_scale', None)
 
                 weight, max_w_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
-                    weight=weight,
-                    weight_scale=max_w_scale,
-                    input_scale=input_scale)
+                    weight=weight, weight_scale=max_w_scale, input_scale=input_scale)
                 if input_scale is not None:
-                    layer.input_scale = Parameter(input_scale,
-                                                  requires_grad=False)
+                    layer.input_scale = Parameter(input_scale, requires_grad=False)
 
             layer.weight = Parameter(weight.t(), requires_grad=False)
             layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
@@ -70,8 +67,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                         weight_scale=layer.weight_scale,
                         input_scale=input_scale)
                 if input_scale is not None:
-                    layer.input_scale = Parameter(input_scale,
-                                                  requires_grad=False)
+                    layer.input_scale = Parameter(input_scale, requires_grad=False)
             else:
                 weight_scale = layer.weight_scale.data
 
@@ -84,26 +80,22 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
         # INPUT SCALE
         if self.is_static_input_scheme and hasattr(layer, 'input_scale'):
-            layer.input_scale = Parameter(layer.input_scale.max(),
-                                          requires_grad=False)
+            layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
         else:
             layer.input_scale = None
 
-    def create_weights(self, layer: torch.nn.Module,
-                       output_partition_sizes: List[int],
-                       input_size_per_partition: int,
-                       params_dtype: torch.dtype, weight_loader: Callable,
-                       **kwargs):
+    def create_weights(self, layer: torch.nn.Module, output_partition_sizes: List[int],
+                       input_size_per_partition: int, params_dtype: torch.dtype,
+                       weight_loader: Callable, **kwargs):
         maybe_create_device_identity()
 
         output_size_per_partition = sum(output_partition_sizes)
         layer.logical_widths = output_partition_sizes
 
         # WEIGHT
-        weight = ModelWeightParameter(data=torch.empty(
-            output_size_per_partition,
-            input_size_per_partition,
-            dtype=torch.float8_e4m3fn),
+        weight = ModelWeightParameter(data=torch.empty(output_size_per_partition,
+                                                       input_size_per_partition,
+                                                       dtype=torch.float8_e4m3fn),
                                       input_dim=1,
                                       output_dim=0,
                                       weight_loader=weight_loader)
@@ -113,11 +105,10 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         # TODO: update create_xxx_parameter functions to return
         # the newly added parameters
         if self.strategy == QuantizationStrategy.CHANNEL:
-            weight_scale = ChannelQuantScaleParameter(
-                data=torch.empty((sum(output_partition_sizes), 1),
-                                 dtype=torch.float32),
-                output_dim=0,
-                weight_loader=weight_loader)
+            weight_scale = ChannelQuantScaleParameter(data=torch.empty(
+                (sum(output_partition_sizes), 1), dtype=torch.float32),
+                                                      output_dim=0,
+                                                      weight_loader=weight_loader)
         else:
             assert self.strategy == QuantizationStrategy.TENSOR
             weight_scale = PerTensorScaleParameter(data=torch.empty(

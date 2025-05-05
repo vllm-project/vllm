@@ -15,8 +15,7 @@ from vllm.lora.layers import LoRAMapping
 from vllm.triton_utils import HAS_TRITON
 
 if HAS_TRITON:
-    from vllm.lora.ops.triton_ops import (LoRAKernelMeta, lora_expand,
-                                          lora_shrink)
+    from vllm.lora.ops.triton_ops import (LoRAKernelMeta, lora_expand, lora_shrink)
 
 from .punica_base import PunicaWrapperBase
 
@@ -35,8 +34,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
 
     def __init__(self, max_num_batched_tokens: int, max_batches: int,
                  device: Union[torch.device, str], **kwargs):
-        PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches,
-                                   device)
+        PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches, device)
 
         self.max_loras = kwargs['max_loras']
 
@@ -48,34 +46,30 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         # here), V0 captures the graph as if max_num_seqs is set to
         # the capture size.
         # V1 doesn't have this problem and always respects max_num_seqs.
-        max_num_prompts = (max_batches
-                           if envs.VLLM_USE_V1 else max_num_batched_tokens)
+        max_num_prompts = (max_batches if envs.VLLM_USE_V1 else max_num_batched_tokens)
         self.prompt_mapping_meta = LoRAKernelMeta.make(self.max_loras,
                                                        max_num_prompts,
                                                        device=device)
 
-    def update_metadata(
-            self,
-            mapping: LoRAMapping,
-            lora_index_to_id: List[Optional[int]],
-            max_loras: int,
-            vocab_size: int,
-            extra_vocab_size: int,
-            long_lora_context: Optional["LongContextLoRAContext"] = None,
-            **kwargs):
+    def update_metadata(self,
+                        mapping: LoRAMapping,
+                        lora_index_to_id: List[Optional[int]],
+                        max_loras: int,
+                        vocab_size: int,
+                        extra_vocab_size: int,
+                        long_lora_context: Optional["LongContextLoRAContext"] = None,
+                        **kwargs):
 
         self.is_prefill = mapping.is_prefill
-        self._update_base_metadata(mapping, lora_index_to_id, max_loras,
-                                   vocab_size, extra_vocab_size,
-                                   long_lora_context)
+        self._update_base_metadata(mapping, lora_index_to_id, max_loras, vocab_size,
+                                   extra_vocab_size, long_lora_context)
 
         # Prepare cuda kernel metadata tensors
         self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
         self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
 
     def add_shrink(self, y: torch.Tensor, x: torch.Tensor,
-                   lora_a_stacked: Tuple[torch.Tensor,
-                                         ...], scale: float, **kwargs):
+                   lora_a_stacked: Tuple[torch.Tensor, ...], scale: float, **kwargs):
         """
         Performs GEMM  for multiple slices of lora_a.
             
@@ -130,10 +124,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         y_org = y
         y = y.view(-1, y.shape[-1])
         if lora_bias_stacked is not None:
-            token_lora_indices = torch.narrow(self._token_lora_indices, 0, 0,
-                                              y.size(0))
-            self._apply_bias(token_lora_indices, y, output_slices,
-                             lora_bias_stacked)
+            token_lora_indices = torch.narrow(self._token_lora_indices, 0, 0, y.size(0))
+            self._apply_bias(token_lora_indices, y, output_slices, lora_bias_stacked)
 
         assert x.ndim == 3
         assert x.size(0) == len(output_slices)
@@ -215,8 +207,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
         if lora_bias_stacked is not None:
             assert len(lora_bias_stacked) == len(output_slices)
-            token_lora_indices = torch.narrow(self._token_lora_indices, 0, 0,
-                                              y.size(0))
+            token_lora_indices = torch.narrow(self._token_lora_indices, 0, 0, y.size(0))
             y = self._apply_bias(token_lora_indices, y, output_slices,
                                  lora_bias_stacked)
 
@@ -275,9 +266,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         if buffer is None:
             # We set the buffer to be float32 by default, refer to:
             # https://github.com/triton-lang/triton/issues/1387
-            buffer = torch.zeros((x.size(0), r),
-                                 dtype=torch.float32,
-                                 device=x.device)
+            buffer = torch.zeros((x.size(0), r), dtype=torch.float32, device=x.device)
 
         lora_shrink(x, [lora_a_stacked], buffer.unsqueeze(dim=0),
                     *self.prompt_mapping_meta.meta_args(x.size(0)), scale)

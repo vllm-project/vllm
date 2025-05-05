@@ -102,8 +102,7 @@ async def test_image_embedding(server: RemoteOpenAIServer, model_name: str,
     response.raise_for_status()
     embeddings = EmbeddingResponse.model_validate(response.json())
 
-    hf_prompt_tokens = get_hf_prompt_tokens(model_name, content_text,
-                                            image_url)
+    hf_prompt_tokens = get_hf_prompt_tokens(model_name, content_text, image_url)
 
     assert embeddings.id is not None
     assert len(embeddings.data) == 1

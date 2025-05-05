@@ -119,8 +119,7 @@ class Qwen2VLImageEmbeddingInputs(TypedDict):
     """
 
 
-Qwen2VLImageInputs = Union[Qwen2VLImagePixelInputs,
-                           Qwen2VLImageEmbeddingInputs]
+Qwen2VLImageInputs = Union[Qwen2VLImagePixelInputs, Qwen2VLImageEmbeddingInputs]
 
 
 class Qwen2VLVideoPixelInputs(TypedDict):
@@ -159,8 +158,7 @@ class Qwen2VLVideoEmbeddingInputs(TypedDict):
     """
 
 
-Qwen2VLVideoInputs = Union[Qwen2VLVideoPixelInputs,
-                           Qwen2VLVideoEmbeddingInputs]
+Qwen2VLVideoInputs = Union[Qwen2VLVideoPixelInputs, Qwen2VLVideoEmbeddingInputs]
 
 # === Vision Encoder === #
 
@@ -214,16 +212,14 @@ def apply_rotary_emb_torch(x: torch.Tensor,
     """
     ro_dim = cos.shape[-1] * 2
     assert ro_dim <= x.shape[-1]
-    cos = repeat(
-        cos,
-        "... d -> ... 1 (2 d)" if not interleaved else "... d -> ... 1 (d 2)")
-    sin = repeat(
-        sin,
-        "... d -> ... 1 (2 d)" if not interleaved else "... d -> ... 1 (d 2)")
+    cos = repeat(cos,
+                 "... d -> ... 1 (2 d)" if not interleaved else "... d -> ... 1 (d 2)")
+    sin = repeat(sin,
+                 "... d -> ... 1 (2 d)" if not interleaved else "... d -> ... 1 (d 2)")
     return torch.cat(
         [
-            x[..., :ro_dim] * cos +
-            rotate_half(x[..., :ro_dim], interleaved) * sin, x[..., ro_dim:]
+            x[..., :ro_dim] * cos + rotate_half(x[..., :ro_dim], interleaved) * sin,
+            x[..., ro_dim:]
         ],
         dim=-1,
     )
@@ -318,8 +314,7 @@ class Qwen2VisionAttention(nn.Module):
         q, k, v = self.split_qkv(x)
         batch_size = q.shape[1]
 
-        q, k, v = (rearrange(x, "s b ... -> b s ...").contiguous()
-                   for x in (q, k, v))
+        q, k, v = (rearrange(x, "s b ... -> b s ...").contiguous() for x in (q, k, v))
         if rotary_pos_emb is not None:
             q = apply_rotary_pos_emb_vision(q, rotary_pos_emb)
             k = apply_rotary_pos_emb_vision(k, rotary_pos_emb)
@@ -341,9 +336,7 @@ class Qwen2VisionAttention(nn.Module):
                                             dropout_p=0,
                                             causal=False)
 
-            context_layer = rearrange(output,
-                                      "(b s) ... -> b s ...",
-                                      b=batch_size)
+            context_layer = rearrange(output, "(b s) ... -> b s ...", b=batch_size)
         elif self.attn_backend == _Backend.TORCH_SDPA:
             # Execute attention entry by entry for speed & less VRAM.
             outputs = []
@@ -355,10 +348,7 @@ class Qwen2VisionAttention(nn.Module):
                 v_i = v[:, start_idx:end_idx]
                 q_i, k_i, v_i = (rearrange(x, "b s h d -> b h s d")
                                  for x in [q_i, k_i, v_i])
-                output_i = F.scaled_dot_product_attention(q_i,
-                                                          k_i,
-                                                          v_i,
-                                                          dropout_p=0.0)
+                output_i = F.scaled_dot_product_attention(q_i, k_i, v_i, dropout_p=0.0)
                 output_i = rearrange(output_i, "b h s d -> b s h d ")
                 outputs.append(output_i)
             context_layer = torch.cat(outputs, dim=1)
@@ -370,10 +360,13 @@ class Qwen2VisionAttention(nn.Module):
                                                        kv_seqlen=None,
                                                        device=q.device)
 
-            context_layer = xops.memory_efficient_attention_forward(
-                q, k, v, attn_bias=attn_bias, p=0, scale=None)
-        context_layer = rearrange(context_layer,
-                                  "b s h d -> s b (h d)").contiguous()
+            context_layer = xops.memory_efficient_attention_forward(q,
+                                                                    k,
+                                                                    v,
+                                                                    attn_bias=attn_bias,
+                                                                    p=0,
+                                                                    scale=None)
+        context_layer = rearrange(context_layer, "b s h d -> s b (h d)").contiguous()
 
         output, _ = self.proj(context_layer)
         return output
@@ -452,8 +445,7 @@ class Qwen2VisionPatchEmbed(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         L, C = x.shape
-        x = x.view(L, -1, self.temporal_patch_size, self.patch_size,
-                   self.patch_size)
+        x = x.view(L, -1, self.temporal_patch_size, self.patch_size, self.patch_size)
         x = self.proj(x).view(L, self.embed_dim)
         return x
 
@@ -505,8 +497,7 @@ class Qwen2VisionRotaryEmbedding(nn.Module):
         super().__init__()
         self.dim = dim
         self.theta = theta
-        inv_freq = 1.0 / (theta
-                          **(torch.arange(0, dim, 2, dtype=torch.float) / dim))
+        inv_freq = 1.0 / (theta**(torch.arange(0, dim, 2, dtype=torch.float) / dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self._seq_len_cached = 0
         self._freqs_cached = None
@@ -516,8 +507,8 @@ class Qwen2VisionRotaryEmbedding(nn.Module):
             seqlen *= 2
             self._seq_len_cached = seqlen
             self.inv_freq = 1.0 / (self.theta**(torch.arange(
-                0, self.dim, 2, dtype=torch.float, device=self.inv_freq.device)
-                                                / self.dim))
+                0, self.dim, 2, dtype=torch.float, device=self.inv_freq.device) /
+                                                self.dim))
             seq = torch.arange(seqlen,
                                device=self.inv_freq.device,
                                dtype=self.inv_freq.dtype)
@@ -608,8 +599,7 @@ class Qwen2VisionTransformer(nn.Module):
                 w // self.spatial_merge_size,
                 self.spatial_merge_size,
             ).permute(0, 2, 1, 3).flatten()
-            pos_ids.append(
-                torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1))
+            pos_ids.append(torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1))
         pos_ids = torch.cat(pos_ids, dim=0)
         max_grid_size = grid_thw[:, 1:].max()
         rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
@@ -617,8 +607,8 @@ class Qwen2VisionTransformer(nn.Module):
         return rotary_pos_emb
 
     def compute_attn_mask_seqlen(
-            self, cu_seqlens: torch.Tensor
-    ) -> tuple[Optional[int], Optional[list[int]]]:
+            self,
+            cu_seqlens: torch.Tensor) -> tuple[Optional[int], Optional[list[int]]]:
         max_seqlen, seqlens = None, None
         if self.attn_backend == _Backend.FLASH_ATTN:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
@@ -640,8 +630,8 @@ class Qwen2VisionTransformer(nn.Module):
 
         # compute cu_seqlens
         cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2],
-                                             grid_thw[:, 0]).cumsum(
-                                                 dim=0, dtype=torch.int32)
+                                             grid_thw[:, 0]).cumsum(dim=0,
+                                                                    dtype=torch.int32)
         cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0)
 
         # transformers
@@ -663,8 +653,7 @@ class Qwen2VisionTransformer(nn.Module):
 
         return x
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -686,8 +675,7 @@ class Qwen2VisionTransformer(nn.Module):
                 break
             else:
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
@@ -701,15 +689,12 @@ def _qwen2vl_field_config(hf_inputs: Mapping[str, torch.Tensor]):
     video_grid_sizes = video_grid_thw.prod(-1)
 
     return dict(
-        pixel_values=MultiModalFieldConfig.flat_from_sizes(
-            "image", image_grid_sizes),
-        image_embeds=MultiModalFieldConfig.flat_from_sizes(
-            "image", image_grid_sizes),
+        pixel_values=MultiModalFieldConfig.flat_from_sizes("image", image_grid_sizes),
+        image_embeds=MultiModalFieldConfig.flat_from_sizes("image", image_grid_sizes),
         image_grid_thw=MultiModalFieldConfig.batched("image"),
         pixel_values_videos=MultiModalFieldConfig.flat_from_sizes(
             "video", video_grid_sizes),
-        video_embeds=MultiModalFieldConfig.flat_from_sizes(
-            "video", video_grid_sizes),
+        video_embeds=MultiModalFieldConfig.flat_from_sizes("video", video_grid_sizes),
         video_grid_thw=MultiModalFieldConfig.batched("video"),
     )
 
@@ -844,11 +829,9 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
                 min_pixels=image_processor.min_pixels,
                 max_pixels=image_processor.max_pixels,
             )
-            preprocessed_size = ImageSize(width=resized_width,
-                                          height=resized_height)
+            preprocessed_size = ImageSize(width=resized_width, height=resized_height)
         else:
-            preprocessed_size = ImageSize(width=image_width,
-                                          height=image_height)
+            preprocessed_size = ImageSize(width=image_width, height=image_height)
 
         # NOTE: Frames are padded to be divisible by `temporal_patch_size`
         # https://github.com/huggingface/transformers/blob/v4.48.3/src/transformers/models/qwen2_vl/image_processing_qwen2_vl.py#L294
@@ -940,8 +923,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         max_videos = mm_counts.get("video", 0)
 
         max_image_tokens = self.get_max_image_tokens() * max_images
-        max_total_frames = self._get_max_video_frames(seq_len -
-                                                      max_image_tokens)
+        max_total_frames = self._get_max_video_frames(seq_len - max_image_tokens)
         max_frames_per_video = min(max_total_frames // max(max_videos, 1),
                                    _MAX_FRAMES_PER_VIDEO)
 
@@ -957,8 +939,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         return self.get_num_video_tokens(
             image_width=target_width,
             image_height=target_height,
-            num_frames=self.get_num_frames_with_most_features(
-                seq_len, mm_counts),
+            num_frames=self.get_num_frames_with_most_features(seq_len, mm_counts),
             image_processor=None,
         )
 
@@ -1003,8 +984,7 @@ class Qwen2VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2VLProcessingInfo]):
         }
 
 
-class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]
-                                 ):
+class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]):
 
     def _get_data_parser(self) -> MultiModalDataParser:
         return Qwen2VLMultiModalDataParser()
@@ -1028,8 +1008,7 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]
         out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        image_processor = self.info.get_image_processor(
-            **hf_processor_mm_kwargs)
+        image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
 
@@ -1051,8 +1030,7 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]
             PromptReplacement(
                 modality=modality,
                 target=[placeholder[modality]],
-                replacement=partial(get_replacement_qwen2vl,
-                                    modality=modality),
+                replacement=partial(get_replacement_qwen2vl, modality=modality),
             ) for modality in ("image", "video")
         ]
 
@@ -1067,8 +1045,8 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]
 @MULTIMODAL_REGISTRY.register_processor(Qwen2VLMultiModalProcessor,
                                         info=Qwen2VLProcessingInfo,
                                         dummy_inputs=Qwen2VLDummyInputsBuilder)
-class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                      SupportsLoRA, SupportsPP):
+class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA,
+                                      SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -1251,20 +1229,18 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         for input_key in kwargs:
             if input_key in ("pixel_values",
                              "image_embeds") and "images" not in modalities:
-                modalities["images"] = self._parse_and_validate_image_input(
-                    **kwargs)
+                modalities["images"] = self._parse_and_validate_image_input(**kwargs)
             if input_key in ("pixel_values_videos",
                              "video_embeds") and "videos" not in modalities:
-                modalities["videos"] = self._parse_and_validate_video_input(
-                    **kwargs)
+                modalities["videos"] = self._parse_and_validate_video_input(**kwargs)
 
         return modalities
 
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> Optional[MultiModalEmbeddings]:
 
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
@@ -1371,10 +1347,9 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                     assert positions.ndim == 2 and positions.size(0) == 3, (
                         "multimodal section rotary embedding requires "
                         f"(3, seq_len) positions, but got {positions.size()}")
-                inputs_embeds = self.get_input_embeddings_v0(
-                    input_ids,
-                    image_input=image_input,
-                    video_input=video_input)
+                inputs_embeds = self.get_input_embeddings_v0(input_ids,
+                                                             image_input=image_input,
+                                                             video_input=video_input)
                 input_ids = None
 
         hidden_states = self.language_model.model(
@@ -1390,11 +1365,9 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states, sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
 
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

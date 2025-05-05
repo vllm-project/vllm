@@ -27,8 +27,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
     # ==============================
     # Worker-side methods
     # ==============================
-    def start_load_kv(self, forward_context: "ForwardContext",
-                      **kwargs) -> None:
+    def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         """
         Start loading the KV cache from the connector to vLLM's paged
         KV buffer. This is called from the forward context before the
@@ -109,16 +108,14 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         return self._lmcache_engine.get_num_new_matched_tokens(
             request, num_computed_tokens)
 
-    def update_state_after_alloc(self, request: "Request",
-                                 num_external_tokens: int):
+    def update_state_after_alloc(self, request: "Request", num_external_tokens: int):
         """
         Update KVConnector state after block allocation.
         """
-        self._lmcache_engine.update_state_after_alloc(request,
-                                                      num_external_tokens)
+        self._lmcache_engine.update_state_after_alloc(request, num_external_tokens)
 
-    def build_connector_meta(
-            self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
+    def build_connector_meta(self,
+                             scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
         """
         Build the connector metadata for this step.
 

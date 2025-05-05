@@ -75,10 +75,9 @@ async def test_chat_session_root_path_with_api_key(server: RemoteOpenAIServer,
     if test_case.expected_error is not None:
         ctx = pytest.raises(test_case.expected_error)
     with ctx:
-        client = openai.AsyncOpenAI(
-            api_key=test_case.api_key,
-            base_url=server.url_for(*test_case.base_url),
-            max_retries=0)
+        client = openai.AsyncOpenAI(api_key=test_case.api_key,
+                                    base_url=server.url_for(*test_case.base_url),
+                                    max_retries=0)
         chat_completion = await client.chat.completions.create(
             model=test_case.model_name,
             messages=[{

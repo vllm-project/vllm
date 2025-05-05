@@ -116,10 +116,9 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
         weight_dtype = (torch.float8_e4m3fn
                         if self.quant_config.is_checkpoint_fp8_serialized else
                         params_dtype)
-        weight = ModelWeightParameter(data=torch.empty(
-            output_size_per_partition,
-            input_size_per_partition,
-            dtype=weight_dtype),
+        weight = ModelWeightParameter(data=torch.empty(output_size_per_partition,
+                                                       input_size_per_partition,
+                                                       dtype=weight_dtype),
                                       input_dim=1,
                                       output_dim=0,
                                       weight_loader=weight_loader)
@@ -144,12 +143,12 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
         weight = layer.weight
         max_w_scale = layer.weight_scale.max()
         if not (layer.weight_scale == layer.weight_scale[0]).all():
-            max_w_scale, weight = requantize_with_max_scale(
-                layer.weight, layer.weight_scale, layer.logical_widths)
+            max_w_scale, weight = requantize_with_max_scale(layer.weight,
+                                                            layer.weight_scale,
+                                                            layer.logical_widths)
         layer.weight = Parameter(weight.t(), requires_grad=False)
         layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
-        layer.input_scale = Parameter(layer.input_scale.max(),
-                                      requires_grad=False)
+        layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
 
     def apply(
         self,
@@ -176,9 +175,8 @@ class ModelOptNvFp4Config(QuantizationConfig):
     ) -> None:
         self.is_checkpoint_nvfp4_serialized = is_checkpoint_nvfp4_serialized
         if is_checkpoint_nvfp4_serialized:
-            logger.warning(
-                "Detected ModelOpt NVFP4 checkpoint. Please note that"
-                " the format is experimental and could change in future.")
+            logger.warning("Detected ModelOpt NVFP4 checkpoint. Please note that"
+                           " the format is experimental and could change in future.")
 
             self.group_size = group_size
             self.kv_cache_quant_algo = kv_cache_quant_algo
@@ -217,8 +215,8 @@ class ModelOptNvFp4Config(QuantizationConfig):
             raise ValueError("NVFP4 quantization requires group size and "
                              "kv_cache_quant_algo specified in "
                              "hf_quant_config.json")
-        return cls(is_checkpoint_nvfp4_serialized, kv_cache_quant_algo,
-                   exclude_modules, group_size)
+        return cls(is_checkpoint_nvfp4_serialized, kv_cache_quant_algo, exclude_modules,
+                   group_size)
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
@@ -245,8 +243,7 @@ class ModelOptFp8KVCacheMethod(BaseKVCacheMethod):
     Supports loading kv-cache scaling factors from FP8 checkpoints.
     """
 
-    def __init__(self, quant_config: Union[ModelOptFp8Config,
-                                           ModelOptNvFp4Config]):
+    def __init__(self, quant_config: Union[ModelOptFp8Config, ModelOptNvFp4Config]):
         super().__init__(quant_config)
 
 
@@ -293,8 +290,8 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
                              "not multiple of 16")
         # The nvfp4 weight is still represented as
         weight_dtype = (torch.float8_e4m3fn
-                        if self.quant_config.is_checkpoint_nvfp4_serialized
-                        else params_dtype)
+                        if self.quant_config.is_checkpoint_nvfp4_serialized else
+                        params_dtype)
         # Weight
         weight = ModelWeightParameter(
             data=torch.empty(
@@ -347,8 +344,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         batches, rows, cols = padded_scale.shape
         assert rows % 128 == 0
         assert cols % 4 == 0
-        padded_scale = padded_scale.reshape(batches, rows // 128, 4, 32,
-                                            cols // 4, 4)
+        padded_scale = padded_scale.reshape(batches, rows // 128, 4, 32, cols // 4, 4)
         swizzled_scale = padded_scale.permute((0, 1, 4, 3, 2, 5))
         swizzled_scale = swizzled_scale.contiguous().cuda()
         return (swizzled_scale.reshape(M, K)
@@ -369,8 +365,8 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         # Swizzle the weight blockscale.
         # contracting dimension is input dimension
         # block_size = 16;
-        assert (layer.weight_scale.shape[1] % 16 == 0), (
-            "Expected weight_scale.dim(1) to be divisible by 16")
+        assert (layer.weight_scale.shape[1] %
+                16 == 0), ("Expected weight_scale.dim(1) to be divisible by 16")
         assert (layer.weight_scale.dtype == torch.float8_e4m3fn), (
             "Weight Block scale must be represented as FP8-E4M3")
         swizzled_weight_scale = self.swizzle_blockscale(layer.weight_scale)

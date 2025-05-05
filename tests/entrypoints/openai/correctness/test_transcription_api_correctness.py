@@ -120,8 +120,7 @@ def run_evaluation(model: str,
     if n_examples > 0:
         dataset = dataset.select(range(n_examples))
     start = time.perf_counter()
-    results = asyncio.run(
-        process_dataset(model, client, dataset, max_concurrent_reqs))
+    results = asyncio.run(process_dataset(model, client, dataset, max_concurrent_reqs))
     end = time.perf_counter()
     total_time = end - start
     print(f"Total Test Time: {total_time:.4f} seconds")
@@ -131,8 +130,7 @@ def run_evaluation(model: str,
     predictions = [res[2] for res in results]
     references = [res[3] for res in results]
     wer = load("wer")
-    wer_score = 100 * wer.compute(references=references,
-                                  predictions=predictions)
+    wer_score = 100 * wer.compute(references=references, predictions=predictions)
     print("WER:", wer_score)
     return wer_score
 
@@ -140,8 +138,8 @@ def run_evaluation(model: str,
 # alternatives "openai/whisper-large-v2", "openai/whisper-large-v3-turbo"..
 @pytest.mark.parametrize("model_name", ["openai/whisper-large-v3"])
 # Original dataset is 20GB+ in size, hence we use a pre-filtered slice.
-@pytest.mark.parametrize(
-    "dataset_repo", ["D4nt3/esb-datasets-earnings22-validation-tiny-filtered"])
+@pytest.mark.parametrize("dataset_repo",
+                         ["D4nt3/esb-datasets-earnings22-validation-tiny-filtered"])
 # NOTE: Expected WER measured with equivalent hf.transformers args:
 # whisper-large-v3 + esb-datasets-earnings22-validation-tiny-filtered.
 @pytest.mark.parametrize("expected_wer", [12.744980])
@@ -160,7 +158,7 @@ def test_wer_correctness(model_name,
                 else len(dataset)
 
         client = remote_server.get_async_client()
-        wer = run_evaluation(model_name, client, dataset,
-                             max_concurrent_request, n_examples)
+        wer = run_evaluation(model_name, client, dataset, max_concurrent_request,
+                             n_examples)
         if expected_wer:
             torch.testing.assert_close(wer, expected_wer, atol=1e-1, rtol=1e-2)

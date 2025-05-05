@@ -46,8 +46,7 @@ def dequant_out_scale(
         flattened_output *= b_scales
         return flattened_output.view(orig_shape)
     else:
-        b_scales = scales.view(scales.shape[:-3] + (-1, )).expand(
-            -1, weights.shape[1])
+        b_scales = scales.view(scales.shape[:-3] + (-1, )).expand(-1, weights.shape[1])
         weights *= b_scales
         return F.linear(input, weights, bias)
 
@@ -64,8 +63,7 @@ def dequant_weight_scale(
 
     weights = ops.aqlm_dequant(codes, codebooks, output_partition_sizes)
 
-    b_scales = scales.view(scales.shape[:-3] + (-1, )).expand(
-        -1, weights.shape[1])
+    b_scales = scales.view(scales.shape[:-3] + (-1, )).expand(-1, weights.shape[1])
     weights *= b_scales
     return F.linear(input, weights, bias)
 
@@ -195,19 +193,17 @@ def main():
 
         # reasonable ranges for m.
         for m in [
-                1, 2, 4, 8, 10, 12, 14, 16, 24, 32, 48, 52, 56, 64, 96, 112,
-                128, 256, 512, 1024, 1536, 2048, 3072, 4096
+                1, 2, 4, 8, 10, 12, 14, 16, 24, 32, 48, 52, 56, 64, 96, 112, 128, 256,
+                512, 1024, 1536, 2048, 3072, 4096
         ]:
             print(f'{m}', file=sys.__stdout__)
             for ksp in ksandpartions:
-                run_grid(m, ksp[0], torch.tensor(ksp[1]), nbooks, bits,
-                         methods)
+                run_grid(m, ksp[0], torch.tensor(ksp[1]), nbooks, bits, methods)
 
         sys.stdout = sys.__stdout__
 
 
-def run_grid(m: int, k: int, parts: torch.Tensor, nbooks: int, bits: int,
-             methods):
+def run_grid(m: int, k: int, parts: torch.Tensor, nbooks: int, bits: int, methods):
 
     # I didn't see visible improvements from increasing these, but feel free :)
     num_warmup_trials = 1
@@ -254,8 +250,8 @@ def run_grid(m: int, k: int, parts: torch.Tensor, nbooks: int, bits: int,
     print('')
 
 
-def run_timing(num_calls: int, m: int, k: int, parts: torch.Tensor,
-               nbooks: int, bits: int, method) -> float:
+def run_timing(num_calls: int, m: int, k: int, parts: torch.Tensor, nbooks: int,
+               bits: int, method) -> float:
 
     n = int(parts.sum().item())
 

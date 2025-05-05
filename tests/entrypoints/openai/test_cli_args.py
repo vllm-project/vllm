@@ -44,9 +44,7 @@ def test_valid_json_format(serve_parser):
         json.dumps(LORA_MODULE),
     ])
     expected = [
-        LoRAModulePath(name='module2',
-                       path='/path/to/module2',
-                       base_model_name='llama')
+        LoRAModulePath(name='module2', path='/path/to/module2', base_model_name='llama')
     ]
     assert args.lora_modules == expected
 
@@ -54,9 +52,8 @@ def test_valid_json_format(serve_parser):
 def test_invalid_json_format(serve_parser):
     # Test invalid JSON format input, missing closing brace
     with pytest.raises(SystemExit):
-        serve_parser.parse_args([
-            '--lora-modules', '{"name": "module3", "path": "/path/to/module3"'
-        ])
+        serve_parser.parse_args(
+            ['--lora-modules', '{"name": "module3", "path": "/path/to/module3"'])
 
 
 def test_invalid_type_error(serve_parser):
@@ -92,9 +89,7 @@ def test_multiple_valid_inputs(serve_parser):
     ])
     expected = [
         LoRAModulePath(name='module1', path='/path/to/module1'),
-        LoRAModulePath(name='module2',
-                       path='/path/to/module2',
-                       base_model_name='llama')
+        LoRAModulePath(name='module2', path='/path/to/module2', base_model_name='llama')
     ]
     assert args.lora_modules == expected
 

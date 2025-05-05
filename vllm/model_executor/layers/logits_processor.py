@@ -63,8 +63,7 @@ class LogitsProcessor(nn.Module):
             logits = hidden_states
         else:
             if sampling_metadata is not None:
-                hidden_states = _prune_hidden_states(hidden_states,
-                                                     sampling_metadata)
+                hidden_states = _prune_hidden_states(hidden_states, sampling_metadata)
 
             # Get the logits for the next tokens.
             logits = self._get_logits(hidden_states, lm_head, embedding_bias)
@@ -105,9 +104,7 @@ class LogitsProcessor(nn.Module):
         embedding_bias: Optional[torch.Tensor],
     ) -> Optional[torch.Tensor]:
         # Get the logits for the next tokens.
-        logits = lm_head.quant_method.apply(lm_head,
-                                            hidden_states,
-                                            bias=embedding_bias)
+        logits = lm_head.quant_method.apply(lm_head, hidden_states, bias=embedding_bias)
 
         # Gather logits for TP
         logits = self._gather_logits(logits)
@@ -132,8 +129,7 @@ def _prune_hidden_states(
     # (warmup, profile_run) we might not have selected_token_indices,
     # so we skip pruning.
     if sampling_metadata.selected_token_indices is not None:
-        return hidden_states.index_select(
-            0, sampling_metadata.selected_token_indices)
+        return hidden_states.index_select(0, sampling_metadata.selected_token_indices)
     else:
         return hidden_states
 
@@ -152,8 +148,7 @@ def _apply_logits_processors(
         if logits_processors:
             found_logits_processors = True
 
-            for seq_id, logits_row_idx in zip(seq_ids,
-                                              seq_group.sample_indices):
+            for seq_id, logits_row_idx in zip(seq_ids, seq_group.sample_indices):
                 logits_row = logits[logits_row_idx]
                 past_tokens_ids = seq_group.seq_data[seq_id].output_token_ids
                 prompt_tokens_ids = seq_group.seq_data[seq_id].prompt_token_ids
@@ -163,8 +158,7 @@ def _apply_logits_processors(
                         (logits_row_idx,
                          _logits_processor_threadpool.submit(
                              _apply_logits_processors_single_seq, logits_row,
-                             logits_processors, past_tokens_ids,
-                             prompt_tokens_ids)))
+                             logits_processors, past_tokens_ids, prompt_tokens_ids)))
                 else:
                     logits[logits_row_idx] = \
                         _apply_logits_processors_single_seq(
@@ -183,8 +177,7 @@ def _apply_logits_processors(
     return logits
 
 
-def _apply_logits_processors_single_seq(logits_row, logits_processors,
-                                        past_tokens_ids,
+def _apply_logits_processors_single_seq(logits_row, logits_processors, past_tokens_ids,
                                         prompt_tokens_ids) -> torch.Tensor:
     for logits_processor in logits_processors:
         parameters = inspect.signature(logits_processor).parameters

@@ -15,13 +15,12 @@ SIMPLE_FUNCTION_CALL = FunctionCall(
     name="get_weather",
     arguments='{"city": "San Francisco", "metric": "celsius"}',
 )
-MORE_TYPES_FUNCTION_OUTPUT = (
-    "register_user(name='John Doe', "
-    "age=37, "
-    "address={'city': 'San Francisco', 'state': 'CA'}, "
-    "role=None, "
-    "passed_test=True, "
-    "aliases=['John', 'Johnny'])")
+MORE_TYPES_FUNCTION_OUTPUT = ("register_user(name='John Doe', "
+                              "age=37, "
+                              "address={'city': 'San Francisco', 'state': 'CA'}, "
+                              "role=None, "
+                              "passed_test=True, "
+                              "aliases=['John', 'Johnny'])")
 MORE_TYPES_FUNCTION_CALL = FunctionCall(
     name="register_user",
     arguments='{"name": "John Doe", '
@@ -83,12 +82,10 @@ TEST_CASES = [
                  f"[{MORE_TYPES_FUNCTION_OUTPUT}]", [MORE_TYPES_FUNCTION_CALL],
                  id="more_types_nonstreaming"),
     pytest.param(True,
-                 f"[{PARAMETERLESS_FUNCTION_OUTPUT}]",
-                 [PARAMETERLESS_FUNCTION_CALL],
+                 f"[{PARAMETERLESS_FUNCTION_OUTPUT}]", [PARAMETERLESS_FUNCTION_CALL],
                  id="parameterless_streaming"),
     pytest.param(False,
-                 f"[{PARAMETERLESS_FUNCTION_OUTPUT}]",
-                 [PARAMETERLESS_FUNCTION_CALL],
+                 f"[{PARAMETERLESS_FUNCTION_OUTPUT}]", [PARAMETERLESS_FUNCTION_CALL],
                  id="parameterless_nonstreaming"),
     pytest.param(True,
                  f"[{EMPTY_DICT_FUNCTION_OUTPUT}]", [EMPTY_DICT_FUNCTION_CALL],
@@ -103,12 +100,10 @@ TEST_CASES = [
                  f"[{EMPTY_LIST_FUNCTION_OUTPUT}]", [EMPTY_LIST_FUNCTION_CALL],
                  id="empty_list_nonstreaming"),
     pytest.param(True,
-                 f"[{ESCAPED_STRING_FUNCTION_OUTPUT}]",
-                 [ESCAPED_STRING_FUNCTION_CALL],
+                 f"[{ESCAPED_STRING_FUNCTION_OUTPUT}]", [ESCAPED_STRING_FUNCTION_CALL],
                  id="escaped_string_streaming"),
     pytest.param(False,
-                 f"[{ESCAPED_STRING_FUNCTION_OUTPUT}]",
-                 [ESCAPED_STRING_FUNCTION_CALL],
+                 f"[{ESCAPED_STRING_FUNCTION_OUTPUT}]", [ESCAPED_STRING_FUNCTION_CALL],
                  id="escaped_string_nonstreaming"),
     pytest.param(True,
                  f"[{SIMPLE_FUNCTION_OUTPUT}, {MORE_TYPES_FUNCTION_OUTPUT}]",
@@ -121,8 +116,7 @@ TEST_CASES = [
 ]
 
 
-@pytest.mark.parametrize("streaming, model_output, expected_tool_calls",
-                         TEST_CASES)
+@pytest.mark.parametrize("streaming, model_output, expected_tool_calls", TEST_CASES)
 def test_tool_call(streaming: bool, model_output: str,
                    expected_tool_calls: list[FunctionCall]):
     mock_tokenizer = MagicMock()
@@ -151,8 +145,9 @@ def test_streaming_tool_call_with_large_steps():
         f"{EMPTY_LIST_FUNCTION_OUTPUT}]",
     ]
 
-    reconstructor = run_tool_extraction_streaming(
-        tool_parser, model_output_deltas, assert_one_tool_per_delta=False)
+    reconstructor = run_tool_extraction_streaming(tool_parser,
+                                                  model_output_deltas,
+                                                  assert_one_tool_per_delta=False)
 
     assert reconstructor.other_content == ""
     assert len(reconstructor.tool_calls) == 3

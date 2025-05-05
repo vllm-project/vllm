@@ -99,8 +99,7 @@ def truncate_tool_call_ids(request: "ChatCompletionRequest"):
 
 
 def validate_request_params(request: "ChatCompletionRequest"):
-    if (request.skip_special_tokens is not None
-            and not request.skip_special_tokens):
+    if (request.skip_special_tokens is not None and not request.skip_special_tokens):
         raise ValueError("skip_special_tokens=False is not supported "
                          "for Mistral tokenizers.")
 
@@ -131,23 +130,20 @@ def find_tokenizer_file(files: List[str]):
 
     matched_files = [file for file in files if file_pattern.match(file)]
     if len(matched_files) > 1:
-        raise OSError(
-            f"Found {len(matched_files)} files matching the "
-            f"pattern: `{file_pattern.pattern}`. Make sure only one Mistral "
-            f"tokenizer is present in {files}.")
+        raise OSError(f"Found {len(matched_files)} files matching the "
+                      f"pattern: `{file_pattern.pattern}`. Make sure only one Mistral "
+                      f"tokenizer is present in {files}.")
     elif len(matched_files) == 0:
-        raise OSError(
-            f"Found {len(matched_files)} files matching the "
-            f"pattern: `{file_pattern.pattern}`. Make sure that a Mistral "
-            f"tokenizer is present in {files}.")
+        raise OSError(f"Found {len(matched_files)} files matching the "
+                      f"pattern: `{file_pattern.pattern}`. Make sure that a Mistral "
+                      f"tokenizer is present in {files}.")
 
     return matched_files[0]
 
 
 def make_mistral_chat_completion_request(
         messages: List["ChatCompletionMessageParam"],
-        tools: Optional[List[Dict[str,
-                                  Any]]] = None) -> "ChatCompletionRequest":
+        tools: Optional[List[Dict[str, Any]]] = None) -> "ChatCompletionRequest":
     last_message = cast(Dict[str, Any], messages[-1])
     if last_message["role"] == "assistant":
         last_message["prefix"] = True
@@ -166,8 +162,7 @@ def make_mistral_chat_completion_request(
     # "parameters" dict to be present, even if it's empty.
     if tools:
         for function in [
-                tool["function"] for tool in tools
-                if tool["type"] == "function"
+                tool["function"] for tool in tools if tool["type"] == "function"
         ]:
             if function.get("parameters") is None:
                 function["parameters"] = {}
@@ -202,10 +197,7 @@ class MistralTokenizer(TokenizerBase):
         # Convert to a Dict[str, int] to match protocol, but this is a lossy
         # conversion. There may be multiple token ids that decode to the same
         # string due to partial UTF-8 byte sequences being converted to �
-        self._vocab_dict = {
-            token: idx
-            for idx, token in enumerate(self._vocab)
-        }
+        self._vocab_dict = {token: idx for idx, token in enumerate(self._vocab)}
         self.tokenizer = tokenizer_
         self._max_token_id = self.vocab_size - 1
 
@@ -221,12 +213,10 @@ class MistralTokenizer(TokenizerBase):
             tokenizer_file = cls._download_mistral_tokenizer_from_hf(
                 path_or_repo_id, revision)
         elif Path(path_or_repo_id).is_dir():
-            tokenizer_file_name = find_tokenizer_file(
-                os.listdir(path_or_repo_id))
+            tokenizer_file_name = find_tokenizer_file(os.listdir(path_or_repo_id))
             tokenizer_file = str(Path(path_or_repo_id) / tokenizer_file_name)
         else:
-            assert Path(
-                path_or_repo_id).is_file(), f"Invalid path: {path_or_repo_id}"
+            assert Path(path_or_repo_id).is_file(), f"Invalid path: {path_or_repo_id}"
             tokenizer_file = str(Path(path_or_repo_id))
 
         from mistral_common.tokens.tokenizers.mistral import (
@@ -239,11 +229,9 @@ class MistralTokenizer(TokenizerBase):
                                             revision: Optional[str]) -> str:
         try:
             hf_api = HfApi()
-            files = hf_api.list_repo_files(repo_id=tokenizer_name,
-                                           revision=revision)
+            files = hf_api.list_repo_files(repo_id=tokenizer_name, revision=revision)
         except ConnectionError as exc:
-            files = list_local_repo_files(repo_id=tokenizer_name,
-                                          revision=revision)
+            files = list_local_repo_files(repo_id=tokenizer_name, revision=revision)
 
             if len(files) == 0:
                 raise exc
@@ -266,10 +254,7 @@ class MistralTokenizer(TokenizerBase):
             special_tokens = self.tokenizer.SPECIAL_TOKENS
         else:
             special_tokens = list(SpecialTokens)
-        return [
-            s.value if isinstance(s, SpecialTokens) else s
-            for s in special_tokens
-        ]
+        return [s.value if isinstance(s, SpecialTokens) else s for s in special_tokens]
 
     @property
     def all_special_tokens(self) -> list[str]:
@@ -277,9 +262,7 @@ class MistralTokenizer(TokenizerBase):
 
     @property
     def all_special_ids(self) -> list[int]:
-        return [
-            self.all_special_tokens.index(t) for t in self.all_special_tokens
-        ]
+        return [self.all_special_tokens.index(t) for t in self.all_special_tokens]
 
     @property
     def bos_token_id(self) -> int:
@@ -388,9 +371,8 @@ class MistralTokenizer(TokenizerBase):
         from mistral_common.tokens.tokenizers.base import SpecialTokens
         if self.is_tekken:
             tokens = [
-                t for t in tokens
-                if (t is SpecialTokens.tool_calls
-                    or t not in self.tokenizer._all_special_tokens)
+                t for t in tokens if (t is SpecialTokens.tool_calls
+                                      or t not in self.tokenizer._all_special_tokens)
             ]
 
             if any(isinstance(t, bytes) for t in tokens):
@@ -423,8 +405,7 @@ class MistralTokenizer(TokenizerBase):
             for token in tokens:
                 if token in special_tokens:
                     if regular_tokens:
-                        decoded_list.append(
-                            self.tokenizer.decode(regular_tokens))
+                        decoded_list.append(self.tokenizer.decode(regular_tokens))
                         regular_tokens = []
                     decoded_list.append(token)
                 else:
@@ -444,9 +425,8 @@ class MistralTokenizer(TokenizerBase):
     def decode(self,
                ids: Union[List[int], int],
                skip_special_tokens: bool = True) -> str:
-        assert (
-            skip_special_tokens
-        ), "skip_special_tokens=False is not supported for Mistral tokenizers."
+        assert (skip_special_tokens
+                ), "skip_special_tokens=False is not supported for Mistral tokenizers."
 
         if isinstance(ids, int):
             ids = [ids]
@@ -460,17 +440,16 @@ class MistralTokenizer(TokenizerBase):
         from mistral_common.tokens.tokenizers.base import SpecialTokens
 
         # TODO(Patrick) - potentially allow special tokens to not be skipped
-        assert (
-            skip_special_tokens
-        ), "skip_special_tokens=False is not supported for Mistral tokenizers."
+        assert (skip_special_tokens
+                ), "skip_special_tokens=False is not supported for Mistral tokenizers."
 
         assert self.is_tekken or self.is_spm, type(self.tokenizer)
 
         if self.is_tekken:
             # skip special tokens except tool call
             ids = [
-                i for i in ids if i > self.tokenizer.num_special_tokens or i ==
-                self.tokenizer.get_control_token(SpecialTokens.tool_calls)
+                i for i in ids if i > self.tokenizer.num_special_tokens
+                or i == self.tokenizer.get_control_token(SpecialTokens.tool_calls)
             ]
 
         tokens = [self.tokenizer.id_to_piece(id) for id in ids]

@@ -45,8 +45,8 @@ class AsyncEngineDeadError(RuntimeError):
     pass
 
 
-def _log_task_completion(task: asyncio.Task,
-                         error_callback: Callable[[Exception], None]) -> None:
+def _log_task_completion(task: asyncio.Task, error_callback: Callable[[Exception],
+                                                                      None]) -> None:
     """This function is only intended for the `engine.run_engine_loop()` task.
 
     In particular, that task runs a `while True` loop that can only exit if
@@ -86,8 +86,7 @@ class AsyncStream:
         self._queue: asyncio.Queue = asyncio.Queue()
         self._finished = False
 
-    def put(self, item: Union[RequestOutput, PoolingRequestOutput,
-                              Exception]) -> None:
+    def put(self, item: Union[RequestOutput, PoolingRequestOutput, Exception]) -> None:
         if not self._finished:
             self._queue.put_nowait(item)
 
@@ -105,8 +104,7 @@ class AsyncStream:
         return self._finished
 
     async def generator(
-        self
-    ) -> AsyncGenerator[Union[RequestOutput, PoolingRequestOutput], None]:
+            self) -> AsyncGenerator[Union[RequestOutput, PoolingRequestOutput], None]:
         try:
             while True:
                 result = await self._queue.get()
@@ -132,8 +130,7 @@ class RequestTracker:
     def __init__(self) -> None:
         self._request_streams: Dict[str, AsyncStream] = {}
         self._aborted_requests: asyncio.Queue[str] = asyncio.Queue()
-        self._new_requests: asyncio.Queue[Tuple[AsyncStream,
-                                                dict]] = asyncio.Queue()
+        self._new_requests: asyncio.Queue[Tuple[AsyncStream, dict]] = asyncio.Queue()
         self.new_requests_event = asyncio.Event()
 
     def __contains__(self, item):
@@ -267,8 +264,8 @@ class _AsyncLLMEngine(LLMEngine):
         super().__init__(*args, **kwargs)
 
     async def step_async(
-        self, virtual_engine: int
-    ) -> List[Union[RequestOutput, PoolingRequestOutput]]:
+            self,
+            virtual_engine: int) -> List[Union[RequestOutput, PoolingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
         The workers are ran asynchronously if possible.
 
@@ -297,8 +294,7 @@ class _AsyncLLMEngine(LLMEngine):
 
             # Schedule iteration
             (seq_group_metadata_list, scheduler_outputs,
-             allow_async_output_proc
-             ) = self.scheduler[virtual_engine].schedule()
+             allow_async_output_proc) = self.scheduler[virtual_engine].schedule()
 
             ctx.seq_group_metadata_list = seq_group_metadata_list
             ctx.scheduler_outputs = scheduler_outputs
@@ -317,9 +313,10 @@ class _AsyncLLMEngine(LLMEngine):
                     and scheduler_outputs.num_lookahead_slots > 0):
                 # cache the scheduler outputs for the next iteration if we have
                 # lookahead slots
-                self._cache_scheduler_outputs_for_multi_step(
-                    virtual_engine, seq_group_metadata_list, scheduler_outputs,
-                    allow_async_output_proc)
+                self._cache_scheduler_outputs_for_multi_step(virtual_engine,
+                                                             seq_group_metadata_list,
+                                                             scheduler_outputs,
+                                                             allow_async_output_proc)
         else:
             finished_requests_ids = list()
 
@@ -349,12 +346,10 @@ class _AsyncLLMEngine(LLMEngine):
                 last_sampled_token_ids=last_sampled_token_ids)
 
             if allow_async_output_proc:
-                execute_model_req.async_callback = self.async_callbacks[
-                    virtual_engine]
+                execute_model_req.async_callback = self.async_callbacks[virtual_engine]
 
             # Execute the model.
-            outputs = await self.model_executor.execute_model_async(
-                execute_model_req)
+            outputs = await self.model_executor.execute_model_async(execute_model_req)
 
             # we need to do this here so that last step's sampled_token_ids can
             # be passed to the next iteration for PP.
@@ -373,8 +368,7 @@ class _AsyncLLMEngine(LLMEngine):
         if not self._has_remaining_steps(seq_group_metadata_list):
             # Clear the cache if we have finished all the steps
             if self.scheduler_config.is_multi_step:
-                self.cached_scheduler_outputs[
-                    virtual_engine] = SchedulerOutputState()
+                self.cached_scheduler_outputs[virtual_engine] = SchedulerOutputState()
 
             # is_first_step_output is True only when the num_steps of all
             # the sequences are 1. When the num_steps > 1,
@@ -393,9 +387,8 @@ class _AsyncLLMEngine(LLMEngine):
                 assert len(
                     outputs
                 ) == 1, "Async postprocessor expects only a single output set"
-                self._advance_to_next_step(
-                    outputs[0], seq_group_metadata_list,
-                    scheduler_outputs.scheduled_seq_groups)
+                self._advance_to_next_step(outputs[0], seq_group_metadata_list,
+                                           scheduler_outputs.scheduled_seq_groups)
 
             if not allow_async_output_proc:
                 self._process_model_outputs(ctx=ctx)
@@ -425,8 +418,7 @@ class _AsyncLLMEngine(LLMEngine):
     async def get_tokenizer_async(self,
                                   lora_request: Optional[LoRARequest] = None
                                   ) -> AnyTokenizer:
-        return await (
-            self.get_tokenizer_group().get_lora_tokenizer_async(lora_request))
+        return await (self.get_tokenizer_group().get_lora_tokenizer_async(lora_request))
 
     @overload
     @deprecated("'inputs' will be renamed to 'prompt")
@@ -489,13 +481,11 @@ class _AsyncLLMEngine(LLMEngine):
         if arrival_time is None:
             arrival_time = time.time()
 
-        if (isinstance(prompt, dict)
-                and prompt.get("prompt_embeds", None) is not None
+        if (isinstance(prompt, dict) and prompt.get("prompt_embeds", None) is not None
                 and not prompt.get("prompt_token_ids", None)):
             # We use the -2 dimension (instead of 0) in case a batched input
             # of batch size 1 is passed in.
-            prompt["prompt_token_ids"] = [0
-                                          ] * prompt["prompt_embeds"].shape[-2]
+            prompt["prompt_token_ids"] = [0] * prompt["prompt_embeds"].shape[-2]
 
         processed_inputs = await self.input_preprocessor.preprocess_async(
             prompt,
@@ -512,8 +502,7 @@ class _AsyncLLMEngine(LLMEngine):
             params = await build_guided_decoding_logits_processor_async(
                 sampling_params=params,
                 tokenizer=await self.get_tokenizer_async(lora_request),
-                default_guided_backend=self.decoding_config.
-                guided_decoding_backend,
+                default_guided_backend=self.decoding_config.guided_decoding_backend,
                 reasoning_backend=self.decoding_config.reasoning_backend,
                 model_config=self.model_config)
 
@@ -606,11 +595,10 @@ class AsyncLLMEngine(EngineClient):
                  start_engine_loop: bool = True,
                  **kwargs) -> None:
         if envs.VLLM_USE_V1:
-            raise ValueError(
-                "Using V0 AsyncLLMEngine, but envs.VLLM_USE_V1=True. "
-                "This should not happen. As a workaround, try using "
-                "AsyncLLMEngine.from_vllm_config(...) or explicitly set "
-                "VLLM_USE_V1=0 or 1 and report this issue on Github.")
+            raise ValueError("Using V0 AsyncLLMEngine, but envs.VLLM_USE_V1=True. "
+                             "This should not happen. As a workaround, try using "
+                             "AsyncLLMEngine.from_vllm_config(...) or explicitly set "
+                             "VLLM_USE_V1=0 or 1 and report this issue on Github.")
 
         self.log_requests = log_requests
         self.engine = self._engine_class(*args, **kwargs)
@@ -642,8 +630,7 @@ class AsyncLLMEngine(EngineClient):
             rt.new_requests_event.set()
 
     @classmethod
-    def _get_executor_cls(cls,
-                          engine_config: VllmConfig) -> Type[ExecutorBase]:
+    def _get_executor_cls(cls, engine_config: VllmConfig) -> Type[ExecutorBase]:
         return LLMEngine._get_executor_cls(engine_config)
 
     @classmethod
@@ -702,8 +689,8 @@ class AsyncLLMEngine(EngineClient):
 
     @property
     def is_stopped(self) -> bool:
-        return self.errored or (self.background_loop is not None and
-                                self._background_loop_unshielded is not None
+        return self.errored or (self.background_loop is not None
+                                and self._background_loop_unshielded is not None
                                 and self._background_loop_unshielded.done())
 
     @property
@@ -744,8 +731,8 @@ class AsyncLLMEngine(EngineClient):
         # Initialize the RequestTracker here so it uses the right event loop.
         self._request_tracker = RequestTracker()
 
-        self._background_loop_unshielded = asyncio.get_event_loop(
-        ).create_task(self.run_engine_loop(weakref.ref(self)))
+        self._background_loop_unshielded = asyncio.get_event_loop().create_task(
+            self.run_engine_loop(weakref.ref(self)))
         self._background_loop_unshielded.add_done_callback(
             partial(_log_task_completion, error_callback=self._error_callback))
         self.background_loop = asyncio.shield(self._background_loop_unshielded)
@@ -806,8 +793,8 @@ class AsyncLLMEngine(EngineClient):
         # Put the outputs into the corresponding streams.
         all_finished = True
         for request_output in request_outputs:
-            self._request_tracker.process_request_output(
-                request_output, verbose=self.log_requests)
+            self._request_tracker.process_request_output(request_output,
+                                                         verbose=self.log_requests)
             all_finished = all_finished and request_output.finished
 
         return all_finished
@@ -858,28 +845,24 @@ class AsyncLLMEngine(EngineClient):
             # (eg. NCCL timeouts).
             try:
                 async with asyncio_timeout(ENGINE_ITERATION_TIMEOUT_S):
-                    done, _ = await asyncio.wait(
-                        requests_in_progress,
-                        return_when=asyncio.FIRST_COMPLETED)
+                    done, _ = await asyncio.wait(requests_in_progress,
+                                                 return_when=asyncio.FIRST_COMPLETED)
                     for _ in range(pipeline_parallel_size):
                         await asyncio.sleep(0)
                 for task in done:
                     result = task.result()
                     virtual_engine = requests_in_progress.index(task)
                     has_unfinished_requests = (
-                        engine.engine.
-                        has_unfinished_requests_for_virtual_engine(
+                        engine.engine.has_unfinished_requests_for_virtual_engine(
                             virtual_engine))
                     if result or has_unfinished_requests:
-                        requests_in_progress[virtual_engine] = (
-                            asyncio.create_task(
-                                engine.engine_step(virtual_engine)))
+                        requests_in_progress[virtual_engine] = (asyncio.create_task(
+                            engine.engine_step(virtual_engine)))
                         has_requests_in_progress[virtual_engine] = True
                     else:
                         has_requests_in_progress[virtual_engine] = False
             except asyncio.TimeoutError as exc:
-                logger.error(
-                    "Engine iteration timed out. This should never happen!")
+                logger.error("Engine iteration timed out. This should never happen!")
                 engine.set_errored(exc)
                 raise
             await asyncio.sleep(0)
@@ -899,8 +882,8 @@ class AsyncLLMEngine(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
-    ) -> Coroutine[None, None, AsyncGenerator[Union[
-            RequestOutput, PoolingRequestOutput], None]]:
+    ) -> Coroutine[None, None, AsyncGenerator[Union[RequestOutput,
+                                                    PoolingRequestOutput], None]]:
         ...
 
     @overload
@@ -914,8 +897,8 @@ class AsyncLLMEngine(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
-    ) -> Coroutine[None, None, AsyncGenerator[Union[
-            RequestOutput, PoolingRequestOutput], None]]:
+    ) -> Coroutine[None, None, AsyncGenerator[Union[RequestOutput,
+                                                    PoolingRequestOutput], None]]:
         ...
 
     @deprecate_kwargs(
@@ -949,8 +932,7 @@ class AsyncLLMEngine(EngineClient):
                     "error that caused the background loop to stop "
                     "(AsyncEngineDeadError).")
 
-        if (priority != 0
-                and not self.engine.scheduler_config.policy == "priority"):
+        if (priority != 0 and not self.engine.scheduler_config.policy == "priority"):
             raise ValueError(f"Got priority {priority} but "
                              "Priority scheduling is not enabled.")
 
@@ -1201,10 +1183,9 @@ class AsyncLLMEngine(EngineClient):
         """Get the lora configuration of the vLLM engine."""
         return self.engine.get_lora_config()
 
-    async def do_log_stats(
-            self,
-            scheduler_outputs: Optional[SchedulerOutputs] = None,
-            model_output: Optional[List[SamplerOutput]] = None) -> None:
+    async def do_log_stats(self,
+                           scheduler_outputs: Optional[SchedulerOutputs] = None,
+                           model_output: Optional[List[SamplerOutput]] = None) -> None:
         self.engine.do_log_stats()
 
     async def check_health(self) -> None:
@@ -1232,8 +1213,7 @@ class AsyncLLMEngine(EngineClient):
     async def stop_profile(self) -> None:
         self.engine.stop_profile()
 
-    async def reset_prefix_cache(self,
-                                 device: Optional[Device] = None) -> None:
+    async def reset_prefix_cache(self, device: Optional[Device] = None) -> None:
         self.engine.reset_prefix_cache(device)
 
     async def sleep(self, level: int = 1) -> None:
@@ -1256,8 +1236,7 @@ class AsyncLLMEngine(EngineClient):
         """
         Perform a collective RPC call to the given path.
         """
-        return await self.engine.collective_rpc_async(method, timeout, args,
-                                                      kwargs)
+        return await self.engine.collective_rpc_async(method, timeout, args, kwargs)
 
 
 # TODO(v1): Remove this class proxy when V1 goes default.

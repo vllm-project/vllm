@@ -88,8 +88,8 @@ def test_enabled_ops(env: str, torch_level: int, ops_enabled: list[int],
         assert SiluAndMul2().enabled() == SiluAndMul().enabled()
 
 
-@pytest.mark.parametrize(
-    "env", ["all,none", "all,+rms_norm,all", "+rms_norm,-rms_norm"])
+@pytest.mark.parametrize("env",
+                         ["all,none", "all,+rms_norm,all", "+rms_norm,-rms_norm"])
 def test_enabled_ops_invalid(env: str):
     with pytest.raises(Exception):  # noqa
         vllm_config = VllmConfig(compilation_config=CompilationConfig(
@@ -113,8 +113,7 @@ def test_topk_dispatch(use_rocm_aiter: str, monkeypatch):
 
 @pytest.mark.parametrize("use_rocm_aiter", ["0", "1"])
 @pytest.mark.parametrize("inplace", [True, False])
-def test_fused_experts_dispatch(use_rocm_aiter: str, inplace: bool,
-                                monkeypatch):
+def test_fused_experts_dispatch(use_rocm_aiter: str, inplace: bool, monkeypatch):
 
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_rocm_aiter)
     is_rocm_aiter_moe_enabled.cache_clear()

@@ -29,16 +29,14 @@ class XPUPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
-                             block_size: int, use_v1: bool,
-                             use_mla: bool) -> str:
+                             block_size: int, use_v1: bool, use_mla: bool) -> str:
         if selected_backend != _Backend.IPEX:
             logger.info("Cannot use %s backend on XPU.", selected_backend)
         logger.info("Using IPEX attention backend.")
         return "vllm.attention.backends.ipex_attn.IpexAttnBackend"
 
     @staticmethod
-    def get_device_capability(
-            device_id: int = 0) -> Optional[DeviceCapability]:
+    def get_device_capability(device_id: int = 0) -> Optional[DeviceCapability]:
         # capacity format differs from cuda's and will cause unexpected
         # failure, so use None directly
         return None
@@ -78,14 +76,12 @@ class XPUPlatform(Platform):
                     cls.get_device_name())
                 model_config.dtype = torch.float16
         if not model_config.enforce_eager:
-            logger.warning(
-                "CUDA graph is not supported on XPU, fallback to the eager "
-                "mode.")
+            logger.warning("CUDA graph is not supported on XPU, fallback to the eager "
+                           "mode.")
             model_config.enforce_eager = True
 
         if vllm_config.speculative_config is not None:
-            raise NotImplementedError(
-                "XPU does not support speculative decoding")
+            raise NotImplementedError("XPU does not support speculative decoding")
 
         if vllm_config.device_config is not None:
             assert vllm_config.device_config.device_type == "xpu"
@@ -101,16 +97,14 @@ class XPUPlatform(Platform):
             # FIXME(kunshang):
             # spawn needs calling `if __name__ == '__main__':``
             # fork is not supported for xpu start new process.
-            logger.error(
-                "Both start methods (spawn and fork) have issue "
-                "on XPU if you use mp backend, setting it to ray instead.")
+            logger.error("Both start methods (spawn and fork) have issue "
+                         "on XPU if you use mp backend, setting it to ray instead.")
             parallel_config.distributed_executor_backend = "ray"
 
         elif parallel_config.distributed_executor_backend != "ray":
             logger.warning(
                 "%s is not supported on XPU, fallback to ray distributed"
-                " executor backend.",
-                parallel_config.distributed_executor_backend)
+                " executor backend.", parallel_config.distributed_executor_backend)
             parallel_config.distributed_executor_backend = "ray"
 
     @classmethod
@@ -120,8 +114,7 @@ class XPUPlatform(Platform):
 
     @classmethod
     def get_current_memory_usage(cls,
-                                 device: Optional[torch.types.Device] = None
-                                 ) -> float:
+                                 device: Optional[torch.types.Device] = None) -> float:
         torch.xpu.reset_peak_memory_stats(device)
         return torch.xpu.max_memory_allocated(device)
 
@@ -133,8 +126,7 @@ class XPUPlatform(Platform):
         elif device_name.count("data center gpu") > 0:
             return True
         else:
-            logger.warning("Unknown device name %s, always use float16",
-                           device_name)
+            logger.warning("Unknown device name %s, always use float16", device_name)
             return False
 
     @classmethod

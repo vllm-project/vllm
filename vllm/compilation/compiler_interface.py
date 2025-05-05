@@ -226,8 +226,7 @@ class InductorAdaptor(CompilerInterface):
             original_load_name = None
 
             def hijacked_compile_fx_inner(*args, **kwargs):
-                output = torch._inductor.compile_fx.compile_fx_inner(
-                    *args, **kwargs)
+                output = torch._inductor.compile_fx.compile_fx_inner(*args, **kwargs)
                 nonlocal hash_str
                 inductor_compiled_graph = output
                 if inductor_compiled_graph is not None:
@@ -294,9 +293,8 @@ class InductorAdaptor(CompilerInterface):
 
             # for forcing the graph to be cached
             stack.enter_context(
-                patch(
-                    "torch._inductor.codecache.FxGraphCache._check_can_cache",
-                    _check_can_cache))
+                patch("torch._inductor.codecache.FxGraphCache._check_can_cache",
+                      _check_can_cache))
 
             # Dynamo metrics context, see method for more details.
             stack.enter_context(self.metrics_context())
@@ -311,15 +309,13 @@ class InductorAdaptor(CompilerInterface):
                 stack.enter_context(
                     torch._inductor.config.patch(fx_graph_remote_cache=False))
                 stack.enter_context(
-                    torch._functorch.config.patch(
-                        enable_remote_autograd_cache=False))
+                    torch._functorch.config.patch(enable_remote_autograd_cache=False))
 
             with pass_context(runtime_shape):
-                compiled_graph = compile_fx(
-                    graph,
-                    example_inputs,
-                    inner_compile=hijacked_compile_fx_inner,
-                    config_patches=current_config)
+                compiled_graph = compile_fx(graph,
+                                            example_inputs,
+                                            inner_compile=hijacked_compile_fx_inner,
+                                            config_patches=current_config)
 
         # We treat VLLM_DISABLE_COMPILE_CACHE as the overall switch for torch
         # compilation cache. So turn off the checks if we disable the

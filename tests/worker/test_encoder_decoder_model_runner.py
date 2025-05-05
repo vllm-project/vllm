@@ -14,8 +14,7 @@ from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 BATCH_SIZES = [1, 4, 16, 64, 256]
 
 
-def _create_model_runner(model: str, *args,
-                         **kwargs) -> EncoderDecoderModelRunner:
+def _create_model_runner(model: str, *args, **kwargs) -> EncoderDecoderModelRunner:
     engine_args = EngineArgs(model, *args, **kwargs)
     engine_config = engine_args.create_engine_config()
     model_runner = EncoderDecoderModelRunner(
@@ -43,8 +42,7 @@ def test_empty_seq_group():
         enforce_eager=True,
     )
     seq_group_metadata_list: list[SequenceGroupMetadata] = []
-    model_input = model_runner._prepare_model_input_tensors(
-        seq_group_metadata_list)
+    model_input = model_runner._prepare_model_input_tensors(seq_group_metadata_list)
     (
         input_tokens,
         input_positions,
@@ -158,9 +156,8 @@ def test_prepare_prompt(batch_size):
     assert attn_metadata.max_decode_seq_len == 0
     # - Encoder attention metadata
     assert attn_metadata.encoder_seq_lens == encoder_seq_lens
-    assert torch.equal(
-        attn_metadata.encoder_seq_lens_tensor,
-        torch.tensor(encoder_seq_lens, device=device, dtype=torch.int))
+    assert torch.equal(attn_metadata.encoder_seq_lens_tensor,
+                       torch.tensor(encoder_seq_lens, device=device, dtype=torch.int))
     assert attn_metadata.max_encoder_seq_len == max(encoder_seq_lens)
     assert attn_metadata.num_encoder_tokens == sum(encoder_seq_lens)
 
@@ -244,8 +241,7 @@ def test_prepare_prompt(batch_size):
     for seq_len in seq_lens:
         # Compute the index offset of the final token in each
         # prompt (recall that the prompts are concatenated)
-        expected_selected_token_indices.append(selected_token_start_idx +
-                                               seq_len - 1)
+        expected_selected_token_indices.append(selected_token_start_idx + seq_len - 1)
         selected_token_start_idx += seq_len
 
     sampling_metadata = model_input.sampling_metadata
@@ -297,12 +293,7 @@ def test_prepare_decode(batch_size, multiple_seqs_per_seq_group):
     seq_lens: list[int] = []
     encoder_seq_lens: list[int] = []
     seq_group_metadata_list: list[SequenceGroupMetadata] = []
-    block_tables = {
-        0: [1],
-        1: [3]
-    } if multiple_seqs_per_seq_group else {
-        0: [1]
-    }
+    block_tables = {0: [1], 1: [3]} if multiple_seqs_per_seq_group else {0: [1]}
     cross_block_table = [2]
     for i in range(batch_size):
         # make sure all tokens fit into one block
@@ -325,8 +316,7 @@ def test_prepare_decode(batch_size, multiple_seqs_per_seq_group):
         )
         assert seq_group_metadata.token_chunk_size == 1
         seq_group_metadata_list.append(seq_group_metadata)
-        seq_lens.extend(
-            [seq_len for _ in range(len(seq_group_metadata.seq_data))])
+        seq_lens.extend([seq_len for _ in range(len(seq_group_metadata.seq_data))])
         encoder_seq_lens.extend(
             [encoder_seq_len for _ in range(len(seq_group_metadata.seq_data))])
 
@@ -360,9 +350,8 @@ def test_prepare_decode(batch_size, multiple_seqs_per_seq_group):
     assert attn_metadata.max_decode_seq_len == max(seq_lens)
     # - Encoder attention metadata
     assert attn_metadata.encoder_seq_lens == encoder_seq_lens
-    assert torch.equal(
-        attn_metadata.encoder_seq_lens_tensor,
-        torch.tensor(encoder_seq_lens, device=device, dtype=torch.int))
+    assert torch.equal(attn_metadata.encoder_seq_lens_tensor,
+                       torch.tensor(encoder_seq_lens, device=device, dtype=torch.int))
     assert attn_metadata.max_encoder_seq_len == max(encoder_seq_lens)
     assert attn_metadata.num_encoder_tokens == sum(encoder_seq_lens)
 
@@ -399,11 +388,8 @@ def test_prepare_decode(batch_size, multiple_seqs_per_seq_group):
 
     # Verify block tables are correct for prompts
     # - Decoder self-attention
-    flattened_block_tables = [
-        block_table for block_table in block_tables.values()
-    ]
-    expected = torch.tensor(flattened_block_tables *
-                            len(seq_group_metadata_list),
+    flattened_block_tables = [block_table for block_table in block_tables.values()]
+    expected = torch.tensor(flattened_block_tables * len(seq_group_metadata_list),
                             dtype=torch.int32,
                             device=model_runner.device)
     assert torch.equal(
@@ -496,12 +482,7 @@ def test_prepare_decode_cuda_graph(batch_size, multiple_seqs_per_seq_group):
         enable_chunked_prefill=False,
         enforce_eager=False,
     )
-    block_tables = {
-        0: [1],
-        1: [3]
-    } if multiple_seqs_per_seq_group else {
-        0: [1]
-    }
+    block_tables = {0: [1], 1: [3]} if multiple_seqs_per_seq_group else {0: [1]}
     seq_lens: list[int] = []
     encoder_seq_lens: list[int] = []
     seq_group_metadata_list: list[SequenceGroupMetadata] = []
@@ -527,12 +508,10 @@ def test_prepare_decode_cuda_graph(batch_size, multiple_seqs_per_seq_group):
             cross_block_table=cross_block_table,
         )
         assert seq_group_metadata.token_chunk_size == 1
-        seq_lens.extend(
-            [seq_len for _ in range(len(seq_group_metadata.seq_data))])
+        seq_lens.extend([seq_len for _ in range(len(seq_group_metadata.seq_data))])
         encoder_seq_lens.extend(
             [encoder_seq_len for _ in range(len(seq_group_metadata.seq_data))])
-        expanded_batch_size = expanded_batch_size + len(
-            seq_group_metadata.seq_data)
+        expanded_batch_size = expanded_batch_size + len(seq_group_metadata.seq_data)
         seq_group_metadata_list.append(seq_group_metadata)
 
     model_input = model_runner.prepare_model_input(seq_group_metadata_list)
@@ -548,8 +527,7 @@ def test_prepare_decode_cuda_graph(batch_size, multiple_seqs_per_seq_group):
     # With CUDA Graph capture and replay enabled, the decoder and encoder
     # input sequences will be padded. Create the expected padded tensors
     # accordingly.
-    graph_batch_size = model_runner.vllm_config.pad_for_cudagraph(
-        expanded_batch_size)
+    graph_batch_size = model_runner.vllm_config.pad_for_cudagraph(expanded_batch_size)
     cuda_graph_pad_size = graph_batch_size - expanded_batch_size
     padded_seq_lens = seq_lens + list(itertools.repeat(1, cuda_graph_pad_size))
     padded_encoder_seq_lens = encoder_seq_lens + list(
@@ -563,9 +541,8 @@ def test_prepare_decode_cuda_graph(batch_size, multiple_seqs_per_seq_group):
     device = model_runner.device
     assert attn_metadata.num_prefills == 0
     assert attn_metadata.num_decode_tokens > 0
-    assert torch.equal(
-        attn_metadata.seq_lens_tensor,
-        torch.tensor(padded_seq_lens, device=device, dtype=torch.int))
+    assert torch.equal(attn_metadata.seq_lens_tensor,
+                       torch.tensor(padded_seq_lens, device=device, dtype=torch.int))
     assert attn_metadata.seq_lens == padded_seq_lens
     assert attn_metadata.max_prefill_seq_len == 0
     assert attn_metadata.max_decode_seq_len == max(seq_lens)

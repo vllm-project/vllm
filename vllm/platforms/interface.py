@@ -155,8 +155,7 @@ class Platform:
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
-                             block_size: int, use_v1: bool,
-                             use_mla: bool) -> str:
+                             block_size: int, use_v1: bool, use_mla: bool) -> str:
         """Get the attention backend class of a device."""
         return ""
 
@@ -284,9 +283,8 @@ class Platform:
         """
         if cls.supported_quantization and \
             quant not in cls.supported_quantization:
-            raise ValueError(
-                f"{quant} quantization is currently not supported in "
-                f"{cls.device_name}.")
+            raise ValueError(f"{quant} quantization is currently not supported in "
+                             f"{cls.device_name}.")
 
     @classmethod
     def get_cpu_architecture(cls) -> CpuArchEnum:
@@ -318,8 +316,7 @@ class Platform:
 
     @classmethod
     def get_current_memory_usage(cls,
-                                 device: Optional[torch.types.Device] = None
-                                 ) -> float:
+                                 device: Optional[torch.types.Device] = None) -> float:
         """
         Return the memory usage in bytes.
         """
@@ -379,8 +376,7 @@ class Platform:
 
         parallel_config = get_current_vllm_config().parallel_config
         return (envs.VLLM_USE_V1
-                or parallel_config.distributed_executor_backend
-                == "external_launcher")
+                or parallel_config.distributed_executor_backend == "external_launcher")
 
     @classmethod
     def supports_v1(cls, model_config: ModelConfig) -> bool:

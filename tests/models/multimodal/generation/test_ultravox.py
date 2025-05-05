@@ -88,8 +88,7 @@ def _get_prompt(audio_count, question, placeholder):
                                          add_generation_prompt=True)
 
 
-def vllm_to_hf_output(vllm_output: tuple[list[int], str,
-                                         Optional[SampleLogprobs]],
+def vllm_to_hf_output(vllm_output: tuple[list[int], str, Optional[SampleLogprobs]],
                       model: str):
     """Sanitize vllm output to be comparable with hf output."""
     output_ids, output_str, out_logprobs = vllm_output
@@ -126,8 +125,7 @@ def run_test(
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
 
-    with vllm_runner(model, dtype=dtype, enforce_eager=True,
-                     **kwargs) as vllm_model:
+    with vllm_runner(model, dtype=dtype, enforce_eager=True, **kwargs) as vllm_model:
         vllm_outputs_per_audio = [
             vllm_model.generate_greedy_logprobs([vllm_prompt],
                                                 max_tokens,
@@ -138,23 +136,21 @@ def run_test(
 
     with hf_runner(model, dtype=dtype, auto_cls=AutoModel) as hf_model:
         hf_outputs_per_audio = [
-            hf_model.generate_greedy_logprobs_limit(
-                [hf_prompt],
-                max_tokens,
-                num_logprobs=num_logprobs,
-                audios=[(resample_audio_librosa(audio[0],
-                                                orig_sr=audio[1],
-                                                target_sr=16000), 16000)])
+            hf_model.generate_greedy_logprobs_limit([hf_prompt],
+                                                    max_tokens,
+                                                    num_logprobs=num_logprobs,
+                                                    audios=[(resample_audio_librosa(
+                                                        audio[0],
+                                                        orig_sr=audio[1],
+                                                        target_sr=16000), 16000)])
             for _, hf_prompt, audio in prompts_and_audios
         ]
 
-    for hf_outputs, vllm_outputs in zip(hf_outputs_per_audio,
-                                        vllm_outputs_per_audio):
+    for hf_outputs, vllm_outputs in zip(hf_outputs_per_audio, vllm_outputs_per_audio):
         check_logprobs_close(
             outputs_0_lst=hf_outputs,
             outputs_1_lst=[
-                vllm_to_hf_output(vllm_output, model)
-                for vllm_output in vllm_outputs
+                vllm_to_hf_output(vllm_output, model) for vllm_output in vllm_outputs
             ],
             name_0="hf",
             name_1="vllm",
@@ -179,8 +175,7 @@ def run_multi_audio_test(
                      dtype=dtype,
                      enforce_eager=True,
                      limit_mm_per_prompt={
-                         "audio":
-                         max((len(audio) for _, audio in prompts_and_audios))
+                         "audio": max((len(audio) for _, audio in prompts_and_audios))
                      },
                      **kwargs) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
@@ -202,9 +197,8 @@ def run_multi_audio_test(
     pytest.param({}, marks=pytest.mark.cpu_model),
     pytest.param(CHUNKED_PREFILL_KWARGS),
 ])
-def test_models(hf_runner, vllm_runner, audio_assets: AudioTestAssets,
-                dtype: str, max_tokens: int, num_logprobs: int,
-                vllm_kwargs: dict) -> None:
+def test_models(hf_runner, vllm_runner, audio_assets: AudioTestAssets, dtype: str,
+                max_tokens: int, num_logprobs: int, vllm_kwargs: dict) -> None:
     audio_inputs = [(
         _get_prompt(1, audio, VLLM_PLACEHOLDER),
         _get_prompt(1, audio, HF_PLACEHOLDER),
@@ -231,17 +225,14 @@ def test_models(hf_runner, vllm_runner, audio_assets: AudioTestAssets,
     pytest.param({}, marks=pytest.mark.cpu_model),
     pytest.param(CHUNKED_PREFILL_KWARGS),
 ])
-def test_models_with_multiple_audios(vllm_runner,
-                                     audio_assets: AudioTestAssets, dtype: str,
-                                     max_tokens: int, num_logprobs: int,
+def test_models_with_multiple_audios(vllm_runner, audio_assets: AudioTestAssets,
+                                     dtype: str, max_tokens: int, num_logprobs: int,
                                      vllm_kwargs: dict) -> None:
 
-    vllm_prompt = _get_prompt(len(audio_assets), MULTI_AUDIO_PROMPT,
-                              VLLM_PLACEHOLDER)
+    vllm_prompt = _get_prompt(len(audio_assets), MULTI_AUDIO_PROMPT, VLLM_PLACEHOLDER)
     run_multi_audio_test(
         vllm_runner,
-        [(vllm_prompt, [audio.audio_and_sample_rate
-                        for audio in audio_assets])],
+        [(vllm_prompt, [audio.audio_and_sample_rate for audio in audio_assets])],
         MODEL_NAME,
         dtype=dtype,
         max_tokens=max_tokens,
@@ -265,10 +256,8 @@ async def test_online_serving(client, audio_assets: AudioTestAssets):
                 }
             } for audio in audio_assets],
             {
-                "type":
-                "text",
-                "text":
-                f"What's happening in these {len(audio_assets)} audio clips?"
+                "type": "text",
+                "text": f"What's happening in these {len(audio_assets)} audio clips?"
             },
         ],
     }]

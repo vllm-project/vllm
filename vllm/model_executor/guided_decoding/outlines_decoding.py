@@ -62,8 +62,7 @@ async def get_outlines_guided_decoding_logits_processor(
     guided_params: GuidedDecodingParams,
     tokenizer: PreTrainedTokenizerBase,
     reasoner: Optional[ReasoningParser],
-) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, CFGLogitsProcessor,
-           None]:
+) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, CFGLogitsProcessor, None]:
     """
     Given an OpenAI-compatible request, check for guided decoding parameters
     and get the necessary logits processor for the given guide.
@@ -83,9 +82,8 @@ async def get_outlines_guided_decoding_logits_processor(
             max_workers=max_workers)
     loop = asyncio.get_running_loop()
 
-    return await loop.run_in_executor(global_thread_pool,
-                                      _get_logits_processor, guide, tokenizer,
-                                      mode, guided_params.whitespace_pattern,
+    return await loop.run_in_executor(global_thread_pool, _get_logits_processor, guide,
+                                      tokenizer, mode, guided_params.whitespace_pattern,
                                       reasoner)
 
 
@@ -93,8 +91,7 @@ def get_local_outlines_guided_decoding_logits_processor(
     guided_params: GuidedDecodingParams,
     tokenizer: PreTrainedTokenizerBase,
     reasoner: Optional[ReasoningParser],
-) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, CFGLogitsProcessor,
-           None]:
+) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, CFGLogitsProcessor, None]:
     """
     Given an OpenAI-compatible request, check for guided decoding parameters
     and get the necessary logits processor for the given guide.
@@ -123,9 +120,7 @@ def _get_guide_and_mode(
         return guided_params.regex, GuidedDecodingMode.REGEX
     elif guided_params.choice:
         # choice just uses regex
-        choices = [
-            regex_escape(str(choice)) for choice in guided_params.choice
-        ]
+        choices = [regex_escape(str(choice)) for choice in guided_params.choice]
         choices_regex = "(" + "|".join(choices) + ")"
         return choices_regex, GuidedDecodingMode.CHOICE
     elif guided_params.grammar:
@@ -144,8 +139,7 @@ def _get_logits_processor(
     reasoner: Optional[ReasoningParser],
 ) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, CFGLogitsProcessor]:
     if mode == GuidedDecodingMode.JSON:
-        return JSONLogitsProcessor(guide, tokenizer, whitespace_pattern,
-                                   reasoner)
+        return JSONLogitsProcessor(guide, tokenizer, whitespace_pattern, reasoner)
     elif mode == GuidedDecodingMode.REGEX or mode == GuidedDecodingMode.CHOICE:
         return RegexLogitsProcessor(guide, tokenizer, reasoner)
     elif mode == GuidedDecodingMode.GRAMMAR:

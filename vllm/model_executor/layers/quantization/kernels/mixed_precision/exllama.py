@@ -24,8 +24,7 @@ class ExllamaLinearKernel(MPLinearKernel):
         return 60
 
     @classmethod
-    def can_implement(cls,
-                      c: MPLinearLayerConfig) -> Tuple[bool, Optional[str]]:
+    def can_implement(cls, c: MPLinearLayerConfig) -> Tuple[bool, Optional[str]]:
         if c.has_g_idx and\
             c.partition_weight_shape[0] != c.full_weight_shape[0]:
             return False, "Act reordering currently not supported by Exllama, "\
@@ -79,11 +78,9 @@ class ExllamaLinearKernel(MPLinearKernel):
                     "a bug in the original GPTQ checkpoint format leading to "
                     "exllama kernel adding 1 to the zero points during "
                     "inference")
-            zeros = pack_quantized_values_into_int32(zeros,
-                                                     c.weight_type,
-                                                     packed_dim=1)
-            setattr(layer, self.w_zp_name,
-                    torch.nn.Parameter(zeros, requires_grad=False))
+            zeros = pack_quantized_values_into_int32(zeros, c.weight_type, packed_dim=1)
+            setattr(layer, self.w_zp_name, torch.nn.Parameter(zeros,
+                                                              requires_grad=False))
 
         if c.has_g_idx:
 

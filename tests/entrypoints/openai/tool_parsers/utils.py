@@ -36,8 +36,7 @@ class StreamingToolReconstructor:
                 "Streaming tool calls should only emit function calls. Got "
                 f"{call_delta.type}")
             current_tool_call = self.tool_calls[
-                call_delta.index] if call_delta.index < len(
-                    self.tool_calls) else None
+                call_delta.index] if call_delta.index < len(self.tool_calls) else None
             if current_tool_call:
                 assert (not call_delta.function.name), (
                     "Streaming tool calls should emit the full function name "
@@ -45,11 +44,10 @@ class StreamingToolReconstructor:
                 assert (not call_delta.id), (
                     "Streaming tool calls must emit function id only once. Got "
                     f"{call_delta.id}")
-                assert (call_delta.index == len(self.tool_calls) - 1), (
-                    f"Incorrect index for tool delta. Got {call_delta.index}, "
-                    f"expected {len(self.tool_calls) - 1}")
-                current_tool_call.function.arguments += (
-                    call_delta.function.arguments)
+                assert (call_delta.index == len(self.tool_calls) -
+                        1), (f"Incorrect index for tool delta. Got {call_delta.index}, "
+                             f"expected {len(self.tool_calls) - 1}")
+                current_tool_call.function.arguments += (call_delta.function.arguments)
             else:
                 assert call_delta.id is not None, (
                     "Streaming tool calls must have an id on first appearance")
@@ -63,8 +61,7 @@ class StreamingToolReconstructor:
                     ToolCall(id=call_delta.id,
                              function=FunctionCall(
                                  name=call_delta.function.name,
-                                 arguments=call_delta.function.arguments
-                                 or "")))
+                                 arguments=call_delta.function.arguments or "")))
 
 
 def run_tool_extraction(
@@ -82,17 +79,16 @@ def run_tool_extraction(
             assert_one_tool_per_delta=assert_one_tool_per_delta)
         return reconstructor.other_content or None, reconstructor.tool_calls
     else:
-        extracted = run_tool_extraction_nonstreaming(tool_parser, model_output,
-                                                     request)
+        extracted = run_tool_extraction_nonstreaming(tool_parser, model_output, request)
         assert extracted.tools_called == bool(extracted.tool_calls)
         return extracted.content, extracted.tool_calls
 
 
 def run_tool_extraction_nonstreaming(
-    tool_parser: ToolParser,
-    model_output: str,
-    request: Union[ChatCompletionRequest, None] = None
-) -> ExtractedToolCallInformation:
+        tool_parser: ToolParser,
+        model_output: str,
+        request: Union[ChatCompletionRequest,
+                       None] = None) -> ExtractedToolCallInformation:
     request = request or ChatCompletionRequest(messages=[], model="test-model")
     return tool_parser.extract_tool_calls(model_output, request)
 
@@ -117,8 +113,8 @@ def run_tool_extraction_streaming(
         current_text = previous_text + delta
         current_tokens = previous_tokens + token_delta
         delta_message = tool_parser.extract_tool_calls_streaming(
-            previous_text, current_text, delta, previous_tokens,
-            current_tokens, token_delta, request)
+            previous_text, current_text, delta, previous_tokens, current_tokens,
+            token_delta, request)
         if delta_message is not None:
             reconstructor.append_delta(delta_message)
         previous_text = current_text

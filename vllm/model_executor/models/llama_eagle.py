@@ -75,8 +75,7 @@ class LlamaModel(nn.Module):
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         input_embeds = self.embed_tokens(input_ids)
-        hidden_states = self.fc(
-            torch.cat((input_embeds, hidden_states), dim=-1))
+        hidden_states = self.fc(torch.cat((input_embeds, hidden_states), dim=-1))
         residual = None
         for layer in self.layers:
             hidden_states, residual = layer(
@@ -87,8 +86,7 @@ class LlamaModel(nn.Module):
         hidden_states = hidden_states + residual
         return hidden_states, hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -110,8 +108,7 @@ class LlamaModel(nn.Module):
                 break
             else:
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
@@ -142,8 +139,7 @@ class EagleLlamaForCausalLM(LlamaForCausalLM):
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(
             self,
-            skip_prefixes=(["lm_head."]
-                           if self.config.tie_word_embeddings else None),
+            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
 
         model_weights = {}

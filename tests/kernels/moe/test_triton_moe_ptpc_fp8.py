@@ -12,8 +12,7 @@ from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.platforms import current_platform
 
 if current_platform.get_device_capability() < (9, 0):
-    pytest.skip("FP8 Triton requires CUDA 9.0 or higher",
-                allow_module_level=True)
+    pytest.skip("FP8 Triton requires CUDA 9.0 or higher", allow_module_level=True)
 
 
 def native_w8a8_per_token_matmul(A, B, As, Bs, output_dtype=torch.float16):
@@ -23,8 +22,7 @@ def native_w8a8_per_token_matmul(A, B, As, Bs, output_dtype=torch.float16):
     B = B.to(torch.float32)
 
     assert A.shape[-1] == B.shape[-1], "Dimension mismatch"
-    assert B.ndim == 2 and B.is_contiguous(
-    ), "B must be a 2D contiguous tensor"
+    assert B.ndim == 2 and B.is_contiguous(), "B must be a 2D contiguous tensor"
 
     # Reshape input
     M = A.numel() // A.shape[-1]
@@ -79,8 +77,8 @@ def torch_w8a8_per_column_moe(a, w1, w2, w1_s, w2_s, score, topk):
             # Activation function
             act_out = SiluAndMul().forward_native(inter_out)
             # Quantize activation output with per-token
-            act_out_q, act_out_s = ops.scaled_fp8_quant(
-                act_out, use_per_token_if_dynamic=True)
+            act_out_q, act_out_s = ops.scaled_fp8_quant(act_out,
+                                                        use_per_token_if_dynamic=True)
 
             # Second MLP layer
             out[mask] = native_w8a8_per_token_matmul(act_out_q,
@@ -125,12 +123,10 @@ def test_w8a8_fp8_fused_moe(M, N, K, E, topk, dtype, seed):
 
     # Generate int8 weights
     w1_fp32 = (torch.rand((E, 2 * N, K), dtype=torch.float32) - 0.5) * 2
-    w1 = (w1_fp32 * fp8_max).clamp(min=fp8_min,
-                                   max=fp8_max).to(torch.float8_e4m3fn)
+    w1 = (w1_fp32 * fp8_max).clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
 
     w2_fp32 = (torch.rand((E, K, N), dtype=torch.float32) - 0.5) * 2
-    w2 = (w2_fp32 * fp8_max).clamp(min=fp8_min,
-                                   max=fp8_max).to(torch.float8_e4m3fn)
+    w2 = (w2_fp32 * fp8_max).clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
 
     # Generate scale for each column (per-column quantization)
     w1_s = torch.rand(E, 2 * N, device=w1_fp32.device) * factor_for_scale
@@ -153,7 +149,7 @@ def test_w8a8_fp8_fused_moe(M, N, K, E, topk, dtype, seed):
     )
 
     # Check results
-    rel_diff = (torch.mean(
-        torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
-                torch.mean(torch.abs(ref_out.to(torch.float32))))
+    rel_diff = (
+        torch.mean(torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
+        torch.mean(torch.abs(ref_out.to(torch.float32))))
     assert rel_diff < 0.05

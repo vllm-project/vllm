@@ -68,9 +68,7 @@ class QuarkConfig(QuantizationConfig):
         if isinstance(layer, Attention):
             return QuarkKVCacheMethod(self)
         if isinstance(layer, FusedMoE):
-            return QuarkMoEMethod.get_moe_method(self,
-                                                 module=layer,
-                                                 layer_name=prefix)
+            return QuarkMoEMethod.get_moe_method(self, module=layer, layer_name=prefix)
         return None
 
     @classmethod
@@ -91,8 +89,7 @@ class QuarkConfig(QuantizationConfig):
             kv_cache_config = None
         else:
             kv_cache_set = set(kv_cache_group)
-            layer_quant_config = cast(Dict[str, Any],
-                                      config.get("layer_quant_config"))
+            layer_quant_config = cast(Dict[str, Any], config.get("layer_quant_config"))
             layer_quant_names = list(layer_quant_config.keys())
             layer_quant_set = set(layer_quant_names)
 
@@ -107,17 +104,13 @@ class QuarkConfig(QuantizationConfig):
                 cast(Dict[str, Any], layer_quant_config.get(name))
                 for name in kv_cache_group
             ]
-            if not all(
-                    deep_compare(q_config, q_configs[0])
-                    for q_config in q_configs):
-                raise ValueError(
-                    "The quantization method used for kv_cache should "
-                    "be the same, but the quantization method for the "
-                    "kv_cache layer in the config is different.")
+            if not all(deep_compare(q_config, q_configs[0]) for q_config in q_configs):
+                raise ValueError("The quantization method used for kv_cache should "
+                                 "be the same, but the quantization method for the "
+                                 "kv_cache layer in the config is different.")
             kv_cache_config = q_configs[0].get("output_tensors")
             if kv_cache_config is None:
-                raise ValueError(
-                    "The kv_cache quantization configuration is empty.")
+                raise ValueError("The kv_cache quantization configuration is empty.")
 
             # Since we have already set kv_cache quantization configurations,
             # we will remove the quantization configuration for the
@@ -127,8 +120,7 @@ class QuarkConfig(QuantizationConfig):
 
             # In case q_proj output is also quantized, remove the configuration
             # to keep qkv consistency.
-            q_proj_q_config = cast(Dict[str, Any],
-                                   layer_quant_config.get("*q_proj"))
+            q_proj_q_config = cast(Dict[str, Any], layer_quant_config.get("*q_proj"))
             if q_proj_q_config is not None:
                 q_proj_q_config["output_tensors"] = None
 
@@ -141,9 +133,7 @@ class QuarkConfig(QuantizationConfig):
     def get_config_filenames(cls) -> List[str]:
         return []
 
-    def _check_scheme_supported(self,
-                                min_capability: int,
-                                error: bool = True) -> bool:
+    def _check_scheme_supported(self, min_capability: int, error: bool = True) -> bool:
         capability_tuple = current_platform.get_device_capability()
 
         if capability_tuple is not None:
@@ -171,8 +161,7 @@ class QuarkConfig(QuantizationConfig):
         is_per_tensor_or_channel_weight = (weight_quant.get("qscheme")
                                            in ["per_tensor", "per_channel"])
 
-        if not (is_fp8_dtype and is_static_weight
-                and is_per_tensor_or_channel_weight):
+        if not (is_fp8_dtype and is_static_weight and is_per_tensor_or_channel_weight):
             return False
 
         # Dynamic quantization is always supported if weights supported.
@@ -192,8 +181,7 @@ class QuarkConfig(QuantizationConfig):
         is_int8_dtype = (weight_quant.get("dtype") == "int8"
                          and input_quant.get("dtype") == "int8")
 
-        is_tensor = (weight_quant.get("qscheme")
-                     in ["per_tensor", "per_channel"]
+        is_tensor = (weight_quant.get("qscheme") in ["per_tensor", "per_channel"]
                      and input_quant.get("qscheme") == "per_tensor")
 
         is_static = (not weight_quant.get("is_dynamic")
@@ -224,34 +212,31 @@ class QuarkConfig(QuantizationConfig):
             if not all(
                     deep_compare(q_config, shard_configs[0])
                     for q_config in shard_configs):
-                raise ValueError(
-                    f"Found a different quantization configuration for "
-                    f"{shard_proj_names} in {layer_name}. vLLM "
-                    "requires all to use the same scheme.")
+                raise ValueError(f"Found a different quantization configuration for "
+                                 f"{shard_proj_names} in {layer_name}. vLLM "
+                                 "requires all to use the same scheme.")
             return shard_configs[0]
         else:
-            layer_quant_config = cast(
-                Dict[str, Any], self.quant_config.get("layer_quant_config"))
+            layer_quant_config = cast(Dict[str, Any],
+                                      self.quant_config.get("layer_quant_config"))
             for name_pattern in layer_quant_config:
                 if fnmatch.fnmatch(layer_name, name_pattern):
                     return layer_quant_config[name_pattern]
 
             layer_type = cast(str, type(module))
             layer_type_quant_config = cast(
-                Dict[str, Any],
-                self.quant_config.get("layer_type_quant_config"))
+                Dict[str, Any], self.quant_config.get("layer_type_quant_config"))
             if layer_type in layer_type_quant_config:
                 return layer_type_quant_config[layer_type]
 
-            global_quant_config = cast(
-                Dict[str, Any], self.quant_config.get("global_quant_config"))
+            global_quant_config = cast(Dict[str, Any],
+                                       self.quant_config.get("global_quant_config"))
             return global_quant_config
 
     def _get_scheme_from_config(self, config: Dict[str, Any]) -> "QuarkScheme":
         if config.get("output_tensors") or config.get("bias"):
-            raise NotImplementedError(
-                "Currently, Quark models with output_tensors "
-                "and bias quantized are not supported")
+            raise NotImplementedError("Currently, Quark models with output_tensors "
+                                      "and bias quantized are not supported")
         weight_config = cast(Dict[str, Any], config.get("weight"))
         input_config = cast(Dict[str, Any], config.get("input_tensors"))
 
@@ -260,8 +245,8 @@ class QuarkConfig(QuantizationConfig):
                 QuarkW8A8Fp8.get_min_capability(), error=False)
             if is_fp8_w8a8_supported:
                 weight_qscheme = cast(str, weight_config.get("qscheme"))
-                input_static = (input_config is not None and
-                                not cast(bool, input_config.get("is_dynamic")))
+                input_static = (input_config is not None
+                                and not cast(bool, input_config.get("is_dynamic")))
                 return QuarkW8A8Fp8(qscheme=weight_qscheme,
                                     is_static_input_scheme=input_static)
         elif self._is_static_tensor_w8a8(weight_config, input_config):
@@ -274,8 +259,7 @@ class QuarkConfig(QuantizationConfig):
                                   f"Weight config: {weight_config}, "
                                   f"Input config: {input_config}")
 
-    def get_scheme(self, layer: torch.nn.Module,
-                   layer_name: str) -> "QuarkScheme":
+    def get_scheme(self, layer: torch.nn.Module, layer_name: str) -> "QuarkScheme":
 
         layer_quant_config = self._find_matched_config(layer_name, layer)
 
@@ -317,8 +301,7 @@ class QuarkLinearMethod(LinearMethodBase):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.scheme.process_weights_after_loading(layer)
 
-    def create_weights(self, layer: torch.nn.Module,
-                       input_size_per_partition: int,
+    def create_weights(self, layer: torch.nn.Module, input_size_per_partition: int,
                        output_partition_sizes: List[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
@@ -328,14 +311,13 @@ class QuarkLinearMethod(LinearMethodBase):
         details
         """
         weight_loader = extra_weight_attrs.get("weight_loader")
-        layer.scheme.create_weights(
-            layer=layer,
-            input_size=input_size,
-            input_size_per_partition=input_size_per_partition,
-            output_partition_sizes=output_partition_sizes,
-            output_size=output_size,
-            params_dtype=params_dtype,
-            weight_loader=weight_loader)
+        layer.scheme.create_weights(layer=layer,
+                                    input_size=input_size,
+                                    input_size_per_partition=input_size_per_partition,
+                                    output_partition_sizes=output_partition_sizes,
+                                    output_size=output_size,
+                                    params_dtype=params_dtype,
+                                    weight_loader=weight_loader)
 
     def apply(self,
               layer: torch.nn.Module,
@@ -374,9 +356,8 @@ class QuarkKVCacheMethod(BaseKVCacheMethod):
 
         dtype = kv_cache_config.get("dtype")
         if dtype != "fp8_e4m3":
-            raise NotImplementedError(
-                "Currently supported kv cache quantization is "
-                f"dtype=fp8_e4m3, however received {dtype}")
+            raise NotImplementedError("Currently supported kv cache quantization is "
+                                      f"dtype=fp8_e4m3, however received {dtype}")
 
         qscheme = kv_cache_config.get("qscheme")
         if qscheme != "per_tensor":

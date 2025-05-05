@@ -41,11 +41,10 @@ class TestConfig:
 class Qwen2VLTester:
     """Test helper for Qwen2 VL models with LoRA"""
 
-    PROMPT_TEMPLATE = (
-        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>"
-        "\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"
-        "What is in the image?<|im_end|>\n"
-        "<|im_start|>assistant\n")
+    PROMPT_TEMPLATE = ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>"
+                       "\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"
+                       "What is in the image?<|im_end|>\n"
+                       "<|im_start|>assistant\n")
 
     def __init__(self, config: TestConfig):
         self.config = config
@@ -82,14 +81,9 @@ class Qwen2VLTester:
             },
         } for asset in images]
 
-        lora_request = LoRARequest(str(lora_id), lora_id,
-                                   self.config.lora_path)
-        outputs = self.llm.generate(inputs,
-                                    sampling_params,
-                                    lora_request=lora_request)
-        generated_texts = [
-            output.outputs[0].text.strip() for output in outputs
-        ]
+        lora_request = LoRARequest(str(lora_id), lora_id, self.config.lora_path)
+        outputs = self.llm.generate(inputs, sampling_params, lora_request=lora_request)
+        generated_texts = [output.outputs[0].text.strip() for output in outputs]
 
         # Validate outputs
         for generated, expected in zip(generated_texts, expected_outputs):
@@ -114,20 +108,16 @@ QWEN2VL_MODEL_PATH = "Qwen/Qwen2-VL-2B-Instruct"
 QWEN25VL_MODEL_PATH = "Qwen/Qwen2.5-VL-3B-Instruct"
 
 
-@pytest.mark.xfail(
-    current_platform.is_rocm(),
-    reason="Qwen2-VL dependency xformers incompatible with ROCm")
+@pytest.mark.xfail(current_platform.is_rocm(),
+                   reason="Qwen2-VL dependency xformers incompatible with ROCm")
 def test_qwen2vl_lora(qwen2vl_lora_files):
     """Test Qwen 2.0 VL model with LoRA"""
-    config = TestConfig(model_path=QWEN2VL_MODEL_PATH,
-                        lora_path=qwen2vl_lora_files)
+    config = TestConfig(model_path=QWEN2VL_MODEL_PATH, lora_path=qwen2vl_lora_files)
     tester = Qwen2VLTester(config)
 
     # Test with different LoRA IDs
     for lora_id in [1, 2]:
-        tester.run_test(TEST_IMAGES,
-                        expected_outputs=EXPECTED_OUTPUTS,
-                        lora_id=lora_id)
+        tester.run_test(TEST_IMAGES, expected_outputs=EXPECTED_OUTPUTS, lora_id=lora_id)
 
 
 @pytest.mark.xfail(
@@ -140,12 +130,9 @@ def test_qwen2vl_lora(qwen2vl_lora_files):
 )
 def test_qwen25vl_lora(qwen25vl_lora_files):
     """Test Qwen 2.5 VL model with LoRA"""
-    config = TestConfig(model_path=QWEN25VL_MODEL_PATH,
-                        lora_path=qwen25vl_lora_files)
+    config = TestConfig(model_path=QWEN25VL_MODEL_PATH, lora_path=qwen25vl_lora_files)
     tester = Qwen2VLTester(config)
 
     # Test with different LoRA IDs
     for lora_id in [1, 2]:
-        tester.run_test(TEST_IMAGES,
-                        expected_outputs=EXPECTED_OUTPUTS,
-                        lora_id=lora_id)
+        tester.run_test(TEST_IMAGES, expected_outputs=EXPECTED_OUTPUTS, lora_id=lora_id)

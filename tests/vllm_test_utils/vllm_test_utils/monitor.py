@@ -18,8 +18,7 @@ class MonitoredValues(Generic[_T]):
 
 @contextlib.contextmanager
 def monitor(
-    measure_func: Callable[[],
-                           _T]) -> Generator[MonitoredValues[_T], None, None]:
+        measure_func: Callable[[], _T]) -> Generator[MonitoredValues[_T], None, None]:
     """
     Trace the function calls to continuously monitor the change of
     a value.

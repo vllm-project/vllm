@@ -45,15 +45,9 @@ class EPTestSettings:
     ):
         return EPTestSettings(
             parallel_setups=[
-                ParallelSetup(tp_size=tp_base,
-                              eager_mode=False,
-                              chunked_prefill=False),
-                ParallelSetup(tp_size=tp_base,
-                              eager_mode=False,
-                              chunked_prefill=True),
-                ParallelSetup(tp_size=tp_base,
-                              eager_mode=True,
-                              chunked_prefill=False),
+                ParallelSetup(tp_size=tp_base, eager_mode=False, chunked_prefill=False),
+                ParallelSetup(tp_size=tp_base, eager_mode=False, chunked_prefill=True),
+                ParallelSetup(tp_size=tp_base, eager_mode=True, chunked_prefill=False),
                 ParallelSetup(tp_size=2 * tp_base,
                               eager_mode=False,
                               chunked_prefill=True),
@@ -81,9 +75,7 @@ class EPTestSettings:
     ):
         return EPTestSettings(
             parallel_setups=[
-                ParallelSetup(tp_size=tp_base,
-                              eager_mode=True,
-                              chunked_prefill=False),
+                ParallelSetup(tp_size=tp_base, eager_mode=True, chunked_prefill=False),
             ],
             distributed_backends=["mp"],
             task=task,
@@ -98,8 +90,7 @@ class EPTestSettings:
 
         for parallel_setup in self.parallel_setups:
             for distributed_backend in self.distributed_backends:
-                yield (model_name, parallel_setup, distributed_backend,
-                       self.task, opts)
+                yield (model_name, parallel_setup, distributed_backend, self.task, opts)
 
 
 # NOTE: You can adjust tp_base locally to fit the model in GPU

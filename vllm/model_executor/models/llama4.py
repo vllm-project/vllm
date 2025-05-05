@@ -290,8 +290,7 @@ class Llama4DecoderLayer(nn.Module):
                 bias=False,
                 prefix=f"{prefix}.feed_forward",
             )
-        self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
 
@@ -306,14 +305,11 @@ class Llama4DecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(
-                hidden_states, residual)
-        hidden_states = self.self_attn(positions=positions,
-                                       hidden_states=hidden_states)
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
 
         # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual)
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.feed_forward(hidden_states)
         return hidden_states, residual
 
@@ -327,9 +323,7 @@ class Llama4Model(LlamaModel):
                  prefix: str = "",
                  layer_type: type[Llama4DecoderLayer] = Llama4DecoderLayer):
         self.num_experts = vllm_config.model_config.hf_config.num_local_experts
-        super().__init__(vllm_config=vllm_config,
-                         prefix=prefix,
-                         layer_type=layer_type)
+        super().__init__(vllm_config=vllm_config, prefix=prefix, layer_type=layer_type)
 
     def load_moe_expert_weights(
         self,
@@ -343,8 +337,7 @@ class Llama4Model(LlamaModel):
         expert_param_loaded = False
         if "experts.gate_up_proj" in name:
             loaded_weight = loaded_weight.chunk(2, dim=-1)
-        for (param_name, weight_name, expert_id,
-             shard_id) in expert_params_mapping:
+        for (param_name, weight_name, expert_id, shard_id) in expert_params_mapping:
             new_loaded_weight = loaded_weight
             if fused:
                 e_str, _, proj_str, _ = weight_name.split('.')
@@ -368,8 +361,7 @@ class Llama4Model(LlamaModel):
                 new_loaded_weight = new_loaded_weight.transpose(-1, -2)
                 layer_idx = extract_layer_index(name)
                 # EP mapping
-                expert_map = self.layers[
-                    layer_idx].feed_forward.experts.expert_map
+                expert_map = self.layers[layer_idx].feed_forward.experts.expert_map
                 if expert_map is not None:
                     local_expert_indices = (expert_map != -1) \
                                             .nonzero() \
@@ -390,8 +382,7 @@ class Llama4Model(LlamaModel):
             expert_param_loaded = True
         return expert_param_loaded
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -417,14 +408,13 @@ class Llama4Model(LlamaModel):
             if "experts.gate_up_proj" in name or "experts.down_proj" in name:
                 fused_experts_params = True
                 expert_params_mapping = expert_params_mapping_fused
-            if (self.quant_config is not None and
-                (scale_name := self.quant_config.get_cache_scale(name))):
+            if (self.quant_config is not None
+                    and (scale_name := self.quant_config.get_cache_scale(name))):
                 # Loading kv cache quantization scales
                 param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
-                                 loaded_weight[0])
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                loaded_weight = (loaded_weight
+                                 if loaded_weight.dim() == 0 else loaded_weight[0])
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
@@ -440,13 +430,12 @@ class Llama4Model(LlamaModel):
                 loaded_params.add(name)
                 break
             else:
-                moe_loaded = self.load_moe_expert_weights(
-                    name,
-                    loaded_weight,
-                    params_dict,
-                    loaded_params,
-                    expert_params_mapping,
-                    fused=fused_experts_params)
+                moe_loaded = self.load_moe_expert_weights(name,
+                                                          loaded_weight,
+                                                          params_dict,
+                                                          loaded_params,
+                                                          expert_params_mapping,
+                                                          fused=fused_experts_params)
 
                 if not moe_loaded:
                     if is_pp_missing_parameter(name, self):
@@ -489,12 +478,10 @@ class Llama4ForCausalLM(LlamaForCausalLM):
                            prefix=prefix,
                            layer_type=layer_type)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(
             self,
-            skip_prefixes=(["lm_head."]
-                           if self.config.tie_word_embeddings else None),
+            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
         weights = [
             self.permute_qk_weight_for_rotary(name, loaded_weight)
@@ -520,11 +507,9 @@ class Llama4ForCausalLM(LlamaForCausalLM):
         # rotary embeds should be sliced
         if ("wk" in modules or "k_proj" in modules) \
            and modules[-1] == "weight":
-            loaded_weight = permute(loaded_weight,
-                                    self.config.num_key_value_heads)
+            loaded_weight = permute(loaded_weight, self.config.num_key_value_heads)
         elif ("wq" in modules or "q_proj" in modules) \
                 and modules[-1] == "weight":
-            loaded_weight = permute(loaded_weight,
-                                    self.config.num_attention_heads)
+            loaded_weight = permute(loaded_weight, self.config.num_attention_heads)
 
         return name, loaded_weight

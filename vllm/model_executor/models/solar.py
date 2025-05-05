@@ -198,8 +198,7 @@ class SolarDecoderLayer(nn.Module):
                 config, "original_max_position_embeddings", None):
             rope_scaling["original_max_position_embeddings"] \
                 = config.original_max_position_embeddings
-        max_position_embeddings = getattr(config, "max_position_embeddings",
-                                          8192)
+        max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         # Support abacusai/Smaug-72B-v0.1 with attention_bias
         # Support internlm/internlm-7b with bias
         attention_bias = getattr(config, "attention_bias", False) or getattr(
@@ -226,8 +225,7 @@ class SolarDecoderLayer(nn.Module):
             bias=getattr(config, "mlp_bias", False),
             prefix=f"{prefix}.mlp",
         )
-        self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
 
@@ -242,16 +240,14 @@ class SolarDecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(
-                hidden_states, residual)
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
 
         # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual)
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
@@ -296,9 +292,8 @@ class SolarModel(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size))
+        self.make_empty_intermediate_tensors = (make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -336,12 +331,10 @@ class SolarModel(nn.Module):
                 bskcn_h_2 = hidden_states.clone()
                 bskcn_r_2 = residual.clone()
             if i in self.config.bskcn_3:
-                hidden_states = bskcn_h_1 * bskcn_tv + hidden_states * (
-                    1 - bskcn_tv)
+                hidden_states = bskcn_h_1 * bskcn_tv + hidden_states * (1 - bskcn_tv)
                 residual = bskcn_r_1 * bskcn_tv + residual * (1 - bskcn_tv)
             if i in self.config.bskcn_4:
-                hidden_states = bskcn_h_2 * bskcn_tv + hidden_states * (
-                    1 - bskcn_tv)
+                hidden_states = bskcn_h_2 * bskcn_tv + hidden_states * (1 - bskcn_tv)
                 residual = bskcn_r_2 * bskcn_tv + residual * (1 - bskcn_tv)
             layer = self.layers[i]
             hidden_states, residual = layer(
@@ -412,8 +405,7 @@ class SolarForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
             logit_scale = getattr(config, "logit_scale", 1.0)
             self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                    config.vocab_size,
-                                                    logit_scale)
+                                                    config.vocab_size, logit_scale)
         else:
             self.lm_head = PPMissingLayer()
 
@@ -433,12 +425,10 @@ class SolarForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -452,19 +442,17 @@ class SolarForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
-            if ("rotary_emb.cos_cached" in name
-                    or "rotary_emb.sin_cached" in name):
+            if ("rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
-            if (self.quant_config is not None and
-                (scale_name := self.quant_config.get_cache_scale(name))):
+            if (self.quant_config is not None
+                    and (scale_name := self.quant_config.get_cache_scale(name))):
                 # Loading kv cache quantization scales
                 param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
-                                 loaded_weight[0])
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                loaded_weight = (loaded_weight
+                                 if loaded_weight.dim() == 0 else loaded_weight[0])
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
@@ -497,8 +485,7 @@ class SolarForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                     continue
 
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params

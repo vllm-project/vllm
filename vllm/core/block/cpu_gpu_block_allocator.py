@@ -57,8 +57,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         """
         # For HPU, block id 0 is used only for padding
         reserved_blocks = 1 if current_platform.is_hpu() else 0
-        block_ids = list(
-            range(reserved_blocks, num_gpu_blocks + num_cpu_blocks))
+        block_ids = list(range(reserved_blocks, num_gpu_blocks + num_cpu_blocks))
         num_gpu_blocks -= reserved_blocks
         gpu_block_ids = block_ids[:num_gpu_blocks]
         cpu_block_ids = block_ids[num_gpu_blocks:]
@@ -119,8 +118,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
 
     def allocate_or_get_null_block(self) -> Block:
         if self._null_block is None:
-            self._null_block = NullBlock(
-                self.allocate_mutable_block(None, Device.GPU))
+            self._null_block = NullBlock(self.allocate_mutable_block(None, Device.GPU))
         return self._null_block
 
     def allocate_mutable_block(self,
@@ -140,15 +138,14 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         Returns:
             Block: The newly allocated mutable block.
         """
-        return self._allocators[device].allocate_mutable_block(
-            prev_block, extra_hash=extra_hash)
+        return self._allocators[device].allocate_mutable_block(prev_block,
+                                                               extra_hash=extra_hash)
 
-    def allocate_immutable_blocks(
-            self,
-            prev_block: Optional[Block],
-            block_token_ids: List[List[int]],
-            device: Device,
-            extra_hash: Optional[int] = None) -> List[Block]:
+    def allocate_immutable_blocks(self,
+                                  prev_block: Optional[Block],
+                                  block_token_ids: List[List[int]],
+                                  device: Device,
+                                  extra_hash: Optional[int] = None) -> List[Block]:
         """Allocates a new group of immutable blocks with the provided block 
         token IDs on the specified device.
 
@@ -166,8 +163,9 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             List[Block]: The newly allocated list of immutable blocks 
                 containing the provided block token IDs.
         """
-        return self._allocators[device].allocate_immutable_blocks(
-            prev_block, block_token_ids, extra_hash=extra_hash)
+        return self._allocators[device].allocate_immutable_blocks(prev_block,
+                                                                  block_token_ids,
+                                                                  extra_hash=extra_hash)
 
     def allocate_immutable_block(self,
                                  prev_block: Optional[Block],
@@ -191,8 +189,9 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             Block: The newly allocated immutable block containing the provided
                 token IDs.
         """
-        return self._allocators[device].allocate_immutable_block(
-            prev_block, token_ids, extra_hash=extra_hash)
+        return self._allocators[device].allocate_immutable_block(prev_block,
+                                                                 token_ids,
+                                                                 extra_hash=extra_hash)
 
     def free(self, block: Block) -> None:
         """Frees the memory occupied by the given block.
@@ -283,8 +282,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
                 current_swap_mapping[src_block_id] = dst_block_id
         return current_swap_mapping
 
-    def get_num_full_blocks_touched(self, blocks: List[Block],
-                                    device: Device) -> int:
+    def get_num_full_blocks_touched(self, blocks: List[Block], device: Device) -> int:
         """Returns the number of full blocks that will be touched by
         swapping in/out the given blocks on to the 'device'.
 
@@ -312,8 +310,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         device = Device.GPU
         return self._allocators[device].clear_copy_on_writes()
 
-    def mark_blocks_as_accessed(self, block_ids: List[int],
-                                now: float) -> None:
+    def mark_blocks_as_accessed(self, block_ids: List[int], now: float) -> None:
         """Mark blocks as accessed, only use for prefix caching."""
         # Prefix caching only supported on GPU.
         device = Device.GPU
@@ -400,8 +397,7 @@ class NullBlock(Block):
 
     @property
     def num_tokens_total(self) -> int:
-        raise NotImplementedError(
-            "num_tokens_total is not used for null block")
+        raise NotImplementedError("num_tokens_total is not used for null block")
 
     @property
     def num_empty_slots(self) -> BlockId:

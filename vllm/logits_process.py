@@ -7,8 +7,7 @@ import torch
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 
 LogitsProcessor = Union[Callable[[list[int], torch.Tensor], torch.Tensor],
-                        Callable[[list[int], list[int], torch.Tensor],
-                                 torch.Tensor]]
+                        Callable[[list[int], list[int], torch.Tensor], torch.Tensor]]
 """LogitsProcessor is a function that takes a list
 of previously generated tokens, the logits tensor
 for the next token and, optionally, prompt tokens as a
@@ -16,9 +15,8 @@ first argument, and returns a modified tensor of logits
 to sample from."""
 
 
-def get_bad_words_logits_processors(
-        bad_words: list[str],
-        tokenizer: AnyTokenizer) -> list[LogitsProcessor]:
+def get_bad_words_logits_processors(bad_words: list[str],
+                                    tokenizer: AnyTokenizer) -> list[LogitsProcessor]:
     bad_words_ids: list[list[int]] = list()
 
     for bad_word in bad_words:
@@ -39,8 +37,7 @@ def get_bad_words_logits_processors(
             # If no space at the beginning
             # or if prefix space produces a new word token
             if (not add_prefix_space) or (
-                    add_prefix_space
-                    and prompt_token_ids[0] != bad_words_ids[-1][0]
+                    add_prefix_space and prompt_token_ids[0] != bad_words_ids[-1][0]
                     and len(prompt_token_ids) == len(bad_words_ids[-1])):
                 bad_words_ids.append(prompt_token_ids)
 
@@ -80,8 +77,8 @@ class NoBadWordsLogitsProcessor:
             assert len(actual_prefix) == len(expected_prefix)
 
             is_match = tuple(actual_prefix) == tuple(expected_prefix)
-            last_token_bias[last_token_id] += (self._SMALLEST_LOGIT if is_match
-                                               else self._NEUTRAL_LOGIT)
+            last_token_bias[last_token_id] += (self._SMALLEST_LOGIT
+                                               if is_match else self._NEUTRAL_LOGIT)
 
         logits = logits + self.word_bias + last_token_bias
 
@@ -113,9 +110,8 @@ class NoBadWordsLogitsProcessor:
                     invalid_token_ids.append(token_id)
 
         if len(invalid_token_ids) > 0:
-            raise ValueError(
-                f"The model vocabulary size is {vocab_size},"
-                f" but the following tokens"
-                f" were specified as bad: {invalid_token_ids}."
-                f" All token id values should be integers satisfying:"
-                f" 0 <= token_id < {vocab_size}.")
+            raise ValueError(f"The model vocabulary size is {vocab_size},"
+                             f" but the following tokens"
+                             f" were specified as bad: {invalid_token_ids}."
+                             f" All token id values should be integers satisfying:"
+                             f" 0 <= token_id < {vocab_size}.")

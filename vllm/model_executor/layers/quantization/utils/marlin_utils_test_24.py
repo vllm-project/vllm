@@ -26,8 +26,7 @@ from .quant_utils import gptq_quantize_weights
 # matrix elements into reordered metadata matrix elements (or,
 # equivalently, for gathering reordered metadata matrix element back
 # into metadata matrix elements).
-def _calculate_meta_reordering_scatter_offsets(m, meta_ncols, meta_dtype,
-                                               device):
+def _calculate_meta_reordering_scatter_offsets(m, meta_ncols, meta_dtype, device):
     dst_rows = torch.arange(0, m, device=device)[:, None].repeat(1, meta_ncols)
     dst_cols = torch.arange(0, meta_ncols, device=device).repeat(m, 1)
 
@@ -50,8 +49,7 @@ def _calculate_meta_reordering_scatter_offsets(m, meta_ncols, meta_dtype,
     interleave = 2
     cols_maj = dst_cols // interleave
     cols_min = dst_cols % interleave
-    return (cols_maj * m * interleave + dst_rows * interleave +
-            cols_min).view(-1)
+    return (cols_maj * m * interleave + dst_rows * interleave + cols_min).view(-1)
 
 
 # This function converts dense matrix into sparse semi-structured
@@ -75,8 +73,7 @@ def sparse_semi_structured_from_dense_cutlass(dense):
         raise RuntimeError(f"Invalid datatype {dense.dtype} of dense matrix")
     quadbits_per_meta_elem = meta_dtype.itemsize * 8 // 4
     if quadbits_per_meta_elem not in (4, 8):
-        raise RuntimeError(
-            "Invalid number of elements per meta element calculated")
+        raise RuntimeError("Invalid number of elements per meta element calculated")
 
     if meta_dtype == torch.int32:
         if m % 16 != 0:
@@ -153,12 +150,10 @@ def sparse_semi_structured_from_dense_cutlass(dense):
     else:
         sparse = dense_2.gather(-1,
                                 idxs0.unsqueeze(-1) // 2).view(
-                                    m,
-                                    k // 2)  # type: ignore[possibly-undefined]
+                                    m, k // 2)  # type: ignore[possibly-undefined]
 
     meta_4 = idxs0 | (idxs1 << 2)
-    meta_n = meta_4.view(
-        (-1, meta_ncols, quadbits_per_meta_elem)).to(meta_dtype)
+    meta_n = meta_4.view((-1, meta_ncols, quadbits_per_meta_elem)).to(meta_dtype)
 
     if quadbits_per_meta_elem == 4:
         meta = (meta_n[:, :, 0]
@@ -227,8 +222,7 @@ def sparse_semi_structured_to_dense_cutlass(sparse, meta_reordered):
     # Undo meta tensor elements reordering.
     meta_offsets = _calculate_meta_reordering_scatter_offsets(
         m, meta_ncols, meta_dtype, device)
-    meta = torch.gather(meta_reordered.view(-1), 0,
-                        meta_offsets).view(m, meta_ncols)
+    meta = torch.gather(meta_reordered.view(-1), 0, meta_offsets).view(m, meta_ncols)
 
     # Unpack sparse tensor back to original dense tensor, using
     # information provided by meta tensor.  Note that torch.float
@@ -269,9 +263,8 @@ def sparse_semi_structured_to_dense_cutlass(sparse, meta_reordered):
         meta_2[:, :, 14] = (meta >> 28) & 0b11
         meta_2[:, :, 15] = (meta >> 30) & 0b11
 
-    dense_offsets = meta_2.view(-1) + (
-        torch.arange(0, 2 * m * k // ksparse, device=device) * 4).view(
-            -1, 1).repeat(1, 2).view(-1)
+    dense_offsets = meta_2.view(-1) + (torch.arange(
+        0, 2 * m * k // ksparse, device=device) * 4).view(-1, 1).repeat(1, 2).view(-1)
 
     dense = torch.zeros((m * 2 * k, ), dtype=sparse.dtype, device=device)
     if sparse.dtype != torch.float:
@@ -300,9 +293,8 @@ def mask_creator(tensor):
     mask = None
     # for i, tensor in enumerate(tensors):
     if tensor.numel() % M != 0:
-        raise ValueError(
-            f"Tensor of size {tensor.shape} can't be evenly divided into "
-            f"{M} groups")
+        raise ValueError(f"Tensor of size {tensor.shape} can't be evenly divided into "
+                         f"{M} groups")
 
     num_groups = tensor.numel() // M
 
@@ -359,8 +351,7 @@ def compress_quantized_24_weight(q_24, size_k, size_n, wtype: ScalarType):
 
     # Compress
     q_24_no_zp = q_24_no_zp.t().contiguous()
-    q_24_no_zp_comp, meta = sparse_semi_structured_from_dense_cutlass(
-        q_24_no_zp)
+    q_24_no_zp_comp, meta = sparse_semi_structured_from_dense_cutlass(q_24_no_zp)
     q_24_no_zp_comp = q_24_no_zp_comp.t().contiguous()
 
     # Restore bias
@@ -395,8 +386,7 @@ def get_weight_perm_24(num_bits: int):
                     2 * (i % 4 + 4),
                     2 * (i % 4 + 4) + 1,
             ]:
-                perm1.append(16 * row + col_o * 256 + 8 * (col % 2) +
-                             4 * block)
+                perm1.append(16 * row + col_o * 256 + 8 * (col % 2) + 4 * block)
         for j in range(4):
             perm_list.extend([p + 1 * j for p in perm1])
     perm = numpy.array(perm_list)
@@ -442,12 +432,13 @@ def marlin_24_quantize(
     w_24, mask_24 = inject_24(w, size_k, size_n)
 
     # Quantize
-    w_24_ref, q_w_24, s, g_idx, rand_perm = gptq_quantize_weights(
-        w_24, quant_type, group_size, act_order=False)
+    w_24_ref, q_w_24, s, g_idx, rand_perm = gptq_quantize_weights(w_24,
+                                                                  quant_type,
+                                                                  group_size,
+                                                                  act_order=False)
 
     # Compress quantized weight
-    q_w_24_comp, meta = compress_quantized_24_weight(q_w_24, size_k, size_n,
-                                                     quant_type)
+    q_w_24_comp, meta = compress_quantized_24_weight(q_w_24, size_k, size_n, quant_type)
     size_k_comp = size_k // 2
 
     # Reformat to marlin

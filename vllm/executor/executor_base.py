@@ -110,8 +110,8 @@ class ExecutorBase(ABC):
         """
         # NOTE: This is logged in the executor because there can be >1 workers.
         logger.info("# %s blocks: %d, # CPU blocks: %d",
-                    vllm.platforms.current_platform.device_name,
-                    num_gpu_blocks, num_cpu_blocks)
+                    vllm.platforms.current_platform.device_name, num_gpu_blocks,
+                    num_cpu_blocks)
         max_concurrency = (num_gpu_blocks * self.cache_config.block_size /
                            self.model_config.max_model_len)
         logger.info("Maximum concurrency for %s tokens per request: %.2fx",
@@ -120,8 +120,7 @@ class ExecutorBase(ABC):
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
-        self.collective_rpc("initialize_cache",
-                            args=(num_gpu_blocks, num_cpu_blocks))
+        self.collective_rpc("initialize_cache", args=(num_gpu_blocks, num_cpu_blocks))
 
     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
         """
@@ -137,8 +136,7 @@ class ExecutorBase(ABC):
     def execute_model(
         self, execute_model_req: ExecuteModelRequest
     ) -> Optional[List[Union[SamplerOutput, PoolerOutput]]]:
-        output = self.collective_rpc("execute_model",
-                                     args=(execute_model_req, ))
+        output = self.collective_rpc("execute_model", args=(execute_model_req, ))
         return output[0]
 
     def stop_remote_worker_execution_loop(self) -> None:
@@ -163,33 +161,28 @@ class ExecutorBase(ABC):
             assert s == sets[0], "All workers should have the same LORAs."
         return sets[0]
 
-    def add_prompt_adapter(
-            self, prompt_adapter_request: PromptAdapterRequest) -> bool:
+    def add_prompt_adapter(self, prompt_adapter_request: PromptAdapterRequest) -> bool:
         assert prompt_adapter_request.prompt_adapter_id > 0, \
             "prompt_adapter_id must be greater than 0."
         return all(
-            self.collective_rpc("add_prompt_adapter",
-                                args=(prompt_adapter_request, )))
+            self.collective_rpc("add_prompt_adapter", args=(prompt_adapter_request, )))
 
     def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
         assert prompt_adapter_id > 0, \
             "prompt_adapter_id must be greater than 0."
         return all(
-            self.collective_rpc("remove_prompt_adapter",
-                                args=(prompt_adapter_id, )))
+            self.collective_rpc("remove_prompt_adapter", args=(prompt_adapter_id, )))
 
     def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
         assert prompt_adapter_id > 0, \
             "prompt_adapter_id must be greater than 0."
-        return all(
-            self.collective_rpc("pin_prompt_adapter",
-                                args=(prompt_adapter_id, )))
+        return all(self.collective_rpc("pin_prompt_adapter",
+                                       args=(prompt_adapter_id, )))
 
     def list_prompt_adapters(self) -> Set[int]:
         sets = self.collective_rpc("list_prompt_adapters")
         for s in sets:
-            assert (s == sets[0]
-                    ), "All workers should have the same prompt adapters."
+            assert (s == sets[0]), "All workers should have the same prompt adapters."
         return sets[0]
 
     def start_profile(self) -> None:
@@ -241,9 +234,7 @@ class ExecutorBase(ABC):
         max_size: Optional[int] = None,
     ) -> None:
         self.collective_rpc("save_sharded_state",
-                            kwargs=dict(path=path,
-                                        pattern=pattern,
-                                        max_size=max_size))
+                            kwargs=dict(path=path, pattern=pattern, max_size=max_size))
 
     @abstractmethod
     def check_health(self) -> None:
@@ -259,8 +250,7 @@ class ExecutorBase(ABC):
         self.shutdown()
 
     async def execute_model_async(
-            self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+            self, execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
         """Executes one model step on the given sequences."""
         output = await make_async(self.execute_model)(execute_model_req)
         return output
@@ -358,8 +348,7 @@ class DistributedExecutorBase(ExecutorBase):
         raise NotImplementedError
 
     async def execute_model_async(
-            self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+            self, execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
         if self.parallel_worker_tasks is None:
             # Start model execution loop running in the parallel workers
             self.parallel_worker_tasks = asyncio.create_task(

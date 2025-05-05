@@ -59,10 +59,8 @@ def test_models(
     if backend == "FLASHINFER" and current_platform.is_rocm():
         pytest.skip("Flashinfer does not support ROCm/HIP.")
 
-    if backend in ("XFORMERS",
-                   "FLASHINFER") and model == "google/gemma-2-2b-it":
-        pytest.skip(
-            f"{backend} does not support gemma2 with full context length.")
+    if backend in ("XFORMERS", "FLASHINFER") and model == "google/gemma-2-2b-it":
+        pytest.skip(f"{backend} does not support gemma2 with full context length.")
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_ATTENTION_BACKEND", backend)
@@ -82,8 +80,7 @@ def test_models(
                         dtype=dtype,
                         enforce_eager=enforce_eager,
                         gpu_memory_utilization=0.7) as vllm_model:
-            vllm_outputs = vllm_model.generate_greedy(example_prompts,
-                                                      max_tokens)
+            vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
 
         check_outputs_equal(
             outputs_0_lst=hf_outputs,
@@ -146,8 +143,7 @@ def test_models_distributed(
                 tensor_parallel_size=2,
                 distributed_executor_backend=distributed_executor_backend,
         ) as vllm_model:
-            vllm_outputs = vllm_model.generate_greedy(example_prompts,
-                                                      max_tokens)
+            vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
 
         with hf_runner(model, dtype=dtype) as hf_model:
             hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)

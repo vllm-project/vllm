@@ -308,9 +308,8 @@ class MLACommonState(AttentionState, Generic[T]):
             self.context_chunk_workspace_size = min(
                 # Max sure there is enough for 8 full length request or at least
                 # 4 pages of cache per request
-                max(
-                    8 * self.model_config.max_model_len, 4 *
-                    scheduler_config.max_num_seqs * cache_config.block_size),
+                max(8 * self.model_config.max_model_len,
+                    4 * scheduler_config.max_num_seqs * cache_config.block_size),
                 # For long-context models try not to over-allocate limiting
                 # kv-cache space, limiting it to 64k tokens,
                 # which would result in the workspace being:
@@ -353,10 +352,10 @@ class MLACommonState(AttentionState, Generic[T]):
         assert self._is_graph_capturing
         return self.__class__(self.runner)
 
-    def graph_capture_get_metadata_for_batch(
-            self,
-            batch_size: int,
-            is_encoder_decoder_model: bool = False) -> T:
+    def graph_capture_get_metadata_for_batch(self,
+                                             batch_size: int,
+                                             is_encoder_decoder_model: bool = False
+                                             ) -> T:
         assert self._is_graph_capturing
 
         attn_metadata = self.runner.attn_backend.make_metadata(
@@ -409,12 +408,12 @@ class MLACommonState(AttentionState, Generic[T]):
         num_positions = input_positions.shape[0]
         input_buffers["seq_lens_tensor"].copy_(
             attn_metadata.decode_metadata.seq_lens_tensor, non_blocking=True)
-        input_buffers["block_tables"].copy_(
-            attn_metadata.decode_metadata.block_tables, non_blocking=True)
+        input_buffers["block_tables"].copy_(attn_metadata.decode_metadata.block_tables,
+                                            non_blocking=True)
         # CUDA graph buffer is padded so only perform a partial copy based on
         # num_positions
-        input_buffers["input_positions"][:num_positions].copy_(
-            input_positions, non_blocking=True)
+        input_buffers["input_positions"][:num_positions].copy_(input_positions,
+                                                               non_blocking=True)
         if is_encoder_decoder_model:
             raise NotImplementedError(
                 "TritonMLAState does not support encoder/decoder yet")
@@ -533,9 +532,8 @@ class MLACommonMetadata(AttentionMetadata):
         supported_head_sizes = MLACommonBackend.get_supported_head_sizes()
         if self.head_dim is not None and self.head_dim \
                 not in supported_head_sizes:
-            raise ValueError(
-                f"Only {supported_head_sizes} are supported for head_dim,",
-                f" received {self.head_dim}.")
+            raise ValueError(f"Only {supported_head_sizes} are supported for head_dim,",
+                             f" received {self.head_dim}.")
 
     @property
     def prefill_metadata(self):
@@ -553,8 +551,8 @@ class MLACommonMetadata(AttentionMetadata):
                            self.query_start_loc[:self.num_prefills + 1])
         slot_mapping = (None if self.slot_mapping is None else
                         self.slot_mapping[:self.num_prefill_tokens])
-        seq_lens = (None if self.seq_lens is None else
-                    self.seq_lens[:self.num_prefills])
+        seq_lens = (None
+                    if self.seq_lens is None else self.seq_lens[:self.num_prefills])
         seq_lens_tensor = (None if self.seq_lens_tensor is None else
                            self.seq_lens_tensor[:self.num_prefills])
         seq_start_loc = (None if self.seq_start_loc is None else
@@ -720,9 +718,8 @@ class MLACommonMetadata(AttentionMetadata):
                                sampled_token_ids=sampled_token_ids,
                                input_positions=model_input.input_positions)
 
-    def _ops_advance_step(self, num_seqs: int, num_queries: int,
-                          block_size: int, input_tokens: torch.Tensor,
-                          sampled_token_ids: torch.Tensor,
+    def _ops_advance_step(self, num_seqs: int, num_queries: int, block_size: int,
+                          input_tokens: torch.Tensor, sampled_token_ids: torch.Tensor,
                           input_positions: torch.Tensor) -> None:
         # here we use advance_step_flashinfo to update the paged_kv_* tensors
         ops.advance_step_flashattn(num_seqs=num_seqs,
@@ -767,16 +764,14 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
         self.curr_seq_lens: List[int] = []
         self.input_positions: List[int] = []
         self.multimodal_placeholder_maps: Dict[
-            str,
-            MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
+            str, MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
         self.num_prefills = 0
         self.num_prefill_tokens = 0
         self.num_decode_tokens = 0
         self.has_prefix_cache_hit = False
 
-    def _add_seq_group(
-            self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
-            chunked_prefill_enabled: bool, prefix_cache_hit: bool):
+    def _add_seq_group(self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
+                       chunked_prefill_enabled: bool, prefix_cache_hit: bool):
         """Add a sequence group to the metadata. Specifically update/append
         1. context length.
         2. block table.
@@ -788,9 +783,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
         for (seq_id, token_len, seq_len, curr_seq_len, query_len, context_len,
              curr_sliding_window_block, input_positions) in zip(
                  inter_data.seq_ids, [len(t) for t in inter_data.input_tokens],
-                 inter_data.orig_seq_lens, inter_data.seq_lens,
-                 inter_data.query_lens, inter_data.context_lens,
-                 inter_data.curr_sliding_window_blocks,
+                 inter_data.orig_seq_lens, inter_data.seq_lens, inter_data.query_lens,
+                 inter_data.context_lens, inter_data.curr_sliding_window_blocks,
                  inter_data.input_positions):
             self.input_positions.extend(input_positions)
             self.context_lens.append(context_len)
@@ -816,22 +810,19 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
                 if curr_sliding_window_block == 0:
                     block_table = block_tables[seq_id]
                 else:
-                    block_table = block_tables[seq_id][
-                        -curr_sliding_window_block:]
+                    block_table = block_tables[seq_id][-curr_sliding_window_block:]
             self.block_tables.append(block_table)
 
             # Compute slot mapping.
             is_profile_run = is_block_tables_empty(block_tables)
             start_idx = compute_slot_mapping_start_idx(is_prompt, query_len,
-                                                       context_len,
-                                                       self.sliding_window)
-            compute_slot_mapping(is_profile_run, self.slot_mapping, seq_id,
-                                 seq_len, context_len, start_idx,
-                                 self.block_size, inter_data.block_tables)
+                                                       context_len, self.sliding_window)
+            compute_slot_mapping(is_profile_run, self.slot_mapping, seq_id, seq_len,
+                                 context_len, start_idx, self.block_size,
+                                 inter_data.block_tables)
 
-    def _get_graph_runner_block_tables(
-            self, num_seqs: int,
-            block_tables: List[List[int]]) -> torch.Tensor:
+    def _get_graph_runner_block_tables(self, num_seqs: int,
+                                       block_tables: List[List[int]]) -> torch.Tensor:
         # The shape of graph_block_tables is
         # [max batch size, max context len // block size].
         max_batch_size, max_blocks = self.runner.graph_block_tables.shape
@@ -847,11 +838,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
                     # It may be possible to have more blocks allocated due
                     # to lookahead slots of multi-step, however, they are
                     # not used anyway, so can be safely ignored.
-                    graph_block_tables[
-                        i, :max_blocks] = block_table[:max_blocks]
+                    graph_block_tables[i, :max_blocks] = block_table[:max_blocks]
 
-        return torch.from_numpy(graph_block_tables).to(
-            device=self.runner.device, non_blocking=True)
+        return torch.from_numpy(graph_block_tables).to(device=self.runner.device,
+                                                       non_blocking=True)
 
     def build(self, seq_lens: List[int], query_lens: List[int],
               cuda_graph_pad_size: int, batch_size: int):
@@ -870,8 +860,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
         ])
 
         for inter_data in self.input_builder.inter_data_list:
-            self._add_seq_group(inter_data,
-                                self.input_builder.chunked_prefill_enabled,
+            self._add_seq_group(inter_data, self.input_builder.chunked_prefill_enabled,
                                 prefix_cache_hit)
 
         device = self.runner.device
@@ -908,19 +897,18 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
         assert max_query_len > 0, ("query_lens: {}".format(query_lens))
 
         assert device is not None
-        context_lens_tensor = async_tensor_h2d(self.context_lens, torch.int,
-                                               device, self.runner.pin_memory)
+        context_lens_tensor = async_tensor_h2d(self.context_lens, torch.int, device,
+                                               self.runner.pin_memory)
         seq_lens_tensor = async_tensor_h2d(seq_lens, torch.int, device,
                                            self.runner.pin_memory)
-        input_positions = async_tensor_h2d(self.input_positions, torch.long,
-                                           device, self.runner.pin_memory)
-        slot_mapping_tensor = async_tensor_h2d(self.slot_mapping, torch.long,
-                                               device, self.runner.pin_memory)
-        query_start_loc_tensor = async_tensor_h2d(query_start_loc, torch.int32,
-                                                  device,
+        input_positions = async_tensor_h2d(self.input_positions, torch.long, device,
+                                           self.runner.pin_memory)
+        slot_mapping_tensor = async_tensor_h2d(self.slot_mapping, torch.long, device,
+                                               self.runner.pin_memory)
+        query_start_loc_tensor = async_tensor_h2d(query_start_loc, torch.int32, device,
                                                   self.runner.pin_memory)
-        seq_start_loc_tensor = async_tensor_h2d(seq_start_loc, torch.int32,
-                                                device, self.runner.pin_memory)
+        seq_start_loc_tensor = async_tensor_h2d(seq_start_loc, torch.int32, device,
+                                                self.runner.pin_memory)
 
         context_chunk_cu_seq_lens = None
         context_chunk_starts = None
@@ -963,8 +951,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
             chunk_ends = torch.min(context_lens_tensor[:self.num_prefills]\
                 .unsqueeze(0), context_chunk_starts + max_context_chunk)
             chunk_seq_lens = (chunk_ends - context_chunk_starts).clamp(min=0)
-            _context_chunk_cu_seq_lens = chunk_seq_lens.cumsum(dim=1).to(
-                torch.int32)
+            _context_chunk_cu_seq_lens = chunk_seq_lens.cumsum(dim=1).to(torch.int32)
             zero = torch.zeros(num_chunks, dtype=torch.int32, device=device)\
                 .unsqueeze(-1)
             context_chunk_cu_seq_lens = \
@@ -1050,8 +1037,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         self.v_head_dim = v_head_dim
 
         self.rotary_emb = rotary_emb
-        self.use_yarn_rope = isinstance(rotary_emb,
-                                        DeepseekScalingRotaryEmbedding)
+        self.use_yarn_rope = isinstance(rotary_emb, DeepseekScalingRotaryEmbedding)
         self.kv_b_proj = kv_b_proj
 
         self.triton_fa_func = triton_attention
@@ -1077,8 +1063,8 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                                          return_softmax_lse, **kwargs):
         maybe_padded_v = v
         if self._pad_v:
-            maybe_padded_v = torch.nn.functional.pad(
-                v, [0, q.shape[-1] - v.shape[-1]], value=0)
+            maybe_padded_v = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]],
+                                                     value=0)
 
         if is_hip and envs.VLLM_USE_TRITON_FLASH_ATTN \
             and not return_softmax_lse:
@@ -1151,9 +1137,8 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             for attr in WEIGHT_NAMES:
                 if hasattr(layer, attr):
                     return getattr(layer, attr)
-            raise AttributeError(
-                f"Layer '{layer}' has no recognized weight attribute:"
-                f" {WEIGHT_NAMES}.")
+            raise AttributeError(f"Layer '{layer}' has no recognized weight attribute:"
+                                 f" {WEIGHT_NAMES}.")
 
         def get_and_maybe_dequant_weights(layer: LinearBase):
             if not isinstance(layer.quant_method, UnquantizedLinearMethod):
@@ -1161,9 +1146,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 eye = torch.eye(layer.input_size_per_partition,
                                 dtype=act_dtype,
                                 device=get_layer_weight(layer).device)
-                dequant_weights = layer.quant_method.apply(layer,
-                                                           eye,
-                                                           bias=None)
+                dequant_weights = layer.quant_method.apply(layer, eye, bias=None)
                 del eye
                 # standardize to (output, input)
                 return dequant_weights.T
@@ -1173,22 +1156,21 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         # `W_UV` and `W_UK_T`, we we just store fp16/bf16 copies and perform
         # the bmm's in 16-bit, the extra memory overhead of this is fairly low
         kv_b_proj_weight = get_and_maybe_dequant_weights(self.kv_b_proj).T
-        assert kv_b_proj_weight.shape == (
-            self.kv_lora_rank,
-            self.num_heads * (self.qk_nope_head_dim + self.v_head_dim)), (
-                f"{kv_b_proj_weight.shape=}, "
-                f"{self.kv_lora_rank=}, "
-                f"{self.num_heads=}, "
-                f"{self.qk_nope_head_dim=}, "
-                f"{self.v_head_dim=}")
+        assert kv_b_proj_weight.shape == (self.kv_lora_rank, self.num_heads *
+                                          (self.qk_nope_head_dim + self.v_head_dim)), (
+                                              f"{kv_b_proj_weight.shape=}, "
+                                              f"{self.kv_lora_rank=}, "
+                                              f"{self.num_heads=}, "
+                                              f"{self.qk_nope_head_dim=}, "
+                                              f"{self.v_head_dim=}")
         kv_b_proj_weight = kv_b_proj_weight.view(
             self.kv_lora_rank,
             self.num_heads,
             self.qk_nope_head_dim + self.v_head_dim,
         )
 
-        W_UK, W_UV = kv_b_proj_weight.split(
-            [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        W_UK, W_UV = kv_b_proj_weight.split([self.qk_nope_head_dim, self.v_head_dim],
+                                            dim=-1)
 
         # Convert from (L, N, V) to (N, L, V)
         self.W_UV = W_UV.transpose(0, 1)
@@ -1240,8 +1222,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             k_nope, v = kv_nope\
                 .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
-            k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))),
-                          dim=-1)
+            k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 
             attn_output, attn_softmax_lse = \
                 self._flash_attn_varlen_diff_headdims(
@@ -1349,8 +1330,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if output is not None:
-            raise NotImplementedError(
-                "output is not yet supported for MLAImplBase")
+            raise NotImplementedError("output is not yet supported for MLAImplBase")
 
         if attn_metadata.is_profile_run and \
             attn_metadata.context_chunk_workspace is not None:
@@ -1358,8 +1338,8 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             # for `self.kv_b_proj(kv_c_normed)` in `_compute_prefill_context`
             # since this can be large
             _ = torch.empty(
-                (attn_metadata.context_chunk_workspace.shape[0],
-                 self.num_heads, self.qk_nope_head_dim + self.v_head_dim),
+                (attn_metadata.context_chunk_workspace.shape[0], self.num_heads,
+                 self.qk_nope_head_dim + self.v_head_dim),
                 device=k_c_normed.device,
                 dtype=k_c_normed.dtype,
             )
@@ -1420,8 +1400,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                              dtype=q.dtype)
         if has_prefill:
             output[:num_prefill_tokens] = self._forward_prefill(
-                prefill_q, prefill_k_c_normed, prefill_k_pe, kv_cache,
-                attn_metadata)
+                prefill_q, prefill_k_c_normed, prefill_k_pe, kv_cache, attn_metadata)
 
         if has_decode:
             output[num_prefill_tokens:] = self._forward_decode(

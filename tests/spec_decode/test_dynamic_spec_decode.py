@@ -30,13 +30,13 @@ def test_disable_spec_tokens(queue_size: int, batch_size: int, k: int,
     draft_worker = mock_worker(cls=MultiStepWorker)
     target_worker = mock_worker()
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
-    worker = SpecDecodeWorker(proposer_worker=draft_worker,
-                              scorer_worker=target_worker,
-                              spec_decode_sampler=mock_spec_decode_sampler(
-                                  acceptance_sampler_method),
-                              disable_logprobs=False,
-                              metrics_collector=metrics_collector,
-                              disable_by_batch_size=disable_by_batch_size)
+    worker = SpecDecodeWorker(
+        proposer_worker=draft_worker,
+        scorer_worker=target_worker,
+        spec_decode_sampler=mock_spec_decode_sampler(acceptance_sampler_method),
+        disable_logprobs=False,
+        metrics_collector=metrics_collector,
+        disable_by_batch_size=disable_by_batch_size)
 
     exception_secret = 'artificial stop'
     draft_worker.get_spec_proposals.side_effect = ValueError(exception_secret)
@@ -57,8 +57,7 @@ def test_disable_spec_tokens(queue_size: int, batch_size: int, k: int,
     # When the batch size is larger than the threshold,
     # we expect no speculative tokens (0).
     expected_num_spec_tokens = None if queue_size < disable_by_batch_size else 0
-    assert seq_group_metadata_list[
-        0].num_speculative_tokens == expected_num_spec_tokens
+    assert seq_group_metadata_list[0].num_speculative_tokens == expected_num_spec_tokens
 
     draft_worker.sampler_output.side_effect = ValueError(exception_secret)
 
@@ -73,17 +72,14 @@ def test_disable_spec_tokens(queue_size: int, batch_size: int, k: int,
     if queue_size < disable_by_batch_size:
         # Should raise exception when executing the mocked draft model.
         with pytest.raises(ValueError, match=exception_secret):
-            proposer.get_spec_proposals(
-                execute_model_req=ExecuteModelRequest(
-                    seq_group_metadata_list=seq_group_metadata_list,
-                    num_lookahead_slots=k),
-                seq_ids_with_bonus_token_in_last_step=set())
+            proposer.get_spec_proposals(execute_model_req=ExecuteModelRequest(
+                seq_group_metadata_list=seq_group_metadata_list, num_lookahead_slots=k),
+                                        seq_ids_with_bonus_token_in_last_step=set())
     else:
         # Should not execute the draft model because spec decode is disabled
         # for all requests. Accordingly, the proposal length should be 0.
         proposals = proposer.get_spec_proposals(
             execute_model_req=ExecuteModelRequest(
-                seq_group_metadata_list=seq_group_metadata_list,
-                num_lookahead_slots=k),
+                seq_group_metadata_list=seq_group_metadata_list, num_lookahead_slots=k),
             seq_ids_with_bonus_token_in_last_step=set())
         assert proposals.proposal_lens.tolist() == [0] * batch_size

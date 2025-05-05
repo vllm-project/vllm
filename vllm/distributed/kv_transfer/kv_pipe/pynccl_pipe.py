@@ -83,8 +83,8 @@ class PyNcclPipe(KVPipeBase):
 
     def _get_device_send_recv_impl(
         self, group: StatelessProcessGroup
-    ) -> Tuple[Callable[[torch.Tensor, int], None], Callable[
-        [torch.Tensor, int], None]]:
+    ) -> Tuple[Callable[[torch.Tensor, int], None], Callable[[torch.Tensor, int],
+                                                             None]]:
 
         send: Callable[[torch.Tensor, int], None]
         recv: Callable[[torch.Tensor, int], None]
@@ -178,8 +178,7 @@ class PyNcclPipe(KVPipeBase):
         metadata = self._make_metadata(tensor)
         self._send_metadata(metadata)
         if tensor is not None:
-            self.device_send_func(tensor.to(self.device),
-                                  self.target_rank_for_send)
+            self.device_send_func(tensor.to(self.device), self.target_rank_for_send)
 
     def _recv_impl(self) -> Optional[torch.Tensor]:
         """
@@ -243,8 +242,7 @@ class PyNcclPipe(KVPipeBase):
         with self.buffer_size_lock:
             self.buffer_size += tensor_size
 
-        self.transport_thread.submit(self.send_tensor_wrapper, tensor,
-                                     tensor_size)
+        self.transport_thread.submit(self.send_tensor_wrapper, tensor, tensor_size)
 
     def recv_tensor(self) -> Optional[torch.Tensor]:
         """
@@ -274,6 +272,5 @@ class PyNcclPipe(KVPipeBase):
         """
         Close the pipe and release associated resources.
         """
-        if hasattr(self,
-                   "transport_thread") and self.transport_thread is not None:
+        if hasattr(self, "transport_thread") and self.transport_thread is not None:
             self.transport_thread.shutdown()

@@ -31,5 +31,4 @@ def find_cuda_init(fn: Callable[[], object]) -> None:
 
 
 if __name__ == "__main__":
-    find_cuda_init(
-        lambda: importlib.import_module("vllm.model_executor.models.llava"))
+    find_cuda_init(lambda: importlib.import_module("vllm.model_executor.models.llava"))

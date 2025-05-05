@@ -80,8 +80,7 @@ def create_worker(cls: Callable[..., T],
     )
     engine_config = engine_args.create_engine_config()
 
-    distributed_init_method = get_distributed_init_method(
-        get_ip(), get_open_port())
+    distributed_init_method = get_distributed_init_method(get_ip(), get_open_port())
 
     worker = cls(
         vllm_config=engine_config,
@@ -97,9 +96,8 @@ def create_worker(cls: Callable[..., T],
 
     engine_config.cache_config.num_gpu_blocks = num_gpu_blocks
     engine_config.cache_config.num_cpu_blocks = 0
-    worker.initialize_cache(
-        num_gpu_blocks=engine_config.cache_config.num_gpu_blocks,
-        num_cpu_blocks=engine_config.cache_config.num_cpu_blocks)
+    worker.initialize_cache(num_gpu_blocks=engine_config.cache_config.num_gpu_blocks,
+                            num_cpu_blocks=engine_config.cache_config.num_cpu_blocks)
 
     return worker
 
@@ -130,11 +128,9 @@ def create_seq_group_metadata_from_prompts(
     }
 
     seq_grou_metadata_list = []
-    for i, (prompt_token_ids,
-            cont_token_ids) in enumerate(zip(prompts, continuations)):
+    for i, (prompt_token_ids, cont_token_ids) in enumerate(zip(prompts, continuations)):
         data = SequenceData.from_seqs(prompt_token_ids, cont_token_ids)
-        data.update_num_computed_tokens(
-            len(prompt_token_ids) + len(cont_token_ids) - 1)
+        data.update_num_computed_tokens(len(prompt_token_ids) + len(cont_token_ids) - 1)
         seq_data = {i: data}
         seq_grou_metadata_list.append(
             SequenceGroupMetadata(
@@ -182,18 +178,15 @@ def create_chunked_seq_group_metadata_from_prompt(
     return seq_group_metadata_list
 
 
-def assert_logprobs_dict_allclose(
-        actual_logprobs: list[dict[int, Logprob]],
-        expected_logprobs: list[dict[int, Logprob]]) -> None:
+def assert_logprobs_dict_allclose(actual_logprobs: list[dict[int, Logprob]],
+                                  expected_logprobs: list[dict[int, Logprob]]) -> None:
     for single_step_actual_logprobs, single_step_expected_logprobs in zip(
             actual_logprobs, expected_logprobs):
         assert set(single_step_actual_logprobs.keys()) == set(
             single_step_expected_logprobs.keys())
         for token_id in single_step_actual_logprobs:
-            actual = torch.tensor(
-                single_step_actual_logprobs[token_id].logprob)
-            expected = torch.tensor(
-                single_step_expected_logprobs[token_id].logprob)
+            actual = torch.tensor(single_step_actual_logprobs[token_id].logprob)
+            expected = torch.tensor(single_step_expected_logprobs[token_id].logprob)
             torch.testing.assert_close(actual, expected)
 
 
@@ -223,8 +216,7 @@ def create_sampler_output_list(
         ],
                       sampled_token_probs=probs[step],
                       logprobs=logprobs[step],
-                      sampled_token_ids=token_ids[step])
-        for step in range(num_steps)
+                      sampled_token_ids=token_ids[step]) for step in range(num_steps)
     ]
 
 
@@ -263,17 +255,16 @@ def create_batch(batch_size,
         seq_group_metadata_list = seq_group_metadata_list[:batch_size]
         prev_output_tokens = []
     else:
-        prev_output_tokens = [[
-            next(iterator) for _ in range(prev_output_token_len)
-        ] for _ in range(batch_size)]
+        prev_output_tokens = [[next(iterator) for _ in range(prev_output_token_len)]
+                              for _ in range(batch_size)]
         final_prompt_lens = [
             len(prompt) + len(prev_output_token) + k + 1
             for prompt, prev_output_token in zip(prompts, prev_output_tokens)
         ]
 
         seq_group_metadata_list = create_seq_group_metadata_from_prompts(
-            prompts, num_gpu_blocks, block_size, final_prompt_lens,
-            prev_output_tokens, seq_ids)
+            prompts, num_gpu_blocks, block_size, final_prompt_lens, prev_output_tokens,
+            seq_ids)
     return seq_group_metadata_list, prompts, prev_output_tokens
 
 

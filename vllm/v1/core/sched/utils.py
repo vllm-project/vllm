@@ -10,8 +10,7 @@ def check_stop(request: Request, max_model_len: int) -> bool:
 
     sampling_params = request.sampling_params
     last_token_id = request.output_token_ids[-1]
-    if (not sampling_params.ignore_eos
-            and last_token_id == request.eos_token_id):
+    if (not sampling_params.ignore_eos and last_token_id == request.eos_token_id):
         request.status = RequestStatus.FINISHED_STOPPED
         return True
 

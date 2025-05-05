@@ -18,8 +18,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.loggers import LoggingStatLogger
 
 if not current_platform.is_cuda():
-    pytest.skip(reason="V1 currently only supported on CUDA.",
-                allow_module_level=True)
+    pytest.skip(reason="V1 currently only supported on CUDA.", allow_module_level=True)
 
 TEXT_ENGINE_ARGS = AsyncEngineArgs(model="meta-llama/Llama-3.2-1B-Instruct",
                                    enforce_eager=True,
@@ -77,14 +76,12 @@ async def generate(engine: AsyncLLM,
     return count, request_id
 
 
-@pytest.mark.parametrize(
-    "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
-@pytest.mark.parametrize("engine_args,prompt",
-                         [(TEXT_ENGINE_ARGS, TEXT_PROMPT),
-                          (VISION_ENGINE_ARGS, VISION_PROMPT)])
+@pytest.mark.parametrize("output_kind",
+                         [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
+@pytest.mark.parametrize("engine_args,prompt", [(TEXT_ENGINE_ARGS, TEXT_PROMPT),
+                                                (VISION_ENGINE_ARGS, VISION_PROMPT)])
 @pytest.mark.asyncio
-async def test_load(monkeypatch: pytest.MonkeyPatch,
-                    output_kind: RequestOutputKind,
+async def test_load(monkeypatch: pytest.MonkeyPatch, output_kind: RequestOutputKind,
                     engine_args: AsyncEngineArgs, prompt: PromptType):
     # TODO(rickyx): Remove monkeypatch once we have a better way to test V1
     # so that in the future when we switch, we don't have to change all the
@@ -109,8 +106,7 @@ async def test_load(monkeypatch: pytest.MonkeyPatch,
                              NUM_EXPECTED_TOKENS)))
 
         # Confirm that we got all the EXPECTED tokens from the requests.
-        done, pending = await asyncio.wait(tasks,
-                                           return_when=asyncio.FIRST_EXCEPTION)
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
         for task in pending:
             task.cancel()
         for task in done:
@@ -122,14 +118,12 @@ async def test_load(monkeypatch: pytest.MonkeyPatch,
         assert not engine.output_processor.has_unfinished_requests()
 
 
-@pytest.mark.parametrize(
-    "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
-@pytest.mark.parametrize("engine_args,prompt",
-                         [(TEXT_ENGINE_ARGS, TEXT_PROMPT),
-                          (VISION_ENGINE_ARGS, VISION_PROMPT)])
+@pytest.mark.parametrize("output_kind",
+                         [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
+@pytest.mark.parametrize("engine_args,prompt", [(TEXT_ENGINE_ARGS, TEXT_PROMPT),
+                                                (VISION_ENGINE_ARGS, VISION_PROMPT)])
 @pytest.mark.asyncio
-async def test_abort(monkeypatch: pytest.MonkeyPatch,
-                     output_kind: RequestOutputKind,
+async def test_abort(monkeypatch: pytest.MonkeyPatch, output_kind: RequestOutputKind,
                      engine_args: AsyncEngineArgs, prompt: PromptType):
 
     with monkeypatch.context() as m, ExitStack() as after:
@@ -154,8 +148,7 @@ async def test_abort(monkeypatch: pytest.MonkeyPatch,
             n = 3 if idx in PARALLEL_SAMPLE_REQ_IDS else 1
             tasks.append(
                 asyncio.create_task(
-                    generate(engine, request_id, prompt, output_kind,
-                             max_tokens, n)))
+                    generate(engine, request_id, prompt, output_kind, max_tokens, n)))
 
         # API server cancels requests when they disconnect.
         for idx in REQUEST_IDS_TO_ABORT:
@@ -183,17 +176,15 @@ async def test_abort(monkeypatch: pytest.MonkeyPatch,
         # Confirm we can do another generation.
         request_id = f"request-{REQUEST_IDS_TO_ABORT[0]}"
         task = asyncio.create_task(
-            generate(engine, request_id, prompt, output_kind,
-                     NUM_EXPECTED_TOKENS))
+            generate(engine, request_id, prompt, output_kind, NUM_EXPECTED_TOKENS))
         num_generated_tokens, request_id = await task
         assert num_generated_tokens == NUM_EXPECTED_TOKENS
         assert not engine.output_processor.has_unfinished_requests()
 
 
 @pytest.mark.parametrize("n", [1, 3])
-@pytest.mark.parametrize("engine_args,prompt",
-                         [(TEXT_ENGINE_ARGS, TEXT_PROMPT),
-                          (VISION_ENGINE_ARGS, VISION_PROMPT)])
+@pytest.mark.parametrize("engine_args,prompt", [(TEXT_ENGINE_ARGS, TEXT_PROMPT),
+                                                (VISION_ENGINE_ARGS, VISION_PROMPT)])
 @pytest.mark.asyncio
 async def test_finished_flag(monkeypatch: pytest.MonkeyPatch, n: int,
                              engine_args: AsyncEngineArgs, prompt: PromptType):
@@ -210,10 +201,8 @@ async def test_finished_flag(monkeypatch: pytest.MonkeyPatch, n: int,
                                          seed=33,
                                          n=n)
         outputs = [
-            out
-            async for out in engine.generate(request_id="request-33",
-                                             prompt=prompt,
-                                             sampling_params=sampling_params)
+            out async for out in engine.generate(
+                request_id="request-33", prompt=prompt, sampling_params=sampling_params)
         ]
 
         # Assert only the last output has the finished flag set

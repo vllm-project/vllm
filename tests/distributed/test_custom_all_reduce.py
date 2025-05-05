@@ -33,8 +33,7 @@ def graph_allreduce(
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
         device = torch.device(f"cuda:{rank}")
         torch.cuda.set_device(device)
-        init_test_distributed_environment(tp_size, pp_size, rank,
-                                          distributed_init_port)
+        init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
         ensure_model_parallel_initialized(tp_size, pp_size)
         group = get_tensor_model_parallel_group().device_group
 
@@ -70,8 +69,7 @@ def graph_allreduce(
                                          device=torch.cuda.current_device())
                     torch.cuda.synchronize()
                     graph = torch.cuda.CUDAGraph()
-                    with torch.cuda.graph(graph,
-                                          stream=graph_capture_context.stream):
+                    with torch.cuda.graph(graph, stream=graph_capture_context.stream):
                         for i in range(num_communication):
                             out1 = tensor_model_parallel_all_reduce(inp1)
                             # the input buffer is immediately modified to test
@@ -96,8 +94,7 @@ def eager_allreduce(
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
         device = torch.device(f"cuda:{rank}")
         torch.cuda.set_device(device)
-        init_test_distributed_environment(tp_size, pp_size, rank,
-                                          distributed_init_port)
+        init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
 
         # we use the first group to communicate once
         # and the second group to communicate twice
@@ -132,5 +129,4 @@ def test_custom_allreduce(
     world_size = tp_size * pipeline_parallel_size
     if world_size > torch.cuda.device_count():
         pytest.skip("Not enough GPUs to run the test.")
-    multi_process_parallel(monkeypatch, tp_size, pipeline_parallel_size,
-                           test_target)
+    multi_process_parallel(monkeypatch, tp_size, pipeline_parallel_size, test_target)

@@ -43,13 +43,10 @@ prompts = [
 @pytest.mark.parametrize(
     "model, quant_key",
     [("nm-testing/TinyLlama-1.1B-Chat-v1.0-FP8-e2e", kFp8StaticTensorSym),
-     ("nm-testing/TinyLlama-1.1B-Chat-v1.0-FP8_DYNAMIC-e2e",
-      kFp8DynamicTokenSym)])
+     ("nm-testing/TinyLlama-1.1B-Chat-v1.0-FP8_DYNAMIC-e2e", kFp8DynamicTokenSym)])
 @pytest.mark.parametrize("do_fusion", [True, False])
-@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE != "cuda",
-                    reason="Only test on CUDA")
-def test_fix_functionalization(model: str, quant_key: QuantKey,
-                               do_fusion: bool):
+@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE != "cuda", reason="Only test on CUDA")
+def test_fix_functionalization(model: str, quant_key: QuantKey, do_fusion: bool):
     torch.set_default_device("cuda")
 
     vllm_config = VllmConfig()
@@ -76,9 +73,7 @@ def test_fix_functionalization(model: str, quant_key: QuantKey,
     # 2 LLM instances.
 
     sampling_params = SamplingParams(temperature=0.0, top_p=1.0)
-    model_runner.model = torch.compile(orig_model,
-                                       fullgraph=True,
-                                       backend=backend_func)
+    model_runner.model = torch.compile(orig_model, fullgraph=True, backend=backend_func)
     gen_func = llm.generate(prompts, sampling_params)
 
     model_runner.model = torch.compile(orig_model,
@@ -92,8 +87,9 @@ def test_fix_functionalization(model: str, quant_key: QuantKey,
 
     # OPS_IN_MODEL always appear. RMS_OP is fused away if we run fusion,
     # and replaced by fused quantized ops in RMS_QUANT_OPS.
-    rms_ops = [FUSED_OPS[(quant_key, True)], FUSED_OPS[(quant_key, False)]
-               ] if do_fusion else [RMS_OP]
+    rms_ops = [FUSED_OPS[(quant_key,
+                          True)], FUSED_OPS[(quant_key,
+                                             False)]] if do_fusion else [RMS_OP]
     silu_mul_ops = [SILU_MUL_QUANT_OP] if do_fusion and \
         quant_key == kFp8StaticTensorSym else [
         SILU_MUL_OP

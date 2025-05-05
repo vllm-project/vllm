@@ -180,8 +180,7 @@ class Worker(LocalOrDistributedWorkerBase):
             torch.cuda.reset_peak_memory_stats()
             self.baseline_snapshot = MemorySnapshot()
         else:
-            raise RuntimeError(
-                f"Not support device type: {self.device_config.device}")
+            raise RuntimeError(f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
         init_worker_distributed_environment(self.vllm_config, self.rank,
                                             self.distributed_init_method,
@@ -218,8 +217,7 @@ class Worker(LocalOrDistributedWorkerBase):
         self,
         tensorizer_config: TensorizerConfig,
     ) -> None:
-        self.model_runner.save_tensorized_model(
-            tensorizer_config=tensorizer_config, )
+        self.model_runner.save_tensorized_model(tensorizer_config=tensorizer_config, )
 
     @torch.inference_mode()
     def determine_num_available_blocks(self) -> Tuple[int, int]:
@@ -264,8 +262,7 @@ class Worker(LocalOrDistributedWorkerBase):
             num_cpu_blocks = 0
         else:
             num_gpu_blocks = int(available_kv_cache_memory // cache_block_size)
-            num_cpu_blocks = int(self.cache_config.swap_space_bytes //
-                                 cache_block_size)
+            num_cpu_blocks = int(self.cache_config.swap_space_bytes // cache_block_size)
         num_gpu_blocks = max(num_gpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
 
@@ -303,17 +300,15 @@ class Worker(LocalOrDistributedWorkerBase):
             f"This happens when the GPU memory was "
             "not properly cleaned up before initializing the vLLM instance.")
 
-    def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
+    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         """Allocate GPU and CPU KV cache with the specified number of blocks.
 
         This also warms up the model, which may record CUDA graphs.
         """
-        raise_if_cache_size_invalid(
-            num_gpu_blocks, self.cache_config.block_size,
-            self.cache_config.is_attention_free,
-            self.model_config.max_model_len,
-            self.parallel_config.pipeline_parallel_size)
+        raise_if_cache_size_invalid(num_gpu_blocks, self.cache_config.block_size,
+                                    self.cache_config.is_attention_free,
+                                    self.model_config.max_model_len,
+                                    self.parallel_config.pipeline_parallel_size)
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
@@ -331,16 +326,15 @@ class Worker(LocalOrDistributedWorkerBase):
     def _init_cache_engine(self):
         assert self.cache_config.num_gpu_blocks is not None
         self.cache_engine = [
-            CacheEngine(self.cache_config, self.model_config,
-                        self.parallel_config, self.device_config)
+            CacheEngine(self.cache_config, self.model_config, self.parallel_config,
+                        self.device_config)
             for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
         self.gpu_cache = [
             self.cache_engine[ve].gpu_cache
             for ve in range(self.parallel_config.pipeline_parallel_size)
         ]
-        bind_kv_cache(self.compilation_config.static_forward_context,
-                      self.gpu_cache)
+        bind_kv_cache(self.compilation_config.static_forward_context, self.gpu_cache)
 
     def _warm_up_model(self) -> None:
         # warm up sizes that are not in cudagraph capture sizes,
@@ -349,8 +343,8 @@ class Worker(LocalOrDistributedWorkerBase):
         warmup_sizes = self.vllm_config.compilation_config.compile_sizes.copy()
         if not self.model_config.enforce_eager:
             warmup_sizes = [
-                x for x in warmup_sizes if x not in
-                self.vllm_config.compilation_config.cudagraph_capture_sizes
+                x for x in warmup_sizes
+                if x not in self.vllm_config.compilation_config.cudagraph_capture_sizes
             ]
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
@@ -370,8 +364,8 @@ class Worker(LocalOrDistributedWorkerBase):
         return self.gpu_cache
 
     @torch.inference_mode()
-    def prepare_worker_input(
-            self, execute_model_req: ExecuteModelRequest) -> WorkerInput:
+    def prepare_worker_input(self,
+                             execute_model_req: ExecuteModelRequest) -> WorkerInput:
         virtual_engine = execute_model_req.virtual_engine
         num_steps = execute_model_req.num_steps
         num_seq_groups = len(execute_model_req.seq_group_metadata_list)
@@ -405,20 +399,17 @@ class Worker(LocalOrDistributedWorkerBase):
         # Issue cache operations.
         if (worker_input.blocks_to_swap_in is not None
                 and worker_input.blocks_to_swap_in.numel() > 0):
-            self.cache_engine[virtual_engine].swap_in(
-                worker_input.blocks_to_swap_in)
+            self.cache_engine[virtual_engine].swap_in(worker_input.blocks_to_swap_in)
         if (worker_input.blocks_to_swap_out is not None
                 and worker_input.blocks_to_swap_out.numel() > 0):
-            self.cache_engine[virtual_engine].swap_out(
-                worker_input.blocks_to_swap_out)
+            self.cache_engine[virtual_engine].swap_out(worker_input.blocks_to_swap_out)
         if (worker_input.blocks_to_copy is not None
                 and worker_input.blocks_to_copy.numel() > 0):
             self.cache_engine[virtual_engine].copy(worker_input.blocks_to_copy)
 
     def _get_cached_seq_group_metadata(
-            self,
-            seq_group_metadata_list: List[Union[SequenceGroupMetadata,
-                                                SequenceGroupMetadataDelta]],
+            self, seq_group_metadata_list: List[Union[SequenceGroupMetadata,
+                                                      SequenceGroupMetadataDelta]],
             finished_request_ids: List[str]) -> List[SequenceGroupMetadata]:
         """Return a list of cached Sequence Group Metadata after updating its
         state.
@@ -444,8 +435,7 @@ class Worker(LocalOrDistributedWorkerBase):
                     # preempted. Reset the cache because we need to start
                     # from scratch.
                     assert isinstance(metadata_or_delta, SequenceGroupMetadata)
-                    self._seq_group_metadata_cache[
-                        request_id] = metadata_or_delta
+                    self._seq_group_metadata_cache[request_id] = metadata_or_delta
 
             new_seq_group_metadata_list.append(
                 self._seq_group_metadata_cache[request_id])
@@ -466,10 +456,8 @@ class Worker(LocalOrDistributedWorkerBase):
                 execute_model_req.seq_group_metadata_list,
                 execute_model_req.finished_requests_ids)
 
-            execute_model_req.seq_group_metadata_list = (
-                new_seq_group_metadata_list)
-        output = super()._execute_model_spmd(execute_model_req,
-                                             intermediate_tensors)
+            execute_model_req.seq_group_metadata_list = (new_seq_group_metadata_list)
+        output = super()._execute_model_spmd(execute_model_req, intermediate_tensors)
         return output
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
@@ -484,8 +472,7 @@ class Worker(LocalOrDistributedWorkerBase):
     def list_loras(self) -> Set[int]:
         return self.model_runner.list_loras()
 
-    def add_prompt_adapter(
-            self, prompt_adapter_request: PromptAdapterRequest) -> bool:
+    def add_prompt_adapter(self, prompt_adapter_request: PromptAdapterRequest) -> bool:
         return self.model_runner.add_prompt_adapter(prompt_adapter_request)
 
     def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
@@ -508,8 +495,7 @@ class Worker(LocalOrDistributedWorkerBase):
     def get_cache_block_size_bytes(self) -> int:
         """Get the size of the KV cache block size in bytes.
         """
-        return CacheEngine.get_cache_block_size(self.cache_config,
-                                                self.model_config,
+        return CacheEngine.get_cache_block_size(self.cache_config, self.model_config,
                                                 self.parallel_config)
 
 
@@ -563,9 +549,8 @@ def raise_if_cache_size_invalid(num_gpu_blocks, block_size, is_attention_free,
                          "initializing the engine.")
     max_seq_len = block_size * (num_gpu_blocks // pipeline_parallel_size)
     if not is_attention_free and max_model_len > max_seq_len:
-        raise ValueError(
-            f"The model's max seq len ({max_model_len}) "
-            "is larger than the maximum number of tokens that can be "
-            f"stored in KV cache ({max_seq_len}). Try increasing "
-            "`gpu_memory_utilization` or decreasing `max_model_len` when "
-            "initializing the engine.")
+        raise ValueError(f"The model's max seq len ({max_model_len}) "
+                         "is larger than the maximum number of tokens that can be "
+                         f"stored in KV cache ({max_seq_len}). Try increasing "
+                         "`gpu_memory_utilization` or decreasing `max_model_len` when "
+                         "initializing the engine.")

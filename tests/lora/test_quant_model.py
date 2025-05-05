@@ -22,18 +22,15 @@ MODELS: list[ModelWithQuantization]
 #AWQ quantization is currently not supported in ROCm.
 if current_platform.is_rocm():
     MODELS = [
-        ModelWithQuantization(
-            model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ",
-            quantization="GPTQ"),
+        ModelWithQuantization(model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ",
+                              quantization="GPTQ"),
     ]
 else:
     MODELS = [
-        ModelWithQuantization(
-            model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ",
-            quantization="AWQ"),
-        ModelWithQuantization(
-            model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ",
-            quantization="GPTQ"),
+        ModelWithQuantization(model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ",
+                              quantization="AWQ"),
+        ModelWithQuantization(model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ",
+                              quantization="GPTQ"),
     ]
 
 
@@ -65,8 +62,7 @@ def do_sample(llm: vllm.LLM,
     outputs = llm.generate(
         prompts,
         sampling_params,
-        lora_request=LoRARequest(str(lora_id), lora_id, lora_path)
-        if lora_id else None)
+        lora_request=LoRARequest(str(lora_id), lora_id, lora_path) if lora_id else None)
     # Print the outputs.
     generated_texts: list[str] = []
     for output in outputs:
@@ -93,8 +89,7 @@ def test_quant_model_lora(tinyllama_lora_files, model):
 
     if model.quantization is None:
         expected_no_lora_output = [
-            "Here are some examples of orange-brown colors",
-            "I'm sorry, I don't have"
+            "Here are some examples of orange-brown colors", "I'm sorry, I don't have"
         ]
         expected_lora_output = [
             "#ff8050",
@@ -122,8 +117,7 @@ def test_quant_model_lora(tinyllama_lora_files, model):
     def expect_match(output, expected_output):
         # HACK: GPTQ lora outputs are just incredibly unstable.
         # Assert that the outputs changed.
-        if (model.quantization == "GPTQ"
-                and expected_output is expected_lora_output):
+        if (model.quantization == "GPTQ" and expected_output is expected_lora_output):
             assert output != expected_no_lora_output
             for i, o in enumerate(output):
                 assert o.startswith(
@@ -134,31 +128,19 @@ def test_quant_model_lora(tinyllama_lora_files, model):
     max_tokens = 10
 
     print("lora adapter created")
-    output = do_sample(llm,
-                       tinyllama_lora_files,
-                       lora_id=0,
-                       max_tokens=max_tokens)
+    output = do_sample(llm, tinyllama_lora_files, lora_id=0, max_tokens=max_tokens)
     expect_match(output, expected_no_lora_output)
 
     print("lora 1")
-    output = do_sample(llm,
-                       tinyllama_lora_files,
-                       lora_id=1,
-                       max_tokens=max_tokens)
+    output = do_sample(llm, tinyllama_lora_files, lora_id=1, max_tokens=max_tokens)
     expect_match(output, expected_lora_output)
 
     print("no lora")
-    output = do_sample(llm,
-                       tinyllama_lora_files,
-                       lora_id=0,
-                       max_tokens=max_tokens)
+    output = do_sample(llm, tinyllama_lora_files, lora_id=0, max_tokens=max_tokens)
     expect_match(output, expected_no_lora_output)
 
     print("lora 2")
-    output = do_sample(llm,
-                       tinyllama_lora_files,
-                       lora_id=2,
-                       max_tokens=max_tokens)
+    output = do_sample(llm, tinyllama_lora_files, lora_id=2, max_tokens=max_tokens)
     expect_match(output, expected_lora_output)
 
     print("removing lora")
@@ -168,8 +150,7 @@ def test_quant_model_lora(tinyllama_lora_files, model):
 
 
 @pytest.mark.parametrize("model", MODELS)
-def test_quant_model_tp_equality(tinyllama_lora_files, num_gpus_available,
-                                 model):
+def test_quant_model_tp_equality(tinyllama_lora_files, num_gpus_available, model):
     if num_gpus_available < 2:
         pytest.skip(f"Not enough GPUs for tensor parallelism {2}")
     if model.quantization == "GPTQ":

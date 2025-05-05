@@ -34,8 +34,7 @@ class SchedulerStats:
 
     gpu_cache_usage: float = 0.0
 
-    prefix_cache_stats: PrefixCacheStats = field(
-        default_factory=PrefixCacheStats)
+    prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
 
     spec_decoding_stats: Optional[SpecDecodingStats] = None
 
@@ -115,8 +114,8 @@ class IterationStats:
 
         # Process request-level engine core events
         if output.events is not None:
-            self.update_from_events(output.request_id, output.events,
-                                    is_prefilling, req_stats, lora_stats)
+            self.update_from_events(output.request_id, output.events, is_prefilling,
+                                    req_stats, lora_stats)
 
         # Process the batch-level "new tokens" engine core event
         if is_prefilling:
@@ -225,8 +224,7 @@ class LoRARequestStates:
         lora_stats.running_requests.remove(request_id)
         lora_stats.waiting_requests.add(request_id)
 
-    def update_iteration_stats(self,
-                               iteration_stats: Optional[IterationStats]):
+    def update_iteration_stats(self, iteration_stats: Optional[IterationStats]):
         if iteration_stats is None:
             return
         for lora_name, stats in self.lora_name_to_stats.items():

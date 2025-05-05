@@ -29,8 +29,7 @@ class MyLLM(LLM):
         # every worker will use 0.4 GPU, so that we can schedule
         # 2 instances on the same GPUs.
         os.environ["VLLM_RAY_PER_WORKER_GPUS"] = "0.4"
-        os.environ["VLLM_RAY_BUNDLE_INDICES"] = ",".join(
-            map(str, bundle_indices))
+        os.environ["VLLM_RAY_BUNDLE_INDICES"] = ",".join(map(str, bundle_indices))
         print(f"creating LLM with bundle_indices={bundle_indices}")
         super().__init__(*args, **kwargs)
 
@@ -151,5 +150,4 @@ for llm in inference_engines:
                                   args=(ipc_handles, )))
 print("check if the weights are updated")
 for llm in inference_engines:
-    assert ray.get(
-        llm.collective_rpc.remote("check_weights_changed", args=tuple()))
+    assert ray.get(llm.collective_rpc.remote("check_weights_changed", args=tuple()))

@@ -39,9 +39,7 @@ class XpuCommunicator(DeviceCommunicatorBase):
                                     dtype=input_.dtype,
                                     device=input_.device)
         # All-gather.
-        dist.all_gather_into_tensor(output_tensor,
-                                    input_,
-                                    group=self.device_group)
+        dist.all_gather_into_tensor(output_tensor, input_, group=self.device_group)
         if self.rank_in_group == dst:
             # Reshape
             output_tensor = output_tensor.movedim(0, dim)

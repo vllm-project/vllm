@@ -207,10 +207,9 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
               f"--max-num-batched-tokens")
         sys.exit(-1)
     if batch_size > max_num_seqs:
-        print(
-            f"ERROR: chosen batch_size ({batch_size}) is larger than "
-            f"max_num_seqs ({max_num_seqs}) and therefore cannot be run in a "
-            f"single profile step, please choose a smaller batch size")
+        print(f"ERROR: chosen batch_size ({batch_size}) is larger than "
+              f"max_num_seqs ({max_num_seqs}) and therefore cannot be run in a "
+              f"single profile step, please choose a smaller batch size")
         sys.exit(-1)
     print("llm.llm_engine.model_config.max_model_len: ",
           llm.llm_engine.model_config.max_model_len)
@@ -237,10 +236,9 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
             prompt_token_ids = torch.randint(llm.get_tokenizer().vocab_size,
                                              size=(prompt_len, )).tolist()
 
-            llm.llm_engine.add_request(
-                request_id=f"seq{i}",
-                prompt={'prompt_token_ids': prompt_token_ids},
-                params=sampling_params)
+            llm.llm_engine.add_request(request_id=f"seq{i}",
+                                       prompt={'prompt_token_ids': prompt_token_ids},
+                                       params=sampling_params)
 
     def abort_requests():
         for i in range(batch_size):
@@ -261,10 +259,8 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
 
     decode_profs = []
     for _ in tqdm.tqdm(range(num_steps_to_profile - 1)):
-        num_running_seqs = llm.llm_engine.scheduler[
-            0].get_num_unfinished_seq_groups()
-        with layerwise_profile(
-                num_running_seqs=num_running_seqs) as decode_prof:
+        num_running_seqs = llm.llm_engine.scheduler[0].get_num_unfinished_seq_groups()
+        with layerwise_profile(num_running_seqs=num_running_seqs) as decode_prof:
             llm.llm_engine.step()
         decode_profs.append(decode_prof)
 
@@ -309,10 +305,10 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
     if csv_output:
         csv_filename_base = csv_output[:-4] \
                 if csv_output.endswith('.csv') else csv_output
-        prefill_results.export_model_stats_table_csv(
-            csv_filename_base + "_prefill_model_table.csv")
-        prefill_results.export_summary_stats_table_csv(
-            csv_filename_base + "_prefill_summary_table.csv")
+        prefill_results.export_model_stats_table_csv(csv_filename_base +
+                                                     "_prefill_model_table.csv")
+        prefill_results.export_summary_stats_table_csv(csv_filename_base +
+                                                       "_prefill_summary_table.csv")
 
         if has_decode:
             decode_results_list[0].export_model_stats_table_csv(\
@@ -350,11 +346,11 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
 
     if context.save_chrome_traces_folder is not None:
         os.makedirs(context.save_chrome_traces_folder, exist_ok=True)
-        prefill_prof.profiler.export_chrome_trace(
-            context.save_chrome_traces_folder + "/prefill.json")
+        prefill_prof.profiler.export_chrome_trace(context.save_chrome_traces_folder +
+                                                  "/prefill.json")
         for idx, decode_prof in enumerate(decode_profs):
-            decode_prof.profiler.export_chrome_trace(
-                context.save_chrome_traces_folder + f"/decode_{idx + 1}.json")
+            decode_prof.profiler.export_chrome_trace(context.save_chrome_traces_folder +
+                                                     f"/decode_{idx + 1}.json")
         print("Traces saved as prefill.json and decode_1.json, etc."
               f" in folder {context.save_chrome_traces_folder}")
 
@@ -419,8 +415,7 @@ Profile a model
     subparsers = parser.add_subparsers(dest="cmd")
 
     run_num_steps_parser = subparsers.add_parser(
-        "run_num_steps",
-        help="This variation profiles n engine.step() invocations.")
+        "run_num_steps", help="This variation profiles n engine.step() invocations.")
     run_num_steps_parser.add_argument(
         '-n',
         '--num-steps',
@@ -439,8 +434,7 @@ Profile a model
         '-n',
         '--complete-num-requests-per-step',
         type=int,
-        help=
-        "Complete complete_num_requests_per_step requests every decode step."
+        help="Complete complete_num_requests_per_step requests every decode step."
         "For e.g., with batch_size 128 and complete_num_requests_per_step 32,"
         "the profiler is run for 6 engine steps, with the steps processing, "
         "128, 128, 96, 64, 32, 1 requests respectively.\n"
@@ -453,13 +447,12 @@ Profile a model
 
 
 def main(args):
-    context = ProfileContext(
-        engine_args=EngineArgs.from_cli_args(args),
-        **{
-            k: v
-            for k, v in vars(args).items()
-            if k in inspect.signature(ProfileContext).parameters
-        })
+    context = ProfileContext(engine_args=EngineArgs.from_cli_args(args),
+                             **{
+                                 k: v
+                                 for k, v in vars(args).items()
+                                 if k in inspect.signature(ProfileContext).parameters
+                             })
     run_profile(context, csv_output=args.csv, json_output=args.json)
 
 

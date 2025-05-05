@@ -32,19 +32,14 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         # Initialize the Q and KV cache scales to -1.0, an invalid value.
         # If the q and k/v_scales appear in the checkpoint, it will be
         # overwritten when loading weights.
-        layer.q_scale = torch.nn.Parameter(torch.tensor(-1.0),
-                                           requires_grad=False)
-        layer.k_scale = torch.nn.Parameter(torch.tensor(-1.0),
-                                           requires_grad=False)
-        layer.v_scale = torch.nn.Parameter(torch.tensor(-1.0),
-                                           requires_grad=False)
+        layer.q_scale = torch.nn.Parameter(torch.tensor(-1.0), requires_grad=False)
+        layer.k_scale = torch.nn.Parameter(torch.tensor(-1.0), requires_grad=False)
+        layer.v_scale = torch.nn.Parameter(torch.tensor(-1.0), requires_grad=False)
         # Initialize P = softmax(QK^T) scales
-        layer.prob_scale = torch.nn.Parameter(torch.tensor(-1.0),
-                                              requires_grad=False)
+        layer.prob_scale = torch.nn.Parameter(torch.tensor(-1.0), requires_grad=False)
 
     def apply(self, layer: torch.nn.Module) -> torch.Tensor:
-        raise RuntimeError(
-            f"{self.__class__.__name__}.apply should not be called.")
+        raise RuntimeError(f"{self.__class__.__name__}.apply should not be called.")
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # If the kv-cache dtype is auto, we enforce the k/v_scale to be 1.0
@@ -76,16 +71,14 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                     k_scale *= 2
                     v_scale *= 2
 
-            if not isinstance(k_scale, float) or not isinstance(
-                    v_scale, float):
+            if not isinstance(k_scale, float) or not isinstance(v_scale, float):
                 raise ValueError("Only support per-tensor scaling factor "
                                  "for fp8 KV cache")
 
             if layer.q_scale < 0.0:
-                logger.warning_once(
-                    "Checkpoint does not provide a q scaling factor. "
-                    "Setting it to k_scale. This only matters for "
-                    "the flash-attn backend.")
+                logger.warning_once("Checkpoint does not provide a q scaling factor. "
+                                    "Setting it to k_scale. This only matters for "
+                                    "the flash-attn backend.")
                 layer._q_scale.copy_(k_scale)
 
             # These are used in the final Attention.forward()
@@ -116,8 +109,7 @@ class BaseKVCacheMethod(QuantizeMethodBase):
 
         is_singleton_float = lambda x: isinstance(x, float) or isinstance(
             x, torch.Tensor) and x.numel() == 1 and x.is_floating_point()
-        if not is_singleton_float(q_scale) or not is_singleton_float(
-                prob_scale):
+        if not is_singleton_float(q_scale) or not is_singleton_float(prob_scale):
             raise ValueError("Only support per-tensor scaling factor"
                              "for fp8-quantized Q/prob")
 
@@ -125,11 +117,10 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         layer._q_scale.copy_(q_scale)
         layer._prob_scale.copy_(prob_scale)
         if q_scale == 1.0 or prob_scale == 1.0:
-            logger.warning_once(
-                f"Using Q scale {q_scale} and prob scale {prob_scale} "
-                "with fp8 attention. This may cause accuracy issues. "
-                "Please make sure Q/prob scaling factors are "
-                "available in the fp8 checkpoint.")
+            logger.warning_once(f"Using Q scale {q_scale} and prob scale {prob_scale} "
+                                "with fp8 attention. This may cause accuracy issues. "
+                                "Please make sure Q/prob scaling factors are "
+                                "available in the fp8 checkpoint.")
 
         del layer.k_scale
         del layer.v_scale

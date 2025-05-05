@@ -73,8 +73,7 @@ class TritonAttentionImpl(AttentionImpl):
         use_irope: bool = False,
     ) -> None:
         if blocksparse_params is not None:
-            raise ValueError(
-                "TritonAttention does not support block-sparse attention.")
+            raise ValueError("TritonAttention does not support block-sparse attention.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)

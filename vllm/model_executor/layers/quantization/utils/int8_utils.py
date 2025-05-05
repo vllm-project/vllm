@@ -42,9 +42,8 @@ def apply_w8a8_block_int8_linear(
     return output.to(dtype=input.dtype).view(*output_shape)
 
 
-def input_to_int8(
-        x: torch.Tensor,
-        dtype: torch.dtype = torch.int8) -> Tuple[torch.Tensor, torch.Tensor]:
+def input_to_int8(x: torch.Tensor,
+                  dtype: torch.dtype = torch.int8) -> Tuple[torch.Tensor, torch.Tensor]:
     """This function quantizes input values to int8 values with
     tensor-wise quantization."""
     iinfo = torch.iinfo(dtype)
@@ -127,8 +126,7 @@ def _per_token_quant_int8(
     cols = tl.arange(0, BLOCK)
     mask = cols < N
 
-    x = tl.load(x_ptr + row_id * stride_x + cols, mask=mask,
-                other=0.0).to(tl.float32)
+    x = tl.load(x_ptr + row_id * stride_x + cols, mask=mask, other=0.0).to(tl.float32)
     absmax = tl.maximum(tl.max(tl.abs(x)), 1e-10)
     scale_x = absmax / 127
     x_q = x * (127 / absmax)
@@ -142,9 +140,7 @@ def per_token_quant_int8(x):
     M = x.numel() // x.shape[-1]
     N = x.shape[-1]
     x_q = torch.empty_like(x, device=x.device, dtype=torch.int8)
-    scales = torch.empty(x.shape[:-1] + (1, ),
-                         device=x.device,
-                         dtype=torch.float32)
+    scales = torch.empty(x.shape[:-1] + (1, ), device=x.device, dtype=torch.float32)
     BLOCK = triton.next_power_of_2(N)
     # heuristics for number of warps
     num_warps = min(max(BLOCK // 256, 1), 8)
@@ -326,20 +322,15 @@ def _w8a8_block_int8_matmul(
 
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        a = tl.load(a_ptrs,
-                    mask=offs_k[None, :] < K - k * BLOCK_SIZE_K,
-                    other=0.0)
-        b = tl.load(b_ptrs,
-                    mask=offs_k[:, None] < K - k * BLOCK_SIZE_K,
-                    other=0.0)
+        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
+        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
 
         k_start = k * BLOCK_SIZE_K
         offs_ks = k_start // group_k
         a_s = tl.load(As_ptrs + offs_ks * stride_As_k)
         b_s = tl.load(Bs_ptrs + offs_ks * stride_Bs_k)
 
-        accumulator += tl.dot(a, b).to(tl.float32) * a_s[:,
-                                                         None] * b_s[None, :]
+        accumulator += tl.dot(a, b).to(tl.float32) * a_s[:, None] * b_s[None, :]
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
 
@@ -374,8 +365,8 @@ def get_w8a8_block_int8_configs(N: int, K: int, block_n: int,
     device_name = current_platform.get_device_name().replace(" ", "_")
     json_file_name = f"N={N},K={K},device_name={device_name},dtype=int8_w8a8,block_shape=[{block_n}, {block_k}].json"  # noqa: E501
 
-    config_file_path = os.path.join(
-        os.path.dirname(os.path.realpath(__file__)), "configs", json_file_name)
+    config_file_path = os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                                    "configs", json_file_name)
     if os.path.exists(config_file_path):
         with open(config_file_path) as f:
             logger.info(

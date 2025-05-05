@@ -31,8 +31,7 @@ def load_plugins_by_group(group: str) -> Dict[str, Callable]:
     for plugin in discovered_plugins:
         logger.info("name=%s, value=%s", plugin.name, plugin.value)
     if allowed_plugins is None:
-        logger.info("all available plugins for group %s will be loaded.",
-                    group)
+        logger.info("all available plugins for group %s will be loaded.", group)
         logger.info("set environment variable VLLM_PLUGINS to control"
                     " which plugins to load.")
     plugins = {}

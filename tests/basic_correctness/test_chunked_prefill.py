@@ -84,8 +84,7 @@ def test_models(
                 enforce_eager=enforce_eager,
                 max_num_seqs=max_num_seqs,
         ) as vllm_model:
-            vllm_outputs = vllm_model.generate_greedy(example_prompts,
-                                                      max_tokens)
+            vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
 
         check_outputs_equal(
             outputs_0_lst=hf_outputs,
@@ -159,8 +158,7 @@ def test_models_distributed(
 
 @pytest.mark.parametrize(
     "kv_cache_dtype,model",
-    [("fp8_e4m3",
-      "nm-testing/TinyLlama-1.1B-compressed-tensors-kv-cache-scheme")])
+    [("fp8_e4m3", "nm-testing/TinyLlama-1.1B-compressed-tensors-kv-cache-scheme")])
 # Due to low-precision numerical divergence, we only test logprob of 4 tokens
 @pytest.mark.parametrize("max_tokens", [4])
 @pytest.mark.parametrize("chunked_prefill_token_size", [4, 16])

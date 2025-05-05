@@ -39,10 +39,9 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             attn_type: str,
             # MLA Specific Arguments
             **mla_args) -> None:
-        super().__init__(num_heads, head_size, scale, num_kv_heads,
-                         alibi_slopes, sliding_window, kv_cache_dtype,
-                         blocksparse_params, logits_soft_cap, attn_type,
-                         **mla_args)
+        super().__init__(num_heads, head_size, scale, num_kv_heads, alibi_slopes,
+                         sliding_window, kv_cache_dtype, blocksparse_params,
+                         logits_soft_cap, attn_type, **mla_args)
 
         unsupported_features = [
             alibi_slopes, sliding_window, blocksparse_params, logits_soft_cap
@@ -60,8 +59,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                                       "TritonMLAImpl")
 
         if is_quantized_kv_cache(self.kv_cache_dtype):
-            raise NotImplementedError(
-                "TritonMLA with FP8 KV cache not yet supported")
+            raise NotImplementedError("TritonMLA with FP8 KV cache not yet supported")
 
     def _forward_decode(
         self,
@@ -106,8 +104,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         # Run MQA
         decode_attention_fwd(q, kv_c_and_k_pe_cache, kv_c_cache, o,
-                             decode_meta.block_tables,
-                             decode_meta.seq_lens_tensor, attn_logits,
-                             num_kv_splits, self.scale, PAGE_SIZE)
+                             decode_meta.block_tables, decode_meta.seq_lens_tensor,
+                             attn_logits, num_kv_splits, self.scale, PAGE_SIZE)
 
         return self._v_up_proj(o)

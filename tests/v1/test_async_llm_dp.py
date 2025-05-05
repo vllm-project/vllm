@@ -24,8 +24,7 @@ engine_args = AsyncEngineArgs(
 )
 
 if not current_platform.supports_v1(engine_args.create_model_config()):
-    pytest.skip(reason="Requires V1-supporting platform.",
-                allow_module_level=True)
+    pytest.skip(reason="Requires V1-supporting platform.", allow_module_level=True)
 
 
 async def generate(engine: AsyncLLM,
@@ -58,8 +57,8 @@ async def generate(engine: AsyncLLM,
     return count, request_id
 
 
-@pytest.mark.parametrize(
-    "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
+@pytest.mark.parametrize("output_kind",
+                         [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
 @pytest.mark.asyncio
 async def test_load(output_kind: RequestOutputKind):
 
@@ -84,8 +83,7 @@ async def test_load(output_kind: RequestOutputKind):
                              NUM_EXPECTED_TOKENS)))
 
         # Confirm that we got all the EXPECTED tokens from the requests.
-        done, pending = await asyncio.wait(tasks,
-                                           return_when=asyncio.FIRST_EXCEPTION)
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
         for task in pending:
             task.cancel()
         for task in done:

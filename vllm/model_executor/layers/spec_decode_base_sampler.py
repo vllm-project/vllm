@@ -40,12 +40,8 @@ class SpecDecodeBaseSampler(nn.Module):
             device = f"{current_platform.device_type}:{device}"
         elif not isinstance(device, str):
             raise ValueError(f"Device must be int or str, get {type(device)}")
-        self.num_accepted_tokens = torch.tensor(0,
-                                                dtype=torch.long,
-                                                device=device)
-        self.num_emitted_tokens = torch.tensor(0,
-                                               dtype=torch.long,
-                                               device=device)
+        self.num_accepted_tokens = torch.tensor(0, dtype=torch.long, device=device)
+        self.num_emitted_tokens = torch.tensor(0, dtype=torch.long, device=device)
 
     def init_tensors(self,
                      device: Union[int, str],
@@ -55,12 +51,8 @@ class SpecDecodeBaseSampler(nn.Module):
             device_type = device_type.type
         if isinstance(device, int):
             device = f"{device_type}:{device}"
-        self.num_accepted_tokens = torch.tensor(0,
-                                                dtype=torch.long,
-                                                device=device)
-        self.num_emitted_tokens = torch.tensor(0,
-                                               dtype=torch.long,
-                                               device=device)
+        self.num_accepted_tokens = torch.tensor(0, dtype=torch.long, device=device)
+        self.num_emitted_tokens = torch.tensor(0, dtype=torch.long, device=device)
 
     @property
     def probs_dtype(self):
@@ -107,10 +99,9 @@ class SpecDecodeBaseSampler(nn.Module):
         after_false_mask = indices == limits.unsqueeze(1)
 
         # Create an extended output tensor
-        output_with_bonus_tokens = -torch.ones(
-            (batch_size, k + self._num_bonus_tokens),
-            dtype=self.token_id_dtype,
-            device=accepted.device)
+        output_with_bonus_tokens = -torch.ones((batch_size, k + self._num_bonus_tokens),
+                                               dtype=self.token_id_dtype,
+                                               device=accepted.device)
         output = output_with_bonus_tokens[:, :k]
 
         # Fill in the first k columns of the output tensor using masks and data
@@ -125,8 +116,7 @@ class SpecDecodeBaseSampler(nn.Module):
                                                       bonus_token_ids, -1)
 
         # Fill the recovered token ids.
-        output.mul_(~after_false_mask).add_(
-            substitute_token_ids.mul(after_false_mask))
+        output.mul_(~after_false_mask).add_(substitute_token_ids.mul(after_false_mask))
 
         self.num_accepted_tokens += accepted.sum()
         self.num_emitted_tokens += (output_with_bonus_tokens != -1).sum()
@@ -141,15 +131,12 @@ class SpecDecodeBaseSampler(nn.Module):
         bonus_token_ids: torch.Tensor,
         draft_probs: Optional[torch.Tensor] = None,
     ) -> None:
-        self._raise_if_incorrect_shape(target_with_bonus_probs,
-                                       draft_token_ids, bonus_token_ids,
-                                       draft_probs)
-        self._raise_if_incorrect_dtype(target_with_bonus_probs,
-                                       draft_token_ids, bonus_token_ids,
-                                       draft_probs)
-        self._raise_if_inconsistent_device(target_with_bonus_probs,
-                                           draft_token_ids, bonus_token_ids,
-                                           draft_probs)
+        self._raise_if_incorrect_shape(target_with_bonus_probs, draft_token_ids,
+                                       bonus_token_ids, draft_probs)
+        self._raise_if_incorrect_dtype(target_with_bonus_probs, draft_token_ids,
+                                       bonus_token_ids, draft_probs)
+        self._raise_if_inconsistent_device(target_with_bonus_probs, draft_token_ids,
+                                           bonus_token_ids, draft_probs)
         self._raise_if_out_of_bounds_vocab(target_with_bonus_probs.shape[-1],
                                            draft_token_ids, bonus_token_ids)
 
@@ -178,8 +165,7 @@ class SpecDecodeBaseSampler(nn.Module):
 
         # validate the shape of draft probs if it is set
         if draft_probs is not None:
-            (draft_batch_size, num_draft_probs,
-             draft_vocab_size) = draft_probs.shape
+            (draft_batch_size, num_draft_probs, draft_vocab_size) = draft_probs.shape
             assert draft_batch_size == target_batch_size
             assert num_draft_probs == num_target_probs
             assert (draft_vocab_size == target_vocab_size
@@ -206,10 +192,9 @@ class SpecDecodeBaseSampler(nn.Module):
         draft_probs: Optional[torch.Tensor] = None,
     ) -> None:
         devices = [
-            t.device for t in [
-                target_with_bonus_probs, bonus_token_ids, draft_probs,
-                draft_token_ids
-            ] if t is not None
+            t.device for t in
+            [target_with_bonus_probs, bonus_token_ids, draft_probs, draft_token_ids]
+            if t is not None
         ]
         assert all([devices[0] == device for device in devices])
 

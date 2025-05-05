@@ -24,8 +24,7 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
             "this method should not be called.")
 
     @classmethod
-    def can_implement(
-            cls, c: ScaledMMLinearLayerConfig) -> Tuple[bool, Optional[str]]:
+    def can_implement(cls, c: ScaledMMLinearLayerConfig) -> Tuple[bool, Optional[str]]:
 
         if not current_platform.is_tpu():
             return False, "ScaledMMXLA requires running on TPU."
@@ -55,14 +54,12 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
         is_fused_module = len(layer.logical_widths) > 1
         weight_scale = getattr(layer, self.w_s_name)
         if is_fused_module and not self.config.is_channelwise:
-            weight_scale = convert_to_channelwise(weight_scale,
-                                                  layer.logical_widths)
+            weight_scale = convert_to_channelwise(weight_scale, layer.logical_widths)
 
         # [out_channel,] (different than cutlass_scaled_mm)
         weight_scale = weight_scale.squeeze(-1)
-        replace_parameter(
-            layer, self.w_s_name,
-            torch.nn.Parameter(weight_scale.data, requires_grad=False))
+        replace_parameter(layer, self.w_s_name,
+                          torch.nn.Parameter(weight_scale.data, requires_grad=False))
 
         # Only support symmetric dynamic activation quantization.
         setattr(layer, self.i_s_name, None)

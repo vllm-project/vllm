@@ -82,8 +82,7 @@ def load_aya_vision(question: str, image_urls: list[str]) -> ModelRequestData:
 
     placeholders = [{"type": "image", "image": url} for url in image_urls]
     messages = [{
-        "role":
-        "user",
+        "role": "user",
         "content": [
             *placeholders,
             {
@@ -106,8 +105,7 @@ def load_aya_vision(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
-def load_deepseek_vl2(question: str,
-                      image_urls: list[str]) -> ModelRequestData:
+def load_deepseek_vl2(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "deepseek-ai/deepseek-vl2-tiny"
 
     engine_args = EngineArgs(
@@ -141,8 +139,7 @@ def load_gemma3(question: str, image_urls: list[str]) -> ModelRequestData:
 
     placeholders = [{"type": "image", "image": url} for url in image_urls]
     messages = [{
-        "role":
-        "user",
+        "role": "user",
         "content": [
             *placeholders,
             {
@@ -180,8 +177,7 @@ def load_h2ovl(question: str, image_urls: list[str]) -> ModelRequestData:
                              for i, _ in enumerate(image_urls, start=1))
     messages = [{'role': 'user', 'content': f"{placeholders}\n{question}"}]
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name,
-                                              trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     prompt = tokenizer.apply_chat_template(messages,
                                            tokenize=False,
                                            add_generation_prompt=True)
@@ -269,8 +265,7 @@ def load_internvl(question: str, image_urls: list[str]) -> ModelRequestData:
                              for i, _ in enumerate(image_urls, start=1))
     messages = [{'role': 'user', 'content': f"{placeholders}\n{question}"}]
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name,
-                                              trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     prompt = tokenizer.apply_chat_template(messages,
                                            tokenize=False,
                                            add_generation_prompt=True)
@@ -302,8 +297,7 @@ def load_llama4(question: str, image_urls: list[str]) -> ModelRequestData:
 
     placeholders = [{"type": "image", "image": url} for url in image_urls]
     messages = [{
-        "role":
-        "user",
+        "role": "user",
         "content": [
             *placeholders,
             {
@@ -339,8 +333,7 @@ def load_kimi_vl(question: str, image_urls: list[str]) -> ModelRequestData:
 
     placeholders = [{"type": "image", "image": url} for url in image_urls]
     messages = [{
-        "role":
-        "user",
+        "role": "user",
         "content": [
             *placeholders,
             {
@@ -350,8 +343,7 @@ def load_kimi_vl(question: str, image_urls: list[str]) -> ModelRequestData:
         ],
     }]
 
-    processor = AutoProcessor.from_pretrained(model_name,
-                                              trust_remote_code=True)
+    processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
 
     prompt = processor.apply_chat_template(messages,
                                            tokenize=False,
@@ -423,8 +415,7 @@ def load_nvlm_d(question: str, image_urls: list[str]) -> ModelRequestData:
                              for i, _ in enumerate(image_urls, start=1))
     messages = [{'role': 'user', 'content': f"{placeholders}\n{question}"}]
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name,
-                                              trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     prompt = tokenizer.apply_chat_template(messages,
                                            tokenize=False,
                                            add_generation_prompt=True)
@@ -450,8 +441,8 @@ def load_ovis2(question: str, image_urls: list[str]) -> ModelRequestData:
         hf_overrides={"architectures": ["Ovis2ForConditionalGeneration"]},
     )
 
-    placeholder = '\n'.join(
-        [f'Image {i+1}: <image>' for i in range(len(image_urls))]) + '\n'
+    placeholder = '\n'.join([f'Image {i+1}: <image>'
+                             for i in range(len(image_urls))]) + '\n'
     prompt = ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
               f"<|im_start|>user\n{placeholder}"
               f"{question}<|im_end|>\n"
@@ -540,8 +531,7 @@ def load_phi4mm(question: str, image_urls: list[str]) -> ModelRequestData:
         mm_processor_kwargs={"dynamic_hd": 4},
     )
 
-    placeholders = "".join(f"<|image_{i}|>"
-                           for i, _ in enumerate(image_urls, start=1))
+    placeholders = "".join(f"<|image_{i}|>" for i, _ in enumerate(image_urls, start=1))
     prompt = f"<|user|>{placeholders}{question}<|end|><|assistant|>"
 
     return ModelRequestData(
@@ -552,8 +542,7 @@ def load_phi4mm(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
-def load_qwen_vl_chat(question: str,
-                      image_urls: list[str]) -> ModelRequestData:
+def load_qwen_vl_chat(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "Qwen/Qwen-VL-Chat"
     engine_args = EngineArgs(
         model=model_name,
@@ -570,8 +559,7 @@ def load_qwen_vl_chat(question: str,
     # so we need to explicitly pass it. We use ChatML since it's used in the
     # generation utils of the model:
     # https://huggingface.co/Qwen/Qwen-VL-Chat/blob/main/qwen_generation_utils.py#L265
-    tokenizer = AutoTokenizer.from_pretrained(model_name,
-                                              trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 
     # Copied from: https://huggingface.co/docs/transformers/main/en/chat_templating
     chat_template = "{% if not add_generation_prompt is defined %}{% set add_generation_prompt = false %}{% endif %}{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"  # noqa: E501
@@ -618,8 +606,7 @@ def load_qwen2_vl(question: str, image_urls: list[str]) -> ModelRequestData:
         "role": "system",
         "content": "You are a helpful assistant."
     }, {
-        "role":
-        "user",
+        "role": "user",
         "content": [
             *placeholders,
             {
@@ -670,8 +657,7 @@ def load_qwen2_5_vl(question: str, image_urls: list[str]) -> ModelRequestData:
         "role": "system",
         "content": "You are a helpful assistant."
     }, {
-        "role":
-        "user",
+        "role": "user",
         "content": [
             *placeholders,
             {
@@ -690,8 +676,7 @@ def load_qwen2_5_vl(question: str, image_urls: list[str]) -> ModelRequestData:
     if process_vision_info is None:
         image_data = [fetch_image(url) for url in image_urls]
     else:
-        image_data, _ = process_vision_info(messages,
-                                            return_video_kwargs=False)
+        image_data, _ = process_vision_info(messages, return_video_kwargs=False)
 
     return ModelRequestData(
         engine_args=engine_args,
@@ -724,8 +709,7 @@ model_example_map = {
 }
 
 
-def run_generate(model, question: str, image_urls: list[str],
-                 seed: Optional[int]):
+def run_generate(model, question: str, image_urls: list[str], seed: Optional[int]):
     req_data = model_example_map[model](question, image_urls)
 
     engine_args = asdict(req_data.engine_args) | {"seed": args.seed}
@@ -753,8 +737,7 @@ def run_generate(model, question: str, image_urls: list[str],
         print("-" * 50)
 
 
-def run_chat(model: str, question: str, image_urls: list[str],
-             seed: Optional[int]):
+def run_chat(model: str, question: str, image_urls: list[str], seed: Optional[int]):
     req_data = model_example_map[model](question, image_urls)
 
     # Disable other modalities to save memory

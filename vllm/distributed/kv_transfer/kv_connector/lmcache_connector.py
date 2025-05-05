@@ -44,8 +44,7 @@ class LMCacheConnector(KVConnectorBase):
                     self.transfer_config)
 
         # TODO (Jiayi): Find model_config, parallel_config, and cache_config
-        self.engine = init_lmcache_engine(config.model_config,
-                                          config.parallel_config,
+        self.engine = init_lmcache_engine(config.model_config, config.parallel_config,
                                           config.cache_config)
         self.lmcache_engine_name = ENGINE_NAME
         self.lmcache_engine_builder = LMCacheEngineBuilder
@@ -79,8 +78,7 @@ class LMCacheConnector(KVConnectorBase):
         model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
         kv_caches: List[torch.Tensor],
-        hidden_or_intermediate_states: Union[torch.Tensor,
-                                             IntermediateTensors],
+        hidden_or_intermediate_states: Union[torch.Tensor, IntermediateTensors],
     ) -> None:
 
         store_status = self.lmcache_should_store(model_input)

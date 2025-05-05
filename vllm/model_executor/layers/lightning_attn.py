@@ -7,8 +7,8 @@ from einops import rearrange
 
 @triton.jit
 def _fwd_diag_kernel(Q, K, V, Out, S, b: tl.constexpr, h: tl.constexpr, n,
-                     d: tl.constexpr, e: tl.constexpr, BLOCK: tl.constexpr,
-                     NUM_BLOCK, CBLOCK: tl.constexpr):
+                     d: tl.constexpr, e: tl.constexpr, BLOCK: tl.constexpr, NUM_BLOCK,
+                     CBLOCK: tl.constexpr):
     # This kernel computes the diagonal blocks of the attention matrix
     # Each diagonal block represents attention
     # where queries attend to keys in the same block
@@ -37,17 +37,13 @@ def _fwd_diag_kernel(Q, K, V, Out, S, b: tl.constexpr, h: tl.constexpr, n,
 
     # Calculate pointers to the query, key, value, and output tensors
     Q_block_ptr = (Q + qk_offset + qk_block_offset + q_cblock_offset +
-                   tl.arange(0, CBLOCK)[:, None] * d +
-                   tl.arange(0, d)[None, :])
+                   tl.arange(0, CBLOCK)[:, None] * d + tl.arange(0, d)[None, :])
     K_trans_block_ptr = (K + qk_offset + qk_block_offset +
-                         tl.arange(0, CBLOCK)[None, :] * d +
-                         tl.arange(0, d)[:, None])
-    V_block_ptr = (V + v_offset + v_block_offset +
-                   tl.arange(0, CBLOCK)[:, None] * e +
+                         tl.arange(0, CBLOCK)[None, :] * d + tl.arange(0, d)[:, None])
+    V_block_ptr = (V + v_offset + v_block_offset + tl.arange(0, CBLOCK)[:, None] * e +
                    tl.arange(0, e)[None, :])
     O_block_ptr = (Out + o_offset + o_block_offset + o_cblock_offset +
-                   tl.arange(0, CBLOCK)[:, None] * e +
-                   tl.arange(0, e)[None, :])
+                   tl.arange(0, CBLOCK)[:, None] * e + tl.arange(0, e)[None, :])
 
     # Load the decay rate for the current head
     S_block_ptr = S + off_h
@@ -57,8 +53,7 @@ def _fwd_diag_kernel(Q, K, V, Out, S, b: tl.constexpr, h: tl.constexpr, n,
     q_index = tl.arange(0, CBLOCK) + i * CBLOCK
 
     # Load query values
-    q = tl.load(Q_block_ptr,
-                mask=block_offset + q_index[:, None] < n,
+    q = tl.load(Q_block_ptr, mask=block_offset + q_index[:, None] < n,
                 other=0.0).to(tl.float32)
 
     # Initialize output accumulator
@@ -146,8 +141,7 @@ def _fwd_kv_parallel(
     K_trans_block_ptr = (K + k_offset + k_block_offset +
                          tl.arange(0, CBLOCK)[None, :] * d +
                          tl.arange(0, D_FBLOCK)[:, None])
-    V_block_ptr = (V + v_offset + v_block_offset +
-                   tl.arange(0, CBLOCK)[:, None] * e +
+    V_block_ptr = (V + v_offset + v_block_offset + tl.arange(0, CBLOCK)[:, None] * e +
                    tl.arange(0, E_FBLOCK)[None, :])
     KV_block_ptr = (KV + kv_offset + kv_block_offset +
                     tl.arange(0, D_FBLOCK)[:, None] * e +
@@ -193,8 +187,8 @@ def _fwd_kv_parallel(
 
 @triton.jit
 def _fwd_kv_reduce(S, KV, KV_HISTORY, b: tl.constexpr, h: tl.constexpr, n,
-                   d: tl.constexpr, e: tl.constexpr, BLOCK: tl.constexpr,
-                   NUM_BLOCK, D_FBLOCK: tl.constexpr, E_FBLOCK: tl.constexpr):
+                   d: tl.constexpr, e: tl.constexpr, BLOCK: tl.constexpr, NUM_BLOCK,
+                   D_FBLOCK: tl.constexpr, E_FBLOCK: tl.constexpr):
     # This kernel reduces the key-value outer products
     # across blocks and updates the KV history
     off_bh = tl.program_id(0)  # batch-head index
@@ -295,8 +289,7 @@ def _fwd_none_diag_kernel(
     q_index = block_offset + tl.arange(0, CBLOCK)
 
     # Load query values
-    q = tl.load(Q_block_ptr, mask=q_index[:, None] < n,
-                other=0.).to(tl.float32)
+    q = tl.load(Q_block_ptr, mask=q_index[:, None] < n, other=0.).to(tl.float32)
 
     # Compute decay factors for the current sub-block
     q_decay = tl.exp(-s.to(tl.float32) * (off_c * CBLOCK + c_array[:, None]))
@@ -305,8 +298,7 @@ def _fwd_none_diag_kernel(
     qkv_none_diag = tl.dot(q, kv) * q_decay
 
     # Load diagonal attention output (computed by _fwd_diag_kernel)
-    qkv_diag = tl.load(O_block_ptr, mask=q_index[:, None] < n,
-                       other=0.).to(tl.float32)
+    qkv_diag = tl.load(O_block_ptr, mask=q_index[:, None] < n, other=0.).to(tl.float32)
 
     # Combine diagonal and non-diagonal attention outputs
     qkv = qkv_diag + qkv_none_diag
@@ -380,9 +372,7 @@ class _attention(torch.autograd.Function):
         assert BLOCK % CBLOCK == 0, "BLOCK must be a multiple of CBLOCK"
 
         # Step 2: Compute key-value outer products for each block in parallel
-        kv = torch.empty((b, h, NUM_BLOCK, d, e),
-                         dtype=torch.float32,
-                         device=q.device)
+        kv = torch.empty((b, h, NUM_BLOCK, d, e), dtype=torch.float32, device=q.device)
         grid = (b * h, NUM_BLOCK)
         _fwd_kv_parallel[grid](
             k,

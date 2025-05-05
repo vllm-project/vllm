@@ -23,10 +23,8 @@ HF_TEXT_PROMPTS = [
 ]
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
-    "stop_sign":
-    "What is shown in this image?",
-    "cherry_blossom":
-    "What is shown in this image?"
+    "stop_sign": "What is shown in this image?",
+    "cherry_blossom": "What is shown in this image?"
 })
 
 MODELS = ["MrLight/dse-qwen2-2b-mrl-v1"]
@@ -111,13 +109,11 @@ def _run_test(
         vllm_outputs = vllm_model.encode(texts, images=input_images)
 
     hf_outputs = []
-    with hf_runner(model,
-                   dtype=dtype,
+    with hf_runner(model, dtype=dtype,
                    auto_cls=Qwen2VLForConditionalGeneration) as hf_model:
 
         prompts = []
-        for text, image, embed_text in zip(input_texts, input_images,
-                                           embed_texts):
+        for text, image, embed_text in zip(input_texts, input_images, embed_texts):
             # dse requires non-standard input processing
             # because it needs an image_pad token
             messages = get_messages(image, text, embed_text)
@@ -196,10 +192,8 @@ def test_models_image(
     model: str,
     dtype: str,
 ) -> None:
-    input_texts_images = [
-        (text, asset.pil_image)
-        for text, asset in zip(HF_IMAGE_PROMPTS, image_assets)
-    ]
+    input_texts_images = [(text, asset.pil_image)
+                          for text, asset in zip(HF_IMAGE_PROMPTS, image_assets)]
     input_texts = [text for text, _ in input_texts_images]
     input_images = [image for _, image in input_texts_images]
     embed_texts = [False] * len(input_texts)

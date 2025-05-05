@@ -267,8 +267,7 @@ def test_rope_customization():
     )
     assert getattr(llama_model_config.hf_config, "rope_scaling",
                    None) == TEST_ROPE_SCALING
-    assert getattr(llama_model_config.hf_config, "rope_theta",
-                   None) == TEST_ROPE_THETA
+    assert getattr(llama_model_config.hf_config, "rope_theta", None) == TEST_ROPE_THETA
     assert llama_model_config.max_model_len == 16384
 
     longchat_model_config = ModelConfig(
@@ -381,16 +380,15 @@ def test_generation_config_loading():
     # The generation config could be overridden by the user.
     override_generation_config = {"temperature": 0.5, "top_k": 5}
 
-    model_config = ModelConfig(
-        model_id,
-        task="auto",
-        tokenizer=model_id,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        seed=0,
-        dtype="float16",
-        generation_config="auto",
-        override_generation_config=override_generation_config)
+    model_config = ModelConfig(model_id,
+                               task="auto",
+                               tokenizer=model_id,
+                               tokenizer_mode="auto",
+                               trust_remote_code=False,
+                               seed=0,
+                               dtype="float16",
+                               generation_config="auto",
+                               override_generation_config=override_generation_config)
 
     override_result = correct_generation_config.copy()
     override_result.update(override_generation_config)
@@ -399,16 +397,15 @@ def test_generation_config_loading():
 
     # When generation_config is set to "vllm" and override_generation_config
     # is set, the override_generation_config should be used directly.
-    model_config = ModelConfig(
-        model_id,
-        task="auto",
-        tokenizer=model_id,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        seed=0,
-        dtype="float16",
-        generation_config="vllm",
-        override_generation_config=override_generation_config)
+    model_config = ModelConfig(model_id,
+                               task="auto",
+                               tokenizer=model_id,
+                               tokenizer_mode="auto",
+                               trust_remote_code=False,
+                               seed=0,
+                               dtype="float16",
+                               generation_config="vllm",
+                               override_generation_config=override_generation_config)
 
     assert model_config.get_diff_sampling_param() == override_generation_config
 

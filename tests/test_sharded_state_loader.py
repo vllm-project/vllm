@@ -57,8 +57,7 @@ def _run_writer(input_dir, output_dir, weights_patterns, **kwargs):
     llm_sharded_writer = LLM(model=input_dir, **kwargs)
 
     # Dump worker states to output directory
-    llm_sharded_writer.llm_engine.model_executor.save_sharded_state(
-        path=output_dir)
+    llm_sharded_writer.llm_engine.model_executor.save_sharded_state(path=output_dir)
 
     # Copy metadata files to output directory
     for file in os.listdir(input_dir):
@@ -79,8 +78,7 @@ def _run_generate(input_dir, queue: mp.Queue, **kwargs):
 @pytest.mark.parametrize("enable_lora", [False, True])
 @pytest.mark.parametrize("tp_size", [1, 2])
 def test_sharded_state_loader(enable_lora, tp_size, num_gpus_available,
-                              llama_3p2_1b_files,
-                              monkeypatch: pytest.MonkeyPatch):
+                              llama_3p2_1b_files, monkeypatch: pytest.MonkeyPatch):
     if num_gpus_available < tp_size:
         pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
 

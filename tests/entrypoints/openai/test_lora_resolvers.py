@@ -38,8 +38,7 @@ class MockModelConfig:
     tokenizer_mode: str = "auto"
     max_model_len: int = 100
     tokenizer_revision: Optional[str] = None
-    multimodal_config: MultiModalConfig = field(
-        default_factory=MultiModalConfig)
+    multimodal_config: MultiModalConfig = field(default_factory=MultiModalConfig)
     hf_config: MockHFConfig = field(default_factory=MockHFConfig)
     logits_processor_pattern: Optional[str] = None
     diff_sampling_param: Optional[dict] = None
@@ -112,8 +111,7 @@ def mock_serving_setup():
 
 
 @pytest.mark.asyncio
-async def test_serving_completion_with_lora_resolver(mock_serving_setup,
-                                                     monkeypatch):
+async def test_serving_completion_with_lora_resolver(mock_serving_setup, monkeypatch):
     monkeypatch.setenv("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "true")
 
     mock_engine, serving_completion = mock_serving_setup
@@ -141,8 +139,7 @@ async def test_serving_completion_with_lora_resolver(mock_serving_setup,
 
 
 @pytest.mark.asyncio
-async def test_serving_completion_resolver_not_found(mock_serving_setup,
-                                                     monkeypatch):
+async def test_serving_completion_resolver_not_found(mock_serving_setup, monkeypatch):
     monkeypatch.setenv("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "true")
 
     mock_engine, serving_completion = mock_serving_setup
@@ -164,8 +161,8 @@ async def test_serving_completion_resolver_not_found(mock_serving_setup,
 
 
 @pytest.mark.asyncio
-async def test_serving_completion_resolver_add_lora_fails(
-        mock_serving_setup, monkeypatch):
+async def test_serving_completion_resolver_add_lora_fails(mock_serving_setup,
+                                                          monkeypatch):
     monkeypatch.setenv("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "true")
 
     mock_engine, serving_completion = mock_serving_setup

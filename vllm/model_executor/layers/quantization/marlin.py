@@ -35,10 +35,9 @@ class MarlinConfig(QuantizationConfig):
         self.group_size = group_size
         self.lm_head_quantized = lm_head_quantized
         if self.group_size != 128 and self.group_size != -1:
-            raise ValueError(
-                "Currently, only group size 128 and -1 (channelwise) "
-                "is supported for Marlin, but got group_size of "
-                f"{self.group_size}")
+            raise ValueError("Currently, only group size 128 and -1 (channelwise) "
+                             "is supported for Marlin, but got group_size of "
+                             f"{self.group_size}")
 
         # 4 Bits packed into 32 bit datatype.
         self.pack_factor = 32 // 4
@@ -83,13 +82,12 @@ class MarlinConfig(QuantizationConfig):
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "MarlinConfig":
         group_size = cls.get_from_keys(config, ["group_size"])
-        lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"],
-                                                 default=False)
+        lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"], default=False)
         return cls(group_size, lm_head_quantized)
 
     @classmethod
-    def override_quantization_method(
-            cls, hf_quant_cfg, user_quant) -> Optional[QuantizationMethods]:
+    def override_quantization_method(cls, hf_quant_cfg,
+                                     user_quant) -> Optional[QuantizationMethods]:
         # compat: autogptq >=0.8.0 use checkpoint_format: str
         # compat: autogptq <=0.7.1 is_marlin_format: bool
         is_marlin_format = (hf_quant_cfg.get("checkpoint_format") == "marlin"
@@ -99,8 +97,8 @@ class MarlinConfig(QuantizationConfig):
                                or user_quant == "marlin")
 
         if is_marlin_format and is_valid_user_quant:
-            msg = ("The model is serialized in {} format. Using {} kernel.".
-                   format(cls.get_name(), cls.get_name()))
+            msg = ("The model is serialized in {} format. Using {} kernel.".format(
+                cls.get_name(), cls.get_name()))
             logger.info(msg)
             return cls.get_name()
 
@@ -108,8 +106,8 @@ class MarlinConfig(QuantizationConfig):
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["MarlinLinearMethod"]:
-        if (isinstance(layer, LinearBase) or
-            (isinstance(layer, ParallelLMHead) and self.lm_head_quantized)):
+        if (isinstance(layer, LinearBase)
+                or (isinstance(layer, ParallelLMHead) and self.lm_head_quantized)):
             return MarlinLinearMethod(self)
         return None
 
@@ -144,55 +142,49 @@ class MarlinLinearMethod(LinearMethodBase):
         # Validate output_size_per_partition
         output_size_per_partition = sum(output_partition_sizes)
         if output_size_per_partition % self.quant_config.min_n_threads != 0:
-            raise ValueError(
-                f"Weight output_size_per_partition = "
-                f"{output_size_per_partition} is not divisible by "
-                f"min_n_threads = {self.quant_config.min_n_threads}.")
+            raise ValueError(f"Weight output_size_per_partition = "
+                             f"{output_size_per_partition} is not divisible by "
+                             f"min_n_threads = {self.quant_config.min_n_threads}.")
         if output_size_per_partition % self.quant_config.pack_factor != 0:
-            raise ValueError(
-                f"Weight output_size_per_partition = "
-                f"{output_size_per_partition} is not divisible by "
-                f"pack_factor = {self.quant_config.pack_factor}.")
+            raise ValueError(f"Weight output_size_per_partition = "
+                             f"{output_size_per_partition} is not divisible by "
+                             f"pack_factor = {self.quant_config.pack_factor}.")
 
         # Validate input_size_per_partition
         if input_size_per_partition % self.quant_config.min_k_threads != 0:
-            raise ValueError(
-                f"Weight input_size_per_partition = "
-                f"{input_size_per_partition} is not divisible by "
-                f"min_k_threads = {self.quant_config.min_k_threads}.")
-        if (self.quant_config.group_size != -1 and
-                input_size_per_partition % self.quant_config.group_size != 0):
+            raise ValueError(f"Weight input_size_per_partition = "
+                             f"{input_size_per_partition} is not divisible by "
+                             f"min_k_threads = {self.quant_config.min_k_threads}.")
+        if (self.quant_config.group_size != -1
+                and input_size_per_partition % self.quant_config.group_size != 0):
             raise ValueError(f"Weight input_size_per_partition = "
                              f"{input_size_per_partition} is not divisible by "
                              f"group_size = {self.quant_config.group_size}.")
 
         # Check that we have at least 4 tiles horizontally in the shard
-        num_tiles_per_perm = self.quant_config.perm_len // (
-            self.quant_config.tile_size**2)
+        num_tiles_per_perm = self.quant_config.perm_len // (self.quant_config.tile_size
+                                                            **2)
         if output_size_per_partition % num_tiles_per_perm != 0:
-            raise ValueError(
-                "Each permutation group must reside on the same gpu")
+            raise ValueError("Each permutation group must reside on the same gpu")
 
         # Quantized 4Bit weights packed into Int32.
-        qweight = PackedvLLMParameter(
-            data=torch.empty(
-                input_size_per_partition // self.quant_config.tile_size,
-                output_size_per_partition * self.quant_config.tile_size //
-                self.quant_config.pack_factor,
-                device="cuda",
-                dtype=torch.int32,
-            ),
-            input_dim=0,
-            output_dim=1,
-            packed_dim=1,
-            packed_factor=self.quant_config.pack_factor,
-            marlin_tile_size=self.quant_config.tile_size,
-            weight_loader=weight_loader)
+        qweight = PackedvLLMParameter(data=torch.empty(
+            input_size_per_partition // self.quant_config.tile_size,
+            output_size_per_partition * self.quant_config.tile_size //
+            self.quant_config.pack_factor,
+            device="cuda",
+            dtype=torch.int32,
+        ),
+                                      input_dim=0,
+                                      output_dim=1,
+                                      packed_dim=1,
+                                      packed_factor=self.quant_config.pack_factor,
+                                      marlin_tile_size=self.quant_config.tile_size,
+                                      weight_loader=weight_loader)
 
         # Determine if channelwise or not
         input_groups = (1 if self.quant_config.group_size == -1 else
-                        input_size_per_partition //
-                        self.quant_config.group_size)
+                        input_size_per_partition // self.quant_config.group_size)
 
         weight_scale_args = {
             "data":
@@ -206,8 +198,7 @@ class MarlinLinearMethod(LinearMethodBase):
             weight_loader
         }
         if input_groups == 1:
-            scales = ChannelQuantScaleParameter(output_dim=1,
-                                                **weight_scale_args)
+            scales = ChannelQuantScaleParameter(output_dim=1, **weight_scale_args)
         else:
             scales = GroupQuantScaleParameter(output_dim=1,
                                               input_dim=0,
@@ -249,8 +240,8 @@ class MarlinLinearMethod(LinearMethodBase):
         size_k = x_2d.shape[1]
         size_n = scales.shape[1]
 
-        output_2d = ops.marlin_gemm(x_2d, qweight, scales, workspace, size_m,
-                                    size_n, size_k)
+        output_2d = ops.marlin_gemm(x_2d, qweight, scales, workspace, size_m, size_n,
+                                    size_k)
 
         output = output_2d.view(x.shape[:-1] + (output_2d.shape[1], ))
 

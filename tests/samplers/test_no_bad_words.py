@@ -60,13 +60,10 @@ class TestOneTokenBadWord:
             output_token_ids = self._generate(llm)
             assert output_token_ids[0] == self.target_token_id
 
-            output_token_ids = self._generate(llm,
-                                              bad_words=[self.TARGET_TOKEN])
+            output_token_ids = self._generate(llm, bad_words=[self.TARGET_TOKEN])
             assert self.target_token_id not in output_token_ids
 
-    def _generate(self,
-                  model: LLM,
-                  bad_words: Optional[list[str]] = None) -> list[int]:
+    def _generate(self, model: LLM, bad_words: Optional[list[str]] = None) -> list[int]:
         return _generate(
             model=model,
             prompt=self.PROMPT,
@@ -74,11 +71,8 @@ class TestOneTokenBadWord:
             bad_words=bad_words,
         )
 
-    def _encode(self,
-                prompt: str,
-                add_special_tokens: bool = True) -> list[int]:
-        return self.tokenizer(prompt,
-                              add_special_tokens=add_special_tokens).input_ids
+    def _encode(self, prompt: str, add_special_tokens: bool = True) -> list[int]:
+        return self.tokenizer(prompt, add_special_tokens=add_special_tokens).input_ids
 
 
 class TestTwoTokenBadWord:
@@ -109,12 +103,10 @@ class TestTwoTokenBadWord:
                 self.target_token_id1, self.target_token_id2
             ]
 
-            output_token_ids = self._generate(llm,
-                                              bad_words=[self.TARGET_TOKEN1])
+            output_token_ids = self._generate(llm, bad_words=[self.TARGET_TOKEN1])
             assert self.target_token_id1 not in output_token_ids
 
-            output_token_ids = self._generate(llm,
-                                              bad_words=[self.TARGET_TOKEN2])
+            output_token_ids = self._generate(llm, bad_words=[self.TARGET_TOKEN2])
             assert output_token_ids[0] == self.target_token_id1
             assert self.target_token_id2 not in output_token_ids
 
@@ -124,9 +116,8 @@ class TestTwoTokenBadWord:
             assert output_token_ids[:2] != [
                 self.target_token_id1, self.target_token_id2
             ]
-            assert not self._contains(
-                output_token_ids,
-                [self.target_token_id1, self.target_token_id2])
+            assert not self._contains(output_token_ids,
+                                      [self.target_token_id1, self.target_token_id2])
             # Model dependent behaviour
             assert output_token_ids[:2] == [
                 self.target_token_id1, self.neighbour_token_id2
@@ -142,21 +133,17 @@ class TestTwoTokenBadWord:
             assert output_token_ids[:2] != [
                 self.target_token_id1, self.target_token_id2
             ]
-            assert not self._contains(
-                output_token_ids,
-                [self.target_token_id1, self.target_token_id2])
+            assert not self._contains(output_token_ids,
+                                      [self.target_token_id1, self.target_token_id2])
             assert output_token_ids[:2] != [
                 self.target_token_id1, self.neighbour_token_id2
             ]
-            assert not self._contains(
-                output_token_ids,
-                [self.target_token_id1, self.neighbour_token_id2])
+            assert not self._contains(output_token_ids,
+                                      [self.target_token_id1, self.neighbour_token_id2])
             assert ((self.target_token_id2 in output_token_ids)
                     or (self.neighbour_token_id2 in output_token_ids))
 
-    def _generate(self,
-                  model: LLM,
-                  bad_words: Optional[list[str]] = None) -> list[int]:
+    def _generate(self, model: LLM, bad_words: Optional[list[str]] = None) -> list[int]:
         return _generate(
             model=model,
             prompt=self.PROMPT,
@@ -186,8 +173,5 @@ class TestTwoTokenBadWord:
 
         return False
 
-    def _encode(self,
-                prompt: str,
-                add_special_tokens: bool = True) -> list[int]:
-        return self.tokenizer(prompt,
-                              add_special_tokens=add_special_tokens).input_ids
+    def _encode(self, prompt: str, add_special_tokens: bool = True) -> list[int]:
+        return self.tokenizer(prompt, add_special_tokens=add_special_tokens).input_ids

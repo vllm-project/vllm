@@ -17,8 +17,7 @@ class MambaCacheParams:
     state_indices_tensor: torch.Tensor = torch.Tensor()
 
     def at_layer_idx(self, layer_idx):
-        return MambaCacheParams(self.conv_state[layer_idx],
-                                self.ssm_state[layer_idx],
+        return MambaCacheParams(self.conv_state[layer_idx], self.ssm_state[layer_idx],
                                 self.state_indices_tensor)
 
 
@@ -53,15 +52,13 @@ class MambaCacheManager(ConstantSizeCache):
 
     def _copy_cache(self, from_index: int, to_index: int):
         for cache_t in self.cache:
-            cache_t[:, to_index].copy_(cache_t[:, from_index],
-                                       non_blocking=True)
+            cache_t[:, to_index].copy_(cache_t[:, from_index], non_blocking=True)
 
     def current_run_tensors(self, **kwargs) -> MambaCacheParams:
         """
         Return the tensors for the current run's conv and ssm state.
         """
-        cache_tensors, state_indices_tensor = super().current_run_tensors(
-            **kwargs)
+        cache_tensors, state_indices_tensor = super().current_run_tensors(**kwargs)
         return MambaCacheParams(cache_tensors[0], cache_tensors[1],
                                 state_indices_tensor)
 

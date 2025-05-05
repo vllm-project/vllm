@@ -53,12 +53,11 @@ async def test_async_llm_processor_error(model: str) -> None:
     # This should be no problem.
     EXPECTED_TOKENS = 5
     outputs = []
-    async for out in async_llm.generate(
-            "Hello my name is",
-            request_id="abc",
-            sampling_params=SamplingParams(
-                max_tokens=EXPECTED_TOKENS,
-                output_kind=RequestOutputKind.DELTA)):
+    async for out in async_llm.generate("Hello my name is",
+                                        request_id="abc",
+                                        sampling_params=SamplingParams(
+                                            max_tokens=EXPECTED_TOKENS,
+                                            output_kind=RequestOutputKind.DELTA)):
         outputs.append(out)
 
     generated_tokens = []

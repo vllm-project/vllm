@@ -40,8 +40,7 @@ def test_multi_node_assignment() -> None:
 
         current_ip = get_ip()
         workers = []
-        for bundle_id, bundle in enumerate(
-                config.placement_group.bundle_specs):
+        for bundle_id, bundle in enumerate(config.placement_group.bundle_specs):
             if not bundle.get("GPU", 0):
                 continue
             scheduling_strategy = PlacementGroupSchedulingStrategy(

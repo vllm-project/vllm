@@ -46,8 +46,8 @@ def should_ignore_layer(
         # Layer should be ignored if shards are ignored.
         should_ignore_layer = None
         for shard_name in shard_names:
-            should_ignore_shard = check_equal_or_regex_match(
-                layer_name=shard_name, targets=ignore)
+            should_ignore_shard = check_equal_or_regex_match(layer_name=shard_name,
+                                                             targets=ignore)
 
             # If shard_idx=0, set layer ignore to match shard.
             if should_ignore_layer is None:
@@ -69,8 +69,7 @@ def should_ignore_layer(
     return should_ignore_layer
 
 
-def check_equal_or_regex_match(layer_name: str,
-                               targets: Iterable[str]) -> bool:
+def check_equal_or_regex_match(layer_name: str, targets: Iterable[str]) -> bool:
     """
     Checks whether a layer_name is exactly equal or a regex match for 
     if target starts with 're:' to any target in list.

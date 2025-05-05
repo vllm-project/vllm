@@ -93,8 +93,8 @@ def _validate_image_prompt_replacements_one(
 
         # NOTE: There is a BOS token
         assert first_placeholder.offset == 1
-        assert first_placeholder.length == (
-            len(processed_inputs["prompt_token_ids"]) - 1) // num_imgs
+        assert first_placeholder.length == (len(processed_inputs["prompt_token_ids"]) -
+                                            1) // num_imgs
 
     except Exception as exc:
         failed_size_excs.append((image_size, exc))

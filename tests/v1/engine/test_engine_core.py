@@ -20,8 +20,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from ...utils import create_new_process_for_each_test
 
 if not current_platform.is_cuda():
-    pytest.skip(reason="V1 currently only supported on CUDA.",
-                allow_module_level=True)
+    pytest.skip(reason="V1 currently only supported on CUDA.", allow_module_level=True)
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
@@ -230,8 +229,7 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
     Test that the engine can handle multiple concurrent batches.
     """
 
-    def make_request_with_max_tokens(req_id: int,
-                                     max_tokens: int) -> EngineCoreRequest:
+    def make_request_with_max_tokens(req_id: int, max_tokens: int) -> EngineCoreRequest:
         request = make_request()
         request.request_id = req_id
         request.sampling_params.max_tokens = max_tokens
@@ -239,8 +237,7 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
 
     class DummyExecutor(UniProcExecutor):
 
-        def initialize_from_config(
-                self, kv_cache_configs: list[KVCacheConfig]) -> None:
+        def initialize_from_config(self, kv_cache_configs: list[KVCacheConfig]) -> None:
             super().initialize_from_config(kv_cache_configs)
 
             # Create a thread pool with a single worker
@@ -253,8 +250,7 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
             """Make execute_model non-blocking."""
 
             def _execute():
-                output = self.collective_rpc("execute_model",
-                                             args=(scheduler_output, ))
+                output = self.collective_rpc("execute_model", args=(scheduler_output, ))
                 # Make a copy because output[0] may be reused
                 # by the next batch.
                 return copy.deepcopy(output[0])
@@ -301,8 +297,7 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
         scheduler_output = engine_core.batch_queue.queue[-1][1]
         assert scheduler_output.num_scheduled_tokens[0] == 10
         # num_computed_tokens should have been updated immediately.
-        assert engine_core.scheduler.requests[
-            req0.request_id].num_computed_tokens == 10
+        assert engine_core.scheduler.requests[req0.request_id].num_computed_tokens == 10
 
         # Schedule Batch 2: (2, req0), (8, req1)
         assert engine_core.step_with_batch_queue() is None

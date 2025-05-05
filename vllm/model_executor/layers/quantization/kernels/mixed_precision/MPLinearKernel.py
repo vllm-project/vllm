@@ -30,8 +30,7 @@ class MPLinearKernel(ABC):
 
     @classmethod
     @abstractmethod
-    def can_implement(cls,
-                      c: MPLinearLayerConfig) -> Tuple[bool, Optional[str]]:
+    def can_implement(cls, c: MPLinearLayerConfig) -> Tuple[bool, Optional[str]]:
         raise NotImplementedError
 
     def __init__(self,
@@ -70,17 +69,15 @@ class MPLinearKernel(ABC):
             new_param = fn(old_param)
             # replace the parameter with torch.nn.Parameter for TorchDynamo
             # compatibility
-            replace_parameter(
-                layer, name,
-                torch.nn.Parameter(new_param.data, requires_grad=False))
+            replace_parameter(layer, name,
+                              torch.nn.Parameter(new_param.data, requires_grad=False))
 
-    def _get_weight_params(
-            self, layer: torch.nn.Module) -> Tuple[
-                torch.Tensor,  # w_q
-                torch.Tensor,  # w_s
-                Optional[torch.Tensor],  # w_zp, 
-                Optional[torch.Tensor]  # w_gidx
-            ]:
+    def _get_weight_params(self, layer: torch.nn.Module) -> Tuple[
+            torch.Tensor,  # w_q
+            torch.Tensor,  # w_s
+            Optional[torch.Tensor],  # w_zp, 
+            Optional[torch.Tensor]  # w_gidx
+    ]:
         return (
             getattr(layer, self.w_q_name),
             getattr(layer, self.w_s_name),

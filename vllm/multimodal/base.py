@@ -131,8 +131,7 @@ class MultiModalPlaceholderMap:
 
         if len(multi_modal_items) != len(multi_modal_placeholders):
             raise ValueError(
-                "Multi-modal placeholders and items must have the same length."
-            )
+                "Multi-modal placeholders and items must have the same length.")
         for placeholder_dict, mm_item in zip(multi_modal_placeholders,
                                              multi_modal_items):
             placeholder = range(

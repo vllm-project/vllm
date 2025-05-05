@@ -55,8 +55,9 @@ class BlockPool:
         # if there is already an identical block in the cache. This is because
         # we want to make sure the allocated block IDs won't change so that
         # block tables are append-only.
-        self.cached_block_hash_to_block: dict[BlockHashType, dict[
-            int, KVCacheBlock]] = defaultdict(dict)
+        self.cached_block_hash_to_block: dict[BlockHashType,
+                                              dict[int,
+                                                   KVCacheBlock]] = defaultdict(dict)
 
         # To represent a placeholder block with block_id=0.
         # The ref_cnt of null_block is not maintained, needs special care to
@@ -66,8 +67,7 @@ class BlockPool:
         self.enable_kv_cache_events = enable_kv_cache_events
         self.kv_event_queue: list[KVCacheEvent] = []
 
-    def get_cached_block(self,
-                         block_hash: BlockHashType) -> Optional[KVCacheBlock]:
+    def get_cached_block(self, block_hash: BlockHashType) -> Optional[KVCacheBlock]:
         """Get a cached block by the block hash, or None if cache miss.
         If there are duplicated blocks, we return the first block in the cache.
 
@@ -127,8 +127,7 @@ class BlockPool:
             prev_block_hash_value = prev_block.block_hash.hash_value
 
         parent_block_hash = prev_block_hash_value
-        new_hashes: Optional[list[int]] = ([] if self.enable_kv_cache_events
-                                           else None)
+        new_hashes: Optional[list[int]] = ([] if self.enable_kv_cache_events else None)
         for i, blk in enumerate(new_full_blocks):
             assert blk.block_hash is None
 
@@ -145,8 +144,7 @@ class BlockPool:
                 blk_idx = num_cached_blocks + i
                 start_token_idx = blk_idx * block_size
                 end_token_idx = (blk_idx + 1) * block_size
-                block_tokens = request.all_token_ids[
-                    start_token_idx:end_token_idx]
+                block_tokens = request.all_token_ids[start_token_idx:end_token_idx]
                 assert len(block_tokens) == block_size, (
                     f"Expected {block_size} tokens, got "
                     f"{len(block_tokens)} at {blk_idx}th block for request "
@@ -175,12 +173,11 @@ class BlockPool:
                 BlockStored(
                     block_hashes=new_hashes,
                     parent_block_hash=parent_block_hash,
-                    token_ids=request.
-                    all_token_ids[num_cached_blocks *
-                                  block_size:num_full_blocks * block_size],
+                    token_ids=request.all_token_ids[num_cached_blocks *
+                                                    block_size:num_full_blocks *
+                                                    block_size],
                     block_size=block_size,
-                    lora_id=request.lora_request.id
-                    if request.lora_request else None,
+                    lora_id=request.lora_request.id if request.lora_request else None,
                 ))
 
     def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
@@ -195,8 +192,7 @@ class BlockPool:
             A list of new block.
         """
         if num_blocks > self.get_num_free_blocks():
-            raise ValueError(
-                f"Cannot get {num_blocks} free blocks from the pool")
+            raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
         ret: list[KVCacheBlock] = []
         idx = 0

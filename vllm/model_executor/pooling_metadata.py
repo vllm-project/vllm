@@ -67,5 +67,4 @@ class PoolingTensors:
             pin_memory=pin_memory,
         )
 
-        return cls(prompt_lens=prompt_lens_t.to(device=device,
-                                                non_blocking=True), )
+        return cls(prompt_lens=prompt_lens_t.to(device=device, non_blocking=True), )

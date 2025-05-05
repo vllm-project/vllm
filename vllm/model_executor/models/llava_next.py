@@ -56,8 +56,7 @@ class LlavaNextImageEmbeddingInputs(TypedDict):
     """
 
 
-LlavaNextImageInputs = Union[LlavaNextImagePixelInputs,
-                             LlavaNextImageEmbeddingInputs]
+LlavaNextImageInputs = Union[LlavaNextImagePixelInputs, LlavaNextImageEmbeddingInputs]
 
 
 class LlavaNextLikeConfig(LlavaLikeConfig, Protocol):
@@ -156,8 +155,7 @@ class LlavaNextProcessingInfo(BaseLlavaProcessingInfo):
                                                   image_height=height)
             if feat_size > largest_feature_size:
                 largest_feature_size = feat_size
-                largest_feature_pinpoint = ImageSize(width=width,
-                                                     height=height)
+                largest_feature_pinpoint = ImageSize(width=width, height=height)
 
         if largest_feature_size == 0 or largest_feature_pinpoint is None:
             raise ValueError("Cannot have a largest feature size of 0!")
@@ -198,8 +196,7 @@ class LlavaNextMultiModalProcessor(
 @MULTIMODAL_REGISTRY.register_processor(LlavaNextMultiModalProcessor,
                                         info=LlavaNextProcessingInfo,
                                         dummy_inputs=LlavaDummyInputsBuilder)
-class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                        SupportsPP):
+class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -218,21 +215,19 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
                 vision_feature_layer)
             self.feature_sample_layers = vision_feature_layer
         else:
-            raise TypeError(
-                f"vision_layer_feature type: {type(vision_feature_layer)}"
-                " is not supported")
+            raise TypeError(f"vision_layer_feature type: {type(vision_feature_layer)}"
+                            " is not supported")
 
         self.config = config
         self.multimodal_config = multimodal_config
 
         # TODO: Optionally initializes this for supporting embeddings.
-        self.vision_tower = init_vision_tower_for_llava(
-            config,
-            quant_config,
-            require_post_norm=False,
-            prefix=maybe_prefix(prefix, "vision_tower"))
-        self.image_newline = nn.Parameter(
-            torch.empty(config.text_config.hidden_size))
+        self.vision_tower = init_vision_tower_for_llava(config,
+                                                        quant_config,
+                                                        require_post_norm=False,
+                                                        prefix=maybe_prefix(
+                                                            prefix, "vision_tower"))
+        self.image_newline = nn.Parameter(torch.empty(config.text_config.hidden_size))
         self.multi_modal_projector = LlavaMultiModalProjector(
             vision_hidden_size=vision_hidden_size,
             text_hidden_size=config.text_config.hidden_size,
@@ -306,8 +301,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
 
             return LlavaNextImagePixelInputs(
                 type="pixel_values",
-                pixel_values=self._validate_pixel_values(
-                    flatten_bn(pixel_values)),
+                pixel_values=self._validate_pixel_values(flatten_bn(pixel_values)),
                 image_sizes=self._validate_image_sizes(
                     flatten_bn(image_sizes, concat=True)),
             )
@@ -342,8 +336,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
-        image_features = vision_tower(
-            pixel_values, feature_sample_layers=self.feature_sample_layers)
+        image_features = vision_tower(pixel_values,
+                                      feature_sample_layers=self.feature_sample_layers)
 
         return self._select_image_features(
             image_features,
@@ -363,9 +357,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
 
             base_patch_embeds = patch_embeddings[0]
             if height * width != base_patch_embeds.shape[0]:
-                raise ValueError(
-                    "The number of patches is not consistent with the "
-                    "image size.")
+                raise ValueError("The number of patches is not consistent with the "
+                                 "image size.")
 
             if patch_embeddings.shape[0] > 1:
                 other_patch_embeds = patch_embeddings[1:]
@@ -436,8 +429,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
             stacked_patch_embeddings = self.multi_modal_projector(
                 stacked_image_features)
 
-            return stacked_patch_embeddings.view(
-                b, num_patches, *stacked_patch_embeddings.shape[1:])
+            return stacked_patch_embeddings.view(b, num_patches,
+                                                 *stacked_patch_embeddings.shape[1:])
 
         num_patches_per_batch = [v.shape[0] for v in pixel_values]
         stacked_pixel_values = torch.cat(pixel_values)
@@ -474,8 +467,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
@@ -559,8 +552,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
         # condition is for v0 compatibility.
         elif inputs_embeds is None:
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
+            inputs_embeds = self.get_input_embeddings(input_ids, vision_embeddings)
             input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
@@ -574,10 +566,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states, sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

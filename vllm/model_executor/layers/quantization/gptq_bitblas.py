@@ -63,17 +63,15 @@ class GPTQBitBLASConfig(QuantizationConfig):
         try:
             import bitblas
             if bitblas.__version__ < MINIMUM_BITBLAS_VERSION:
-                raise ImportError(
-                    "bitblas version is wrong. Please "
-                    f"install bitblas>={MINIMUM_BITBLAS_VERSION}")
+                raise ImportError("bitblas version is wrong. Please "
+                                  f"install bitblas>={MINIMUM_BITBLAS_VERSION}")
         except ImportError as e:
             bitblas_import_exception = e
-            raise ValueError(
-                "Trying to use the bitblas backend, but could not import"
-                f"with the following error: {bitblas_import_exception}. "
-                "Please install bitblas through the following command: "
-                f"`pip install bitblas>={MINIMUM_BITBLAS_VERSION}`"
-            ) from bitblas_import_exception
+            raise ValueError("Trying to use the bitblas backend, but could not import"
+                             f"with the following error: {bitblas_import_exception}. "
+                             "Please install bitblas through the following command: "
+                             f"`pip install bitblas>={MINIMUM_BITBLAS_VERSION}`"
+                             ) from bitblas_import_exception
 
         if desc_act and group_size == -1:
             # In this case, act_order == True is the same as act_order == False
@@ -95,9 +93,8 @@ class GPTQBitBLASConfig(QuantizationConfig):
                 "are supported.")
 
         if self.is_sym not in GPTQ_BITBLAS_SUPPORTED_SYM:
-            raise ValueError(
-                f"BitBLAS does not support is_sym = {self.is_sym}. "
-                f"Only sym = {GPTQ_BITBLAS_SUPPORTED_SYM} are supported.")
+            raise ValueError(f"BitBLAS does not support is_sym = {self.is_sym}. "
+                             f"Only sym = {GPTQ_BITBLAS_SUPPORTED_SYM} are supported.")
 
         self.storage_dtype = self.GPTQ_BITBLAS_STORAGE_DTYPE
 
@@ -147,14 +144,13 @@ class GPTQBitBLASConfig(QuantizationConfig):
         desc_act = cls.get_from_keys(config, ["desc_act"])
         is_sym = cls.get_from_keys(config, ["sym"])
         quant_method = cls.get_from_keys(config, ["quant_method"])
-        lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"],
-                                                 default=False)
+        lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"], default=False)
         return cls(weight_bits, group_size, desc_act, is_sym, quant_method,
                    lm_head_quantized)
 
     @classmethod
-    def override_quantization_method(
-            cls, hf_quant_cfg, user_quant) -> Optional[QuantizationMethods]:
+    def override_quantization_method(cls, hf_quant_cfg,
+                                     user_quant) -> Optional[QuantizationMethods]:
         can_convert = cls.is_gptq_bitblas_compatible(hf_quant_cfg)
 
         is_valid_user_quant = (user_quant is None or user_quant == "bitblas"
@@ -197,8 +193,7 @@ class GPTQBitBLASConfig(QuantizationConfig):
             return False
 
         # If we cannot find the info needed in the config, cannot convert.
-        if (num_bits is None or group_size is None or sym is None
-                or desc_act is None):
+        if (num_bits is None or group_size is None or sym is None or desc_act is None):
             return False
 
         if (num_bits, sym) not in cls.TYPE_MAP:
@@ -211,8 +206,7 @@ class GPTQBitBLASConfig(QuantizationConfig):
             return False
 
         # Otherwise, can convert if model satisfies bitblas constraints.
-        return check_bitblas_supported(quant_type=cls.TYPE_MAP[(num_bits,
-                                                                sym)],
+        return check_bitblas_supported(quant_type=cls.TYPE_MAP[(num_bits, sym)],
                                        group_size=group_size)
 
 
@@ -278,8 +272,7 @@ class GPTQBitBLASLinearMethod(LinearMethodBase):
         if input_size_per_partition % group_size != 0:
             raise ValueError(
                 f"Input size per partition ({input_size_per_partition}) must "
-                f"be divisible by group size ({self.quant_config.group_size})."
-            )
+                f"be divisible by group size ({self.quant_config.group_size}).")
 
         kernel_type = self.kernel_type
         # Validate output_size_per_partition
@@ -300,8 +293,7 @@ class GPTQBitBLASLinearMethod(LinearMethodBase):
         )
 
         if kernel_type.__name__ not in self._kernel_backends_being_used:
-            logger.info("Using %s for GPTQBitBLASLinearMethod",
-                        kernel_type.__name__)
+            logger.info("Using %s for GPTQBitBLASLinearMethod", kernel_type.__name__)
             self._kernel_backends_being_used.add(kernel_type.__name__)
 
         # Normalize group_size
@@ -326,17 +318,16 @@ class GPTQBitBLASLinearMethod(LinearMethodBase):
 
         # Init buffers
         # Quantized weights
-        qweight = PackedvLLMParameter(
-            data=torch.empty(
-                input_size_per_partition // self.quant_config.pack_factor,
-                output_size_per_partition,
-                dtype=torch.int32,
-            ),
-            input_dim=0,
-            output_dim=1,
-            packed_dim=0,
-            packed_factor=self.quant_config.pack_factor,
-            weight_loader=weight_loader)
+        qweight = PackedvLLMParameter(data=torch.empty(
+            input_size_per_partition // self.quant_config.pack_factor,
+            output_size_per_partition,
+            dtype=torch.int32,
+        ),
+                                      input_dim=0,
+                                      output_dim=1,
+                                      packed_dim=0,
+                                      packed_factor=self.quant_config.pack_factor,
+                                      weight_loader=weight_loader)
 
         # Activation order
         # Ignore warning from fused linear layers such as QKVParallelLinear.
@@ -388,24 +379,21 @@ class GPTQBitBLASLinearMethod(LinearMethodBase):
         }
 
         if scales_and_zp_input_dim is None:
-            scales = ChannelQuantScaleParameter(output_dim=1,
-                                                **weight_scale_args)
-            qzeros = PackedColumnParameter(
-                output_dim=1,
-                packed_dim=1,
-                packed_factor=self.quant_config.pack_factor,
-                **qzeros_args)
+            scales = ChannelQuantScaleParameter(output_dim=1, **weight_scale_args)
+            qzeros = PackedColumnParameter(output_dim=1,
+                                           packed_dim=1,
+                                           packed_factor=self.quant_config.pack_factor,
+                                           **qzeros_args)
 
         else:
             scales = GroupQuantScaleParameter(output_dim=1,
                                               input_dim=0,
                                               **weight_scale_args)
-            qzeros = PackedvLLMParameter(
-                input_dim=0,
-                output_dim=1,
-                packed_dim=1,
-                packed_factor=self.quant_config.pack_factor,
-                **qzeros_args)
+            qzeros = PackedvLLMParameter(input_dim=0,
+                                         output_dim=1,
+                                         packed_dim=1,
+                                         packed_factor=self.quant_config.pack_factor,
+                                         **qzeros_args)
 
         layer.register_parameter("qweight", qweight)
         layer.register_parameter("g_idx", g_idx)

@@ -103,15 +103,12 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         images_kwargs = self._resolve_image_kwargs(
             processor, {
                 "do_pan_and_scan", "pan_and_scan_min_crop_size",
-                "pan_and_scan_max_num_crops",
-                "pan_and_scan_min_ratio_to_activate"
+                "pan_and_scan_max_num_crops", "pan_and_scan_min_ratio_to_activate"
             })
 
         do_pan_and_scan = images_kwargs["do_pan_and_scan"]
-        pan_and_scan_min_crop_size = images_kwargs[
-            "pan_and_scan_min_crop_size"]
-        pan_and_scan_max_num_crops = images_kwargs[
-            "pan_and_scan_max_num_crops"]
+        pan_and_scan_min_crop_size = images_kwargs["pan_and_scan_min_crop_size"]
+        pan_and_scan_max_num_crops = images_kwargs["pan_and_scan_max_num_crops"]
         pan_and_scan_min_ratio_to_activate = images_kwargs[
             "pan_and_scan_min_ratio_to_activate"]
 
@@ -179,12 +176,10 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
             image_text = boi_token
         else:
             crops_image_tokens = " ".join(boi_token for _ in range(num_crops))
-            image_text = (
-                f"Here is the original image {boi_token} and here are some "
-                f"crops to help you see better {crops_image_tokens}")
+            image_text = (f"Here is the original image {boi_token} and here are some "
+                          f"crops to help you see better {crops_image_tokens}")
 
-        repl_full = image_text.replace(boi_token,
-                                       processor.full_image_sequence)
+        repl_full = image_text.replace(boi_token, processor.full_image_sequence)
 
         tokenizer = processor.tokenizer
         vocab = tokenizer.get_vocab()
@@ -214,8 +209,8 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
     def get_image_size_with_most_features(self) -> ImageSize:
         processor = self.get_hf_processor()
 
-        images_kwargs = self._resolve_image_kwargs(
-            processor, {"pan_and_scan_max_num_crops"})
+        images_kwargs = self._resolve_image_kwargs(processor,
+                                                   {"pan_and_scan_max_num_crops"})
         max_num_crops = images_kwargs["pan_and_scan_max_num_crops"]
 
         # Result in the max possible feature size (h:w = max_num_crops:1)
@@ -267,20 +262,17 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
         # HF processor pops the `num_crops` kwarg, which is needed by vLLM
         if (images := mm_data.get("images")) is not None:
             parsed_images = (self._get_data_parser().parse_mm_data({
-                "image":
-                images
+                "image": images
             }).get_items("image", ImageProcessorItems))
             image_sizes = [
-                parsed_images.get_image_size(i)
-                for i in range(len(parsed_images))
+                parsed_images.get_image_size(i) for i in range(len(parsed_images))
             ]
             hf_processor = self.info.get_hf_processor(**mm_kwargs)
 
             num_crops = [
                 self.info.get_num_crops(image_width=size.width,
                                         image_height=size.height,
-                                        processor=hf_processor)
-                for size in image_sizes
+                                        processor=hf_processor) for size in image_sizes
             ]
             processed_outputs["num_crops"] = torch.tensor(num_crops)
 
@@ -294,8 +286,7 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
         num_crops = hf_inputs.get("num_crops", torch.empty(0))
 
         return dict(
-            pixel_values=MultiModalFieldConfig.flat_from_sizes(
-                "image", num_crops + 1),
+            pixel_values=MultiModalFieldConfig.flat_from_sizes("image", num_crops + 1),
             num_crops=MultiModalFieldConfig.batched("image"),
         )
 
@@ -396,8 +387,7 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
             repl_token_ids.extend(repl_toks)
             repl_orig_idxs.extend(orig_idx for _ in range(len(repl_toks)))
 
-        repls = find_mm_placeholders(mm_prompt_updates, repl_token_ids,
-                                     mm_item_counts)
+        repls = find_mm_placeholders(mm_prompt_updates, repl_token_ids, mm_item_counts)
 
         return {
             modality: [
@@ -422,9 +412,8 @@ class Gemma3MultiModalProjector(nn.Module):
             torch.zeros(config.vision_config.hidden_size,
                         config.text_config.hidden_size))
 
-        self.mm_soft_emb_norm = GemmaRMSNorm(
-            config.vision_config.hidden_size,
-            eps=config.vision_config.layer_norm_eps)
+        self.mm_soft_emb_norm = GemmaRMSNorm(config.vision_config.hidden_size,
+                                             eps=config.vision_config.layer_norm_eps)
 
         self.patches_per_image = int(config.vision_config.image_size //
                                      config.vision_config.patch_size)
@@ -438,8 +427,7 @@ class Gemma3MultiModalProjector(nn.Module):
 
         reshaped_vision_outputs = vision_outputs.transpose(1, 2)
         reshaped_vision_outputs = reshaped_vision_outputs.reshape(
-            batch_size, seq_length, self.patches_per_image,
-            self.patches_per_image)
+            batch_size, seq_length, self.patches_per_image, self.patches_per_image)
         reshaped_vision_outputs = reshaped_vision_outputs.contiguous()
 
         pooled_vision_outputs = self.avg_pool(reshaped_vision_outputs)
@@ -448,8 +436,8 @@ class Gemma3MultiModalProjector(nn.Module):
 
         normed_vision_outputs = self.mm_soft_emb_norm(pooled_vision_outputs)
 
-        projected_vision_outputs = torch.matmul(
-            normed_vision_outputs, self.mm_input_projection_weight)
+        projected_vision_outputs = torch.matmul(normed_vision_outputs,
+                                                self.mm_input_projection_weight)
         return projected_vision_outputs.type_as(vision_outputs)
 
 
@@ -478,8 +466,8 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         self.config = config
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
-        self.sliding_window = getattr(config.text_config,
-                                      "interleaved_sliding_window", None)
+        self.sliding_window = getattr(config.text_config, "interleaved_sliding_window",
+                                      None)
 
         self.vision_tower = SiglipVisionModel(config.vision_config,
                                               quant_config,
@@ -568,15 +556,13 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         )
         image_embeds = self.multi_modal_projector(image_features)
 
-        return [
-            e.flatten(0, 1) for e in image_embeds.split(num_patches.tolist())
-        ]
+        return [e.flatten(0, 1) for e in image_embeds.split(num_patches.tolist())]
 
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
@@ -612,8 +598,7 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         elif inputs_embeds is None:
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
 
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
+            inputs_embeds = self.get_input_embeddings(input_ids, vision_embeddings)
             if vision_embeddings is not None:
                 kwargs = self.prepare_attn_masks(
                     input_ids,
@@ -683,8 +668,8 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
                 local_attn_mask = torch.ones_like(global_attn_mask)
                 local_attn_mask = torch.tril(local_attn_mask,
                                              diagonal=-self.sliding_window)
-                local_attn_mask = torch.where(local_attn_mask == 0,
-                                              global_attn_mask, float("-inf"))
+                local_attn_mask = torch.where(local_attn_mask == 0, global_attn_mask,
+                                              float("-inf"))
                 local_attn_masks.append(local_attn_mask)
         kwargs["global_attn_masks"] = global_attn_masks
         kwargs["local_attn_masks"] = local_attn_masks
@@ -695,11 +680,9 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states, sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 
@@ -707,7 +690,6 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         """
         Get the module prefix in multimodal models
         """
-        return MultiModelKeys.from_string_field(
-            language_model="language_model",
-            connector="multi_modal_projector",
-            tower_model="vision_tower")
+        return MultiModelKeys.from_string_field(language_model="language_model",
+                                                connector="multi_modal_projector",
+                                                tower_model="vision_tower")

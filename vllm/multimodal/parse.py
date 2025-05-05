@@ -322,8 +322,7 @@ class MultiModalDataParser:
         )
 
     def _is_embeddings(
-            self, data: object
-    ) -> TypeGuard[Union[torch.Tensor, list[torch.Tensor]]]:
+            self, data: object) -> TypeGuard[Union[torch.Tensor, list[torch.Tensor]]]:
         if isinstance(data, torch.Tensor):
             return data.ndim == 3
         if is_list_of(data, torch.Tensor):
@@ -367,8 +366,7 @@ class MultiModalDataParser:
             return AudioEmbeddingItems(data)
 
         if (is_list_of(data, float)
-                or isinstance(data,
-                              (np.ndarray, torch.Tensor)) and data.ndim == 1
+                or isinstance(data, (np.ndarray, torch.Tensor)) and data.ndim == 1
                 or isinstance(data, tuple)):
             data_items = [data]
         elif isinstance(data, (np.ndarray, torch.Tensor)):
@@ -382,8 +380,7 @@ class MultiModalDataParser:
             if orig_sr is None:
                 new_audio = audio
             else:
-                new_audio = self.audio_resampler.resample(audio,
-                                                          orig_sr=orig_sr)
+                new_audio = self.audio_resampler.resample(audio, orig_sr=orig_sr)
 
             new_audios.append(new_audio)
 
@@ -400,8 +397,7 @@ class MultiModalDataParser:
             return ImageEmbeddingItems(data)
 
         if (isinstance(data, Image)
-                or isinstance(data,
-                              (np.ndarray, torch.Tensor)) and data.ndim == 3):
+                or isinstance(data, (np.ndarray, torch.Tensor)) and data.ndim == 3):
             data_items = [data]
         elif isinstance(data, (np.ndarray, torch.Tensor)):
             data_items = [elem for elem in data]
@@ -421,8 +417,7 @@ class MultiModalDataParser:
             return VideoEmbeddingItems(data)
 
         if (is_list_of(data, Image)
-                or isinstance(data,
-                              (np.ndarray, torch.Tensor)) and data.ndim == 4):
+                or isinstance(data, (np.ndarray, torch.Tensor)) and data.ndim == 4):
             data_items = [data]
         elif isinstance(data, (np.ndarray, torch.Tensor)):
             data_items = [elem for elem in data]
@@ -438,8 +433,7 @@ class MultiModalDataParser:
             "video": self._parse_video_data,
         }
 
-    def parse_mm_data(self,
-                      mm_data: MultiModalDataDict) -> MultiModalDataItems:
+    def parse_mm_data(self, mm_data: MultiModalDataDict) -> MultiModalDataItems:
         subparsers = self._get_subparsers()
 
         mm_items = MultiModalDataItems()

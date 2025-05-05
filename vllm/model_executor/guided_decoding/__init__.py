@@ -20,8 +20,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def maybe_backend_fallback(
-        guided_params: GuidedDecodingParams) -> GuidedDecodingParams:
+def maybe_backend_fallback(guided_params: GuidedDecodingParams) -> GuidedDecodingParams:
 
     def fallback_or_error(guided_params: GuidedDecodingParams, message: str,
                           fallback: str) -> None:
@@ -60,8 +59,8 @@ def maybe_backend_fallback(
             xgr_installed)
 
         # xgrammar doesn't support some JSON schema features
-        if (guided_params.json is not None and
-                has_xgrammar_unsupported_json_features(guided_params.json)):
+        if (guided_params.json is not None
+                and has_xgrammar_unsupported_json_features(guided_params.json)):
             fallback_or_error(
                 guided_params,
                 "xgrammar does not support advanced JSON schema features like "
@@ -76,22 +75,20 @@ def maybe_backend_fallback(
                 convert_lark_to_gbnf(guided_params.grammar)
             except Exception:
                 fallback_or_error(
-                    guided_params,
-                    "xgrammar does not support Lark grammars and the "
+                    guided_params, "xgrammar does not support Lark grammars and the "
                     "grammar failed to convert to GBNF.", "outlines")
 
         # If the xgrammar module cannot be imported successfully,
         # we should still allow users to use guided decoding with a fallback.
         elif not xgr_installed:
-            fallback_or_error(
-                guided_params,
-                "xgrammar module cannot be imported successfully.", "outlines")
+            fallback_or_error(guided_params,
+                              "xgrammar module cannot be imported successfully.",
+                              "outlines")
 
-    if (guided_params.backend == "outlines"
-            and guided_params.json_object is not None):
+    if (guided_params.backend == "outlines" and guided_params.json_object is not None):
         # outlines doesn't support json_object, fallback to guidance
-        fallback_or_error(guided_params,
-                          "outlines does not support json_object.", "guidance")
+        fallback_or_error(guided_params, "outlines does not support json_object.",
+                          "guidance")
 
     return guided_params
 
@@ -104,8 +101,7 @@ async def get_guided_decoding_logits_processor(
 
     reasoner = None
     if reasoning_backend:
-        reasoner_class = ReasoningParserManager.get_reasoning_parser(
-            reasoning_backend)
+        reasoner_class = ReasoningParserManager.get_reasoning_parser(reasoning_backend)
         reasoner = reasoner_class(tokenizer)
 
     guided_params = maybe_backend_fallback(guided_params)
@@ -134,8 +130,7 @@ async def get_guided_decoding_logits_processor(
             guided_params, tokenizer)
     raise ValueError(
         f"Unknown guided decoding backend '{guided_params.backend}'. "
-        "Must be one of 'outlines, 'lm-format-enforcer', 'xgrammar', 'guidance'"
-    )
+        "Must be one of 'outlines, 'lm-format-enforcer', 'xgrammar', 'guidance'")
 
 
 def get_local_guided_decoding_logits_processor(
@@ -147,8 +142,7 @@ def get_local_guided_decoding_logits_processor(
 
     reasoner = None
     if reasoning_backend:
-        reasoner_class = ReasoningParserManager.get_reasoning_parser(
-            reasoning_backend)
+        reasoner_class = ReasoningParserManager.get_reasoning_parser(reasoning_backend)
         reasoner = reasoner_class(tokenizer)
 
     # CFG grammar not supported by LMFE, so we use outlines instead
@@ -176,5 +170,4 @@ def get_local_guided_decoding_logits_processor(
 
     raise ValueError(
         f"Unknown guided decoding backend '{guided_params.backend}'. "
-        "Must be one of 'outlines, 'lm-format-enforcer', 'xgrammar', 'guidance'"
-    )
+        "Must be one of 'outlines, 'lm-format-enforcer', 'xgrammar', 'guidance'")

@@ -73,14 +73,12 @@ class SimpleBuffer(KVLookupBufferBase):
 
         # simple common prefix matching
         min_length = min(len(tokens_sender), len(tokens_recver))
-        if torch.allclose(tokens_sender[:min_length],
-                          tokens_recver[:min_length]):
+        if torch.allclose(tokens_sender[:min_length], tokens_recver[:min_length]):
             return min_length
 
         return 0
 
-    def _send_tensor_and_dec_size(self,
-                                  tensor: Optional[torch.Tensor]) -> None:
+    def _send_tensor_and_dec_size(self, tensor: Optional[torch.Tensor]) -> None:
 
         assert tensor is not None, "Use self.data_pipe.send(None) instead"
         self.buffer_size -= tensor.element_size() * tensor.numel()
@@ -100,8 +98,7 @@ class SimpleBuffer(KVLookupBufferBase):
         raise AssertionError(f"Unknown data type {type(data)}")
 
     def _add_to_buffer(self, input_tokens: torch.Tensor, roi: torch.Tensor,
-                       key: torch.Tensor, value: torch.Tensor,
-                       hidden: torch.Tensor):
+                       key: torch.Tensor, value: torch.Tensor, hidden: torch.Tensor):
 
         if isinstance(input_tokens, torch.Tensor):
             input_tokens = input_tokens.clone()
@@ -157,8 +154,7 @@ class SimpleBuffer(KVLookupBufferBase):
                     # but this buffer size won't (and shouldn't) be too large so
                     # the fix is not urgent.
                     for _ in range(len(self.buffer)):
-                        if self._matches(self.buffer[0],
-                                         tokens_roi_recver) > 0:
+                        if self._matches(self.buffer[0], tokens_roi_recver) > 0:
                             return True
                         # rotate the element we just accessed to the end
                         self.buffer.rotate(-1)
@@ -166,8 +162,7 @@ class SimpleBuffer(KVLookupBufferBase):
 
                 with self.buffer_cv:
                     while not is_buffer_available(tokens_roi_recver):
-                        logger.debug(
-                            "KV transfer buffer is not available. Waiting...")
+                        logger.debug("KV transfer buffer is not available. Waiting...")
                         self.buffer_cv.wait()
                     # need to clone the tensor
                     # in case the tensor is freed before sending finishes
@@ -182,9 +177,8 @@ class SimpleBuffer(KVLookupBufferBase):
 
         logger.debug("Closing drop_select_handler")
 
-    def drop_select(
-            self, input_tokens: Optional[torch.Tensor],
-            roi: Optional[torch.Tensor]) -> List[Optional[torch.Tensor]]:
+    def drop_select(self, input_tokens: Optional[torch.Tensor],
+                    roi: Optional[torch.Tensor]) -> List[Optional[torch.Tensor]]:
 
         assert self.request_handling_thread is None, \
             "drop_select should be called by the KV cache consumer "\
@@ -211,9 +205,8 @@ class SimpleBuffer(KVLookupBufferBase):
 
         return [input_tokens, roi, key, value, hidden]
 
-    def insert(self, input_tokens: torch.Tensor, roi: torch.Tensor,
-               key: torch.Tensor, value: torch.Tensor,
-               hidden: torch.Tensor) -> None:
+    def insert(self, input_tokens: torch.Tensor, roi: torch.Tensor, key: torch.Tensor,
+               value: torch.Tensor, hidden: torch.Tensor) -> None:
 
         self._add_to_buffer(input_tokens, roi, key, value, hidden)
 
@@ -226,8 +219,9 @@ class SimpleBuffer(KVLookupBufferBase):
 
     def close(self):
 
-        if hasattr(self, "request_handling_thread"
-                   ) and self.request_handling_thread is not None:
+        if hasattr(
+                self,
+                "request_handling_thread") and self.request_handling_thread is not None:
             self.request_handling_thread.join()
 
         else:

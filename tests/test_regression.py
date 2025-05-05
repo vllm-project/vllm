@@ -17,9 +17,7 @@ from vllm import LLM, SamplingParams
 def test_duplicated_ignored_sequence_group():
     """https://github.com/vllm-project/vllm/issues/1655"""
 
-    sampling_params = SamplingParams(temperature=0.01,
-                                     top_p=0.1,
-                                     max_tokens=256)
+    sampling_params = SamplingParams(temperature=0.01, top_p=0.1, max_tokens=256)
     llm = LLM(model="distilbert/distilgpt2",
               max_num_batched_tokens=4096,
               tensor_parallel_size=1)
@@ -30,9 +28,7 @@ def test_duplicated_ignored_sequence_group():
 
 
 def test_max_tokens_none():
-    sampling_params = SamplingParams(temperature=0.01,
-                                     top_p=0.1,
-                                     max_tokens=None)
+    sampling_params = SamplingParams(temperature=0.01, top_p=0.1, max_tokens=None)
     llm = LLM(model="distilbert/distilgpt2",
               max_num_batched_tokens=4096,
               tensor_parallel_size=1)

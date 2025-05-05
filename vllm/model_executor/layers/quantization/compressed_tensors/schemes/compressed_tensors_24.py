@@ -39,10 +39,9 @@ class CompressedTensors24(CompressedTensorsScheme):
         self.model_compressor = (
             ModelCompressor.from_compression_config(model_compression_config)
             if model_compression_config is not None else None)
-        self.do_sparse_decompress = (
-            self.model_compressor is not None
-            and self.model_compressor.sparsity_config.format
-            == CompressionFormat.sparse_24_bitmask.value)
+        self.do_sparse_decompress = (self.model_compressor is not None
+                                     and self.model_compressor.sparsity_config.format
+                                     == CompressionFormat.sparse_24_bitmask.value)
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -60,9 +59,8 @@ class CompressedTensors24(CompressedTensorsScheme):
         **kwargs,
     ):
         if not sparse_cutlass_supported():
-            raise ValueError(
-                "Sparse CUTLASS not supported. vLLM must be built with "
-                "CUDA 12.2 or later to use this feature")
+            raise ValueError("Sparse CUTLASS not supported. vLLM must be built with "
+                             "CUDA 12.2 or later to use this feature")
 
         layer.logical_widths = output_partition_sizes
         layer.input_size = input_size
@@ -81,9 +79,9 @@ class CompressedTensors24(CompressedTensorsScheme):
             weight_loader=weight_loader,
         )
         if self.do_sparse_decompress:
-            assert all(partition_size % 8 == 0
-                       for partition_size in output_partition_sizes
-                       ), "All partitions must be divisible by 8 for "
+            assert all(
+                partition_size % 8 == 0 for partition_size in
+                output_partition_sizes), "All partitions must be divisible by 8 for "
             "2:4 sparse compressed models"
 
             shape = BasevLLMParameter(
@@ -130,8 +128,7 @@ class CompressedTensors24(CompressedTensorsScheme):
                 assert (self.weight_quant and self.weight_quant.strategy
                         == QuantizationStrategy.TENSOR.value)
                 weight_scale = PerTensorScaleParameter(
-                    data=torch.empty(len(output_partition_sizes),
-                                     dtype=torch.float32),
+                    data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
                     weight_loader=weight_loader,
                 )
 
@@ -140,8 +137,7 @@ class CompressedTensors24(CompressedTensorsScheme):
             # input quant will be non-none
             if self.input_quant and not self.input_quant.dynamic:
                 # register input quant scale
-                assert (self.input_quant.strategy ==
-                        QuantizationStrategy.TENSOR.value)
+                assert (self.input_quant.strategy == QuantizationStrategy.TENSOR.value)
                 input_scale = BasevLLMParameter(
                     data=torch.empty(1, dtype=torch.float32),
                     weight_loader=weight_loader,
@@ -151,11 +147,9 @@ class CompressedTensors24(CompressedTensorsScheme):
 
         else:
             # for sparse-only, pass in 1 for weight/input scales
-            weight_scale = torch.nn.Parameter(data=torch.ones(
-                1, dtype=torch.float32),
+            weight_scale = torch.nn.Parameter(data=torch.ones(1, dtype=torch.float32),
                                               requires_grad=False)
-            input_scale = torch.nn.Parameter(data=torch.ones(
-                1, dtype=torch.float32),
+            input_scale = torch.nn.Parameter(data=torch.ones(1, dtype=torch.float32),
                                              requires_grad=False)
             layer.register_parameter("input_scale", input_scale)
             layer.register_parameter("weight_scale", weight_scale)
@@ -201,12 +195,11 @@ class CompressedTensors24(CompressedTensorsScheme):
                 )
             else:
                 # torch.compile workaround
-                layer.weight_scale = torch.nn.Parameter(
-                    layer.weight_scale.data, requires_grad=False)
+                layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data,
+                                                        requires_grad=False)
 
         # Set all negative zero values to 0 prior to compression
-        if (layer.weight.dtype.is_floating_point
-                and layer.weight.dtype.itemsize >= 2):
+        if (layer.weight.dtype.is_floating_point and layer.weight.dtype.itemsize >= 2):
             layer.weight.data[layer.weight.data == -0.0] = 0.0
 
         w_compressed, meta = ops.cutlass_sparse_compress(layer.weight.data)
@@ -339,9 +332,9 @@ class CompressedTensors24(CompressedTensorsScheme):
 
         if split_weights:
             decompressed_shards = [
-                _process_split(compressed_weight, shape, bitmask)
-                for compressed_weight, shape, bitmask in zip(
-                    split_weights, split_shape, split_bitmask)
+                _process_split(compressed_weight, shape,
+                               bitmask) for compressed_weight, shape, bitmask in zip(
+                                   split_weights, split_shape, split_bitmask)
             ]
             decompressed = combine_shards(decompressed_shards)
         else:

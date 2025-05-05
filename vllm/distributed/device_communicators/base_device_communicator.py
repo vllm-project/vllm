@@ -28,8 +28,7 @@ class DeviceCommunicatorBase:
         self.ranks = dist.get_process_group_ranks(cpu_group)
         self.global_rank = dist.get_rank()
         self.global_world_size = dist.get_world_size()
-        self.rank_in_group = dist.get_group_rank(self.cpu_group,
-                                                 self.global_rank)
+        self.rank_in_group = dist.get_group_rank(self.cpu_group, self.global_rank)
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         dist.all_reduce(input_, group=self.device_group)
@@ -49,21 +48,16 @@ class DeviceCommunicatorBase:
                                     dtype=input_.dtype,
                                     device=input_.device)
         # All-gather.
-        dist.all_gather_into_tensor(output_tensor,
-                                    input_,
-                                    group=self.device_group)
+        dist.all_gather_into_tensor(output_tensor, input_, group=self.device_group)
         # Reshape
         output_tensor = output_tensor.reshape((self.world_size, ) + input_size)
         output_tensor = output_tensor.movedim(0, dim)
         output_tensor = output_tensor.reshape(input_size[:dim] +
-                                              (self.world_size *
-                                               input_size[dim], ) +
+                                              (self.world_size * input_size[dim], ) +
                                               input_size[dim + 1:])
         return output_tensor
 
-    def reduce_scatter(self,
-                       input_: torch.Tensor,
-                       dim: int = -1) -> torch.Tensor:
+    def reduce_scatter(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         world_size = self.world_size
         # Bypass the function if we are using only 1 GPU.
         if world_size == 1:

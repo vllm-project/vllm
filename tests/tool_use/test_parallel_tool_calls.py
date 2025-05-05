@@ -109,8 +109,7 @@ async def test_parallel_tool_calls(client: openai.AsyncOpenAI,
             # if a tool call ID is streamed, make sure one hasn't been already
             if tool_call.id:
                 tool_call_id_count += 1
-                assert (isinstance(tool_call.id, str)
-                        and (len(tool_call.id) >= 9))
+                assert (isinstance(tool_call.id, str) and (len(tool_call.id) >= 9))
 
             # if parts of the function start being streamed
             if tool_call.function:
@@ -124,20 +123,17 @@ async def test_parallel_tool_calls(client: openai.AsyncOpenAI,
                     # make sure they're a string and then add them to the list
                     assert isinstance(tool_call.function.arguments, str)
 
-                    tool_call_args[
-                        tool_call.index] += tool_call.function.arguments
+                    tool_call_args[tool_call.index] += tool_call.function.arguments
 
     assert finish_reason_count == 1
     assert role_name == 'assistant'
 
-    assert (len(non_streamed_tool_calls) == len(tool_call_names) ==
-            len(tool_call_args))
+    assert (len(non_streamed_tool_calls) == len(tool_call_names) == len(tool_call_args))
 
     for i in range(2):
         assert non_streamed_tool_calls[i].function.name == tool_call_names[i]
         streamed_args = json.loads(tool_call_args[i])
-        non_streamed_args = json.loads(
-            non_streamed_tool_calls[i].function.arguments)
+        non_streamed_args = json.loads(non_streamed_tool_calls[i].function.arguments)
         assert streamed_args == non_streamed_args
 
 

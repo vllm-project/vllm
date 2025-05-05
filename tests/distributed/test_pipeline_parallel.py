@@ -63,10 +63,9 @@ class PPTestSettings:
 
     def __post_init__(self):
         if len(self.distributed_backends) != len(self.vllm_major_versions):
-            raise ValueError(
-                f"Length mismatch: distributed_backends "
-                f"({len(self.distributed_backends)}) != "
-                f"vllm_major_versions ({len(self.vllm_major_versions)})")
+            raise ValueError(f"Length mismatch: distributed_backends "
+                             f"({len(self.distributed_backends)}) != "
+                             f"vllm_major_versions ({len(self.vllm_major_versions)})")
 
     @staticmethod
     def detailed(
@@ -137,8 +136,8 @@ class PPTestSettings:
         for parallel_setup in self.parallel_setups:
             for backend, vllm_major_version in zip(self.distributed_backends,
                                                    self.vllm_major_versions):
-                yield (model_id, parallel_setup, backend, vllm_major_version,
-                       self.task, opts)
+                yield (model_id, parallel_setup, backend, vllm_major_version, self.task,
+                       opts)
 
 
 # NOTE: You can adjust tp_base and/or pp_base locally to fit the model in GPU
@@ -337,8 +336,7 @@ def _compare_tp(
         common_args.extend(["--hf-overrides", json.dumps(hf_overrides)])
 
     specific_case = tp_size == 2 and pp_size == 2 and chunked_prefill
-    if distributed_backend == "ray" and (vllm_major_version == "1"
-                                         or specific_case):
+    if distributed_backend == "ray" and (vllm_major_version == "1" or specific_case):
         # For V1, test Ray Compiled Graph for all the tests
         # For V0, test Ray Compiled Graph for a subset of the tests
         pp_env = {
@@ -381,12 +379,7 @@ def _compare_tp(
     ]
 
     try:
-        compare_two_settings(model_id,
-                             pp_args,
-                             tp_args,
-                             pp_env,
-                             tp_env,
-                             method=method)
+        compare_two_settings(model_id, pp_args, tp_args, pp_env, tp_env, method=method)
     except Exception:
         testing_ray_compiled_graph = pp_env is not None
         if testing_ray_compiled_graph and vllm_major_version == "0":
@@ -398,8 +391,8 @@ def _compare_tp(
 
 
 @pytest.mark.parametrize(
-    ("model_id", "parallel_setup", "distributed_backend", "vllm_major_version",
-     "task", "test_options"),
+    ("model_id", "parallel_setup", "distributed_backend", "vllm_major_version", "task",
+     "test_options"),
     [
         params for model_id, settings in TEXT_GENERATION_MODELS.items()
         for params in settings.iter_params(model_id) if model_id in TEST_MODELS
@@ -427,8 +420,8 @@ def test_tp_language_generation(
 
 
 @pytest.mark.parametrize(
-    ("model_id", "parallel_setup", "distributed_backend", "vllm_major_version",
-     "task", "test_options"),
+    ("model_id", "parallel_setup", "distributed_backend", "vllm_major_version", "task",
+     "test_options"),
     [
         params for model_id, settings in EMBEDDING_MODELS.items()
         for params in settings.iter_params(model_id) if model_id in TEST_MODELS
@@ -456,8 +449,8 @@ def test_tp_language_embedding(
 
 
 @pytest.mark.parametrize(
-    ("model_id", "parallel_setup", "distributed_backend", "vllm_major_version",
-     "task", "test_options"),
+    ("model_id", "parallel_setup", "distributed_backend", "vllm_major_version", "task",
+     "test_options"),
     [
         params for model_id, settings in MULTIMODAL_MODELS.items()
         for params in settings.iter_params(model_id) if model_id in TEST_MODELS

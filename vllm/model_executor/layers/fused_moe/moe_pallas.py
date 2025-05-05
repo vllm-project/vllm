@@ -42,8 +42,7 @@ def fused_moe(
     topk_indices = topk_indices.flatten()
     topk_argsort_indices = topk_indices.argsort()
     topk_argsort_revert_indices = topk_argsort_indices.argsort()
-    token_indices = torch.arange(num_tokens,
-                                 device=device).repeat_interleave(topk)
+    token_indices = torch.arange(num_tokens, device=device).repeat_interleave(topk)
     token_indices = token_indices[topk_argsort_indices]
     group_sizes = _histogram(topk_indices.to(torch.int32), 0, num_experts - 1)
 

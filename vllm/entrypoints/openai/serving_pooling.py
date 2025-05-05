@@ -79,8 +79,7 @@ class OpenAIServingPooling(OpenAIServing):
 
         encoding_format = request.encoding_format
         if request.dimensions is not None:
-            return self.create_error_response(
-                "dimensions is currently not supported")
+            return self.create_error_response("dimensions is currently not supported")
 
         model_name = self._get_model_name(request.model)
         request_id = f"pool-{self._base_request_id(raw_request)}"
@@ -112,8 +111,7 @@ class OpenAIServingPooling(OpenAIServing):
                     tokenizer,
                     request.messages,
                     chat_template=request.chat_template or self.chat_template,
-                    chat_template_content_format=self.
-                    chat_template_content_format,
+                    chat_template_content_format=self.chat_template_content_format,
                     # In pooling requests, we are not generating tokens,
                     # so there is no need to append extra tokens to the input
                     add_generation_prompt=False,
@@ -122,14 +120,13 @@ class OpenAIServingPooling(OpenAIServing):
                     add_special_tokens=request.add_special_tokens,
                 )
             else:
-                (request_prompts,
-                 engine_prompts) = await self._preprocess_completion(
-                     request,
-                     tokenizer,
-                     request.input,
-                     truncate_prompt_tokens=truncate_prompt_tokens,
-                     add_special_tokens=request.add_special_tokens,
-                 )
+                (request_prompts, engine_prompts) = await self._preprocess_completion(
+                    request,
+                    tokenizer,
+                    request.input,
+                    truncate_prompt_tokens=truncate_prompt_tokens,
+                    add_special_tokens=request.add_special_tokens,
+                )
         except (ValueError, TypeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
@@ -178,8 +175,7 @@ class OpenAIServingPooling(OpenAIServing):
 
             assert all(final_res is not None for final_res in final_res_batch)
 
-            final_res_batch_checked = cast(list[PoolingRequestOutput],
-                                           final_res_batch)
+            final_res_batch_checked = cast(list[PoolingRequestOutput], final_res_batch)
 
             response = self.request_output_to_pooling_response(
                 final_res_batch_checked,

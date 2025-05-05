@@ -29,15 +29,14 @@ ACT_ORDER_OPTS = [False, True]
 K_FULL_OPTS = [False, True]
 
 
-def bench_run(results: list[benchmark.Measurement], model: str,
-              act_order: bool, is_k_full: bool, quant_type: ScalarType,
-              group_size: int, size_m: int, size_k: int, size_n: int):
+def bench_run(results: list[benchmark.Measurement], model: str, act_order: bool,
+              is_k_full: bool, quant_type: ScalarType, group_size: int, size_m: int,
+              size_k: int, size_n: int):
     label = "Quant Matmul"
 
     sub_label = ("{}, act={} k_full={}, q={}, g={}, "
-                 "MKN=({}x{}x{})".format(model, act_order, is_k_full,
-                                         str(quant_type), group_size, size_m,
-                                         size_k, size_n))
+                 "MKN=({}x{}x{})".format(model, act_order, is_k_full, str(quant_type),
+                                         group_size, size_m, size_k, size_n))
 
     print(f"Testing: {sub_label}")
 
@@ -93,8 +92,7 @@ def bench_run(results: list[benchmark.Measurement], model: str,
         as_supported_case = as_supported_case and supported_arch
         if supported_arch:
             has_zp = False
-            w_ref, qw, s, zp = quantize_weights(b, quant_type, group_size,
-                                                has_zp)
+            w_ref, qw, s, zp = quantize_weights(b, quant_type, group_size, has_zp)
             qw = qw.to(torch.uint8)
 
             qw_reorder, s_reorder, zp_reorder = \
@@ -136,8 +134,7 @@ def bench_run(results: list[benchmark.Measurement], model: str,
         "zp_reorder": zp_reorder if as_supported_case else None,
         "sm_count": sm_count if as_supported_case else None,
         "sm_version": sm_version if as_supported_case else None,
-        "CUBLAS_M_THRESHOLD":
-        CUBLAS_M_THRESHOLD if as_supported_case else None,
+        "CUBLAS_M_THRESHOLD": CUBLAS_M_THRESHOLD if as_supported_case else None,
         # Kernels
         "gptq_marlin_gemm": ops.gptq_marlin_gemm,
         "gptq_marlin_24_gemm": ops.gptq_marlin_24_gemm,
@@ -242,28 +239,25 @@ def main(args):
                            ) > 0 and is_k_full not in args.limit_k_full:
                         continue
 
-                    for quant_type in query_marlin_supported_quant_types(
-                            False):
+                    for quant_type in query_marlin_supported_quant_types(False):
                         if len(args.limit_num_bits) > 0 and \
                             quant_type.size_bits not in args.limit_num_bits:
                             continue
 
                         for group_size in MARLIN_SUPPORTED_GROUP_SIZES:
-                            if len(
-                                    args.limit_group_size
-                            ) > 0 and group_size not in args.limit_group_size:
+                            if len(args.limit_group_size
+                                   ) > 0 and group_size not in args.limit_group_size:
                                 continue
 
                             # For act_order, the group_size must be less than
                             # size_k
-                            if act_order and (group_size == size_k
-                                              or group_size == -1):
+                            if act_order and (group_size == size_k or group_size == -1):
                                 continue
 
                             for size_m in args.batch_sizes:
                                 bench_run(results, model, act_order, is_k_full,
-                                          quant_type, group_size, size_m,
-                                          size_k, size_n)
+                                          quant_type, group_size, size_m, size_k,
+                                          size_n)
 
     compare = benchmark.Compare(results)
     compare.print()

@@ -74,13 +74,12 @@ class BlocksparseParams:
         if self.homo_head:
             self.head_sliding_step = 0
         elif self.homo_head_group:
-            head_sliding_step = get_head_sliding_step(total_kv_heads,
-                                                      self.vert_stride)
+            head_sliding_step = get_head_sliding_step(total_kv_heads, self.vert_stride)
             # negative indicates sliding along kv heads, i.e., homo q group
             self.head_sliding_step = -head_sliding_step
         else:
-            self.head_sliding_step = get_head_sliding_step(
-                total_heads, self.vert_stride)
+            self.head_sliding_step = get_head_sliding_step(total_heads,
+                                                           self.vert_stride)
 
         self.active_head_range = (
             tp_rank * self.num_heads,
@@ -117,8 +116,8 @@ class BlocksparseFlashAttentionBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
-        return PagedAttention.get_kv_cache_shape(num_blocks, block_size,
-                                                 num_kv_heads, head_size)
+        return PagedAttention.get_kv_cache_shape(num_blocks, block_size, num_kv_heads,
+                                                 head_size)
 
     @staticmethod
     def swap_blocks(
@@ -196,14 +195,11 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
     # Max number of query tokens for among request in the batch.
     max_decode_query_len: Optional[int] = None
 
-    _cached_prefill_metadata: Optional[
-        "BlocksparseFlashAttentionMetadata"] = None
-    _cached_decode_metadata: Optional[
-        "BlocksparseFlashAttentionMetadata"] = None
+    _cached_prefill_metadata: Optional["BlocksparseFlashAttentionMetadata"] = None
+    _cached_decode_metadata: Optional["BlocksparseFlashAttentionMetadata"] = None
 
     @property
-    def prefill_metadata(
-            self) -> Optional["BlocksparseFlashAttentionMetadata"]:
+    def prefill_metadata(self) -> Optional["BlocksparseFlashAttentionMetadata"]:
         if self.num_prefills == 0:
             return None
 
@@ -222,8 +218,7 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=0,
             slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
-            multi_modal_placeholder_index_maps=self.
-            multi_modal_placeholder_index_maps,
+            multi_modal_placeholder_index_maps=self.multi_modal_placeholder_index_maps,
             enable_kv_scales_calculation=self.enable_kv_scales_calculation,
             seq_lens=self.seq_lens[:self.num_prefills],
             seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],

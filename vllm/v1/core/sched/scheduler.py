@@ -64,9 +64,8 @@ class Scheduler(SchedulerInterface):
         self.max_num_scheduled_tokens = \
             self.scheduler_config.max_num_batched_tokens
         self.max_model_len = self.scheduler_config.max_model_len
-        self.enable_kv_cache_events = (
-            self.kv_events_config is not None
-            and self.kv_events_config.enable_kv_cache_events)
+        self.enable_kv_cache_events = (self.kv_events_config is not None
+                                       and self.kv_events_config.enable_kv_cache_events)
 
         # Create KVConnector for the Scheduler. Note that each Worker
         # will have a corresponding KVConnector with Role=WORKER.
@@ -76,8 +75,7 @@ class Scheduler(SchedulerInterface):
             self.connector = KVConnectorFactory.create_connector_v1(
                 config=self.vllm_config, role=KVConnectorRole.SCHEDULER)
 
-        self.kv_event_publisher = EventPublisherFactory.create(
-            self.kv_events_config)
+        self.kv_event_publisher = EventPublisherFactory.create(self.kv_events_config)
 
         num_gpu_blocks = self.cache_config.num_gpu_blocks
         assert num_gpu_blocks is not None and num_gpu_blocks > 0
@@ -99,8 +97,7 @@ class Scheduler(SchedulerInterface):
         # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating
         # them at each scheduling step.
         # Request id -> deque of CachedRequestData
-        self._cached_reqs_data: dict[
-            str, deque[CachedRequestData]] = defaultdict(deque)
+        self._cached_reqs_data: dict[str, deque[CachedRequestData]] = defaultdict(deque)
 
         # Encoder-related.
         # Calculate encoder cache size if applicable
@@ -120,8 +117,7 @@ class Scheduler(SchedulerInterface):
         # NOTE: For the models without encoder (e.g., text-only models),
         # the encoder cache will not be initialized because cache size is 0
         # for these models.
-        self.encoder_cache_manager = EncoderCacheManager(
-            cache_size=encoder_cache_size)
+        self.encoder_cache_manager = EncoderCacheManager(cache_size=encoder_cache_size)
 
         speculative_config = vllm_config.speculative_config
 
@@ -190,15 +186,13 @@ class Scheduler(SchedulerInterface):
                               request.num_computed_tokens)
             if (0 < self.scheduler_config.long_prefill_token_threshold <
                     num_new_tokens):
-                num_new_tokens = (
-                    self.scheduler_config.long_prefill_token_threshold)
+                num_new_tokens = (self.scheduler_config.long_prefill_token_threshold)
             num_new_tokens = min(num_new_tokens, token_budget)
 
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
-            num_new_tokens = min(
-                num_new_tokens,
-                self.max_model_len - request.num_computed_tokens)
+            num_new_tokens = min(num_new_tokens,
+                                 self.max_model_len - request.num_computed_tokens)
 
             # Schedule encoder inputs.
             encoder_inputs_to_schedule = None
@@ -236,8 +230,8 @@ class Scheduler(SchedulerInterface):
                     preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0
                     if self.log_stats:
-                        preempted_req.record_event(
-                            EngineCoreEventType.PREEMPTED, scheduled_timestamp)
+                        preempted_req.record_event(EngineCoreEventType.PREEMPTED,
+                                                   scheduled_timestamp)
 
                     self.waiting.appendleft(preempted_req)
                     preempted_reqs.append(preempted_req)
@@ -261,9 +255,7 @@ class Scheduler(SchedulerInterface):
                 # Therefore, we might introduce some additional
                 # cycle to fill in the bitmask, which could be a big no-op.
                 structured_output_request_ids[request.request_id] = req_index
-            req_to_new_block_ids[request.request_id] = [
-                b.block_id for b in new_blocks
-            ]
+            req_to_new_block_ids[request.request_id] = [b.block_id for b in new_blocks]
             num_scheduled_tokens[request.request_id] = num_new_tokens
             token_budget -= num_new_tokens
             req_index += 1
@@ -323,8 +315,7 @@ class Scheduler(SchedulerInterface):
                 # constraint.
                 if self.lora_config and request.lora_request and (
                         len(scheduled_loras) == self.lora_config.max_loras
-                        and request.lora_request.lora_int_id
-                        not in scheduled_loras):
+                        and request.lora_request.lora_int_id not in scheduled_loras):
                     # Scheduling would exceed max_loras, skip.
                     self.waiting.popleft()
                     skipped_waiting_requests.appendleft(request)
@@ -336,10 +327,9 @@ class Scheduler(SchedulerInterface):
                         request)
 
                 # Get externally-cached tokens if using a KVConnector.
-                num_external_tokens = (
-                    0 if self.connector is None else
-                    self.connector.get_num_new_matched_tokens(
-                        request, num_computed_tokens))
+                num_external_tokens = (0 if self.connector is None else
+                                       self.connector.get_num_new_matched_tokens(
+                                           request, num_computed_tokens))
 
                 # Total computed tokens (local + external).
                 num_computed_tokens += num_external_tokens
@@ -360,8 +350,7 @@ class Scheduler(SchedulerInterface):
                 if request.has_encoder_inputs:
                     (encoder_inputs_to_schedule, num_new_tokens,
                      new_encoder_budget) = self._try_schedule_encoder_inputs(
-                         request, num_computed_tokens, num_new_tokens,
-                         encoder_budget)
+                         request, num_computed_tokens, num_new_tokens, encoder_budget)
                     if num_new_tokens == 0:
                         # The request cannot be scheduled.
                         break
@@ -390,8 +379,7 @@ class Scheduler(SchedulerInterface):
 
                 self.waiting.popleft()
                 if request.use_structured_output:
-                    structured_output_request_ids[
-                        request.request_id] = req_index
+                    structured_output_request_ids[request.request_id] = req_index
                 req_index += 1
                 self.running.append(request)
                 if self.log_stats:
@@ -402,8 +390,7 @@ class Scheduler(SchedulerInterface):
                 elif request.status == RequestStatus.PREEMPTED:
                     scheduled_resumed_reqs.append(request)
                 else:
-                    raise RuntimeError(
-                        f"Invalid request status: {request.status}")
+                    raise RuntimeError(f"Invalid request status: {request.status}")
 
                 if self.lora_config and request.lora_request:
                     scheduled_loras.add(request.lora_request.lora_int_id)
@@ -455,8 +442,7 @@ class Scheduler(SchedulerInterface):
         )
         # Construct the scheduler output.
         new_reqs_data = [
-            NewRequestData.from_request(req,
-                                        req_to_new_block_ids[req.request_id])
+            NewRequestData.from_request(req, req_to_new_block_ids[req.request_id])
             for req in scheduled_new_reqs
         ]
         resumed_reqs_data = [
@@ -535,8 +521,8 @@ class Scheduler(SchedulerInterface):
         # them at each scheduling step.
         num_computed_tokens = request.num_computed_tokens
         num_regular_tokens = num_scheduled_tokens - num_scheduled_spec_tokens
-        new_token_ids = request.all_token_ids[
-            num_computed_tokens:num_computed_tokens + num_regular_tokens]
+        new_token_ids = request.all_token_ids[num_computed_tokens:num_computed_tokens +
+                                              num_regular_tokens]
 
         req_data_queue = self._cached_reqs_data.get(request.request_id)
         if req_data_queue:
@@ -548,10 +534,8 @@ class Scheduler(SchedulerInterface):
         else:
             # No cached request data, or all cached request data has been
             # used by the scheduled requests.
-            req_data = CachedRequestData.from_request(request,
-                                                      resumed_from_preemption,
-                                                      new_token_ids,
-                                                      new_block_ids)
+            req_data = CachedRequestData.from_request(request, resumed_from_preemption,
+                                                      new_token_ids, new_block_ids)
         return req_data
 
     def _try_schedule_encoder_inputs(
@@ -694,8 +678,7 @@ class Scheduler(SchedulerInterface):
                     if start_pos + num_tokens <= request.num_computed_tokens:
                         # The encoder output is already processed and stored
                         # in the decoder's KV cache.
-                        self.encoder_cache_manager.free_encoder_input(
-                            request, input_id)
+                        self.encoder_cache_manager.free_encoder_input(request, input_id)
 
             stopped = False
             new_logprobs = None
@@ -773,8 +756,8 @@ class Scheduler(SchedulerInterface):
         )
         if self.include_finished_set:
             #TODO currently sending duplicates here, improve this
-            engine_core_outputs.finished_requests = (
-                scheduler_output.finished_req_ids | self.finished_req_ids)
+            engine_core_outputs.finished_requests = (scheduler_output.finished_req_ids
+                                                     | self.finished_req_ids)
 
         return engine_core_outputs
 
@@ -857,9 +840,8 @@ class Scheduler(SchedulerInterface):
             return None
         if spec_decoding_stats is None:
             spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)
-        spec_decoding_stats.observe_draft(
-            num_draft_tokens=num_draft_tokens,
-            num_accepted_tokens=num_accepted_tokens)
+        spec_decoding_stats.observe_draft(num_draft_tokens=num_draft_tokens,
+                                          num_accepted_tokens=num_accepted_tokens)
         return spec_decoding_stats
 
     def shutdown(self) -> None:

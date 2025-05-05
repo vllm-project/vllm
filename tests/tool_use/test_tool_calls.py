@@ -59,14 +59,13 @@ async def test_tool_call_and_choice(client: openai.AsyncOpenAI):
     finish_reason_count: int = 0
 
     # make the same request, streaming
-    stream = await client.chat.completions.create(
-        model=model_name,
-        messages=MESSAGES_ASKING_FOR_TOOLS,
-        temperature=0,
-        max_completion_tokens=100,
-        tools=[WEATHER_TOOL, SEARCH_TOOL],
-        logprobs=False,
-        stream=True)
+    stream = await client.chat.completions.create(model=model_name,
+                                                  messages=MESSAGES_ASKING_FOR_TOOLS,
+                                                  temperature=0,
+                                                  max_completion_tokens=100,
+                                                  tools=[WEATHER_TOOL, SEARCH_TOOL],
+                                                  logprobs=False,
+                                                  stream=True)
 
     async for chunk in stream:
         assert chunk.choices[0].index == 0
@@ -158,14 +157,13 @@ async def test_tool_call_with_results(client: openai.AsyncOpenAI):
     assert choice.message.content is not None
     assert "98" in choice.message.content  # the temperature from the response
 
-    stream = await client.chat.completions.create(
-        messages=MESSAGES_WITH_TOOL_RESPONSE,
-        temperature=0,
-        max_completion_tokens=100,
-        model=model_name,
-        tools=[WEATHER_TOOL, SEARCH_TOOL],
-        logprobs=False,
-        stream=True)
+    stream = await client.chat.completions.create(messages=MESSAGES_WITH_TOOL_RESPONSE,
+                                                  temperature=0,
+                                                  max_completion_tokens=100,
+                                                  model=model_name,
+                                                  tools=[WEATHER_TOOL, SEARCH_TOOL],
+                                                  logprobs=False,
+                                                  stream=True)
 
     chunks: list[str] = []
     finish_reason_count = 0

@@ -32,8 +32,7 @@ def test_registry_imports(model_arch):
     if model_arch in _SPECULATIVE_DECODING_MODELS:
         return  # Ignore these models which do not have a unified format
 
-    if (model_arch in _TEXT_GENERATION_MODELS
-            or model_arch in _MULTIMODAL_MODELS):
+    if (model_arch in _TEXT_GENERATION_MODELS or model_arch in _MULTIMODAL_MODELS):
         assert is_text_generation_model(model_cls)
 
     # All vLLM models should be convertible to a pooling model
@@ -94,6 +93,5 @@ def test_hf_registry_coverage():
     untested_archs = (ModelRegistry.get_supported_archs() -
                       HF_EXAMPLE_MODELS.get_supported_archs())
 
-    assert not untested_archs, (
-        "Please add the following architectures to "
-        f"`tests/models/registry.py`: {untested_archs}")
+    assert not untested_archs, ("Please add the following architectures to "
+                                f"`tests/models/registry.py`: {untested_archs}")

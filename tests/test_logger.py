@@ -125,8 +125,7 @@ def test_an_error_is_raised_when_custom_logging_config_is_invalid_json():
     with NamedTemporaryFile(encoding="utf-8", mode="w") as logging_config_file:
         logging_config_file.write("---\nloggers: []\nversion: 1")
         logging_config_file.flush()
-        with patch("vllm.logger.VLLM_LOGGING_CONFIG_PATH",
-                   logging_config_file.name):
+        with patch("vllm.logger.VLLM_LOGGING_CONFIG_PATH", logging_config_file.name):
             with pytest.raises(JSONDecodeError) as ex_info:
                 _configure_vllm_root_logger()
             assert ex_info.type == JSONDecodeError
@@ -150,8 +149,7 @@ def test_an_error_is_raised_when_custom_logging_config_is_unexpected_json(
     with NamedTemporaryFile(encoding="utf-8", mode="w") as logging_config_file:
         logging_config_file.write(json.dumps(unexpected_config))
         logging_config_file.flush()
-        with patch("vllm.logger.VLLM_LOGGING_CONFIG_PATH",
-                   logging_config_file.name):
+        with patch("vllm.logger.VLLM_LOGGING_CONFIG_PATH", logging_config_file.name):
             with pytest.raises(ValueError) as ex_info:
                 _configure_vllm_root_logger()
             assert ex_info.type == ValueError  # noqa: E721
@@ -198,8 +196,7 @@ def test_custom_logging_config_causes_an_error_if_configure_logging_is_off():
     with NamedTemporaryFile(encoding="utf-8", mode="w") as logging_config_file:
         logging_config_file.write(json.dumps(valid_logging_config))
         logging_config_file.flush()
-        with patch("vllm.logger.VLLM_LOGGING_CONFIG_PATH",
-                   logging_config_file.name):
+        with patch("vllm.logger.VLLM_LOGGING_CONFIG_PATH", logging_config_file.name):
             with pytest.raises(RuntimeError) as ex_info:
                 _configure_vllm_root_logger()
             assert ex_info.type is RuntimeError

@@ -17,34 +17,22 @@ from vllm.lora.request import LoRARequest
 
 
 def create_test_prompts(
-        lora_path: str
-) -> list[tuple[str, SamplingParams, Optional[LoRARequest]]]:
+        lora_path: str) -> list[tuple[str, SamplingParams, Optional[LoRARequest]]]:
     return [
         # this is an example of using quantization without LoRA
         ("My name is",
-         SamplingParams(temperature=0.0,
-                        logprobs=1,
-                        prompt_logprobs=1,
+         SamplingParams(temperature=0.0, logprobs=1, prompt_logprobs=1,
                         max_tokens=128), None),
         # the next three examples use quantization with LoRA
         ("my name is",
-         SamplingParams(temperature=0.0,
-                        logprobs=1,
-                        prompt_logprobs=1,
-                        max_tokens=128),
-         LoRARequest("lora-test-1", 1, lora_path)),
+         SamplingParams(temperature=0.0, logprobs=1, prompt_logprobs=1,
+                        max_tokens=128), LoRARequest("lora-test-1", 1, lora_path)),
         ("The capital of USA is",
-         SamplingParams(temperature=0.0,
-                        logprobs=1,
-                        prompt_logprobs=1,
-                        max_tokens=128),
-         LoRARequest("lora-test-2", 1, lora_path)),
+         SamplingParams(temperature=0.0, logprobs=1, prompt_logprobs=1,
+                        max_tokens=128), LoRARequest("lora-test-2", 1, lora_path)),
         ("The capital of France is",
-         SamplingParams(temperature=0.0,
-                        logprobs=1,
-                        prompt_logprobs=1,
-                        max_tokens=128),
-         LoRARequest("lora-test-3", 1, lora_path)),
+         SamplingParams(temperature=0.0, logprobs=1, prompt_logprobs=1,
+                        max_tokens=128), LoRARequest("lora-test-3", 1, lora_path)),
     ]
 
 
@@ -114,11 +102,8 @@ def main():
     }]
 
     for test_config in test_configs:
-        print(
-            f"~~~~~~~~~~~~~~~~ Running: {test_config['name']} ~~~~~~~~~~~~~~~~"
-        )
-        engine = initialize_engine(test_config['model'],
-                                   test_config['quantization'],
+        print(f"~~~~~~~~~~~~~~~~ Running: {test_config['name']} ~~~~~~~~~~~~~~~~")
+        engine = initialize_engine(test_config['model'], test_config['quantization'],
                                    test_config['lora_repo'])
         lora_path = snapshot_download(repo_id=test_config['lora_repo'])
         test_prompts = create_test_prompts(lora_path)

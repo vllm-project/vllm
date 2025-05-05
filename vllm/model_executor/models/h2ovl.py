@@ -267,14 +267,13 @@ class H2OVLProcessor(BaseInternVLProcessor):
         dynamic_image_size: Optional[bool] = None,
         use_thumbnail: Optional[bool] = None,
     ) -> tuple[int, int]:
-        min_dynamic_patch = (self.min_dynamic_patch if min_dynamic_patch
-                             is None else min_dynamic_patch)
-        max_dynamic_patch = (self.max_dynamic_patch if max_dynamic_patch
-                             is None else max_dynamic_patch)
-        dynamic_image_size = (self.dynamic_image_size if dynamic_image_size
-                              is None else dynamic_image_size)
-        use_thumbnail = (self.use_thumbnail
-                         if use_thumbnail is None else use_thumbnail)
+        min_dynamic_patch = (self.min_dynamic_patch
+                             if min_dynamic_patch is None else min_dynamic_patch)
+        max_dynamic_patch = (self.max_dynamic_patch
+                             if max_dynamic_patch is None else max_dynamic_patch)
+        dynamic_image_size = (self.dynamic_image_size
+                              if dynamic_image_size is None else dynamic_image_size)
+        use_thumbnail = (self.use_thumbnail if use_thumbnail is None else use_thumbnail)
 
         return resolve_h2ovl_min_max_num(
             min_dynamic_patch=min_dynamic_patch,
@@ -430,8 +429,7 @@ class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
         )
 
 
-class H2OVLMultiModalProcessor(InternVLMultiModalProcessor[H2OVLProcessingInfo]
-                               ):
+class H2OVLMultiModalProcessor(InternVLMultiModalProcessor[H2OVLProcessingInfo]):
 
     def _get_prompt_updates(
         self,
@@ -455,8 +453,8 @@ class H2OVLMultiModalProcessor(InternVLMultiModalProcessor[H2OVLProcessingInfo]
         num_images = len(image_num_patches)
 
         def get_replacement_internvl(item_idx: int):
-            images = mm_items.get_items(
-                "image", (ImageEmbeddingItems, ImageProcessorItems))
+            images = mm_items.get_items("image",
+                                        (ImageEmbeddingItems, ImageProcessorItems))
 
             if isinstance(images, ImageEmbeddingItems):
                 feature_size = images.get_feature_size(item_idx)
@@ -511,10 +509,9 @@ class H2OVLMultiModalProcessor(InternVLMultiModalProcessor[H2OVLProcessingInfo]
         )
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    H2OVLMultiModalProcessor,
-    info=H2OVLProcessingInfo,
-    dummy_inputs=InternVLDummyInputsBuilder)
+@MULTIMODAL_REGISTRY.register_processor(H2OVLMultiModalProcessor,
+                                        info=H2OVLProcessingInfo,
+                                        dummy_inputs=InternVLDummyInputsBuilder)
 class H2OVLChatModel(InternVLChatModel):
 
     def _init_vision_model(

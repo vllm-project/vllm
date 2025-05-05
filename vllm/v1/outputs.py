@@ -44,10 +44,9 @@ class LogprobsTensors(NamedTuple):
                   num_tokens_per_position: int) -> "LogprobsTensors":
         """Create empty LogprobsTensors on CPU."""
 
-        logprob_token_ids = torch.empty(
-            (num_positions, num_tokens_per_position),
-            dtype=torch.int32,
-            device="cpu")
+        logprob_token_ids = torch.empty((num_positions, num_tokens_per_position),
+                                        dtype=torch.int32,
+                                        device="cpu")
         logprobs = torch.empty_like(logprob_token_ids, dtype=torch.float32)
         selected_token_ranks = torch.empty(num_positions,
                                            dtype=torch.int32,

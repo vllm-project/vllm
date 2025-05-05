@@ -27,13 +27,11 @@ def test_decode_attention(B, L, H_Q, H_KV, D_QK, D_V, CACHE_SIZE, PAGE_SIZE):
 
     num_pages_per_batch = cdiv(seq_len, PAGE_SIZE)
     req_to_page = torch.randint(0,
-                                CACHE_SIZE // PAGE_SIZE,
-                                (B, num_pages_per_batch, 1),
+                                CACHE_SIZE // PAGE_SIZE, (B, num_pages_per_batch, 1),
                                 device="cuda")
     req_to_token = req_to_page * PAGE_SIZE
     req_to_token = req_to_token.expand(B, num_pages_per_batch, PAGE_SIZE)
-    req_to_token = req_to_token + torch.arange(PAGE_SIZE, device="cuda").view(
-        1, 1, -1)
+    req_to_token = req_to_token + torch.arange(PAGE_SIZE, device="cuda").view(1, 1, -1)
     req_to_token = req_to_token.view(B, -1)
     req_to_token = req_to_token[:, :seq_len].contiguous()
 

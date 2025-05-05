@@ -29,12 +29,10 @@ def default_server_args():
     ]
 
 
-@pytest.fixture(scope="module",
-                params=[["--no-enable-prefix-caching"],
-                        [
-                            "--no-enable-prefix-caching",
-                            "--disable-frontend-multiprocessing"
-                        ]])
+@pytest.fixture(
+    scope="module",
+    params=[["--no-enable-prefix-caching"],
+            ["--no-enable-prefix-caching", "--disable-frontend-multiprocessing"]])
 def server(default_server_args, request):
     if request.param:
         default_server_args.extend(request.param)
@@ -53,8 +51,7 @@ async def client(server):
     "model_name",
     [MODEL_NAME],
 )
-async def test_single_completion(client: openai.AsyncOpenAI,
-                                 model_name: str) -> None:
+async def test_single_completion(client: openai.AsyncOpenAI, model_name: str) -> None:
     completion = await client.completions.create(model=model_name,
                                                  prompt="Hello, my name is",
                                                  max_tokens=5,
@@ -66,8 +63,9 @@ async def test_single_completion(client: openai.AsyncOpenAI,
     choice = completion.choices[0]
     assert len(choice.text) >= 5
     assert choice.finish_reason == "length"
-    assert completion.usage == openai.types.CompletionUsage(
-        completion_tokens=5, prompt_tokens=6, total_tokens=11)
+    assert completion.usage == openai.types.CompletionUsage(completion_tokens=5,
+                                                            prompt_tokens=6,
+                                                            total_tokens=11)
 
     # test using token IDs
     completion = await client.completions.create(
@@ -190,8 +188,7 @@ async def test_too_many_completion_logprobs(client: openai.AsyncOpenAI,
                                                          (MODEL_NAME, 0),
                                                          (MODEL_NAME, 1),
                                                          (MODEL_NAME, None)])
-async def test_prompt_logprobs_completion(client: openai.AsyncOpenAI,
-                                          model_name: str,
+async def test_prompt_logprobs_completion(client: openai.AsyncOpenAI, model_name: str,
                                           prompt_logprobs: Optional[int]):
     params: dict = {
         "prompt": ["A robot may not injure another robot", "My name is"],
@@ -255,8 +252,7 @@ async def test_completion_streaming(client: openai.AsyncOpenAI,
     "model_name",
     [MODEL_NAME],
 )
-async def test_parallel_no_streaming(client: openai.AsyncOpenAI,
-                                     model_name: str):
+async def test_parallel_no_streaming(client: openai.AsyncOpenAI, model_name: str):
     """Parallel sampling without streaming.
     A single request output contains a list of completions.
     """
@@ -283,10 +279,8 @@ async def test_parallel_no_streaming(client: openai.AsyncOpenAI,
     output_token_lengths = set()
     for idx, choice in enumerate(completion.choices):
         # Assert correct completion index & some finish reason.
-        assert choice.index == idx, (
-            f"Index {choice.index} but expected {idx}.")
-        assert choice.finish_reason is not None, (
-            "None finish_reason is invalid.")
+        assert choice.index == idx, (f"Index {choice.index} but expected {idx}.")
+        assert choice.finish_reason is not None, ("None finish_reason is invalid.")
         text = choice.text
         completion_repeats[text] = completion_repeats.get(text, 0) + 1
         output_token_lengths.add(len(choice.logprobs.tokens))
@@ -295,13 +289,9 @@ async def test_parallel_no_streaming(client: openai.AsyncOpenAI,
     # Assert `n` unique completions
     num_unique = len(completion_repeats)
     if num_unique != n:
-        repeats = {
-            txt: num
-            for (txt, num) in completion_repeats.items() if num > 1
-        }
-        raise AssertionError(
-            f"Expected {n} unique completions, got {num_unique};"
-            f" repeats: {repeats}.")
+        repeats = {txt: num for (txt, num) in completion_repeats.items() if num > 1}
+        raise AssertionError(f"Expected {n} unique completions, got {num_unique};"
+                             f" repeats: {repeats}.")
 
 
 @pytest.mark.asyncio
@@ -353,10 +343,7 @@ async def test_parallel_streaming(client: openai.AsyncOpenAI, model_name: str):
     # Assert `n` unique completions
     num_unique = len(completion_repeats)
     if num_unique != n:
-        repeats = {
-            txt: num
-            for (txt, num) in completion_repeats.items() if num > 1
-        }
+        repeats = {txt: num for (txt, num) in completion_repeats.items() if num > 1}
         raise AssertionError(f"{num_unique} unique completions, expected {n};"
                              f" repeats: {repeats}")
 
@@ -366,8 +353,7 @@ async def test_parallel_streaming(client: openai.AsyncOpenAI, model_name: str):
     "model_name",
     [MODEL_NAME],
 )
-async def test_completion_stream_options(client: openai.AsyncOpenAI,
-                                         model_name: str):
+async def test_completion_stream_options(client: openai.AsyncOpenAI, model_name: str):
     prompt = "What is the capital of France?"
 
     # Test stream=True, stream_options=
@@ -379,8 +365,7 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI,
                                              stream=True,
                                              stream_options={
                                                  "include_usage": False,
-                                                 "continuous_usage_stats":
-                                                 False,
+                                                 "continuous_usage_stats": False,
                                              })
 
     async for chunk in stream:
@@ -395,8 +380,7 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI,
                                              stream=True,
                                              stream_options={
                                                  "include_usage": False,
-                                                 "continuous_usage_stats":
-                                                 True,
+                                                 "continuous_usage_stats": True,
                                              })
     async for chunk in stream:
         assert chunk.usage is None
@@ -410,8 +394,7 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI,
                                              stream=True,
                                              stream_options={
                                                  "include_usage": True,
-                                                 "continuous_usage_stats":
-                                                 False,
+                                                 "continuous_usage_stats": False,
                                              })
     async for chunk in stream:
         if chunk.choices[0].finish_reason is None:
@@ -423,8 +406,7 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI,
             assert final_chunk.usage.prompt_tokens > 0
             assert final_chunk.usage.completion_tokens > 0
             assert final_chunk.usage.total_tokens == (
-                final_chunk.usage.prompt_tokens +
-                final_chunk.usage.completion_tokens)
+                final_chunk.usage.prompt_tokens + final_chunk.usage.completion_tokens)
             assert final_chunk.choices == []
 
     # Test stream=True, stream_options=
@@ -436,8 +418,7 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI,
                                              stream=True,
                                              stream_options={
                                                  "include_usage": True,
-                                                 "continuous_usage_stats":
-                                                 True,
+                                                 "continuous_usage_stats": True,
                                              })
     async for chunk in stream:
         assert chunk.usage is not None
@@ -451,8 +432,7 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI,
             assert final_chunk.usage.prompt_tokens > 0
             assert final_chunk.usage.completion_tokens > 0
             assert final_chunk.usage.total_tokens == (
-                final_chunk.usage.prompt_tokens +
-                final_chunk.usage.completion_tokens)
+                final_chunk.usage.prompt_tokens + final_chunk.usage.completion_tokens)
             assert final_chunk.choices == []
 
     # Test stream=False, stream_options=
@@ -478,24 +458,22 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI,
     # Test stream=False, stream_options=
     #     {"continuous_usage_stats": None}
     with pytest.raises(BadRequestError):
-        await client.completions.create(
-            model=model_name,
-            prompt=prompt,
-            max_tokens=5,
-            temperature=0.0,
-            stream=False,
-            stream_options={"continuous_usage_stats": None})
+        await client.completions.create(model=model_name,
+                                        prompt=prompt,
+                                        max_tokens=5,
+                                        temperature=0.0,
+                                        stream=False,
+                                        stream_options={"continuous_usage_stats": None})
 
     # Test stream=False, stream_options=
     #    {"continuous_usage_stats": True}
     with pytest.raises(BadRequestError):
-        await client.completions.create(
-            model=model_name,
-            prompt=prompt,
-            max_tokens=5,
-            temperature=0.0,
-            stream=False,
-            stream_options={"continuous_usage_stats": True})
+        await client.completions.create(model=model_name,
+                                        prompt=prompt,
+                                        max_tokens=5,
+                                        temperature=0.0,
+                                        stream=False,
+                                        stream_options={"continuous_usage_stats": True})
 
 
 @pytest.mark.asyncio
@@ -558,8 +536,8 @@ async def test_batch_completions(client: openai.AsyncOpenAI, model_name: str):
     [MODEL_NAME],
 )
 @pytest.mark.parametrize("logprobs_arg", [1, 0])
-async def test_echo_logprob_completion(client: openai.AsyncOpenAI,
-                                       model_name: str, logprobs_arg: int):
+async def test_echo_logprob_completion(client: openai.AsyncOpenAI, model_name: str,
+                                       logprobs_arg: int):
     tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
     # test using text and token IDs
     for prompt in ("Hello, my name is", [0, 0, 0, 0, 0]):
@@ -570,17 +548,13 @@ async def test_echo_logprob_completion(client: openai.AsyncOpenAI,
                                                      echo=True,
                                                      logprobs=logprobs_arg)
 
-        prompt_text = tokenizer.decode(prompt) if isinstance(prompt,
-                                                             list) else prompt
+        prompt_text = tokenizer.decode(prompt) if isinstance(prompt, list) else prompt
         assert re.search(r"^" + prompt_text, completion.choices[0].text)
         logprobs = completion.choices[0].logprobs
         assert logprobs is not None
         assert len(logprobs.text_offset) > 5
-        assert (len(logprobs.token_logprobs) > 5
-                and logprobs.token_logprobs[0] is None)
-        assert (len(logprobs.top_logprobs) > 5
-                and logprobs.top_logprobs[0] is None)
+        assert (len(logprobs.token_logprobs) > 5 and logprobs.token_logprobs[0] is None)
+        assert (len(logprobs.top_logprobs) > 5 and logprobs.top_logprobs[0] is None)
         for top_logprobs in logprobs.top_logprobs[1:]:
-            assert max(logprobs_arg,
-                       1) <= len(top_logprobs) <= logprobs_arg + 1
+            assert max(logprobs_arg, 1) <= len(top_logprobs) <= logprobs_arg + 1
         assert len(logprobs.tokens) > 5

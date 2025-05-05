@@ -20,8 +20,7 @@ def test_selector(monkeypatch: pytest.MonkeyPatch):
         m.setenv(STR_BACKEND_ENV_VAR, "ROCM_FLASH")
 
         # Set the current platform to ROCm using monkeypatch
-        monkeypatch.setattr("vllm.attention.selector.current_platform",
-                            RocmPlatform())
+        monkeypatch.setattr("vllm.attention.selector.current_platform", RocmPlatform())
 
         # Test standard ROCm attention
         backend = get_attn_backend(16, torch.float16, torch.float16, 16, False)
@@ -32,22 +31,19 @@ def test_selector(monkeypatch: pytest.MonkeyPatch):
 
         # change the attention backend to triton MLA
         m.setenv(STR_BACKEND_ENV_VAR, "TRITON_MLA")
-        backend = get_attn_backend(576, torch.bfloat16, "auto", 16, False,
-                                   False, True)
+        backend = get_attn_backend(576, torch.bfloat16, "auto", 16, False, False, True)
         assert backend.get_name() == "TRITON_MLA"
 
         # If attention backend is None
         # If use_mla is true
         # The selected backend is triton MLA
         m.setenv(STR_BACKEND_ENV_VAR, None)
-        backend = get_attn_backend(576, torch.bfloat16, "auto", 16, False,
-                                   False, True)
+        backend = get_attn_backend(576, torch.bfloat16, "auto", 16, False, False, True)
         assert backend.get_name() == "TRITON_MLA"
 
         # change the attention backend to AITER MLA
         m.setenv(STR_BACKEND_ENV_VAR, "ROCM_AITER_MLA")
-        backend = get_attn_backend(576, torch.bfloat16, "auto", 1, False,
-                                   False, True)
+        backend = get_attn_backend(576, torch.bfloat16, "auto", 1, False, False, True)
         assert backend.get_name() == "ROCM_AITER_MLA"
 
         # If attention backend is None
@@ -56,6 +52,5 @@ def test_selector(monkeypatch: pytest.MonkeyPatch):
         # The selected backend is ROCM_AITER_MLA
         m.setenv(STR_BACKEND_ENV_VAR, None)
         m.setenv("VLLM_ROCM_USE_AITER", "1")
-        backend = get_attn_backend(576, torch.bfloat16, "auto", 1, False,
-                                   False, True)
+        backend = get_attn_backend(576, torch.bfloat16, "auto", 1, False, False, True)
         assert backend.get_name() == "ROCM_AITER_MLA"

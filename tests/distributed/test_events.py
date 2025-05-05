@@ -41,10 +41,8 @@ def test_basic_publishing(publisher, subscriber):
 
     seq, received = result
     assert seq == 0, "Sequence number mismatch"
-    assert received.ts == pytest.approx(test_batch.ts,
-                                        abs=0.1), ("Timestamp mismatch")
-    assert len(received.events) == len(
-        test_batch.events), ("Number of events mismatch")
+    assert received.ts == pytest.approx(test_batch.ts, abs=0.1), ("Timestamp mismatch")
+    assert len(received.events) == len(test_batch.events), ("Number of events mismatch")
 
     for i, event in enumerate(received.events):
         assert event.id == i, "Event id mismatch"
@@ -86,8 +84,7 @@ def test_replay_mechanism(publisher, subscriber):
     seqs = [seq for seq, _ in replayed]
     assert all(seq >= 10 for seq in seqs), "Replayed messages not in order"
     assert seqs == list(range(min(seqs),
-                              max(seqs) +
-                              1)), ("Replayed messages not consecutive")
+                              max(seqs) + 1)), ("Replayed messages not consecutive")
 
 
 def test_buffer_limit(publisher, subscriber, publisher_config):
@@ -176,8 +173,7 @@ def test_high_volume(publisher, subscriber):
 
     publisher_thread.join()
 
-    assert len(received) >= num_batches * 0.9, (
-        "We should have received most messages")
+    assert len(received) >= num_batches * 0.9, ("We should have received most messages")
 
     seqs = [seq for seq, _ in received]
     assert sorted(seqs) == seqs, "Sequence numbers should be in order"

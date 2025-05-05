@@ -77,8 +77,7 @@ class CustomOp(nn.Module):
         if enabled:
             compilation_config.enabled_custom_ops.update([self.__class__.name])
         else:
-            compilation_config.disabled_custom_ops.update(
-                [self.__class__.name])
+            compilation_config.disabled_custom_ops.update([self.__class__.name])
 
         if not enabled:
             return self.forward_native
@@ -114,8 +113,7 @@ class CustomOp(nn.Module):
 
         enabled = f"+{cls.name}" in custom_ops
         disabled = f"-{cls.name}" in custom_ops
-        assert not (enabled
-                    and disabled), f"Cannot enable and disable {cls.name}"
+        assert not (enabled and disabled), f"Cannot enable and disable {cls.name}"
 
         return (CustomOp.default_on() or enabled) and not disabled
 

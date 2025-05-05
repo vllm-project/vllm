@@ -50,15 +50,13 @@ def ref_dynamic_per_token_quant(x: torch.tensor,
         iscales = as_float32_tensor(s_1 / scales)
         torch_out = as_float32_tensor(x) * iscales
         torch_out = torch_out.round()
-        torch_out = torch_out.clamp(qtype_traits_min,
-                                    qtype_traits_max).to(quant_dtype)
+        torch_out = torch_out.clamp(qtype_traits_min, qtype_traits_max).to(quant_dtype)
     else:
         assert quant_dtype == FP8_DTYPE
         min_scaling_factor = s_1 / (qtype_max * s_512)
         scales = scales.clamp(min=min_scaling_factor)
         torch_out = as_float32_tensor(x) / scales
-        torch_out = torch_out.clamp(qtype_traits_min,
-                                    qtype_traits_max).to(quant_dtype)
+        torch_out = torch_out.clamp(qtype_traits_min, qtype_traits_max).to(quant_dtype)
 
     return torch_out, scales
 
@@ -84,14 +82,13 @@ def ref_dynamic_per_tensor_fp8_quant(x: torch.tensor) \
     x_max = as_float32_tensor(x.abs().max())
     ref_scale = x_max / fp8_max
     ref_iscale = one / ref_scale
-    ref_out = (as_float32_tensor(x) * ref_iscale).clamp(
-        fp8_traits_min, fp8_traits_max).to(FP8_DTYPE)
+    ref_out = (as_float32_tensor(x) * ref_iscale).clamp(fp8_traits_min,
+                                                        fp8_traits_max).to(FP8_DTYPE)
     return ref_out, ref_scale.view((1, ))
 
 
-def native_w8a8_block_matmul(A: torch.Tensor, B: torch.Tensor,
-                             As: torch.Tensor, Bs: torch.Tensor, block_size,
-                             output_dtype):
+def native_w8a8_block_matmul(A: torch.Tensor, B: torch.Tensor, As: torch.Tensor,
+                             Bs: torch.Tensor, block_size, output_dtype):
     """This function performs matrix multiplication with block-wise
     quantization using native torch.
     It is agnostic to the input data type and can be used for both int8 and
@@ -123,18 +120,14 @@ def native_w8a8_block_matmul(A: torch.Tensor, B: torch.Tensor,
     C_shape = (M, N)
     C = torch.zeros(C_shape, dtype=torch.float32, device=A.device)
 
-    A_tiles = [
-        A[:, i * block_k:min((i + 1) * block_k, K)] for i in range(k_tiles)
-    ]
+    A_tiles = [A[:, i * block_k:min((i + 1) * block_k, K)] for i in range(k_tiles)]
     B_tiles = [[
         B[
             j * block_n:min((j + 1) * block_n, N),
             i * block_k:min((i + 1) * block_k, K),
         ] for i in range(k_tiles)
     ] for j in range(n_tiles)]
-    C_tiles = [
-        C[:, j * block_n:min((j + 1) * block_n, N)] for j in range(n_tiles)
-    ]
+    C_tiles = [C[:, j * block_n:min((j + 1) * block_n, N)] for j in range(n_tiles)]
     As_tiles = [As[:, i:i + 1] for i in range(k_tiles)]
 
     for i in range(k_tiles):

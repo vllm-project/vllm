@@ -33,13 +33,10 @@ class HpuCommunicator(DeviceCommunicatorBase):
                                     device=input_.device)
         # All-gather.
         htorch.core.mark_step()
-        dist.all_gather_into_tensor(output_tensor,
-                                    input_,
-                                    group=self.device_group)
+        dist.all_gather_into_tensor(output_tensor, input_, group=self.device_group)
         # Reshape
         output_tensor = output_tensor.movedim(0, dim)
         output_tensor = output_tensor.reshape(input_size[:dim] +
-                                              (world_size *
-                                               input_size[dim], ) +
+                                              (world_size * input_size[dim], ) +
                                               input_size[dim + 1:])
         return output_tensor

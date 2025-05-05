@@ -28,8 +28,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
     outputs = llm.generate(
         prompts,
         sampling_params,
-        lora_request=LoRARequest(str(lora_id), lora_id, lora_path)
-        if lora_id else None)
+        lora_request=LoRARequest(str(lora_id), lora_id, lora_path) if lora_id else None)
     # Print the outputs.
     generated_texts: list[str] = []
     for output in outputs:
@@ -63,8 +62,8 @@ def test_baichuan_lora(baichuan_lora_files):
 
 
 @pytest.mark.parametrize("fully_sharded", [True, False])
-def test_baichuan_tensor_parallel_equality(baichuan_lora_files,
-                                           num_gpus_available, fully_sharded):
+def test_baichuan_tensor_parallel_equality(baichuan_lora_files, num_gpus_available,
+                                           fully_sharded):
     if num_gpus_available < 4:
         pytest.skip(f"Not enough GPUs for tensor parallelism {4}")
 

@@ -32,8 +32,7 @@ def _validate_image_max_tokens_one(
 
 @pytest.mark.skip("This test takes around 5 minutes to run. "
                   "Comment this out to run it manually.")
-@pytest.mark.parametrize("model_id",
-                         ["llava-hf/llava-onevision-qwen2-0.5b-ov-hf"])
+@pytest.mark.parametrize("model_id", ["llava-hf/llava-onevision-qwen2-0.5b-ov-hf"])
 def test_processor_max_tokens(model_id):
     ctx = build_model_context(
         model_id,
@@ -126,8 +125,7 @@ def _test_image_prompt_replacements(
         raise AssertionError(msg)
 
 
-@pytest.mark.parametrize("model_id",
-                         ["llava-hf/llava-onevision-qwen2-0.5b-ov-hf"])
+@pytest.mark.parametrize("model_id", ["llava-hf/llava-onevision-qwen2-0.5b-ov-hf"])
 @pytest.mark.parametrize("num_imgs", [1, 2])
 def test_processor_prompt_replacements_regression(model_id, num_imgs):
     ctx = build_model_context(
@@ -153,8 +151,7 @@ def test_processor_prompt_replacements_regression(model_id, num_imgs):
 
 @pytest.mark.skip("This test takes around 2 hours to run. "
                   "Comment this out to run it manually.")
-@pytest.mark.parametrize("model_id",
-                         ["llava-hf/llava-onevision-qwen2-0.5b-ov-hf"])
+@pytest.mark.parametrize("model_id", ["llava-hf/llava-onevision-qwen2-0.5b-ov-hf"])
 @pytest.mark.parametrize("num_imgs", [1])
 def test_processor_prompt_replacements_all(model_id, num_imgs):
     ctx = build_model_context(

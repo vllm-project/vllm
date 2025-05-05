@@ -67,10 +67,9 @@ def main(args):
     if is_v1_engine:
         # For V1 engine, we need to use engine_core.save_sharded_state
         print("Using V1 engine save path")
-        llm.llm_engine.engine_core.save_sharded_state(
-            path=args.output,
-            pattern=args.file_pattern,
-            max_size=args.max_file_size)
+        llm.llm_engine.engine_core.save_sharded_state(path=args.output,
+                                                      pattern=args.file_pattern,
+                                                      max_size=args.max_file_size)
     else:
         # For V0 engine
         print("Using V0 engine save path")

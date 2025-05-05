@@ -66,8 +66,7 @@ class AriaVisionTransformer(Idefics3VisionTransformer, SupportsQuant):
         # Identity layer
         self.post_layernorm = nn.Identity()
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -92,8 +91,7 @@ class AriaVisionTransformer(Idefics3VisionTransformer, SupportsQuant):
                 break
             else:
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
@@ -109,12 +107,8 @@ class AriaProjectorMLP(nn.Module):
     ) -> None:
         super().__init__()
 
-        self.linear_in = ColumnParallelLinear(in_features,
-                                              hidden_features,
-                                              bias=False)
-        self.linear_out = RowParallelLinear(hidden_features,
-                                            output_dim,
-                                            bias=False)
+        self.linear_in = ColumnParallelLinear(in_features, hidden_features, bias=False)
+        self.linear_out = RowParallelLinear(hidden_features, output_dim, bias=False)
         self.act = get_act_fn("gelu_new")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -162,8 +156,7 @@ class AriaProjector(nn.Module):
         self.cross_attn = AriaCrossAttention(config)
 
         self.layer_norm = nn.LayerNorm(self.in_features)
-        self.feed_forward = AriaProjectorMLP(self.in_features,
-                                             self.hidden_features,
+        self.feed_forward = AriaProjectorMLP(self.in_features, self.hidden_features,
                                              self.output_dim)
 
     def forward(
@@ -218,8 +211,7 @@ class AriaFusedMoE(FusedMoE):
             # the shape of loaded_weight is
             # (num_experts, moe_intermediate_size, hidden_size)
             if self.tp_size > 1:
-                down_current_rank = loaded_weight.chunk(self.tp_size,
-                                                        dim=1)[tp_rank]
+                down_current_rank = loaded_weight.chunk(self.tp_size, dim=1)[tp_rank]
                 param.data.copy_(down_current_rank.transpose(1, 2))
             else:
                 param.data.copy_(loaded_weight.transpose(1, 2))
@@ -244,8 +236,7 @@ class AriaTextMoELayer(nn.Module):
         self.config = config
 
         self.router_weight = nn.Parameter(
-            torch.empty(
-                (self.config.moe_num_experts, self.config.hidden_size)))
+            torch.empty((self.config.moe_num_experts, self.config.hidden_size)))
 
         self.experts = AriaFusedMoE(
             num_experts=config.moe_num_experts,
@@ -276,8 +267,7 @@ class AriaTextMoELayer(nn.Module):
             torch.Tensor: Output tensor after passing through the MoE layer.
         """
 
-        router_output = torch.nn.functional.linear(hidden_states,
-                                                   self.router_weight)
+        router_output = torch.nn.functional.linear(hidden_states, self.router_weight)
 
         hidden_states_copy = hidden_states.clone()
         # NOTE: hidden_states will be modified inplace by `FusedMoE`
@@ -326,8 +316,7 @@ class AriaTextModel(LlamaModel, SupportsQuant):
 
     # Adapted from LlamaModel.load_weights with the modification of adding
     # the expert weights mapping to `stacked_params_mapping`
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -343,19 +332,17 @@ class AriaTextModel(LlamaModel, SupportsQuant):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
-            if ("rotary_emb.cos_cached" in name
-                    or "rotary_emb.sin_cached" in name):
+            if ("rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
-            if (self.quant_config is not None and
-                (scale_name := self.quant_config.get_cache_scale(name))):
+            if (self.quant_config is not None
+                    and (scale_name := self.quant_config.get_cache_scale(name))):
                 # Loading kv cache quantization scales
                 param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
-                                 loaded_weight[0])
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                loaded_weight = (loaded_weight
+                                 if loaded_weight.dim() == 0 else loaded_weight[0])
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
@@ -387,8 +374,7 @@ class AriaTextModel(LlamaModel, SupportsQuant):
                     continue
 
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
@@ -527,8 +513,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 self.vocab_size, logit_scale)
 
-    def _validate_image_sizes(
-            self, images: List[torch.Tensor]) -> List[torch.Tensor]:
+    def _validate_image_sizes(self, images: List[torch.Tensor]) -> List[torch.Tensor]:
         if not all(img.shape == images[0].shape for img in images):
             raise ValueError("All images must be the same size")
         return images
@@ -577,8 +562,8 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         return (patches_subgrid.sum(dim=(-1, -2)) > 0).bool()
 
     def _process_image_input(
-        self, image_input: AriaImagePixelInputs
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+            self,
+            image_input: AriaImagePixelInputs) -> Tuple[torch.Tensor, torch.Tensor]:
         assert self.vision_tower is not None
 
         pixel_values = image_input['pixel_values']
@@ -600,8 +585,8 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
@@ -615,9 +600,9 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                self.config.image_token_index)
+            inputs_embeds = merge_multimodal_embeddings(input_ids, inputs_embeds,
+                                                        multimodal_embeddings,
+                                                        self.config.image_token_index)
         return inputs_embeds
 
     def forward(
@@ -632,8 +617,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
             multimodal_embeddings = self.get_multimodal_embeddings(**kwargs)
             # always pass the input via `inputs_embeds`
             # to make sure the computation graph is consistent
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      multimodal_embeddings)
+            inputs_embeds = self.get_input_embeddings(input_ids, multimodal_embeddings)
             input_ids = None
 
         hidden_states = self.language_model(
@@ -647,8 +631,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
         return logits
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):

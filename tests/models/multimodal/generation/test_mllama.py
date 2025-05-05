@@ -52,8 +52,7 @@ prompt_data = {
     # Tell me a story
     TEXT_ONLY: [41551, 757, 264, 3446],
     # <|image|> What's the content of this image
-    IMAGE_AT_BEG:
-    [MLLAMA_IMAGE_TOKEN_ID, 3639, 596, 279, 2262, 315, 420, 2217, 220],
+    IMAGE_AT_BEG: [MLLAMA_IMAGE_TOKEN_ID, 3639, 596, 279, 2262, 315, 420, 2217, 220],
     # Hello <|image|>What' the content of this image
     IMAGE_AT_MIDDLE:
     [9906, 220, MLLAMA_IMAGE_TOKEN_ID, 3923, 6, 279, 2262, 315, 420, 2217],
@@ -65,8 +64,7 @@ prompt_data = {
 }
 
 
-def vllm_to_hf_output(vllm_output: tuple[list[int], str,
-                                         Optional[SampleLogprobs]],
+def vllm_to_hf_output(vllm_output: tuple[list[int], str, Optional[SampleLogprobs]],
                       model: str):
     """Sanitize vllm output to be comparable with hf output."""
     output_ids, output_str, out_logprobs = vllm_output
@@ -104,14 +102,8 @@ def _get_inputs(
         ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
     elif sizes is not None:
         inputs_per_image = [(
-            [
-                prompt if size is not None else text_only_prompts[0]
-                for size in sizes
-            ],
-            [
-                image.resize(size) if size is not None else None
-                for size in sizes
-            ],
+            [prompt if size is not None else text_only_prompts[0] for size in sizes],
+            [image.resize(size) if size is not None else None for size in sizes],
         ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
         if len(sizes) == 0:
             inputs_per_image.append(
@@ -217,8 +209,7 @@ def _run_test(
             max_num_seqs=3,
             tensor_parallel_size=tensor_parallel_size,
             distributed_executor_backend=distributed_executor_backend,
-            limit_mm_per_prompt={"image":
-                                 _LIMIT_IMAGE_PER_PROMPT}) as vllm_model:
+            limit_mm_per_prompt={"image": _LIMIT_IMAGE_PER_PROMPT}) as vllm_model:
         vllm_outputs_per_image = [
             vllm_model.generate_greedy_logprobs(prompts,
                                                 max_tokens,
@@ -239,13 +230,11 @@ def _run_test(
             for prompts, images in inputs
         ]
 
-    for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
-                                        vllm_outputs_per_image):
+    for hf_outputs, vllm_outputs in zip(hf_outputs_per_image, vllm_outputs_per_image):
         check_logprobs_close(
             outputs_0_lst=hf_outputs,
             outputs_1_lst=[
-                vllm_to_hf_output(vllm_output, model)
-                for vllm_output in vllm_outputs
+                vllm_to_hf_output(vllm_output, model) for vllm_output in vllm_outputs
             ],
             name_0="hf",
             name_1="vllm",
@@ -272,11 +261,11 @@ def clear_cache():
         # Single-size, batched
         [(512, 512), (512, 512), (512, 512)],
         # Multi-size, batched
-        [(512, 512), (1024, 512), (1536, 512), (2048, 512), (512, 1024),
-         (1024, 1024), (512, 1536), (512, 2028)],
+        [(512, 512), (1024, 512), (1536, 512), (2048, 512), (512, 1024), (1024, 1024),
+         (512, 1536), (512, 2028)],
         # Multi-size, batched, including text only
-        [(512, 512), (1024, 512), (1536, 512), (2048, 512), (512, 1024),
-         (1024, 1024), (512, 1536), (512, 2028), None],
+        [(512, 512), (1024, 512), (1536, 512), (2048, 512), (512, 1024), (1024, 1024),
+         (512, 1536), (512, 2028), None],
         # mllama has 8 possible aspect ratios, carefully set the sizes
         # to cover all of them
     ])
@@ -284,9 +273,8 @@ def clear_cache():
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("attn_backend", LIST_ENC_DEC_SUPPORTED_BACKENDS)
-def test_models_single_leading_image(hf_runner, vllm_runner, image_assets,
-                                     model, sizes, dtype, max_tokens,
-                                     num_logprobs,
+def test_models_single_leading_image(hf_runner, vllm_runner, image_assets, model, sizes,
+                                     dtype, max_tokens, num_logprobs,
                                      attn_backend: _Backend) -> None:
     with global_force_attn_backend_context_manager(attn_backend):
         if attn_backend == _Backend.FLASH_ATTN:
@@ -312,8 +300,8 @@ def test_models_single_leading_image(hf_runner, vllm_runner, image_assets,
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("attn_backend", LIST_ENC_DEC_SUPPORTED_BACKENDS)
-def test_models_multi_leading_images(hf_runner, vllm_runner, image_assets,
-                                     model, dtype, max_tokens, num_logprobs,
+def test_models_multi_leading_images(hf_runner, vllm_runner, image_assets, model, dtype,
+                                     max_tokens, num_logprobs,
                                      attn_backend: _Backend) -> None:
 
     stop_sign = image_assets[0].pil_image
@@ -361,8 +349,8 @@ def test_models_multi_leading_images(hf_runner, vllm_runner, image_assets,
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("attn_backend", LIST_ENC_DEC_SUPPORTED_BACKENDS)
-def test_models_interleaved_images(hf_runner, vllm_runner, image_assets, model,
-                                   dtype, max_tokens, num_logprobs,
+def test_models_interleaved_images(hf_runner, vllm_runner, image_assets, model, dtype,
+                                   max_tokens, num_logprobs,
                                    attn_backend: _Backend) -> None:
 
     stop_sign = image_assets[0].pil_image
@@ -447,8 +435,7 @@ def test_bnb_regression(
             },
         },
         {
-            "prompt":
-            "The color of the sky is blue but sometimes it can also be",
+            "prompt": "The color of the sky is blue but sometimes it can also be",
         },
     ]
     # Test regression about QKVCrossParallelLinear
@@ -531,8 +518,8 @@ def test_explicit_implicit_prompt(
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("attn_backend", LIST_ENC_DEC_SUPPORTED_BACKENDS)
-def test_regression(vllm_runner, image_assets, model, dtype, max_tokens,
-                    num_logprobs, attn_backend: _Backend) -> None:
+def test_regression(vllm_runner, image_assets, model, dtype, max_tokens, num_logprobs,
+                    attn_backend: _Backend) -> None:
 
     stop_sign = image_assets[0].pil_image
 
@@ -542,8 +529,7 @@ def test_regression(vllm_runner, image_assets, model, dtype, max_tokens,
             max_model_len=8192,
             max_num_seqs=4,
             tensor_parallel_size=1,
-            limit_mm_per_prompt={"image":
-                                 _LIMIT_IMAGE_PER_PROMPT}) as vllm_model:
+            limit_mm_per_prompt={"image": _LIMIT_IMAGE_PER_PROMPT}) as vllm_model:
 
         # Regression tests for https://github.com/vllm-project/vllm/issues/10648
 
@@ -615,8 +601,7 @@ class DummyModel:
      ([TEXT_ONLY, IMAGE_AT_BEG], (None, None)),
      ([IMAGE_AT_MIDDLE], ((10, 12), [[0, 6]])),
      ([TEXT_ONLY, IMAGE_AT_MIDDLE], ((14, 12), [[0, 6]])),
-     ([TEXT_ONLY, IMAGE_AT_BEG, IMAGE_AT_MIDDLE],
-      ((23, 24), [[0, 6], [6, 12]])),
+     ([TEXT_ONLY, IMAGE_AT_BEG, IMAGE_AT_MIDDLE], ((23, 24), [[0, 6], [6, 12]])),
      ([IMAGE_AT_MIDDLE, TEXT_ONLY], ((14, 12), [[0, 6]])),
      ([TWO_IMAGES], ((18, 12), [[6, 12]])),
      ([TEXT_ONLY, TWO_IMAGES], ((22, 12), [[6, 12]]))])
@@ -733,8 +718,7 @@ def test_get_full_text_row_masked_out_mask(input_indices) -> None:
     ([0, 1601, 8005], [[1], [4, 1]], [1601, 8005]),
     ([0, 19212, 0, 3202], [[4, 4, 4], [2]], [19212, 3202]),
 ])
-def test_parse_and_validate_encoder_lens(encoder_seq_lens, num_tiles,
-                                         expected) -> None:
+def test_parse_and_validate_encoder_lens(encoder_seq_lens, num_tiles, expected) -> None:
 
     dummy = DummyModel()
     num_tokens_per_tile = 1601

@@ -86,8 +86,7 @@ def _is_req_added(model_runner, req_id: str) -> bool:
 
 def _is_sampling_metadata_changed(model_runner,
                                   sampling_metadata_before: SamplingMetadata):
-    return model_runner.input_batch.sampling_metadata is not (
-        sampling_metadata_before)
+    return model_runner.input_batch.sampling_metadata is not (sampling_metadata_before)
 
 
 def _is_req_state_block_table_match(model_runner, req_id: str) -> bool:
@@ -97,8 +96,8 @@ def _is_req_state_block_table_match(model_runner, req_id: str) -> bool:
     if block_table.num_blocks_per_row[req_index] != len(req_state.block_ids):
         return False
     num_blocks = block_table.num_blocks_per_row[req_index]
-    return (block_table.block_table_np[req_index, :num_blocks] ==
-            req_state.block_ids).all()
+    return (block_table.block_table_np[req_index, :num_blocks] == req_state.block_ids
+            ).all()
 
 
 def test_update_states_new_request(model_runner):

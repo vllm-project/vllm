@@ -27,8 +27,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-AnyTokenizer = Union[PreTrainedTokenizer, PreTrainedTokenizerFast,
-                     TokenizerBase]
+AnyTokenizer = Union[PreTrainedTokenizer, PreTrainedTokenizerFast, TokenizerBase]
 
 
 def decode_tokens(
@@ -45,8 +44,7 @@ def decode_tokens(
     settings.
     """
     if skip_special_tokens is not None:
-        return tokenizer.decode(token_ids,
-                                skip_special_tokens=skip_special_tokens)
+        return tokenizer.decode(token_ids, skip_special_tokens=skip_special_tokens)
 
     return tokenizer.decode(token_ids)
 
@@ -90,8 +88,7 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
 
     tokenizer_all_special_ids = tokenizer.all_special_ids
     tokenizer_all_special_tokens = tokenizer.all_special_tokens
-    tokenizer_all_special_tokens_extended = (
-        tokenizer.all_special_tokens_extended)
+    tokenizer_all_special_tokens_extended = (tokenizer.all_special_tokens_extended)
     tokenizer_vocab = tokenizer.get_vocab()
     tokenizer_len = len(tokenizer)
 
@@ -193,8 +190,7 @@ def get_tokenizer(
 
     if tokenizer_mode == "slow":
         if kwargs.get("use_fast", False):
-            raise ValueError(
-                "Cannot use the fast tokenizer in slow tokenizer mode.")
+            raise ValueError("Cannot use the fast tokenizer in slow tokenizer mode.")
         kwargs["use_fast"] = False
 
     if "truncation_side" not in kwargs:
@@ -252,15 +248,13 @@ def get_tokenizer(
                 raise e
 
         # NOTE: We can remove this after https://github.com/THUDM/ChatGLM3/issues/1324
-        if type(tokenizer).__name__ in ("ChatGLMTokenizer",
-                                        "ChatGLM4Tokenizer"):
+        if type(tokenizer).__name__ in ("ChatGLMTokenizer", "ChatGLM4Tokenizer"):
             assert isinstance(tokenizer, PreTrainedTokenizer)
             patch_padding_side(tokenizer)
 
         if not isinstance(tokenizer, PreTrainedTokenizerFast):
-            logger.warning(
-                "Using a slow tokenizer. This might cause a significant "
-                "slowdown. Consider using a fast tokenizer instead.")
+            logger.warning("Using a slow tokenizer. This might cause a significant "
+                           "slowdown. Consider using a fast tokenizer instead.")
         tokenizer = get_cached_tokenizer(tokenizer)
 
     return tokenizer

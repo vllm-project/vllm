@@ -7,16 +7,15 @@ from vllm.distributed import cleanup_dist_env_and_memory
 # please see benchmarks/benchmark_prefix_caching.py
 
 # Common prefix.
-prefix = (
-    "You are an expert school principal, skilled in effectively managing "
-    "faculty and staff. Draft 10-15 questions for a potential first grade "
-    "Head Teacher for my K-12, all-girls', independent school that emphasizes "
-    "community, joyful discovery, and life-long learning. The candidate is "
-    "coming in for a first-round panel interview for a 8th grade Math "
-    "teaching role. They have 5 years of previous teaching experience "
-    "as an assistant teacher at a co-ed, public school with experience "
-    "in middle school math teaching. Based on these information, fulfill "
-    "the following paragraph: ")
+prefix = ("You are an expert school principal, skilled in effectively managing "
+          "faculty and staff. Draft 10-15 questions for a potential first grade "
+          "Head Teacher for my K-12, all-girls', independent school that emphasizes "
+          "community, joyful discovery, and life-long learning. The candidate is "
+          "coming in for a first-round panel interview for a 8th grade Math "
+          "teaching role. They have 5 years of previous teaching experience "
+          "as an assistant teacher at a co-ed, public school with experience "
+          "in middle school math teaching. Based on these information, fulfill "
+          "the following paragraph: ")
 
 # Sample prompts.
 prompts = [

@@ -71,8 +71,7 @@ class LoggingStatLogger(StatLoggerBase):
     def _track_iteration_stats(self, iteration_stats: IterationStats):
         # Save tracked stats for token counters.
         self.num_prompt_tokens.append(iteration_stats.num_prompt_tokens)
-        self.num_generation_tokens.append(
-            iteration_stats.num_generation_tokens)
+        self.num_generation_tokens.append(iteration_stats.num_generation_tokens)
 
     def _get_throughput(self, tracked_stats: list[int], now: float) -> float:
         # Compute summary metrics for tracked stats
@@ -88,25 +87,22 @@ class LoggingStatLogger(StatLoggerBase):
         self.prefix_caching_metrics.observe(scheduler_stats.prefix_cache_stats)
 
         if scheduler_stats.spec_decoding_stats is not None:
-            self.spec_decoding_logging.observe(
-                scheduler_stats.spec_decoding_stats)
+            self.spec_decoding_logging.observe(scheduler_stats.spec_decoding_stats)
 
         self.last_scheduler_stats = scheduler_stats
 
     def log(self):
         now = time.monotonic()
         prompt_throughput = self._get_throughput(self.num_prompt_tokens, now)
-        generation_throughput = self._get_throughput(
-            self.num_generation_tokens, now)
+        generation_throughput = self._get_throughput(self.num_generation_tokens, now)
 
         self._reset(now)
 
         scheduler_stats = self.last_scheduler_stats
 
         log_fn = logger.info
-        if not any(
-            (prompt_throughput, generation_throughput,
-             self.last_prompt_throughput, self.last_generation_throughput)):
+        if not any((prompt_throughput, generation_throughput,
+                    self.last_prompt_throughput, self.last_generation_throughput)):
             # Avoid log noise on an idle production system
             log_fn = logger.debug
         self.last_generation_throughput = generation_throughput
@@ -151,15 +147,12 @@ class PrometheusStatLogger(StatLoggerBase):
             vllm_config.observability_config.show_hidden_metrics
 
         labelnames = ["model_name", "engine"]
-        labelvalues = [
-            vllm_config.model_config.served_model_name,
-            str(engine_index)
-        ]
+        labelvalues = [vllm_config.model_config.served_model_name, str(engine_index)]
 
         max_model_len = vllm_config.model_config.max_model_len
 
-        self.spec_decoding_prom = SpecDecodingProm(
-            vllm_config.speculative_config, labelnames, labelvalues)
+        self.spec_decoding_prom = SpecDecodingProm(vllm_config.speculative_config,
+                                                   labelnames, labelvalues)
 
         #
         # Scheduler state
@@ -190,8 +183,7 @@ class PrometheusStatLogger(StatLoggerBase):
 
         self.counter_gpu_prefix_cache_hits = prometheus_client.Counter(
             name="vllm:gpu_prefix_cache_hits",
-            documentation=
-            "GPU prefix cache hits, in terms of number of cached blocks.",
+            documentation="GPU prefix cache hits, in terms of number of cached blocks.",
             labelnames=labelnames).labels(*labelvalues)
 
         #
@@ -212,16 +204,14 @@ class PrometheusStatLogger(StatLoggerBase):
             documentation="Number of generation tokens processed.",
             labelnames=labelnames).labels(*labelvalues)
 
-        self.counter_request_success: dict[FinishReason,
-                                           prometheus_client.Counter] = {}
+        self.counter_request_success: dict[FinishReason, prometheus_client.Counter] = {}
         counter_request_success_base = prometheus_client.Counter(
             name="vllm:request_success_total",
             documentation="Count of successfully processed requests.",
             labelnames=labelnames + ["finished_reason"])
         for reason in FinishReason:
-            self.counter_request_success[
-                reason] = counter_request_success_base.labels(*(labelvalues +
-                                                                [str(reason)]))
+            self.counter_request_success[reason] = counter_request_success_base.labels(
+                *(labelvalues + [str(reason)]))
 
         #
         # Histograms of counts
@@ -297,8 +287,8 @@ class PrometheusStatLogger(StatLoggerBase):
                 labelnames=labelnames).labels(*labelvalues)
 
         request_latency_buckets = [
-            0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0,
-            40.0, 50.0, 60.0, 120.0, 240.0, 480.0, 960.0, 1920.0, 7680.0
+            0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0,
+            60.0, 120.0, 240.0, 480.0, 960.0, 1920.0, 7680.0
         ]
         self.histogram_e2e_time_request = \
             prometheus_client.Histogram(
@@ -368,8 +358,7 @@ class PrometheusStatLogger(StatLoggerBase):
         # Since prometheus multiprocessing mode does not support Info, emulate
         # info here with a gauge.
         info_gauge = prometheus_client.Gauge(
-            name=name,
-            documentation=documentation,
+            name=name, documentation=documentation,
             labelnames=metrics_info.keys()).labels(**metrics_info)
         info_gauge.set(1)
 
@@ -383,27 +372,23 @@ class PrometheusStatLogger(StatLoggerBase):
 
         self.counter_gpu_prefix_cache_queries.inc(
             scheduler_stats.prefix_cache_stats.queries)
-        self.counter_gpu_prefix_cache_hits.inc(
-            scheduler_stats.prefix_cache_stats.hits)
+        self.counter_gpu_prefix_cache_hits.inc(scheduler_stats.prefix_cache_stats.hits)
 
         if scheduler_stats.spec_decoding_stats is not None:
-            self.spec_decoding_prom.observe(
-                scheduler_stats.spec_decoding_stats)
+            self.spec_decoding_prom.observe(scheduler_stats.spec_decoding_stats)
 
         if iteration_stats is None:
             return
 
         self.counter_num_preempted_reqs.inc(iteration_stats.num_preempted_reqs)
         self.counter_prompt_tokens.inc(iteration_stats.num_prompt_tokens)
-        self.counter_generation_tokens.inc(
-            iteration_stats.num_generation_tokens)
+        self.counter_generation_tokens.inc(iteration_stats.num_generation_tokens)
         self.histogram_iteration_tokens.observe(
             iteration_stats.num_prompt_tokens + \
             iteration_stats.num_generation_tokens)
 
         for max_gen_tokens in iteration_stats.max_num_generation_tokens_iter:
-            self.histogram_max_num_generation_tokens_request.observe(
-                max_gen_tokens)
+            self.histogram_max_num_generation_tokens_request.observe(max_gen_tokens)
         for n_param in iteration_stats.n_params_iter:
             self.histogram_n_request.observe(n_param)
         for ttft in iteration_stats.time_to_first_tokens_iter:
@@ -413,22 +398,17 @@ class PrometheusStatLogger(StatLoggerBase):
 
         for finished_request in iteration_stats.finished_requests:
             self.counter_request_success[finished_request.finish_reason].inc()
-            self.histogram_e2e_time_request.observe(
-                finished_request.e2e_latency)
-            self.histogram_queue_time_request.observe(
-                finished_request.queued_time)
-            self.histogram_prefill_time_request.observe(
-                finished_request.prefill_time)
+            self.histogram_e2e_time_request.observe(finished_request.e2e_latency)
+            self.histogram_queue_time_request.observe(finished_request.queued_time)
+            self.histogram_prefill_time_request.observe(finished_request.prefill_time)
             self.histogram_inference_time_request.observe(
                 finished_request.inference_time)
-            self.histogram_decode_time_request.observe(
-                finished_request.decode_time)
+            self.histogram_decode_time_request.observe(finished_request.decode_time)
             self.histogram_num_prompt_tokens_request.observe(
                 finished_request.num_prompt_tokens)
             self.histogram_num_generation_tokens_request.observe(
                 finished_request.num_generation_tokens)
-            self.histogram_max_tokens_request.observe(
-                finished_request.max_tokens_param)
+            self.histogram_max_tokens_request.observe(finished_request.max_tokens_param)
 
         if self.gauge_lora_info is not None:
             running_lora_adapters = \

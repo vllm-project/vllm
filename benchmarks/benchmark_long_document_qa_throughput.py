@@ -142,8 +142,8 @@ def main(args):
 
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(
-        description=
-        'Benchmark the performance with or without automatic prefix caching.')
+        description='Benchmark the performance with or without automatic prefix caching.'
+    )
 
     parser.add_argument(
         '--document-length',

@@ -36,21 +36,14 @@ def test_merge_kernel(
     assert num_query_heads % num_kv_heads == 0
 
     # Prepare inputs.
-    prefix_output = torch.randn(num_tokens,
-                                num_query_heads,
-                                head_size,
-                                dtype=dtype)
-    suffix_output = torch.randn(num_tokens,
-                                num_query_heads,
-                                head_size,
-                                dtype=dtype)
+    prefix_output = torch.randn(num_tokens, num_query_heads, head_size, dtype=dtype)
+    suffix_output = torch.randn(num_tokens, num_query_heads, head_size, dtype=dtype)
     prefix_lse = torch.randn(num_query_heads, num_tokens, dtype=torch.float32)
     suffix_lse = torch.randn(num_query_heads, num_tokens, dtype=torch.float32)
 
     # Run the kernel.
     output = torch.empty(num_tokens, num_query_heads, head_size, dtype=dtype)
-    merge_attn_states(output, prefix_output, prefix_lse, suffix_output,
-                      suffix_lse)
+    merge_attn_states(output, prefix_output, prefix_lse, suffix_output, suffix_lse)
 
     # Reference implementation.
     max_lse = torch.maximum(prefix_lse, suffix_lse)
@@ -121,18 +114,13 @@ def test_cascade(
     max_kv_len = max(kv_lens)
 
     total_num_query_tokens = sum(query_lens)
-    query = torch.randn(total_num_query_tokens,
-                        num_query_heads,
-                        head_size,
-                        dtype=dtype)
+    query = torch.randn(total_num_query_tokens, num_query_heads, head_size, dtype=dtype)
     cu_query_lens = torch.tensor([0] + query_lens,
-                                 dtype=torch.int32).cumsum(dim=0,
-                                                           dtype=torch.int32)
+                                 dtype=torch.int32).cumsum(dim=0, dtype=torch.int32)
     kv_lens_tensor = torch.tensor(kv_lens, dtype=torch.int32)
     max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
     block_tables = torch.randint(0,
-                                 num_blocks,
-                                 (num_seqs, max_num_blocks_per_seq),
+                                 num_blocks, (num_seqs, max_num_blocks_per_seq),
                                  dtype=torch.int32)
 
     assert common_prefix_len > 0
@@ -160,8 +148,7 @@ def test_cascade(
 
     # Run cascade attention.
     assert all(common_prefix_len < kv_len for kv_len in kv_lens)
-    cu_prefix_query_lens = torch.tensor([0, total_num_query_tokens],
-                                        dtype=torch.int32)
+    cu_prefix_query_lens = torch.tensor([0, total_num_query_tokens], dtype=torch.int32)
     prefix_kv_lens = torch.tensor([common_prefix_len], dtype=torch.int32)
     suffix_kv_lens = kv_lens_tensor - common_prefix_len
     output = torch.empty_like(query)

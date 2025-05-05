@@ -691,8 +691,7 @@ VLM_TEST_SETTINGS = _mark_splits(VLM_TEST_SETTINGS, num_groups=2)
     ))
 def test_single_image_models(tmp_path: PosixPath, model_type: str,
                              test_case: ExpandableVLMTestArgs,
-                             hf_runner: type[HfRunner],
-                             vllm_runner: type[VllmRunner],
+                             hf_runner: type[HfRunner], vllm_runner: type[VllmRunner],
                              image_assets: ImageTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
@@ -715,8 +714,7 @@ def test_single_image_models(tmp_path: PosixPath, model_type: str,
         create_new_process_for_each_test=False,
     ))
 def test_multi_image_models(tmp_path: PosixPath, model_type: str,
-                            test_case: ExpandableVLMTestArgs,
-                            hf_runner: type[HfRunner],
+                            test_case: ExpandableVLMTestArgs, hf_runner: type[HfRunner],
                             vllm_runner: type[VllmRunner],
                             image_assets: ImageTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
@@ -739,8 +737,7 @@ def test_multi_image_models(tmp_path: PosixPath, model_type: str,
         test_type=VLMTestType.EMBEDDING,
         create_new_process_for_each_test=False,
     ))
-def test_image_embedding_models(model_type: str,
-                                test_case: ExpandableVLMTestArgs,
+def test_image_embedding_models(model_type: str, test_case: ExpandableVLMTestArgs,
                                 hf_runner: type[HfRunner],
                                 vllm_runner: type[VllmRunner],
                                 image_assets: ImageTestAssets, monkeypatch):
@@ -864,12 +861,10 @@ def test_multi_image_models_heavy(tmp_path: PosixPath, model_type: str,
         create_new_process_for_each_test=True,
     ))
 @create_new_process_for_each_test()
-def test_image_embedding_models_heavy(model_type: str,
-                                      test_case: ExpandableVLMTestArgs,
+def test_image_embedding_models_heavy(model_type: str, test_case: ExpandableVLMTestArgs,
                                       hf_runner: type[HfRunner],
                                       vllm_runner: type[VllmRunner],
-                                      image_assets: ImageTestAssets,
-                                      monkeypatch):
+                                      image_assets: ImageTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
@@ -890,8 +885,7 @@ def test_image_embedding_models_heavy(model_type: str,
         create_new_process_for_each_test=True,
     ))
 def test_video_models_heavy(model_type: str, test_case: ExpandableVLMTestArgs,
-                            hf_runner: type[HfRunner],
-                            vllm_runner: type[VllmRunner],
+                            hf_runner: type[HfRunner], vllm_runner: type[VllmRunner],
                             video_assets: VideoTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")

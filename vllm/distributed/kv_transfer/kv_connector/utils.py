@@ -58,8 +58,8 @@ class model_aware_kv_ops_helper:
             value_cache = kv_cache[1].reshape(-1, num_heads, head_size)
         return key_cache, value_cache
 
-    def put_kv_to_cache(self, model_executable: torch.nn.Module, keys, values,
-                        layer, kv_cache, slot_mapping, start_pos, end_pos):
+    def put_kv_to_cache(self, model_executable: torch.nn.Module, keys, values, layer,
+                        kv_cache, slot_mapping, start_pos, end_pos):
 
         model_config = model_executable.model.config
 

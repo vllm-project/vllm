@@ -56,10 +56,9 @@ def models_list(*, all: bool = True, keywords: Optional[list[str]] = None):
             }))
 
         if is_quant_method_supported("marlin"):
-            TEST_MODELS.append(
-                ("robertgshaw2/TinyLlama-1.1B-Chat-v1.0-g128-marlin", {
-                    "quantization": "marlin"
-                }))
+            TEST_MODELS.append(("robertgshaw2/TinyLlama-1.1B-Chat-v1.0-g128-marlin", {
+                "quantization": "marlin"
+            }))
 
         if not current_platform.is_rocm() and is_quant_method_supported("awq"):
             TEST_MODELS.append(("TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ", {
@@ -103,8 +102,8 @@ PassConfig = CompilationConfig.PassConfig
     "compilation_config, model_info",
     [
         # additional compile sizes, only some of the models
-        (CompilationConfig(level=CompilationLevel.PIECEWISE,
-                           compile_sizes=[1, 2]), model)
+        (CompilationConfig(level=CompilationLevel.PIECEWISE, compile_sizes=[1, 2
+                                                                            ]), model)
         for model in models_list(all=False)
     ] + [
         # RMSNorm + quant fusion, only 8-bit quant models

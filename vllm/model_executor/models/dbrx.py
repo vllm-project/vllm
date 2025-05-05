@@ -110,8 +110,7 @@ class DbrxExperts(FusedMoE):
                     loaded_weight,
                     [-1, self.intermediate_size * self.tp_size, self.d_model],
                 )
-                param_data[:, shard_size:2 *
-                           shard_size, :] = loaded_weight[:, shard, :]
+                param_data[:, shard_size:2 * shard_size, :] = loaded_weight[:, shard, :]
             elif param_name.endswith("weight_scale"):
                 param_data[:, 1] = loaded_weight
             else:
@@ -289,11 +288,10 @@ class DbrxBlock(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
-        self.norm_attn_norm = DbrxFusedNormAttention(
-            config,
-            cache_config,
-            quant_config,
-            prefix=f"{prefix}.norm_attn_norm")
+        self.norm_attn_norm = DbrxFusedNormAttention(config,
+                                                     cache_config,
+                                                     quant_config,
+                                                     prefix=f"{prefix}.norm_attn_norm")
         self.ffn = DbrxMoE(config, quant_config, prefix=f"{prefix}.ffn")
 
     def forward(
@@ -325,19 +323,16 @@ class DbrxModel(nn.Module):
         )
         self.start_layer, self.end_layer, self.blocks = make_layers(
             config.n_layers,
-            lambda prefix: DbrxBlock(
-                config, cache_config, quant_config, prefix=prefix),
+            lambda prefix: DbrxBlock(config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.blocks",
         )
         self.norm_f = nn.LayerNorm(config.d_model, eps=1e-5)
         for module in self.modules():
-            if hasattr(module, "bias") and isinstance(module.bias,
-                                                      nn.Parameter):
+            if hasattr(module, "bias") and isinstance(module.bias, nn.Parameter):
                 # Remove the bias term in Linear and LayerNorm.
                 module.register_parameter("bias", None)
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(["hidden_states"],
-                                                    config.d_model))
+        self.make_empty_intermediate_tensors = (make_empty_intermediate_tensors_factory(
+            ["hidden_states"], config.d_model))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.wte(input_ids)
@@ -373,13 +368,11 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
         quant_config = vllm_config.quant_config
         self.config = config
         if config.tie_word_embeddings:
-            raise ValueError(
-                "tie_word_embeddings is not supported for Dbrx models.")
+            raise ValueError("tie_word_embeddings is not supported for Dbrx models.")
         self.quant_config = quant_config
         self.unpadded_vocab_size = config.vocab_size
         self.transformer = DbrxModel(vllm_config=vllm_config,
-                                     prefix=maybe_prefix(
-                                         prefix, "transformer"))
+                                     prefix=maybe_prefix(prefix, "transformer"))
         self.lm_head = ParallelLMHead(
             config.vocab_size,
             config.d_model,
@@ -402,8 +395,8 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.transformer(input_ids, positions,
-                                         intermediate_tensors, inputs_embeds)
+        hidden_states = self.transformer(input_ids, positions, intermediate_tensors,
+                                         inputs_embeds)
         return hidden_states
 
     def compute_logits(
@@ -411,12 +404,10 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         expert_params_mapping = [(
             "w13" if weight_name in ["w1", "v1"] else "w2",
             f"mlp.{weight_name}",
@@ -425,14 +416,13 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
         loaded_params: Set[str] = set()
 
         for name, loaded_weight in weights:
-            if (self.quant_config is not None and
-                (scale_name := self.quant_config.get_cache_scale(name))):
+            if (self.quant_config is not None
+                    and (scale_name := self.quant_config.get_cache_scale(name))):
                 # Loading kv cache quantization scales
                 param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
-                                 loaded_weight[0])
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                loaded_weight = (loaded_weight
+                                 if loaded_weight.dim() == 0 else loaded_weight[0])
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
@@ -458,8 +448,7 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
                 if name is None:
                     continue
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params

@@ -67,9 +67,7 @@ async def _generate(request_dict: dict, raw_request: Request) -> Response:
         async for request_output in results_generator:
             prompt = request_output.prompt
             assert prompt is not None
-            text_outputs = [
-                prompt + output.text for output in request_output.outputs
-            ]
+            text_outputs = [prompt + output.text for output in request_output.outputs]
             ret = {"text": text_outputs}
             yield (json.dumps(ret) + "\n").encode("utf-8")
 
@@ -108,9 +106,8 @@ async def init_app(
     global engine
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
-    engine = (llm_engine
-              if llm_engine is not None else AsyncLLMEngine.from_engine_args(
-                  engine_args, usage_context=UsageContext.API_SERVER))
+    engine = (llm_engine if llm_engine is not None else AsyncLLMEngine.from_engine_args(
+        engine_args, usage_context=UsageContext.API_SERVER))
     app.state.engine_client = engine
     return app
 
@@ -154,17 +151,15 @@ if __name__ == "__main__":
                         type=str,
                         default=None,
                         help="The CA certificates file")
-    parser.add_argument(
-        "--enable-ssl-refresh",
-        action="store_true",
-        default=False,
-        help="Refresh SSL Context when SSL certificate files change")
+    parser.add_argument("--enable-ssl-refresh",
+                        action="store_true",
+                        default=False,
+                        help="Refresh SSL Context when SSL certificate files change")
     parser.add_argument(
         "--ssl-cert-reqs",
         type=int,
         default=int(ssl.CERT_NONE),
-        help="Whether client certificate is required (see stdlib ssl module's)"
-    )
+        help="Whether client certificate is required (see stdlib ssl module's)")
     parser.add_argument(
         "--root-path",
         type=str,

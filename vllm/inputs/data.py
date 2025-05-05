@@ -263,17 +263,16 @@ def build_explicit_enc_dec_prompt(
 ) -> ExplicitEncoderDecoderPrompt[_T1, _T2]:
     if mm_processor_kwargs is None:
         mm_processor_kwargs = {}
-    return ExplicitEncoderDecoderPrompt(
-        encoder_prompt=encoder_prompt,
-        decoder_prompt=decoder_prompt,
-        mm_processor_kwargs=mm_processor_kwargs)
+    return ExplicitEncoderDecoderPrompt(encoder_prompt=encoder_prompt,
+                                        decoder_prompt=decoder_prompt,
+                                        mm_processor_kwargs=mm_processor_kwargs)
 
 
 def zip_enc_dec_prompts(
     enc_prompts: Iterable[_T1],
     dec_prompts: Iterable[Optional[_T2]],
-    mm_processor_kwargs: Optional[Union[Iterable[dict[str, Any]],
-                                        dict[str, Any]]] = None,
+    mm_processor_kwargs: Optional[Union[Iterable[dict[str, Any]], dict[str,
+                                                                       Any]]] = None,
 ) -> list[ExplicitEncoderDecoderPrompt[_T1, _T2]]:
     """
     Zip encoder and decoder prompts together into a list of
@@ -287,23 +286,19 @@ def zip_enc_dec_prompts(
         mm_processor_kwargs = cast(dict[str, Any], {})
     if isinstance(mm_processor_kwargs, dict):
         return [
-            build_explicit_enc_dec_prompt(
-                encoder_prompt, decoder_prompt,
-                cast(dict[str, Any], mm_processor_kwargs))
-            for (encoder_prompt,
-                 decoder_prompt) in zip(enc_prompts, dec_prompts)
+            build_explicit_enc_dec_prompt(encoder_prompt, decoder_prompt,
+                                          cast(dict[str, Any], mm_processor_kwargs))
+            for (encoder_prompt, decoder_prompt) in zip(enc_prompts, dec_prompts)
         ]
     return [
-        build_explicit_enc_dec_prompt(encoder_prompt, decoder_prompt,
-                                      mm_proc_kwargs)
-        for (encoder_prompt, decoder_prompt, mm_proc_kwargs
-             ) in zip(enc_prompts, dec_prompts, mm_processor_kwargs)
+        build_explicit_enc_dec_prompt(encoder_prompt, decoder_prompt, mm_proc_kwargs)
+        for (encoder_prompt, decoder_prompt,
+             mm_proc_kwargs) in zip(enc_prompts, dec_prompts, mm_processor_kwargs)
     ]
 
 
 def to_enc_dec_tuple_list(
     enc_dec_prompts: Iterable[ExplicitEncoderDecoderPrompt[_T1, _T2]],
 ) -> list[tuple[_T1, Optional[_T2]]]:
-    return [(enc_dec_prompt["encoder_prompt"],
-             enc_dec_prompt["decoder_prompt"])
+    return [(enc_dec_prompt["encoder_prompt"], enc_dec_prompt["decoder_prompt"])
             for enc_dec_prompt in enc_dec_prompts]

@@ -50,16 +50,14 @@ class NeuronQuantConfig(QuantizationConfig):
     def from_config(cls, config: Dict[str, Any]) -> "NeuronQuantConfig":
         quantize_method = cls.get_from_keys(config, ["quantize_method"])
         dequant_dtype = cls.get_from_keys(config, ["dequant_dtype"])
-        return cls(dequant_dtype=dequant_dtype,
-                   quantize_method=quantize_method)
+        return cls(dequant_dtype=dequant_dtype, quantize_method=quantize_method)
 
     def get_quant_method(self, layer: Module, prefix: str) -> Optional[Any]:
         if find_spec("transformers_neuronx") is not None:
             return self.get_quantization_config()
         else:
-            raise NotImplementedError(
-                "Neuron Quantization is only supported through"
-                " transformers_neuronx.")
+            raise NotImplementedError("Neuron Quantization is only supported through"
+                                      " transformers_neuronx.")
 
     def get_quantization_config(self):
         from transformers_neuronx.config import QuantizationConfig

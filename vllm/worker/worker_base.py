@@ -61,8 +61,7 @@ class WorkerBase:
         """
         raise NotImplementedError
 
-    def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
+    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         """Initialize the KV cache with the given size in blocks.
         """
         raise NotImplementedError
@@ -153,8 +152,7 @@ class DelegateWorkerBase(WorkerBase):
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         return self.worker.determine_num_available_blocks()
 
-    def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
+    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
     def load_model(self) -> None:
@@ -201,8 +199,7 @@ class LoRANotSupportedWorkerBase(WorkerBase):
         raise ValueError(f"{type(self)} does not support LoRA")
 
     def pin_lora(self, lora_id: int) -> bool:
-        return ValueError(
-            f"{type(self)} does not support LoRA")  # type: ignore
+        return ValueError(f"{type(self)} does not support LoRA")  # type: ignore
 
     def list_loras(self) -> Set[int]:
         raise ValueError(f"{type(self)} does not support LoRA")
@@ -239,8 +236,7 @@ class WorkerInput:
             num_steps=tensor_dict.pop("num_steps"),
         )
 
-    def as_broadcastable_tensor_dict(
-            self) -> Dict[str, Union[int, torch.Tensor]]:
+    def as_broadcastable_tensor_dict(self) -> Dict[str, Union[int, torch.Tensor]]:
         """
         Extract broadcastable fields.
         """
@@ -293,8 +289,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         raise NotImplementedError
 
     @abstractmethod
-    def prepare_worker_input(
-            self, execute_model_req: ExecuteModelRequest) -> WorkerInput:
+    def prepare_worker_input(self,
+                             execute_model_req: ExecuteModelRequest) -> WorkerInput:
         """
         Prepare the inputs to WorkerBase.execute_worker from an execution
         request. This method may move data to the worker's local device. It is
@@ -311,8 +307,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
     def _get_worker_input_from_broadcast(
         self
-    ) -> Optional[Tuple[BroadcastableModelInput, WorkerInput, Dict[
-            str, torch.Tensor]]]:
+    ) -> Optional[Tuple[BroadcastableModelInput, WorkerInput, Dict[str, torch.Tensor]]]:
         """ Get the worker input from the broadcasted tensor dict. """
         assert self.do_metadata_broadcast
         assert not self.is_driver_worker
@@ -321,9 +316,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             return None
 
         worker_input = WorkerInput.from_broadcasted_tensor_dict(broadcast_data)
-        model_input = (
-            self.model_runner.make_model_input_from_broadcasted_tensor_dict(
-                broadcast_data))
+        model_input = (self.model_runner.make_model_input_from_broadcasted_tensor_dict(
+            broadcast_data))
 
         kwargs = extract_previous_hidden_states(broadcast_data)
 
@@ -337,11 +331,9 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
         worker_input: WorkerInput = self.prepare_worker_input(
             execute_model_req=execute_model_req)
-        model_input: ModelRunnerInputBase = (
-            self.model_runner.prepare_model_input(
-                execute_model_req.seq_group_metadata_list,
-                execute_model_req.virtual_engine,
-                execute_model_req.finished_requests_ids))
+        model_input: ModelRunnerInputBase = (self.model_runner.prepare_model_input(
+            execute_model_req.seq_group_metadata_list, execute_model_req.virtual_engine,
+            execute_model_req.finished_requests_ids))
 
         kwargs = extract_previous_hidden_states(execute_model_req)
 
@@ -361,8 +353,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
     def prepare_input(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> Optional[Tuple[BroadcastableModelInput, WorkerInput, Dict[
-            str, torch.Tensor]]]:
+    ) -> Optional[Tuple[BroadcastableModelInput, WorkerInput, Dict[str, torch.Tensor]]]:
         """
         Prepare the inputs to ModelRunner and workers.
         """
@@ -410,8 +401,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         orig_model_execute_time = 0.0
         if not get_pp_group().is_first_rank:
             intermediate_tensors = IntermediateTensors(
-                get_pp_group().recv_tensor_dict(
-                    all_gather_group=get_tp_group()))
+                get_pp_group().recv_tensor_dict(all_gather_group=get_tp_group()))
             if (self.observability_config is not None
                     and self.observability_config.collect_model_execute_time):
                 orig_model_execute_time = intermediate_tensors.tensors.get(
@@ -441,8 +431,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                 and self.observability_config.collect_model_execute_time
                 and output is not None):
             for o in output:
-                o.model_execute_time = (orig_model_execute_time +
-                                        model_execute_time)
+                o.model_execute_time = (orig_model_execute_time + model_execute_time)
 
         # output is List[SamplerOutput]
         return output
@@ -462,9 +451,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             "ExecuteModelRequest")
         worker_input: WorkerInput = self.prepare_worker_input(
             execute_model_req=execute_model_req)
-        model_input: ModelRunnerInputBase = (
-            self.model_runner.prepare_model_input(
-                execute_model_req.seq_group_metadata_list))
+        model_input: ModelRunnerInputBase = (self.model_runner.prepare_model_input(
+            execute_model_req.seq_group_metadata_list))
 
         self.execute_worker(worker_input)
 
@@ -530,8 +518,7 @@ class WorkerWrapperBase:
         if self.rpc_rank in rank_mapping:
             self.rpc_rank = rank_mapping[self.rpc_rank]
 
-    def update_environment_variables(self, envs_list: List[Dict[str,
-                                                                str]]) -> None:
+    def update_environment_variables(self, envs_list: List[Dict[str, str]]) -> None:
         envs = envs_list[self.rpc_rank]
         key = 'CUDA_VISIBLE_DEVICES'
         if key in envs and key in os.environ:
@@ -562,10 +549,8 @@ class WorkerWrapperBase:
                 "passing worker_cls as a class object is strongly deprecated,"
                 " as the serialization of class objects can be tricky and"
                 " error-prone. To be safe, please keep the class in a separate"
-                " module and pass the qualified name of the class as a string."
-            )
-            assert isinstance(self.vllm_config.parallel_config.worker_cls,
-                              bytes)
+                " module and pass the qualified name of the class as a string.")
+            assert isinstance(self.vllm_config.parallel_config.worker_cls, bytes)
             worker_class = cloudpickle.loads(
                 self.vllm_config.parallel_config.worker_cls)
         if self.vllm_config.parallel_config.worker_extension_cls:
@@ -586,9 +571,8 @@ class WorkerWrapperBase:
                 # dynamically inherit the worker extension class
                 worker_class.__bases__ = worker_class.__bases__ + (
                     worker_extension_cls, )
-                logger.info(
-                    "Injected %s into %s for extended collective_rpc calls %s",
-                    worker_extension_cls, worker_class, extended_calls)
+                logger.info("Injected %s into %s for extended collective_rpc calls %s",
+                            worker_extension_cls, worker_class, extended_calls)
         with set_current_vllm_config(self.vllm_config):
             # To make vLLM config available during worker initialization
             self.worker = worker_class(**kwargs)

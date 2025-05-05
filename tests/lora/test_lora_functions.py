@@ -81,8 +81,7 @@ async def test_lora_functions_async():
 
     if os.getenv("VLLM_USE_V1") == "0":
         pytest.skip(
-            reason=
-            "V0 AsyncLLMEngine does not expose remove/list/pin LoRA functions")
+            reason="V0 AsyncLLMEngine does not expose remove/list/pin LoRA functions")
 
     # The run_with_both_engines_lora fixture sets up the `VLLM_USE_V1`
     # environment variable. reload vllm.enging.async_llm_engine as

@@ -70,10 +70,8 @@ def test_allocate_prefix_caching(block_size: int, sequence_len: int):
 
     token_ids = list(range(sequence_len))
     chunked_tokens = list(chunk_list(token_ids, block_size))
-    num_mutable_blocks_per_alloc = 0 if len(
-        chunked_tokens[-1]) == block_size else 1
-    num_immutable_blocks_per_alloc = len(
-        chunked_tokens) - num_mutable_blocks_per_alloc
+    num_mutable_blocks_per_alloc = 0 if len(chunked_tokens[-1]) == block_size else 1
+    num_immutable_blocks_per_alloc = len(chunked_tokens) - num_mutable_blocks_per_alloc
 
     block_tables: list[BlockTable] = []
     for alloc_i in range(1, 6):
@@ -88,9 +86,9 @@ def test_allocate_prefix_caching(block_size: int, sequence_len: int):
         # Expect all sequences to share allocations, except for their last block
         # (which may be mutable).
         assert allocator.get_num_free_blocks(
-            device=Device.GPU) == num_gpu_blocks - (
-                num_immutable_blocks_per_alloc + num_mutable_blocks_per_alloc *
-                (alloc_i))
+            device=Device.GPU) == num_gpu_blocks - (num_immutable_blocks_per_alloc +
+                                                    num_mutable_blocks_per_alloc *
+                                                    (alloc_i))
 
 
 @pytest.mark.parametrize("block_size", [16])
@@ -129,8 +127,7 @@ def test_allocate_free(block_size: int, sequence_len: int, allocator_type: str,
         block_table.allocate(token_ids=token_ids, device=device)
         assert allocator.get_num_free_blocks(
             device) == num_device_blocks - num_blocks_per_alloc
-        assert all(block_id is not None
-                   for block_id in block_table.physical_block_ids)
+        assert all(block_id is not None for block_id in block_table.physical_block_ids)
 
         block_table.free()
         assert allocator.get_num_free_blocks(device) == num_device_blocks
@@ -168,20 +165,17 @@ def test_append_token_ids_allocation(block_size: int, sequence_len: int,
         block_allocator=allocator,
     )
 
-    num_expected_blocks_before_append = len(
-        list(chunk_list(token_ids, block_size)))
+    num_expected_blocks_before_append = len(list(chunk_list(token_ids, block_size)))
     num_expected_appended_blocks = len(
         list(chunk_list(token_ids + token_ids_to_append,
                         block_size))) - num_expected_blocks_before_append
 
     block_table.allocate(token_ids=token_ids, device=Device.GPU)
 
-    assert len(
-        block_table.physical_block_ids) == num_expected_blocks_before_append
+    assert len(block_table.physical_block_ids) == num_expected_blocks_before_append
     block_table.append_token_ids(token_ids_to_append)
-    assert len(
-        block_table.physical_block_ids
-    ) == num_expected_blocks_before_append + num_expected_appended_blocks
+    assert len(block_table.physical_block_ids
+               ) == num_expected_blocks_before_append + num_expected_appended_blocks
 
 
 @pytest.mark.parametrize("block_size", [1, 8])
@@ -189,8 +183,7 @@ def test_append_token_ids_allocation(block_size: int, sequence_len: int,
 @pytest.mark.parametrize("num_empty_slots", [1, 16, 129])
 @pytest.mark.parametrize("allocator_type", ["naive", "prefix_caching"])
 def test_ensure_num_empty_slots_allocation(block_size: int, sequence_len: int,
-                                           num_empty_slots: int,
-                                           allocator_type: str):
+                                           num_empty_slots: int, allocator_type: str):
     """Test the allocation behavior when ensuring a certain number of empty
     slots in a BlockTable.
 
@@ -217,8 +210,7 @@ def test_ensure_num_empty_slots_allocation(block_size: int, sequence_len: int,
         block_allocator=allocator,
     )
 
-    num_expected_blocks_before_append = len(
-        list(chunk_list(token_ids, block_size)))
+    num_expected_blocks_before_append = len(list(chunk_list(token_ids, block_size)))
     num_expected_appended_blocks = len(
         list(chunk_list(token_ids + [-1] * num_empty_slots,
                         block_size))) - num_expected_blocks_before_append
@@ -227,12 +219,10 @@ def test_ensure_num_empty_slots_allocation(block_size: int, sequence_len: int,
 
     # Assert that the empty slots consume the expected number of additional
     # blocks.
-    assert len(
-        block_table.physical_block_ids) == num_expected_blocks_before_append
+    assert len(block_table.physical_block_ids) == num_expected_blocks_before_append
     block_table.ensure_num_empty_slots(num_empty_slots)
-    assert len(
-        block_table.physical_block_ids
-    ) == num_expected_blocks_before_append + num_expected_appended_blocks
+    assert len(block_table.physical_block_ids
+               ) == num_expected_blocks_before_append + num_expected_appended_blocks
 
     # Now, ensure no additional blocks consumed as we fill up the empty slots.
     num_free_blocks = allocator.get_num_free_blocks(device=Device.GPU)
@@ -311,16 +301,13 @@ def test_fork(seq_len: int, block_size: int, allocator_type: str):
 
     block_table.allocate(token_ids)
 
-    num_free_blocks_before_fork = allocator.get_num_free_blocks(
-        device=Device.GPU)
+    num_free_blocks_before_fork = allocator.get_num_free_blocks(device=Device.GPU)
 
     forked_block_table = block_table.fork()
 
     # Expect physical_block_ids and token_ids to match.
-    assert (block_table.physical_block_ids ==
-            forked_block_table.physical_block_ids)
-    assert block_table._get_all_token_ids(
-    ) == forked_block_table._get_all_token_ids()
+    assert (block_table.physical_block_ids == forked_block_table.physical_block_ids)
+    assert block_table._get_all_token_ids() == forked_block_table._get_all_token_ids()
 
     # Do not expect any additional allocations.
     assert allocator.get_num_free_blocks(
@@ -347,8 +334,8 @@ def test_fork(seq_len: int, block_size: int, allocator_type: str):
 @pytest.mark.parametrize("append_len", [1, 16, 129])
 @pytest.mark.parametrize("appender", ["forked", "original"])
 @pytest.mark.parametrize("allocator_type", ["naive", "prefix_caching"])
-def test_cow(block_size: int, sequence_len: int, append_len: int,
-             allocator_type: str, appender: str):
+def test_cow(block_size: int, sequence_len: int, append_len: int, allocator_type: str,
+             appender: str):
     """Fork a sequence; append to the forked sequence; verify there's a CoW.
     """
     num_gpu_blocks = 1024
@@ -379,8 +366,8 @@ def test_cow(block_size: int, sequence_len: int, append_len: int,
     forked_block_table = original_block_table.fork()
 
     # Expect no additional allocation (copy on _write_).
-    assert allocator.get_num_free_blocks(
-        Device.GPU) == (num_gpu_blocks - num_expected_non_cow_blocks)
+    assert allocator.get_num_free_blocks(Device.GPU) == (num_gpu_blocks -
+                                                         num_expected_non_cow_blocks)
 
     if appender == "forked":
         appender_block_table = forked_block_table
@@ -431,9 +418,8 @@ def test_cow(block_size: int, sequence_len: int, append_len: int,
 @pytest.mark.parametrize("lookahead_slots", [1, 16, 129])
 @pytest.mark.parametrize("appender", ["forked", "original"])
 @pytest.mark.parametrize("allocator_type", ["naive", "prefix_caching"])
-def test_cow_lookahead_simple(block_size: int, sequence_len: int,
-                              append_len: int, lookahead_slots: int,
-                              allocator_type: str, appender: str):
+def test_cow_lookahead_simple(block_size: int, sequence_len: int, append_len: int,
+                              lookahead_slots: int, allocator_type: str, appender: str):
     """Similar to test_cow, except with lookahead allocation. The assertions are
     less rigorous due to the complexity of the property under test.
     """
@@ -546,10 +532,8 @@ def test_num_blocks_touched_by_append_slots(block_size: int, sequence_len: int,
     _ = block_table.fork()
 
     # Determine how many blocks should be touched.
-    expected_num_touched_blocks = (
-        block_table.get_num_blocks_touched_by_append_slots(
-            token_ids=token_ids_to_append,
-            num_lookahead_slots=num_lookahead_slots))
+    expected_num_touched_blocks = (block_table.get_num_blocks_touched_by_append_slots(
+        token_ids=token_ids_to_append, num_lookahead_slots=num_lookahead_slots))
 
     # Measure how many blocks are touched by measuring num_free_blocks before
     # and after the append.

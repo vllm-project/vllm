@@ -142,9 +142,8 @@ class ipex_ops:
         is_neox: bool,
     ) -> None:
         rot_dim = cos_sin_cache.size(1)
-        ipex.llm.functional.rotary_embedding_batched(positions, query, key,
-                                                     head_size, cos_sin_cache,
-                                                     is_neox, rot_dim)
+        ipex.llm.functional.rotary_embedding_batched(positions, query, key, head_size,
+                                                     cos_sin_cache, is_neox, rot_dim)
 
     @staticmethod
     def batched_rotary_embedding(positions: torch.Tensor, query: torch.Tensor,
@@ -152,9 +151,8 @@ class ipex_ops:
                                  cos_sin_cache: torch.Tensor, is_neox: bool,
                                  rot_dim: int,
                                  cos_sin_cache_offsets: torch.Tensor) -> None:
-        ipex.llm.functional.rotary_embedding_batched(positions, query, key,
-                                                     head_size, cos_sin_cache,
-                                                     is_neox, rot_dim,
+        ipex.llm.functional.rotary_embedding_batched(positions, query, key, head_size,
+                                                     cos_sin_cache, is_neox, rot_dim,
                                                      cos_sin_cache_offsets)
 
     @staticmethod
@@ -165,8 +163,8 @@ class ipex_ops:
     @staticmethod
     def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
                            weight: torch.Tensor, epsilon: float) -> None:
-        tmp = ipex.llm.functional.add_rms_norm(residual, input, weight, None,
-                                               epsilon, True)
+        tmp = ipex.llm.functional.add_rms_norm(residual, input, weight, None, epsilon,
+                                               True)
         input.copy_(tmp)
 
     @staticmethod
@@ -195,15 +193,12 @@ class ipex_ops:
                 raise ValueError("IPEX CPU does not support logits_soft_cap")
             assert alibi_slopes is None
             assert window_size_left < 0 and window_size_right < 0
-            ipex.llm.functional.varlen_attention(query.contiguous(),
-                                                 key.contiguous(),
+            ipex.llm.functional.varlen_attention(query.contiguous(), key.contiguous(),
                                                  value.contiguous(), out,
-                                                 seqlen_q.int(),
-                                                 seqlen_k.int(), max_seqlen_q,
-                                                 max_seqlen_k, pdropout,
-                                                 softmax_scale, zero_tensors,
-                                                 is_causal, return_softmax,
-                                                 gen_)
+                                                 seqlen_q.int(), seqlen_k.int(),
+                                                 max_seqlen_q, max_seqlen_k, pdropout,
+                                                 softmax_scale, zero_tensors, is_causal,
+                                                 return_softmax, gen_)
         else:  # XPU build
             ipex.llm.functional.varlen_attention(
                 query.contiguous(), key.contiguous(), value.contiguous(), out,
@@ -224,12 +219,11 @@ class ipex_ops:
         v_scale: float,
     ) -> None:
         assert kv_cache_dtype == "auto"
-        ipex.llm.modules.PagedAttention.reshape_and_cache(
-            key, value, key_cache, value_cache, slot_mapping)
+        ipex.llm.modules.PagedAttention.reshape_and_cache(key, value, key_cache,
+                                                          value_cache, slot_mapping)
 
     @staticmethod
-    def copy_blocks(key_caches: list[torch.Tensor],
-                    value_caches: list[torch.Tensor],
+    def copy_blocks(key_caches: list[torch.Tensor], value_caches: list[torch.Tensor],
                     block_mapping: torch.Tensor) -> None:
         torch.xpu.copy_blocks(  # type: ignore
             key_caches,

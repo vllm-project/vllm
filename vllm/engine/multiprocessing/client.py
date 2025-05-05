@@ -87,8 +87,7 @@ class MQLLMEngineClient(EngineClient):
             every N seconds, confirming the engine is healthy
     """
 
-    def __init__(self, ipc_path: str, engine_config: VllmConfig,
-                 engine_pid: int):
+    def __init__(self, ipc_path: str, engine_config: VllmConfig, engine_pid: int):
         self.context = zmq.asyncio.Context()
         self._errored_with: Optional[BaseException] = None
 
@@ -102,8 +101,7 @@ class MQLLMEngineClient(EngineClient):
             model_config=self.model_config,
             scheduler_config=engine_config.scheduler_config,
             lora_config=engine_config.lora_config)
-        self.input_preprocessor = InputPreprocessor(self.model_config,
-                                                    self.tokenizer)
+        self.input_preprocessor = InputPreprocessor(self.model_config, self.tokenizer)
 
         # Send RPCGenerateRequest to the MQLLMEngine.
         self.input_socket: Socket = self.context.socket(zmq.constants.PUSH)
@@ -158,16 +156,14 @@ class MQLLMEngineClient(EngineClient):
                         self._engine_process.status() == psutil.STATUS_ZOMBIE):
                     # NB: is_running() returns True for zombies
                     self._set_errored(
-                        RuntimeError(
-                            f"Engine process (pid {self._engine_process.pid}) "
-                            "died."))
+                        RuntimeError(f"Engine process (pid {self._engine_process.pid}) "
+                                     "died."))
                     break
 
                 if await self.heartbeat_socket.poll(timeout=timeout):
                     # Heartbeat received- check the message
-                    await self._check_success(
-                        error_message="Heartbeat failed.",
-                        socket=self.heartbeat_socket)
+                    await self._check_success(error_message="Heartbeat failed.",
+                                              socket=self.heartbeat_socket)
 
                 logger.debug("Heartbeat successful.")
 
@@ -176,8 +172,7 @@ class MQLLMEngineClient(EngineClient):
 
         except psutil.NoSuchProcess:
             self._set_errored(
-                RuntimeError(
-                    f"Engine process (pid {self._engine_process.pid}) died."))
+                RuntimeError(f"Engine process (pid {self._engine_process.pid}) died."))
 
         except Exception as e:
             self._set_errored(e)
@@ -188,22 +183,19 @@ class MQLLMEngineClient(EngineClient):
         try:
             while True:
                 # Poll, checking for ENGINE_DEAD
-                while await self.output_socket.poll(timeout=VLLM_RPC_TIMEOUT
-                                                    ) == 0:
+                while await self.output_socket.poll(timeout=VLLM_RPC_TIMEOUT) == 0:
                     logger.debug("Waiting for output from MQLLMEngine.")
 
                     # If errored, alert all running requests.
                     if self.errored:
                         for queue_j in tuple(self.output_queues.values()):
-                            queue_j.put_nowait(
-                                ENGINE_DEAD_ERROR(self._errored_with))
+                            queue_j.put_nowait(ENGINE_DEAD_ERROR(self._errored_with))
                         return
 
                 message: Frame = await self.output_socket.recv(copy=False)
                 request_outputs = pickle.loads(message.buffer)
 
-                is_error = isinstance(request_outputs,
-                                      (BaseException, RPCError))
+                is_error = isinstance(request_outputs, (BaseException, RPCError))
                 if is_error:
                     if isinstance(request_outputs, RPCError):
                         rpc_error: RPCError = request_outputs
@@ -248,9 +240,8 @@ class MQLLMEngineClient(EngineClient):
                         if queue is not None:
                             queue.put_nowait(exception)
                 # Put each output into the appropriate queue.
-                elif isinstance(
-                        request_outputs,
-                    (RPCAdapterLoadedResponse, RPCIsSleepingResponse)):
+                elif isinstance(request_outputs,
+                                (RPCAdapterLoadedResponse, RPCIsSleepingResponse)):
                     self._add_output(request_outputs)
                 else:
                     for request_output in request_outputs:
@@ -259,8 +250,7 @@ class MQLLMEngineClient(EngineClient):
         except asyncio.CancelledError:
             logger.debug("Shutting down MQLLMEngineClient output handler.")
 
-    def _add_output(self, request_output: Union[RequestOutput,
-                                                RPCAdapterLoadedResponse,
+    def _add_output(self, request_output: Union[RequestOutput, RPCAdapterLoadedResponse,
                                                 RPCIsSleepingResponse]):
         queue = self.output_queues.get(request_output.request_id)
         if queue is not None:
@@ -276,8 +266,7 @@ class MQLLMEngineClient(EngineClient):
             # returned by the engine
             # setup will be called multiple times during the startup of
             # the engine
-            self.output_loop = asyncio.create_task(
-                self.run_output_handler_loop())
+            self.output_loop = asyncio.create_task(self.run_output_handler_loop())
 
         with self.get_data_socket() as socket:
             # Wait until server is ready.
@@ -307,10 +296,8 @@ class MQLLMEngineClient(EngineClient):
             self._errored_with = e
 
     @staticmethod
-    async def _send_get_data_rpc_request(request: RPCStartupRequest,
-                                         expected_type: Any,
-                                         error_message: str,
-                                         socket: Socket) -> Any:
+    async def _send_get_data_rpc_request(request: RPCStartupRequest, expected_type: Any,
+                                         error_message: str, socket: Socket) -> Any:
         """Send an RPC request that is expecting data back."""
 
         # Ping RPCServer with a request.
@@ -333,8 +320,7 @@ class MQLLMEngineClient(EngineClient):
         return data
 
     @staticmethod
-    async def _send_one_way_rpc_request(request: RPC_REQUEST_T,
-                                        socket: Socket):
+    async def _send_one_way_rpc_request(request: RPC_REQUEST_T, socket: Socket):
         """Send one-way RPC request to trigger an action."""
 
         if socket.closed:
@@ -367,8 +353,7 @@ class MQLLMEngineClient(EngineClient):
         # Raise error if unsuccessful
         if isinstance(response, BaseException):
             raise response
-        elif (not isinstance(response, str)
-              or response != VLLM_RPC_SUCCESS_STR):
+        elif (not isinstance(response, str) or response != VLLM_RPC_SUCCESS_STR):
             raise ValueError(error_message)
 
     async def get_input_preprocessor(self) -> InputPreprocessor:
@@ -402,8 +387,8 @@ class MQLLMEngineClient(EngineClient):
         """Send an ABORT_REQUEST signal to the RPC Server"""
 
         with suppress(MQClientClosedError):
-            await self._send_one_way_rpc_request(
-                request=RPCAbortRequest(request_id), socket=self.input_socket)
+            await self._send_one_way_rpc_request(request=RPCAbortRequest(request_id),
+                                                 socket=self.input_socket)
 
     async def do_log_stats(
         self,
@@ -508,9 +493,8 @@ class MQLLMEngineClient(EngineClient):
         assert (prompt is not None and sampling_params is not None
                 and request_id is not None)
 
-        return self._process_request(prompt, sampling_params, request_id,
-                                     lora_request, trace_headers,
-                                     prompt_adapter_request, priority)
+        return self._process_request(prompt, sampling_params, request_id, lora_request,
+                                     trace_headers, prompt_adapter_request, priority)
 
     @overload
     def encode(
@@ -594,8 +578,8 @@ class MQLLMEngineClient(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
-    ) -> Union[AsyncGenerator[RequestOutput, None], AsyncGenerator[
-            PoolingRequestOutput, None]]:
+    ) -> Union[AsyncGenerator[RequestOutput, None], AsyncGenerator[PoolingRequestOutput,
+                                                                   None]]:
         """Send an RPCGenerateRequest to the RPCServer and stream responses."""
 
         # If already dead, error out.
@@ -623,8 +607,7 @@ class MQLLMEngineClient(EngineClient):
                 )
 
         # 1) Create output queue for this requests.
-        queue: asyncio.Queue[Union[RequestOutput,
-                                   BaseException]] = asyncio.Queue()
+        queue: asyncio.Queue[Union[RequestOutput, BaseException]] = asyncio.Queue()
         self.output_queues[request_id] = queue
 
         try:
@@ -651,8 +634,7 @@ class MQLLMEngineClient(EngineClient):
                 ))
 
             # 3) Send the RPCGenerateRequest to the MQLLMEngine.
-            parts = (request_bytes,
-                     lp_bytes) if lp_bytes else (request_bytes, )
+            parts = (request_bytes, lp_bytes) if lp_bytes else (request_bytes, )
             await self.input_socket.send_multipart(parts, copy=False)
 
             # 4) Stream the RequestOutputs from the output queue. Note
@@ -678,32 +660,30 @@ class MQLLMEngineClient(EngineClient):
     async def start_profile(self) -> None:
         """Start profiling the engine"""
 
-        await self._send_one_way_rpc_request(
-            request=RPCUProfileRequest.START_PROFILE, socket=self.input_socket)
+        await self._send_one_way_rpc_request(request=RPCUProfileRequest.START_PROFILE,
+                                             socket=self.input_socket)
 
     async def stop_profile(self) -> None:
         """Stop profiling the engine"""
 
-        await self._send_one_way_rpc_request(
-            request=RPCUProfileRequest.STOP_PROFILE, socket=self.input_socket)
+        await self._send_one_way_rpc_request(request=RPCUProfileRequest.STOP_PROFILE,
+                                             socket=self.input_socket)
 
-    async def reset_prefix_cache(self,
-                                 device: Optional[Device] = None) -> None:
+    async def reset_prefix_cache(self, device: Optional[Device] = None) -> None:
         """Reset the prefix cache"""
 
-        await self._send_one_way_rpc_request(
-            request=RPCResetPrefixCacheRequest(device),
-            socket=self.input_socket)
+        await self._send_one_way_rpc_request(request=RPCResetPrefixCacheRequest(device),
+                                             socket=self.input_socket)
 
     async def sleep(self, level: int = 1) -> None:
         """Sleep the engine for a given level"""
-        return await self._send_one_way_rpc_request(
-            request=RPCSleepRequest(level), socket=self.input_socket)
+        return await self._send_one_way_rpc_request(request=RPCSleepRequest(level),
+                                                    socket=self.input_socket)
 
     async def wake_up(self, tags: Optional[list[str]] = None) -> None:
         """Wake up the engine"""
-        return await self._send_one_way_rpc_request(
-            request=RPCWakeUpRequest(tags), socket=self.input_socket)
+        return await self._send_one_way_rpc_request(request=RPCWakeUpRequest(tags),
+                                                    socket=self.input_socket)
 
     async def is_sleeping(self) -> bool:
         """Check whether the engine is sleeping"""

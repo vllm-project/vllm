@@ -45,8 +45,7 @@ def get_bench_params() -> list[bench_params_t]:
 
 # Reference impls
 def unfused_int8_impl(rms_norm_layer: RMSNorm, x: torch.Tensor,
-                      residual: Optional[torch.Tensor],
-                      quant_dtype: torch.dtype):
+                      residual: Optional[torch.Tensor], quant_dtype: torch.dtype):
     # Norm
     torch_out = None
     if residual is None:
@@ -59,8 +58,7 @@ def unfused_int8_impl(rms_norm_layer: RMSNorm, x: torch.Tensor,
 
 
 def unfused_fp8_impl(rms_norm_layer: RMSNorm, x: torch.Tensor,
-                     residual: Optional[torch.Tensor],
-                     quant_dtype: torch.dtype):
+                     residual: Optional[torch.Tensor], quant_dtype: torch.dtype):
     # Norm
     torch_out = None
     if residual is None:
@@ -86,8 +84,8 @@ def fused_impl(
 
 # Bench functions
 def bench_fn(rms_norm_layer: RMSNorm, x: torch.Tensor, residual: torch.Tensor,
-             quant_dtype: torch.dtype, label: str, sub_label: str,
-             fn: Callable, description: str) -> TMeasurement:
+             quant_dtype: torch.dtype, label: str, sub_label: str, fn: Callable,
+             description: str) -> TMeasurement:
 
     min_run_time = 1
 
@@ -115,10 +113,9 @@ def bench(params: bench_params_t, label: str, sub_label: str) \
     layer.weight.data.normal_(mean=1.0, std=0.1)
     # Make inputs
     scale = 1 / params.hidden_size
-    x = torch.randn(params.num_tokens,
-                    params.hidden_size,
-                    dtype=params.dtype,
-                    device='cuda') * scale
+    x = torch.randn(
+        params.num_tokens, params.hidden_size, dtype=params.dtype,
+        device='cuda') * scale
     residual = (torch.randn_like(x) * scale).to(device='cuda') \
             if params.add_residual else None
 
@@ -126,8 +123,8 @@ def bench(params: bench_params_t, label: str, sub_label: str) \
 
     # unfused int8 impl.
     timers.append(
-        bench_fn(layer, x, residual, torch.int8, label, sub_label,
-                 unfused_int8_impl, "unfused_int8_impl"))
+        bench_fn(layer, x, residual, torch.int8, label, sub_label, unfused_int8_impl,
+                 "unfused_int8_impl"))
 
     # unfused fp8 impl.
     timers.append(
@@ -141,8 +138,8 @@ def bench(params: bench_params_t, label: str, sub_label: str) \
 
     # fused fp8 impl.
     timers.append(
-        bench_fn(layer, x, residual, torch.float8_e4m3fn, label, sub_label,
-                 fused_impl, "fused_fp8_impl"))
+        bench_fn(layer, x, residual, torch.float8_e4m3fn, label, sub_label, fused_impl,
+                 "fused_fp8_impl"))
 
     print_timers(timers)
 
@@ -162,8 +159,7 @@ def main():
 
     timers = []
     for bp in tqdm(bench_params):
-        timers.extend(
-            bench(bp, "rms-norm-dynamic-per-token-quant", bp.description()))
+        timers.extend(bench(bp, "rms-norm-dynamic-per-token-quant", bp.description()))
     print_timers(timers)
 
     # pickle all the results

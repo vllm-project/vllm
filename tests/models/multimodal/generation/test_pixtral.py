@@ -139,8 +139,7 @@ def _dump_outputs_w_logprobs(
     json_data = [(tokens, text, [{
         k: asdict(v)
         for k, v in token_logprobs.items()
-    } for token_logprobs in (logprobs or [])])
-                 for tokens, text, logprobs in outputs]
+    } for token_logprobs in (logprobs or [])]) for tokens, text, logprobs in outputs]
 
     with open(filename, "w") as f:
         json.dump(json_data, f)
@@ -166,8 +165,7 @@ def test_chat(
     model: str,
     dtype: str,
 ) -> None:
-    EXPECTED_CHAT_LOGPROBS = load_outputs_w_logprobs(
-        FIXTURE_LOGPROBS_CHAT[model])
+    EXPECTED_CHAT_LOGPROBS = load_outputs_w_logprobs(FIXTURE_LOGPROBS_CHAT[model])
     with vllm_runner(
             model,
             dtype=dtype,
@@ -179,8 +177,7 @@ def test_chat(
     ) as vllm_model:
         outputs = []
         for msg in MSGS:
-            output = vllm_model.model.chat(msg,
-                                           sampling_params=SAMPLING_PARAMS)
+            output = vllm_model.model.chat(msg, sampling_params=SAMPLING_PARAMS)
 
             outputs.extend(output)
 
@@ -196,14 +193,14 @@ def test_chat(
 
 
 @large_gpu_test(min_gb=48)
-@pytest.mark.parametrize("prompt,expected_ranges",
-                         [(_create_engine_inputs_hf(IMG_URLS[:1]),
-                           [PlaceholderRange(offset=11, length=494)]),
-                          (_create_engine_inputs_hf(IMG_URLS[1:4]), [
-                              PlaceholderRange(offset=11, length=266),
-                              PlaceholderRange(offset=277, length=1056),
-                              PlaceholderRange(offset=1333, length=418)
-                          ])])
+@pytest.mark.parametrize("prompt,expected_ranges", [
+    (_create_engine_inputs_hf(IMG_URLS[:1]), [PlaceholderRange(offset=11, length=494)]),
+    (_create_engine_inputs_hf(IMG_URLS[1:4]), [
+        PlaceholderRange(offset=11, length=266),
+        PlaceholderRange(offset=277, length=1056),
+        PlaceholderRange(offset=1333, length=418)
+    ])
+])
 def test_multi_modal_placeholders(vllm_runner, prompt,
                                   expected_ranges: list[PlaceholderRange],
                                   monkeypatch) -> None:
@@ -220,8 +217,7 @@ def test_multi_modal_placeholders(vllm_runner, prompt,
 
         assert len(outputs) == 1, f"{len(outputs)=}"
         output: RequestOutput = outputs[0]
-        assert hasattr(output,
-                       "multi_modal_placeholders"), f"{output.__dict__=}"
+        assert hasattr(output, "multi_modal_placeholders"), f"{output.__dict__=}"
         assert "image" in output.multi_modal_placeholders, \
             f"{output.multi_modal_placeholders.keys()=}"
         image_placeholder_ranges: list[

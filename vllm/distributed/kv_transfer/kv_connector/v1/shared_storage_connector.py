@@ -83,8 +83,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
         logger.info(vllm_config.kv_transfer_config)
         logger.info("Shared storage path is %s", self._storage_path)
 
-    def start_load_kv(self, forward_context: "ForwardContext",
-                      **kwargs) -> None:
+    def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         """Start loading the KV cache from the connector buffer to vLLM's 
         paged KV buffer.
 
@@ -138,14 +137,12 @@ class SharedStorageConnector(KVConnectorBase_V1):
 
         if metadata is None:
             logger.warning(
-                "In connector.start_load_kv, but the connector metadata is None"
-            )
+                "In connector.start_load_kv, but the connector metadata is None")
             return
 
         attn_metadata = forward_context.attn_metadata
         if attn_metadata is None:
-            logger.warning(
-                "In connector.start_load_kv, but the attn_metadata is None")
+            logger.warning("In connector.start_load_kv, but the attn_metadata is None")
             return
 
         # Load the KV for each request each layer
@@ -159,12 +156,9 @@ class SharedStorageConnector(KVConnectorBase_V1):
                 kv_cache_layer = attn_layer.kv_cache[\
                         forward_context.virtual_engine]
 
-                filename = self._generate_filename_debug(
-                    layer_name, request.token_ids)
-                kv_cache = safetensors.torch.load_file(
-                    filename)["kv_cache"].cuda()
-                inject_kv_into_layer(kv_cache_layer, kv_cache,
-                                     request.slot_mapping)
+                filename = self._generate_filename_debug(layer_name, request.token_ids)
+                kv_cache = safetensors.torch.load_file(filename)["kv_cache"].cuda()
+                inject_kv_into_layer(kv_cache_layer, kv_cache, request.slot_mapping)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """Blocking until the KV for a specific layer is loaded into vLLM's
@@ -201,20 +195,16 @@ class SharedStorageConnector(KVConnectorBase_V1):
             """
             if isinstance(attn_metadata, MLACommonMetadata):
                 num_pages, page_size = layer.shape[0], layer.shape[1]
-                return layer.reshape(num_pages * page_size, -1)[slot_mapping,
-                                                                ...]
+                return layer.reshape(num_pages * page_size, -1)[slot_mapping, ...]
             num_pages, page_size = layer.shape[1], layer.shape[2]
-            return layer.reshape(2, num_pages * page_size, -1)[:, slot_mapping,
-                                                               ...]
+            return layer.reshape(2, num_pages * page_size, -1)[:, slot_mapping, ...]
 
         connector_metadata = self._get_connector_metadata()
         assert isinstance(connector_metadata, SharedStorageConnectorMetadata)
         for request in connector_metadata.requests:
             if request.is_store:
-                filename = self._generate_filename_debug(
-                    layer_name, request.token_ids)
-                kv_cache = extract_kv_from_layer(kv_layer,
-                                                 request.slot_mapping)
+                filename = self._generate_filename_debug(layer_name, request.token_ids)
+                kv_cache = extract_kv_from_layer(kv_layer, request.slot_mapping)
                 tensors = {"kv_cache": kv_cache.detach().cpu()}
                 safetensors.torch.save_file(tensors, filename)
 
@@ -259,8 +249,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
 
         return num_tokens_to_check - num_computed_tokens
 
-    def update_state_after_alloc(self, request: "Request",
-                                 num_external_tokens: int):
+    def update_state_after_alloc(self, request: "Request", num_external_tokens: int):
         """
         Update KVConnector state after block allocation.
 
@@ -357,8 +346,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
         ids.
         """
         input_ids_bytes = input_ids.numpy().tobytes()
-        input_ids_hash = hashlib.md5(input_ids_bytes,
-                                     usedforsecurity=False).hexdigest()
+        input_ids_hash = hashlib.md5(input_ids_bytes, usedforsecurity=False).hexdigest()
         foldername = os.path.join(self._storage_path, input_ids_hash)
         if create_folder:
             os.makedirs(foldername, exist_ok=True)
@@ -372,8 +360,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
         """Generate a file name based on the layer name and the hash 
         of the bytes of the input ids.
         """
-        foldername = self._generate_foldername_debug(input_ids,
-                                                     create_folder=True)
+        foldername = self._generate_foldername_debug(input_ids, create_folder=True)
         return os.path.join(foldername, f"{layer_name}.safetensors")
 
 

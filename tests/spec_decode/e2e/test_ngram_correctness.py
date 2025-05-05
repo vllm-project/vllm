@@ -71,9 +71,8 @@ from .conftest import run_equality_correctness_test
 @pytest.mark.parametrize("prefill_chunk_size", [-1, 4])
 @pytest.mark.parametrize("seed", [1])
 def test_ngram_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
-                                      per_test_common_llm_kwargs,
-                                      baseline_llm_kwargs, test_llm_kwargs,
-                                      batch_size: int, output_len: int,
+                                      per_test_common_llm_kwargs, baseline_llm_kwargs,
+                                      test_llm_kwargs, batch_size: int, output_len: int,
                                       prefill_chunk_size: int, seed: int):
     """Verify greedy equality on a tiny model with different batch size."""
     maybe_enable_chunked_prefill(prefill_chunk_size, common_llm_kwargs)
@@ -128,10 +127,9 @@ def test_ngram_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize("seed", [1])
 @pytest.mark.parametrize("logprobs", [1, 6])
 def test_ngram_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
-                                   per_test_common_llm_kwargs,
-                                   baseline_llm_kwargs, test_llm_kwargs,
-                                   batch_size: int, output_len: int, seed: int,
-                                   logprobs: int):
+                                   per_test_common_llm_kwargs, baseline_llm_kwargs,
+                                   test_llm_kwargs, batch_size: int, output_len: int,
+                                   seed: int, logprobs: int):
     """Verify greedy equality on a tiny model with different batch size."""
     run_equality_correctness_test(
         vllm_runner,
@@ -145,8 +143,7 @@ def test_ngram_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
         temperature=0.0,
         logprobs=logprobs,
         prompt_logprobs=logprobs,
-        disable_logprobs=test_llm_kwargs["speculative_config"]
-        ["disable_logprobs"])
+        disable_logprobs=test_llm_kwargs["speculative_config"]["disable_logprobs"])
 
 
 @pytest.mark.parametrize(
@@ -195,10 +192,11 @@ def test_ngram_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
     ])
 @pytest.mark.parametrize("batch_size", [4])
 @pytest.mark.parametrize("seed", [1])
-def test_ngram_e2e_greedy_correctness_with_preemption(
-        vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
-        baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
-        seed: int):
+def test_ngram_e2e_greedy_correctness_with_preemption(vllm_runner, common_llm_kwargs,
+                                                      per_test_common_llm_kwargs,
+                                                      baseline_llm_kwargs,
+                                                      test_llm_kwargs, batch_size: int,
+                                                      output_len: int, seed: int):
     """Verify greedy equality, even when some sequences are preempted mid-
     generation.
     """
@@ -254,10 +252,9 @@ def test_ngram_e2e_greedy_correctness_with_preemption(
         32,
     ])
 @pytest.mark.parametrize("seed", [1])
-def test_ngram_different_k(vllm_runner, common_llm_kwargs,
-                           per_test_common_llm_kwargs, baseline_llm_kwargs,
-                           test_llm_kwargs, batch_size: int, output_len: int,
-                           seed: int):
+def test_ngram_different_k(vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
+                           baseline_llm_kwargs, test_llm_kwargs, batch_size: int,
+                           output_len: int, seed: int):
     """Verify that ngram speculative decoding produces exact equality
     to without spec decode with many different values of k and
     different ngram prompt_lookup_max.
@@ -310,10 +307,9 @@ def test_ngram_different_k(vllm_runner, common_llm_kwargs,
         32,
     ])
 @pytest.mark.parametrize("seed", [1])
-def test_ngram_disable_queue(vllm_runner, common_llm_kwargs,
-                             per_test_common_llm_kwargs, baseline_llm_kwargs,
-                             test_llm_kwargs, batch_size: int, output_len: int,
-                             seed: int):
+def test_ngram_disable_queue(vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
+                             baseline_llm_kwargs, test_llm_kwargs, batch_size: int,
+                             output_len: int, seed: int):
     """Verify that ngram speculative decoding produces exact equality
     to without spec decode with many different values of k and
     different ngram prompt_lookup_max.
@@ -355,10 +351,9 @@ def test_ngram_disable_queue(vllm_runner, common_llm_kwargs,
         32,
     ])
 @pytest.mark.parametrize("seed", [1])
-def test_ngram_scorer(vllm_runner, common_llm_kwargs,
-                      per_test_common_llm_kwargs, baseline_llm_kwargs,
-                      test_llm_kwargs, batch_size: int, output_len: int,
-                      seed: int):
+def test_ngram_scorer(vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
+                      baseline_llm_kwargs, test_llm_kwargs, batch_size: int,
+                      output_len: int, seed: int):
     """Verify that ngram speculative decoding generates the same output 
     with batch expansion scorer and mqa scorer.
     """

@@ -101,8 +101,8 @@ master_port = get_open_port()
 handle = llm.collective_rpc.remote("init_weight_update_group",
                                    args=(master_address, master_port, 1, 3))
 
-model_update_group = stateless_init_process_group(master_address, master_port,
-                                                  0, 3, torch.device("cuda:0"))
+model_update_group = stateless_init_process_group(master_address, master_port, 0, 3,
+                                                  torch.device("cuda:0"))
 ray.get(handle)
 
 # simulate training, modify the weights of the model.
@@ -111,8 +111,7 @@ for name, p in train_model.named_parameters():
 
 # sync weight from the training process to the inference engine.
 for name, p in train_model.named_parameters():
-    handle = llm.collective_rpc.remote("update_weight",
-                                       args=(name, p.dtype, p.shape))
+    handle = llm.collective_rpc.remote("update_weight", args=(name, p.dtype, p.shape))
     model_update_group.broadcast(p, src=0, stream=torch.cuda.current_stream())
     ray.get(handle)
 

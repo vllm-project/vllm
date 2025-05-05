@@ -61,8 +61,7 @@ class PEFTHelper:
             if self.vllm_max_position_embeddings is None:
                 self.vllm_max_position_embeddings = self.context_length
             self.vllm_long_context_scaling_factor = float(
-                math.ceil(self.context_length /
-                          self.vllm_max_position_embeddings))
+                math.ceil(self.context_length / self.vllm_max_position_embeddings))
 
     @classmethod
     def from_dict(cls, config_dict: dict) -> "PEFTHelper":
@@ -78,14 +77,10 @@ class PEFTHelper:
         # Identify any missing required fields
         missing_fields = required_fields - set(config_dict.keys())
         if missing_fields:
-            raise ValueError(
-                f"Missing required configuration fields: {missing_fields}")
+            raise ValueError(f"Missing required configuration fields: {missing_fields}")
 
         # Filter out fields that aren't defined in the class
-        filtered_dict = {
-            k: v
-            for k, v in config_dict.items() if k in class_fields
-        }
+        filtered_dict = {k: v for k, v in config_dict.items() if k in class_fields}
         return cls(**filtered_dict)
 
     @classmethod
@@ -105,11 +100,9 @@ class PEFTHelper:
         """
         error_msg = self._validate_features()
         if self.r > lora_config.max_lora_rank:
-            error_msg.append(
-                f"LoRA rank {self.r} is greater than max_lora_rank"
-                f" {lora_config.max_lora_rank}.")
+            error_msg.append(f"LoRA rank {self.r} is greater than max_lora_rank"
+                             f" {lora_config.max_lora_rank}.")
         if self.bias != "none" and not lora_config.bias_enabled:
-            error_msg.append(
-                "Adapter bias cannot be used without bias_enabled.")
+            error_msg.append("Adapter bias cannot be used without bias_enabled.")
         if error_msg:
             raise ValueError(f"{' '.join(error_msg)}")

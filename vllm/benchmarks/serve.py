@@ -79,8 +79,7 @@ def sample_random_requests(
     range_ratio: float,
     tokenizer: PreTrainedTokenizerBase,
 ) -> list[tuple[str, int, int]]:
-    prefix_token_ids = np.random.randint(0,
-                                         tokenizer.vocab_size,
+    prefix_token_ids = np.random.randint(0, tokenizer.vocab_size,
                                          size=prefix_len).tolist()
 
     input_lens = np.random.randint(
@@ -100,8 +99,8 @@ def sample_random_requests(
                                   [(offsets[i] + i + j) % tokenizer.vocab_size
                                    for j in range(input_lens[i])])
 
-        input_requests.append((prompt, int(prefix_len + input_lens[i]),
-                               int(output_lens[i]), None))
+        input_requests.append(
+            (prompt, int(prefix_len + input_lens[i]), int(output_lens[i]), None))
 
     return input_requests
 
@@ -297,8 +296,7 @@ async def benchmark(
         raise ValueError(f"Unknown endpoint_type: {endpoint_type}")
 
     print("Starting initial single prompt test run...")
-    test_prompt, test_prompt_len, test_output_len, test_mm_content = (
-        input_requests[0])
+    test_prompt, test_prompt_len, test_output_len, test_mm_content = (input_requests[0])
     if endpoint_type != "openai-chat" and test_mm_content is not None:
         # multi-modal benchmark is only available on OpenAI Chat endpoint.
         raise ValueError("Multi-modal content is only supported on "
@@ -357,16 +355,13 @@ async def benchmark(
     # and it will simplify the code in limited_request_func.
     #    semaphore = (asyncio.Semaphore(max_concurrency)
     #                 if max_concurrency else contextlib.nullcontext())
-    semaphore = (asyncio.Semaphore(max_concurrency)
-                 if max_concurrency else None)
+    semaphore = (asyncio.Semaphore(max_concurrency) if max_concurrency else None)
 
     async def limited_request_func(request_func_input, pbar):
         if semaphore is None:
-            return await request_func(request_func_input=request_func_input,
-                                      pbar=pbar)
+            return await request_func(request_func_input=request_func_input, pbar=pbar)
         async with semaphore:
-            return await request_func(request_func_input=request_func_input,
-                                      pbar=pbar)
+            return await request_func(request_func_input=request_func_input, pbar=pbar)
 
     benchmark_start_time = time.perf_counter()
     tasks: list[asyncio.Task] = []
@@ -389,8 +384,7 @@ async def benchmark(
                                               ignore_eos=ignore_eos)
         tasks.append(
             asyncio.create_task(
-                limited_request_func(request_func_input=request_func_input,
-                                     pbar=pbar)))
+                limited_request_func(request_func_input=request_func_input, pbar=pbar)))
     outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
 
     if profile:
@@ -424,11 +418,9 @@ async def benchmark(
 
     print("{s:{c}^{n}}".format(s=' Serving Benchmark Result ', n=50, c='='))
     print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
-    print("{:<40} {:<10.2f}".format("Benchmark duration (s):",
-                                    benchmark_duration))
+    print("{:<40} {:<10.2f}".format("Benchmark duration (s):", benchmark_duration))
     print("{:<40} {:<10}".format("Total input tokens:", metrics.total_input))
-    print("{:<40} {:<10}".format("Total generated tokens:",
-                                 metrics.total_output))
+    print("{:<40} {:<10}".format("Total generated tokens:", metrics.total_output))
     print("{:<40} {:<10.2f}".format("Request throughput (req/s):",
                                     metrics.request_throughput))
     if goodput_config_dict:
@@ -445,8 +437,7 @@ async def benchmark(
         "total_input_tokens": metrics.total_input,
         "total_output_tokens": metrics.total_output,
         "request_throughput": metrics.request_throughput,
-        "request_goodput:":
-        metrics.request_goodput if goodput_config_dict else None,
+        "request_goodput:": metrics.request_goodput if goodput_config_dict else None,
         "output_throughput": metrics.output_throughput,
         "total_token_throughput": metrics.total_token_throughput,
         "input_lens": [output.prompt_len for output in outputs],
@@ -482,16 +473,13 @@ async def benchmark(
             metrics, f"median_{metric_attribute_name}_ms")
         result[f"std_{metric_attribute_name}_ms"] = getattr(
             metrics, f"std_{metric_attribute_name}_ms")
-        for p, value in getattr(metrics,
-                                f"percentiles_{metric_attribute_name}_ms"):
+        for p, value in getattr(metrics, f"percentiles_{metric_attribute_name}_ms"):
             p_word = str(int(p)) if int(p) == p else str(p)
-            print("{:<40} {:<10.2f}".format(f"P{p_word} {metric_name} (ms):",
-                                            value))
+            print("{:<40} {:<10.2f}".format(f"P{p_word} {metric_name} (ms):", value))
             result[f"p{p_word}_{metric_attribute_name}_ms"] = value
 
     process_one_metric("ttft", "TTFT", "Time to First Token")
-    process_one_metric("tpot", "TPOT",
-                       "Time per Output Token (excl. 1st token)")
+    process_one_metric("tpot", "TPOT", "Time per Output Token (excl. 1st token)")
     process_one_metric("itl", "ITL", "Inter-token Latency")
     process_one_metric("e2el", "E2EL", "End-to-end Latency")
 
@@ -508,15 +496,13 @@ def check_goodput_args(args):
         goodput_config_dict = parse_goodput(args.goodput)
         for slo_name, slo_val in goodput_config_dict.items():
             if slo_name not in VALID_NAMES:
-                raise ValueError(
-                    f"Invalid metric name found, {slo_name}: {slo_val}. "
-                    "The service level objective name should be one of "
-                    f"{str(VALID_NAMES)}. ")
+                raise ValueError(f"Invalid metric name found, {slo_name}: {slo_val}. "
+                                 "The service level objective name should be one of "
+                                 f"{str(VALID_NAMES)}. ")
             if slo_val < 0:
-                raise ValueError(
-                    f"Invalid value found, {slo_name}: {slo_val}. "
-                    "The service level objective value should be "
-                    "non-negative.")
+                raise ValueError(f"Invalid value found, {slo_name}: {slo_val}. "
+                                 "The service level objective value should be "
+                                 "non-negative.")
     return goodput_config_dict
 
 
@@ -535,13 +521,12 @@ def parse_goodput(slo_pairs):
     return goodput_config_dict
 
 
-def save_to_pytorch_benchmark_format(args: argparse.Namespace,
-                                     results: dict[str, Any],
+def save_to_pytorch_benchmark_format(args: argparse.Namespace, results: dict[str, Any],
                                      file_name: str) -> None:
     metrics = [
-        "median_ttft_ms", "mean_ttft_ms", "std_ttft_ms", "p99_ttft_ms",
-        "mean_tpot_ms", "median_tpot_ms", "std_tpot_ms", "p99_tpot_ms",
-        "median_itl_ms", "mean_itl_ms", "std_itl_ms", "p99_itl_ms"
+        "median_ttft_ms", "mean_ttft_ms", "std_ttft_ms", "p99_ttft_ms", "mean_tpot_ms",
+        "median_tpot_ms", "std_tpot_ms", "p99_tpot_ms", "median_itl_ms", "mean_itl_ms",
+        "std_itl_ms", "p99_itl_ms"
     ]
     # These raw data might be useful, but they are rather big. They can be added
     # later if needed
@@ -749,15 +734,13 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "--random-input-len",
         type=int,
         default=1024,
-        help=
-        "Number of input tokens per request, used only for random sampling.",
+        help="Number of input tokens per request, used only for random sampling.",
     )
     random_group.add_argument(
         "--random-output-len",
         type=int,
         default=128,
-        help=
-        "Number of output tokens per request, used only for random sampling.",
+        help="Number of output tokens per request, used only for random sampling.",
     )
     random_group.add_argument(
         "--random-range-ratio",
@@ -826,9 +809,8 @@ def main(args: argparse.Namespace):
     # TODO: This should be refactored to use the benchmark_dataset.py
     # in later PRs.
     if args.dataset_name is None:
-        raise ValueError(
-            "Please specify '--dataset-name' and the corresponding "
-            "'--dataset-path' if required.")
+        raise ValueError("Please specify '--dataset-name' and the corresponding "
+                         "'--dataset-path' if required.")
     elif args.dataset_name == "random":
         input_requests = sample_random_requests(
             prefix_len=args.random_prefix_len,
@@ -864,9 +846,7 @@ def main(args: argparse.Namespace):
             disable_tqdm=args.disable_tqdm,
             profile=args.profile,
             selected_percentile_metrics=args.percentile_metrics.split(","),
-            selected_percentiles=[
-                float(p) for p in args.metric_percentiles.split(",")
-            ],
+            selected_percentiles=[float(p) for p in args.metric_percentiles.split(",")],
             ignore_eos=args.ignore_eos,
             goodput_config_dict=goodput_config_dict,
             max_concurrency=args.max_concurrency,
@@ -895,12 +875,11 @@ def main(args: argparse.Namespace):
                     result_json[kvstring[0].strip()] = kvstring[1].strip()
                 else:
                     raise ValueError(
-                        "Invalid metadata format. Please use KEY=VALUE format."
-                    )
+                        "Invalid metadata format. Please use KEY=VALUE format.")
 
         # Traffic
-        result_json["request_rate"] = (args.request_rate if args.request_rate
-                                       < float("inf") else "inf")
+        result_json["request_rate"] = (args.request_rate
+                                       if args.request_rate < float("inf") else "inf")
         result_json["burstiness"] = args.burstiness
         result_json["max_concurrency"] = args.max_concurrency
 

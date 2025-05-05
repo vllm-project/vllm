@@ -115,8 +115,7 @@ class RequestStatsUpdate(
 
     # Timestamp when the update is recorded. This is used to record time
     # intervals between events rather than wall clock time.
-    monotonic_ts_s: float = msgspec_field(
-        default_factory=lambda: time.monotonic())
+    monotonic_ts_s: float = msgspec_field(default_factory=lambda: time.monotonic())
 
     ############################################################
     # Metadata associated with the update.
@@ -258,8 +257,7 @@ class RequestStats:
         Since a request could be preempted in decoding and later resumed
         to prefill the decoded tokens, we use the first prefill start timestamp.
         """
-        return (self.prefill_start_ts_s_lst[0]
-                if self.prefill_start_ts_s_lst else None)
+        return (self.prefill_start_ts_s_lst[0] if self.prefill_start_ts_s_lst else None)
 
     @property
     def e2e_latency_s(self) -> Optional[float]:
@@ -313,8 +311,7 @@ class RequestStats:
             return []
         latency_s_lst = []
         for i in range(1, len(self.output_token_ts_s_lst)):
-            assert (self.output_token_ts_s_lst[i]
-                    >= self.output_token_ts_s_lst[i - 1])
+            assert (self.output_token_ts_s_lst[i] >= self.output_token_ts_s_lst[i - 1])
             latency_s = (self.output_token_ts_s_lst[i] -
                          self.output_token_ts_s_lst[i - 1])
             latency_s_lst.append(latency_s)
@@ -370,8 +367,8 @@ class RequestStats:
         if len(self.output_token_ts_s_lst) == 0:
             self.first_token_ts_s = ts_s
             assert (
-                self.prefill_ts_s is not None
-            ), "Request must be running before generating output tokens."
+                self.prefill_ts_s
+                is not None), "Request must be running before generating output tokens."
 
         # Some X new tokens were generated at the ts.
         self.output_token_ts_s_lst.extend([ts_s] * num_new_tokens)
@@ -412,8 +409,7 @@ class SchedulerStats:
     # Number of requests currently waiting.
     num_waiting_reqs: int = 0
 
-    kv_cache_stats: KVCacheStats = dataclass_field(
-        default_factory=KVCacheStats)
+    kv_cache_stats: KVCacheStats = dataclass_field(default_factory=KVCacheStats)
 
 
 @dataclass
@@ -438,8 +434,7 @@ class EngineCoreStatsSnapshot(
     """
 
     # Snapshot of the scheduler stats.
-    scheduler_stats: SchedulerStats = msgspec_field(
-        default_factory=SchedulerStats)
+    scheduler_stats: SchedulerStats = msgspec_field(default_factory=SchedulerStats)
 
     # Per request stats updates.
     requests_stats_updates: list[RequestStatsUpdate] = msgspec_field(

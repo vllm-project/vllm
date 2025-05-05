@@ -12,9 +12,7 @@ from .utils import ARGS, CONFIGS, ServerConfig
 
 # select models to test based on command line arguments
 def pytest_addoption(parser):
-    parser.addoption("--models",
-                     nargs="+",
-                     help="Specify one or more models to test")
+    parser.addoption("--models", nargs="+", help="Specify one or more models to test")
     parser.addoption("--extended",
                      action="store_true",
                      default=False,

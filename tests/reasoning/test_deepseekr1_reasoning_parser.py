@@ -258,11 +258,10 @@ def test_reasoning(
     output = deepseek_r1_qwen_tokenizer.tokenize(param_dict["output"])
     # decode everything to tokens
     output_tokens: list[str] = [
-        deepseek_r1_qwen_tokenizer.convert_tokens_to_string([token])
-        for token in output
+        deepseek_r1_qwen_tokenizer.convert_tokens_to_string([token]) for token in output
     ]
-    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(
-        parser_name)(deepseek_r1_qwen_tokenizer)
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        deepseek_r1_qwen_tokenizer)
 
     reasoning, content = run_reasoning_extraction(parser,
                                                   output_tokens,

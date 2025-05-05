@@ -51,8 +51,7 @@ def get_mla_metadata(
                                  dtype torch.int32.
         num_splits: (batch_size + 1), dtype torch.int32.
     """
-    return torch.ops._flashmla_C.get_mla_metadata(cache_seqlens,
-                                                  num_heads_per_head_k,
+    return torch.ops._flashmla_C.get_mla_metadata(cache_seqlens, num_heads_per_head_k,
                                                   num_heads_k)
 
 

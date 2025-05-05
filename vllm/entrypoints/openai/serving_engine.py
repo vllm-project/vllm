@@ -52,14 +52,13 @@ from vllm.utils import is_list_of, make_async, random_uuid
 logger = init_logger(__name__)
 
 CompletionLikeRequest = Union[CompletionRequest, DetokenizeRequest,
-                              EmbeddingCompletionRequest, RerankRequest,
-                              ScoreRequest, TokenizeCompletionRequest]
+                              EmbeddingCompletionRequest, RerankRequest, ScoreRequest,
+                              TokenizeCompletionRequest]
 
 ChatLikeRequest = Union[ChatCompletionRequest, EmbeddingChatRequest,
                         TokenizeChatRequest]
 
-AnyRequest = Union[CompletionLikeRequest, ChatLikeRequest,
-                   TranscriptionRequest]
+AnyRequest = Union[CompletionLikeRequest, ChatLikeRequest, TranscriptionRequest]
 
 
 class TextTokensPrompt(TypedDict):
@@ -97,17 +96,14 @@ class OpenAIServing:
         self._tokenize_prompt_input_async = make_async(
             self._tokenize_prompt_input, executor=self._tokenizer_executor)
         self._tokenize_prompt_input_or_inputs_async = make_async(
-            self._tokenize_prompt_input_or_inputs,
-            executor=self._tokenizer_executor)
+            self._tokenize_prompt_input_or_inputs, executor=self._tokenizer_executor)
 
     def create_error_response(
             self,
             message: str,
             err_type: str = "BadRequestError",
             status_code: HTTPStatus = HTTPStatus.BAD_REQUEST) -> ErrorResponse:
-        return ErrorResponse(message=message,
-                             type=err_type,
-                             code=status_code.value)
+        return ErrorResponse(message=message, type=err_type, code=status_code.value)
 
     def create_streaming_error_response(
             self,
@@ -131,9 +127,7 @@ class OpenAIServing:
 
         if self._is_model_supported(request.model):
             return None
-        if request.model in [
-                lora.lora_name for lora in self.models.lora_requests
-        ]:
+        if request.model in [lora.lora_name for lora in self.models.lora_requests]:
             return None
         if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING and request.model and (
                 load_result := await self.models.resolve_lora(request.model)):
@@ -177,8 +171,7 @@ class OpenAIServing:
         add_special_tokens: bool,
     ) -> TextTokensPrompt:
         if (self.model_config.encoder_config is not None
-                and self.model_config.encoder_config.get(
-                    "do_lower_case", False)):
+                and self.model_config.encoder_config.get("do_lower_case", False)):
             prompt = prompt.lower()
 
         if truncate_prompt_tokens is None:
@@ -220,27 +213,24 @@ class OpenAIServing:
         token_num = len(input_ids)
 
         # Note: EmbeddingRequest and ScoreRequest doesn't have max_tokens
-        if isinstance(request,
-                      (EmbeddingChatRequest, EmbeddingCompletionRequest,
-                       ScoreRequest, RerankRequest)):
+        if isinstance(request, (EmbeddingChatRequest, EmbeddingCompletionRequest,
+                                ScoreRequest, RerankRequest)):
 
             operation = "score" if isinstance(request, ScoreRequest) \
                 else "embedding generation"
             if token_num > self.max_model_len:
-                raise ValueError(
-                    f"This model's maximum context length is "
-                    f"{self.max_model_len} tokens. However, you requested "
-                    f"{token_num} tokens in the input for {operation}. "
-                    f"Please reduce the length of the input.")
-            return TextTokensPrompt(prompt=input_text,
-                                    prompt_token_ids=input_ids)
+                raise ValueError(f"This model's maximum context length is "
+                                 f"{self.max_model_len} tokens. However, you requested "
+                                 f"{token_num} tokens in the input for {operation}. "
+                                 f"Please reduce the length of the input.")
+            return TextTokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
         # Note: TokenizeRequest and DetokenizeRequest doesn't have max_tokens
         # and does not require model context length validation
-        if isinstance(request, (TokenizeCompletionRequest, TokenizeChatRequest,
-                                DetokenizeRequest)):
-            return TextTokensPrompt(prompt=input_text,
-                                    prompt_token_ids=input_ids)
+        if isinstance(
+                request,
+            (TokenizeCompletionRequest, TokenizeChatRequest, DetokenizeRequest)):
+            return TextTokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
         # chat completion endpoint supports max_completion_tokens
         if isinstance(request, ChatCompletionRequest):
@@ -250,19 +240,17 @@ class OpenAIServing:
             max_tokens = request.max_tokens
         if max_tokens is None:
             if token_num >= self.max_model_len:
-                raise ValueError(
-                    f"This model's maximum context length is "
-                    f"{self.max_model_len} tokens. However, you requested "
-                    f"{token_num} tokens in the messages, "
-                    f"Please reduce the length of the messages.")
+                raise ValueError(f"This model's maximum context length is "
+                                 f"{self.max_model_len} tokens. However, you requested "
+                                 f"{token_num} tokens in the messages, "
+                                 f"Please reduce the length of the messages.")
         elif token_num + max_tokens > self.max_model_len:
-            raise ValueError(
-                f"This model's maximum context length is "
-                f"{self.max_model_len} tokens. However, you requested "
-                f"{max_tokens + token_num} tokens "
-                f"({token_num} in the messages, "
-                f"{max_tokens} in the completion). "
-                f"Please reduce the length of the messages or completion.")
+            raise ValueError(f"This model's maximum context length is "
+                             f"{self.max_model_len} tokens. However, you requested "
+                             f"{max_tokens + token_num} tokens "
+                             f"({token_num} in the messages, "
+                             f"{max_tokens} in the completion). "
+                             f"Please reduce the length of the messages or completion.")
 
         return TextTokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
@@ -341,9 +329,8 @@ class OpenAIServing:
                 tokenizer,
                 prompt=prompt_input["content"],
                 truncate_prompt_tokens=truncate_prompt_tokens,
-                add_special_tokens=add_special_tokens)
-            if prompt_input["is_tokens"] is False else
-            self._normalize_prompt_tokens_to_input(
+                add_special_tokens=add_special_tokens) if prompt_input["is_tokens"]
+            is False else self._normalize_prompt_tokens_to_input(
                 request,
                 tokenizer,
                 prompt_ids=prompt_input["content"],
@@ -389,8 +376,7 @@ class OpenAIServing:
         tool_parser: Optional[Callable[[AnyTokenizer], ToolParser]] = None,
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
         add_special_tokens: bool = False,
-    ) -> tuple[list[ConversationMessage], Sequence[RequestPrompt],
-               list[TokensPrompt]]:
+    ) -> tuple[list[ConversationMessage], Sequence[RequestPrompt], list[TokensPrompt]]:
         model_config = self.model_config
 
         resolved_content_format = resolve_chat_template_content_format(
@@ -457,14 +443,13 @@ class OpenAIServing:
             )
         else:
             # For MistralTokenizer
-            assert is_list_of(request_prompt, int), (
-                "Prompt has to be either a string or a list of token ids")
-            prompt_inputs = TextTokensPrompt(
-                prompt=tokenizer.decode(request_prompt),
-                prompt_token_ids=request_prompt)
+            assert is_list_of(
+                request_prompt,
+                int), ("Prompt has to be either a string or a list of token ids")
+            prompt_inputs = TextTokensPrompt(prompt=tokenizer.decode(request_prompt),
+                                             prompt_token_ids=request_prompt)
 
-        engine_prompt = TokensPrompt(
-            prompt_token_ids=prompt_inputs["prompt_token_ids"])
+        engine_prompt = TokensPrompt(prompt_token_ids=prompt_inputs["prompt_token_ids"])
         if mm_data is not None:
             engine_prompt["multi_modal_data"] = mm_data
         if request.mm_processor_kwargs is not None:
@@ -479,8 +464,7 @@ class OpenAIServing:
         self,
         request_id: str,
         inputs: RequestPrompt,
-        params: Optional[Union[SamplingParams, PoolingParams,
-                               BeamSearchParams]],
+        params: Optional[Union[SamplingParams, PoolingParams, BeamSearchParams]],
         lora_request: Optional[LoRARequest],
         prompt_adapter_request: Optional[PromptAdapterRequest],
     ) -> None:
@@ -558,8 +542,7 @@ class OpenAIServing:
 
 
 def clamp_prompt_logprobs(
-    prompt_logprobs: Union[PromptLogprobs,
-                           None]) -> Union[PromptLogprobs, None]:
+        prompt_logprobs: Union[PromptLogprobs, None]) -> Union[PromptLogprobs, None]:
     if prompt_logprobs is None:
         return prompt_logprobs
 

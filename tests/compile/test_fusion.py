@@ -36,9 +36,8 @@ class TestModel(torch.nn.Module):
             torch.rand(hidden_size, hidden_size).to(dtype=FP8_DTYPE).t()
             for _ in range(2)
         ]
-        self.fp8_linear = Fp8LinearOp(
-            cutlass_fp8_supported=cutlass_fp8_enabled,
-            use_per_token_if_dynamic=True)
+        self.fp8_linear = Fp8LinearOp(cutlass_fp8_supported=cutlass_fp8_enabled,
+                                      use_per_token_if_dynamic=True)
 
     def forward(self, x):
         resid = torch.sqrt(x)

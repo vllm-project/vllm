@@ -42,10 +42,8 @@ class Processor:
         self.decoding_config = vllm_config.decoding_config
         self.tokenizer = tokenizer
 
-        self.generation_config_fields = (
-            self.model_config.try_get_generation_config())
-        self.input_preprocessor = InputPreprocessor(self.model_config,
-                                                    self.tokenizer,
+        self.generation_config_fields = (self.model_config.try_get_generation_config())
+        self.input_preprocessor = InputPreprocessor(self.model_config, self.tokenizer,
                                                     mm_registry)
 
         self.mm_input_cache_client = MirroredProcessingCache(self.model_config)
@@ -61,15 +59,13 @@ class Processor:
         max_logprobs = self.model_config.max_logprobs
         # Validate sample logprobs.
         if params.logprobs and params.logprobs > max_logprobs:
-            raise ValueError(
-                f"Requested sample logprobs of {params.logprobs}, "
-                f"which is greater than max allowed: {max_logprobs}")
+            raise ValueError(f"Requested sample logprobs of {params.logprobs}, "
+                             f"which is greater than max allowed: {max_logprobs}")
 
         # Validate prompt logprobs.
         if params.prompt_logprobs and params.prompt_logprobs > max_logprobs:
-            raise ValueError(
-                f"Requested prompt logprobs of {params.prompt_logprobs}, "
-                f"which is greater than max allowed: {max_logprobs}")
+            raise ValueError(f"Requested prompt logprobs of {params.prompt_logprobs}, "
+                             f"which is greater than max allowed: {max_logprobs}")
 
     def _validate_sampling_params(
         self,
@@ -84,8 +80,7 @@ class Processor:
             raise ValueError("allowed_token_ids is not None and empty!")
         vocab_size = self.model_config.get_vocab_size()
         if not all(0 <= tid < vocab_size for tid in params.allowed_token_ids):
-            raise ValueError(
-                "allowed_token_ids contains out-of-vocab token id!")
+            raise ValueError("allowed_token_ids contains out-of-vocab token id!")
 
     def _validate_logit_bias(
         self,
@@ -103,9 +98,8 @@ class Processor:
                 invalid_token_ids.append(token_id)
 
         if invalid_token_ids:
-            raise ValueError(
-                f"token_id(s) {invalid_token_ids} in logit_bias contain "
-                f"out-of-vocab token ids. Vocabulary size: {vocab_size}")
+            raise ValueError(f"token_id(s) {invalid_token_ids} in logit_bias contain "
+                             f"out-of-vocab token ids. Vocabulary size: {vocab_size}")
 
     def _validate_supported_sampling_params(
         self,
@@ -251,11 +245,10 @@ class Processor:
         sampling_params = params.clone()
         # If unset max tokens, then generate up to the max_model_len.
         if sampling_params.max_tokens is None:
-            sampling_params.max_tokens = (
-                self.model_config.max_model_len -
-                len(decoder_inputs["prompt_token_ids"]))
-        sampling_params.update_from_generation_config(
-            self.generation_config_fields, eos_token_id)
+            sampling_params.max_tokens = (self.model_config.max_model_len -
+                                          len(decoder_inputs["prompt_token_ids"]))
+        sampling_params.update_from_generation_config(self.generation_config_fields,
+                                                      eos_token_id)
         sampling_params.update_from_tokenizer(
             self.tokenizer.get_lora_tokenizer(lora_request))
 
@@ -292,13 +285,12 @@ class Processor:
                     items = decoder_mm_inputs.get_items(modality)
                     item = items[used_indices[modality]]
 
-                    orig_sorted_mm_inputs.append(
-                        MultiModalKwargs.from_items([item]))
+                    orig_sorted_mm_inputs.append(MultiModalKwargs.from_items([item]))
                     used_indices[modality] += 1
             else:
                 orig_sorted_mm_inputs = [
-                    MultiModalKwargs.from_items([item]) for item in
-                    decoder_mm_inputs.get_items(sorted_item_modalities[0])
+                    MultiModalKwargs.from_items([item])
+                    for item in decoder_mm_inputs.get_items(sorted_item_modalities[0])
                 ]
 
             if sorted_mm_hashes is not None:
@@ -330,9 +322,7 @@ class Processor:
                                        lora_request,
                                        prompt_type="encoder")
 
-        self._validate_model_input(decoder_inputs,
-                                   lora_request,
-                                   prompt_type="decoder")
+        self._validate_model_input(decoder_inputs, lora_request, prompt_type="decoder")
 
     def _validate_model_input(
         self,
@@ -375,9 +365,8 @@ class Processor:
                     "inputs, the number of image tokens depends on the number "
                     "of images, and possibly their aspect ratios as well.")
             else:
-                suggestion = (
-                    "Make sure that `max_model_len` is no smaller than the "
-                    "number of text tokens.")
+                suggestion = ("Make sure that `max_model_len` is no smaller than the "
+                              "number of text tokens.")
 
             raise ValueError(
                 f"The {prompt_type} prompt (length {len(prompt_ids)}) is "

@@ -32,8 +32,7 @@ def get_lora_requests(lora_path) -> list[LoRARequest]:
     return lora_requests
 
 
-async def requests_processing_time(llm,
-                                   lora_requests: list[LoRARequest]) -> float:
+async def requests_processing_time(llm, lora_requests: list[LoRARequest]) -> float:
 
     sampling_params = SamplingParams(n=1,
                                      temperature=0.0,
@@ -120,12 +119,10 @@ async def test_add_lora(chatglm3_lora_files):
         else:
             # No way to check V0 engine results as the calls just return None.
             pass
-        time_with_add_lora = await requests_processing_time(
-            llm, warmup_run_requests)
+        time_with_add_lora = await requests_processing_time(llm, warmup_run_requests)
 
         # Run without any warmup
-        time_cold_start = await requests_processing_time(
-            llm, cold_run_requests)
+        time_cold_start = await requests_processing_time(llm, cold_run_requests)
 
     print(f"time hot-start {time_with_add_lora} vs "
           f"time cold-start {time_cold_start} ")

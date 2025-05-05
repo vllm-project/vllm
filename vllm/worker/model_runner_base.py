@@ -24,8 +24,8 @@ T = TypeVar('T', bound="BroadcastableModelInput")
 
 
 def _add_attn_metadata_broadcastable_dict(
-        tensor_dict: Dict[str, Any],
-        attn_metadata: Optional["AttentionMetadata"]) -> None:
+        tensor_dict: Dict[str,
+                          Any], attn_metadata: Optional["AttentionMetadata"]) -> None:
     """
     Helper method to update tensor_dict with broadcastable
     AttentionMetadata fields.
@@ -149,8 +149,7 @@ class ModelRunnerInputBuilderBase(ABC, Generic[T]):
   """
 
     @abstractmethod
-    def prepare(self,
-                finished_requests_ids: Optional[List[str]] = None) -> None:
+    def prepare(self, finished_requests_ids: Optional[List[str]] = None) -> None:
         raise NotImplementedError
 
     @abstractmethod

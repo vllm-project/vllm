@@ -49,9 +49,9 @@ except ImportError:
     _write_stream = tensorizer.placeholder_attr("_write_stream")
 
 __all__ = [
-    'EncryptionParams', 'DecryptionParams', 'TensorDeserializer',
-    'TensorSerializer', 'open_stream', 'convert_bytes', 'get_mem_usage',
-    'no_init_or_tensor', 'TensorizerConfig'
+    'EncryptionParams', 'DecryptionParams', 'TensorDeserializer', 'TensorSerializer',
+    'open_stream', 'convert_bytes', 'get_mem_usage', 'no_init_or_tensor',
+    'TensorizerConfig'
 ]
 
 logger = init_logger(__name__)
@@ -96,24 +96,20 @@ class TensorizerConfig:
     ) -> None:
         if parallel_config.tensor_parallel_size > 1 \
             and not self._is_sharded:
-            raise ValueError(
-                "For a sharded model, tensorizer_uri should include a"
-                " string format template like '%04d' to be formatted"
-                " with the rank of the shard")
+            raise ValueError("For a sharded model, tensorizer_uri should include a"
+                             " string format template like '%04d' to be formatted"
+                             " with the rank of the shard")
 
     def verify_with_model_config(self, model_config: "ModelConfig") -> None:
-        if (model_config.quantization is not None
-                and self.tensorizer_uri is not None):
-            logger.warning(
-                "Loading a model using Tensorizer with quantization on vLLM"
-                " is unstable and may lead to errors.")
+        if (model_config.quantization is not None and self.tensorizer_uri is not None):
+            logger.warning("Loading a model using Tensorizer with quantization on vLLM"
+                           " is unstable and may lead to errors.")
 
     def open_stream(self, tensorizer_args: Optional["TensorizerArgs"] = None):
         if tensorizer_args is None:
             tensorizer_args = self._construct_tensorizer_args()
 
-        return open_stream(self.tensorizer_uri,
-                           **tensorizer_args.stream_params)
+        return open_stream(self.tensorizer_uri, **tensorizer_args.stream_params)
 
 
 def load_with_tensorizer(tensorizer_config: TensorizerConfig,
@@ -124,8 +120,8 @@ def load_with_tensorizer(tensorizer_config: TensorizerConfig,
 
 @dataclass
 class TensorizerArgs:
-    tensorizer_uri: Union[io.BufferedIOBase, io.RawIOBase, BinaryIO, str,
-                          bytes, os.PathLike, int]
+    tensorizer_uri: Union[io.BufferedIOBase, io.RawIOBase, BinaryIO, str, bytes,
+                          os.PathLike, int]
     vllm_tensorized: Optional[bool] = False
     verify_hash: Optional[bool] = False
     num_readers: Optional[int] = None
@@ -260,10 +256,9 @@ class TensorizerArgs:
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace) -> "TensorizerArgs":
         attrs = [attr.name for attr in dataclasses.fields(cls)]
-        tensorizer_args = cls(**{
-            attr: getattr(args, attr)
-            for attr in attrs if hasattr(args, attr)
-        })
+        tensorizer_args = cls(
+            **{attr: getattr(args, attr)
+               for attr in attrs if hasattr(args, attr)})
         return tensorizer_args
 
 
@@ -279,8 +274,7 @@ class TensorizerAgent:
 
     def __init__(self, tensorizer_config: TensorizerConfig, vllm_config):
         self.tensorizer_config = tensorizer_config
-        self.tensorizer_args = (
-            self.tensorizer_config._construct_tensorizer_args())
+        self.tensorizer_args = (self.tensorizer_config._construct_tensorizer_args())
         self.vllm_config = vllm_config
         self.model = self._init_model()
 
@@ -292,16 +286,14 @@ class TensorizerAgent:
         # TODO: Do we need to consider old-style model class?
         with no_init_or_tensor(), set_current_vllm_config(self.vllm_config,
                                                           check_compile=True):
-            return self.tensorizer_config.model_class(
-                vllm_config=self.vllm_config, )
+            return self.tensorizer_config.model_class(vllm_config=self.vllm_config, )
 
     def _resize_lora_embeddings(self):
         """Modify LoRA embedding layers to use bigger tensors
         to allow for adapter added tokens."""
         for child in self.model.modules():
             if (isinstance(child, VocabParallelEmbedding)
-                    and child.weight.shape[0]
-                    < child.num_embeddings_per_partition):
+                    and child.weight.shape[0] < child.num_embeddings_per_partition):
                 new_weight = torch.empty(child.num_embeddings_per_partition,
                                          child.embedding_dim,
                                          dtype=child.weight.dtype,
@@ -338,12 +330,11 @@ class TensorizerAgent:
         start = time.perf_counter()
         with _read_stream(
                 self.tensorizer_config.tensorizer_uri,
-                **self.tensorizer_args.stream_params
-        ) as stream, TensorDeserializer(
-                stream,
-                dtype=self.tensorizer_config.dtype,
-                device=f'cuda:{torch.cuda.current_device()}',
-                **self.tensorizer_args.deserializer_params) as deserializer:
+                **self.tensorizer_args.stream_params) as stream, TensorDeserializer(
+                    stream,
+                    dtype=self.tensorizer_config.dtype,
+                    device=f'cuda:{torch.cuda.current_device()}',
+                    **self.tensorizer_args.deserializer_params) as deserializer:
             deserializer.load_into_module(self.model)
             end = time.perf_counter()
 
@@ -352,8 +343,8 @@ class TensorizerAgent:
         per_second = convert_bytes(deserializer.total_tensor_bytes / duration)
         after_mem = get_mem_usage()
         deserializer.close()
-        logger.info("Deserialized %s in %0.2fs, %s/s", total_bytes_str,
-                    end - start, per_second)
+        logger.info("Deserialized %s in %0.2fs, %s/s", total_bytes_str, end - start,
+                    per_second)
         logger.info("Memory usage before: %s", before_mem)
         logger.info("Memory usage after: %s", after_mem)
 
@@ -376,8 +367,7 @@ def tensorizer_weights_iterator(
     deserializer_args = tensorizer_args.deserializer_params
     stream_params = tensorizer_args.stream_params
     stream = open_stream(tensorizer_args.tensorizer_uri, **stream_params)
-    with TensorDeserializer(stream, **deserializer_args,
-                            device="cpu") as state:
+    with TensorDeserializer(stream, **deserializer_args, device="cpu") as state:
         yield from state.items()
     del state
 
@@ -395,8 +385,8 @@ def is_vllm_tensorized(tensorizer_config: "TensorizerConfig") -> bool:
         bool: True if the model is a vLLM model, False otherwise.
     """
     tensorizer_args = tensorizer_config._construct_tensorizer_args()
-    deserializer = TensorDeserializer(open_stream(
-        tensorizer_args.tensorizer_uri, **tensorizer_args.stream_params),
+    deserializer = TensorDeserializer(open_stream(tensorizer_args.tensorizer_uri,
+                                                  **tensorizer_args.stream_params),
                                       **tensorizer_args.deserializer_params,
                                       lazy_load=True)
     if tensorizer_config.vllm_tensorized:
@@ -446,8 +436,7 @@ def tensorize_vllm_model(engine_args: EngineArgs,
     """
     engine_config = engine_args.create_engine_config()
     tensorizer_config.verify_with_model_config(engine_config.model_config)
-    tensorizer_config.verify_with_parallel_config(
-        engine_config.parallel_config)
+    tensorizer_config.verify_with_parallel_config(engine_config.parallel_config)
 
     # generate the encryption key before creating the engine to support sharding
     if generate_keyfile and (keyfile :=

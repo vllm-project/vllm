@@ -77,10 +77,7 @@ class Zamba2LoRA(nn.Module):
             B_class = MergedColumnParallelLinear
         else:
             B_class = ColumnParallelLinear
-        self.B = B_class(rank,
-                         output_dim,
-                         bias=False,
-                         quant_config=quant_config)
+        self.B = B_class(rank, output_dim, bias=False, quant_config=quant_config)
 
     def forward(
         self,
@@ -237,8 +234,7 @@ class Zamba2Attention(nn.Module):
             Output tensor [batch_size, seq_len, hidden_size]
         """
         qkv, _ = self.qkv_proj(hidden_states)
-        query_states, key_states, value_states = qkv.split([self.qkv_size] * 3,
-                                                           dim=-1)
+        query_states, key_states, value_states = qkv.split([self.qkv_size] * 3, dim=-1)
 
         if self.config.use_shared_attention_adapter:
             # Apply adapter transformations to Q, K, V if enabled
@@ -258,8 +254,7 @@ class Zamba2Attention(nn.Module):
             value_states = value_states + v_lora_output
 
         if self.config.use_mem_rope:
-            query_states, key_states = self.rotary_emb(position_ids,
-                                                       query_states,
+            query_states, key_states = self.rotary_emb(position_ids, query_states,
                                                        key_states)
 
         y = self.dpa_list[block_idx](query_states, key_states, value_states)
@@ -329,8 +324,7 @@ class Zamba2MLP(nn.Module):
                 gate_up_proj_adapter = nn.Identity()
             self.gate_up_proj_adapter_list.append(gate_up_proj_adapter)
 
-    def forward(self, hidden_states: torch.Tensor,
-                block_idx: int) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor, block_idx: int) -> torch.Tensor:
         """Forward pass through the MLP layer.
         
         Args:
@@ -409,11 +403,9 @@ class Zamba2AttentionDecoderLayer(nn.Module):
 
         # Initialize layer normalizations
         # Input normalization operates on concatenated states
-        self.input_layernorm = RMSNorm(2 * config.hidden_size,
-                                       eps=config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(2 * config.hidden_size, eps=config.rms_norm_eps)
         # Pre-FF normalization operates on attention output
-        self.pre_ff_layernorm = RMSNorm(config.hidden_size,
-                                        eps=config.rms_norm_eps)
+        self.pre_ff_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -439,8 +431,8 @@ class Zamba2AttentionDecoderLayer(nn.Module):
         # (which is the output of the previous (mamba) layer).
         # The concatenated tensor is then used as input of the pre-attention
         # RMSNorm (see fig. 2 in https://arxiv.org/pdf/2405.16712).
-        hidden_states = torch.concatenate(
-            [hidden_states, original_hidden_states], dim=-1)
+        hidden_states = torch.concatenate([hidden_states, original_hidden_states],
+                                          dim=-1)
 
         # Layer norm before attention
         hidden_states = self.input_layernorm(hidden_states)
@@ -500,8 +492,7 @@ class Zamba2MambaDecoderLayer(nn.Module):
         )
 
         # Input normalization
-        self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -586,8 +577,7 @@ class Zamba2HybridLayer(nn.Module):
                                        config.hidden_size,
                                        bias=False,
                                        quant_config=quant_config)
-        self.mamba_decoder = Zamba2MambaDecoderLayer(config,
-                                                     quant_config=quant_config)
+        self.mamba_decoder = Zamba2MambaDecoderLayer(config, quant_config=quant_config)
 
     def forward(
         self,
@@ -700,16 +690,14 @@ class Zamba2Model(nn.Module):
             if layer_type == "hybrid":
                 block = next(blocks)
                 block_idx = layer2block_map[layer_idx]
-                layers.append(
-                    Zamba2HybridLayer(block, config, block_idx, quant_config))
+                layers.append(Zamba2HybridLayer(block, config, block_idx, quant_config))
             else:
-                layers.append(
-                    Zamba2MambaDecoderLayer(config, quant_config=quant_config))
+                layers.append(Zamba2MambaDecoderLayer(config,
+                                                      quant_config=quant_config))
         self.layers = nn.ModuleList(layers)
 
         # Final layer normalization
-        self.final_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
+        self.final_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Convert input token IDs to embeddings.
@@ -770,8 +758,7 @@ class Zamba2Model(nn.Module):
         hidden_states = self.final_layernorm(hidden_states)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -785,8 +772,7 @@ class Zamba2Model(nn.Module):
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in chkpt_weight_name:
                     continue
-                chkpt_weight_name = chkpt_weight_name.replace(
-                    weight_name, param_name)
+                chkpt_weight_name = chkpt_weight_name.replace(weight_name, param_name)
                 param = params_dict[chkpt_weight_name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -795,8 +781,7 @@ class Zamba2Model(nn.Module):
                 if chkpt_weight_name not in params_dict:
                     continue
                 param = params_dict[chkpt_weight_name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(chkpt_weight_name)
         return loaded_params
@@ -898,9 +883,10 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
         # Initialize Mamba cache if needed
         if self.mamba_cache is None:
             num_mamba_layers = self.config.num_hidden_layers
-            self.mamba_cache = MambaCacheManager(
-                self.vllm_config, self.lm_head.weight.dtype, num_mamba_layers,
-                *self._get_mamba_cache_shape())
+            self.mamba_cache = MambaCacheManager(self.vllm_config,
+                                                 self.lm_head.weight.dtype,
+                                                 num_mamba_layers,
+                                                 *self._get_mamba_cache_shape())
 
         # Get cache parameters for current run
         mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
@@ -915,8 +901,7 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
 
         return hidden_states
 
-    def copy_inputs_before_cuda_graphs(self, input_buffers: Dict[str,
-                                                                 torch.Tensor],
+    def copy_inputs_before_cuda_graphs(self, input_buffers: Dict[str, torch.Tensor],
                                        **kwargs) -> Dict[str, torch.Tensor]:
         """Copy inputs before CUDA graph capture.
         
@@ -927,11 +912,10 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
         Returns:
             Updated input buffers
         """
-        return self.mamba_cache.copy_inputs_before_cuda_graphs(
-            input_buffers, **kwargs)
+        return self.mamba_cache.copy_inputs_before_cuda_graphs(input_buffers, **kwargs)
 
-    def get_seqlen_agnostic_capture_inputs(
-            self, batch_size: int) -> Dict[str, torch.Tensor]:
+    def get_seqlen_agnostic_capture_inputs(self,
+                                           batch_size: int) -> Dict[str, torch.Tensor]:
         """Get inputs for sequence-length-agnostic graph capture.
         
         Args:
@@ -941,8 +925,7 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
         """
         return self.mamba_cache.get_seqlen_agnostic_capture_inputs(batch_size)
 
-    def _get_mamba_cache_shape(
-            self) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+    def _get_mamba_cache_shape(self) -> Tuple[Tuple[int, int], Tuple[int, int]]:
         """Calculate shapes for Mamba's convolutional and state caches.
         
         Returns:
@@ -959,13 +942,12 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
 
         # if n_groups is not divisible by world_size, need to extend the shards
         # to ensure all groups needed by a head is sharded along with it
-        n_groups = (self.config.mamba_ngroups + extra_groups_for_head_shards(
-            self.config.mamba_ngroups, world_size))
+        n_groups = (self.config.mamba_ngroups +
+                    extra_groups_for_head_shards(self.config.mamba_ngroups, world_size))
 
         # Calculate conv state shape (includes groups)
         # - heads and n_groups are TP-ed
-        conv_dim = (intermediate_size +
-                    2 * n_groups * self.config.mamba_d_state)
+        conv_dim = (intermediate_size + 2 * n_groups * self.config.mamba_d_state)
         conv_state_shape = (
             divide(conv_dim, world_size),
             self.config.mamba_d_conv - 1,
@@ -976,8 +958,7 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
         # - they are typically small
         #   e.g., (h_heads, d_head, d_state) = (128, 64, 128)
         temporal_state_shape = (
-            divide(divide(intermediate_size, self.config.mamba_headdim),
-                   world_size),
+            divide(divide(intermediate_size, self.config.mamba_headdim), world_size),
             self.config.mamba_headdim,
             self.config.mamba_d_state,
         )
@@ -998,11 +979,9 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
         Returns:
             Logits for next token prediction
         """
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

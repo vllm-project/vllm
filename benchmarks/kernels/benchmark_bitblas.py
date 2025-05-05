@@ -170,8 +170,7 @@ shapes = [
 ]
 
 # Build test shapes with all the shared arguments
-test_shapes = [(MatmulConfig, Matmul, (*shape, *shared_args))
-               for shape in shapes]
+test_shapes = [(MatmulConfig, Matmul, (*shape, *shared_args)) for shape in shapes]
 
 benchmark_sets = []
 benchmark_sets.extend(test_shapes)
@@ -206,9 +205,7 @@ for config_key, values in benchmark_results.items():
     func_name = args_split[0]
     input_args_str = "-".join(args_split[1:])
     col_widths[0] = max(col_widths[0], len(func_name) + 2, len(headers[0]) + 2)
-    col_widths[1] = max(col_widths[1],
-                        len(input_args_str) + 2,
-                        len(headers[1]) + 2)
+    col_widths[1] = max(col_widths[1], len(input_args_str) + 2, len(headers[1]) + 2)
     col_widths[2] = max(col_widths[2],
                         len(f"{values['BitBLAS_top20_latency']:.3f} ms") + 2,
                         len(headers[2]) + 2)

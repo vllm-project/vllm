@@ -42,10 +42,8 @@ async def serve_http(app: FastAPI,
 
     loop = asyncio.get_running_loop()
 
-    watchdog_task = loop.create_task(
-        watchdog_loop(server, app.state.engine_client))
-    server_task = loop.create_task(
-        server.serve(sockets=[sock] if sock else None))
+    watchdog_task = loop.create_task(watchdog_loop(server, app.state.engine_client))
+    server_task = loop.create_task(server.serve(sockets=[sock] if sock else None))
 
     ssl_cert_refresher = None if not enable_ssl_refresh else SSLCertRefresher(
         ssl_context=config.ssl,
@@ -73,9 +71,8 @@ async def serve_http(app: FastAPI,
         port = uvicorn_kwargs["port"]
         process = find_process_using_port(port)
         if process is not None:
-            logger.debug(
-                "port %s is used by process %s launched with command:\n%s",
-                port, process, " ".join(process.cmdline()))
+            logger.debug("port %s is used by process %s launched with command:\n%s",
+                         port, process, " ".join(process.cmdline()))
         logger.info("Shutting down FastAPI HTTP server.")
         return server.shutdown()
     finally:

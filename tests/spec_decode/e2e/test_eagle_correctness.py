@@ -69,15 +69,13 @@ PRECISION = "float32"
 @pytest.mark.parametrize("batch_size", [1, 32])
 @pytest.mark.parametrize("seed", [1])
 def test_eagle_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
-                                      per_test_common_llm_kwargs,
-                                      baseline_llm_kwargs, test_llm_kwargs,
-                                      batch_size: int, output_len: int,
+                                      per_test_common_llm_kwargs, baseline_llm_kwargs,
+                                      test_llm_kwargs, batch_size: int, output_len: int,
                                       seed: int):
 
     run_equality_correctness_test(vllm_runner, common_llm_kwargs,
-                                  per_test_common_llm_kwargs,
-                                  baseline_llm_kwargs, test_llm_kwargs,
-                                  batch_size, output_len, seed)
+                                  per_test_common_llm_kwargs, baseline_llm_kwargs,
+                                  test_llm_kwargs, batch_size, output_len, seed)
 
 
 @pytest.mark.parametrize(
@@ -117,10 +115,9 @@ def test_eagle_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize("seed", [1])
 @pytest.mark.parametrize("logprobs", [1, 6])
 def test_eagle_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
-                                   per_test_common_llm_kwargs,
-                                   baseline_llm_kwargs, test_llm_kwargs,
-                                   batch_size: int, output_len: int, seed: int,
-                                   logprobs: int):
+                                   per_test_common_llm_kwargs, baseline_llm_kwargs,
+                                   test_llm_kwargs, batch_size: int, output_len: int,
+                                   seed: int, logprobs: int):
 
     run_equality_correctness_test(
         vllm_runner,
@@ -133,8 +130,7 @@ def test_eagle_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
         seed,
         logprobs=logprobs,
         prompt_logprobs=logprobs,
-        disable_logprobs=test_llm_kwargs["speculative_config"]
-        ["disable_logprobs"])
+        disable_logprobs=test_llm_kwargs["speculative_config"]["disable_logprobs"])
 
 
 @pytest.mark.parametrize(
@@ -166,16 +162,16 @@ def test_eagle_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
 ])
 @pytest.mark.parametrize("batch_size", [1, 32])
 @pytest.mark.parametrize("seed", [1])
-def test_eagle_e2e_greedy_correctness_cuda_graph(
-        vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
-        baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
-        seed: int):
+def test_eagle_e2e_greedy_correctness_cuda_graph(vllm_runner, common_llm_kwargs,
+                                                 per_test_common_llm_kwargs,
+                                                 baseline_llm_kwargs, test_llm_kwargs,
+                                                 batch_size: int, output_len: int,
+                                                 seed: int):
     """Verify greedy equality with cuda graph enabled and different
     batch sizes."""
     run_equality_correctness_test(vllm_runner, common_llm_kwargs,
-                                  per_test_common_llm_kwargs,
-                                  baseline_llm_kwargs, test_llm_kwargs,
-                                  batch_size, output_len, seed)
+                                  per_test_common_llm_kwargs, baseline_llm_kwargs,
+                                  test_llm_kwargs, batch_size, output_len, seed)
 
 
 @pytest.mark.parametrize(
@@ -213,17 +209,17 @@ def test_eagle_e2e_greedy_correctness_cuda_graph(
     ])
 @pytest.mark.parametrize("batch_size", [4])
 @pytest.mark.parametrize("seed", [1])
-def test_eagle_e2e_greedy_correctness_with_preemption(
-        vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
-        baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
-        seed: int):
+def test_eagle_e2e_greedy_correctness_with_preemption(vllm_runner, common_llm_kwargs,
+                                                      per_test_common_llm_kwargs,
+                                                      baseline_llm_kwargs,
+                                                      test_llm_kwargs, batch_size: int,
+                                                      output_len: int, seed: int):
     """Verify greedy equality, even when some sequences are preempted mid-
     generation.
     """
     run_equality_correctness_test(vllm_runner, common_llm_kwargs,
-                                  per_test_common_llm_kwargs,
-                                  baseline_llm_kwargs, test_llm_kwargs,
-                                  batch_size, output_len, seed)
+                                  per_test_common_llm_kwargs, baseline_llm_kwargs,
+                                  test_llm_kwargs, batch_size, output_len, seed)
 
 
 @pytest.mark.parametrize(
@@ -260,17 +256,15 @@ def test_eagle_e2e_greedy_correctness_with_preemption(
         32,
     ])
 @pytest.mark.parametrize("seed", [1])
-def test_eagle_different_k(vllm_runner, common_llm_kwargs,
-                           per_test_common_llm_kwargs, baseline_llm_kwargs,
-                           test_llm_kwargs, batch_size: int, output_len: int,
-                           seed: int):
+def test_eagle_different_k(vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
+                           baseline_llm_kwargs, test_llm_kwargs, batch_size: int,
+                           output_len: int, seed: int):
     """Verify that eagle speculative decoding produces exact equality
     to without spec decode with different values of num_speculative_tokens.
     """
     run_equality_correctness_test(vllm_runner, common_llm_kwargs,
-                                  per_test_common_llm_kwargs,
-                                  baseline_llm_kwargs, test_llm_kwargs,
-                                  batch_size, output_len, seed)
+                                  per_test_common_llm_kwargs, baseline_llm_kwargs,
+                                  test_llm_kwargs, batch_size, output_len, seed)
 
 
 @pytest.mark.parametrize(
@@ -302,18 +296,16 @@ def test_eagle_different_k(vllm_runner, common_llm_kwargs,
         32,
     ])
 @pytest.mark.parametrize("seed", [1])
-def test_eagle_disable_queue(vllm_runner, common_llm_kwargs,
-                             per_test_common_llm_kwargs, baseline_llm_kwargs,
-                             test_llm_kwargs, batch_size: int, output_len: int,
-                             seed: int):
+def test_eagle_disable_queue(vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
+                             baseline_llm_kwargs, test_llm_kwargs, batch_size: int,
+                             output_len: int, seed: int):
     """Verify that eagle speculative decoding produces exact equality
     to without spec decode when speculation is disabled for large
     batch sizes.
     """
     run_equality_correctness_test(vllm_runner, common_llm_kwargs,
-                                  per_test_common_llm_kwargs,
-                                  baseline_llm_kwargs, test_llm_kwargs,
-                                  batch_size, output_len, seed)
+                                  per_test_common_llm_kwargs, baseline_llm_kwargs,
+                                  test_llm_kwargs, batch_size, output_len, seed)
 
 
 @pytest.mark.parametrize(
@@ -351,9 +343,9 @@ def test_eagle_disable_queue(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize("seed", [1])
 def test_llama2_eagle_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
                                              per_test_common_llm_kwargs,
-                                             baseline_llm_kwargs,
-                                             test_llm_kwargs, batch_size: int,
-                                             output_len: int, seed: int):
+                                             baseline_llm_kwargs, test_llm_kwargs,
+                                             batch_size: int, output_len: int,
+                                             seed: int):
 
     run_equality_correctness_test(vllm_runner,
                                   common_llm_kwargs,
@@ -401,9 +393,9 @@ def test_llama2_eagle_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize("seed", [1])
 def test_llama3_eagle_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
                                              per_test_common_llm_kwargs,
-                                             baseline_llm_kwargs,
-                                             test_llm_kwargs, batch_size: int,
-                                             output_len: int, seed: int):
+                                             baseline_llm_kwargs, test_llm_kwargs,
+                                             batch_size: int, output_len: int,
+                                             seed: int):
 
     run_equality_correctness_test(vllm_runner,
                                   common_llm_kwargs,
@@ -451,9 +443,9 @@ def test_llama3_eagle_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize("seed", [1])
 def test_qwen2_eagle_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
                                             per_test_common_llm_kwargs,
-                                            baseline_llm_kwargs,
-                                            test_llm_kwargs, batch_size: int,
-                                            output_len: int, seed: int):
+                                            baseline_llm_kwargs, test_llm_kwargs,
+                                            batch_size: int, output_len: int,
+                                            seed: int):
 
     run_equality_correctness_test(vllm_runner,
                                   common_llm_kwargs,

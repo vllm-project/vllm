@@ -126,9 +126,7 @@ async def test_healthcheck_response_time(
         return end_time - start_time
 
     no_load_response_time = get_response_time(server.url_for("health"))
-    tasks = [
-        asyncio.create_task(create_func(**body)) for _ in range(num_requests)
-    ]
+    tasks = [asyncio.create_task(create_func(**body)) for _ in range(num_requests)]
     await asyncio.sleep(1)  # give the tasks a chance to start running
     load_response_time = get_response_time(server.url_for("health"))
 

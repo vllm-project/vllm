@@ -126,8 +126,8 @@ class PlaceholderAttentionMetadata(AttentionMetadata):
         # Compute some attn_metadata fields which default to None
         query_start_loc = (None if self.query_start_loc is None else
                            self.query_start_loc[:self.num_prefills + 1])
-        seq_lens = (None if self.seq_lens is None else
-                    self.seq_lens[:self.num_prefills])
+        seq_lens = (None
+                    if self.seq_lens is None else self.seq_lens[:self.num_prefills])
         seq_lens_tensor = (None if self.seq_lens_tensor is None else
                            self.seq_lens_tensor[:self.num_prefills])
         seq_start_loc = (None if self.seq_start_loc is None else
@@ -144,8 +144,7 @@ class PlaceholderAttentionMetadata(AttentionMetadata):
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=0,
             slot_mapping=slot_mapping,
-            multi_modal_placeholder_index_maps=self.
-            multi_modal_placeholder_index_maps,
+            multi_modal_placeholder_index_maps=self.multi_modal_placeholder_index_maps,
             enable_kv_scales_calculation=self.enable_kv_scales_calculation,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
@@ -252,12 +251,11 @@ class PlaceholderAttentionMetadata(AttentionMetadata):
 
         # Update sequences, masking off entries greater than num_queries
         device = self.seq_lens_tensor.device
-        mask = torch.arange(self.seq_lens_tensor.size(0),
-                            device=device) < num_queries
+        mask = torch.arange(self.seq_lens_tensor.size(0), device=device) < num_queries
         self.seq_lens_tensor += mask.to(self.seq_lens_tensor.dtype)
         if sampled_token_ids is not None:
-            model_input.input_tokens.masked_scatter_(
-                mask, sampled_token_ids[:num_queries])
+            model_input.input_tokens.masked_scatter_(mask,
+                                                     sampled_token_ids[:num_queries])
 
 
 class PlaceholderAttentionMetadataBuilder(
@@ -273,34 +271,30 @@ class PlaceholderAttentionMetadataBuilder(
         self.context_lens: List[int] = []
         self.curr_seq_lens: List[int] = []
         self.multimodal_placeholder_maps: Dict[
-            str,
-            MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
+            str, MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
         self.num_prefills = 0
         self.num_prefill_tokens = 0
         self.num_decode_tokens = 0
 
-    def _add_seq_group(
-            self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
-            chunked_prefill_enabled: bool):
+    def _add_seq_group(self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
+                       chunked_prefill_enabled: bool):
         """Add a sequence group to the metadata. Specifically update/append
         1. context length.
         """
         is_prompt = inter_data.is_prompt
 
-        for (seq_id, token_len, seq_len, curr_seq_len, query_len, context_len,
-             curr_sliding_window_block) in zip(
+        for (seq_id, token_len, seq_len, curr_seq_len, query_len,
+             context_len, curr_sliding_window_block) in zip(
                  inter_data.seq_ids, [len(t) for t in inter_data.input_tokens],
-                 inter_data.orig_seq_lens, inter_data.seq_lens,
-                 inter_data.query_lens, inter_data.context_lens,
-                 inter_data.curr_sliding_window_blocks):
+                 inter_data.orig_seq_lens, inter_data.seq_lens, inter_data.query_lens,
+                 inter_data.context_lens, inter_data.curr_sliding_window_blocks):
             self.context_lens.append(context_len)
 
             if is_prompt:
                 mm_maps = inter_data.multi_modal_placeholder_maps
                 if mm_maps:
                     for modality, placeholders in mm_maps.items():
-                        self.multimodal_placeholder_maps[modality].extend(
-                            placeholders)
+                        self.multimodal_placeholder_maps[modality].extend(placeholders)
 
                 self.num_prefills += 1
                 self.num_prefill_tokens += token_len
@@ -349,20 +343,18 @@ class PlaceholderAttentionMetadataBuilder(
         assert max_query_len > 0, ("query_lens: {}".format(query_lens))
 
         assert device is not None
-        context_lens_tensor = async_tensor_h2d(self.context_lens, torch.int,
-                                               device, self.runner.pin_memory)
+        context_lens_tensor = async_tensor_h2d(self.context_lens, torch.int, device,
+                                               self.runner.pin_memory)
         seq_lens_tensor = async_tensor_h2d(seq_lens, torch.int, device,
                                            self.runner.pin_memory)
-        query_start_loc_tensor = async_tensor_h2d(query_start_loc, torch.int32,
-                                                  device,
+        query_start_loc_tensor = async_tensor_h2d(query_start_loc, torch.int32, device,
                                                   self.runner.pin_memory)
-        seq_start_loc_tensor = async_tensor_h2d(seq_start_loc, torch.int32,
-                                                device, self.runner.pin_memory)
+        seq_start_loc_tensor = async_tensor_h2d(seq_start_loc, torch.int32, device,
+                                                self.runner.pin_memory)
 
         placeholder_index_maps = {
             modality: placeholder_map.index_map()
-            for modality, placeholder_map in
-            self.multimodal_placeholder_maps.items()
+            for modality, placeholder_map in self.multimodal_placeholder_maps.items()
         }
 
         # Placeholders

@@ -30,8 +30,8 @@ A {class}`transformers.image_utils.ImageInput` representing a single image
 item, which can be passed to a HuggingFace `ImageProcessor`.
 """
 
-HfVideoItem: TypeAlias = Union[list[Image], np.ndarray, torch.Tensor,
-                               list[np.ndarray], list[torch.Tensor]]
+HfVideoItem: TypeAlias = Union[list[Image], np.ndarray, torch.Tensor, list[np.ndarray],
+                               list[torch.Tensor]]
 """
 A {class}`transformers.image_utils.VideoInput` representing a single video
 item, which can be passed to a HuggingFace `VideoProcessor`.
@@ -63,8 +63,7 @@ which are treated as video embeddings;
 these are directly passed to the model without HF processing.
 """
 
-AudioItem: TypeAlias = Union[HfAudioItem, tuple[np.ndarray, float],
-                             torch.Tensor]
+AudioItem: TypeAlias = Union[HfAudioItem, tuple[np.ndarray, float], torch.Tensor]
 """
 Represents a single audio
 item, which can be passed to a HuggingFace `AudioProcessor`.
@@ -464,9 +463,7 @@ class MultiModalFieldConfig:
         )
 
     @staticmethod
-    def flat_from_sizes(modality: str,
-                        size_per_item: torch.Tensor,
-                        dim: int = 0):
+    def flat_from_sizes(modality: str, size_per_item: torch.Tensor, dim: int = 0):
         """
         Defines a field where an element in the batch is obtained by
         slicing along the first dimension of the underlying data.
@@ -623,9 +620,8 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
             batch_sizes = {k: len(v) for k, v in elems_in_modality.items()}
 
             if len(set(batch_sizes.values())) > 1:
-                raise ValueError(
-                    f"Cannot merge different batch sizes for {modality=}! "
-                    f"Found: {batch_sizes=}")
+                raise ValueError(f"Cannot merge different batch sizes for {modality=}! "
+                                 f"Found: {batch_sizes=}")
 
             batch_size = next(iter(batch_sizes.values()))
             for item_idx in range(batch_size):
@@ -761,9 +757,8 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
 
     def _validate_modality(self, method_name: str, modality: str) -> None:
         if not self._items_by_modality:
-            raise RuntimeError(
-                f"`{method_name}` is not supported when "
-                "MultiModalKwargs is not initialized with `items`")
+            raise RuntimeError(f"`{method_name}` is not supported when "
+                               "MultiModalKwargs is not initialized with `items`")
 
         if modality not in self._items_by_modality:
             available_modalities = set(self._items_by_modality.keys())

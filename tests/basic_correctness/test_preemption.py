@@ -171,8 +171,7 @@ def test_preemption_infeasible(
             max_model_len=((prefill_blocks + decode_blocks // 2) * BLOCK_SIZE),
             distributed_executor_backend=distributed_executor_backend,
     ) as vllm_model:
-        sampling_params = SamplingParams(max_tokens=max_tokens,
-                                         ignore_eos=True)
+        sampling_params = SamplingParams(max_tokens=max_tokens, ignore_eos=True)
         req_outputs = vllm_model.model.generate(
             example_prompts,
             sampling_params=sampling_params,

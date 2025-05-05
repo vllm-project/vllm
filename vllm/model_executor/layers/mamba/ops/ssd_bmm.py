@@ -14,78 +14,69 @@ import triton.language as tl
 
 @triton.autotune(
     configs=[
-        triton.Config(
-            {
-                'BLOCK_SIZE_M': 128,
-                'BLOCK_SIZE_N': 256,
-                'BLOCK_SIZE_K': 64
-            },
-            num_stages=3,
-            num_warps=8),
-        triton.Config(
-            {
-                'BLOCK_SIZE_M': 64,
-                'BLOCK_SIZE_N': 256,
-                'BLOCK_SIZE_K': 32
-            },
-            num_stages=4,
-            num_warps=4),
-        triton.Config(
-            {
-                'BLOCK_SIZE_M': 128,
-                'BLOCK_SIZE_N': 128,
-                'BLOCK_SIZE_K': 32
-            },
-            num_stages=4,
-            num_warps=4),
-        triton.Config(
-            {
-                'BLOCK_SIZE_M': 128,
-                'BLOCK_SIZE_N': 64,
-                'BLOCK_SIZE_K': 32
-            },
-            num_stages=4,
-            num_warps=4),
-        triton.Config(
-            {
-                'BLOCK_SIZE_M': 64,
-                'BLOCK_SIZE_N': 128,
-                'BLOCK_SIZE_K': 32
-            },
-            num_stages=4,
-            num_warps=4),
-        triton.Config(
-            {
-                'BLOCK_SIZE_M': 128,
-                'BLOCK_SIZE_N': 32,
-                'BLOCK_SIZE_K': 32
-            },
-            num_stages=4,
-            num_warps=4),
-        triton.Config(
-            {
-                'BLOCK_SIZE_M': 64,
-                'BLOCK_SIZE_N': 32,
-                'BLOCK_SIZE_K': 32
-            },
-            num_stages=5,
-            num_warps=2),
-        triton.Config(
-            {
-                'BLOCK_SIZE_M': 32,
-                'BLOCK_SIZE_N': 64,
-                'BLOCK_SIZE_K': 32
-            },
-            num_stages=5,
-            num_warps=2),
-        triton.Config(
-            {
-                'BLOCK_SIZE_M': 64,
-                'BLOCK_SIZE_N': 64,
-                'BLOCK_SIZE_K': 32
-            },
-            num_stages=4,
-            num_warps=2),
+        triton.Config({
+            'BLOCK_SIZE_M': 128,
+            'BLOCK_SIZE_N': 256,
+            'BLOCK_SIZE_K': 64
+        },
+                      num_stages=3,
+                      num_warps=8),
+        triton.Config({
+            'BLOCK_SIZE_M': 64,
+            'BLOCK_SIZE_N': 256,
+            'BLOCK_SIZE_K': 32
+        },
+                      num_stages=4,
+                      num_warps=4),
+        triton.Config({
+            'BLOCK_SIZE_M': 128,
+            'BLOCK_SIZE_N': 128,
+            'BLOCK_SIZE_K': 32
+        },
+                      num_stages=4,
+                      num_warps=4),
+        triton.Config({
+            'BLOCK_SIZE_M': 128,
+            'BLOCK_SIZE_N': 64,
+            'BLOCK_SIZE_K': 32
+        },
+                      num_stages=4,
+                      num_warps=4),
+        triton.Config({
+            'BLOCK_SIZE_M': 64,
+            'BLOCK_SIZE_N': 128,
+            'BLOCK_SIZE_K': 32
+        },
+                      num_stages=4,
+                      num_warps=4),
+        triton.Config({
+            'BLOCK_SIZE_M': 128,
+            'BLOCK_SIZE_N': 32,
+            'BLOCK_SIZE_K': 32
+        },
+                      num_stages=4,
+                      num_warps=4),
+        triton.Config({
+            'BLOCK_SIZE_M': 64,
+            'BLOCK_SIZE_N': 32,
+            'BLOCK_SIZE_K': 32
+        },
+                      num_stages=5,
+                      num_warps=2),
+        triton.Config({
+            'BLOCK_SIZE_M': 32,
+            'BLOCK_SIZE_N': 64,
+            'BLOCK_SIZE_K': 32
+        },
+                      num_stages=5,
+                      num_warps=2),
+        triton.Config({
+            'BLOCK_SIZE_M': 64,
+            'BLOCK_SIZE_N': 64,
+            'BLOCK_SIZE_K': 32
+        },
+                      num_stages=4,
+                      num_warps=2),
     ],
     key=['chunk_size', 'K', 'IS_CAUSAL'],
 )
@@ -142,10 +133,8 @@ def _bmm_chunk_fwd_kernel(
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     offs_k = tl.arange(0, BLOCK_SIZE_K)
-    a_ptrs = a_ptr + (offs_m[:, None] * stride_a_seqlen +
-                      offs_k[None, :] * stride_ak)
-    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk +
-                      offs_n[None, :] * stride_b_seqlen)
+    a_ptrs = a_ptr + (offs_m[:, None] * stride_a_seqlen + offs_k[None, :] * stride_ak)
+    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_n[None, :] * stride_b_seqlen)
     chunk_size_limit = min(chunk_size, seqlen - pid_c * chunk_size)
 
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
@@ -176,20 +165,13 @@ def _bmm_chunk_fwd_kernel(
     out = acc.to(out_ptr.dtype.element_ty)
 
     out_ptr += pid_b * stride_out_batch + pid_c * stride_out_chunk + pid_h * stride_out_head
-    out_ptrs = out_ptr + (stride_outm * offs_m[:, None] +
-                          offs_n[None, :] * stride_outn)
+    out_ptrs = out_ptr + (stride_outm * offs_m[:, None] + offs_n[None, :] * stride_outn)
     tl.store(out_ptrs,
              out,
-             mask=(offs_m[:, None] < chunk_size) &
-             (offs_n[None, :] < chunk_size))
+             mask=(offs_m[:, None] < chunk_size) & (offs_n[None, :] < chunk_size))
 
 
-def _bmm_chunk_fwd(a,
-                   b,
-                   chunk_size,
-                   seq_idx=None,
-                   causal=False,
-                   output_dtype=None):
+def _bmm_chunk_fwd(a, b, chunk_size, seq_idx=None, causal=False, output_dtype=None):
     """
     Argument:
         a: (batch, seqlen, k) or (batch, seqlen, ngroups, k)
@@ -216,18 +198,15 @@ def _bmm_chunk_fwd(a,
     nchunks = math.ceil(seqlen / chunk_size)
     # Allocates output.
     out_dtype = a.dtype if output_dtype is None else output_dtype
-    out = torch.empty(
-        (batch, nchunks, chunk_size, chunk_size) if not has_groups else
-        (batch, nchunks, ngroups, chunk_size, chunk_size),
-        device=a.device,
-        dtype=out_dtype)
-    dot_dtype = (tl.bfloat16
-                 if a.dtype == torch.bfloat16 or b.dtype == torch.bfloat16 else
-                 (tl.float16 if a.dtype == torch.float16
-                  or b.dtype == torch.float16 else tl.float32))
-    grid = lambda META: (triton.cdiv(
-        chunk_size, META['BLOCK_SIZE_M']) * triton.cdiv(
-            chunk_size, META['BLOCK_SIZE_N']), batch, nchunks
+    out = torch.empty((batch, nchunks, chunk_size, chunk_size) if not has_groups else
+                      (batch, nchunks, ngroups, chunk_size, chunk_size),
+                      device=a.device,
+                      dtype=out_dtype)
+    dot_dtype = (tl.bfloat16 if a.dtype == torch.bfloat16 or b.dtype == torch.bfloat16
+                 else (tl.float16 if a.dtype == torch.float16
+                       or b.dtype == torch.float16 else tl.float32))
+    grid = lambda META: (triton.cdiv(chunk_size, META['BLOCK_SIZE_M']) * triton.cdiv(
+        chunk_size, META['BLOCK_SIZE_N']), batch, nchunks
                          if not has_groups else nchunks * ngroups)
     with torch.cuda.device(a.device.index):
         _bmm_chunk_fwd_kernel[grid](
@@ -252,8 +231,8 @@ def _bmm_chunk_fwd(a,
             0 if not has_groups else out.stride(2),
             out.stride(-2),
             out.stride(-1),
-            *((seq_idx.stride(0),
-               seq_idx.stride(1)) if seq_idx is not None else (0, 0)),
+            *((seq_idx.stride(0), seq_idx.stride(1)) if seq_idx is not None else
+              (0, 0)),
             causal,
             dot_dtype,
             HAS_SEQ_IDX=seq_idx is not None,

@@ -12,8 +12,7 @@ from vllm import _custom_ops as ops
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.triton_utils import HAS_TRITON
 
-TRITON3 = HAS_TRITON and (version.parse(triton.__version__)
-                          >= version.parse("3.0.0"))
+TRITON3 = HAS_TRITON and (version.parse(triton.__version__) >= version.parse("3.0.0"))
 
 if TRITON3:
 
@@ -29,8 +28,7 @@ else:
         return dt
 
 
-@triton.heuristics(
-    {"HAS_DT_BIAS": lambda args: args["dt_bias_ptr"] is not None})
+@triton.heuristics({"HAS_DT_BIAS": lambda args: args["dt_bias_ptr"] is not None})
 @triton.heuristics({"HAS_D": lambda args: args["D_ptr"] is not None})
 @triton.heuristics({"HAS_Z": lambda args: args["z_ptr"] is not None})
 @triton.heuristics({
@@ -110,8 +108,7 @@ def _selective_scan_update_kernel(
     if HAS_STATE_BATCH_INDICES:
         state_batch_indices_ptr += pid_b
         state_batch_idx = tl.load(state_batch_indices_ptr)
-        state_ptr += (state_batch_idx * stride_state_batch +
-                      pid_h * stride_state_head)
+        state_ptr += (state_batch_idx * stride_state_batch + pid_h * stride_state_head)
     else:
         state_ptr += pid_b * stride_state_batch + pid_h * stride_state_head
 
@@ -120,10 +117,8 @@ def _selective_scan_update_kernel(
     if HAS_DT_BIAS:
         dt_bias_ptr += pid_h * stride_dt_bias_head
     A_ptr += pid_h * stride_A_head
-    B_ptr += pid_b * stride_B_batch + (pid_h //
-                                       nheads_ngroups_ratio) * stride_B_group
-    C_ptr += pid_b * stride_C_batch + (pid_h //
-                                       nheads_ngroups_ratio) * stride_C_group
+    B_ptr += pid_b * stride_B_batch + (pid_h // nheads_ngroups_ratio) * stride_B_group
+    C_ptr += pid_b * stride_C_batch + (pid_h // nheads_ngroups_ratio) * stride_C_group
     if HAS_Z:
         z_ptr += pid_b * stride_z_batch + pid_h * stride_z_head
     out_ptr += pid_b * stride_out_batch + pid_h * stride_out_head
@@ -156,8 +151,7 @@ def _selective_scan_update_kernel(
     if not TIE_HDIM:
         dt = tl.load(dt_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
         if HAS_DT_BIAS:
-            dt += tl.load(dt_bias_ptrs, mask=offs_m < dim,
-                          other=0.0).to(tl.float32)
+            dt += tl.load(dt_bias_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
         if DT_SOFTPLUS:
             dt = softplus(dt)
         A = tl.load(A_ptrs,
@@ -306,8 +300,7 @@ def selective_state_update(state,
             dt.stride(0),
             dt.stride(1),
             dt.stride(2),
-            *(dt_bias.stride(0),
-              dt_bias.stride(1)) if dt_bias is not None else 0,
+            *(dt_bias.stride(0), dt_bias.stride(1)) if dt_bias is not None else 0,
             A.stride(0),
             A.stride(1),
             A.stride(2),

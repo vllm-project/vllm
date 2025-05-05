@@ -73,8 +73,7 @@ def convert_lark_to_ebnf(grammar_str: str) -> str:
     def check_quotes(text: str, rule_name: str, line_num: int) -> None:
         """Validate quote matching in text."""
         if text.count("'") % 2 != 0 or text.count('"') % 2 != 0:
-            raise ValueError(
-                f"Mismatched quotes in {rule_name} on line {line_num}")
+            raise ValueError(f"Mismatched quotes in {rule_name} on line {line_num}")
 
     def extract_references(text: str) -> set:
         """Extract rule references from text."""
@@ -150,8 +149,7 @@ def convert_lark_to_ebnf(grammar_str: str) -> str:
 
     # Add final rule if exists
     if current_rule:
-        output_lines.append(
-            f"{current_rule} ::= {' | '.join(current_definition)}")
+        output_lines.append(f"{current_rule} ::= {' | '.join(current_definition)}")
 
     # Validate all rules are defined
     undefined_rules = referenced_rules - defined_rules - {'root'}

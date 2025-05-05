@@ -76,8 +76,7 @@ def sample_json_schema():
                 }
             }
         },
-        "required":
-        ["name", "age", "skills", "grade", "email", "work_history"]
+        "required": ["name", "age", "skills", "grade", "email", "work_history"]
     }
 
 
@@ -146,8 +145,8 @@ def sample_definition_json_schema():
 @pytest.fixture
 def sample_guided_choice():
     return [
-        "Python", "Java", "JavaScript", "C++", "C#", "PHP", "TypeScript",
-        "Ruby", "Swift", "Kotlin"
+        "Python", "Java", "JavaScript", "C++", "C#", "PHP", "TypeScript", "Ruby",
+        "Swift", "Kotlin"
     ]
 
 

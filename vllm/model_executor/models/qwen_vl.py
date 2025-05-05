@@ -128,13 +128,12 @@ class VisualAttention(nn.Module):
             self.hidden_size_per_attention_head, dim=-1)
 
         # [sq, b, np, hn] -> [sq, b * np, hn]
-        query_layer = query_layer.view(
-            sq, b * self.num_attention_heads_per_partition,
-            self.hidden_size_per_attention_head).transpose(0, 1)
+        query_layer = query_layer.view(sq, b * self.num_attention_heads_per_partition,
+                                       self.hidden_size_per_attention_head).transpose(
+                                           0, 1)
         # [sk, b, np, hn] -> [sk, b * np, hn]
-        key_layer = key_layer.view(
-            sq, b * self.num_attention_heads_per_partition,
-            self.hidden_size_per_attention_head).transpose(0, 1)
+        key_layer = key_layer.view(sq, b * self.num_attention_heads_per_partition,
+                                   self.hidden_size_per_attention_head).transpose(0, 1)
 
         q_scaled = query_layer / self.norm_factor
         if attn_mask is not None:
@@ -144,17 +143,16 @@ class VisualAttention(nn.Module):
             attention_probs = torch.bmm(q_scaled, key_layer.transpose(-2, -1))
         attention_probs = attention_probs.softmax(dim=-1)
 
-        value_layer = value_layer.view(
-            sq, b * self.num_attention_heads_per_partition,
-            self.hidden_size_per_attention_head).transpose(0, 1)
+        value_layer = value_layer.view(sq, b * self.num_attention_heads_per_partition,
+                                       self.hidden_size_per_attention_head).transpose(
+                                           0, 1)
 
         # matmul: [b * np, sq, hn]
         context_layer = torch.bmm(attention_probs, value_layer)
 
         # change view [b, np, sq, hn]
-        context_layer = context_layer.view(
-            b, self.num_attention_heads_per_partition, sq,
-            self.hidden_size_per_attention_head)
+        context_layer = context_layer.view(b, self.num_attention_heads_per_partition,
+                                           sq, self.hidden_size_per_attention_head)
 
         # [b, np, sq, hn] --> [sq, b, np, hn]
         context_layer = context_layer.permute(2, 0, 1, 3).contiguous()
@@ -258,8 +256,7 @@ class TransformerBlock(nn.Module):
                                  heads,
                                  mlp_ratio,
                                  norm_layer=norm_layer,
-                                 quant_config=quant_config)
-            for _ in range(layers)
+                                 quant_config=quant_config) for _ in range(layers)
         ])
 
     def get_cast_dtype(self) -> torch.dtype:
@@ -293,8 +290,7 @@ class VisionTransformer(nn.Module):
         super().__init__()
         image_height, image_width = self.image_size = (image_size, image_size)
         patch_height, patch_width = self.patch_size = (patch_size, patch_size)
-        self.grid_size = (image_height // patch_height,
-                          image_width // patch_width)
+        self.grid_size = (image_height // patch_height, image_width // patch_width)
         self.output_dim = output_dim
         self.conv1 = nn.Conv2d(in_channels=3,
                                out_channels=width,
@@ -304,8 +300,7 @@ class VisionTransformer(nn.Module):
 
         # class embeddings and positional embeddings
         scale = width**-0.5
-        self.positional_embedding = nn.Parameter(scale *
-                                                 torch.randn(256, width))
+        self.positional_embedding = nn.Parameter(scale * torch.randn(256, width))
 
         norm_layer = partial(nn.LayerNorm, eps=1e-6)
 
@@ -346,12 +341,10 @@ class VisionTransformer(nn.Module):
 
         # to patches
         x = self.conv1(x)  # shape = [*, width, grid, grid]
-        x = x.reshape(x.shape[0], x.shape[1],
-                      -1)  # shape = [*, width, grid ** 2]
+        x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
         x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
 
-        x = x + get_abs_pos(self.positional_embedding, int(math.sqrt(
-            x.size(1))))
+        x = x + get_abs_pos(self.positional_embedding, int(math.sqrt(x.size(1))))
 
         x = self.ln_pre(x)
 
@@ -374,8 +367,7 @@ class QwenVLModel(QWenModel):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
 
-        self.visual = VisionTransformer(**config.visual,
-                                        quant_config=quant_config)
+        self.visual = VisionTransformer(**config.visual, quant_config=quant_config)
 
 
 @lru_cache(maxsize=1)
@@ -626,8 +618,7 @@ class QwenVLMultiModalProcessor(BaseMultiModalProcessor[QwenVLProcessingInfo]):
         out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
         tokenizer = self.info.get_tokenizer()
-        special_tokens: dict[str,
-                             int] = tokenizer.special_tokens  # type: ignore
+        special_tokens: dict[str, int] = tokenizer.special_tokens  # type: ignore
 
         processor = self.info.get_hf_processor()
         img_start_id = special_tokens[processor.image_start_tag]
@@ -693,14 +684,13 @@ class QwenVLForConditionalGeneration(QWenBaseModel, SupportsPP, SupportsLoRA,
 
         if actual_dims != expected_dims:
             expected_expr = ("batch_size", *map(str, expected_dims))
-            raise ValueError(
-                f"The expected shape of pixel values is {expected_expr}. "
-                f"You supplied {tuple(data.shape)}.")
+            raise ValueError(f"The expected shape of pixel values is {expected_expr}. "
+                             f"You supplied {tuple(data.shape)}.")
 
         return data
 
-    def _parse_and_validate_image_input(
-            self, **kwargs: object) -> Optional[QwenImageInputs]:
+    def _parse_and_validate_image_input(self,
+                                        **kwargs: object) -> Optional[QwenImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
 
@@ -711,8 +701,7 @@ class QwenVLForConditionalGeneration(QWenBaseModel, SupportsPP, SupportsLoRA,
 
             return QwenImagePixelInputs(
                 type="pixel_values",
-                data=self._validate_pixel_values(
-                    flatten_bn(pixel_values, concat=True)),
+                data=self._validate_pixel_values(flatten_bn(pixel_values, concat=True)),
             )
 
         if image_embeds is not None:
@@ -727,8 +716,7 @@ class QwenVLForConditionalGeneration(QWenBaseModel, SupportsPP, SupportsLoRA,
 
         return None
 
-    def _process_image_input(self,
-                             image_input: QwenImageInputs) -> torch.Tensor:
+    def _process_image_input(self, image_input: QwenImageInputs) -> torch.Tensor:
         if image_input["type"] == "image_embeds":
             return image_input["data"]
 
@@ -737,8 +725,8 @@ class QwenVLForConditionalGeneration(QWenBaseModel, SupportsPP, SupportsLoRA,
     def get_language_model(self) -> torch.nn.Module:
         return self.transformer
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
@@ -775,10 +763,9 @@ class QwenVLForConditionalGeneration(QWenBaseModel, SupportsPP, SupportsLoRA,
         # condition is for v0 compatibility.
         elif inputs_embeds is None:
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
+            inputs_embeds = self.get_input_embeddings(input_ids, vision_embeddings)
             input_ids = None
 
-        hidden_states = self.transformer(input_ids, positions,
-                                         intermediate_tensors, inputs_embeds)
+        hidden_states = self.transformer(input_ids, positions, intermediate_tensors,
+                                         inputs_embeds)
         return hidden_states

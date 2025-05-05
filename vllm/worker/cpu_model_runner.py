@@ -58,8 +58,7 @@ class ModelInputForCPU(ModelRunnerInputBase):
     lora_mapping: Optional["LoRAMapping"] = None
     lora_requests: Optional[Set[LoRARequest]] = None
 
-    def as_broadcastable_tensor_dict(
-            self) -> Dict[str, Union[int, torch.Tensor]]:
+    def as_broadcastable_tensor_dict(self) -> Dict[str, Union[int, torch.Tensor]]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
@@ -74,10 +73,9 @@ class ModelInputForCPU(ModelRunnerInputBase):
 
     @classmethod
     def from_broadcasted_tensor_dict(
-        cls: Type[TModelInputForCPU],
-        tensor_dict: Dict[str, Any],
-        attn_backend: Optional["AttentionBackend"] = None
-    ) -> TModelInputForCPU:
+            cls: Type[TModelInputForCPU],
+            tensor_dict: Dict[str, Any],
+            attn_backend: Optional["AttentionBackend"] = None) -> TModelInputForCPU:
         if attn_backend is not None:
             tensor_dict = _init_attn_metadata_from_tensor_dict(
                 attn_backend, tensor_dict)
@@ -100,8 +98,7 @@ class ModelInputForCPUWithSamplingMetadata(ModelInputForCPU):
             "multi_modal_kwargs": self.multi_modal_kwargs,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
-        _add_sampling_metadata_broadcastable_dict(tensor_dict,
-                                                  self.sampling_metadata)
+        _add_sampling_metadata_broadcastable_dict(tensor_dict, self.sampling_metadata)
         return tensor_dict
 
     @classmethod
@@ -137,10 +134,8 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             self.slot_mapping: List[int] = []
             self.multi_modal_inputs_list: List[MultiModalKwargs] = []
             self.multi_modal_placeholder_maps: Dict[
-                str, MultiModalPlaceholderMap] = defaultdict(
-                    MultiModalPlaceholderMap)
-            self.input_mrope_positions: List[List[int]] = [[]
-                                                           for _ in range(3)]
+                str, MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
+            self.input_mrope_positions: List[List[int]] = [[] for _ in range(3)]
 
     def __init__(self,
                  runner: "CPUModelRunner",
@@ -160,8 +155,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             attn_backend = self.runner.attn_backend
             self.att_metadata_builder = attn_backend.get_builder_cls()(self)
 
-    def prepare(self,
-                finished_requests_ids: Optional[List[str]] = None) -> None:
+    def prepare(self, finished_requests_ids: Optional[List[str]] = None) -> None:
         self.seq_group_metadata_list: List[SequenceGroupMetadata] = []
         self.input_data = ModelInputForCPUBuilder.ModelInputData(
             self.runner.model_config.uses_mrope)
@@ -170,8 +164,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
     def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata):
         self.seq_group_metadata_list.append(seq_group_metadata)
 
-    def set_seq_group_list(
-            self, seq_group_metadata_list: List[SequenceGroupMetadata]):
+    def set_seq_group_list(self, seq_group_metadata_list: List[SequenceGroupMetadata]):
         self.seq_group_metadata_list = seq_group_metadata_list
 
     def build(self) -> ModelInputForCPU:
@@ -182,8 +175,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                                     dtype=torch.long,
                                     device="cpu")
         input_positions = torch.tensor(
-            input_data.input_positions
-            if not any(input_data.input_mrope_positions) else
+            input_data.input_positions if not any(input_data.input_mrope_positions) else
             input_data.input_mrope_positions,
             dtype=torch.long,
             device="cpu")
@@ -198,8 +190,8 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             multi_modal_kwargs = MultiModalKwargs.batch(
                 input_data.multi_modal_inputs_list)
 
-        attn_metadata = self.att_metadata_builder.build(
-            input_data.seq_lens, input_data.query_lens, -1, -1)
+        attn_metadata = self.att_metadata_builder.build(input_data.seq_lens,
+                                                        input_data.query_lens, -1, -1)
 
         is_prompt = (self.seq_group_metadata_list[0].is_prompt
                      if self.seq_group_metadata_list else None)
@@ -207,12 +199,11 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         lora_requests = set()
         lora_mapping = None
         if self.enable_lora:
-            lora_requests = set(seq.lora_request
-                                for seq in self.seq_group_metadata_list
+            lora_requests = set(seq.lora_request for seq in self.seq_group_metadata_list
                                 if seq.lora_request is not None)
 
-            lora_mapping = self._prepare_lora_input(
-                self.seq_group_metadata_list, is_prompt)
+            lora_mapping = self._prepare_lora_input(self.seq_group_metadata_list,
+                                                    is_prompt)
 
         return self.model_input_cls(input_tokens=input_tokens,
                                     input_positions=input_positions,
@@ -229,15 +220,14 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             for seq_id, seq_data in seq_group_metadata.seq_data.items():
                 if seq_group_metadata.is_prompt:
                     self._compute_prompt_input_tokens(self.input_data,
-                                                      seq_group_metadata,
-                                                      seq_data, seq_id)
+                                                      seq_group_metadata, seq_data,
+                                                      seq_id)
                     if seq_group_metadata.multi_modal_data:
-                        self._compute_multi_modal_input(
-                            seq_group_metadata, seq_data)
+                        self._compute_multi_modal_input(seq_group_metadata, seq_data)
                 else:
                     self._compute_decode_input_tokens(self.input_data,
-                                                      seq_group_metadata,
-                                                      seq_data, seq_id)
+                                                      seq_group_metadata, seq_data,
+                                                      seq_id)
 
     def _compute_decode_input_tokens(self, data: ModelInputData,
                                      seq_group_metadata: SequenceGroupMetadata,
@@ -304,8 +294,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         # For prefix caching
         prefix_cache_block_num = len(seq_group_metadata.computed_block_nums)
         if prefix_cache_block_num > 0:
-            prefix_cache_len = (prefix_cache_block_num *
-                                self.runner.block_size)
+            prefix_cache_len = (prefix_cache_block_num * self.runner.block_size)
             if prefix_cache_len <= context_len:
                 # We already passed the cache hit region,
                 # so do normal computation.
@@ -352,8 +341,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         data.prefill_block_tables.append(block_table)
         data.seq_lens.append(seq_len)
 
-    def _compute_multi_modal_input(self,
-                                   seq_group_metadata: SequenceGroupMetadata,
+    def _compute_multi_modal_input(self, seq_group_metadata: SequenceGroupMetadata,
                                    seq_data: SequenceData):
         computed_len = seq_data.get_num_computed_tokens()
         seq_len = self.input_data.seq_lens[-1]
@@ -373,14 +361,12 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
 
             image_grid_thw = mm_kwargs.get("image_grid_thw", None)
             video_grid_thw = mm_kwargs.get("video_grid_thw", None)
-            audio_feature_lengths = mm_kwargs.get("audio_feature_lengths",
-                                                  None)
-            assert (
-                image_grid_thw is not None or video_grid_thw is not None
-                or audio_feature_lengths is not None), (
-                    "mrope embedding type requires multi-modal input mapper "
-                    "returns 'image_grid_thw' or 'video_grid_thw' or "
-                    "'audio_feature_lengths'.")
+            audio_feature_lengths = mm_kwargs.get("audio_feature_lengths", None)
+            assert (image_grid_thw is not None or video_grid_thw is not None
+                    or audio_feature_lengths is not None), (
+                        "mrope embedding type requires multi-modal input mapper "
+                        "returns 'image_grid_thw' or 'video_grid_thw' or "
+                        "'audio_feature_lengths'.")
 
             second_per_grid_ts = mm_kwargs.get("second_per_grid_ts", None)
             use_audio_in_video = mm_kwargs.get("use_audio_in_video", False)
@@ -409,9 +395,8 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             self.input_data.multi_modal_placeholder_maps[modality].extend(
                 placeholder_map)
 
-    def _prepare_lora_input(
-            self, seq_group_metadata_list: List[SequenceGroupMetadata],
-            is_prefill: bool) -> LoRAMapping:
+    def _prepare_lora_input(self, seq_group_metadata_list: List[SequenceGroupMetadata],
+                            is_prefill: bool) -> LoRAMapping:
         index_mapping = []
         prompt_mapping = []
         for seq in seq_group_metadata_list:
@@ -458,8 +443,7 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
         self.kv_cache_dtype = kv_cache_dtype
         self.sliding_window = model_config.get_sliding_window()
         self.block_size = cache_config.block_size
-        num_attn_heads = self.model_config.get_num_attention_heads(
-            self.parallel_config)
+        num_attn_heads = self.model_config.get_num_attention_heads(self.parallel_config)
         needs_attn_backend = (num_attn_heads != 0
                               or self.model_config.is_attention_free)
         self.attn_backend = get_attn_backend(
@@ -512,10 +496,9 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
         return self.model
 
     def _prepare_model_input_tensors(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        finished_requests_ids: Optional[List[str]] = None
-    ) -> TModelInputForCPU:
+            self,
+            seq_group_metadata_list: List[SequenceGroupMetadata],
+            finished_requests_ids: Optional[List[str]] = None) -> TModelInputForCPU:
         """Helper method to prepare the model input based on a given sequence
         group. Prepares metadata needed for the base model forward pass but not
         metadata for possible additional steps, e.g., sampling.
@@ -586,8 +569,8 @@ class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
         metadata for the sampling step.
 
         """
-        model_input = self._prepare_model_input_tensors(
-            seq_group_metadata_list, finished_requests_ids)
+        model_input = self._prepare_model_input_tensors(seq_group_metadata_list,
+                                                        finished_requests_ids)
         # Sampling metadata is only required for the final pp group
         generators = self.get_generators(finished_requests_ids)
         sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list,
@@ -614,14 +597,12 @@ class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
         previous_hidden_states: Optional[torch.Tensor] = None,
     ) -> Optional[List[SamplerOutput]]:
         if num_steps > 1:
-            raise ValueError(
-                "CPU worker does not support multi-step execution.")
+            raise ValueError("CPU worker does not support multi-step execution.")
 
         if self.lora_config:
             assert model_input.lora_requests is not None
             assert model_input.lora_mapping is not None
-            self.set_active_loras(model_input.lora_requests,
-                                  model_input.lora_mapping)
+            self.set_active_loras(model_input.lora_requests, model_input.lora_mapping)
 
         model_executable = self.model
 
@@ -645,8 +626,7 @@ class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
             )
 
         # Compute the logits.
-        logits = self.model.compute_logits(hidden_states,
-                                           model_input.sampling_metadata)
+        logits = self.model.compute_logits(hidden_states, model_input.sampling_metadata)
 
         # Only perform sampling in the driver worker.
         if not self.is_driver_worker:

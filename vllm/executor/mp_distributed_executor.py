@@ -49,9 +49,8 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
 
         # Set CUDA_VISIBLE_DEVICES for the driver, inherited by workers
         if "CUDA_VISIBLE_DEVICES" not in os.environ:
-            update_environment_variables({
-                "CUDA_VISIBLE_DEVICES": (",".join(map(str, range(world_size))))
-            })
+            update_environment_variables(
+                {"CUDA_VISIBLE_DEVICES": (",".join(map(str, range(world_size))))})
 
     def _init_executor(self) -> None:
 
@@ -87,8 +86,7 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
         else:
             result_handler = ResultHandler()
             for rank in range(1, world_size):
-                worker = ProcessWorkerWrapper(result_handler,
-                                              WorkerWrapperBase,
+                worker = ProcessWorkerWrapper(result_handler, WorkerWrapperBase,
                                               self.vllm_config, rank)
                 self.workers.append(worker)
                 if rank % tensor_parallel_size == 0:
@@ -106,8 +104,7 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
         self.driver_worker = WorkerWrapperBase(self.vllm_config, 0)
 
         all_kwargs = []
-        distributed_init_method = get_distributed_init_method(
-            get_ip(), get_open_port())
+        distributed_init_method = get_distributed_init_method(get_ip(), get_open_port())
         for i in range(world_size):
             local_rank = i
             rank = i
@@ -122,15 +119,14 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
             all_kwargs.append(kwargs)
         self._run_workers("init_worker", all_kwargs)
         self._run_workers("init_device")
-        self._run_workers("load_model",
-                          max_concurrent_workers=self.parallel_config.
-                          max_parallel_loading_workers)
+        self._run_workers(
+            "load_model",
+            max_concurrent_workers=self.parallel_config.max_parallel_loading_workers)
         self.driver_exec_model = make_async(self.driver_worker.execute_model)
         self.pp_locks: Optional[List[asyncio.Lock]] = None
 
     def shutdown(self):
-        if (worker_monitor := getattr(self, "worker_monitor",
-                                      None)) is not None:
+        if (worker_monitor := getattr(self, "worker_monitor", None)) is not None:
             worker_monitor.close()
 
     def _driver_execute_model(
@@ -163,8 +159,7 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
         del method
 
         if max_concurrent_workers:
-            raise NotImplementedError(
-                "max_concurrent_workers is not supported yet.")
+            raise NotImplementedError("max_concurrent_workers is not supported yet.")
 
         if async_run_tensor_parallel_workers_only:
             # Run only non-driver workers and just return futures.
@@ -179,17 +174,14 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
             for worker in self.workers
         ]
 
-        driver_worker_output = run_method(self.driver_worker, sent_method,
-                                          args, kwargs)
+        driver_worker_output = run_method(self.driver_worker, sent_method, args, kwargs)
 
         # Get the results of the workers.
-        return [driver_worker_output
-                ] + [output.get() for output in worker_outputs]
+        return [driver_worker_output] + [output.get() for output in worker_outputs]
 
     def check_health(self) -> None:
         """Raises an error if engine is unhealthy."""
-        if self.worker_monitor is not None and not self.worker_monitor.is_alive(
-        ):
+        if self.worker_monitor is not None and not self.worker_monitor.is_alive():
             raise RuntimeError("Worker processes are not running")
 
     def _wait_for_tasks_completion(self, parallel_worker_tasks: Any) -> None:
@@ -199,8 +191,8 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
             result.get()
 
     async def _driver_execute_model_async(
-        self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
+            self,
+            execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> List[SamplerOutput]:
         if not self.tp_driver_workers:
             return await self.driver_exec_model(execute_model_req)
@@ -220,13 +212,12 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
                 _run_task_with_lock(self.driver_exec_model, self.pp_locks[0],
                                     execute_model_req))
         ]
-        for pp_rank, driver_worker in enumerate(self.tp_driver_workers,
-                                                start=1):
+        for pp_rank, driver_worker in enumerate(self.tp_driver_workers, start=1):
             tasks.append(
                 asyncio.create_task(
                     _run_task_with_lock(driver_worker.execute_method_async,
-                                        self.pp_locks[pp_rank],
-                                        "execute_model", execute_model_req)))
+                                        self.pp_locks[pp_rank], "execute_model",
+                                        execute_model_req)))
         results = await asyncio.gather(*tasks)
 
         # Only the last PP stage has the final results.

@@ -52,8 +52,8 @@ class Proxy:
         scheduling_policy: SchedulingPolicy,
         custom_create_completion: Optional[Callable[[Request],
                                                     StreamingResponse]] = None,
-        custom_create_chat_completion: Optional[Callable[
-            [Request], StreamingResponse]] = None,
+        custom_create_chat_completion: Optional[Callable[[Request],
+                                                         StreamingResponse]] = None,
     ):
         self.prefill_instances = prefill_instances
         self.decode_instances = decode_instances
@@ -67,20 +67,17 @@ class Proxy:
         self.setup_routes()
 
     def setup_routes(self):
+        self.router.post("/v1/completions",
+                         dependencies=[
+                             Depends(self.validate_json_request)
+                         ])(self.custom_create_completion if self.
+                            custom_create_completion else self.create_completion)
         self.router.post(
-            "/v1/completions",
-            dependencies=[
-                Depends(self.validate_json_request)
-            ])(self.custom_create_completion if self.
-               custom_create_completion else self.create_completion)
-        self.router.post(
-            "/v1/chat/completions",
-            dependencies=[
+            "/v1/chat/completions", dependencies=[
                 Depends(self.validate_json_request)
             ])(self.custom_create_chat_completion if self.
                custom_create_chat_completion else self.create_chat_completion)
-        self.router.get("/status",
-                        response_class=JSONResponse)(self.get_status)
+        self.router.get("/status", response_class=JSONResponse)(self.get_status)
         self.router.post("/instances/add",
                          dependencies=[Depends(self.api_key_authenticate)
                                        ])(self.add_instance_endpoint)
@@ -90,8 +87,7 @@ class Proxy:
         if content_type != "application/json":
             raise HTTPException(
                 status_code=415,
-                detail=
-                "Unsupported Media Type: Only 'application/json' is allowed",
+                detail="Unsupported Media Type: Only 'application/json' is allowed",
             )
 
     def api_key_authenticate(self, x_api_key: str = Header(...)):
@@ -103,8 +99,7 @@ class Proxy:
                 detail="Server configuration error.",
             )
         if x_api_key != expected_api_key:
-            logger.warning("Unauthorized access attempt with API Key: %s",
-                           x_api_key)
+            logger.warning("Unauthorized access attempt with API Key: %s", x_api_key)
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Forbidden: Invalid API Key.",
@@ -113,8 +108,7 @@ class Proxy:
     async def validate_instance(self, instance: str) -> bool:
         url = f"http://{instance}/v1/models"
         try:
-            async with aiohttp.ClientSession(
-                    timeout=AIOHTTP_TIMEOUT) as client:
+            async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as client:
                 logger.info("Verifying %s ...", instance)
                 async with client.get(url) as response:
                     if response.status == 200:
@@ -122,12 +116,11 @@ class Proxy:
                         if "data" in data and len(data["data"]) > 0:
                             model_cur = data["data"][0].get("id", "")
                             if model_cur == self.model:
-                                logger.info("Instance: %s could be added.",
-                                            instance)
+                                logger.info("Instance: %s could be added.", instance)
                                 return True
                             else:
-                                logger.warning("Mismatch model %s : %s != %s",
-                                               instance, model_cur, self.model)
+                                logger.warning("Mismatch model %s : %s != %s", instance,
+                                               model_cur, self.model)
                                 return False
                         else:
                             return False
@@ -147,19 +140,16 @@ class Proxy:
             instance_type = data.get("type")
             instance = data.get("instance")
             if instance_type not in ["prefill", "decode"]:
-                raise HTTPException(status_code=400,
-                                    detail="Invalid instance type.")
+                raise HTTPException(status_code=400, detail="Invalid instance type.")
             if not instance or ":" not in instance:
-                raise HTTPException(status_code=400,
-                                    detail="Invalid instance format.")
+                raise HTTPException(status_code=400, detail="Invalid instance format.")
             host, port_str = instance.split(":")
             try:
                 if host != "localhost":
                     ipaddress.ip_address(host)
                 port = int(port_str)
                 if not (0 < port < 65536):
-                    raise HTTPException(status_code=400,
-                                        detail="Invalid port number.")
+                    raise HTTPException(status_code=400, detail="Invalid port number.")
             except Exception as e:
                 raise HTTPException(status_code=400,
                                     detail="Invalid instance address.") from e
@@ -172,8 +162,7 @@ class Proxy:
             if instance_type == "prefill":
                 if instance not in self.prefill_instances:
                     self.prefill_instances.append(instance)
-                    self.prefill_cycler = itertools.cycle(
-                        self.prefill_instances)
+                    self.prefill_cycler = itertools.cycle(self.prefill_instances)
                 else:
                     raise HTTPException(status_code=400,
                                         detail="Instance already exists.")
@@ -185,10 +174,8 @@ class Proxy:
                     raise HTTPException(status_code=400,
                                         detail="Instance already exists.")
 
-            return JSONResponse(content={
-                "message":
-                f"Added {instance} to {instance_type}_instances."
-            })
+            return JSONResponse(
+                content={"message": f"Added {instance} to {instance_type}_instances."})
         except HTTPException as http_exc:
             raise http_exc
         except Exception as e:
@@ -197,9 +184,7 @@ class Proxy:
 
     async def forward_request(self, url, data, use_chunked=True):
         async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
-            headers = {
-                "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"
-            }
+            headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
             try:
                 async with session.post(url=url, json=data,
                                         headers=headers) as response:
@@ -221,16 +206,14 @@ class Proxy:
                                      response.status, error_content)
                         raise HTTPException(
                             status_code=response.status,
-                            detail=
-                            f"Request failed with status {response.status}: "
+                            detail=f"Request failed with status {response.status}: "
                             f"{error_content}",
                         )
             except aiohttp.ClientError as e:
                 logger.error("ClientError occurred: %s", str(e))
                 raise HTTPException(
                     status_code=502,
-                    detail=
-                    "Bad Gateway: Error communicating with upstream server.",
+                    detail="Bad Gateway: Error communicating with upstream server.",
                 ) from e
             except Exception as e:
                 logger.error("Unexpected error: %s", str(e))
@@ -306,8 +289,7 @@ class Proxy:
 
             try:
                 generator = self.forward_request(
-                    "http://" + decode_instance + "/v1/chat/completions",
-                    request)
+                    "http://" + decode_instance + "/v1/chat/completions", request)
             except HTTPException as http_exc:
                 self.remove_instance_endpoint("decode", decode_instance)
                 raise http_exc
@@ -345,10 +327,8 @@ class ProxyServer:
         self,
         args: argparse.Namespace,
         scheduling_policy: Optional[SchedulingPolicy] = None,
-        create_completion: Optional[Callable[[Request],
-                                             StreamingResponse]] = None,
-        create_chat_completion: Optional[Callable[[Request],
-                                                  StreamingResponse]] = None,
+        create_completion: Optional[Callable[[Request], StreamingResponse]] = None,
+        create_chat_completion: Optional[Callable[[Request], StreamingResponse]] = None,
     ):
         self.validate_parsed_serve_args(args)
         self.port = args.port
@@ -356,8 +336,8 @@ class ProxyServer:
             prefill_instances=[] if args.prefill is None else args.prefill,
             decode_instances=[] if args.decode is None else args.decode,
             model=args.model,
-            scheduling_policy=(scheduling_policy if scheduling_policy
-                               is not None else RoundRobinSchedulingPolicy()),
+            scheduling_policy=(scheduling_policy if scheduling_policy is not None else
+                               RoundRobinSchedulingPolicy()),
             custom_create_completion=create_completion,
             custom_create_chat_completion=create_chat_completion,
         )
@@ -382,11 +362,9 @@ class ProxyServer:
                     ipaddress.ip_address(host)
                 port = int(port)
                 if not (0 < port < 65536):
-                    raise ValueError(
-                        f"Invalid port number in instance: {instance}")
+                    raise ValueError(f"Invalid port number in instance: {instance}")
             except Exception as e:
-                raise ValueError(
-                    f"Invalid instance {instance}: {str(e)}") from e
+                raise ValueError(f"Invalid instance {instance}: {str(e)}") from e
 
     def verify_model_config(self, instances: list, model: str) -> None:
         model_suffix = model.split("/")[-1]
@@ -397,9 +375,8 @@ class ProxyServer:
                     model_cur = response.json()["data"][0]["id"]
                     model_cur_suffix = model_cur.split("/")[-1]
                     if model_cur_suffix != model_suffix:
-                        raise ValueError(
-                            f"{instance} serves a different model: "
-                            f"{model_cur} != {model}")
+                        raise ValueError(f"{instance} serves a different model: "
+                                         f"{model_cur} != {model}")
                 else:
                     raise ValueError(f"Cannot get model id from {instance}!")
             except requests.RequestException as e:
@@ -417,11 +394,7 @@ class ProxyServer:
 if __name__ == "__main__":
     # Todo: allow more config
     parser = argparse.ArgumentParser("vLLM disaggregated proxy server.")
-    parser.add_argument("--model",
-                        "-m",
-                        type=str,
-                        required=True,
-                        help="Model name")
+    parser.add_argument("--model", "-m", type=str, required=True, help="Model name")
 
     parser.add_argument(
         "--prefill",

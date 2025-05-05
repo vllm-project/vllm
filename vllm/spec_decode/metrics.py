@@ -71,10 +71,14 @@ class AsyncMetricsCollector:
         self._in_flight_copy: Optional[torch.cuda.Event] = None
 
         pin_memory = is_pin_memory_available()
-        self._aggregate_num_accepted_tokens = torch.tensor(
-            0, dtype=torch.long, device="cpu", pin_memory=pin_memory)
-        self._aggregate_num_emitted_tokens = torch.tensor(
-            0, dtype=torch.long, device="cpu", pin_memory=pin_memory)
+        self._aggregate_num_accepted_tokens = torch.tensor(0,
+                                                           dtype=torch.long,
+                                                           device="cpu",
+                                                           pin_memory=pin_memory)
+        self._aggregate_num_emitted_tokens = torch.tensor(0,
+                                                          dtype=torch.long,
+                                                          device="cpu",
+                                                          pin_memory=pin_memory)
         self._aggregate_num_draft_tokens = 0
 
         self._rejsample_metrics_collect_interval_s = collect_interval_s
@@ -94,8 +98,8 @@ class AsyncMetricsCollector:
         if stream is not None:
             self._copy_stream = stream()
 
-    def maybe_collect_rejsample_metrics(
-            self, k: int) -> Optional[SpecDecodeWorkerMetrics]:
+    def maybe_collect_rejsample_metrics(self,
+                                        k: int) -> Optional[SpecDecodeWorkerMetrics]:
         # Skip for any platform that doesn't have device Event
         if current_platform.Event is None:
             return None
@@ -133,8 +137,7 @@ class AsyncMetricsCollector:
 
         with torch.cuda.stream(self._copy_stream):
             self._aggregate_num_accepted_tokens.copy_(
-                self.spec_decode_sampler.num_accepted_tokens,
-                non_blocking=True)
+                self.spec_decode_sampler.num_accepted_tokens, non_blocking=True)
             self._aggregate_num_emitted_tokens.copy_(
                 self.spec_decode_sampler.num_emitted_tokens, non_blocking=True)
             # Number of draft tokens is calculated on CPU, so no copy is
@@ -148,8 +151,7 @@ class AsyncMetricsCollector:
         return aggregate_metrics_ready
 
     def _collect_rejsample_metrics(
-            self, k: int,
-            ready_event: torch.cuda.Event) -> SpecDecodeWorkerMetrics:
+            self, k: int, ready_event: torch.cuda.Event) -> SpecDecodeWorkerMetrics:
         """Create metrics object from statistics copied asynchronously.
 
         Args:
@@ -168,8 +170,7 @@ class AsyncMetricsCollector:
         emitted_tokens = self._aggregate_num_emitted_tokens.item()
         draft_tokens = self._aggregate_num_draft_tokens
 
-        max_num_emitted_tokens = self.get_max_num_emitted_tokens(
-            draft_tokens, k)
+        max_num_emitted_tokens = self.get_max_num_emitted_tokens(draft_tokens, k)
 
         if draft_tokens > 0:
             draft_acceptance_rate = accepted_tokens / draft_tokens

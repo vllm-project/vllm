@@ -88,8 +88,7 @@ def emb_model_name(request):
 
 
 def test_is_matryoshka(vllm_runner, emb_model_name):
-    with vllm_runner(emb_model_name, task="embed",
-                     max_model_len=None) as vllm_model:
+    with vllm_runner(emb_model_name, task="embed", max_model_len=None) as vllm_model:
         assert vllm_model.model.llm_engine.model_config.is_matryoshka
 
 
@@ -155,13 +154,11 @@ def test_matryoshka(
 
         if dimensions not in matryoshka_dimensions:
             with pytest.raises(ValueError):
-                vllm_model.encode(
-                    example_prompts,
-                    pooling_params=PoolingParams(dimensions=dimensions))
+                vllm_model.encode(example_prompts,
+                                  pooling_params=PoolingParams(dimensions=dimensions))
         else:
             vllm_outputs = vllm_model.encode(
-                example_prompts,
-                pooling_params=PoolingParams(dimensions=dimensions))
+                example_prompts, pooling_params=PoolingParams(dimensions=dimensions))
 
             check_embeddings_close(
                 embeddings_0_lst=hf_outputs,

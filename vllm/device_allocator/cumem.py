@@ -82,13 +82,11 @@ def unmap_and_release(allocation_handle: HandleType) -> None:
 
 
 def get_pluggable_allocator(
-    python_malloc_fn: Callable[[int],
-                               int], python_free_func: Callable[[int, int],
-                                                                None]
+    python_malloc_fn: Callable[[int], int], python_free_func: Callable[[int, int], None]
 ) -> torch.cuda.memory.CUDAPluggableAllocator:
     init_module(python_malloc_fn, python_free_func)
-    new_alloc = torch.cuda.memory.CUDAPluggableAllocator(
-        lib_name, 'my_malloc', 'my_free')
+    new_alloc = torch.cuda.memory.CUDAPluggableAllocator(lib_name, 'my_malloc',
+                                                         'my_free')
     return new_alloc
 
 
@@ -157,8 +155,8 @@ class CuMemAllocator:
         Internal method to store the allocation data
         when memory is allocated in the memory pool."""
         py_d_mem = allocation_handle[2]
-        self.pointer_to_data[py_d_mem] = AllocationData(
-            allocation_handle, self.current_tag)
+        self.pointer_to_data[py_d_mem] = AllocationData(allocation_handle,
+                                                        self.current_tag)
         return
 
     def python_free_callback(self, ptr: int) -> HandleType:
@@ -170,10 +168,7 @@ class CuMemAllocator:
             data.cpu_backup_tensor = None
         return data.handle
 
-    def sleep(
-            self,
-            offload_tags: Optional[Union[Tuple[str, ...],
-                                         str]] = None) -> None:
+    def sleep(self, offload_tags: Optional[Union[Tuple[str, ...], str]] = None) -> None:
         """
         Put the allocator in sleep mode.
         All data in the memory allocation with the specified tag will be
@@ -195,11 +190,10 @@ class CuMemAllocator:
             handle = data.handle
             if data.tag in offload_tags:
                 size_in_bytes = handle[1]
-                cpu_backup_tensor = torch.empty(
-                    size_in_bytes,
-                    dtype=torch.uint8,
-                    device='cpu',
-                    pin_memory=is_pin_memory_available())
+                cpu_backup_tensor = torch.empty(size_in_bytes,
+                                                dtype=torch.uint8,
+                                                device='cpu',
+                                                pin_memory=is_pin_memory_available())
                 cpu_ptr = cpu_backup_tensor.data_ptr()
                 libcudart.cudaMemcpy(cpu_ptr, ptr, size_in_bytes)
                 data.cpu_backup_tensor = cpu_backup_tensor

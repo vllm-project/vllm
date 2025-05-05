@@ -50,8 +50,7 @@ class TeleChat2Model(LlamaModel):
                 layer.mlp.gate_up_proj.bias = None
                 layer.mlp.gate_up_proj.skip_bias_add = True
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             ('gate_up_proj', 'gate_proj', 0),
             ('gate_up_proj', 'up_proj', 1),
@@ -128,12 +127,10 @@ class TeleChat2ForCausalLM(LlamaForCausalLM):
                     layer_type: type[nn.Module] = LlamaDecoderLayer):
         return TeleChat2Model(vllm_config=vllm_config, prefix=prefix)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
 
         loader = AutoWeightsLoader(
             self,
-            skip_prefixes=(["lm_head."]
-                           if self.config.tie_word_embeddings else None),
+            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

@@ -45,15 +45,13 @@ class TPUSupportedSamplingMetadata:
 
     min_tokens = None  # impl is not vectorized
 
-    logit_bias: list[Optional[dict[int, float]]] = field(
-        default_factory=lambda: list())
+    logit_bias: list[Optional[dict[int, float]]] = field(default_factory=lambda: list())
 
     allowed_token_ids_mask = None
     bad_words_token_ids = None
 
     # Generator not supported by xla
-    _generators: dict[int,
-                      torch.Generator] = field(default_factory=lambda: dict())
+    _generators: dict[int, torch.Generator] = field(default_factory=lambda: dict())
 
     @property
     def generators(self) -> dict[int, torch.Generator]:
@@ -62,11 +60,11 @@ class TPUSupportedSamplingMetadata:
 
     @classmethod
     def from_input_batch(
-        cls,
-        input_batch: InputBatch,
-        padded_num_reqs: int,
-        xla_device: torch.device,
-        generate_params_if_all_greedy: bool = False
+            cls,
+            input_batch: InputBatch,
+            padded_num_reqs: int,
+            xla_device: torch.device,
+            generate_params_if_all_greedy: bool = False
     ) -> "TPUSupportedSamplingMetadata":
         """
         Copy sampling tensors slices from `input_batch` to on device tensors.
@@ -85,8 +83,7 @@ class TPUSupportedSamplingMetadata:
                 they are not strictly needed for greedy decoding.
         """
         # Early return to avoid unnecessary cpu to tpu copy
-        if (input_batch.all_greedy is True
-                and generate_params_if_all_greedy is False):
+        if (input_batch.all_greedy is True and generate_params_if_all_greedy is False):
             return cls(all_greedy=True)
 
         num_reqs = input_batch.num_reqs
@@ -97,22 +94,16 @@ class TPUSupportedSamplingMetadata:
 
         fill_slice(input_batch.temperature_cpu_tensor,
                    DEFAULT_SAMPLING_PARAMS["temperature"])
-        fill_slice(input_batch.min_p_cpu_tensor,
-                   DEFAULT_SAMPLING_PARAMS["min_p"])
-        fill_slice(input_batch.top_k_cpu_tensor,
-                   DEFAULT_SAMPLING_PARAMS["top_k"])
-        fill_slice(input_batch.top_p_cpu_tensor,
-                   DEFAULT_SAMPLING_PARAMS["top_p"])
+        fill_slice(input_batch.min_p_cpu_tensor, DEFAULT_SAMPLING_PARAMS["min_p"])
+        fill_slice(input_batch.top_k_cpu_tensor, DEFAULT_SAMPLING_PARAMS["top_k"])
+        fill_slice(input_batch.top_p_cpu_tensor, DEFAULT_SAMPLING_PARAMS["top_p"])
 
         # Slice persistent device tensors to a fixed pre-compiled padded shape.
         return cls(
-            temperature=input_batch.temperature_cpu_tensor[:padded_num_reqs].
-            to(xla_device),
+            temperature=input_batch.temperature_cpu_tensor[:padded_num_reqs].to(
+                xla_device),
             all_greedy=input_batch.all_greedy,
             # TODO enable more and avoid returning None values
-            top_p=input_batch.top_p_cpu_tensor[:padded_num_reqs].to(
-                xla_device),
-            top_k=input_batch.top_k_cpu_tensor[:padded_num_reqs].to(
-                xla_device),
-            min_p=input_batch.min_p_cpu_tensor[:padded_num_reqs].to(
-                xla_device))
+            top_p=input_batch.top_p_cpu_tensor[:padded_num_reqs].to(xla_device),
+            top_k=input_batch.top_k_cpu_tensor[:padded_num_reqs].to(xla_device),
+            min_p=input_batch.min_p_cpu_tensor[:padded_num_reqs].to(xla_device))

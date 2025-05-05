@@ -15,8 +15,7 @@ from vllm.lora.request import LoRARequest
 
 
 def create_test_prompts(
-        lora_path: str
-) -> list[tuple[str, SamplingParams, Optional[LoRARequest]]]:
+        lora_path: str) -> list[tuple[str, SamplingParams, Optional[LoRARequest]]]:
     """Create a list of test prompts with their sampling parameters.
 
     2 requests for base model, 4 requests for the LoRA. We define 2
@@ -27,14 +26,10 @@ def create_test_prompts(
     """
     return [
         ("A robot may not injure a human being",
-         SamplingParams(temperature=0.0,
-                        logprobs=1,
-                        prompt_logprobs=1,
+         SamplingParams(temperature=0.0, logprobs=1, prompt_logprobs=1,
                         max_tokens=128), None),
         ("To be or not to be,",
-         SamplingParams(temperature=0.8,
-                        top_k=5,
-                        presence_penalty=0.2,
+         SamplingParams(temperature=0.8, top_k=5, presence_penalty=0.2,
                         max_tokens=128), None),
         (
             "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_74 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]",  # noqa: E501

@@ -29,8 +29,8 @@ class SmolVLMProcessingInfo(Idefics3ProcessingInfo):
 
         return self.ctx.get_hf_processor(SmolVLMProcessor, **kwargs)
 
-    def _get_image_token(
-            self, processor: Optional[SmolVLMProcessor]) -> tuple[str, str]:
+    def _get_image_token(self,
+                         processor: Optional[SmolVLMProcessor]) -> tuple[str, str]:
         if processor is None:
             processor = self.get_hf_processor()
         image_token = processor.image_token

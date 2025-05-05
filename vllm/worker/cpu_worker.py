@@ -35,8 +35,7 @@ class CPUCacheEngine:
     """
 
     def __init__(self, cache_config: CacheConfig, model_config: ModelConfig,
-                 parallel_config: ParallelConfig,
-                 device_config: DeviceConfig) -> None:
+                 parallel_config: ParallelConfig, device_config: DeviceConfig) -> None:
         assert device_config.device_type == "cpu"
         self.cache_config = cache_config
         self.model_config = model_config
@@ -82,8 +81,7 @@ class CPUCacheEngine:
             num_blocks, self.block_size, self.num_heads, self.head_size)
         kv_cache: List[torch.Tensor] = []
         for _ in range(self.num_layers):
-            kv_cache.append(
-                torch.empty(kv_cache_shape, dtype=self.dtype, device="cpu"))
+            kv_cache.append(torch.empty(kv_cache_shape, dtype=self.dtype, device="cpu"))
         return kv_cache
 
     def swap_in(self, src_to_dst: Dict[int, int]) -> None:
@@ -222,8 +220,7 @@ class CPUWorker(LocalOrDistributedWorkerBase):
                 logger.info(ret)
 
         # Note: unique identifier for creating allreduce shared memory
-        os.environ["VLLM_DIST_IDENT"] = self.distributed_init_method.split(
-            ":")[-1]
+        os.environ["VLLM_DIST_IDENT"] = self.distributed_init_method.split(":")[-1]
         self.device = torch.device("cpu")
         self.init_distributed_environment()
         # Set random seed.
@@ -256,16 +253,14 @@ class CPUWorker(LocalOrDistributedWorkerBase):
         num_cpu_blocks = 0
         return num_gpu_blocks, num_cpu_blocks
 
-    def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
+    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         """Initialize the KV cache. Currently, swappable CPU memory is not
         supported.
 
         Since this worker does not support GPUs, we use the num_gpu_blocks to
         determine how many non-swappable CPU blocks to allocate.
         """
-        assert (num_cpu_blocks == 0
-                ), f"{type(self)} does not support swappable cache"
+        assert (num_cpu_blocks == 0), f"{type(self)} does not support swappable cache"
 
         # Note: To reuse the cache management procedure,
         # use cpu cache as 'gpu cache'.
@@ -309,21 +304,19 @@ class CPUWorker(LocalOrDistributedWorkerBase):
 
     def _init_cache_engine(self) -> None:
         self.cache_engine = [
-            CPUCacheEngine(self.cache_config, self.model_config,
-                           self.parallel_config, self.device_config)
+            CPUCacheEngine(self.cache_config, self.model_config, self.parallel_config,
+                           self.device_config)
             for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
         self.cpu_cache = [
             self.cache_engine[ve].cpu_cache
             for ve in range(self.parallel_config.pipeline_parallel_size)
         ]
-        bind_kv_cache(self.compilation_config.static_forward_context,
-                      self.cpu_cache)
+        bind_kv_cache(self.compilation_config.static_forward_context, self.cpu_cache)
         self.model_runner.block_size = self.cache_engine[0].block_size
 
-        assert all(
-            self.cpu_cache[ve] is not None
-            for ve in range(self.parallel_config.pipeline_parallel_size))
+        assert all(self.cpu_cache[ve] is not None
+                   for ve in range(self.parallel_config.pipeline_parallel_size))
 
         # Populate the cache to warmup the memory
         for ve in range(self.parallel_config.pipeline_parallel_size):
@@ -356,8 +349,8 @@ class CPUWorker(LocalOrDistributedWorkerBase):
                 worker_input.blocks_to_copy)
 
     @torch.inference_mode()
-    def prepare_worker_input(
-            self, execute_model_req: ExecuteModelRequest) -> WorkerInput:
+    def prepare_worker_input(self,
+                             execute_model_req: ExecuteModelRequest) -> WorkerInput:
         assert execute_model_req is not None
         virtual_engine: int = execute_model_req.virtual_engine
         num_seq_groups: int = len(execute_model_req.seq_group_metadata_list)
@@ -388,13 +381,13 @@ class CPUWorker(LocalOrDistributedWorkerBase):
         # A small all_reduce for warmup.
         torch.distributed.all_reduce(torch.zeros(1).cpu())
 
-        ensure_model_parallel_initialized(
-            parallel_config.tensor_parallel_size,
-            parallel_config.pipeline_parallel_size)
+        ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
+                                          parallel_config.pipeline_parallel_size)
 
     def get_cache_block_size_bytes(self) -> int:
         """Return the size in bytes of a single KV cache block.
         """
-        return CPUCacheEngine.get_cache_block_size(
-            self.cache_config.block_size, self.cache_config.cache_dtype,
-            self.model_config, self.parallel_config)
+        return CPUCacheEngine.get_cache_block_size(self.cache_config.block_size,
+                                                   self.cache_config.cache_dtype,
+                                                   self.model_config,
+                                                   self.parallel_config)

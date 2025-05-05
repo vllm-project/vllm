@@ -123,8 +123,7 @@ def test_eagle_correctness(
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         del ref_llm
 
-        spec_model_name = eagle3_model_name(
-        ) if use_eagle3 else eagle_model_name()
+        spec_model_name = eagle3_model_name() if use_eagle3 else eagle_model_name()
         spec_llm = LLM(
             model=model_name,
             trust_remote_code=True,

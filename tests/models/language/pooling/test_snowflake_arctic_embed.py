@@ -61,11 +61,7 @@ def test_models(
 
     example_prompts = example_prompts + EMBEDDING_PROMPTS
 
-    vllm_extra_kwargs = {
-        "hf_overrides": {
-            "is_matryoshka": model_info.is_matryoshka
-        }
-    }
+    vllm_extra_kwargs = {"hf_overrides": {"is_matryoshka": model_info.is_matryoshka}}
 
     with hf_runner(model_info.name, dtype=dtype,
                    is_sentence_transformer=True) as hf_model:

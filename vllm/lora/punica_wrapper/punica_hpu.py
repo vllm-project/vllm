@@ -22,8 +22,8 @@ class PunicaWrapperHPU(PunicaWrapperBase):
                  device: Union[torch.device, str], **kwargs):
         # Increasing max_num_batched_tokens by 3x to handle increase in
         # tensor size due to padding.
-        PunicaWrapperBase.__init__(self, 3 * max_num_batched_tokens,
-                                   max_batches, device)
+        PunicaWrapperBase.__init__(self, 3 * max_num_batched_tokens, max_batches,
+                                   device)
 
     def _update_base_metadata(
         self,
@@ -48,8 +48,7 @@ class PunicaWrapperHPU(PunicaWrapperBase):
         # graph accumulation. Hence HPU appends `lora_offset` to a list and
         # converts it to a tensor only after it is ready.
         if long_lora_context:
-            index_mapping_indices: List[int] = list(
-                mapping.index_mapping).copy()
+            index_mapping_indices: List[int] = list(mapping.index_mapping).copy()
             long_lora_offsets: List[int] = []
             for i in range(len(index_mapping_indices)):
                 lora_offset: int = long_lora_context.offsets_by_lora_id.get(
@@ -64,9 +63,8 @@ class PunicaWrapperHPU(PunicaWrapperBase):
         self._sampler_indices[:sampler_indices.shape[0]].copy_(sampler_indices)
         self._sampler_indices_padded[:sampler_indices_padded.shape[0]].copy_(
             sampler_indices_padded)
-        self._embeddings_indices[:embeddings_indices.
-                                 shape[0], :embeddings_indices.shape[1]].copy_(
-                                     embeddings_indices)
+        self._embeddings_indices[:embeddings_indices.shape[0], :embeddings_indices.
+                                 shape[1]].copy_(embeddings_indices)
         if long_lora_offsets_tensor is not None:
             self._long_lora_indices[:long_lora_offsets_tensor.shape[0]].copy_(
                 long_lora_offsets_tensor)

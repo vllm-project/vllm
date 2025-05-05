@@ -49,15 +49,13 @@ class SSLCertRefresher:
             self.watch_ssl_ca_task = asyncio.create_task(
                 self._watch_files([self.ca_path], update_ssl_ca))
 
-    async def _watch_files(self, paths, fun: Callable[[Change, str],
-                                                      None]) -> None:
+    async def _watch_files(self, paths, fun: Callable[[Change, str], None]) -> None:
         """Watch multiple file paths asynchronously."""
         logger.info("SSLCertRefresher monitors files: %s", paths)
         async for changes in awatch(*paths):
             try:
                 for change, file_path in changes:
-                    logger.info("File change detected: %s - %s", change.name,
-                                file_path)
+                    logger.info("File change detected: %s - %s", change.name, file_path)
                     fun(change, file_path)
             except Exception as e:
                 logger.error(

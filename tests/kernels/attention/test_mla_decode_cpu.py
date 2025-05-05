@@ -25,18 +25,12 @@ def ref_mla(
 
     for i in range(bs):
         # gather and flatten KV-cache
-        kv = kv_cache[
-            block_tables[i]]  # (max_num_blocks, block_size, head_dim)
-        kv = kv.view(1, -1,
-                     head_dim)[:, :seq_lens[i]]  # (1, seq_len, head_dim)
+        kv = kv_cache[block_tables[i]]  # (max_num_blocks, block_size, head_dim)
+        kv = kv.view(1, -1, head_dim)[:, :seq_lens[i]]  # (1, seq_len, head_dim)
         v = kv[:, :, :v_head_dim]
 
         q = query[i].view(num_heads, 1, head_dim)
-        o = F.scaled_dot_product_attention(q,
-                                           kv,
-                                           v,
-                                           scale=scale,
-                                           enable_gqa=True)
+        o = F.scaled_dot_product_attention(q, kv, v, scale=scale, enable_gqa=True)
         out[i] = o.view(num_heads, v_head_dim)
 
     return out
@@ -75,8 +69,7 @@ def test_mla_decode_cpu(
     seqlen_pad = cdiv(max_seq_len, 256) * 256  # is this necessary?
 
     q = torch.randn(bs, h_q, d)
-    block_table = torch.arange(bs * seqlen_pad // block_size,
-                               dtype=torch.int32)
+    block_table = torch.arange(bs * seqlen_pad // block_size, dtype=torch.int32)
     block_table = block_table.view(bs, seqlen_pad // block_size)
 
     kv_cache = torch.randn(block_table.numel(), block_size, d)
@@ -84,8 +77,7 @@ def test_mla_decode_cpu(
         kv_cache.view(bs, seqlen_pad, d)[i, seq_len:] = float("nan")
 
     out_mla = q.new_zeros(bs, h_q, dv)
-    ops.mla_decode_kvcache_cpu(out_mla, q, kv_cache, scale, block_table,
-                               seq_lens)
+    ops.mla_decode_kvcache_cpu(out_mla, q, kv_cache, scale, block_table, seq_lens)
 
     out_ref = q.new_zeros(bs, h_q, dv)
     ref_mla(out_ref, q, kv_cache, scale, block_table, seq_lens)

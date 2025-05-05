@@ -31,8 +31,7 @@ class EAGLEConfig(PretrainedConfig):
             model_config = model
 
         for k, v in kwargs.items():
-            if k != "architectures" and k != "model_type" and hasattr(
-                    model_config, k):
+            if k != "architectures" and k != "model_type" and hasattr(model_config, k):
                 setattr(model_config, k, v)
 
         self.model = model_config
@@ -77,6 +76,6 @@ class EAGLEConfig(PretrainedConfig):
         pretrained_model_name_or_path: Union[str, os.PathLike],
         **kwargs,
     ) -> "EAGLEConfig":
-        config_dict, kwargs = cls.get_config_dict(
-            pretrained_model_name_or_path, **kwargs)
+        config_dict, kwargs = cls.get_config_dict(pretrained_model_name_or_path,
+                                                  **kwargs)
         return cls.from_dict(config_dict, **kwargs)

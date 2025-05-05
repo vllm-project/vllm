@@ -52,8 +52,8 @@ from .conftest import run_equality_correctness_test_tp
     ])
 @pytest.mark.parametrize("seed", [1])
 def test_target_model_tp_gt_1(common_llm_kwargs, per_test_common_llm_kwargs,
-                              baseline_llm_kwargs, test_llm_kwargs,
-                              batch_size: int, output_len: int, seed: int):
+                              baseline_llm_kwargs, test_llm_kwargs, batch_size: int,
+                              output_len: int, seed: int):
     """Verify greedy equality when tensor parallelism is used.
     """
     if current_platform.is_rocm():
@@ -85,31 +85,29 @@ def test_target_model_tp_gt_1(common_llm_kwargs, per_test_common_llm_kwargs,
     ]])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [[]])
 @pytest.mark.parametrize("baseline_llm_kwargs", [[]])
-@pytest.mark.parametrize(
-    "model, test_llm_kwargs",
-    [("JackFram/llama-68m", [
-        "--speculative_config",
-        json.dumps({
-            "model": "JackFram/llama-68m",
-            "num_speculative_tokens": 5,
-            "draft_tensor_parallel_size": 1,
-        }),
-    ]),
-     ("ibm-granite/granite-3b-code-instruct", [
-         "--speculative_config",
-         json.dumps({
-             "model": "ibm-granite/granite-3b-code-instruct",
-             "num_speculative_tokens": 5,
-             "draft_tensor_parallel_size": 1,
-         }),
-     ])])
+@pytest.mark.parametrize("model, test_llm_kwargs",
+                         [("JackFram/llama-68m", [
+                             "--speculative_config",
+                             json.dumps({
+                                 "model": "JackFram/llama-68m",
+                                 "num_speculative_tokens": 5,
+                                 "draft_tensor_parallel_size": 1,
+                             }),
+                         ]),
+                          ("ibm-granite/granite-3b-code-instruct", [
+                              "--speculative_config",
+                              json.dumps({
+                                  "model": "ibm-granite/granite-3b-code-instruct",
+                                  "num_speculative_tokens": 5,
+                                  "draft_tensor_parallel_size": 1,
+                              }),
+                          ])])
 @pytest.mark.parametrize("batch_size", [2])
 @pytest.mark.parametrize("seed", [1])
 def test_draft_model_tp_lt_target_model_tp2(model, common_llm_kwargs,
                                             per_test_common_llm_kwargs,
-                                            baseline_llm_kwargs,
-                                            test_llm_kwargs, batch_size: int,
-                                            seed: int):
+                                            baseline_llm_kwargs, test_llm_kwargs,
+                                            batch_size: int, seed: int):
     """Verify spec decode works well with smaller tp for draft models.
     """
     run_equality_correctness_test_tp(model,
@@ -137,13 +135,12 @@ def test_draft_model_tp_lt_target_model_tp2(model, common_llm_kwargs,
         "--dtype",
         "bfloat16",
     ]])
-@pytest.mark.parametrize(
-    "per_test_common_llm_kwargs",
-    [["--enable-chunked-prefill", "False"],
-     [
-         "--enable-chunked-prefill", "True", "--max-num-batched-tokens", "4",
-         "--max-num-seqs", "4"
-     ]])
+@pytest.mark.parametrize("per_test_common_llm_kwargs",
+                         [["--enable-chunked-prefill", "False"],
+                          [
+                              "--enable-chunked-prefill", "True",
+                              "--max-num-batched-tokens", "4", "--max-num-seqs", "4"
+                          ]])
 @pytest.mark.parametrize("baseline_llm_kwargs", [[]])
 @pytest.mark.parametrize("model, test_llm_kwargs",
                          [("JackFram/llama-68m", [
@@ -167,8 +164,8 @@ def test_draft_model_tp_lt_target_model_tp2(model, common_llm_kwargs,
 def test_spec_decode_chunked_prefill_tp2(model, common_llm_kwargs,
                                          per_test_common_llm_kwargs,
                                          baseline_llm_kwargs, test_llm_kwargs,
-                                         logprobs: Optional[int],
-                                         batch_size: int, seed: int):
+                                         logprobs: Optional[int], batch_size: int,
+                                         seed: int):
     """Verify spec decode works well with same and different TP size for
     the draft model with chunked prefill.
     """
@@ -198,13 +195,12 @@ def test_spec_decode_chunked_prefill_tp2(model, common_llm_kwargs,
         "--dtype",
         "bfloat16",
     ]])
-@pytest.mark.parametrize(
-    "per_test_common_llm_kwargs",
-    [["--enable-chunked-prefill", "False"],
-     [
-         "--enable-chunked-prefill", "True", "--max-num-batched-tokens", "4",
-         "--max-num-seqs", "4"
-     ]])
+@pytest.mark.parametrize("per_test_common_llm_kwargs",
+                         [["--enable-chunked-prefill", "False"],
+                          [
+                              "--enable-chunked-prefill", "True",
+                              "--max-num-batched-tokens", "4", "--max-num-seqs", "4"
+                          ]])
 @pytest.mark.parametrize("baseline_llm_kwargs", [[]])
 @pytest.mark.parametrize("model, test_llm_kwargs",
                          [("JackFram/llama-68m", [
@@ -228,9 +224,8 @@ def test_spec_decode_chunked_prefill_tp2(model, common_llm_kwargs,
 @pytest.mark.parametrize("batch_size", [2])
 @pytest.mark.parametrize("seed", [1])
 def test_spec_decode_chunked_prefill_tp2_with_logprobs(
-        model, common_llm_kwargs, per_test_common_llm_kwargs,
-        baseline_llm_kwargs, test_llm_kwargs, logprobs: Optional[int],
-        batch_size: int, seed: int):
+        model, common_llm_kwargs, per_test_common_llm_kwargs, baseline_llm_kwargs,
+        test_llm_kwargs, logprobs: Optional[int], batch_size: int, seed: int):
     """Verify spec decode works well with same and different TP size for
     the draft model with chunked prefill.
     """

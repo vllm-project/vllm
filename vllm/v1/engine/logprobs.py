@@ -66,8 +66,7 @@ class LogprobsProcessor:
 
         token_ids_lst, logprobs_lst, ranks_lst = logprobs_lists
 
-        for rank, logprobs, token_ids in zip(ranks_lst, logprobs_lst,
-                                             token_ids_lst):
+        for rank, logprobs, token_ids in zip(ranks_lst, logprobs_lst, token_ids_lst):
 
             # Detokenize (non-incrementally).
             decoded_tokens = NONES if self.tokenizer is None else (
@@ -130,8 +129,7 @@ class LogprobsProcessor:
             # Update with the Logprob dictionary for this pos.
             self.prompt_logprobs.append(
                 self._make_logprob_dict(prompt_logprobs[pos], token_ids[pos],
-                                        decoded_tokens_for_pos,
-                                        prompt_token_ranks[pos],
+                                        decoded_tokens_for_pos, prompt_token_ranks[pos],
                                         self.num_prompt_logprobs))
 
     def pop_prompt_logprobs(self) -> Optional[PromptLogprobs]:
@@ -187,8 +185,8 @@ class LogprobsProcessor:
                 rank=rank,
                 decoded_token=token,
             )
-            for token_id, logprob, rank, token in zip(
-                logprob_token_ids, logprobs, ranks, decoded_tokens)
+            for token_id, logprob, rank, token in zip(logprob_token_ids, logprobs,
+                                                      ranks, decoded_tokens)
         }
 
     def update_from_output(self, output: EngineCoreOutput) -> None:

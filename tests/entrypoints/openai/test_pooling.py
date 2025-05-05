@@ -131,8 +131,7 @@ async def test_batch_pooling(server: RemoteOpenAIServer, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_conversation_pooling(server: RemoteOpenAIServer,
-                                    model_name: str):
+async def test_conversation_pooling(server: RemoteOpenAIServer, model_name: str):
     messages = [{
         "role": "user",
         "content": "The cat sat on the mat.",
@@ -174,8 +173,7 @@ async def test_conversation_pooling(server: RemoteOpenAIServer,
         },
     )
     completions_response.raise_for_status()
-    completion_poolings = PoolingResponse.model_validate(
-        completions_response.json())
+    completion_poolings = PoolingResponse.model_validate(completions_response.json())
 
     assert chat_poolings.id is not None
     assert completion_poolings.id is not None
@@ -187,8 +185,7 @@ async def test_conversation_pooling(server: RemoteOpenAIServer,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_batch_base64_pooling(server: RemoteOpenAIServer,
-                                    model_name: str):
+async def test_batch_base64_pooling(server: RemoteOpenAIServer, model_name: str):
     input_texts = [
         "Hello my name is",
         "The best thing about vLLM is that it supports many different models"
@@ -219,8 +216,7 @@ async def test_batch_base64_pooling(server: RemoteOpenAIServer,
     decoded_responses_base64_data = []
     for data in responses_base64.data:
         decoded_responses_base64_data.append(
-            np.frombuffer(base64.b64decode(data.data),
-                          dtype="float32").tolist())
+            np.frombuffer(base64.b64decode(data.data), dtype="float32").tolist())
 
     assert responses_float.data[0].data == decoded_responses_base64_data[0]
     assert responses_float.data[1].data == decoded_responses_base64_data[1]

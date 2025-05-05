@@ -45,8 +45,7 @@ class TPUWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
         else:
-            self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
-                self.cache_config.cache_dtype]
+            self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[self.cache_config.cache_dtype]
 
         self.model_runner: TPUModelRunner = TPUModelRunner(
             vllm_config=vllm_config, is_driver_worker=is_driver_worker)
@@ -70,9 +69,8 @@ class TPUWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             distributed_init_method=self.distributed_init_method,
             backend="gloo",
         )
-        ensure_model_parallel_initialized(
-            self.parallel_config.tensor_parallel_size,
-            self.parallel_config.pipeline_parallel_size)
+        ensure_model_parallel_initialized(self.parallel_config.tensor_parallel_size,
+                                          self.parallel_config.pipeline_parallel_size)
 
         # Device initialization should happen after initializing the distributed
         # runtime.
@@ -137,13 +135,10 @@ class TPUWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         # it by reference, rather by specializing on the value ``None``.
         # the `dtype` argument does not matter, and we use `float32` as
         # a placeholder (it has wide hardware support).
-        kv_caches = [(torch.tensor([], dtype=torch.float32,
-                                   device=self.device),
-                      torch.tensor([], dtype=torch.float32,
-                                   device=self.device))
+        kv_caches = [(torch.tensor([], dtype=torch.float32, device=self.device),
+                      torch.tensor([], dtype=torch.float32, device=self.device))
                      for _ in range(num_layers)]
-        bind_kv_cache(self.compilation_config.static_forward_context,
-                      [kv_caches])
+        bind_kv_cache(self.compilation_config.static_forward_context, [kv_caches])
         self.model_runner._dummy_run(
             batch_size=1,
             seq_len=self.scheduler_config.max_num_batched_tokens,
@@ -164,14 +159,13 @@ class TPUWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
                                  self.cache_config.gpu_memory_utilization)
         tpu_kv_cache_bytes = max(usable_memory_size - profiled, 0)
         dtype_bytes = get_dtype_size(self.cache_dtype)
-        block_size_bytes = (dtype_bytes * self.cache_config.block_size *
-                            num_layers * 2 * head_size * num_kv_heads)
+        block_size_bytes = (dtype_bytes * self.cache_config.block_size * num_layers *
+                            2 * head_size * num_kv_heads)
         num_tpu_blocks = tpu_kv_cache_bytes // block_size_bytes
         num_tpu_blocks = (num_tpu_blocks // 8) * 8  # Round down to 8.
 
         # Calculate the CPU KV cache size based on the config.
-        num_cpu_blocks = int(self.cache_config.swap_space_bytes //
-                             block_size_bytes)
+        num_cpu_blocks = int(self.cache_config.swap_space_bytes // block_size_bytes)
         num_cpu_blocks = (num_cpu_blocks // 8) * 8  # Round down to 8.
         return num_tpu_blocks, num_cpu_blocks
 
@@ -196,18 +190,13 @@ class TPUWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         cpu_cache_shape = self.model_runner.attn_backend.get_kv_cache_shape(
             num_cpu_blocks, self.block_size, num_kv_heads, head_size)
         for _ in range(num_layers):
-            tpu_k_cache = torch.zeros(tpu_cache_shape,
-                                      dtype=dtype,
-                                      device=self.device)
+            tpu_k_cache = torch.zeros(tpu_cache_shape, dtype=dtype, device=self.device)
             tpu_v_cache = torch.zeros_like(tpu_k_cache)
             self.tpu_cache.append((tpu_k_cache, tpu_v_cache))
-            cpu_k_cache = torch.zeros(cpu_cache_shape,
-                                      dtype=dtype,
-                                      device="cpu")
+            cpu_k_cache = torch.zeros(cpu_cache_shape, dtype=dtype, device="cpu")
             cpu_v_cache = torch.zeros_like(cpu_k_cache)
             self.cpu_cache.append((cpu_k_cache, cpu_v_cache))
-        bind_kv_cache(self.compilation_config.static_forward_context,
-                      [self.tpu_cache])
+        bind_kv_cache(self.compilation_config.static_forward_context, [self.tpu_cache])
         self._warmup_model()
 
     def _warmup_model(self) -> None:
@@ -250,12 +239,12 @@ class TPUWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     ) -> WorkerInput:
         virtual_engine = execute_model_req.virtual_engine
         num_seq_groups = len(execute_model_req.seq_group_metadata_list)
-        blocks_to_swap_in = _make_src_to_dst(
-            execute_model_req.blocks_to_swap_in, "cpu", self.device)
-        blocks_to_swap_out = _make_src_to_dst(
-            execute_model_req.blocks_to_swap_out, self.device, "cpu")
-        blocks_to_copy = _make_src_to_dst(execute_model_req.blocks_to_copy,
-                                          self.device, self.device)
+        blocks_to_swap_in = _make_src_to_dst(execute_model_req.blocks_to_swap_in, "cpu",
+                                             self.device)
+        blocks_to_swap_out = _make_src_to_dst(execute_model_req.blocks_to_swap_out,
+                                              self.device, "cpu")
+        blocks_to_copy = _make_src_to_dst(execute_model_req.blocks_to_copy, self.device,
+                                          self.device)
         return WorkerInput(
             num_seq_groups=num_seq_groups,
             blocks_to_swap_in=blocks_to_swap_in,
@@ -295,8 +284,7 @@ class TPUWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         if worker_input.blocks_to_copy is not None:
             src_indices, dst_indices = worker_input.blocks_to_copy
             if src_indices.numel() > 0:
-                attn_backend.copy_blocks(self.tpu_cache,
-                                         (src_indices, dst_indices))
+                attn_backend.copy_blocks(self.tpu_cache, (src_indices, dst_indices))
 
 
 def _make_src_to_dst(
@@ -309,12 +297,8 @@ def _make_src_to_dst(
 
     src_indices = [i for i, _ in mapping]
     dst_indices = [i for _, i in mapping]
-    src_indices = torch.tensor(src_indices,
-                               device=src_device,
-                               dtype=torch.int64)
-    dst_indices = torch.tensor(dst_indices,
-                               device=dst_device,
-                               dtype=torch.int64)
+    src_indices = torch.tensor(src_indices, device=src_device, dtype=torch.int64)
+    dst_indices = torch.tensor(dst_indices, device=dst_device, dtype=torch.int64)
     return src_indices, dst_indices
 
 

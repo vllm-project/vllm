@@ -35,9 +35,9 @@ MAIN_MODEL = "JackFram/llama-68m"
 @pytest.mark.parametrize("output_len", [32])
 @pytest.mark.parametrize("seed", [1])
 def test_spec_decode_cuda_graph(vllm_runner, common_llm_kwargs,
-                                per_test_common_llm_kwargs,
-                                baseline_llm_kwargs, test_llm_kwargs,
-                                batch_size: int, output_len: int, seed: int):
+                                per_test_common_llm_kwargs, baseline_llm_kwargs,
+                                test_llm_kwargs, batch_size: int, output_len: int,
+                                seed: int):
     """Verify spec decode equality when cuda graphs are enabled.
     """
     run_equality_correctness_test(vllm_runner,
@@ -93,8 +93,7 @@ def test_spec_decode_cuda_graph(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize("seed", [1])
 def test_speculative_model_quantization_config(vllm_runner, common_llm_kwargs,
                                                per_test_common_llm_kwargs,
-                                               baseline_llm_kwargs,
-                                               test_llm_kwargs,
+                                               baseline_llm_kwargs, test_llm_kwargs,
                                                batch_size: int, seed: int):
     """Verify spec decode works well with draft model quantization configs.
     """

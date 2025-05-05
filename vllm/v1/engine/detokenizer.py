@@ -26,8 +26,7 @@ class IncrementalDetokenizer:
     def output_token_ids(self) -> list[int]:
         return self.token_ids
 
-    def update(self, new_token_ids: list[int],
-               stop_terminated: bool) -> Optional[str]:
+    def update(self, new_token_ids: list[int], stop_terminated: bool) -> Optional[str]:
         self.token_ids.extend(new_token_ids)
         return None
 
@@ -45,8 +44,8 @@ class IncrementalDetokenizer:
             # No tokenizer => skipping detokenization.
             return IncrementalDetokenizer()
 
-        if (isinstance(tokenizer, PreTrainedTokenizerFast) and version.parse(
-                tokenizers.__version__) >= version.parse("0.21.1")):
+        if (isinstance(tokenizer, PreTrainedTokenizerFast)
+                and version.parse(tokenizers.__version__) >= version.parse("0.21.1")):
             # Fast tokenizer => use tokenizers library DecodeStream.
             # And only tokenizers >= 0.21.1 supports Fast Detokenizer.
             return FastIncrementalDetokenizer(tokenizer, request)
@@ -76,8 +75,7 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         # Generation data
         self.output_text = ""
 
-    def update(self, new_token_ids: list[int],
-               stop_terminated: bool) -> Optional[str]:
+    def update(self, new_token_ids: list[int], stop_terminated: bool) -> Optional[str]:
         """
         Update RequestState for the request_id by:
             1) Detokenize the new token ids incrementally.
@@ -151,8 +149,7 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
 
 class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
 
-    def __init__(self, tokenizer: PreTrainedTokenizerFast,
-                 request: EngineCoreRequest):
+    def __init__(self, tokenizer: PreTrainedTokenizerFast, request: EngineCoreRequest):
         super().__init__(request)
 
         sampling_params = request.sampling_params
@@ -186,8 +183,7 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
                                            None)) is None:
                 self.tokenizer.added_token_ids = added_token_ids = {
                     tid: tok.content
-                    for tid, tok in
-                    self.tokenizer.get_added_tokens_decoder().items()
+                    for tid, tok in self.tokenizer.get_added_tokens_decoder().items()
                 }
 
             if added_token_ids:
@@ -223,8 +219,7 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
             convert_prompt_ids_to_tokens(
                 tokenizer=tokenizer,
                 prompt_ids=request.prompt_token_ids,
-                skip_special_tokens=request.sampling_params.
-                skip_special_tokens,
+                skip_special_tokens=request.sampling_params.skip_special_tokens,
             ))
 
         self.token_ids.extend(request.prompt_token_ids)
@@ -232,8 +227,7 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
 
         params = request.sampling_params
         self.skip_special_tokens = params.skip_special_tokens
-        self.spaces_between_special_tokens = (
-            params.spaces_between_special_tokens)
+        self.spaces_between_special_tokens = (params.spaces_between_special_tokens)
 
     @property
     def output_token_ids(self) -> list[int]:
@@ -249,8 +243,7 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
                 prefix_offset=self.prefix_offset,
                 read_offset=self.read_offset,
                 skip_special_tokens=self.skip_special_tokens,
-                spaces_between_special_tokens=self.
-                spaces_between_special_tokens,
+                spaces_between_special_tokens=self.spaces_between_special_tokens,
             ))
 
         self.tokens.extend(new_tokens)

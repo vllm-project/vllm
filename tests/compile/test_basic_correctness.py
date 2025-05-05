@@ -143,7 +143,6 @@ def test_compile_correctness(
             all_envs.append({})
             if level != CompilationLevel.DYNAMO_ONCE and not fullgraph:
                 # "DYNAMO_ONCE" will always use fullgraph
-                all_envs[-1][
-                    "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE"] = "0"  # type: ignore
+                all_envs[-1]["VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE"] = "0"  # type: ignore
 
         compare_all_settings(model, all_args * 3, all_envs, method=method)

@@ -90,7 +90,7 @@ def merge_attn_states_kernel(
     p_scale = p_se / out_se
     s_scale = s_se / out_se
     out = p_out * p_scale + s_out * s_scale
-    tl.store(output + token_idx * num_heads * HEAD_SIZE +
-             head_idx * HEAD_SIZE + head_arange,
+    tl.store(output + token_idx * num_heads * HEAD_SIZE + head_idx * HEAD_SIZE +
+             head_arange,
              out,
              mask=head_mask)

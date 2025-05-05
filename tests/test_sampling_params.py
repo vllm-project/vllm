@@ -64,8 +64,8 @@ def test_sampling_params_from_request_with_no_guided_decoding_backend(
                           ("lm-format-enforcer", "lm-format-enforcer"),
                           ("outlines", "outlines")])
 def test_sampling_params_from_request_with_guided_decoding_backend(
-        request_level_guided_decoding_backend: str, expected: str,
-        model_config, default_max_tokens):
+        request_level_guided_decoding_backend: str, expected: str, model_config,
+        default_max_tokens):
 
     request = ChatCompletionRequest.model_validate({
         'messages': [{

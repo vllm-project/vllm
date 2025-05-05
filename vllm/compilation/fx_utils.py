@@ -29,8 +29,7 @@ def find_specified_fn(nodes: Iterable[fx.Node], op: OpOverload) -> fx.Node:
 
 
 # Returns the first auto_functionalized node with the given op (if it exists)
-def find_auto_fn_maybe(nodes: Iterable[fx.Node],
-                       op: OpOverload) -> Optional[fx.Node]:
+def find_auto_fn_maybe(nodes: Iterable[fx.Node], op: OpOverload) -> Optional[fx.Node]:
     for node in nodes:
         if is_func(node, auto_functionalized) and node.args[0] == op:  # noqa
             return node

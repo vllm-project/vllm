@@ -21,9 +21,7 @@ NUM_HEADS = [64]
 NUM_QUERIES_PER_KV = [1, 8, 64]
 HEAD_SIZES = [128, 96, 24]
 DTYPES = [torch.float16]
-CUDA_DEVICES = [
-    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
-]
+CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
 SLIDING_WINDOW = [0, 16, 64, 128, 256, 512, 2048]
 KV_CACHE_DTYPES = ["auto", "fp8", "fp8_e5m2"]
 
@@ -50,11 +48,9 @@ def test_contexted_kv_attention(
     op: Callable,
 ) -> None:
 
-    if 'fp8' in kv_cache_dtype and not current_platform.has_device_capability(
-            89):
-        pytest.skip(
-            'Triton limitation: fp8e4nv data type is not supported on CUDA'
-            ' arch < 89')
+    if 'fp8' in kv_cache_dtype and not current_platform.has_device_capability(89):
+        pytest.skip('Triton limitation: fp8e4nv data type is not supported on CUDA'
+                    ' arch < 89')
 
     current_platform.seed_everything(0)
     torch.set_default_device(device)
@@ -106,24 +102,18 @@ def test_contexted_kv_attention(
     v = torch.zeros(sum(query_lens), num_kv_heads, head_size, dtype=dtype)
     values = torch.arange(0, cache_size, dtype=torch.long)
     values = values[torch.randperm(cache_size)]
-    block_table = values[:BS * max_block_per_request].view(
-        BS, max_block_per_request)
+    block_table = values[:BS * max_block_per_request].view(BS, max_block_per_request)
     b_seq_len = torch.tensor(seq_lens, dtype=torch.long)
     b_ctx_len = torch.tensor(ctx_lens, dtype=torch.long)
-    b_start_loc = torch.cumsum(torch.tensor([0] + query_lens,
-                                            dtype=torch.long),
-                               dim=0)
+    b_start_loc = torch.cumsum(torch.tensor([0] + query_lens, dtype=torch.long), dim=0)
     max_input_len = MAX_SEQ_LEN
     # copy kv to cache
-    b_seq_start_loc = torch.cumsum(torch.tensor([0] + seq_lens[:-1],
-                                                dtype=torch.long),
+    b_seq_start_loc = torch.cumsum(torch.tensor([0] + seq_lens[:-1], dtype=torch.long),
                                    dim=0)
     for i in range(BS):
         for j in range(query_lens[i]):
-            k[b_start_loc[i] + j].copy_(key[b_seq_start_loc[i] + b_ctx_len[i] +
-                                            j])
-            v[b_start_loc[i] + j].copy_(value[b_seq_start_loc[i] +
-                                              b_ctx_len[i] + j])
+            k[b_start_loc[i] + j].copy_(key[b_seq_start_loc[i] + b_ctx_len[i] + j])
+            v[b_start_loc[i] + j].copy_(value[b_seq_start_loc[i] + b_ctx_len[i] + j])
         cur_ctx = 0
         block_id = 0
         while cur_ctx < b_ctx_len[i]:
@@ -135,11 +125,9 @@ def test_contexted_kv_attention(
             start_slot = block_table[i, block_id] * block_size
             end_slot = start_slot + end_loc - start_loc
             k_cache.view(-1, num_kv_heads,
-                         head_size)[start_slot:end_slot].copy_(
-                             key[start_loc:end_loc])
+                         head_size)[start_slot:end_slot].copy_(key[start_loc:end_loc])
             v_cache.view(-1, num_kv_heads,
-                         head_size)[start_slot:end_slot].copy_(
-                             value[start_loc:end_loc])
+                         head_size)[start_slot:end_slot].copy_(value[start_loc:end_loc])
             cur_ctx += block_size
             block_id += 1
     # transpose K_cache[num_blocks, block_size, num_kv_heads, head_size]
@@ -202,11 +190,10 @@ def test_contexted_kv_attention(
         # see also: vllm/model_executor/layers/attention.py
         query = query.view(query.shape[0], num_kv_heads, num_queries_per_kv,
                            query.shape[-1])
-        key = key[:, :, None, :].expand(key.shape[0], num_kv_heads,
-                                        num_queries_per_kv, key.shape[-1])
-        value = value[:, :,
-                      None, :].expand(value.shape[0], num_kv_heads,
-                                      num_queries_per_kv, value.shape[-1])
+        key = key[:, :, None, :].expand(key.shape[0], num_kv_heads, num_queries_per_kv,
+                                        key.shape[-1])
+        value = value[:, :, None, :].expand(value.shape[0], num_kv_heads,
+                                            num_queries_per_kv, value.shape[-1])
     query = query.unsqueeze(0)
     key = key.unsqueeze(0)
     value = value.unsqueeze(0)
@@ -214,8 +201,7 @@ def test_contexted_kv_attention(
     attn_bias = BlockDiagonalCausalFromBottomRightMask.from_seqlens(
         query_lens, seq_lens)
     if sliding_window > 0:
-        attn_bias = attn_bias.make_local_attention_from_bottomright(
-            sliding_window)
+        attn_bias = attn_bias.make_local_attention_from_bottomright(sliding_window)
     output_ref = xops.memory_efficient_attention_forward(
         query,
         key,
@@ -262,11 +248,9 @@ def test_contexted_kv_attention_alibi(
     op: Callable,
 ) -> None:
 
-    if 'fp8' in kv_cache_dtype and not current_platform.has_device_capability(
-            89):
-        pytest.skip(
-            'Triton limitation: fp8e4nv data type is not supported on CUDA'
-            ' arch < 89')
+    if 'fp8' in kv_cache_dtype and not current_platform.has_device_capability(89):
+        pytest.skip('Triton limitation: fp8e4nv data type is not supported on CUDA'
+                    ' arch < 89')
 
     current_platform.seed_everything(0)
     torch.set_default_device(device)
@@ -298,8 +282,7 @@ def test_contexted_kv_attention_alibi(
                                         end=1 + 2 * num_remaining_heads,
                                         step=2,
                                         dtype=torch.int32)
-            slopes = torch.cat(
-                [slopes, torch.pow(extra_base, extra_powers)], dim=0)
+            slopes = torch.cat([slopes, torch.pow(extra_base, extra_powers)], dim=0)
         return slopes
 
     alibi_slopes = _get_alibi_slopes(num_heads).to(device)
@@ -341,24 +324,18 @@ def test_contexted_kv_attention_alibi(
     v = torch.zeros(sum(query_lens), num_kv_heads, head_size, dtype=dtype)
     values = torch.arange(0, cache_size, dtype=torch.long)
     values = values[torch.randperm(cache_size)]
-    block_table = values[:BS * max_block_per_request].view(
-        BS, max_block_per_request)
+    block_table = values[:BS * max_block_per_request].view(BS, max_block_per_request)
     b_seq_len = torch.tensor(seq_lens, dtype=torch.long)
     b_ctx_len = torch.tensor(ctx_lens, dtype=torch.long)
-    b_start_loc = torch.cumsum(torch.tensor([0] + query_lens,
-                                            dtype=torch.long),
-                               dim=0)
+    b_start_loc = torch.cumsum(torch.tensor([0] + query_lens, dtype=torch.long), dim=0)
     max_input_len = MAX_SEQ_LEN
     # copy kv to cache
-    b_seq_start_loc = torch.cumsum(torch.tensor([0] + seq_lens[:-1],
-                                                dtype=torch.long),
+    b_seq_start_loc = torch.cumsum(torch.tensor([0] + seq_lens[:-1], dtype=torch.long),
                                    dim=0)
     for i in range(BS):
         for j in range(query_lens[i]):
-            k[b_start_loc[i] + j].copy_(key[b_seq_start_loc[i] + b_ctx_len[i] +
-                                            j])
-            v[b_start_loc[i] + j].copy_(value[b_seq_start_loc[i] +
-                                              b_ctx_len[i] + j])
+            k[b_start_loc[i] + j].copy_(key[b_seq_start_loc[i] + b_ctx_len[i] + j])
+            v[b_start_loc[i] + j].copy_(value[b_seq_start_loc[i] + b_ctx_len[i] + j])
         cur_ctx = 0
         block_id = 0
         while cur_ctx < b_ctx_len[i]:
@@ -370,11 +347,9 @@ def test_contexted_kv_attention_alibi(
             start_slot = block_table[i, block_id] * block_size
             end_slot = start_slot + end_loc - start_loc
             k_cache.view(-1, num_kv_heads,
-                         head_size)[start_slot:end_slot].copy_(
-                             key[start_loc:end_loc])
+                         head_size)[start_slot:end_slot].copy_(key[start_loc:end_loc])
             v_cache.view(-1, num_kv_heads,
-                         head_size)[start_slot:end_slot].copy_(
-                             value[start_loc:end_loc])
+                         head_size)[start_slot:end_slot].copy_(value[start_loc:end_loc])
             cur_ctx += block_size
             block_id += 1
     # transpose K_cache[num_blocks, block_size, num_kv_heads, head_size]
@@ -429,10 +404,7 @@ def test_contexted_kv_attention_alibi(
     # NOTE(DefTruth): In order to reuse _make_alibi_bias function,
     # we have to pad query tensor before MQA/GQA expanding.
     if query.shape[0] != key.shape[0]:
-        query_pad = torch.empty(sum(seq_lens),
-                                num_heads,
-                                head_size,
-                                dtype=dtype)
+        query_pad = torch.empty(sum(seq_lens), num_heads, head_size, dtype=dtype)
         query_pad.uniform_(-1e-3, 1e-3)
         seq_start = 0
         query_start = 0
@@ -440,8 +412,7 @@ def test_contexted_kv_attention_alibi(
             seq_end = seq_start + seq_len
             query_end = query_start + query_len
             query_pad[seq_start:seq_end, ...] = torch.cat([
-                torch.zeros(
-                    seq_len - query_len, num_heads, head_size, dtype=dtype),
+                torch.zeros(seq_len - query_len, num_heads, head_size, dtype=dtype),
                 query[query_start:query_end, ...]
             ],
                                                           dim=0)
@@ -455,11 +426,10 @@ def test_contexted_kv_attention_alibi(
         # heads.
         #
         # see also: vllm/model_executor/layers/attention.py
-        key = key[:, :, None, :].expand(key.shape[0], num_kv_heads,
-                                        num_queries_per_kv, key.shape[-1])
-        value = value[:, :,
-                      None, :].expand(value.shape[0], num_kv_heads,
-                                      num_queries_per_kv, value.shape[-1])
+        key = key[:, :, None, :].expand(key.shape[0], num_kv_heads, num_queries_per_kv,
+                                        key.shape[-1])
+        value = value[:, :, None, :].expand(value.shape[0], num_kv_heads,
+                                            num_queries_per_kv, value.shape[-1])
         # [seq, num_kv_heads, num_queries_per_kv, dk]=>
         # [seq, num_kv_heads*num_queries_per_kv, dk] to comply with rest of the
         # codebase. We save some time reshaping alibi matrix at runtime.
@@ -482,19 +452,15 @@ def test_contexted_kv_attention_alibi(
     for i, (query_len, seq_len) in enumerate(zip(query_lens, seq_lens)):
         seq_end = seq_start + seq_len
         query_end = query_start + query_len
-        out = xops.memory_efficient_attention_forward(query[:,
-                                                            seq_start:seq_end],
-                                                      key[:,
-                                                          seq_start:seq_end],
-                                                      value[:,
-                                                            seq_start:seq_end],
+        out = xops.memory_efficient_attention_forward(query[:, seq_start:seq_end],
+                                                      key[:, seq_start:seq_end],
+                                                      value[:, seq_start:seq_end],
                                                       attn_bias=attn_bias[i],
                                                       p=0.0,
                                                       scale=scale)
-        out = out.view_as(query[:, seq_start:seq_end]).view(
-            seq_len, num_heads, head_size)
-        output_ref[query_start:query_end, ...].copy_(out[seq_len - query_len:,
-                                                         ...])
+        out = out.view_as(query[:, seq_start:seq_end]).view(seq_len, num_heads,
+                                                            head_size)
+        output_ref[query_start:query_end, ...].copy_(out[seq_len - query_len:, ...])
         seq_start += seq_len
         query_start += query_len
     torch.cuda.synchronize()
@@ -532,8 +498,7 @@ def test_contexted_kv_attention_f32(
     op: Callable,
 ) -> None:
     test_contexted_kv_attention(num_heads, num_queries_per_kv, head_size,
-                                sliding_window, dtype, kv_cache_dtype, device,
-                                op)
+                                sliding_window, dtype, kv_cache_dtype, device, op)
 
 
 @pytest.mark.optional
@@ -554,5 +519,5 @@ def test_contexted_kv_attention_alibi_f32(
     device: str,
     op: Callable,
 ) -> None:
-    test_contexted_kv_attention_alibi(num_heads, num_queries_per_kv, head_size,
-                                      dtype, kv_cache_dtype, device, op)
+    test_contexted_kv_attention_alibi(num_heads, num_queries_per_kv, head_size, dtype,
+                                      kv_cache_dtype, device, op)

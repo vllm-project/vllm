@@ -165,8 +165,7 @@ def get_clang_version(run_lambda):
 
 
 def get_cmake_version(run_lambda):
-    return run_and_parse_first_match(run_lambda, 'cmake --version',
-                                     r'cmake (.*)')
+    return run_and_parse_first_match(run_lambda, 'cmake --version', r'cmake (.*)')
 
 
 def get_nvidia_driver_version(run_lambda):
@@ -175,13 +174,12 @@ def get_nvidia_driver_version(run_lambda):
         return run_and_parse_first_match(run_lambda, cmd,
                                          r'com[.]nvidia[.]CUDA [(](.*?)[)]')
     smi = get_nvidia_smi()
-    return run_and_parse_first_match(run_lambda, smi,
-                                     r'Driver Version: (.*?) ')
+    return run_and_parse_first_match(run_lambda, smi, r'Driver Version: (.*?) ')
 
 
 def get_gpu_info(run_lambda):
-    if get_platform() == 'darwin' or (TORCH_AVAILABLE and hasattr(
-            torch.version, 'hip') and torch.version.hip is not None):
+    if get_platform() == 'darwin' or (TORCH_AVAILABLE and hasattr(torch.version, 'hip')
+                                      and torch.version.hip is not None):
         if TORCH_AVAILABLE and torch.cuda.is_available():
             if torch.version.hip is not None:
                 prop = torch.cuda.get_device_properties(0)
@@ -203,8 +201,7 @@ def get_gpu_info(run_lambda):
 
 
 def get_running_cuda_version(run_lambda):
-    return run_and_parse_first_match(run_lambda, 'nvcc --version',
-                                     r'release .+ V(.*)')
+    return run_and_parse_first_match(run_lambda, 'nvcc --version', r'release .+ V(.*)')
 
 
 def get_cudnn_version(run_lambda):
@@ -249,10 +246,9 @@ def get_nvidia_smi():
     smi = 'nvidia-smi'
     if get_platform() == 'win32':
         system_root = os.environ.get('SYSTEMROOT', 'C:\\Windows')
-        program_files_root = os.environ.get('PROGRAMFILES',
-                                            'C:\\Program Files')
-        legacy_path = os.path.join(program_files_root, 'NVIDIA Corporation',
-                                   'NVSMI', smi)
+        program_files_root = os.environ.get('PROGRAMFILES', 'C:\\Program Files')
+        legacy_path = os.path.join(program_files_root, 'NVIDIA Corporation', 'NVSMI',
+                                   smi)
         new_path = os.path.join(system_root, 'System32', smi)
         smis = [new_path, legacy_path]
         for candidate_smi in smis:
@@ -400,8 +396,7 @@ def get_cpu_info(run_lambda):
     elif get_platform() == 'win32':
         rc, out, err = run_lambda(
             'wmic cpu get Name,Manufacturer,Family,Architecture,ProcessorType,DeviceID, \
-        CurrentClockSpeed,MaxClockSpeed,L2CacheSize,L2CacheSpeed,Revision /VALUE'
-        )
+        CurrentClockSpeed,MaxClockSpeed,L2CacheSize,L2CacheSpeed,Revision /VALUE')
     elif get_platform() == 'darwin':
         rc, out, err = run_lambda("sysctl -n machdep.cpu.brand_string")
     cpu_info = 'None'
@@ -426,8 +421,7 @@ def get_platform():
 
 
 def get_mac_version(run_lambda):
-    return run_and_parse_first_match(run_lambda, 'sw_vers -productVersion',
-                                     r'(.*)')
+    return run_and_parse_first_match(run_lambda, 'sw_vers -productVersion', r'(.*)')
 
 
 def get_windows_version(run_lambda):
@@ -435,8 +429,7 @@ def get_windows_version(run_lambda):
     wmic_cmd = os.path.join(system_root, 'System32', 'Wbem', 'wmic')
     findstr_cmd = os.path.join(system_root, 'System32', 'findstr')
     return run_and_read_all(
-        run_lambda,
-        '{} os get Caption | {} /v Caption'.format(wmic_cmd, findstr_cmd))
+        run_lambda, '{} os get Caption | {} /v Caption'.format(wmic_cmd, findstr_cmd))
 
 
 def get_lsb_version(run_lambda):
@@ -511,8 +504,7 @@ def get_pip_packages(run_lambda, patterns=None):
             cmd = ["uv", "pip", "list", "--format=freeze"]
         else:
             raise RuntimeError(
-                "Could not collect pip list output (pip or uv module not available)"
-            )
+                "Could not collect pip list output (pip or uv module not available)")
 
         out = run_and_read_all(run_lambda, cmd)
         return "\n".join(line for line in out.splitlines()
@@ -540,8 +532,7 @@ def get_cuda_module_loading_config():
 def is_xnnpack_available():
     if TORCH_AVAILABLE:
         import torch.backends.xnnpack
-        return str(
-            torch.backends.xnnpack.enabled)  # type: ignore[attr-defined]
+        return str(torch.backends.xnnpack.enabled)  # type: ignore[attr-defined]
     else:
         return "N/A"
 
@@ -549,8 +540,8 @@ def is_xnnpack_available():
 def get_env_vars():
     env_vars = ''
     secret_terms = ('secret', 'token', 'api', 'access', 'password')
-    report_prefix = ("TORCH", "NCCL", "PYTORCH", "CUDA", "CUBLAS", "CUDNN",
-                     "OMP_", "MKL_", "NVIDIA")
+    report_prefix = ("TORCH", "NCCL", "PYTORCH", "CUDA", "CUBLAS", "CUDNN", "OMP_",
+                     "MKL_", "NVIDIA")
     for k, v in os.environ.items():
         if any(term in k.lower() for term in secret_terms):
             continue
@@ -602,9 +593,8 @@ def get_env_info():
     return SystemEnv(
         torch_version=version_str,
         is_debug_build=debug_mode_str,
-        python_version='{} ({}-bit runtime)'.format(
-            sys_version,
-            sys.maxsize.bit_length() + 1),
+        python_version='{} ({}-bit runtime)'.format(sys_version,
+                                                    sys.maxsize.bit_length() + 1),
         python_platform=get_python_platform(),
         is_cuda_available=cuda_available_str,
         cuda_compiled_version=cuda_version_str,
@@ -748,19 +738,17 @@ def pretty_str(envinfo):
     mutable_dict = replace_nones(mutable_dict)
 
     # If either of these are '', replace with 'No relevant packages'
-    mutable_dict['pip_packages'] = replace_if_empty(
-        mutable_dict['pip_packages'])
-    mutable_dict['conda_packages'] = replace_if_empty(
-        mutable_dict['conda_packages'])
+    mutable_dict['pip_packages'] = replace_if_empty(mutable_dict['pip_packages'])
+    mutable_dict['conda_packages'] = replace_if_empty(mutable_dict['conda_packages'])
 
     # Tag conda and pip packages with a prefix
     # If they were previously None, they'll show up as ie '[conda] Could not collect'
     if mutable_dict['pip_packages']:
-        mutable_dict['pip_packages'] = prepend(
-            mutable_dict['pip_packages'], '[{}] '.format(envinfo.pip_version))
+        mutable_dict['pip_packages'] = prepend(mutable_dict['pip_packages'],
+                                               '[{}] '.format(envinfo.pip_version))
     if mutable_dict['conda_packages']:
-        mutable_dict['conda_packages'] = prepend(
-            mutable_dict['conda_packages'], '[conda] ')
+        mutable_dict['conda_packages'] = prepend(mutable_dict['conda_packages'],
+                                                 '[conda] ')
     mutable_dict['cpu_info'] = envinfo.cpu_info
     return env_info_fmt.format(**mutable_dict)
 
@@ -779,8 +767,7 @@ def main():
         minidump_dir = torch.utils._crash_handler.DEFAULT_MINIDUMP_DIR
         if sys.platform == "linux" and os.path.exists(minidump_dir):
             dumps = [
-                os.path.join(minidump_dir, dump)
-                for dump in os.listdir(minidump_dir)
+                os.path.join(minidump_dir, dump) for dump in os.listdir(minidump_dir)
             ]
             latest = max(dumps, key=os.path.getctime)
             ctime = os.path.getctime(latest)

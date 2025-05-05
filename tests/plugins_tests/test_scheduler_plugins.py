@@ -39,8 +39,7 @@ def test_scheduler_plugins_v0(monkeypatch: pytest.MonkeyPatch):
             engine.add_request("0", "foo", sampling_params)
             engine.step()
 
-        assert str(
-            exception_info.value) == "Exception raised by DummyV0Scheduler"
+        assert str(exception_info.value) == "Exception raised by DummyV0Scheduler"
 
 
 def test_scheduler_plugins_v1(monkeypatch: pytest.MonkeyPatch):
@@ -64,5 +63,4 @@ def test_scheduler_plugins_v1(monkeypatch: pytest.MonkeyPatch):
             engine.add_request("0", "foo", sampling_params)
             engine.step()
 
-        assert str(
-            exception_info.value) == "Exception raised by DummyV1Scheduler"
+        assert str(exception_info.value) == "Exception raised by DummyV1Scheduler"

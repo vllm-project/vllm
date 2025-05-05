@@ -32,17 +32,14 @@ def main(args: argparse.Namespace):
     )
     print(sampling_params)
     dummy_prompt_token_ids = np.random.randint(10000,
-                                               size=(args.batch_size,
-                                                     args.input_len))
+                                               size=(args.batch_size, args.input_len))
     dummy_prompts: list[PromptType] = [{
         "prompt_token_ids": batch
     } for batch in dummy_prompt_token_ids.tolist()]
 
     def run_to_completion():
         start_time = time.perf_counter()
-        llm.generate(dummy_prompts,
-                     sampling_params=sampling_params,
-                     use_tqdm=False)
+        llm.generate(dummy_prompts, sampling_params=sampling_params, use_tqdm=False)
         end_time = time.perf_counter()
         latency = end_time - start_time
         return latency

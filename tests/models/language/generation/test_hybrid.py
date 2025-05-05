@@ -47,12 +47,12 @@ def test_models(
     num_logprobs: int,
 ) -> None:
     with hf_runner(model) as hf_model:
-        hf_outputs = hf_model.generate_greedy_logprobs_limit(
-            example_prompts, max_tokens, num_logprobs)
+        hf_outputs = hf_model.generate_greedy_logprobs_limit(example_prompts,
+                                                             max_tokens, num_logprobs)
 
     with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
-        vllm_outputs = vllm_model.generate_greedy_logprobs(
-            example_prompts, max_tokens, num_logprobs)
+        vllm_outputs = vllm_model.generate_greedy_logprobs(example_prompts, max_tokens,
+                                                           num_logprobs)
 
     check_logprobs_close(
         outputs_0_lst=hf_outputs,
@@ -75,8 +75,7 @@ def test_batching(
     for_loop_outputs = []
     with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
         for prompt in example_prompts:
-            single_output, = vllm_model.generate_greedy_logprobs([prompt],
-                                                                 max_tokens,
+            single_output, = vllm_model.generate_greedy_logprobs([prompt], max_tokens,
                                                                  num_logprobs)
             for_loop_outputs.append(single_output)
 
@@ -110,14 +109,13 @@ def test_chunked_prefill(
                      enable_chunked_prefill=True,
                      max_num_batched_tokens=max_num_batched_tokens,
                      max_num_seqs=max_num_seqs) as vllm_model:
-        chunked = vllm_model.generate_greedy_logprobs(example_prompts,
-                                                      max_tokens, num_logprobs)
+        chunked = vllm_model.generate_greedy_logprobs(example_prompts, max_tokens,
+                                                      num_logprobs)
 
-    with vllm_runner(model,
-                     enable_chunked_prefill=False,
+    with vllm_runner(model, enable_chunked_prefill=False,
                      max_num_seqs=max_num_seqs) as vllm_model:
-        non_chunked = vllm_model.generate_greedy_logprobs(
-            example_prompts, max_tokens, num_logprobs)
+        non_chunked = vllm_model.generate_greedy_logprobs(example_prompts, max_tokens,
+                                                          num_logprobs)
 
     check_logprobs_close(
         outputs_0_lst=chunked,
@@ -145,10 +143,7 @@ def test_chunked_prefill_with_parallel_sampling(
     decoding steps inside a chunked prefill forward pass
     (where we have both prefill and decode together)
     """
-    sampling_params = SamplingParams(n=3,
-                                     temperature=1,
-                                     seed=0,
-                                     max_tokens=max_tokens)
+    sampling_params = SamplingParams(n=3, temperature=1, seed=0, max_tokens=max_tokens)
     with vllm_runner(
             model,
             enable_chunked_prefill=True,
@@ -172,20 +167,17 @@ def test_mamba_cache_cg_padding(
     batch size. If it's not, a torch RuntimeError will be raised because
     tensor dimensions aren't compatible.
     """
-    vllm_config = EngineArgs(model=model,
-                             trust_remote_code=True).create_engine_config()
-    while len(example_prompts) == vllm_config.pad_for_cudagraph(
-            len(example_prompts)):
+    vllm_config = EngineArgs(model=model, trust_remote_code=True).create_engine_config()
+    while len(example_prompts) == vllm_config.pad_for_cudagraph(len(example_prompts)):
         example_prompts.append(example_prompts[0])
 
     try:
         with vllm_runner(model) as vllm_model:
             vllm_model.generate_greedy(example_prompts, max_tokens)
     except RuntimeError:
-        pytest.fail(
-            "Couldn't run batch size which is not equal to a Cuda Graph "
-            "captured batch size. "
-            "Could be related to mamba cache not padded correctly")
+        pytest.fail("Couldn't run batch size which is not equal to a Cuda Graph "
+                    "captured batch size. "
+                    "Could be related to mamba cache not padded correctly")
 
 
 @pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
@@ -202,8 +194,7 @@ def test_models_preemption_recompute(
     with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
         scheduler = vllm_model.model.llm_engine.scheduler[0]
         scheduler.ENABLE_ARTIFICIAL_PREEMPT = True
-        preempt_vllm_outputs = vllm_model.generate_greedy(
-            example_prompts, max_tokens)
+        preempt_vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
 
         scheduler.ENABLE_ARTIFICIAL_PREEMPT = False
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
@@ -268,13 +259,10 @@ def test_multistep_correctness(
     model: str,
     max_tokens: int,
 ) -> None:
-    with vllm_runner(model, num_scheduler_steps=8,
-                     max_num_seqs=2) as vllm_model:
-        vllm_outputs_multistep = vllm_model.generate_greedy(
-            example_prompts, max_tokens)
+    with vllm_runner(model, num_scheduler_steps=8, max_num_seqs=2) as vllm_model:
+        vllm_outputs_multistep = vllm_model.generate_greedy(example_prompts, max_tokens)
 
-    with vllm_runner(model, num_scheduler_steps=1,
-                     max_num_seqs=2) as vllm_model:
+    with vllm_runner(model, num_scheduler_steps=1, max_num_seqs=2) as vllm_model:
         vllm_outputs_single_step = vllm_model.generate_greedy(
             example_prompts, max_tokens)
 
@@ -297,13 +285,11 @@ def test_distributed_correctness(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-    with vllm_runner(model, tensor_parallel_size=1,
-                     max_num_seqs=2) as vllm_model:
+    with vllm_runner(model, tensor_parallel_size=1, max_num_seqs=2) as vllm_model:
         vllm_outputs_tp_1 = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
-    with vllm_runner(model, tensor_parallel_size=2,
-                     max_num_seqs=2) as vllm_model:
+    with vllm_runner(model, tensor_parallel_size=2, max_num_seqs=2) as vllm_model:
         vllm_outputs_tp_2 = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 

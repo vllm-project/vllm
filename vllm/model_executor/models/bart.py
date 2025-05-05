@@ -301,8 +301,7 @@ class BartCrossAttention(nn.Module):
 
         # TP sharding sizes is accounted for within "*Parallel" layers.
         self.qkv_proj = QKVCrossParallelLinear(self.d_model,
-                                               self.d_model //
-                                               self.total_num_heads,
+                                               self.d_model // self.total_num_heads,
                                                self.total_num_heads,
                                                self.total_num_kv_heads,
                                                bias,
@@ -417,9 +416,8 @@ class BartEncoderLayer(nn.Module):
         hidden_states = residual + hidden_states
         hidden_states = self.final_layer_norm(hidden_states)
 
-        if hidden_states.dtype == torch.float16 and (
-                torch.isinf(hidden_states).any()
-                or torch.isnan(hidden_states).any()):
+        if hidden_states.dtype == torch.float16 and (torch.isinf(hidden_states).any() or
+                                                     torch.isnan(hidden_states).any()):
             clamp_value = torch.finfo(hidden_states.dtype).max - 1000
             hidden_states = torch.clamp(hidden_states,
                                         min=-clamp_value,
@@ -631,8 +629,7 @@ class BartDecoder(nn.Module):
         self.quant_config = quant_config
         self.lora_config = lora_config
         self.max_target_positions = config.max_position_embeddings
-        embed_scale = math.sqrt(
-            config.d_model) if config.scale_embedding else 1.0
+        embed_scale = math.sqrt(config.d_model) if config.scale_embedding else 1.0
 
         self.embed_tokens = BartScaledWordEmbedding(config.vocab_size,
                                                     config.d_model,
@@ -697,9 +694,7 @@ class BartDecoder(nn.Module):
 
 
 class BartModel(nn.Module, SupportsQuant):
-    _tied_weights_keys = [
-        "encoder.embed_tokens.weight", "decoder.embed_tokens.weight"
-    ]
+    _tied_weights_keys = ["encoder.embed_tokens.weight", "decoder.embed_tokens.weight"]
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -754,10 +749,9 @@ class BartModel(nn.Module, SupportsQuant):
 
         # decoder outputs consists of
         # (dec_features, past_key_value, dec_hidden, dec_attn)
-        decoder_outputs = self.decoder(
-            decoder_input_ids=input_ids,
-            decoder_positions=positions,
-            encoder_hidden_states=encoder_hidden_states)
+        decoder_outputs = self.decoder(decoder_input_ids=input_ids,
+                                       decoder_positions=positions,
+                                       encoder_hidden_states=encoder_hidden_states)
 
         return decoder_outputs
 
@@ -781,8 +775,7 @@ class BartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
 
-        embed_scale = math.sqrt(
-            config.d_model) if config.scale_embedding else 1.0
+        embed_scale = math.sqrt(config.d_model) if config.scale_embedding else 1.0
 
         self.lm_head = BartParallelLMHead(config.vocab_size,
                                           config.d_model,
@@ -814,16 +807,14 @@ class BartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
         Returns:
             Output torch.Tensor
         """
-        return self.model(input_ids, positions, encoder_input_ids,
-                          encoder_positions)
+        return self.model(input_ids, positions, encoder_input_ids, encoder_positions)
 
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
         return logits
 
     stacked_params_mapping = {
@@ -881,8 +872,7 @@ class BartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
             name = self._rename_key(name)
             name, shard_id = self._rename_stacked_param(name)
 
-            if ('shared.weight' in name
-                    or 'encoder.embed_tokens.weight' in name
+            if ('shared.weight' in name or 'encoder.embed_tokens.weight' in name
                     or 'decoder.embed_tokens.weight' in name
                     or 'lm_head.weight' in name):
                 assert shared_embedding_weight is None, (
@@ -901,8 +891,7 @@ class BartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
                     continue
 
                 param = model_params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 if shard_id:
                     weight_loader(param, loaded_weight, shard_id)
                 else:

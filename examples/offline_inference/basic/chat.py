@@ -71,8 +71,7 @@ def main(args: dict):
         },
         {
             "role": "user",
-            "content":
-            "Write an essay about the importance of higher education.",
+            "content": "Write an essay about the importance of higher education.",
         },
     ]
     outputs = llm.chat(conversation, sampling_params, use_tqdm=False)

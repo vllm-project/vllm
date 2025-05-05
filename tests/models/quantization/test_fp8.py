@@ -93,8 +93,7 @@ def test_models(
 
 
 @pytest.mark.cpu_model
-@pytest.mark.skipif(not current_platform.is_cpu(),
-                    reason="test for the CPU backend.")
+@pytest.mark.skipif(not current_platform.is_cpu(), reason="test for the CPU backend.")
 @pytest.mark.parametrize(
     "kv_cache_dtype,base_model,test_model",
     [

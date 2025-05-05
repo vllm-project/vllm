@@ -84,8 +84,8 @@ class ROCmFlashAttentionBackend(AttentionBackend):
         head_size: int,
     ) -> Tuple[int, ...]:
         paged_attn = _get_paged_attn_module()
-        return paged_attn.get_kv_cache_shape(num_blocks, block_size,
-                                             num_kv_heads, head_size)
+        return paged_attn.get_kv_cache_shape(num_blocks, block_size, num_kv_heads,
+                                             head_size)
 
     @staticmethod
     def swap_blocks(
@@ -193,8 +193,7 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=0,
             slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
-            multi_modal_placeholder_index_maps=self.
-            multi_modal_placeholder_index_maps,
+            multi_modal_placeholder_index_maps=self.multi_modal_placeholder_index_maps,
             enable_kv_scales_calculation=self.enable_kv_scales_calculation,
             seq_lens=self.seq_lens[:self.num_prefills],
             seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
@@ -344,8 +343,7 @@ def _make_alibi_bias(alibi_slopes: torch.Tensor,
             bias = bias[None, :] - bias[:, None]
 
             num_heads = alibi_slopes.shape[0]
-            bias = bias[None, :].repeat(
-                (num_heads, 1, 1)).to(alibi_slopes.device)
+            bias = bias[None, :].repeat((num_heads, 1, 1)).to(alibi_slopes.device)
             bias.mul_(alibi_slopes[:, None, None])
             if make_attn_mask:
                 inf_mask = torch.empty(
@@ -405,31 +403,31 @@ def _get_seq_len_block_table_args(
         # For encoder-only models, we use the prefill sequence lengths
         assert attn_metadata.seq_lens is not None
         assert attn_metadata.seq_lens_tensor is not None
-        query_seq_start_loc = torch.tensor(
-            list(itertools.accumulate([0] + attn_metadata.seq_lens)),
-            device=attn_metadata.seq_lens_tensor.device,
-            dtype=attn_metadata.seq_lens_tensor.dtype)
+        query_seq_start_loc = torch.tensor(list(
+            itertools.accumulate([0] + attn_metadata.seq_lens)),
+                                           device=attn_metadata.seq_lens_tensor.device,
+                                           dtype=attn_metadata.seq_lens_tensor.dtype)
         max_seq_len = attn_metadata.max_prefill_seq_len
         # Encoder-only models typically use bidirectional attention
         causal_mask = False
 
-        return (query_seq_start_loc, max_seq_len, query_seq_start_loc,
-                max_seq_len, attn_metadata.seq_lens, causal_mask)
+        return (query_seq_start_loc, max_seq_len, query_seq_start_loc, max_seq_len,
+                attn_metadata.seq_lens, causal_mask)
 
     elif attn_type == AttentionType.DECODER:
         # Decoder self-attention
         # Choose max_seq_len based on whether we are in prompt_run
         assert attn_metadata.seq_lens is not None
         assert attn_metadata.seq_lens_tensor is not None
-        query_seq_start_loc = torch.tensor(
-            list(itertools.accumulate([0] + attn_metadata.seq_lens)),
-            device=attn_metadata.seq_lens_tensor.device,
-            dtype=attn_metadata.seq_lens_tensor.dtype)
+        query_seq_start_loc = torch.tensor(list(
+            itertools.accumulate([0] + attn_metadata.seq_lens)),
+                                           device=attn_metadata.seq_lens_tensor.device,
+                                           dtype=attn_metadata.seq_lens_tensor.dtype)
         max_seq_len = attn_metadata.max_prefill_seq_len
         causal_mask = True
 
-        return (query_seq_start_loc, max_seq_len, query_seq_start_loc,
-                max_seq_len, attn_metadata.seq_lens, causal_mask)
+        return (query_seq_start_loc, max_seq_len, query_seq_start_loc, max_seq_len,
+                attn_metadata.seq_lens, causal_mask)
     elif attn_type == AttentionType.ENCODER_DECODER:
         assert attn_metadata.seq_lens is not None
         assert attn_metadata.encoder_seq_lens_tensor is not None
@@ -440,17 +438,16 @@ def _get_seq_len_block_table_args(
 
         assert attn_metadata.encoder_seq_lens is not None
         assert attn_metadata.seq_lens_tensor is not None
-        key_seq_start_loc = torch.tensor(
-            list(itertools.accumulate([0] + attn_metadata.encoder_seq_lens)),
-            device=attn_metadata.seq_lens_tensor.device,
-            dtype=attn_metadata.seq_lens_tensor.dtype)
+        key_seq_start_loc = torch.tensor(list(
+            itertools.accumulate([0] + attn_metadata.encoder_seq_lens)),
+                                         device=attn_metadata.seq_lens_tensor.device,
+                                         dtype=attn_metadata.seq_lens_tensor.dtype)
         causal_mask = False
 
         # Enc/dec cross-attention KVs match encoder sequence length;
         # cross-attention utilizes special "cross" block tables
-        return (query_start_loc, attn_metadata.max_prefill_seq_len,
-                key_seq_start_loc, attn_metadata.max_encoder_seq_len,
-                attn_metadata.seq_lens, causal_mask)
+        return (query_start_loc, attn_metadata.max_prefill_seq_len, key_seq_start_loc,
+                attn_metadata.max_encoder_seq_len, attn_metadata.seq_lens, causal_mask)
     else:
         raise AttributeError(f"Invalid attention type {str(attn_type)}")
 
@@ -503,9 +500,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
             raise ValueError(
                 "ROCmFlashAttention does not support blocksparse attention.")
         if use_irope:
-            logger.warning(
-                "Using irope in V0 is not supported yet, it will fall back "
-                "to global attention for long context.")
+            logger.warning("Using irope in V0 is not supported yet, it will fall back "
+                           "to global attention for long context.")
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
             self.logits_soft_cap = 0.0
@@ -519,16 +515,16 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
-        self.sliding_window = ((sliding_window, sliding_window)
-                               if sliding_window is not None else (-1, -1))
+        self.sliding_window = ((sliding_window,
+                                sliding_window) if sliding_window is not None else
+                               (-1, -1))
         self.kv_cache_dtype = kv_cache_dtype
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         self.paged_attn_module = _get_paged_attn_module()
-        supported_head_sizes = self.paged_attn_module.get_supported_head_sizes(
-        )
+        supported_head_sizes = self.paged_attn_module.get_supported_head_sizes()
 
         if head_size not in supported_head_sizes:
             raise ValueError(
@@ -540,12 +536,11 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         self.use_triton_flash_attn = envs.VLLM_USE_TRITON_FLASH_ATTN
         if self.use_triton_flash_attn:
             if logits_soft_cap is not None:
-                raise ValueError(
-                    "ROCm Triton FlashAttention does not support attention"
-                    " logits soft capping."
-                    " please try using the ROCm CK "
-                    "FA backend instead by setting the env var "
-                    "`VLLM_USE_TRITON_FLASH_ATTN=0`")
+                raise ValueError("ROCm Triton FlashAttention does not support attention"
+                                 " logits soft capping."
+                                 " please try using the ROCm CK "
+                                 "FA backend instead by setting the env var "
+                                 "`VLLM_USE_TRITON_FLASH_ATTN=0`")
 
             from vllm.attention.ops.triton_flash_attention import (  # noqa: F401
                 triton_attention)
@@ -572,9 +567,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
 
             if self.use_naive_attn:
                 if logits_soft_cap is not None:
-                    raise ValueError(
-                        "ROCm Naive FlashAttention does not support "
-                        "attention logits soft capping.")
+                    raise ValueError("ROCm Naive FlashAttention does not support "
+                                     "attention logits soft capping.")
 
                 self.sdpa_attn_func = _sdpa_attention
                 logger.debug("Using naive (SDPA) attention in ROCmBackend")
@@ -584,10 +578,9 @@ class ROCmFlashAttentionImpl(AttentionImpl):
     def repeat_kv(self, x: torch.Tensor, n_rep: int) -> torch.Tensor:
         """torch.repeat_interleave(x, dim=1, repeats=n_rep)"""
         tokens, n_kv_heads, head_dim = x.shape
-        return (x[:, :,
-                  None, :].expand(tokens, n_kv_heads, n_rep,
-                                  head_dim).reshape(tokens, n_kv_heads * n_rep,
-                                                    head_dim))
+        return (x[:, :, None, :].expand(tokens, n_kv_heads, n_rep,
+                                        head_dim).reshape(tokens, n_kv_heads * n_rep,
+                                                          head_dim))
 
     def forward(
         self,
@@ -670,8 +663,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 and not self.aiter_kv_scales_initialized
                 and kv_cache.shape != torch.Size([0])):
             num_blocks = kv_cache.shape[1]
-            block_size = kv_cache.shape[2] // (self.num_kv_heads *
-                                               self.head_size)
+            block_size = kv_cache.shape[2] // (self.num_kv_heads * self.head_size)
             k_scale = torch.empty((self.num_kv_heads, num_blocks * block_size),
                                   dtype=torch.float32,
                                   device=kv_cache.device)
@@ -686,9 +678,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
 
         # Only update KV cache for decoder self-attention
         # and encoder-decoder cross-attention
-        if self.attn_type not in [
-                AttentionType.ENCODER, AttentionType.ENCODER_ONLY
-        ] and kv_cache.numel() > 0:
+        if self.attn_type not in [AttentionType.ENCODER, AttentionType.ENCODER_ONLY
+                                  ] and kv_cache.numel() > 0:
             key_cache, value_cache = paged_attn.split_kv_cache(
                 kv_cache, self.num_kv_heads, self.head_size)
 
@@ -769,9 +760,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     use_fp8_scales = (layer._q_scale and layer._k_scale
                                       and layer._v_scale and layer._prob_scale
                                       and self.kv_cache_dtype == "fp8")
-                    full_scales = (
-                        layer._q_scale, layer._k_scale, layer._v_scale,
-                        layer._prob_scale) if use_fp8_scales else None
+                    full_scales = (layer._q_scale, layer._k_scale, layer._v_scale,
+                                   layer._prob_scale) if use_fp8_scales else None
                     self.triton_attn_func(
                         query,
                         key,
@@ -783,8 +773,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         key_max_seq_len,
                         causal_mask,
                         self.scale,
-                        attn_masks[0][None]
-                        if attn_masks is not None else None,
+                        attn_masks[0][None] if attn_masks is not None else None,
                         full_scales,
                     )
                 elif self.use_naive_attn:
@@ -852,24 +841,25 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         layer._v_scale,
                     )
         # Skip decode phase for encoder-only models
-        if (decode_meta := attn_metadata.decode_metadata) and (
-                self.attn_type != AttentionType.ENCODER_ONLY):
+        if (decode_meta :=
+                attn_metadata.decode_metadata) and (self.attn_type
+                                                    != AttentionType.ENCODER_ONLY):
             # Decoding run.
             # Whether to use rocm custom paged attention or not
             num_seqs, num_heads, head_size = decode_query.shape
             block_size = value_cache.shape[3]
             gqa_ratio = num_heads // self.num_kv_heads
-            use_custom = use_rocm_custom_paged_attention(
-                decode_query.dtype, head_size, block_size, gqa_ratio,
-                decode_meta.max_decode_seq_len, self.sliding_window)
+            use_custom = use_rocm_custom_paged_attention(decode_query.dtype, head_size,
+                                                         block_size, gqa_ratio,
+                                                         decode_meta.max_decode_seq_len,
+                                                         self.sliding_window)
             if use_custom:
-                max_seq_len = (decode_meta.max_decode_seq_len if self.attn_type
-                               != AttentionType.ENCODER_DECODER else
+                max_seq_len = (decode_meta.max_decode_seq_len
+                               if self.attn_type != AttentionType.ENCODER_DECODER else
                                decode_meta.max_encoder_seq_len)
                 assert max_seq_len is not None
-                max_num_partitions = (
-                    (max_seq_len + _PARTITION_SIZE_ROCM - 1) //
-                    _PARTITION_SIZE_ROCM)
+                max_num_partitions = ((max_seq_len + _PARTITION_SIZE_ROCM - 1) //
+                                      _PARTITION_SIZE_ROCM)
                 assert _PARTITION_SIZE_ROCM % block_size == 0
                 tmp_output = torch.empty(
                     size=(num_seqs, num_heads, max_num_partitions, head_size),
@@ -953,8 +943,7 @@ def _sdpa_attention(
 
     for i, seq_len in enumerate(seq_lens):
         end = start + seq_len
-        with torch.nn.attention.sdpa_kernel(
-                torch.nn.attention.SDPBackend.MATH):
+        with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
             sub_out = torch.nn.functional.scaled_dot_product_attention(
                 query[:, start:end, :],
                 key[:, start:end, :],

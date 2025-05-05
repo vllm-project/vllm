@@ -63,8 +63,7 @@ class LlamaConfig:
             factors.append((k, v))
         factors.sort()
         import hashlib
-        return hashlib.md5(str(factors).encode(),
-                           usedforsecurity=False).hexdigest()
+        return hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
 
     def __post_init__(self):
         assert self.mlp_size >= self.hidden_size
@@ -103,8 +102,7 @@ class LlamaMLP(nn.Module):
         # for tractable_init and positive input, this is
         # essentially an elementwise-square
         x = self.gate_up_projection(x)
-        x = x[:, :x.size(1) // 2] * torch.nn.functional.relu(
-            x[:, x.size(1) // 2:])
+        x = x[:, :x.size(1) // 2] * torch.nn.functional.relu(x[:, x.size(1) // 2:])
         x = self.down_projection(x)
         return x
 
@@ -129,8 +127,7 @@ class LlamaAttention(nn.Module):
             nn.init.eye_(self.qkv_projection.weight.data[:config.hidden_size])
             nn.init.eye_(self.qkv_projection.weight.data[config.hidden_size:2 *
                                                          config.hidden_size])
-            nn.init.eye_(self.qkv_projection.weight.data[2 *
-                                                         config.hidden_size:])
+            nn.init.eye_(self.qkv_projection.weight.data[2 * config.hidden_size:])
             nn.init.eye_(self.output_projection.weight.data)
         else:
             nn.init.xavier_normal_(self.qkv_projection.weight.data,
@@ -272,14 +269,12 @@ def run_model(llama_config,
         if split_attn:
             compilation_config.splitting_ops = ["silly.attention"]
     else:
-        compilation_config = CompilationConfig(
-            level=CompilationLevel.NO_COMPILATION, )
+        compilation_config = CompilationConfig(level=CompilationLevel.NO_COMPILATION, )
 
     vllm_config = VllmConfig(compilation_config=compilation_config,
                              additional_config=llama_config)
     with set_current_vllm_config(vllm_config):
-        model = LlamaModel(config=llama_config,
-                           vllm_config=vllm_config,
+        model = LlamaModel(config=llama_config, vllm_config=vllm_config,
                            prefix="").eval().cuda()
 
     B = 16  # max batch size
@@ -352,8 +347,7 @@ def test_toy_llama():
         (1 + llama_config.num_layers
          ),  # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
     ):
-        outputs.append(
-            run_model(llama_config, use_compile=True, split_attn=True))
+        outputs.append(run_model(llama_config, use_compile=True, split_attn=True))
     run_model(tractable_config, use_compile=True, split_attn=True)
 
     for i in range(1, len(outputs)):
@@ -401,8 +395,7 @@ def benchmark():
 
         vllm_config = VllmConfig(compilation_config=compilation_config)
         with set_current_vllm_config(vllm_config):
-            model = LlamaModel(config=llama_config,
-                               vllm_config=vllm_config,
+            model = LlamaModel(config=llama_config, vllm_config=vllm_config,
                                prefix="").eval().cuda().to(torch.bfloat16)
 
         B = 256  # max batch size

@@ -55,8 +55,8 @@ class TorchSDPABackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
-        return PagedAttention.get_kv_cache_shape(num_blocks, block_size,
-                                                 num_kv_heads, head_size)
+        return PagedAttention.get_kv_cache_shape(num_blocks, block_size, num_kv_heads,
+                                                 head_size)
 
     @staticmethod
     def swap_blocks(
@@ -268,8 +268,7 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
                 or attn_type == AttentionType.ENCODER_ONLY):
             # Decoder self-attention
             # Choose max_seq_len based on whether we are in prompt_run
-            return (self.seq_lens_tensor, self.max_decode_seq_len,
-                    self.block_tables)
+            return (self.seq_lens_tensor, self.max_decode_seq_len, self.block_tables)
         elif attn_type == AttentionType.ENCODER_DECODER:
             # Enc/dec cross-attention KVs match encoder sequence length;
             # cross-attention utilizes special "cross" block tables
@@ -277,8 +276,7 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
                     self.cross_block_tables)
         elif attn_type == AttentionType.ENCODER:
             # No block tables associated with encoder attention
-            return (self.encoder_seq_lens_tensor, self.max_encoder_seq_len,
-                    None)
+            return (self.encoder_seq_lens_tensor, self.max_encoder_seq_len, None)
         else:
             raise AttributeError(f"Invalid attention type {str(attn_type)}")
 
@@ -325,10 +323,7 @@ class TorchSDPAMetadataBuilder(AttentionMetadataBuilder[TorchSDPAMetadata]):
                          dim=0,
                          dtype=torch.int32,
                          out=query_start_loc[1:])
-            torch.cumsum(kv_lens_tensor,
-                         dim=0,
-                         dtype=torch.int32,
-                         out=kv_start_loc[1:])
+            torch.cumsum(kv_lens_tensor, dim=0, dtype=torch.int32, out=kv_start_loc[1:])
             max_query_len = max(prefill_query_lens)
             max_kv_len = max(prefill_seq_lens)
         else:
@@ -407,8 +402,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         use_irope: bool = False,
     ) -> None:
         if blocksparse_params is not None:
-            raise ValueError(
-                "Torch SPDA does not support block-sparse attention.")
+            raise ValueError("Torch SPDA does not support block-sparse attention.")
         if logits_soft_cap is not None:
             logger.warning_once("Torch SPDA does not support logits soft cap. "
                                 "Outputs may be slightly off.")
@@ -438,9 +432,8 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                 f"Supported head sizes are: {supported_head_sizes}.")
 
         if is_quantized_kv_cache(kv_cache_dtype) and not _use_ipex:
-            raise NotImplementedError(
-                "Torch SDPA backend FP8 KV cache requires "
-                "intel_extension_for_pytorch support.")
+            raise NotImplementedError("Torch SDPA backend FP8 KV cache requires "
+                                      "intel_extension_for_pytorch support.")
         self.attn_type = attn_type
 
     def forward(
@@ -507,9 +500,10 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                     # Update self-attention KV cache (prefill/decode)
                     updated_slot_mapping = attn_metadata.slot_mapping
 
-                PagedAttention.write_to_paged_cache(
-                    key, value, key_cache, value_cache, updated_slot_mapping,
-                    self.kv_cache_dtype, layer._k_scale, layer._v_scale)
+                PagedAttention.write_to_paged_cache(key, value, key_cache, value_cache,
+                                                    updated_slot_mapping,
+                                                    self.kv_cache_dtype, layer._k_scale,
+                                                    layer._v_scale)
 
         if attn_type != AttentionType.ENCODER:
             # Decoder self-attention supports chunked prefill.
@@ -606,14 +600,13 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         attn_masks = attn_metadata.get_attn_bias(attn_type)
         if attn_masks is None:
             if self.alibi_slopes is not None:
-                attn_masks = _make_alibi_bias(
-                    self.alibi_slopes, query.dtype,
-                    attn_metadata.seq_lens)  # type: ignore
+                attn_masks = _make_alibi_bias(self.alibi_slopes, query.dtype,
+                                              attn_metadata.seq_lens)  # type: ignore
             elif self.sliding_window is not None:
                 assert attn_metadata.seq_lens is not None
-                attn_masks = _make_sliding_window_bias(
-                    attn_metadata.seq_lens, self.sliding_window,
-                    query.dtype)  # type: ignore
+                attn_masks = _make_sliding_window_bias(attn_metadata.seq_lens,
+                                                       self.sliding_window,
+                                                       query.dtype)  # type: ignore
             else:
                 seq_lens, _ = attn_metadata.get_seq_lens(attn_type)
                 attn_masks = [None] * len(seq_lens)
@@ -627,18 +620,18 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
 
         seq_lens_q, seq_lens_kv = attn_metadata.get_seq_lens(attn_type)
         start_q, start_kv = 0, 0
-        for seq_len_q, seq_len_kv, mask in zip(seq_lens_q, seq_lens_kv,
-                                               attn_masks):
+        for seq_len_q, seq_len_kv, mask in zip(seq_lens_q, seq_lens_kv, attn_masks):
             end_q = start_q + seq_len_q
             end_kv = start_kv + seq_len_kv
-            sub_out = scaled_dot_product_attention(
-                query[None, :, start_q:end_q, :],
-                key[None, :, start_kv:end_kv, :],
-                value[None, :, start_kv:end_kv, :],
-                attn_mask=mask,
-                dropout_p=0.0,
-                is_causal=causal_attn and mask is None,
-                scale=self.scale).squeeze(0).movedim(query.dim() - 2, 0)
+            sub_out = scaled_dot_product_attention(query[None, :, start_q:end_q, :],
+                                                   key[None, :, start_kv:end_kv, :],
+                                                   value[None, :, start_kv:end_kv, :],
+                                                   attn_mask=mask,
+                                                   dropout_p=0.0,
+                                                   is_causal=causal_attn
+                                                   and mask is None,
+                                                   scale=self.scale).squeeze(0).movedim(
+                                                       query.dim() - 2, 0)
             output[start_q:end_q, :, :] = sub_out
             start_q, start_kv = end_q, end_kv
 
@@ -661,9 +654,8 @@ def _make_alibi_bias(
         num_heads = alibi_slopes.shape[0]
         bias = bias[None, :].repeat((num_heads, 1, 1))
         bias.mul_(alibi_slopes[:, None, None]).unsqueeze_(0)
-        inf_mask = torch.empty(
-            (1, seq_len, seq_len),
-            dtype=bias.dtype).fill_(-torch.inf).triu_(diagonal=1)
+        inf_mask = torch.empty((1, seq_len, seq_len),
+                               dtype=bias.dtype).fill_(-torch.inf).triu_(diagonal=1)
         attn_biases.append((bias + inf_mask).to(dtype))
 
     return attn_biases

@@ -13,9 +13,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     sparse_cutlass_supported)
 from vllm.platforms import current_platform
 
-CUDA_DEVICES = [
-    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
-]
+CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
 
 capability = current_platform.get_device_capability()
 capability = capability[0] * 10 + capability[1]
@@ -39,9 +37,7 @@ def prune_to_2_4(tensor):
 
     # Create binary mask
     mask = torch.zeros_like(reshaped)
-    mask.scatter_(dim=1,
-                  index=indices,
-                  src=torch.ones_like(indices, dtype=mask.dtype))
+    mask.scatter_(dim=1, index=indices, src=torch.ones_like(indices, dtype=mask.dtype))
 
     # Apply mask and reshape back
     pruned = reshaped * mask
@@ -76,8 +72,8 @@ def check_compress_decompress_invariance(dtype: torch.dtype, b: torch.Tensor,
 
 
 def make_rand_sparse_tensors(
-        dtype: torch.dtype, m: int, n: int, k: int
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        dtype: torch.dtype, m: int, n: int,
+        k: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     a = torch.randn((m, k), device='cuda')
     b = torch.randn((n, k), device='cuda').t()
 
@@ -115,8 +111,7 @@ def test_cutlass_sparse_subset():
     m, n, k = 512, 512, 512
 
     # Create tensors
-    b_comp, e, whole_a, b = make_rand_sparse_tensors(torch.float8_e4m3fn,
-                                                     big_m, n, k)
+    b_comp, e, whole_a, b = make_rand_sparse_tensors(torch.float8_e4m3fn, big_m, n, k)
     a = whole_a[0:m, 0:k]
     scale_a = torch.randn((1, 1), device="cuda", dtype=torch.float32) / 10
     scale_b = torch.randn((1, 1), device="cuda", dtype=torch.float32) / 10
@@ -127,11 +122,7 @@ def test_cutlass_sparse_subset():
                                        scale_a,
                                        scale_b,
                                        out_dtype=torch.bfloat16)
-    baseline = baseline_scaled_mm(a,
-                                  b,
-                                  scale_a,
-                                  scale_b,
-                                  out_dtype=torch.bfloat16)
+    baseline = baseline_scaled_mm(a, b, scale_a, scale_b, out_dtype=torch.bfloat16)
 
     torch.testing.assert_close(out, baseline, rtol=1e-1, atol=1e0)
 
@@ -183,12 +174,7 @@ def test_cutlass_sparse_gemm(m: int, k: int, n: int, dtype: type[torch.dtype],
                                        out_dtype=dtype,
                                        bias=bias)
 
-    baseline = baseline_scaled_mm(a,
-                                  b,
-                                  scale_a,
-                                  scale_b,
-                                  out_dtype=dtype,
-                                  bias=bias)
+    baseline = baseline_scaled_mm(a, b, scale_a, scale_b, out_dtype=dtype, bias=bias)
 
     torch.testing.assert_close(out, baseline, rtol=1e-2, atol=3e-1)
 
@@ -207,8 +193,7 @@ def test_cutlass_sparse_fp8_gemm(m: int, n: int, k: int, use_bias: bool):
     scale_b = (torch.randn((1, 1), device="cuda", dtype=torch.float32))
     out_dtype = torch.bfloat16
 
-    bias = torch.rand(
-        (n, ), device="cuda", dtype=out_dtype) * 10 if use_bias else None
+    bias = torch.rand((n, ), device="cuda", dtype=out_dtype) * 10 if use_bias else None
 
     out = ops.cutlass_scaled_sparse_mm(a,
                                        b_comp,
@@ -243,8 +228,7 @@ def test_cutlass_sparse_int8_gemm(m: int, n: int, k: int, per_act_token: bool,
     scale_b = (torch.randn((1, 1), device="cuda", dtype=torch.float32))
     out_dtype = torch.bfloat16
 
-    bias = torch.rand(
-        (n, ), device="cuda", dtype=out_dtype) * 10 if use_bias else None
+    bias = torch.rand((n, ), device="cuda", dtype=out_dtype) * 10 if use_bias else None
 
     out = ops.cutlass_scaled_sparse_mm(a,
                                        b_comp,

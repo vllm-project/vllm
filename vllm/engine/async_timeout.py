@@ -126,8 +126,7 @@ else:
             """
             deadline = self._deadline
             if deadline is None:
-                raise RuntimeError(
-                    "cannot shift timeout if deadline is not scheduled")
+                raise RuntimeError("cannot shift timeout if deadline is not scheduled")
             self.update(deadline + delay)
 
         def update(self, deadline: float) -> None:
@@ -139,8 +138,7 @@ else:
             undefined starting base, e.g. the time of the system power on.
             """
             if self._state == _State.EXIT:
-                raise RuntimeError(
-                    "cannot reschedule after exit from context manager")
+                raise RuntimeError("cannot reschedule after exit from context manager")
             if self._state == _State.TIMEOUT:
                 raise RuntimeError("cannot reschedule expired timeout")
             if self._timeout_handler is not None:
@@ -161,11 +159,10 @@ else:
 
             task = asyncio.current_task()
             if deadline <= now:
-                self._timeout_handler = self._loop.call_soon(
-                    self._on_timeout, task)
+                self._timeout_handler = self._loop.call_soon(self._on_timeout, task)
             else:
-                self._timeout_handler = self._loop.call_at(
-                    deadline, self._on_timeout, task)
+                self._timeout_handler = self._loop.call_at(deadline, self._on_timeout,
+                                                           task)
 
         def _do_enter(self) -> None:
             if self._state != _State.INIT:

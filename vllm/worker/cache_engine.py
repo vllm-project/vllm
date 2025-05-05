@@ -61,8 +61,8 @@ class CacheEngine:
                                              use_mla=model_config.use_mla)
 
         # Initialize the cache.
-        self.gpu_cache = self._allocate_kv_cache(
-            self.num_gpu_blocks, self.device_config.device_type)
+        self.gpu_cache = self._allocate_kv_cache(self.num_gpu_blocks,
+                                                 self.device_config.device_type)
         self.cpu_cache = self._allocate_kv_cache(self.num_cpu_blocks, "cpu")
 
     def _allocate_kv_cache(
@@ -76,8 +76,7 @@ class CacheEngine:
         pin_memory = is_pin_memory_available() if device == "cpu" else False
         kv_cache: List[torch.Tensor] = []
         try:
-            kv_cache_stride_order = self.attn_backend.get_kv_cache_stride_order(
-            )
+            kv_cache_stride_order = self.attn_backend.get_kv_cache_stride_order()
         except (AttributeError, NotImplementedError):
             kv_cache_stride_order = tuple(range(len(kv_cache_generic_shape)))
 
@@ -92,11 +91,10 @@ class CacheEngine:
             # null block in CpuGpuBlockAllocator requires at least that
             # block to be zeroed-out.
             # We zero-out everything for simplicity.
-            layer_kv_cache = torch.zeros(
-                kv_cache_allocation_shape,
-                dtype=self.dtype,
-                pin_memory=pin_memory,
-                device=device).permute(*kv_cache_stride_order)
+            layer_kv_cache = torch.zeros(kv_cache_allocation_shape,
+                                         dtype=self.dtype,
+                                         pin_memory=pin_memory,
+                                         device=device).permute(*kv_cache_stride_order)
 
             # view back to (TOTAL_PAGES, PAGE_SIZE, entry_shape...) for cases
             # when entry_shape is higher than 1D

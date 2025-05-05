@@ -41,14 +41,8 @@ def parse_args():
                         type=str,
                         default="ibm-research/PowerMoE-3b",
                         help="Model name or path")
-    parser.add_argument("--dp-size",
-                        type=int,
-                        default=2,
-                        help="Data parallel size")
-    parser.add_argument("--tp-size",
-                        type=int,
-                        default=2,
-                        help="Tensor parallel size")
+    parser.add_argument("--dp-size", type=int, default=2, help="Data parallel size")
+    parser.add_argument("--tp-size", type=int, default=2, help="Tensor parallel size")
     parser.add_argument("--node-size",
                         type=int,
                         default=1,
@@ -61,15 +55,12 @@ def parse_args():
                         type=str,
                         default="",
                         help="Master node IP address")
-    parser.add_argument("--master-port",
-                        type=int,
-                        default=0,
-                        help="Master node port")
+    parser.add_argument("--master-port", type=int, default=0, help="Master node port")
     return parser.parse_args()
 
 
-def main(model, dp_size, local_dp_rank, global_dp_rank, dp_master_ip,
-         dp_master_port, GPUs_per_dp_rank):
+def main(model, dp_size, local_dp_rank, global_dp_rank, dp_master_ip, dp_master_port,
+         GPUs_per_dp_rank):
     os.environ["VLLM_DP_RANK"] = str(global_dp_rank)
     os.environ["VLLM_DP_RANK_LOCAL"] = str(local_dp_rank)
     os.environ["VLLM_DP_SIZE"] = str(dp_size)
@@ -153,9 +144,8 @@ if __name__ == "__main__":
     for local_dp_rank, global_dp_rank in enumerate(
             range(node_rank * dp_per_node, (node_rank + 1) * dp_per_node)):
         proc = Process(target=main,
-                       args=(args.model, dp_size, local_dp_rank,
-                             global_dp_rank, dp_master_ip, dp_master_port,
-                             tp_size))
+                       args=(args.model, dp_size, local_dp_rank, global_dp_rank,
+                             dp_master_ip, dp_master_port, tp_size))
         proc.start()
         procs.append(proc)
     exit_code = 0

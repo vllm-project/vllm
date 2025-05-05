@@ -75,8 +75,7 @@ class PerLayerParameters:
     sm_scale: float
 
 
-def get_per_layer_parameters(
-        vllm_config: VllmConfig) -> dict[str, PerLayerParameters]:
+def get_per_layer_parameters(vllm_config: VllmConfig) -> dict[str, PerLayerParameters]:
     """
     Scan all attention layers and determine some hyperparameters
     to use during `plan`.
@@ -95,8 +94,8 @@ def get_per_layer_parameters(
         logits_soft_cap = impl.logits_soft_cap
         sm_scale = impl.scale
 
-        per_layer_params[key] = PerLayerParameters(window_left,
-                                                   logits_soft_cap, sm_scale)
+        per_layer_params[key] = PerLayerParameters(window_left, logits_soft_cap,
+                                                   sm_scale)
 
     return per_layer_params
 
@@ -194,9 +193,8 @@ class FlashInferMetadata:
         supported_head_sizes = FlashInferBackend.get_supported_head_sizes()
         if self.head_dim is not None and self.head_dim \
                 not in supported_head_sizes:
-            raise ValueError(
-                f"Only {supported_head_sizes} are supported for head_dim,",
-                f" received {self.head_dim}.")
+            raise ValueError(f"Only {supported_head_sizes} are supported for head_dim,",
+                             f" received {self.head_dim}.")
 
 
 class FlashInferMetadataBuilder:
@@ -274,10 +272,9 @@ class FlashInferMetadataBuilder:
 
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
-            self._workspace_buffer = torch.empty(
-                FLASHINFER_WORKSPACE_BUFFER_SIZE,
-                dtype=torch.uint8,
-                device=self.runner.device)
+            self._workspace_buffer = torch.empty(FLASHINFER_WORKSPACE_BUFFER_SIZE,
+                                                 dtype=torch.uint8,
+                                                 device=self.runner.device)
         return self._workspace_buffer
 
     def _get_prefill_wrapper(self):
@@ -295,9 +292,7 @@ class FlashInferMetadataBuilder:
             use_tensor_cores = envs.VLLM_FLASHINFER_FORCE_TENSOR_CORES or (
                 num_qo_heads // num_kv_heads > 4)
             self._decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
-                self._get_workspace_buffer(),
-                "NHD",
-                use_tensor_cores=use_tensor_cores)
+                self._get_workspace_buffer(), "NHD", use_tensor_cores=use_tensor_cores)
         return self._decode_wrapper
 
     def _get_cascade_wrapper(self):
@@ -314,14 +309,8 @@ class FlashInferMetadataBuilder:
             attn_metadata.cascade_wrapper = self._get_cascade_wrapper()
             attn_metadata.cascade_wrapper.plan(
                 [attn_metadata.shared_qo_indptr, attn_metadata.qo_indptr],
-                [
-                    attn_metadata.shared_kv_page_indptr,
-                    attn_metadata.paged_kv_indptr
-                ],
-                [
-                    attn_metadata.shared_kv_page_indices,
-                    attn_metadata.paged_kv_indices
-                ],
+                [attn_metadata.shared_kv_page_indptr, attn_metadata.paged_kv_indptr],
+                [attn_metadata.shared_kv_page_indices, attn_metadata.paged_kv_indices],
                 [
                     attn_metadata.shared_kv_last_page_len,
                     attn_metadata.paged_kv_last_page_len
@@ -348,8 +337,8 @@ class FlashInferMetadataBuilder:
                     0] == self._num_prefills + 1
                 assert attn_metadata.paged_kv_indptr[prefill_start:].shape[
                     0] == self._num_prefills + 1
-                assert attn_metadata.paged_kv_last_page_len[
-                    prefill_start:].shape[0] == self._num_prefills
+                assert attn_metadata.paged_kv_last_page_len[prefill_start:].shape[
+                    0] == self._num_prefills
                 # Since prefill_wrapper.run() will be called with
                 # query[num_decode_tokens:] we need to adjust the qo_indptr
                 # to be relative to the start of the prefill queries.
@@ -367,8 +356,7 @@ class FlashInferMetadataBuilder:
                     causal=True,
                     sm_scale=self.global_hyperparameters.sm_scale,
                     window_left=self.global_hyperparameters.window_left,
-                    logits_soft_cap=self.global_hyperparameters.
-                    logits_soft_cap,
+                    logits_soft_cap=self.global_hyperparameters.logits_soft_cap,
                     q_data_type=attn_metadata.q_data_type,
                     kv_data_type=attn_metadata.data_type,
                 )
@@ -387,8 +375,7 @@ class FlashInferMetadataBuilder:
                     pos_encoding_mode="NONE",
                     sm_scale=self.global_hyperparameters.sm_scale,
                     window_left=self.global_hyperparameters.window_left,
-                    logits_soft_cap=self.global_hyperparameters.
-                    logits_soft_cap,
+                    logits_soft_cap=self.global_hyperparameters.logits_soft_cap,
                     q_data_type=attn_metadata.q_data_type,
                     kv_data_type=attn_metadata.data_type,
                 )
@@ -396,8 +383,7 @@ class FlashInferMetadataBuilder:
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
               common_prefix_len: int):
         assert self._num_decodes + self._num_prefills == num_reqs
-        assert (self._num_decode_tokens +
-                self._num_prefill_tokens == num_actual_tokens)
+        assert (self._num_decode_tokens + self._num_prefill_tokens == num_actual_tokens)
         page_size = self.runner.block_size
         device = self.runner.device
         qo_indptr = self.runner.query_start_loc_cpu[:num_reqs + 1].to(
@@ -449,8 +435,8 @@ class FlashInferMetadataBuilder:
         ])
 
         paged_kv_last_page_len = seq_lens % page_size
-        paged_kv_last_page_len = torch.where(paged_kv_last_page_len == 0,
-                                             page_size, paged_kv_last_page_len)
+        paged_kv_last_page_len = torch.where(paged_kv_last_page_len == 0, page_size,
+                                             paged_kv_last_page_len)
 
         attn_metadata = FlashInferMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -605,8 +591,7 @@ class FlashInferImpl(AttentionImpl):
             assert prefill_wrapper is not None
             assert prefill_wrapper._causal
             assert prefill_wrapper._window_left == window_left
-            assert prefill_wrapper._logits_soft_cap == (self.logits_soft_cap
-                                                        or 0.0)
+            assert prefill_wrapper._logits_soft_cap == (self.logits_soft_cap or 0.0)
             assert prefill_wrapper._sm_scale == self.scale
             prefill_wrapper.run(
                 prefill_query,
@@ -621,8 +606,7 @@ class FlashInferImpl(AttentionImpl):
             assert decode_query.shape[0] == num_decode_tokens
             assert decode_wrapper is not None
             assert decode_wrapper._window_left == window_left
-            assert decode_wrapper._logits_soft_cap == (self.logits_soft_cap
-                                                       or 0.0)
+            assert decode_wrapper._logits_soft_cap == (self.logits_soft_cap or 0.0)
             assert decode_wrapper._sm_scale == self.scale
             decode_wrapper.run(
                 decode_query,

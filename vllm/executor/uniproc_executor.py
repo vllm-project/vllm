@@ -23,14 +23,11 @@ class UniProcExecutor(ExecutorBase):
     def _init_executor(self) -> None:
         """Initialize the worker and load the model.
         """
-        self.driver_worker = WorkerWrapperBase(vllm_config=self.vllm_config,
-                                               rpc_rank=0)
-        distributed_init_method = get_distributed_init_method(
-            get_ip(), get_open_port())
+        self.driver_worker = WorkerWrapperBase(vllm_config=self.vllm_config, rpc_rank=0)
+        distributed_init_method = get_distributed_init_method(get_ip(), get_open_port())
         local_rank = 0
         # set local rank as the device index if specified
-        device_info = self.vllm_config.device_config.device.__str__().split(
-            ":")
+        device_info = self.vllm_config.device_config.device.__str__().split(":")
         if len(device_info) > 1:
             local_rank = int(device_info[1])
         rank = 0
@@ -97,8 +94,7 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
             assert not envs.VLLM_ENABLE_V1_MULTIPROCESSING, \
             ("To get deterministic execution in V1, "
             "please set VLLM_ENABLE_V1_MULTIPROCESSING=0")
-        self.driver_worker = WorkerWrapperBase(vllm_config=self.vllm_config,
-                                               rpc_rank=0)
+        self.driver_worker = WorkerWrapperBase(vllm_config=self.vllm_config, rpc_rank=0)
         # engines are launched in torchrun-compatible launchers
         # so we can use the env:// method.
         # required env vars:

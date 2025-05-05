@@ -23,10 +23,9 @@ class QueryResult(NamedTuple):
 # lower-end GPUs.
 # Unless specified, these settings have been tested to work on a single L4.
 
-default_system = (
-    "You are Qwen, a virtual human developed by the Qwen Team, Alibaba "
-    "Group, capable of perceiving auditory and visual inputs, as well as "
-    "generating text and speech.")
+default_system = ("You are Qwen, a virtual human developed by the Qwen Team, Alibaba "
+                  "Group, capable of perceiving auditory and visual inputs, as well as "
+                  "generating text and speech.")
 
 
 def get_mixed_modalities_query() -> QueryResult:
@@ -42,12 +41,9 @@ def get_mixed_modalities_query() -> QueryResult:
         inputs={
             "prompt": prompt,
             "multi_modal_data": {
-                "audio":
-                AudioAsset("mary_had_lamb").audio_and_sample_rate,
-                "image":
-                ImageAsset("cherry_blossom").pil_image.convert("RGB"),
-                "video":
-                VideoAsset(name="baby_reading", num_frames=16).np_ndarrays,
+                "audio": AudioAsset("mary_had_lamb").audio_and_sample_rate,
+                "image": ImageAsset("cherry_blossom").pil_image.convert("RGB"),
+                "video": VideoAsset(name="baby_reading", num_frames=16).np_ndarrays,
             },
         },
         limit_mm_per_prompt={
@@ -132,8 +128,7 @@ def main(args):
     # even when all prompts are identical when running batch inference.
     sampling_params = SamplingParams(temperature=0.2, max_tokens=64)
 
-    outputs = llm.generate(query_result.inputs,
-                           sampling_params=sampling_params)
+    outputs = llm.generate(query_result.inputs, sampling_params=sampling_params)
 
     for o in outputs:
         generated_text = o.outputs[0].text

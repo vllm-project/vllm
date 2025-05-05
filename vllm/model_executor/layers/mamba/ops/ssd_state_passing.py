@@ -89,15 +89,13 @@ def _state_passing_fwd_kernel(
         initstates_ptrs = initstates_ptr
         # - for cont batches, for the first chunk mean it will be the first batch's
         #   init state
-        states = tl.load(initstates_ptrs, mask=offs_m < dim,
-                         other=0.0).to(tl.float32)
+        states = tl.load(initstates_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
 
     tl.store(out_ptrs, states, mask=offs_m < dim)
     out_ptrs += stride_out_chunk
     seq_idx = 0
     for c in range(nchunks):
-        new_states = tl.load(states_ptrs, mask=offs_m < dim,
-                             other=0.0).to(tl.float32)
+        new_states = tl.load(states_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
         dA_cs = tl.load(dA_cs_ptr).to(tl.float32)
         scale = tl.exp(dA_cs)
         if HAS_SEQ_IDX:
@@ -116,8 +114,7 @@ def _state_passing_fwd_kernel(
                     initstates_ptrs = initstates_ptr + seq_idx_new * stride_initstates_batch
 
                     # - update state with seq_idx_new's init state
-                    states = tl.load(initstates_ptrs,
-                                     mask=offs_m < dim,
+                    states = tl.load(initstates_ptrs, mask=offs_m < dim,
                                      other=0.0).to(tl.float32)
             else:
                 scale = tl.where(seq_idx_new == seq_idx, scale, 0.0)
@@ -194,10 +191,9 @@ def _state_passing_fwd(
             dA_chunk_cumsum.stride(2),
             dA_chunk_cumsum.stride(1),
             *((initial_states.stride(0), initial_states.stride(1),
-               initial_states.stride(2)) if initial_states is not None else
-              (0, 0, 0)),
-            *((seq_idx.stride(0),
-               seq_idx.stride(1)) if seq_idx is not None else (0, 0)),
+               initial_states.stride(2)) if initial_states is not None else (0, 0, 0)),
+            *((seq_idx.stride(0), seq_idx.stride(1)) if seq_idx is not None else
+              (0, 0)),
             HAS_INITSTATES=initial_states is not None,
             HAS_SEQ_IDX=seq_idx is not None,
             IS_CONT_BATCHED=is_cont_batched,

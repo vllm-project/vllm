@@ -135,12 +135,9 @@ class Llama3JsonToolParser(ToolParser):
                 start_idx = len(self.bot_token) if current_text.startswith(
                     self.bot_token) else 0
                 while start_idx < len(current_text):
-                    (obj,
-                     end_idx) = partial_json_loads(current_text[start_idx:],
-                                                   flags)
+                    (obj, end_idx) = partial_json_loads(current_text[start_idx:], flags)
                     is_complete.append(
-                        is_complete_json(current_text[start_idx:start_idx +
-                                                      end_idx]))
+                        is_complete_json(current_text[start_idx:start_idx + end_idx]))
                     start_idx += end_idx + len('; ')
                     # depending on the prompt Llama can use
                     # either arguments or parameters
@@ -175,16 +172,15 @@ class Llama3JsonToolParser(ToolParser):
                     cur_arguments = current_tool_call.get("arguments")
                     if cur_arguments:
                         cur_args_json = json.dumps(cur_arguments)
-                        sent = len(
-                            self.streamed_args_for_tool[self.current_tool_id])
+                        sent = len(self.streamed_args_for_tool[self.current_tool_id])
                         argument_diff = cur_args_json[sent:]
 
                         logger.debug("got arguments diff: %s", argument_diff)
                         delta = DeltaMessage(tool_calls=[
                             DeltaToolCall(index=self.current_tool_id,
                                           function=DeltaFunctionCall(
-                                              arguments=argument_diff).
-                                          model_dump(exclude_none=True))
+                                              arguments=argument_diff).model_dump(
+                                                  exclude_none=True))
                         ])
                         self.streamed_args_for_tool[
                             self.current_tool_id] += argument_diff
@@ -224,11 +220,10 @@ class Llama3JsonToolParser(ToolParser):
                 delta = None
 
                 if cur_arguments:
-                    sent = len(
-                        self.streamed_args_for_tool[self.current_tool_id])
+                    sent = len(self.streamed_args_for_tool[self.current_tool_id])
                     cur_args_json = json.dumps(cur_arguments)
-                    prev_arguments = self.prev_tool_call_arr[
-                        self.current_tool_id].get("arguments")
+                    prev_arguments = self.prev_tool_call_arr[self.current_tool_id].get(
+                        "arguments")
 
                     argument_diff = None
                     if is_complete[self.current_tool_id]:
@@ -237,16 +232,15 @@ class Llama3JsonToolParser(ToolParser):
                         prev_args_json = json.dumps(prev_arguments)
                         if cur_args_json != prev_args_json:
 
-                            prefix = find_common_prefix(
-                                prev_args_json, cur_args_json)
+                            prefix = find_common_prefix(prev_args_json, cur_args_json)
                             argument_diff = prefix[sent:]
 
                     if argument_diff is not None:
                         delta = DeltaMessage(tool_calls=[
                             DeltaToolCall(index=self.current_tool_id,
                                           function=DeltaFunctionCall(
-                                              arguments=argument_diff).
-                                          model_dump(exclude_none=True))
+                                              arguments=argument_diff).model_dump(
+                                                  exclude_none=True))
                         ])
                         self.streamed_args_for_tool[
                             self.current_tool_id] += argument_diff
@@ -256,7 +250,6 @@ class Llama3JsonToolParser(ToolParser):
 
         except Exception:
             logger.exception("Error trying to handle streaming tool call.")
-            logger.debug(
-                "Skipping chunk as a result of tool streaming extraction "
-                "error")
+            logger.debug("Skipping chunk as a result of tool streaming extraction "
+                         "error")
             return None

@@ -38,9 +38,8 @@ class Request:
         self.lora_request = lora_request
         self.structured_output_request = structured_output_request
 
-        self.status = (RequestStatus.WAITING_FOR_FSM
-                       if sampling_params.guided_decoding is not None else
-                       RequestStatus.WAITING)
+        self.status = (RequestStatus.WAITING_FOR_FSM if sampling_params.guided_decoding
+                       is not None else RequestStatus.WAITING)
         self.events: list[EngineCoreEvent] = []
         self.stop_reason: Union[int, str, None] = None
         assert sampling_params.max_tokens is not None
@@ -164,8 +163,7 @@ class RequestStatus(enum.IntEnum):
         return status > RequestStatus.PREEMPTED
 
     @staticmethod
-    def get_finished_reason(
-            status: "RequestStatus") -> Union[FinishReason, None]:
+    def get_finished_reason(status: "RequestStatus") -> Union[FinishReason, None]:
         return _FINISHED_REASON_MAP.get(status)
 
 

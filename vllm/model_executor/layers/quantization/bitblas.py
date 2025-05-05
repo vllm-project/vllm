@@ -45,17 +45,15 @@ class BitBLASConfig(QuantizationConfig):
         try:
             import bitblas
             if bitblas.__version__ < MINIMUM_BITBLAS_VERSION:
-                raise ImportError(
-                    "bitblas version is wrong. Please "
-                    f"install bitblas>={MINIMUM_BITBLAS_VERSION}")
+                raise ImportError("bitblas version is wrong. Please "
+                                  f"install bitblas>={MINIMUM_BITBLAS_VERSION}")
         except ImportError as e:
             bitblas_import_exception = e
-            raise ValueError(
-                "Trying to use the bitblas backend, but could not import"
-                f"with the following error: {bitblas_import_exception}. "
-                "Please install bitblas through the following command: "
-                f"`pip install bitblas>={MINIMUM_BITBLAS_VERSION}`"
-            ) from bitblas_import_exception
+            raise ValueError("Trying to use the bitblas backend, but could not import"
+                             f"with the following error: {bitblas_import_exception}. "
+                             "Please install bitblas through the following command: "
+                             f"`pip install bitblas>={MINIMUM_BITBLAS_VERSION}`"
+                             ) from bitblas_import_exception
 
         if desc_act and group_size == -1:
             # In this case, act_order == True is the same as act_order == False
@@ -77,9 +75,8 @@ class BitBLASConfig(QuantizationConfig):
                 "are supported.")
 
         if self.is_sym not in BITBLAS_SUPPORTED_SYM:
-            raise ValueError(
-                f"BitBLAS does not support is_sym = {self.is_sym}. "
-                f"Only sym = {BITBLAS_SUPPORTED_SYM} are supported.")
+            raise ValueError(f"BitBLAS does not support is_sym = {self.is_sym}. "
+                             f"Only sym = {BITBLAS_SUPPORTED_SYM} are supported.")
 
         storage_dtype = self.STORAGE_DTYPE
         storage_nbit = int("".join(c for c in storage_dtype if c.isdigit()))
@@ -134,14 +131,13 @@ class BitBLASConfig(QuantizationConfig):
         desc_act = cls.get_from_keys(config, ["desc_act"], False)
         is_sym = cls.get_from_keys(config, ["sym"], False)
         quant_method = cls.get_from_keys(config, ["quant_method"])
-        lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"],
-                                                 default=False)
+        lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"], default=False)
         return cls(weight_bits, group_size, desc_act, is_sym, quant_method,
                    lm_head_quantized)
 
     @classmethod
-    def override_quantization_method(
-            cls, hf_quant_cfg, user_quant) -> Optional[QuantizationMethods]:
+    def override_quantization_method(cls, hf_quant_cfg,
+                                     user_quant) -> Optional[QuantizationMethods]:
         # compat: autogptq >=0.8.0 use checkpoint_format: str
         # compat: autogptq <=0.7.1 is_bitblas_format: bool
         is_bitblas_format = (hf_quant_cfg.get("checkpoint_format") == "bitblas"
@@ -151,8 +147,8 @@ class BitBLASConfig(QuantizationConfig):
                                or user_quant == "bitblas")
 
         if is_bitblas_format and is_valid_user_quant:
-            msg = ("The model is serialized in {} format. Using {} kernel.".
-                   format(cls.get_name(), cls.get_name()))
+            msg = ("The model is serialized in {} format. Using {} kernel.".format(
+                cls.get_name(), cls.get_name()))
             logger.info(msg)
             return cls.get_name()
 
@@ -284,8 +280,7 @@ class BitBLASLinearMethod(LinearMethodBase):
             weight_loader
         }
         if input_groups == 1:
-            scales = ChannelQuantScaleParameter(output_dim=0,
-                                                **weight_scale_args)
+            scales = ChannelQuantScaleParameter(output_dim=0, **weight_scale_args)
         else:
             scales = GroupQuantScaleParameter(output_dim=0,
                                               input_dim=1,
@@ -402,16 +397,14 @@ class BitBLASLinearMethod(LinearMethodBase):
 
         bitblas_matmul = global_operator_cache.get(config)
         if bitblas_matmul is None:
-            bitblas_matmul = Matmul(config,
-                                    target=BITBLAS_TARGET,
-                                    enable_tuning=False)
+            bitblas_matmul = Matmul(config, target=BITBLAS_TARGET, enable_tuning=False)
             if enable_tuning:
                 TUNING_MESSAGE = (f"BitBLAS Operator {config} is tuning ...")
                 logger.info(TUNING_MESSAGE)
                 bitblas_matmul.hardware_aware_finetune(topk=20)
                 global_operator_cache.add(config, bitblas_matmul)
-                global_operator_cache.save_into_database(
-                    BITBLAS_DATABASE_PATH, BITBLAS_TARGET)
+                global_operator_cache.save_into_database(BITBLAS_DATABASE_PATH,
+                                                         BITBLAS_TARGET)
                 TUNED_MESSAGE = (
                     f"BitBLAS Operator {config} tuned and saved to database.")
                 logger.info(TUNED_MESSAGE)
@@ -419,8 +412,7 @@ class BitBLASLinearMethod(LinearMethodBase):
                 _message = f"BitBLAS Operator {config} created."
                 logger.info(_message)
         else:
-            _message = (
-                f"BitBLAS Operator {config} found in global_operator_cache.")
+            _message = (f"BitBLAS Operator {config} found in global_operator_cache.")
             logger.info(_message)
         return bitblas_matmul
 

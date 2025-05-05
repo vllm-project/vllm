@@ -67,9 +67,8 @@ class ScalarType:
     """
 
     def _floating_point_max_int(self) -> int:
-        assert (
-            self.mantissa <= 52 and self.exponent <= 11
-        ), f"Cannot represent max/min as a double for type {self.__str__()}"
+        assert (self.mantissa <= 52 and self.exponent <= 11
+                ), f"Cannot represent max/min as a double for type {self.__str__()}"
 
         max_mantissa = (1 << self.mantissa) - 1
         if self.nan_repr == NanRepr.EXTD_RANGE_MAX_MIN:
@@ -79,8 +78,8 @@ class ScalarType:
         if (self.nan_repr == NanRepr.EXTD_RANGE_MAX_MIN
                 or self.nan_repr == NanRepr.NONE):
             assert (
-                self.exponent < 11
-            ), f"Cannot represent max/min as a double for type {self.__str__()}"
+                self.exponent
+                < 11), f"Cannot represent max/min as a double for type {self.__str__()}"
             max_exponent = max_exponent + 1
 
         # adjust the exponent to match that of a double
@@ -93,13 +92,11 @@ class ScalarType:
         exponent_bias = (1 << (self.exponent - 1)) - 1
         exponent_bias_double = (1 << 10) - 1  # double e = 11
 
-        max_exponent_double = (max_exponent - exponent_bias +
-                               exponent_bias_double)
+        max_exponent_double = (max_exponent - exponent_bias + exponent_bias_double)
 
         # shift the mantissa and exponent into the proper positions for an
         # IEEE double and bitwise-or them together.
-        return (max_mantissa <<
-                (52 - self.mantissa)) | (max_exponent_double << 52)
+        return (max_mantissa << (52 - self.mantissa)) | (max_exponent_double << 52)
 
     def _floating_point_max(self) -> float:
         double_raw = self._floating_point_max_int()
@@ -123,8 +120,8 @@ class ScalarType:
             min_raw = max_raw | sign_bit_double
             return struct.unpack('!d', struct.pack('!Q', min_raw))[0]
         else:
-            assert (not self.is_signed() or self.size_bits
-                    <= 64), "Cannot represent min as a int64_t"
+            assert (not self.is_signed()
+                    or self.size_bits <= 64), "Cannot represent min as a int64_t"
 
             if self.is_signed():
                 return -(1 << (self.size_bits - 1))
@@ -227,8 +224,8 @@ class ScalarType:
           - if bias is not present it means its zero
         """
         if self.is_floating_point():
-            ret = "float" + str(self.size_bits) + "_e" + str(
-                self.exponent) + "m" + str(self.mantissa)
+            ret = "float" + str(self.size_bits) + "_e" + str(self.exponent) + "m" + str(
+                self.mantissa)
 
             if not self.is_ieee_754():
                 if self._finite_values_only:

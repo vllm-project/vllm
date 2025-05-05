@@ -148,13 +148,11 @@ def _make_test_resources(test_pt: TestPoint, ) -> TestResources:
     )
     if test_pt.num_blocks is None or test_pt.num_heads is None:
         # Caller does not require a KV cache
-        return TestResources(
-            scale, attn,
-            torch.tensor([], dtype=torch.float32, device=CUDA_DEVICE))
+        return TestResources(scale, attn,
+                             torch.tensor([], dtype=torch.float32, device=CUDA_DEVICE))
 
     # Construct KV cache
-    if test_pt.attn_type in (AttentionType.DECODER,
-                             AttentionType.ENCODER_DECODER):
+    if test_pt.attn_type in (AttentionType.DECODER, AttentionType.ENCODER_DECODER):
         kv_cache = make_kv_cache(test_pt.num_blocks,
                                  test_pt.num_heads,
                                  test_pt.head_size,
@@ -343,8 +341,7 @@ def _decoder_attn_setup(
     # Compute correct answer using naive attention implementation
     # with causal attention mask
 
-    causal_mask = make_causal_mask(max_q_seq_len,
-                                   max_kv_seq_len).to(CUDA_DEVICE)
+    causal_mask = make_causal_mask(max_q_seq_len, max_kv_seq_len).to(CUDA_DEVICE)
 
     ideal_output = ref_masked_attention(qkv.query,
                                         qkv.key,
@@ -405,9 +402,7 @@ def _decoder_attn_setup(
     (
         prefill_slot_mapping,
         decode_slot_mapping,
-    ) = split_slot_mapping(slot_mapping_list,
-                           qkv.q_seq_lens,
-                           device=CUDA_DEVICE)
+    ) = split_slot_mapping(slot_mapping_list, qkv.q_seq_lens, device=CUDA_DEVICE)
 
     prefill_pckd_qkv = pack_qkv(prefill_qkv, device=CUDA_DEVICE)
 
@@ -652,8 +647,8 @@ def _run_encoder_attention_test(
         # invoking the forward method.
         # TODO - Update the way we construct the query so that it
         # is shaped as [num_tokens, hidden_size] and we can skip the reshape.
-        reshaped_query = packed_qkv.query.view(
-            -1, test_pt.num_heads * test_pt.head_size)
+        reshaped_query = packed_qkv.query.view(-1,
+                                               test_pt.num_heads * test_pt.head_size)
         return attn.forward(reshaped_query, packed_qkv.key, packed_qkv.value)
 
 
@@ -698,8 +693,8 @@ def _run_decoder_self_attention_test(
         # invoking the forward method.
         # TODO - Update the way we construct the query so that it
         # is shaped as [num_tokens, hidden_size] and we can skip the reshape.
-        reshaped_query = packed_qkv.query.view(
-            -1, test_pt.num_heads * test_pt.head_size)
+        reshaped_query = packed_qkv.query.view(-1,
+                                               test_pt.num_heads * test_pt.head_size)
         return attn.forward(reshaped_query, packed_qkv.key, packed_qkv.value)
 
 
@@ -783,8 +778,7 @@ def set_reset_environment(attn_backend):
     torch.set_default_dtype(default_dtype)
 
 
-@pytest.mark.skipif(current_platform.is_rocm(),
-                    reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
+@pytest.mark.skipif(current_platform.is_rocm(), reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("attn_backend", LIST_ENC_DEC_SUPPORTED_BACKENDS)
@@ -835,9 +829,9 @@ def test_encoder_only(
         # Note: KV cache size of 4096 is arbitrary & chosen intentionally
         # to be more than necessary, since exceeding the kv cache size
         # is not part of this test
-        test_pt = TestPoint(num_heads, head_size, attn_backend.name,
-                            batch_size, block_size, max_dec_seq_len,
-                            max_enc_seq_len, 4096, AttentionType.ENCODER)
+        test_pt = TestPoint(num_heads, head_size, attn_backend.name, batch_size,
+                            block_size, max_dec_seq_len, max_enc_seq_len, 4096,
+                            AttentionType.ENCODER)
 
         # Attention scale factor, attention backend instance, attention wrapper
         # instance, KV cache init
@@ -875,8 +869,7 @@ def test_encoder_only(
                                     attn_backend.name)
 
 
-@pytest.mark.skipif(current_platform.is_rocm(),
-                    reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
+@pytest.mark.skipif(current_platform.is_rocm(), reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("attn_backend", LIST_ENC_DEC_SUPPORTED_BACKENDS)
@@ -959,16 +952,15 @@ def test_e2e_enc_dec_attn(
         # Note: KV cache size of 4096 is arbitrary & chosen intentionally
         # to be more than necessary, since exceeding the kv cache size
         # is not part of this test
-        enc_test_pt = TestPoint(num_heads, head_size, attn_backend.name,
-                                batch_size, block_size, max_dec_seq_len,
-                                max_enc_seq_len, 4096, AttentionType.ENCODER)
-        enc_dec_test_pt = TestPoint(num_heads, head_size, attn_backend.name,
-                                    batch_size, block_size, max_dec_seq_len,
-                                    max_enc_seq_len, 4096,
+        enc_test_pt = TestPoint(num_heads, head_size, attn_backend.name, batch_size,
+                                block_size, max_dec_seq_len, max_enc_seq_len, 4096,
+                                AttentionType.ENCODER)
+        enc_dec_test_pt = TestPoint(num_heads, head_size, attn_backend.name, batch_size,
+                                    block_size, max_dec_seq_len, max_enc_seq_len, 4096,
                                     AttentionType.ENCODER_DECODER)
-        dec_test_pt = TestPoint(num_heads, head_size, attn_backend.name,
-                                batch_size, block_size, max_dec_seq_len,
-                                max_enc_seq_len, 4096, AttentionType.DECODER)
+        dec_test_pt = TestPoint(num_heads, head_size, attn_backend.name, batch_size,
+                                block_size, max_dec_seq_len, max_enc_seq_len, 4096,
+                                AttentionType.DECODER)
 
         # Attention scale factor, attention backend instance, attention wrapper
         # instance, KV cache init
@@ -1044,8 +1036,7 @@ def test_e2e_enc_dec_attn(
             vllm_config=vllm_config)
 
         # - Is prefill decoder self-attention correct?
-        assert_actual_matches_ideal(prephase_dec_test_params,
-                                    prephase_dec_pckd_act_out,
+        assert_actual_matches_ideal(prephase_dec_test_params, prephase_dec_pckd_act_out,
                                     attn_backend.name)
 
         # PREFILL: encoder/decoder cross-attention test
@@ -1060,8 +1051,7 @@ def test_e2e_enc_dec_attn(
 
         # - Is prefill encoder/decoder cross-attention correct?
         assert_actual_matches_ideal(prephase_cross_test_params,
-                                    prephase_cross_pckd_act_out,
-                                    attn_backend.name)
+                                    prephase_cross_pckd_act_out, attn_backend.name)
 
         # DECODE: build decode-phase attention metadata
 
@@ -1084,8 +1074,7 @@ def test_e2e_enc_dec_attn(
             vllm_config=vllm_config)
 
         # - Is decode-phase decoder self-attention correct?
-        assert_actual_matches_ideal(decphase_dec_test_params,
-                                    decphase_dec_pckd_act_out,
+        assert_actual_matches_ideal(decphase_dec_test_params, decphase_dec_pckd_act_out,
                                     attn_backend.name)
 
         # DECODE: encoder/decoder cross-attention test
@@ -1100,5 +1089,4 @@ def test_e2e_enc_dec_attn(
 
         # - Is decode-phase encoder/decoder cross-attention correct?
         assert_actual_matches_ideal(decphase_cross_test_params,
-                                    decphase_cross_pckd_act_out,
-                                    attn_backend.name)
+                                    decphase_cross_pckd_act_out, attn_backend.name)

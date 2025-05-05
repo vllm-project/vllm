@@ -11,8 +11,7 @@ from tabulate import tabulate
 
 def parse_arguments():
     parser = argparse.ArgumentParser(
-        description=
-        'Parse command line arguments for summary-nightly-results script.')
+        description='Parse command line arguments for summary-nightly-results script.')
     parser.add_argument('--results-folder',
                         type=str,
                         required=True,
@@ -85,8 +84,7 @@ def main(args):
     with open(args.description) as f:
         description = f.read()
 
-    description = description.format(
-        nightly_results_benchmarking_table=md_table)
+    description = description.format(nightly_results_benchmarking_table=md_table)
 
     with open("nightly_results.md", "w") as f:
         f.write(description)

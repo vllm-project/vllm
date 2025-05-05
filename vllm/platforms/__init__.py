@@ -22,9 +22,8 @@ def vllm_version_matches_substr(substr: str) -> bool:
     try:
         vllm_version = version("vllm")
     except PackageNotFoundError as e:
-        logger.warning(
-            "The vLLM package was not found, so its version could not be "
-            "inspected. This may cause platform detection to fail.")
+        logger.warning("The vLLM package was not found, so its version could not be "
+                       "inspected. This may cause platform detection to fail.")
         raise e
     return substr in vllm_version
 
@@ -63,8 +62,7 @@ def cuda_platform_plugin() -> Optional[str]:
             is_cuda = (pynvml.nvmlDeviceGetCount() > 0
                        and not vllm_version_matches_substr("cpu"))
             if pynvml.nvmlDeviceGetCount() <= 0:
-                logger.debug(
-                    "CUDA platform is not available because no GPU is found.")
+                logger.debug("CUDA platform is not available because no GPU is found.")
             if vllm_version_matches_substr("cpu"):
                 logger.debug("CUDA platform is not available because"
                              " vLLM is built with CPU.")
@@ -73,8 +71,7 @@ def cuda_platform_plugin() -> Optional[str]:
         finally:
             pynvml.nvmlShutdown()
     except Exception as e:
-        logger.debug("Exception happens when checking CUDA platform: %s",
-                     str(e))
+        logger.debug("Exception happens when checking CUDA platform: %s", str(e))
         if "nvml" not in e.__class__.__name__.lower():
             # If the error is not related to NVML, re-raise it.
             raise e
@@ -206,8 +203,7 @@ def resolve_current_platform_cls_qualname() -> str:
 
     activated_plugins = []
 
-    for name, func in chain(builtin_platform_plugins.items(),
-                            platform_plugins.items()):
+    for name, func in chain(builtin_platform_plugins.items(), platform_plugins.items()):
         try:
             assert callable(func)
             platform_cls_qualname = func()
@@ -218,30 +214,23 @@ def resolve_current_platform_cls_qualname() -> str:
 
     activated_builtin_plugins = list(
         set(activated_plugins) & set(builtin_platform_plugins.keys()))
-    activated_oot_plugins = list(
-        set(activated_plugins) & set(platform_plugins.keys()))
+    activated_oot_plugins = list(set(activated_plugins) & set(platform_plugins.keys()))
 
     if len(activated_oot_plugins) >= 2:
-        raise RuntimeError(
-            "Only one platform plugin can be activated, but got: "
-            f"{activated_oot_plugins}")
+        raise RuntimeError("Only one platform plugin can be activated, but got: "
+                           f"{activated_oot_plugins}")
     elif len(activated_oot_plugins) == 1:
         platform_cls_qualname = platform_plugins[activated_oot_plugins[0]]()
-        logger.info("Platform plugin %s is activated",
-                    activated_oot_plugins[0])
+        logger.info("Platform plugin %s is activated", activated_oot_plugins[0])
     elif len(activated_builtin_plugins) >= 2:
-        raise RuntimeError(
-            "Only one platform plugin can be activated, but got: "
-            f"{activated_builtin_plugins}")
+        raise RuntimeError("Only one platform plugin can be activated, but got: "
+                           f"{activated_builtin_plugins}")
     elif len(activated_builtin_plugins) == 1:
-        platform_cls_qualname = builtin_platform_plugins[
-            activated_builtin_plugins[0]]()
-        logger.info("Automatically detected platform %s.",
-                    activated_builtin_plugins[0])
+        platform_cls_qualname = builtin_platform_plugins[activated_builtin_plugins[0]]()
+        logger.info("Automatically detected platform %s.", activated_builtin_plugins[0])
     else:
         platform_cls_qualname = "vllm.platforms.interface.UnspecifiedPlatform"
-        logger.info(
-            "No platform detected, vLLM is running on UnspecifiedPlatform")
+        logger.info("No platform detected, vLLM is running on UnspecifiedPlatform")
     return platform_cls_qualname
 
 
@@ -268,19 +257,14 @@ def __getattr__(name: str):
         global _current_platform
         if _current_platform is None:
             platform_cls_qualname = resolve_current_platform_cls_qualname()
-            _current_platform = resolve_obj_by_qualname(
-                platform_cls_qualname)()
+            _current_platform = resolve_obj_by_qualname(platform_cls_qualname)()
             global _init_trace
             _init_trace = "".join(traceback.format_stack())
         return _current_platform
     elif name in globals():
         return globals()[name]
     else:
-        raise AttributeError(
-            f"No attribute named '{name}' exists in {__name__}.")
+        raise AttributeError(f"No attribute named '{name}' exists in {__name__}.")
 
 
-__all__ = [
-    'Platform', 'PlatformEnum', 'current_platform', 'CpuArchEnum',
-    "_init_trace"
-]
+__all__ = ['Platform', 'PlatformEnum', 'current_platform', 'CpuArchEnum', "_init_trace"]

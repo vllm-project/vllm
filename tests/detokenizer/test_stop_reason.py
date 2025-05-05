@@ -43,11 +43,10 @@ def test_stop_reason(vllm_model, example_prompts):
 
     # test stop string
     outputs = llm.generate(example_prompts,
-                           sampling_params=SamplingParams(
-                               ignore_eos=True,
-                               seed=SEED,
-                               max_tokens=MAX_TOKENS,
-                               stop="."))
+                           sampling_params=SamplingParams(ignore_eos=True,
+                                                          seed=SEED,
+                                                          max_tokens=MAX_TOKENS,
+                                                          stop="."))
     for output in outputs:
         output = output.outputs[0]
         assert output.finish_reason == "stop"
@@ -55,9 +54,9 @@ def test_stop_reason(vllm_model, example_prompts):
 
     # test EOS token
     outputs = llm.generate(example_prompts,
-                           sampling_params=SamplingParams(
-                               seed=SEED, max_tokens=MAX_TOKENS))
+                           sampling_params=SamplingParams(seed=SEED,
+                                                          max_tokens=MAX_TOKENS))
     for output in outputs:
         output = output.outputs[0]
-        assert output.finish_reason == "length" or (
-            output.finish_reason == "stop" and output.stop_reason is None)
+        assert output.finish_reason == "length" or (output.finish_reason == "stop"
+                                                    and output.stop_reason is None)

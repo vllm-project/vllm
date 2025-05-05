@@ -53,11 +53,9 @@ class BaseLogitsProcessor:
         self._guide: Guide = guide
         self._reasoner: Optional[ReasoningParser] = reasoner
         # CFGState is used for the FSM state for CFGGuide
-        self._fsm_state: DefaultDict[int, Union[int,
-                                                CFGState]] = defaultdict(int)
+        self._fsm_state: DefaultDict[int, Union[int, CFGState]] = defaultdict(int)
 
-    def __call__(self, input_ids: List[int],
-                 scores: torch.Tensor) -> torch.Tensor:
+    def __call__(self, input_ids: List[int], scores: torch.Tensor) -> torch.Tensor:
         """Use the FSM to bias the logits before sampling the next token."""
 
         # Skip the structured logits processing if reasoning is not finished.
@@ -94,8 +92,7 @@ class BaseLogitsProcessor:
                 self._fsm_state[seq_id] = CFGState(
                     parser_state=self._guide.parser.parse(""), prev_token=None)
 
-        instruction = self._guide.get_next_instruction(
-            state=self._fsm_state[seq_id])
+        instruction = self._guide.get_next_instruction(state=self._fsm_state[seq_id])
 
         if type(instruction) == Generate:  # noqa: E721
             allowed_tokens = instruction.tokens
@@ -103,20 +100,16 @@ class BaseLogitsProcessor:
             # TODO: support fast forward tokens
             allowed_tokens = [instruction.tokens[0]]
         else:
-            raise TypeError(
-                f"Unsupported instruction type {type(instruction)}")
+            raise TypeError(f"Unsupported instruction type {type(instruction)}")
 
-        mask = torch.full((scores.shape[-1], ),
-                          -torch.inf,
-                          device=scores.device)
+        mask = torch.full((scores.shape[-1], ), -torch.inf, device=scores.device)
         # The tokenizer may support more token ids than the model can generate,
         # eg. Llama 3.2 Vision models have an `<|image|>` token with id 128256
         # but scores.shape == torch.Size([128256])
         # Using NumPy is faster for filtering token ids
         allowed_tokens = np.array(allowed_tokens, dtype=np.int64)
         allowed_tokens = torch.tensor(allowed_tokens, device=scores.device)
-        allowed_tokens = allowed_tokens.masked_select(
-            allowed_tokens < scores.shape[-1])
+        allowed_tokens = allowed_tokens.masked_select(allowed_tokens < scores.shape[-1])
         mask.index_fill_(0, allowed_tokens, 0)
         if current_platform.is_hpu():
             # Workaround for HPU bug where add_() raise RuntimeError:
@@ -133,8 +126,7 @@ class RegexLogitsProcessor(BaseLogitsProcessor):
 
     @classmethod
     @cache()
-    def _get_guide(cls, regex_string: str,
-                   tokenizer: PreTrainedTokenizerBase) -> Guide:
+    def _get_guide(cls, regex_string: str, tokenizer: PreTrainedTokenizerBase) -> Guide:
         tokenizer = _adapt_tokenizer(tokenizer)
         return RegexGuide.from_regex(regex_string, tokenizer)
 
@@ -154,16 +146,16 @@ class RegexLogitsProcessor(BaseLogitsProcessor):
             The model's tokenizer
 
         """
-        super().__init__(
-            RegexLogitsProcessor._get_guide(regex_string, tokenizer), reasoner)
+        super().__init__(RegexLogitsProcessor._get_guide(regex_string, tokenizer),
+                         reasoner)
 
 
 class JSONLogitsProcessor(RegexLogitsProcessor):
 
-    def __init__(self, schema: Union[str, Dict, BaseModel],
-                 tokenizer: PreTrainedTokenizerBase,
-                 whitespace_pattern: Union[str, None],
-                 reasoner: Optional[ReasoningParser]):
+    def __init__(self, schema: Union[str, Dict,
+                                     BaseModel], tokenizer: PreTrainedTokenizerBase,
+                 whitespace_pattern: Union[str,
+                                           None], reasoner: Optional[ReasoningParser]):
         """Compile the FSM that drives the JSON-guided generation.
 
         Parameters
@@ -214,8 +206,7 @@ class CFGLogitsProcessor(BaseLogitsProcessor):
             The model's tokenizer
 
         """
-        super().__init__(CFGLogitsProcessor._get_guide(cfg, tokenizer),
-                         reasoner)
+        super().__init__(CFGLogitsProcessor._get_guide(cfg, tokenizer), reasoner)
         self._guide = self._guide.copy()
 
 
@@ -252,8 +243,7 @@ def _adapt_tokenizer(tokenizer: PreTrainedTokenizerBase):
         return string
 
     def change_decoder(
-        decoder: Callable[[List[int]],
-                          str]) -> Callable[[List[int]], List[str]]:
+            decoder: Callable[[List[int]], str]) -> Callable[[List[int]], List[str]]:
         """Sync vLLM's decoder with the outlines by returning list."""
 
         def new_decoder(inp_tokens: List[int]) -> List[str]:

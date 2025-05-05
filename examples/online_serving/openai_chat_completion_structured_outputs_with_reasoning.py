@@ -27,8 +27,7 @@ openai_api_base = "http://localhost:8000/v1"
 
 
 def print_completion_details(completion):
-    print("reasoning_content: ",
-          completion.choices[0].message.reasoning_content)
+    print("reasoning_content: ", completion.choices[0].message.reasoning_content)
     print("content: ", completion.choices[0].message.content)
 
 

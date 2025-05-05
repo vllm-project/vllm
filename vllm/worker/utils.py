@@ -7,8 +7,7 @@ from vllm.utils import STR_NOT_IMPL_ENC_DEC_ERR_STRS
 from vllm.worker.model_runner import GPUModelRunnerBase
 
 
-def assert_enc_dec_mr_supported_scenario(
-        enc_dec_mr: GPUModelRunnerBase) -> None:
+def assert_enc_dec_mr_supported_scenario(enc_dec_mr: GPUModelRunnerBase) -> None:
     '''
     Asserted that the provided encoder/decoder model runner instance reflects
     a supported scenario.
@@ -26,14 +25,13 @@ def assert_enc_dec_mr_supported_scenario(
             STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_SWA'])
 
     if enc_dec_mr.scheduler_config.chunked_prefill_enabled:
-        raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_ERR_STRS[
-            'STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL'])
+        raise NotImplementedError(
+            STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL'])
 
     if getattr(enc_dec_mr.model_config.hf_config, 'attn_logit_softcapping',
                None) is not None:
         raise NotImplementedError(
-            STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP']
-        )
+            STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP'])
 
     if enc_dec_mr.lora_config is not None:
         raise NotImplementedError(
@@ -48,5 +46,5 @@ def assert_enc_dec_mr_supported_scenario(
             STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_SPEC_DEC'])
 
     if enc_dec_mr.prompt_adapter_config is not None:
-        raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_ERR_STRS[
-            'STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER'])
+        raise NotImplementedError(
+            STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER'])

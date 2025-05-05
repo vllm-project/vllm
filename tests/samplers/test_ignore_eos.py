@@ -31,8 +31,7 @@ def test_ignore_eos(
     max_tokens: int,
 ) -> None:
     with vllm_runner(model, dtype=dtype) as vllm_model:
-        sampling_params = SamplingParams(max_tokens=max_tokens,
-                                         ignore_eos=True)
+        sampling_params = SamplingParams(max_tokens=max_tokens, ignore_eos=True)
 
         for prompt in example_prompts:
             ignore_eos_output = vllm_model.model.generate(

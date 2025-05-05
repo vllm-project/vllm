@@ -87,8 +87,7 @@ from .conftest import (get_output_from_llm_generator,
 @pytest.mark.parametrize("batch_size", [1, 32])
 @pytest.mark.parametrize("seed", [1])
 @create_new_process_for_each_test()
-def test_spec_decode_e2e_with_detokenization(test_llm_generator,
-                                             batch_size: int):
+def test_spec_decode_e2e_with_detokenization(test_llm_generator, batch_size: int):
     """Run generation with speculative decoding on a batch. Verify the engine
     generates the correct number of tokens (via ignore_eos=True), and that the
     detokenization matches HF transformers.
@@ -179,9 +178,8 @@ def test_spec_decode_e2e_with_detokenization(test_llm_generator,
 @pytest.mark.parametrize("seed", [1])
 @create_new_process_for_each_test()
 def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
-        vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
-        baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
-        seed: int):
+        vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs, baseline_llm_kwargs,
+        test_llm_kwargs, batch_size: int, output_len: int, seed: int):
     """Verify greedy equality on a tiny model with batch size of one.
 
     Since this test is cheaper than other e2e correctness tests, we generate
@@ -257,9 +255,8 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
 @pytest.mark.parametrize("seed", [1])
 @create_new_process_for_each_test()
 def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs(
-        vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
-        baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
-        seed: int):
+        vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs, baseline_llm_kwargs,
+        test_llm_kwargs, batch_size: int, output_len: int, seed: int):
     """Verify greedy equality on a tiny model and large batch size.
     """
     run_equality_correctness_test(vllm_runner,
@@ -317,9 +314,8 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs(
 @pytest.mark.parametrize("seed", [1])
 @create_new_process_for_each_test()
 def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs_diff_output_len(
-        vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
-        baseline_llm_kwargs, test_llm_kwargs, batch_size: int,
-        max_output_len: int, seed: int):
+        vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs, baseline_llm_kwargs,
+        test_llm_kwargs, batch_size: int, max_output_len: int, seed: int):
     """Verify greedy equality on a tiny model, with a large batch size, and when
     sampling respects the EOS token.
     """
@@ -377,9 +373,8 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs_diff_output_len(
 @pytest.mark.parametrize("seed", [1])
 @create_new_process_for_each_test()
 def test_spec_decode_e2e_greedy_correctness_real_model_bs1(
-        vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
-        baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
-        seed: int):
+        vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs, baseline_llm_kwargs,
+        test_llm_kwargs, batch_size: int, output_len: int, seed: int):
     """Verify greedy equality on a "real" model and batch size of 1. This is
     separate from large BS tests to make identifying the source of bugs easier.
     """
@@ -436,9 +431,8 @@ def test_spec_decode_e2e_greedy_correctness_real_model_bs1(
 @pytest.mark.parametrize("seed", [1])
 @create_new_process_for_each_test()
 def test_spec_decode_e2e_greedy_correctness_real_model_large_bs(
-        vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
-        baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
-        seed: int):
+        vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs, baseline_llm_kwargs,
+        test_llm_kwargs, batch_size: int, output_len: int, seed: int):
     """Verify greedy equality with a "real" model on a nontrivial batch size.
     This is the closest test to a real production workload.
     """
@@ -498,9 +492,8 @@ def test_spec_decode_e2e_greedy_correctness_real_model_large_bs(
 @pytest.mark.parametrize("seed", [1])
 @create_new_process_for_each_test()
 def test_spec_decode_e2e_greedy_correctness_with_preemption(
-        vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
-        baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
-        seed: int):
+        vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs, baseline_llm_kwargs,
+        test_llm_kwargs, batch_size: int, output_len: int, seed: int):
     """Verify greedy equality, even when some sequences are preempted mid-
     generation.
     """
@@ -566,8 +559,7 @@ def test_spec_decode_e2e_greedy_correctness_with_preemption(
 def test_spec_decode_different_block_size(vllm_runner, common_llm_kwargs,
                                           per_test_common_llm_kwargs,
                                           baseline_llm_kwargs, test_llm_kwargs,
-                                          batch_size: int, output_len: int,
-                                          seed: int):
+                                          batch_size: int, output_len: int, seed: int):
     """Verify greedy equality over different block sizes.
     """
     run_equality_correctness_test(vllm_runner,
@@ -627,10 +619,9 @@ def test_spec_decode_different_block_size(vllm_runner, common_llm_kwargs,
     ])
 @pytest.mark.parametrize("seed", [1])
 @create_new_process_for_each_test()
-def test_skip_speculation(vllm_runner, common_llm_kwargs,
-                          per_test_common_llm_kwargs, baseline_llm_kwargs,
-                          test_llm_kwargs, batch_size: int, output_len: int,
-                          seed: int):
+def test_skip_speculation(vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
+                          baseline_llm_kwargs, test_llm_kwargs, batch_size: int,
+                          output_len: int, seed: int):
     """Verify greedy equality when some (or all) sequences skip speculation.
     We do this by setting the max model len of the draft model to an
     artificially low value, such that when the sequences grow beyond it, they
@@ -681,10 +672,9 @@ def test_skip_speculation(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize("output_len", [10])
 @pytest.mark.parametrize("seed", [1])
 @create_new_process_for_each_test()
-def test_disable_speculation(vllm_runner, common_llm_kwargs,
-                             per_test_common_llm_kwargs, baseline_llm_kwargs,
-                             test_llm_kwargs, batch_size: int, output_len: int,
-                             seed: int):
+def test_disable_speculation(vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
+                             baseline_llm_kwargs, test_llm_kwargs, batch_size: int,
+                             output_len: int, seed: int):
     """Verify greedy equality when all sequences disable speculation.
     """
     run_equality_correctness_test(vllm_runner,
@@ -739,8 +729,8 @@ def test_disable_speculation(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize("seed", [1])
 @create_new_process_for_each_test()
 def test_many_k(vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
-                baseline_llm_kwargs, test_llm_kwargs, batch_size: int,
-                output_len: int, seed: int):
+                baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
+                seed: int):
     """Verify that speculative decoding produces exact equality to without spec
     decode with many different values of k.
     """
@@ -798,9 +788,8 @@ def test_many_k(vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
 @pytest.mark.parametrize("seed", [1])
 @create_new_process_for_each_test()
 def test_typical_acceptance_sampling(vllm_runner, common_llm_kwargs,
-                                     per_test_common_llm_kwargs,
-                                     baseline_llm_kwargs, test_llm_kwargs,
-                                     batch_size: int, output_len: int,
+                                     per_test_common_llm_kwargs, baseline_llm_kwargs,
+                                     test_llm_kwargs, batch_size: int, output_len: int,
                                      seed: int):
     """Verify that speculative decoding produces exact equality to without spec
     decode with TypicalAcceptanceSampler as the draft token acceptance

@@ -31,8 +31,8 @@ def _start_workers() -> tuple[list[ProcessWorkerWrapper], WorkerMonitor]:
     result_handler = ResultHandler()
     vllm_config = VllmConfig()
     workers = [
-        ProcessWorkerWrapper(result_handler, DummyWorkerWrapper, vllm_config,
-                             rank) for rank in range(8)
+        ProcessWorkerWrapper(result_handler, DummyWorkerWrapper, vllm_config, rank)
+        for rank in range(8)
     ]
 
     worker_monitor = WorkerMonitor(workers, result_handler)
@@ -52,8 +52,7 @@ def test_local_workers() -> None:
 
     def execute_workers(worker_input: str) -> None:
         worker_outputs = [
-            worker.execute_method("worker_method", worker_input)
-            for worker in workers
+            worker.execute_method("worker_method", worker_input) for worker in workers
         ]
 
         for rank, output in enumerate(worker_outputs):
@@ -151,8 +150,7 @@ async def test_local_workers_async() -> None:
     # Test error case
     exception = ValueError("fake error")
     try:
-        _result = await workers[0].execute_method_async(
-            "worker_method", exception)
+        _result = await workers[0].execute_method_async("worker_method", exception)
         pytest.fail("task should have failed")
     except Exception as e:
         assert isinstance(e, ValueError)
@@ -171,8 +169,7 @@ async def test_local_workers_async() -> None:
 
     # Further attempts to submit tasks should fail
     try:
-        _result = await workers[0].execute_method_async(
-            "worker_method", "test")
+        _result = await workers[0].execute_method_async("worker_method", "test")
         pytest.fail("task should fail once workers have been shut down")
     except Exception as e:
         assert isinstance(e, ChildProcessError)

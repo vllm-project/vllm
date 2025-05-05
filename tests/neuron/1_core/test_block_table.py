@@ -24,8 +24,7 @@ def nki_load_and_transform_block_tables(
 ):
     assert is_power_of_2(
         num_blocks_per_tile), f"{num_blocks_per_tile=} must be power of 2"
-    block_tables_sbuf = load_block_tables(block_tables, num_tiles,
-                                          num_blocks_per_tile)
+    block_tables_sbuf = load_block_tables(block_tables, num_tiles, num_blocks_per_tile)
 
     # we need to pass an Index as head_id
     head_id = nl.arange(1)[None, :] + head_id
@@ -72,8 +71,8 @@ def ref_block_tables_transform(
 
     num_blocks_per_tile = block_tables_transposed.shape[0]
     assert num_blocks_per_tile % B_F_SIZE == 0
-    return block_tables_transposed.view(num_blocks_per_tile // B_F_SIZE,
-                                        B_F_SIZE, num_tiles_padded)
+    return block_tables_transposed.view(num_blocks_per_tile // B_F_SIZE, B_F_SIZE,
+                                        num_tiles_padded)
 
 
 @pytest.mark.parametrize(
@@ -148,6 +147,5 @@ def test_load_and_transform_block_tables(
             head_id,
             block_size_tiling_factor,
         )
-        assert (nki_out.shape == ref_out.shape
-                ), f"{nki_out.shape=} != {ref_out.shape=}"
+        assert (nki_out.shape == ref_out.shape), f"{nki_out.shape=} != {ref_out.shape=}"
         assert torch.all(nki_out == ref_out)

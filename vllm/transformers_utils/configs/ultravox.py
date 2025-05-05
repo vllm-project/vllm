@@ -79,8 +79,7 @@ class UltravoxConfig(transformers.PretrainedConfig):
             # Avoid circular import
             from vllm.transformers_utils.config import get_config
 
-            self.text_config = get_config(text_model_id,
-                                          trust_remote_code=False)
+            self.text_config = get_config(text_model_id, trust_remote_code=False)
         else:
             text_config = text_config or {}
             self.text_config = transformers.CONFIG_MAPPING[text_config.get(
@@ -90,8 +89,7 @@ class UltravoxConfig(transformers.PretrainedConfig):
             # Avoid circular import
             from vllm.transformers_utils.config import get_config
 
-            self.audio_config = get_config(audio_model_id,
-                                           trust_remote_code=False)
+            self.audio_config = get_config(audio_model_id, trust_remote_code=False)
         else:
             audio_config = audio_config or {}
             self.audio_config = transformers.CONFIG_MAPPING[audio_config.get(

@@ -32,8 +32,7 @@ class QuantizeMethodBase(ABC):
         raise NotImplementedError
 
     # Not required functions
-    def embedding(self, layer: torch.nn.Module, *args,
-                  **kwargs) -> torch.Tensor:
+    def embedding(self, layer: torch.nn.Module, *args, **kwargs) -> torch.Tensor:
         """Gather embeddings in the layer based on indices in the input tensor.
 
         Expects create_weights to have been called before on the layer."""
@@ -47,19 +46,16 @@ class QuantizeMethodBase(ABC):
         return
 
 
-def method_has_implemented_embedding(
-        method_class: Type[QuantizeMethodBase]) -> bool:
+def method_has_implemented_embedding(method_class: Type[QuantizeMethodBase]) -> bool:
     """
     Not all quant methods have embedding implemented, so we need to check that
     it exists for our given method. We check this by making sure the function
     has been changed from the base implementation.
     """
-    base_embedding = inspect.getattr_static(QuantizeMethodBase, "embedding",
-                                            None)
+    base_embedding = inspect.getattr_static(QuantizeMethodBase, "embedding", None)
     class_embedding = inspect.getattr_static(method_class, "embedding", None)
 
-    return (class_embedding is not None
-            and class_embedding is not base_embedding)
+    return (class_embedding is not None and class_embedding is not base_embedding)
 
 
 class QuantizationConfig(ABC):
@@ -104,8 +100,8 @@ class QuantizationConfig(ABC):
         raise NotImplementedError
 
     @classmethod
-    def override_quantization_method(
-            cls, hf_quant_cfg, user_quant) -> Optional[QuantizationMethods]:
+    def override_quantization_method(cls, hf_quant_cfg,
+                                     user_quant) -> Optional[QuantizationMethods]:
         """
            Detects if this quantization method can support a given checkpoint
            format by overriding the user specified quantization method -- 
@@ -124,8 +120,7 @@ class QuantizationConfig(ABC):
                          "quantization config.")
 
     @staticmethod
-    def get_from_keys_or(config: Dict[str, Any], keys: List[str],
-                         default: Any) -> Any:
+    def get_from_keys_or(config: Dict[str, Any], keys: List[str], default: Any) -> Any:
         """Get a optional value from the model's quantization config."""
         try:
             return QuantizationConfig.get_from_keys(config, keys)

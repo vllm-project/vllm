@@ -83,10 +83,9 @@ class TokenizerDataCache:
             try:
                 vocab_dict = tokenizer.get_vocab()
             except AttributeError as e:
-                raise ValueError(
-                    f"Cannot get the vocabulary of the tokenizer "
-                    f"{type(tokenizer)}. The tokenizer should have a "
-                    "get_vocab method.") from e
+                raise ValueError(f"Cannot get the vocabulary of the tokenizer "
+                                 f"{type(tokenizer)}. The tokenizer should have a "
+                                 "get_vocab method.") from e
 
             # maintain tokenizer's indexing
             encoded_vocab = [""] * tokenizer_info.vocab_size
@@ -198,8 +197,7 @@ class GrammarConfig:
             # This is to avoid exceptions in model execution, which will crash
             # the engine worker process.
             try:
-                xgr.Grammar.from_json_schema(json_str,
-                                             any_whitespace=any_whitespace)
+                xgr.Grammar.from_json_schema(json_str, any_whitespace=any_whitespace)
             except RuntimeError as err:
                 raise ValueError(str(err)) from err
 
@@ -263,8 +261,7 @@ class GrammarConfig:
             )
         else:
             raise ValueError(
-                "Currently only support JSON and EBNF grammar mode for xgrammar"
-            )
+                "Currently only support JSON and EBNF grammar mode for xgrammar")
 
     @staticmethod
     def escape_ebnf_string(s: str) -> str:
@@ -302,8 +299,7 @@ class XGrammarLogitsProcessor:
     prefilled: bool = field(default=False)
 
     def __post_init__(self):
-        self.tokenizer_info = self.config.tokenizer_info(
-            self.config.tokenizer_data)
+        self.tokenizer_info = self.config.tokenizer_info(self.config.tokenizer_data)
 
     def __getstate__(self) -> dict[str, Any]:
         return {'config': self.config, 'reasoner': self.reasoner}
@@ -312,8 +308,7 @@ class XGrammarLogitsProcessor:
         self.config = state['config']
         self.reasoner = state['reasoner']
 
-        self.tokenizer_info = GrammarConfig.tokenizer_info(
-            self.config.tokenizer_data)
+        self.tokenizer_info = GrammarConfig.tokenizer_info(self.config.tokenizer_data)
         self.ctx = None
         self.matchers = []
         self.batch_size = 1
@@ -339,11 +334,9 @@ class XGrammarLogitsProcessor:
             elif self.config.regex_str:
                 self.ctx = compiler.compile_regex(self.config.regex_str)
             else:
-                raise ValueError(
-                    "Invalid configuration for xgrammar logits processor")
+                raise ValueError("Invalid configuration for xgrammar logits processor")
 
-    def __call__(self, input_ids: list[int],
-                 scores: torch.Tensor) -> torch.Tensor:
+    def __call__(self, input_ids: list[int], scores: torch.Tensor) -> torch.Tensor:
 
         # Skip the structured logits processing if reasoning is not finished.
         # reasoner is not None only when `--reasoning-parser` is set.

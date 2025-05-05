@@ -73,9 +73,8 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
         - 'xyz' goes to content
         """
         # Skip single special tokens
-        if len(delta_token_ids) == 1 and (delta_token_ids[0] in [
-                self.start_token_id, self.end_token_id
-        ]):
+        if len(delta_token_ids) == 1 and (delta_token_ids[0]
+                                          in [self.start_token_id, self.end_token_id]):
             return None
 
         # Check if <think> is present in previous or delta.
@@ -137,8 +136,8 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
                 return DeltaMessage(reasoning_content=delta_text)
 
     def extract_reasoning_content(
-            self, model_output: str, request: ChatCompletionRequest
-    ) -> tuple[Optional[str], Optional[str]]:
+            self, model_output: str,
+            request: ChatCompletionRequest) -> tuple[Optional[str], Optional[str]]:
         """
         Extract reasoning content from the model output.
 
@@ -162,8 +161,7 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
         if self.end_token not in model_output:
             return model_output, None
         else:
-            reasoning_content, _, content = model_output.partition(
-                self.end_token)
+            reasoning_content, _, content = model_output.partition(self.end_token)
             # If the end token is not found, return the model output as is.
             # It should not happen since we already checked for the presence
             # of the end token.

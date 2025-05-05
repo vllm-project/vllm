@@ -33,8 +33,7 @@ class CpuPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
-                             block_size: int, use_v1: bool,
-                             use_mla: bool) -> str:
+                             block_size: int, use_v1: bool, use_mla: bool) -> str:
         if selected_backend and selected_backend != _Backend.TORCH_SDPA:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
         if use_mla:
@@ -73,9 +72,8 @@ class CpuPlatform(Platform):
             cache_config.block_size = 128 if ipex_available else 16
 
         if not ipex_available and cache_config.block_size != 16:
-            raise RuntimeError(
-                f"--block-size={cache_config.block_size} requires"
-                " intel_extension_for_pytorch")
+            raise RuntimeError(f"--block-size={cache_config.block_size} requires"
+                               " intel_extension_for_pytorch")
 
         scheduler_config = vllm_config.scheduler_config
         if ((scheduler_config.chunked_prefill_enabled
@@ -86,12 +84,10 @@ class CpuPlatform(Platform):
 
         if cache_config.cache_dtype == "fp8_e4m3":
             cache_config.cache_dtype = "fp8_e5m2"
-            logger.warning(
-                "CPU backend doesn't support fp8_e4m3 KV cache type, "
-                "cast to fp8_e5m2.")
+            logger.warning("CPU backend doesn't support fp8_e4m3 KV cache type, "
+                           "cast to fp8_e5m2.")
 
-        if (cache_config.cache_dtype != "auto"
-                and model_config.dtype == torch.half):
+        if (cache_config.cache_dtype != "auto" and model_config.dtype == torch.half):
             logger.warning("FP8 KV cache on the CPU backend only does not"
                            " support fp16 for now, cast to bf16.")
             model_config.dtype = torch.bfloat16
@@ -101,15 +97,13 @@ class CpuPlatform(Platform):
         if kv_cache_space >= 0:
             if kv_cache_space == 0:
                 cache_config.cpu_kvcache_space_bytes = 4 * GiB_bytes  # type: ignore
-                logger.warning(
-                    "Environment variable VLLM_CPU_KVCACHE_SPACE (GiB) "
-                    "for CPU backend is not set, using 4 by default.")
+                logger.warning("Environment variable VLLM_CPU_KVCACHE_SPACE (GiB) "
+                               "for CPU backend is not set, using 4 by default.")
             else:
                 cache_config.cpu_kvcache_space_bytes = kv_cache_space * GiB_bytes  # type: ignore # noqa
         else:
-            raise RuntimeError(
-                "Invalid environment variable VLLM_CPU_KVCACHE_SPACE"
-                f" {kv_cache_space}, expect a positive integer value.")
+            raise RuntimeError("Invalid environment variable VLLM_CPU_KVCACHE_SPACE"
+                               f" {kv_cache_space}, expect a positive integer value.")
 
         parallel_config = vllm_config.parallel_config
         if (parallel_config.distributed_executor_backend is not None

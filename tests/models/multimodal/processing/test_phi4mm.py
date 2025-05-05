@@ -45,8 +45,7 @@ def test_processor_override(
     img_str = "".join([f"<|image_{idx}|>\n" for idx in range(1, num_imgs + 1)])
     prompt = f"<|user|>\n{img_str}<|end|>\n<|assistant|>\n"
 
-    image_size = ctx.get_hf_config(
-    ).embd_layer["image_embd_layer"]["crop_size"]
+    image_size = ctx.get_hf_config().embd_layer["image_embd_layer"]["crop_size"]
     dummy_image_size = (image_size * 7, image_size * 7)
     dummy_image = image_assets[0].pil_image.resize(dummy_image_size)
     mm_data = {"image": [dummy_image] * num_imgs}

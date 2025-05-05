@@ -11,9 +11,7 @@ QUANT_DTYPES = [torch.float8_e4m3fn]
 NUM_TOKENS = [1, 17, 86, 1234, 3045]  # Arbitrary values for testing
 HIDDEN_SIZES = [16, 48, 128, 1562, 4096]  # Arbitrary values for testing
 SEEDS = [0]
-CUDA_DEVICES = [
-    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
-]
+CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
 
 
 def ref_impl(silu_and_mul: SiluAndMul, x: torch.Tensor,
@@ -25,9 +23,7 @@ def ref_impl(silu_and_mul: SiluAndMul, x: torch.Tensor,
 
 def ops_impl(x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
     out_shape = (x.shape[0], x.shape[1] // 2)
-    out = torch.empty(out_shape,
-                      dtype=torch.torch.float8_e4m3fn,
-                      device=x.device)
+    out = torch.empty(out_shape, dtype=torch.torch.float8_e4m3fn, device=x.device)
     torch.ops._C.silu_and_mul_quant(out, x, scale)
     return out
 

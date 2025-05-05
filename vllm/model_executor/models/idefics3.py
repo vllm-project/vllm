@@ -199,8 +199,7 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
         return grid_w * grid_h + 1
 
     def _get_image_token(
-            self,
-            processor: Optional[Idefics3Processor]) -> tuple[str, str, str]:
+            self, processor: Optional[Idefics3Processor]) -> tuple[str, str, str]:
         if processor is None:
             processor = self.get_hf_processor()
         image_token = processor.image_token.content
@@ -238,8 +237,7 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
         tiles_placeholder = list[str]()
         for i in range(grid_h):
             for j in range(grid_w):
-                placeholder_per_tile = tile_img_placeholder.format(n_h=i + 1,
-                                                                   n_w=j + 1)
+                placeholder_per_tile = tile_img_placeholder.format(n_h=i + 1, n_w=j + 1)
                 tiles_placeholder.append(placeholder_per_tile)
                 # Add line break if it is the last tile in the row
                 if j == grid_w - 1:
@@ -280,8 +278,7 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
         )
 
 
-class Idefics3DummyInputsBuilder(BaseDummyInputsBuilder[Idefics3ProcessingInfo]
-                                 ):
+class Idefics3DummyInputsBuilder(BaseDummyInputsBuilder[Idefics3ProcessingInfo]):
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
@@ -309,8 +306,7 @@ class Idefics3DummyInputsBuilder(BaseDummyInputsBuilder[Idefics3ProcessingInfo]
         }
 
 
-class Idefics3MultiModalProcessor(
-        BaseMultiModalProcessor[Idefics3ProcessingInfo]):
+class Idefics3MultiModalProcessor(BaseMultiModalProcessor[Idefics3ProcessingInfo]):
 
     def _call_hf_processor(
         self,
@@ -361,8 +357,7 @@ class Idefics3MultiModalProcessor(
         num_patches = hf_inputs.get("num_patches", torch.empty(0))
 
         return dict(
-            pixel_values=MultiModalFieldConfig.flat_from_sizes(
-                "image", num_patches),
+            pixel_values=MultiModalFieldConfig.flat_from_sizes("image", num_patches),
             pixel_attention_mask=MultiModalFieldConfig.flat_from_sizes(
                 "image", num_patches),
             image_embeds=MultiModalFieldConfig.batched("image"),
@@ -412,8 +407,7 @@ class Idefics3SimpleMLP(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
-        input_size = config.vision_config.hidden_size * (config.scale_factor**
-                                                         2)
+        input_size = config.vision_config.hidden_size * (config.scale_factor**2)
         output_size = config.text_config.hidden_size
         self.proj = ReplicatedLinear(
             input_size,
@@ -444,14 +438,11 @@ class Idefics3Connector(nn.Module):
             prefix=maybe_prefix(prefix, "modality_projection"),
         )
 
-    def pixel_shuffle(self,
-                      x: torch.Tensor,
-                      scale_factor: int = 2) -> torch.Tensor:
+    def pixel_shuffle(self, x: torch.Tensor, scale_factor: int = 2) -> torch.Tensor:
         bsz, seq, embed_dim = x.size()
         height = width = int(seq**0.5)
         x = x.view(bsz, height, width, embed_dim)
-        x = x.view(bsz, height, int(width / scale_factor),
-                   embed_dim * scale_factor)
+        x = x.view(bsz, height, int(width / scale_factor), embed_dim * scale_factor)
         x = x.permute(0, 2, 1, 3)
         x = x.reshape(
             bsz,
@@ -460,13 +451,11 @@ class Idefics3Connector(nn.Module):
             embed_dim * (scale_factor**2),
         )
         x = x.permute(0, 2, 1, 3)
-        x = x.reshape(bsz, int(seq / (scale_factor**2)),
-                      embed_dim * (scale_factor**2))
+        x = x.reshape(bsz, int(seq / (scale_factor**2)), embed_dim * (scale_factor**2))
         return x
 
     def forward(self, image_hidden_states: torch.Tensor) -> torch.Tensor:
-        image_hidden_states = self.pixel_shuffle(image_hidden_states,
-                                                 self.scale_factor)
+        image_hidden_states = self.pixel_shuffle(image_hidden_states, self.scale_factor)
         image_hidden_states = self.modality_projection(image_hidden_states)
         return image_hidden_states
 
@@ -481,10 +470,10 @@ class Idefics3Model(nn.Module):
 
         self.config = config
         self.vocab_size = self.config.text_config.vocab_size
-        self.vision_model = Idefics3VisionTransformer(
-            config.vision_config,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "vision_model"))
+        self.vision_model = Idefics3VisionTransformer(config.vision_config,
+                                                      quant_config=quant_config,
+                                                      prefix=maybe_prefix(
+                                                          prefix, "vision_model"))
         self.connector = Idefics3Connector(
             config,
             quant_config,
@@ -496,8 +485,8 @@ class Idefics3Model(nn.Module):
         )
 
         self.image_seq_len = int(
-            ((config.vision_config.image_size //
-              config.vision_config.patch_size)**2) / (config.scale_factor**2))
+            ((config.vision_config.image_size // config.vision_config.patch_size)**2) /
+            (config.scale_factor**2))
         self.image_token_id = self.config.image_token_id
 
     def image_pixels_to_features(
@@ -513,14 +502,13 @@ class Idefics3Model(nn.Module):
 
         # Remove padding images - padding images are full 0.
         nb_values_per_image = pixel_values.shape[1:].numel()
-        real_images_inds = (pixel_values == 0.0).sum(
-            dim=(-1, -2, -3)) != nb_values_per_image
+        real_images_inds = (pixel_values == 0.0).sum(dim=(-1, -2,
+                                                          -3)) != nb_values_per_image
         pixel_values = pixel_values[real_images_inds].contiguous()
 
         # Handle the vision attention mask
         # Remove padding images from the mask
-        pixel_attention_mask = pixel_attention_mask[
-            real_images_inds].contiguous()
+        pixel_attention_mask = pixel_attention_mask[real_images_inds].contiguous()
 
         patch_size = self.config.vision_config.patch_size
         patches_subgrid = pixel_attention_mask.unfold(dimension=1,
@@ -562,12 +550,10 @@ class Idefics3Model(nn.Module):
         return hidden_states
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    Idefics3MultiModalProcessor,
-    info=Idefics3ProcessingInfo,
-    dummy_inputs=Idefics3DummyInputsBuilder)
-class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                       SupportsLoRA):
+@MULTIMODAL_REGISTRY.register_processor(Idefics3MultiModalProcessor,
+                                        info=Idefics3ProcessingInfo,
+                                        dummy_inputs=Idefics3DummyInputsBuilder)
+class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -622,8 +608,8 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return data
 
-    def _parse_and_validate_image_input(
-            self, **kwargs: object) -> Optional[ImageInputs]:
+    def _parse_and_validate_image_input(self,
+                                        **kwargs: object) -> Optional[ImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
 
@@ -656,8 +642,7 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
                                  f"Got type: {type(num_patches)}")
 
             pixel_values = flatten_bn(pixel_values, concat=True)
-            pixel_attention_mask = flatten_bn(pixel_attention_mask,
-                                              concat=True)
+            pixel_attention_mask = flatten_bn(pixel_attention_mask, concat=True)
             num_patches = flatten_bn(num_patches, concat=True)
 
             return Idefics3ImagePixelInputs(
@@ -669,8 +654,7 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         raise AssertionError("This line should be unreachable.")
 
-    def _process_image_pixels(
-            self, inputs: Idefics3ImagePixelInputs) -> torch.Tensor:
+    def _process_image_pixels(self, inputs: Idefics3ImagePixelInputs) -> torch.Tensor:
         pixel_values = inputs["pixel_values"]
         pixel_attention_mask = inputs["pixel_attention_mask"]
 
@@ -690,15 +674,13 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         image_features = self.model.connector(image_features)
 
         num_patches = image_input["num_patches"]
-        return [
-            e.flatten(0, 1) for e in image_features.split(num_patches.tolist())
-        ]
+        return [e.flatten(0, 1) for e in image_features.split(num_patches.tolist())]
 
     def get_language_model(self) -> torch.nn.Module:
         return self.model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
@@ -735,8 +717,7 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         # condition is for v0 compatibility.
         elif inputs_embeds is None:
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
+            inputs_embeds = self.get_input_embeddings(input_ids, vision_embeddings)
             input_ids = None
 
         hidden_states = self.model.text_model(input_ids,
@@ -748,12 +729,10 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 
@@ -761,7 +740,6 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         """
         Get the module prefix in multimodal models
         """
-        return MultiModelKeys.from_string_field(
-            language_model="model.text_model",
-            connector="model.connector",
-            tower_model="model.vision_model")
+        return MultiModelKeys.from_string_field(language_model="model.text_model",
+                                                connector="model.connector",
+                                                tower_model="model.vision_model")

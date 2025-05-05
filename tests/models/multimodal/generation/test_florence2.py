@@ -39,8 +39,7 @@ def get_hf_images_prompts(
     return prompts, images
 
 
-def hf_to_vllm_output(hf_output: tuple[list[int], str,
-                                       Optional[SampleLogprobs]]):
+def hf_to_vllm_output(hf_output: tuple[list[int], str, Optional[SampleLogprobs]]):
     """Sanitize hf output to be comparable with vllm output."""
     output_ids, output_str, out_logprobs = hf_output
 
@@ -88,8 +87,7 @@ def run_test(
             for prompts, images in hf_inputs
         ]
 
-    for hf_outputs, vllm_outputs in zip(hf_outputs_per_case,
-                                        vllm_outputs_per_case):
+    for hf_outputs, vllm_outputs in zip(hf_outputs_per_case, vllm_outputs_per_case):
         check_logprobs_close(
             outputs_0_lst=[hf_to_vllm_output(output) for output in hf_outputs],
             outputs_1_lst=vllm_outputs,
@@ -118,9 +116,8 @@ def run_test(
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models(hf_runner: type[HfRunner], vllm_runner: type[VllmRunner],
-                image_assets: ImageTestAssets, model: str,
-                size_factors: list[int], dtype: str, max_tokens: int,
-                num_logprobs: int) -> None:
+                image_assets: ImageTestAssets, model: str, size_factors: list[int],
+                dtype: str, max_tokens: int, num_logprobs: int) -> None:
     images = [asset.pil_image for asset in image_assets]
 
     inputs_per_image = [[

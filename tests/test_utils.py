@@ -162,10 +162,8 @@ def test_underscore_to_dash(parser):
 
 
 def test_mixed_usage(parser):
-    args = parser.parse_args([
-        '--image_input_type', 'image_features', '--model-name',
-        'facebook/opt-125m'
-    ])
+    args = parser.parse_args(
+        ['--image_input_type', 'image_features', '--model-name', 'facebook/opt-125m'])
     assert args.image_input_type == 'image_features'
     assert args.model_name == 'facebook/opt-125m'
 
@@ -204,19 +202,17 @@ def test_missing_required_argument(parser):
 
 def test_cli_override_to_config(parser_with_config, cli_config_file):
     args = parser_with_config.parse_args([
-        'serve', 'mymodel', '--config', cli_config_file,
-        '--tensor-parallel-size', '3'
+        'serve', 'mymodel', '--config', cli_config_file, '--tensor-parallel-size', '3'
     ])
     assert args.tensor_parallel_size == 3
     args = parser_with_config.parse_args([
-        'serve', 'mymodel', '--tensor-parallel-size', '3', '--config',
-        cli_config_file
+        'serve', 'mymodel', '--tensor-parallel-size', '3', '--config', cli_config_file
     ])
     assert args.tensor_parallel_size == 3
     assert args.port == 12312
     args = parser_with_config.parse_args([
-        'serve', 'mymodel', '--tensor-parallel-size', '3', '--config',
-        cli_config_file, '--port', '666'
+        'serve', 'mymodel', '--tensor-parallel-size', '3', '--config', cli_config_file,
+        '--port', '666'
     ])
     assert args.tensor_parallel_size == 3
     assert args.port == 666

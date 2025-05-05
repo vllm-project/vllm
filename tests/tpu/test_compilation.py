@@ -25,10 +25,7 @@ def test_tpu_compilation():
 
         # Currently, top-p sampling is disabled. `top_p` should be 1.0.
         N = 1
-        sampling_params = SamplingParams(temperature=0.7,
-                                         top_p=1.0,
-                                         n=N,
-                                         max_tokens=16)
+        sampling_params = SamplingParams(temperature=0.7, top_p=1.0, n=N, max_tokens=16)
 
         llm = LLM(model="Qwen/Qwen2-1.5B-Instruct",
                   max_num_batched_tokens=256,
@@ -64,8 +61,8 @@ def test_tpu_compilation():
         return numbers[0]
 
     # Check all the compilations are as expected
-    compiled_fns = sorted(glob.glob(
-        os.path.join(temp_dir, "__compiled_fn*Captured*.py")),
+    compiled_fns = sorted(glob.glob(os.path.join(temp_dir,
+                                                 "__compiled_fn*Captured*.py")),
                           key=lambda s: extract_compiled_index(s))
 
     for i, compiled_fn in enumerate(compiled_fns):

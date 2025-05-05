@@ -140,8 +140,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         self.sliding_window = sliding_window
         self.alibi_slopes = alibi_slopes
         if alibi_slopes is not None:
-            alibi_slopes_tensor = torch.tensor(alibi_slopes,
-                                               dtype=torch.bfloat16)
+            alibi_slopes_tensor = torch.tensor(alibi_slopes, dtype=torch.bfloat16)
             self.alibi_slopes = alibi_slopes_tensor
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -209,35 +208,29 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             # Reshape the input keys and values and store them in the cache.
             # If kv_cache is not provided, the new key and value tensors are
             # not cached. This happens during the initial memory profiling run.
-            key_cache = self.k_cache(key, key_cache, block_indices,
-                                     block_offsets)
-            value_cache = self.v_cache(value, value_cache, block_indices,
-                                       block_offsets)
+            key_cache = self.k_cache(key, key_cache, block_indices, block_offsets)
+            value_cache = self.v_cache(value, value_cache, block_indices, block_offsets)
 
         if attn_metadata.is_prompt:
             # Prompt run.
             query_shape = (batch_size, seq_len, self.num_heads, self.head_size)
-            kv_shape = (batch_size, seq_len_kv, self.num_kv_heads,
-                        self.head_size)
+            kv_shape = (batch_size, seq_len_kv, self.num_kv_heads, self.head_size)
 
             attn_bias = attn_metadata.attn_bias
             if attn_bias is not None and self.alibi_slopes is not None:
-                position_bias = _make_alibi_bias(self.alibi_slopes,
-                                                 self.num_kv_heads,
-                                                 attn_bias.dtype,
-                                                 attn_bias.shape[-1])
+                position_bias = _make_alibi_bias(self.alibi_slopes, self.num_kv_heads,
+                                                 attn_bias.dtype, attn_bias.shape[-1])
                 attn_bias = attn_bias.tile((1, self.num_kv_heads, 1, 1))
                 attn_bias.add_(position_bias)
 
-            out = ops.prompt_attention(
-                impl=self.prefill_impl,
-                query=query.view(query_shape),
-                key=key.view(kv_shape),
-                value=value.view(kv_shape),
-                is_causal=True,
-                attn_bias=attn_bias,
-                valid_seq_lengths=attn_metadata.seq_lens_tensor,
-                **self.common_attention_args())
+            out = ops.prompt_attention(impl=self.prefill_impl,
+                                       query=query.view(query_shape),
+                                       key=key.view(kv_shape),
+                                       value=value.view(kv_shape),
+                                       is_causal=True,
+                                       attn_bias=attn_bias,
+                                       valid_seq_lengths=attn_metadata.seq_lens_tensor,
+                                       **self.common_attention_args())
             output = out.reshape(batch_size, seq_len, hidden_size)
         else:
             # Decoding run.

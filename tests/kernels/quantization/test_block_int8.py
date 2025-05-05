@@ -15,15 +15,11 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
 from vllm.platforms import current_platform
 
 if current_platform.get_device_capability() < (7, 0):
-    pytest.skip("INT8 Triton requires CUDA 7.0 or higher",
-                allow_module_level=True)
+    pytest.skip("INT8 Triton requires CUDA 7.0 or higher", allow_module_level=True)
 
 
 # For test
-def native_per_token_group_quant_int8(x,
-                                      group_size,
-                                      eps=1e-10,
-                                      dtype=torch.int8):
+def native_per_token_group_quant_int8(x, group_size, eps=1e-10, dtype=torch.int8):
     """Function to perform per-token-group quantization on an input tensor
     `x` using native torch.
 
@@ -40,11 +36,10 @@ def native_per_token_group_quant_int8(x,
 
     x_ = x.reshape(x.numel() // group_size, group_size)
     # Use float32 for scale calculation for stability
-    amax = x_.abs().max(dim=-1,
-                        keepdim=True)[0].clamp(min=eps).to(torch.float32)
+    amax = x_.abs().max(dim=-1, keepdim=True)[0].clamp(min=eps).to(torch.float32)
     x_s = amax / int8_max
-    x_q = (x_.to(torch.float32) / x_s).round().clamp(
-        min=int8_min, max=int8_max).to(dtype)  # Round before clamping
+    x_q = (x_.to(torch.float32) / x_s).round().clamp(min=int8_min, max=int8_max).to(
+        dtype)  # Round before clamping
     x_q = x_q.reshape(x.shape)
     x_s = x_s.reshape(x.shape[:-1] + (x.shape[-1] // group_size, ))
 
@@ -75,8 +70,7 @@ def torch_w8a8_block_int8_moe(a, w1, w2, w1_s, w2_s, score, topk, block_shape):
                                                  block_shape,
                                                  output_dtype=a.dtype)
             act_out = SiluAndMul().forward_native(inter_out)
-            act_out_q, act_out_s = native_per_token_group_quant_int8(
-                act_out, block_k)
+            act_out_q, act_out_s = native_per_token_group_quant_int8(act_out, block_k)
             act_out = act_out.to(torch.float32)
             out[mask] = native_w8a8_block_matmul(act_out_q,
                                                  w2[i],
@@ -127,13 +121,12 @@ def test_w8a8_block_int8_matmul(M, N, K, block_size, out_dtype, seed):
     As = torch.rand(M, k_tiles, dtype=torch.float32) * factor_for_scale
     Bs = torch.rand(n_tiles, k_tiles, dtype=torch.float32) * factor_for_scale
 
-    ref_out = native_w8a8_block_matmul(A_fp8, B_fp8, As, Bs, block_size,
-                                       out_dtype)
+    ref_out = native_w8a8_block_matmul(A_fp8, B_fp8, As, Bs, block_size, out_dtype)
     out = w8a8_block_int8_matmul(A_fp8, B_fp8, As, Bs, block_size, out_dtype)
 
-    rel_diff = (torch.mean(
-        torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
-                torch.mean(torch.abs(ref_out.to(torch.float32))))
+    rel_diff = (
+        torch.mean(torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
+        torch.mean(torch.abs(ref_out.to(torch.float32))))
     assert rel_diff < 0.001
 
 
@@ -153,8 +146,7 @@ def test_w8a8_block_int8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
 
     a = torch.randn((M, K), dtype=dtype) / 10
 
-    w1_fp32 = (torch.rand(
-        (E, 2 * N, K), dtype=torch.float32) - 0.5) * 2 * int8_max
+    w1_fp32 = (torch.rand((E, 2 * N, K), dtype=torch.float32) - 0.5) * 2 * int8_max
     w1 = w1_fp32.clamp(min=int8_min, max=int8_max).to(torch.int8)
 
     w2_fp32 = (torch.rand((E, K, N), dtype=torch.float32) - 0.5) * 2 * int8_max
@@ -192,7 +184,7 @@ def test_w8a8_block_int8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
                                             block_size)
 
     # Check results
-    rel_diff = (torch.mean(
-        torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
-                torch.mean(torch.abs(ref_out.to(torch.float32))))
+    rel_diff = (
+        torch.mean(torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
+        torch.mean(torch.abs(ref_out.to(torch.float32))))
     assert rel_diff < 0.06

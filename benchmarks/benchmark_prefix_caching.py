@@ -63,8 +63,7 @@ class Request:
     output_len: int
 
 
-def sample_tokens(tokenizer: PreTrainedTokenizerBase,
-                  length: int) -> list[int]:
+def sample_tokens(tokenizer: PreTrainedTokenizerBase, length: int) -> list[int]:
     vocab = tokenizer.get_vocab()
     all_special_ids = set(tokenizer.all_special_ids)
 
@@ -91,8 +90,8 @@ def sample_requests_from_dataset(
     # Filter out the conversations with less than 2 turns.
     dataset = [data for data in dataset if len(data["conversations"]) >= 2]
     # Only keep the first two turns of each conversation.
-    dataset = [(data["conversations"][0]["value"],
-                data["conversations"][1]["value"]) for data in dataset]
+    dataset = [(data["conversations"][0]["value"], data["conversations"][1]["value"])
+               for data in dataset]
 
     # Shuffle the dataset.
     random.shuffle(dataset)
@@ -135,13 +134,12 @@ def sample_requests_from_random(
 
     for i in range(num_requests):
         unique_part_token_ids = sample_tokens(
-            tokenizer,
-            random.randint(min_len - prefix_len, max_len - prefix_len))
+            tokenizer, random.randint(min_len - prefix_len, max_len - prefix_len))
         prompt_token_ids = prefix_token_ids + unique_part_token_ids
         prompt = tokenizer.decode(prompt_token_ids)
         prompt_len = len(prompt_token_ids)
-        assert (min_len <= prompt_len <= max_len
-                ), f"prompt_len {prompt_len} out of range {min_len}:{max_len}"
+        assert (min_len <= prompt_len <=
+                max_len), f"prompt_len {prompt_len} out of range {min_len}:{max_len}"
         requests.append(Request(prompt, prompt_len, fixed_output_len))
     return requests
 
@@ -215,8 +213,8 @@ def main(args):
 
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(
-        description=
-        'Benchmark the performance with or without automatic prefix caching.')
+        description='Benchmark the performance with or without automatic prefix caching.'
+    )
     parser.add_argument("--dataset-path",
                         type=str,
                         default=None,

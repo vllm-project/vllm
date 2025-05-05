@@ -43,8 +43,7 @@ class TorchAOConfig(QuantizationConfig):
         except ImportError as err:
             raise ImportError(
                 "Please install torchao>=0.10.0 via "
-                "`pip install torchao>=0.10.0` to use torchao quantization."
-            ) from err
+                "`pip install torchao>=0.10.0` to use torchao quantization.") from err
 
         hf_config = cls.get_from_keys_or(config, ["quant_type"], None)
         assert hf_config is not None, "quant_type must be specified"
@@ -111,8 +110,7 @@ class TorchAOLinearMethod(LinearMethodBase):
             ),
             requires_grad=False,
         )
-        weight = torchao_quantize_param_data(weight,
-                                             self.quant_config.torchao_config)
+        weight = torchao_quantize_param_data(weight, self.quant_config.torchao_config)
 
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
 

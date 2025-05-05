@@ -64,8 +64,8 @@ async def test_fetch_image_http(image_url: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
 @pytest.mark.parametrize("suffix", get_supported_suffixes())
-async def test_fetch_image_base64(url_images: dict[str, Image.Image],
-                                  image_url: str, suffix: str):
+async def test_fetch_image_base64(url_images: dict[str, Image.Image], image_url: str,
+                                  suffix: str):
     connector = MediaConnector()
     url_image = url_images[image_url]
 
@@ -130,8 +130,7 @@ async def test_fetch_image_local_files(image_url: str):
             local_connector.fetch_image(
                 f"file://{temp_dir}/../{os.path.basename(image_url)}")
         with pytest.raises(RuntimeError, match="Cannot load local files"):
-            connector.fetch_image(
-                f"file://{temp_dir}/../{os.path.basename(image_url)}")
+            connector.fetch_image(f"file://{temp_dir}/../{os.path.basename(image_url)}")
 
 
 # Used for the next two tests related to `merge_and_sort_multimodal_metadata`.
@@ -254,9 +253,7 @@ def test_merge_and_sort_multimodal_metadata():
                 "audio": ["audio_hash1"],
                 "video": ["video_hash1", "video_hash2", "video_hash3"]
             },
-            expected_modalities=[
-                "audio", "video", "video", "video", "image", "image"
-            ],
+            expected_modalities=["audio", "video", "video", "video", "image", "image"],
             expected_ranges=[
                 PlaceholderRange(offset=0, length=2),
                 PlaceholderRange(offset=3, length=4),

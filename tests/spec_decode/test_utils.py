@@ -63,9 +63,7 @@ def test_filter_zero_length_proposals(fake_sequence_group_metadata):
         indices) = split_batch_by_proposal_len(fake_sequence_group_metadata,
                                                proposal_lens)
 
-    expected_groups = [
-        fake_sequence_group_metadata[0], fake_sequence_group_metadata[2]
-    ]
+    expected_groups = [fake_sequence_group_metadata[0], fake_sequence_group_metadata[2]]
     expected_indices = [0, 2]
 
     assert filtered_groups == expected_groups
@@ -78,9 +76,7 @@ def test_filter_non_zero_length_proposals(fake_sequence_group_metadata):
      indices), _ = split_batch_by_proposal_len(fake_sequence_group_metadata,
                                                proposal_lens)
 
-    expected_groups = [
-        fake_sequence_group_metadata[1], fake_sequence_group_metadata[2]
-    ]
+    expected_groups = [fake_sequence_group_metadata[1], fake_sequence_group_metadata[2]]
     expected_indices = [1, 2]
 
     assert filtered_groups == expected_groups
@@ -136,12 +132,10 @@ def test_get_sampled_token_logprobs():
     """Verify get_sampled_token_logprobs returns consistent rankings 
     with regular get_ranks when probabilities match exactly.
     """
-    logprob_tensor = torch.tensor(
-        [[[-.1, -.1]] * 2])  # shape (num_steps, batch_size, vocab_size)
-    sampled_token_tensor = torch.tensor([[1,
-                                          0]])  # shape (num_steps, batch_size)
-    ranks_spec_dec, _ = get_sampled_token_logprobs(logprob_tensor,
-                                                   sampled_token_tensor)
+    logprob_tensor = torch.tensor([[[-.1, -.1]] * 2
+                                   ])  # shape (num_steps, batch_size, vocab_size)
+    sampled_token_tensor = torch.tensor([[1, 0]])  # shape (num_steps, batch_size)
+    ranks_spec_dec, _ = get_sampled_token_logprobs(logprob_tensor, sampled_token_tensor)
 
     ranks_regular = _get_ranks(logprob_tensor.reshape((2, -1)),
                                sampled_token_tensor.reshape(-1))

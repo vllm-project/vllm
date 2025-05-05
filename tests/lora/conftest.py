@@ -224,8 +224,7 @@ def llama_2_7b_engine_extra_embeddings():
     get_model_old = get_model
 
     def get_model_patched(**kwargs):
-        kwargs["vllm_config"].lora_config = LoRAConfig(max_loras=4,
-                                                       max_lora_rank=8)
+        kwargs["vllm_config"].lora_config = LoRAConfig(max_loras=4, max_lora_rank=8)
         return get_model_old(**kwargs)
 
     with patch("vllm.worker.model_runner.get_model", get_model_patched):
@@ -237,8 +236,8 @@ def llama_2_7b_engine_extra_embeddings():
 
 @pytest.fixture
 def llama_2_7b_model_extra_embeddings(llama_2_7b_engine_extra_embeddings):
-    yield (llama_2_7b_engine_extra_embeddings.model_executor.driver_worker.
-           model_runner.model)
+    yield (llama_2_7b_engine_extra_embeddings.model_executor.driver_worker.model_runner.
+           model)
 
 
 @pytest.fixture(params=[True, False])

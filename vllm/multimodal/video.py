@@ -34,8 +34,7 @@ def rescale_video_size(frames: npt.NDArray, size_factor: float) -> npt.NDArray:
     return resize_video(frames, (new_height, new_width))
 
 
-def sample_frames_from_video(frames: npt.NDArray,
-                             num_frames: int) -> npt.NDArray:
+def sample_frames_from_video(frames: npt.NDArray, num_frames: int) -> npt.NDArray:
     total_frames = frames.shape[0]
     if num_frames == -1:
         return frames
@@ -132,10 +131,8 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
                 "image/jpeg",
             )
 
-            return np.stack([
-                np.array(load_frame(frame_data))
-                for frame_data in data.split(",")
-            ])
+            return np.stack(
+                [np.array(load_frame(frame_data)) for frame_data in data.split(",")])
 
         return self.load_bytes(base64.b64decode(data))
 
@@ -159,8 +156,7 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
                 image_format=video_format,
             )
 
-            return ",".join(
-                encode_frame(Image.fromarray(frame)) for frame in video)
+            return ",".join(encode_frame(Image.fromarray(frame)) for frame in video)
 
         msg = "Only JPEG format is supported for now."
         raise NotImplementedError(msg)

@@ -44,10 +44,10 @@ class OrionMLP(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
-        self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size, [intermediate_size] * 2,
-            bias=False,
-            quant_config=quant_config)
+        self.gate_up_proj = MergedColumnParallelLinear(hidden_size,
+                                                       [intermediate_size] * 2,
+                                                       bias=False,
+                                                       quant_config=quant_config)
         self.down_proj = RowParallelLinear(intermediate_size,
                                            hidden_size,
                                            bias=False,
@@ -157,8 +157,7 @@ class OrionDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
-        max_position_embeddings = getattr(config, "max_position_embeddings",
-                                          8192)
+        max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.self_attn = OrionAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -177,8 +176,7 @@ class OrionDecoderLayer(nn.Module):
             quant_config=quant_config,
         )
 
-        self.input_layernorm = nn.LayerNorm(config.hidden_size,
-                                            eps=config.rms_norm_eps)
+        self.input_layernorm = nn.LayerNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = nn.LayerNorm(config.hidden_size,
                                                      eps=config.rms_norm_eps)
 
@@ -227,8 +225,8 @@ class OrionModel(nn.Module):
                 config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.layers")
         self.norm = nn.LayerNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory([
+        self.make_empty_intermediate_tensors = (make_empty_intermediate_tensors_factory(
+            [
                 "hidden_states",
             ], config.hidden_size))
 
@@ -259,8 +257,7 @@ class OrionModel(nn.Module):
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -292,8 +289,7 @@ class OrionModel(nn.Module):
                 if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
@@ -337,12 +333,10 @@ class OrionForCausalLM(nn.Module, SupportsPP):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=([

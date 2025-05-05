@@ -15,8 +15,7 @@ if not envs.VLLM_USE_V1:
 
 
 @pytest.mark.parametrize("model_name", ["Qwen/Qwen2.5-1.5B-Instruct"])
-@pytest.mark.skipif(not current_platform.is_tpu(),
-                    reason="This test needs a TPU")
+@pytest.mark.skipif(not current_platform.is_tpu(), reason="This test needs a TPU")
 def test_sampler_different(model_name: str):
     """
     Test significantly different sampling params to assert the model produces 
@@ -27,9 +26,7 @@ def test_sampler_different(model_name: str):
               max_num_seqs=1,
               max_model_len=512,
               max_num_batched_tokens=512)
-    prompts = [
-        "Write a short story about a robot that dreams for the first time."
-    ]
+    prompts = ["Write a short story about a robot that dreams for the first time."]
     sampling_params = SamplingParams(temperature=0.9, min_p=0.2, max_tokens=64)
     output = llm.generate(prompts, sampling_params)
 

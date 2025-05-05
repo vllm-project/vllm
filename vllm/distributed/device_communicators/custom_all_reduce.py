@@ -31,8 +31,7 @@ def _can_p2p(rank: int, world_size: int) -> bool:
         if i == rank:
             continue
         if envs.VLLM_SKIP_P2P_CHECK:
-            logger.info(
-                "Skipping P2P check and trusting the driver's P2P report.")
+            logger.info("Skipping P2P check and trusting the driver's P2P report.")
             return torch.cuda.can_device_access_peer(rank, i)
         if not gpu_p2p_access_check(rank, i):
             return False
@@ -81,9 +80,8 @@ class CustomAllreduce:
 
         if not all(in_the_same_node_as(group, source_rank=0)):
             # No need to initialize custom allreduce for multi-node case.
-            logger.warning(
-                "Custom allreduce is disabled because this process group"
-                " spans across nodes.")
+            logger.warning("Custom allreduce is disabled because this process group"
+                           " spans across nodes.")
             return
 
         rank = dist.get_rank(group=self.group)
@@ -116,12 +114,9 @@ class CustomAllreduce:
             device_ids = list(range(cuda_device_count_stateless()))
 
         physical_device_id = device_ids[device.index]
-        tensor = torch.tensor([physical_device_id],
-                              dtype=torch.int,
-                              device="cpu")
+        tensor = torch.tensor([physical_device_id], dtype=torch.int, device="cpu")
         gather_list = [
-            torch.tensor([0], dtype=torch.int, device="cpu")
-            for _ in range(world_size)
+            torch.tensor([0], dtype=torch.int, device="cpu") for _ in range(world_size)
         ]
         dist.all_gather(gather_list, tensor, group=self.group)
         physical_device_ids = [t.item() for t in gather_list]
@@ -130,13 +125,11 @@ class CustomAllreduce:
         # where custom allreduce is not supported
         # this checks hardware and driver support for NVLink
         assert current_platform.is_cuda_alike()
-        fully_connected = current_platform.is_fully_connected(
-            physical_device_ids)
+        fully_connected = current_platform.is_fully_connected(physical_device_ids)
         if world_size > 2 and not fully_connected:
-            logger.warning(
-                "Custom allreduce is disabled because it's not supported on"
-                " more than two PCIe-only GPUs. To silence this warning, "
-                "specify disable_custom_all_reduce=True explicitly.")
+            logger.warning("Custom allreduce is disabled because it's not supported on"
+                           " more than two PCIe-only GPUs. To silence this warning, "
+                           "specify disable_custom_all_reduce=True explicitly.")
             return
         # test P2P capability, this checks software/cudaruntime support
         # this is expensive to compute at the first time
@@ -196,8 +189,7 @@ class CustomAllreduce:
         # We cannot directly use `dist.all_gather_object` here
         # because it is incompatible with `gloo` backend under inference mode.
         # see https://github.com/pytorch/pytorch/issues/126032 for details.
-        all_data = [[None, None]
-                    for _ in range(dist.get_world_size(group=self.group))]
+        all_data = [[None, None] for _ in range(dist.get_world_size(group=self.group))]
         all_data[self.rank] = [handle, offset]
         ranks = sorted(dist.get_process_group_ranks(group=self.group))
         for i, rank in enumerate(ranks):

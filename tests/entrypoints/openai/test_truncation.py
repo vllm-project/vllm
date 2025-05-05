@@ -56,9 +56,7 @@ async def test_smaller_truncation_size(client: openai.AsyncOpenAI):
         "truncate_prompt_tokens": truncation_size
     }
 
-    response = await client.post(path="embeddings",
-                                 cast_to=object,
-                                 body={**kwargs})
+    response = await client.post(path="embeddings", cast_to=object, body={**kwargs})
 
     assert response["usage"]["prompt_tokens"] == truncation_size
 
@@ -73,9 +71,7 @@ async def test_bigger_truncation_size(client: openai.AsyncOpenAI):
     }
 
     with pytest.raises(openai.BadRequestError) as err:
-        err = await client.post(path="embeddings",
-                                cast_to=object,
-                                body={**kwargs})
+        err = await client.post(path="embeddings", cast_to=object, body={**kwargs})
 
         assert str(err) == f"""openai.BadRequestError: 
                     Error code: 400 - {{'object': 'error', 
@@ -96,8 +92,6 @@ async def test_max_truncation_size(client: openai.AsyncOpenAI):
         "truncate_prompt_tokens": truncation_size
     }
 
-    response = await client.post(path="embeddings",
-                                 cast_to=object,
-                                 body={**kwargs})
+    response = await client.post(path="embeddings", cast_to=object, body={**kwargs})
 
     assert response["usage"]["prompt_tokens"] == max_model_len

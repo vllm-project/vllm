@@ -51,9 +51,8 @@ def all_gather_test_worker(index, tp_degree, distributed_init_method):
 
     all_gather_dimension = -1
     all_tensors = [
-        torch.arange(total_size, dtype=torch.float32,
-                     device="xla").reshape(tensor_size) * (r + 1)
-        for r in range(tp_degree)
+        torch.arange(total_size, dtype=torch.float32, device="xla").reshape(tensor_size)
+        * (r + 1) for r in range(tp_degree)
     ]
     expected = torch.cat(all_tensors, dim=all_gather_dimension)
     t = all_tensors[index % tp_degree]
@@ -84,11 +83,9 @@ def all_reduce_test_worker(index, tp_degree, distributed_init_method):
 @pytest.mark.parametrize("test_target",
                          [all_reduce_test_worker, all_gather_test_worker])
 @reinitialize_neuron_runtime
-def test_neuron_multi_process_tensor_parallel(monkeypatch, tp_size,
-                                              test_target):
+def test_neuron_multi_process_tensor_parallel(monkeypatch, tp_size, test_target):
 
-    with patch('torch_xla._XLAC._xla_runtime_is_initialized',
-               return_value=False):
+    with patch('torch_xla._XLAC._xla_runtime_is_initialized', return_value=False):
         distributed_init_method = get_distributed_init_method(
             "127.0.0.1", get_open_port())
 

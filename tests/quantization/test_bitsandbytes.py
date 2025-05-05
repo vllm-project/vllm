@@ -26,8 +26,7 @@ models_pre_qaunt_4bit_to_test = [
 ]
 
 models_pre_quant_8bit_to_test = [
-    ('meta-llama/Llama-Guard-3-8B-INT8',
-     'read pre-quantized llama 8-bit model'),
+    ('meta-llama/Llama-Guard-3-8B-INT8', 'read pre-quantized llama 8-bit model'),
     ("yec019/fbopt-350m-8bit", "read pre-quantized 8-bit opt model"),
 ]
 
@@ -36,36 +35,34 @@ models_pre_quant_8bit_to_test = [
                     reason='bitsandbytes is not supported on this GPU type.')
 @pytest.mark.parametrize("model_name, description", models_4bit_to_test)
 @create_new_process_for_each_test()
-def test_load_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
-                             model_name, description) -> None:
+def test_load_4bit_bnb_model(hf_runner, vllm_runner, example_prompts, model_name,
+                             description) -> None:
 
     hf_model_kwargs = {"load_in_4bit": True}
-    validate_generated_texts(hf_runner, vllm_runner, example_prompts[:1],
-                             model_name, False, hf_model_kwargs)
+    validate_generated_texts(hf_runner, vllm_runner, example_prompts[:1], model_name,
+                             False, hf_model_kwargs)
 
 
 @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
                     reason='bitsandbytes is not supported on this GPU type.')
-@pytest.mark.parametrize("model_name, description",
-                         models_pre_qaunt_4bit_to_test)
+@pytest.mark.parametrize("model_name, description", models_pre_qaunt_4bit_to_test)
 @create_new_process_for_each_test()
 def test_load_pre_quant_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                                        model_name, description) -> None:
 
-    validate_generated_texts(hf_runner, vllm_runner, example_prompts[:1],
-                             model_name, True)
+    validate_generated_texts(hf_runner, vllm_runner, example_prompts[:1], model_name,
+                             True)
 
 
 @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
                     reason='bitsandbytes is not supported on this GPU type.')
-@pytest.mark.parametrize("model_name, description",
-                         models_pre_quant_8bit_to_test)
+@pytest.mark.parametrize("model_name, description", models_pre_quant_8bit_to_test)
 @create_new_process_for_each_test()
-def test_load_8bit_bnb_model(hf_runner, vllm_runner, example_prompts,
-                             model_name, description) -> None:
+def test_load_8bit_bnb_model(hf_runner, vllm_runner, example_prompts, model_name,
+                             description) -> None:
 
-    validate_generated_texts(hf_runner, vllm_runner, example_prompts[:1],
-                             model_name, True)
+    validate_generated_texts(hf_runner, vllm_runner, example_prompts[:1], model_name,
+                             True)
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
@@ -74,8 +71,8 @@ def test_load_8bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                     reason='bitsandbytes is not supported on this GPU type.')
 @pytest.mark.parametrize("model_name, description", models_4bit_to_test)
 @create_new_process_for_each_test()
-def test_load_tp_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
-                                model_name, description) -> None:
+def test_load_tp_4bit_bnb_model(hf_runner, vllm_runner, example_prompts, model_name,
+                                description) -> None:
 
     hf_model_kwargs = {"load_in_4bit": True}
     validate_generated_texts(hf_runner,

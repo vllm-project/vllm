@@ -98,10 +98,9 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
         layer.orig_dtype = params_dtype
 
         # WEIGHT
-        weight = ModelWeightParameter(data=torch.empty(
-            output_size_per_partition,
-            input_size_per_partition,
-            dtype=torch.float8_e4m3fn),
+        weight = ModelWeightParameter(data=torch.empty(output_size_per_partition,
+                                                       input_size_per_partition,
+                                                       dtype=torch.float8_e4m3fn),
                                       input_dim=1,
                                       output_dim=0,
                                       weight_loader=weight_loader)
@@ -123,8 +122,7 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer: Module) -> None:
         # required by torch.compile
-        layer.weight_scale = Parameter(layer.weight_scale.data,
-                                       requires_grad=False)
+        layer.weight_scale = Parameter(layer.weight_scale.data, requires_grad=False)
         layer.weight = Parameter(layer.weight.data, requires_grad=False)
 
         weight = layer.weight
@@ -151,14 +149,13 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
         if self.quant_config.use_marlin:
-            return apply_fp8_marlin_linear(
-                input=x,
-                weight=layer.weight,
-                weight_scale=layer.weight_scale,
-                workspace=layer.workspace,
-                size_n=layer.output_size_per_partition,
-                size_k=layer.input_size_per_partition,
-                bias=bias)
+            return apply_fp8_marlin_linear(input=x,
+                                           weight=layer.weight,
+                                           weight_scale=layer.weight_scale,
+                                           workspace=layer.workspace,
+                                           size_n=layer.output_size_per_partition,
+                                           size_k=layer.input_size_per_partition,
+                                           bias=bias)
 
         return self.fp8_linear.apply(input=x,
                                      weight=layer.weight,

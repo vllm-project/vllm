@@ -64,8 +64,8 @@ def _test_image_prompt_replacements(
     failed_size_excs = list[tuple[ImageSize, Exception]]()
 
     for size in image_sizes:
-        _validate_image_prompt_replacements_one(processor, num_imgs,
-                                                failed_size_excs, size)
+        _validate_image_prompt_replacements_one(processor, num_imgs, failed_size_excs,
+                                                size)
 
     if failed_size_excs:
         msg = "Found failing image sizes:" \

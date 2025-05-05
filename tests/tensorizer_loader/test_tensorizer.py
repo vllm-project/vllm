@@ -73,8 +73,7 @@ def test_load_with_tensorizer(mock_agent, tensorizer_config):
     mock_agent_instance = mock_agent.return_value
     mock_agent_instance.deserialize.return_value = MagicMock()
 
-    result = load_with_tensorizer(tensorizer_config,
-                                  quant_method=mock_linear_method)
+    result = load_with_tensorizer(tensorizer_config, quant_method=mock_linear_method)
 
     mock_agent.assert_called_once_with(tensorizer_config,
                                        quant_method=mock_linear_method)
@@ -94,16 +93,14 @@ def test_can_deserialize_s3(vllm_runner):
                          num_readers=1,
                          s3_endpoint="object.ord1.coreweave.com",
                      )) as loaded_hf_model:
-        deserialized_outputs = loaded_hf_model.generate(
-            prompts, sampling_params)
+        deserialized_outputs = loaded_hf_model.generate(prompts, sampling_params)
         # noqa: E501
 
         assert deserialized_outputs
 
 
 @pytest.mark.skipif(not is_curl_installed(), reason="cURL is not installed")
-def test_deserialized_encrypted_vllm_model_has_same_outputs(
-        vllm_runner, tmp_path):
+def test_deserialized_encrypted_vllm_model_has_same_outputs(vllm_runner, tmp_path):
     with vllm_runner(model_ref) as vllm_model:
         model_path = tmp_path / (model_ref + ".tensors")
         key_path = tmp_path / (model_ref + ".key")
@@ -115,8 +112,7 @@ def test_deserialized_encrypted_vllm_model_has_same_outputs(
                                                   encryption_keyfile=key_path)
 
         vllm_model.apply_model(
-            partial(serialize_vllm_model,
-                    tensorizer_config=config_for_serializing))
+            partial(serialize_vllm_model, tensorizer_config=config_for_serializing))
 
     config_for_deserializing = TensorizerConfig(tensorizer_uri=model_path,
                                                 encryption_keyfile=key_path)
@@ -126,15 +122,13 @@ def test_deserialized_encrypted_vllm_model_has_same_outputs(
                      model_loader_extra_config=config_for_deserializing
                      ) as loaded_vllm_model:  # noqa: E501
 
-        deserialized_outputs = loaded_vllm_model.generate(
-            prompts, sampling_params)
+        deserialized_outputs = loaded_vllm_model.generate(prompts, sampling_params)
         # noqa: E501
 
         assert outputs == deserialized_outputs
 
 
-def test_deserialized_hf_model_has_same_outputs(hf_runner, vllm_runner,
-                                                tmp_path):
+def test_deserialized_hf_model_has_same_outputs(hf_runner, vllm_runner, tmp_path):
     with hf_runner(model_ref) as hf_model:
         model_path = tmp_path / (model_ref + ".tensors")
         max_tokens = 50
@@ -149,8 +143,8 @@ def test_deserialized_hf_model_has_same_outputs(hf_runner, vllm_runner,
                          tensorizer_uri=model_path,
                          num_readers=1,
                      )) as loaded_hf_model:
-        deserialized_outputs = loaded_hf_model.generate_greedy(
-            prompts, max_tokens=max_tokens)
+        deserialized_outputs = loaded_hf_model.generate_greedy(prompts,
+                                                               max_tokens=max_tokens)
 
         assert outputs == deserialized_outputs
 
@@ -170,9 +164,8 @@ def test_vllm_model_can_load_with_lora(vllm_runner, tmp_path):
         model_path = tmp_path / (model_ref + ".tensors")
 
         vllm_model.apply_model(
-            partial(
-                serialize_vllm_model,
-                tensorizer_config=TensorizerConfig(tensorizer_uri=model_path)))
+            partial(serialize_vllm_model,
+                    tensorizer_config=TensorizerConfig(tensorizer_uri=model_path)))
 
     with vllm_runner(
             model_ref,
@@ -188,8 +181,8 @@ def test_vllm_model_can_load_with_lora(vllm_runner, tmp_path):
             max_num_seqs=50,
             max_model_len=1000,
     ) as loaded_vllm_model:
-        multilora_inference.process_requests(
-            loaded_vllm_model.model.llm_engine, test_prompts)
+        multilora_inference.process_requests(loaded_vllm_model.model.llm_engine,
+                                             test_prompts)
 
         assert loaded_vllm_model
 
@@ -212,9 +205,8 @@ def test_openai_apiserver_with_tensorizer(vllm_runner, tmp_path):
         model_path = tmp_path / (model_ref + ".tensors")
 
         vllm_model.apply_model(
-            partial(
-                serialize_vllm_model,
-                tensorizer_config=TensorizerConfig(tensorizer_uri=model_path)))
+            partial(serialize_vllm_model,
+                    tensorizer_config=TensorizerConfig(tensorizer_uri=model_path)))
 
         model_loader_extra_config = {
             "tensorizer_uri": str(model_path),
@@ -243,8 +235,9 @@ def test_openai_apiserver_with_tensorizer(vllm_runner, tmp_path):
         assert len(completion.choices) == 1
         assert len(completion.choices[0].text) >= 5
         assert completion.choices[0].finish_reason == "length"
-        assert completion.usage == openai.types.CompletionUsage(
-            completion_tokens=5, prompt_tokens=6, total_tokens=11)
+        assert completion.usage == openai.types.CompletionUsage(completion_tokens=5,
+                                                                prompt_tokens=6,
+                                                                total_tokens=11)
 
 
 def test_raise_value_error_on_invalid_load_format(vllm_runner):
@@ -312,15 +305,13 @@ def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(
     assert os.path.isfile(model_path % 0), "Serialization subprocess failed"
     assert os.path.isfile(model_path % 1), "Serialization subprocess failed"
 
-    with vllm_runner(
-            model_ref,
-            tensor_parallel_size=2,
-            load_format="tensorizer",
-            disable_custom_all_reduce=True,
-            enforce_eager=True,
-            model_loader_extra_config=tensorizer_config) as loaded_vllm_model:
-        deserialized_outputs = loaded_vllm_model.generate(
-            prompts, sampling_params)
+    with vllm_runner(model_ref,
+                     tensor_parallel_size=2,
+                     load_format="tensorizer",
+                     disable_custom_all_reduce=True,
+                     enforce_eager=True,
+                     model_loader_extra_config=tensorizer_config) as loaded_vllm_model:
+        deserialized_outputs = loaded_vllm_model.generate(prompts, sampling_params)
 
     assert outputs == deserialized_outputs
 
@@ -336,16 +327,14 @@ def test_vllm_tensorized_model_has_same_outputs(vllm_runner, tmp_path):
     with vllm_runner(model_ref) as vllm_model:
         outputs = vllm_model.generate(prompts, sampling_params)
 
-        vllm_model.apply_model(
-            partial(serialize_vllm_model, tensorizer_config=config))
+        vllm_model.apply_model(partial(serialize_vllm_model, tensorizer_config=config))
 
         assert is_vllm_tensorized(config)
 
     with vllm_runner(model_ref,
                      load_format="tensorizer",
                      model_loader_extra_config=config) as loaded_vllm_model:
-        deserialized_outputs = loaded_vllm_model.generate(
-            prompts, sampling_params)
+        deserialized_outputs = loaded_vllm_model.generate(prompts, sampling_params)
         # noqa: E501
 
         assert outputs == deserialized_outputs

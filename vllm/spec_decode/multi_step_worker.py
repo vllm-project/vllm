@@ -57,8 +57,7 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
     def set_should_modify_greedy_probs_inplace(self) -> None:
         self.model_runner.sampler.should_modify_greedy_probs_inplace = True
         if hasattr(self.model_runner.model, "sampler"):
-            (self.model_runner.model.sampler.should_modify_greedy_probs_inplace
-             ) = True
+            (self.model_runner.model.sampler.should_modify_greedy_probs_inplace) = True
 
     @torch.inference_mode()
     def sampler_output(
@@ -92,8 +91,7 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
             expanded_request.num_steps = sample_len
             self.model_runner.set_indices_of_seq_with_bonus_tokens(
                 indices_of_seq_with_bonus_tokens)
-            model_outputs = self.execute_model(
-                execute_model_req=expanded_request)
+            model_outputs = self.execute_model(execute_model_req=expanded_request)
         else:
             # Here we run multi-step directly, with every step prepared
             # on the CPU.
@@ -105,15 +103,15 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
             for _ in range(sample_len):
                 model_output: List[SamplerOutput] = self.worker.execute_model(
                     execute_model_req=expanded_request)
-                assert (len(model_output) == 1
-                        ), "composing multistep workers not supported"
+                assert (
+                    len(model_output) == 1), "composing multistep workers not supported"
                 model_output = model_output[0]
-                self._maybe_update_previous_hidden_states(
-                    model_output, expanded_request)
+                self._maybe_update_previous_hidden_states(model_output,
+                                                          expanded_request)
 
-                self._append_new_tokens(
-                    model_output, expanded_request.seq_group_metadata_list,
-                    indices_of_seq_with_bonus_tokens)
+                self._append_new_tokens(model_output,
+                                        expanded_request.seq_group_metadata_list,
+                                        indices_of_seq_with_bonus_tokens)
                 model_outputs.append(model_output)
 
         # move indices to device to avoid stream sync
@@ -125,16 +123,14 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
 
     @staticmethod
     def _maybe_update_previous_hidden_states(
-            model_output: SamplerOutput,
-            expanded_request: ExecuteModelRequest) -> None:
+            model_output: SamplerOutput, expanded_request: ExecuteModelRequest) -> None:
         """
         Updates the previous hidden states in an expanded request
         in-place with the hidden states from the model output. 
         """
         if expanded_request.previous_hidden_states is not None:
             expanded_request.previous_hidden_states = HiddenStates(
-                model_output.hidden_states,
-                expanded_request.seq_group_metadata_list)
+                model_output.hidden_states, expanded_request.seq_group_metadata_list)
 
     @staticmethod
     def _expand_execute_model_request(
@@ -191,8 +187,7 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
         updated_execute_model_req.seq_group_metadata_list =\
             updated_seq_group_metadata_list
 
-        if isinstance(updated_execute_model_req.previous_hidden_states,
-                      HiddenStates):
+        if isinstance(updated_execute_model_req.previous_hidden_states, HiddenStates):
             updated_execute_model_req.previous_hidden_states\
                 .expand_with_bonus_tokens(seq_with_bonus_token_in_last_step)
 
@@ -221,21 +216,16 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
         return [
             SamplerOutput(
                 outputs=[
-                    expanded_batch_output.outputs[i]
-                    for i in output_indices_to_retain
+                    expanded_batch_output.outputs[i] for i in output_indices_to_retain
                 ] if len(expanded_batch_output.outputs) > 0 else [],
                 sampled_token_probs=(
-                    expanded_batch_output.
-                    sampled_token_probs[output_indices_to_retain]
-                    if expanded_batch_output.sampled_token_probs is not None
-                    else None),
-                logprobs=(
-                    expanded_batch_output.logprobs[output_indices_to_retain]
-                    if expanded_batch_output.logprobs is not None else None),
-                sampled_token_ids=(expanded_batch_output.
-                                   sampled_token_ids[output_indices_to_retain]
-                                   if expanded_batch_output.sampled_token_ids
-                                   is not None else None))
+                    expanded_batch_output.sampled_token_probs[output_indices_to_retain]
+                    if expanded_batch_output.sampled_token_probs is not None else None),
+                logprobs=(expanded_batch_output.logprobs[output_indices_to_retain]
+                          if expanded_batch_output.logprobs is not None else None),
+                sampled_token_ids=(
+                    expanded_batch_output.sampled_token_ids[output_indices_to_retain]
+                    if expanded_batch_output.sampled_token_ids is not None else None))
             for expanded_batch_output in expanded_batch_outputs
         ]
 
@@ -247,14 +237,13 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
         """Produce speculations given an input batch of sequences. The number of
         speculative tokens per sequence is determined by max_proposal_len.
         """
-        return self._proposer.get_spec_proposals(
-            execute_model_req, seq_ids_with_bonus_token_in_last_step)
+        return self._proposer.get_spec_proposals(execute_model_req,
+                                                 seq_ids_with_bonus_token_in_last_step)
 
     @staticmethod
-    def _append_new_tokens(
-            model_output: List[SamplerOutput],
-            seq_group_metadata_list: List[SequenceGroupMetadata],
-            indices_of_seq_with_bonus_tokens: List[int]) -> None:
+    def _append_new_tokens(model_output: List[SamplerOutput],
+                           seq_group_metadata_list: List[SequenceGroupMetadata],
+                           indices_of_seq_with_bonus_tokens: List[int]) -> None:
         """Given model output from a single run, append the tokens to the
         sequences. This is normally done outside of the worker, but it is
         required if the worker is to perform multiple forward passes.
@@ -353,9 +342,9 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
         new_seq_group_metadata.seq_data = new_seq_data
         return new_seq_group_metadata
 
-    def _assert_enough_kv_space(
-            self, seq_group_metadata_list: List[SequenceGroupMetadata],
-            num_steps: int) -> None:
+    def _assert_enough_kv_space(self,
+                                seq_group_metadata_list: List[SequenceGroupMetadata],
+                                num_steps: int) -> None:
         """Assert there are enough physical blocks per sequence to store the
         current KV plus additional KV from num_steps tokens.
         """
@@ -375,10 +364,8 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
 
             # The allocated number of kv slots is the number of allocated blocks
             # times the number of slots of block.
-            number_physical_blocks = len(
-                seq_group_metadata.block_tables[seq_id])
-            allocated_kv_slots = (number_physical_blocks *
-                                  self.model_runner.block_size)
+            number_physical_blocks = len(seq_group_metadata.block_tables[seq_id])
+            allocated_kv_slots = (number_physical_blocks * self.model_runner.block_size)
 
             if required_num_kv_slots > allocated_kv_slots:
                 request_id = seq_group_metadata.request_id
@@ -397,26 +384,22 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
         """
         if any([
                 execute_model_req.blocks_to_swap_in,
-                execute_model_req.blocks_to_swap_out,
-                execute_model_req.blocks_to_copy
+                execute_model_req.blocks_to_swap_out, execute_model_req.blocks_to_copy
         ]):
             raise NotImplementedError(
                 "MultiStepWorker does not support cache operations")
 
         if any(
                 len(seq_group_metadata.seq_data.keys()) != 1
-                for seq_group_metadata in
-                execute_model_req.seq_group_metadata_list):
-            raise NotImplementedError(
-                "MultiStepWorker does not support beam search.")
+                for seq_group_metadata in execute_model_req.seq_group_metadata_list):
+            raise NotImplementedError("MultiStepWorker does not support beam search.")
 
     def maybe_load_lm_head_weight(
         self,
         lm_head_weight: torch.Tensor,
     ) -> None:
         weight_loader = getattr(
-            self.worker.model_runner.model_runner.model.lm_head.weight,
-            "weight_loader", default_weight_loader)
-        weight_loader(
-            self.worker.model_runner.model_runner.model.lm_head.weight,
-            lm_head_weight)
+            self.worker.model_runner.model_runner.model.lm_head.weight, "weight_loader",
+            default_weight_loader)
+        weight_loader(self.worker.model_runner.model_runner.model.lm_head.weight,
+                      lm_head_weight)

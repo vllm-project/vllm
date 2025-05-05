@@ -54,13 +54,12 @@ class KVTransferAgent:
         model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
         kv_caches: List[torch.Tensor],
-        hidden_or_intermediate_states: Union[torch.Tensor,
-                                             IntermediateTensors],
+        hidden_or_intermediate_states: Union[torch.Tensor, IntermediateTensors],
     ) -> None:
 
-        self.connector.send_kv_caches_and_hidden_states(
-            model_executable, model_input, kv_caches,
-            hidden_or_intermediate_states)
+        self.connector.send_kv_caches_and_hidden_states(model_executable, model_input,
+                                                        kv_caches,
+                                                        hidden_or_intermediate_states)
 
     def close(self) -> None:
         self.connector.close()

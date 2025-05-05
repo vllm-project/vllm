@@ -81,12 +81,10 @@ class PlaceholderBlockSpaceManager(BlockSpaceManager):
     ) -> None:
         pass
 
-    def get_common_computed_block_ids(self,
-                                      seq_group: List[Sequence]) -> List[int]:
+    def get_common_computed_block_ids(self, seq_group: List[Sequence]) -> List[int]:
         return []
 
-    def mark_blocks_as_computed(self, seq_group: SequenceGroup,
-                                token_chunk_size: int):
+    def mark_blocks_as_computed(self, seq_group: SequenceGroup, token_chunk_size: int):
         pass
 
     def get_prefix_cache_hit_rate(self, device: Device) -> float:

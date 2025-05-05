@@ -46,9 +46,8 @@ SPEC_MODEL = "JackFram/llama-68m"
 @pytest.mark.parametrize("seed", [1])
 def test_draft_model_tp_lt_target_model_tp4(common_llm_kwargs,
                                             per_test_common_llm_kwargs,
-                                            baseline_llm_kwargs,
-                                            test_llm_kwargs, batch_size: int,
-                                            seed: int):
+                                            baseline_llm_kwargs, test_llm_kwargs,
+                                            batch_size: int, seed: int):
     """Verify spec decode works well with smaller tp for draft models.
     """
     run_equality_correctness_test_tp(MAIN_MODEL,
@@ -100,8 +99,8 @@ def test_draft_model_tp_lt_target_model_tp4(common_llm_kwargs,
     ])
 @pytest.mark.parametrize("seed", [1])
 def test_skip_speculation(common_llm_kwargs, per_test_common_llm_kwargs,
-                          baseline_llm_kwargs, test_llm_kwargs,
-                          batch_size: int, output_len: int, seed: int):
+                          baseline_llm_kwargs, test_llm_kwargs, batch_size: int,
+                          output_len: int, seed: int):
     """Verify job failure with RuntimeError when all sequences skip speculation.
     We do this by setting the max model len of the draft model to an
     artificially low value, such that when the sequences grow beyond it, they
@@ -109,8 +108,7 @@ def test_skip_speculation(common_llm_kwargs, per_test_common_llm_kwargs,
 
     TODO: fix it to pass without raising Error. (#5814)
     """
-    with pytest.raises(
-        (openai.APIConnectionError, openai.InternalServerError)):
+    with pytest.raises((openai.APIConnectionError, openai.InternalServerError)):
         run_equality_correctness_test_tp(MAIN_MODEL,
                                          common_llm_kwargs,
                                          per_test_common_llm_kwargs,

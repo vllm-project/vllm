@@ -196,16 +196,16 @@ def test_compilation_config():
         "--compilation-config",
         "{'level': 3, 'cudagraph_capture_sizes': [1, 2, 4, 8]}",
     ])
-    assert (args.compilation_config.level == 3 and
-            args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8])
+    assert (args.compilation_config.level == 3
+            and args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8])
 
     # set to string form of a dict
     args = parser.parse_args([
         "--compilation-config="
         "{'level': 3, 'cudagraph_capture_sizes': [1, 2, 4, 8]}",
     ])
-    assert (args.compilation_config.level == 3 and
-            args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8])
+    assert (args.compilation_config.level == 3
+            and args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8])
 
 
 def test_prefix_cache_default():
@@ -213,8 +213,7 @@ def test_prefix_cache_default():
     args = parser.parse_args([])
 
     engine_args = EngineArgs.from_cli_args(args=args)
-    assert (not engine_args.enable_prefix_caching
-            ), "prefix caching defaults to off."
+    assert (not engine_args.enable_prefix_caching), "prefix caching defaults to off."
 
     # with flag to turn it on.
     args = parser.parse_args(["--enable-prefix-caching"])
@@ -282,8 +281,7 @@ def test_composite_arg_parser(arg, expected, option):
 
 def test_human_readable_model_len():
     # `exit_on_error` disabled to test invalid values below
-    parser = EngineArgs.add_cli_args(
-        FlexibleArgumentParser(exit_on_error=False))
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser(exit_on_error=False))
 
     args = parser.parse_args([])
     assert args.max_model_len is None

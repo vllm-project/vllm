@@ -101,8 +101,7 @@ class MultiprocExecutor(Executor):
         finally:
             if not success:
                 # Clean up the worker procs if there was a failure.
-                self._ensure_worker_termination(
-                    [w.proc for w in unready_workers])
+                self._ensure_worker_termination([w.proc for w in unready_workers])
 
     def start_worker_monitor(self):
         workers = self.workers
@@ -118,19 +117,16 @@ class MultiprocExecutor(Executor):
             if not _self or getattr(_self, 'shutting_down', False):
                 return
             _self.is_failed = True
-            proc_name = next(h.proc.name for h in workers
-                             if h.proc.sentinel == died[0])
-            logger.error(
-                "Worker proc %s died unexpectedly, "
-                "shutting down executor.", proc_name)
+            proc_name = next(h.proc.name for h in workers if h.proc.sentinel == died[0])
+            logger.error("Worker proc %s died unexpectedly, "
+                         "shutting down executor.", proc_name)
             _self.shutdown()
             callback = _self.failure_callback
             if callback is not None:
                 _self.failure_callback = None
                 callback()
 
-        Thread(target=monitor_workers,
-               daemon=True,
+        Thread(target=monitor_workers, daemon=True,
                name="MultiprocWorkerMonitor").start()
 
     def register_failure_callback(self, callback: FailureCallback):
@@ -168,16 +164,15 @@ class MultiprocExecutor(Executor):
             if isinstance(method, str):
                 send_method = method
             else:
-                send_method = cloudpickle.dumps(
-                    method, protocol=pickle.HIGHEST_PROTOCOL)
-            self.rpc_broadcast_mq.enqueue(
-                (send_method, args, kwargs, rank0_reply_only))
+                send_method = cloudpickle.dumps(method,
+                                                protocol=pickle.HIGHEST_PROTOCOL)
+            self.rpc_broadcast_mq.enqueue((send_method, args, kwargs, rank0_reply_only))
 
             workers = (self.workers[0], ) if rank0_reply_only else self.workers
             responses = [None] * len(workers)
             for w in workers:
-                dequeue_timeout = None if deadline is None else (
-                    deadline - time.monotonic())
+                dequeue_timeout = None if deadline is None else (deadline -
+                                                                 time.monotonic())
                 status, result = w.worker_response_mq.dequeue(
                     timeout=dequeue_timeout, cancel=self.shutdown_event)
 
@@ -251,9 +246,8 @@ class WorkerProcHandle:
     worker_response_mq: MessageQueue  # The worker process writes to this MQ
 
     @classmethod
-    def from_unready_handle(
-            cls, unready_handle: UnreadyWorkerProcHandle,
-            worker_response_mq: MessageQueue) -> "WorkerProcHandle":
+    def from_unready_handle(cls, unready_handle: UnreadyWorkerProcHandle,
+                            worker_response_mq: MessageQueue) -> "WorkerProcHandle":
         return cls(
             proc=unready_handle.proc,
             rank=unready_handle.rank,
@@ -277,9 +271,9 @@ class WorkerProc:
         self.rank = rank
         wrapper = WorkerWrapperBase(vllm_config=vllm_config, rpc_rank=rank)
         # TODO: move `init_worker` to executor level as a collective rpc call
-        all_kwargs: list[dict] = [
-            {} for _ in range(vllm_config.parallel_config.world_size)
-        ]
+        all_kwargs: list[dict] = [{}
+                                  for _ in range(vllm_config.parallel_config.world_size)
+                                  ]
         all_kwargs[rank] = {
             "vllm_config": vllm_config,
             "local_rank": local_rank,
@@ -337,7 +331,7 @@ class WorkerProc:
 
     @staticmethod
     def wait_for_ready(
-        unready_proc_handles: list[UnreadyWorkerProcHandle]
+            unready_proc_handles: list[UnreadyWorkerProcHandle]
     ) -> list[WorkerProcHandle]:
 
         e = Exception("WorkerProc initialization failed due to "
@@ -362,8 +356,8 @@ class WorkerProc:
                     worker_response_mq = MessageQueue.create_from_handle(
                         response["handle"], 0)
                     ready_proc_handles[unready_proc_handle.rank] = (
-                        WorkerProcHandle.from_unready_handle(
-                            unready_proc_handle, worker_response_mq))
+                        WorkerProcHandle.from_unready_handle(unready_proc_handle,
+                                                             worker_response_mq))
 
                 except EOFError:
                     e.__suppress_context__ = True
@@ -410,10 +404,8 @@ class WorkerProc:
 
             # Send READY once we know everything is loaded
             ready_writer.send({
-                "status":
-                WorkerProc.READY_STR,
-                "handle":
-                worker.worker_response_mq.export_handle(),
+                "status": WorkerProc.READY_STR,
+                "handle": worker.worker_response_mq.export_handle(),
             })
 
             # Ensure message queues are ready. Will deadlock if re-ordered.

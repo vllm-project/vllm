@@ -25,8 +25,7 @@ def has_kv_transfer_group() -> bool:
     return _KV_CONNECTOR_AGENT is not None
 
 
-def is_v1_kv_transfer_group(
-        connector: Optional[KVConnectorBaseType] = None) -> bool:
+def is_v1_kv_transfer_group(connector: Optional[KVConnectorBaseType] = None) -> bool:
     """Check if the KV connector is the v1 connector.
     If the argument is None, it will check the global KV connector
 

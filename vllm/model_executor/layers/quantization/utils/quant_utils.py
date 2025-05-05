@@ -15,8 +15,7 @@ SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
 
 
 # Normalize the group_shape to the full extent for any dims that are -1
-def _normalize_quant_group_shape(x: torch.Tensor, group_shape: Tuple[int,
-                                                                     int]):
+def _normalize_quant_group_shape(x: torch.Tensor, group_shape: Tuple[int, int]):
     # -1 means full extent
     return (group_shape[0] if group_shape[0] > 0 else x.shape[-2],
             group_shape[1] if group_shape[1] > 0 else x.shape[-1])
@@ -197,10 +196,9 @@ def is_layer_skipped(
             if is_skipped is None:
                 is_skipped = is_shard_skipped
             elif is_shard_skipped != is_skipped:
-                raise ValueError(
-                    f"Detected some but not all shards of {prefix} "
-                    "are quantized. All shards of fused layers "
-                    "to have the same precision.")
+                raise ValueError(f"Detected some but not all shards of {prefix} "
+                                 "are quantized. All shards of fused layers "
+                                 "to have the same precision.")
     else:
         is_skipped = prefix in ignored_layers
 
@@ -285,9 +283,8 @@ def quantize_weights(w: torch.Tensor,
         else:
             # If the bias is such that there are no possible negative/positive
             #  values, set the max value to inf to avoid divide by 0
-            w_s = torch.max(
-                abs(max_val / (max_q_val if max_q_val != 0 else torch.inf)),
-                abs(min_val / (min_q_val if min_q_val != 0 else torch.inf)))
+            w_s = torch.max(abs(max_val / (max_q_val if max_q_val != 0 else torch.inf)),
+                            abs(min_val / (min_q_val if min_q_val != 0 else torch.inf)))
 
     # Quantize
     w_q = torch.round(w / w_s).int() + (maybe_w_zp if zero_points else 0)
@@ -350,13 +347,11 @@ def gptq_quantize_weights(w: torch.Tensor,
     g_idx = torch.empty(0, dtype=torch.int, device=w.device)
     rand_perm = torch.empty(0, dtype=torch.int, device=w.device)
     if act_order:
-        assert (
-            group_size < size_k
-        ), "For act_order, groupsize = {} must be less than size_k = {}".format(
-            group_size, size_k)
+        assert (group_size < size_k
+                ), "For act_order, groupsize = {} must be less than size_k = {}".format(
+                    group_size, size_k)
 
-        w_ref, w_q, g_idx, rand_perm = permute_rows(w_q, w_ref, group_size,
-                                                    test_perm)
+        w_ref, w_q, g_idx, rand_perm = permute_rows(w_q, w_ref, group_size, test_perm)
 
     return w_ref, w_q, w_s, g_idx, rand_perm
 
@@ -447,8 +442,7 @@ def qqq_quantize_weights(w: torch.Tensor, num_bits: int, group_size: int):
 def sort_weights(q_w: torch.Tensor, g_idx: torch.Tensor):
     orig_device = q_w.device
 
-    sort_indices = torch.argsort(g_idx).to(
-        dtype=torch.int32)  # Sort based on g_idx
+    sort_indices = torch.argsort(g_idx).to(dtype=torch.int32)  # Sort based on g_idx
 
     g_idx = g_idx[sort_indices].contiguous()
     q_w = q_w[sort_indices, :].contiguous()

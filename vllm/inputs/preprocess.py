@@ -47,8 +47,7 @@ class InputPreprocessor:
         return self.tokenizer
 
     def get_bos_token_id(self,
-                         lora_request: Optional[LoRARequest] = None
-                         ) -> Optional[int]:
+                         lora_request: Optional[LoRARequest] = None) -> Optional[int]:
         if self.tokenizer is None:
             logger.warning("Using None for BOS token id because tokenizer "
                            "is not initialized")
@@ -57,8 +56,7 @@ class InputPreprocessor:
         return self.tokenizer.get_lora_tokenizer(lora_request).bos_token_id
 
     def get_eos_token_id(self,
-                         lora_request: Optional[LoRARequest] = None
-                         ) -> Optional[int]:
+                         lora_request: Optional[LoRARequest] = None) -> Optional[int]:
         if self.tokenizer is None:
             logger.warning("Using None for EOS token id because tokenizer "
                            "is not initialized")
@@ -74,24 +72,21 @@ class InputPreprocessor:
         '''
 
         if not self.model_config.is_encoder_decoder:
-            logger.warning_once(
-                "Using None for decoder start token id because "
-                "this is not an encoder/decoder model.")
+            logger.warning_once("Using None for decoder start token id because "
+                                "this is not an encoder/decoder model.")
             return None
 
         if (self.model_config is None or self.model_config.hf_config is None):
-            logger.warning_once(
-                "Using None for decoder start token id because "
-                "model config is not available.")
+            logger.warning_once("Using None for decoder start token id because "
+                                "model config is not available.")
             return None
 
         dec_start_token_id = getattr(self.model_config.hf_config,
                                      'decoder_start_token_id', None)
         if dec_start_token_id is None:
-            logger.warning_once(
-                "Falling back on <BOS> for decoder start token "
-                "id because decoder start token id is not "
-                "available.")
+            logger.warning_once("Falling back on <BOS> for decoder start token "
+                                "id because decoder start token id is not "
+                                "available.")
             dec_start_token_id = self.get_bos_token_id()
 
         return dec_start_token_id
@@ -174,8 +169,8 @@ class InputPreprocessor:
     ) -> list[int]:
         if prompt_adapter_request:
             prompt_token_ids = (
-                [0] * prompt_adapter_request.prompt_adapter_num_virtual_tokens
-                + prompt_token_ids)
+                [0] * prompt_adapter_request.prompt_adapter_num_virtual_tokens +
+                prompt_token_ids)
 
         return prompt_token_ids
 
@@ -316,8 +311,7 @@ class InputPreprocessor:
             prompt_embeds = prompt_embeds.squeeze(dim=0)
 
         if prompt_embeds.ndim != 2:
-            raise ValueError(
-                "prompt_embeds must be of shape (seq_len, hidden_size).")
+            raise ValueError("prompt_embeds must be of shape (seq_len, hidden_size).")
 
         return embeds_inputs(prompt_embeds=prompt_embeds,
                              cache_salt=parsed_content.get("cache_salt"))
@@ -547,8 +541,7 @@ class InputPreprocessor:
                              "decoder models")
 
         # Needed for mypy
-        encoder_inputs = cast(Union[TokenInputs, MultiModalInputs],
-                              encoder_inputs)
+        encoder_inputs = cast(Union[TokenInputs, MultiModalInputs], encoder_inputs)
         decoder_inputs = cast(Optional[Union[TokenInputs, MultiModalInputs]],
                               decoder_inputs)
 
@@ -560,8 +553,7 @@ class InputPreprocessor:
                 # overridden by the audio features.
                 dec_token_ids = encoder_inputs["prompt_token_ids"].copy()
             else:
-                dec_token_ids = self._prepare_decoder_input_ids_for_generation(
-                    None)
+                dec_token_ids = self._prepare_decoder_input_ids_for_generation(None)
             decoder_inputs = token_inputs(dec_token_ids)
         else:
             if "multi_modal_data" in decoder_inputs:
@@ -687,9 +679,8 @@ class InputPreprocessor:
             # For multimodal model, override decoder prompt from processor
             # with explicit decoder prompt.
             if self.model_config.is_multimodal_model:
-                encoder_inputs, decoder_inputs = (
-                    self._split_enc_dec_mm_inputs(encoder_inputs,
-                                                  decoder_inputs))
+                encoder_inputs, decoder_inputs = (self._split_enc_dec_mm_inputs(
+                    encoder_inputs, decoder_inputs))
         else:
             inputs = self._prompt_to_llm_inputs(
                 prompt,
@@ -697,8 +688,7 @@ class InputPreprocessor:
             )
             if self.model_config.is_multimodal_model:
                 # Encoder-Decoder Multimodal model
-                encoder_inputs, decoder_inputs = (
-                    self._split_enc_dec_mm_inputs(inputs))
+                encoder_inputs, decoder_inputs = (self._split_enc_dec_mm_inputs(inputs))
             else:
                 encoder_inputs = inputs
                 decoder_inputs = None
@@ -735,9 +725,8 @@ class InputPreprocessor:
             # For multimodal model, override decoder prompt from processor
             # with explicit decoder prompt.
             if self.model_config.is_multimodal_model:
-                encoder_inputs, decoder_inputs = (
-                    self._split_enc_dec_mm_inputs(encoder_inputs,
-                                                  decoder_inputs))
+                encoder_inputs, decoder_inputs = (self._split_enc_dec_mm_inputs(
+                    encoder_inputs, decoder_inputs))
         else:
             inputs = await self._prompt_to_llm_inputs_async(
                 prompt,
@@ -745,8 +734,7 @@ class InputPreprocessor:
             )
             if self.model_config.is_multimodal_model:
                 # Encoder-Decoder Multimodal model
-                encoder_inputs, decoder_inputs = (
-                    self._split_enc_dec_mm_inputs(inputs))
+                encoder_inputs, decoder_inputs = (self._split_enc_dec_mm_inputs(inputs))
             else:
                 encoder_inputs = inputs
                 decoder_inputs = None

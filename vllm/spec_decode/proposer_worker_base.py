@@ -40,8 +40,8 @@ class NonLLMProposerWorkerBase(ProposerWorkerBase, ABC):
     """Proposer worker which does not use a model with kvcache"""
 
     def execute_model(
-        self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
+            self,
+            execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> List[SamplerOutput]:
         """get_spec_proposals is used to get the proposals"""
         return []
@@ -50,8 +50,7 @@ class NonLLMProposerWorkerBase(ProposerWorkerBase, ABC):
         """This is never called on the proposer, only the target model"""
         raise NotImplementedError
 
-    def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
+    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         pass
 
     def get_cache_block_size_bytes(self) -> int:

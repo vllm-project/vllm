@@ -30,8 +30,7 @@ class Internlm2ToolParser(ToolParser):
         super().__init__(tokenizer)
         self.position = 0
 
-    def adjust_request(
-            self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+    def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
         if request.tools and request.tool_choice != 'none':
             # do not skip special tokens because internlm use the special
             # tokens to indicated the start and end of the tool calls
@@ -91,8 +90,7 @@ class Internlm2ToolParser(ToolParser):
             # tool calls are generated in an object in inernlm2
             # it's not support parallel tool calls
             try:
-                tool_call_arr: dict = partial_json_parser.loads(
-                    parsable_arr, flags)
+                tool_call_arr: dict = partial_json_parser.loads(parsable_arr, flags)
             except partial_json_parser.core.exceptions.MalformedJSON:
                 logger.debug('not enough tokens to parse into JSON yet')
                 return None
@@ -127,9 +125,8 @@ class Internlm2ToolParser(ToolParser):
                     delta = None
                 # will never happen
                 elif not cur_arguments and prev_arguments:
-                    logger.error(
-                        "INVARIANT - impossible to have arguments reset "
-                        "mid-arguments")
+                    logger.error("INVARIANT - impossible to have arguments reset "
+                                 "mid-arguments")
                     delta = None
                 # first time to get parameters
                 elif cur_arguments and not prev_arguments:
@@ -141,11 +138,10 @@ class Internlm2ToolParser(ToolParser):
                     delta = DeltaMessage(tool_calls=[
                         DeltaToolCall(index=self.current_tool_id,
                                       function=DeltaFunctionCall(
-                                          arguments=arguments_delta).
-                                      model_dump(exclude_none=True))
+                                          arguments=arguments_delta).model_dump(
+                                              exclude_none=True))
                     ])
-                    self.streamed_args_for_tool[
-                        self.current_tool_id] += arguments_delta
+                    self.streamed_args_for_tool[self.current_tool_id] += arguments_delta
                 # both prev and cur parameters, send the increase parameters
                 elif cur_arguments and prev_arguments:
                     cur_args_json = json.dumps(cur_arguments)
@@ -160,8 +156,7 @@ class Internlm2ToolParser(ToolParser):
                                           arguments=argument_diff).model_dump(
                                               exclude_none=True))
                     ])
-                    self.streamed_args_for_tool[
-                        self.current_tool_id] += argument_diff
+                    self.streamed_args_for_tool[self.current_tool_id] += argument_diff
 
             # check to see if the name is defined and has been sent. if so,
             # stream the name - otherwise keep waiting
@@ -171,9 +166,8 @@ class Internlm2ToolParser(ToolParser):
             return delta
         except Exception:
             logger.exception("Error trying to handle streaming tool call.")
-            logger.debug(
-                "Skipping chunk as a result of tool streaming extraction "
-                "error")
+            logger.debug("Skipping chunk as a result of tool streaming extraction "
+                         "error")
             return None
 
     def extract_tool_calls(
@@ -189,8 +183,7 @@ class Internlm2ToolParser(ToolParser):
             action = action[action.find('{'):]
             action_dict = json.loads(action)
             name, parameters = action_dict['name'], json.dumps(
-                action_dict.get('parameters', action_dict.get('arguments',
-                                                              {})))
+                action_dict.get('parameters', action_dict.get('arguments', {})))
 
             if not tools or name not in [t.function.name for t in tools]:
                 ExtractedToolCallInformation(tools_called=False,
@@ -198,13 +191,11 @@ class Internlm2ToolParser(ToolParser):
                                              content=text)
 
             tool_calls = [
-                ToolCall(
-                    function=FunctionCall(name=name, arguments=parameters))
+                ToolCall(function=FunctionCall(name=name, arguments=parameters))
             ]
-            return ExtractedToolCallInformation(
-                tools_called=True,
-                tool_calls=tool_calls,
-                content=text if len(text) > 0 else None)
+            return ExtractedToolCallInformation(tools_called=True,
+                                                tool_calls=tool_calls,
+                                                content=text if len(text) > 0 else None)
 
         return ExtractedToolCallInformation(tools_called=False,
                                             tool_calls=[],

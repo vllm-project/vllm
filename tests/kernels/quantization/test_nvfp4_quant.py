@@ -12,8 +12,8 @@ if not current_platform.has_device_capability(100):
 
 DTYPES = [torch.float16, torch.bfloat16]
 SHAPES = [(128, 64), (128, 128), (256, 64), (256, 128)]
-PAD_SHAPES = [(90, 64), (150, 64), (128, 48), (128, 80), (150, 80), (90, 48),
-              (90, 128), (150, 128), (150, 48), (90, 80)]
+PAD_SHAPES = [(90, 64), (150, 64), (128, 48), (128, 80), (150, 80), (90, 48), (90, 128),
+              (150, 128), (150, 48), (90, 80)]
 SEEDS = [42]
 CUDA_DEVICES = ['cuda:0']
 
@@ -73,8 +73,7 @@ def ref_nvfp4_quant(x, global_scale):
     assert x.ndim == 2
     m, n = x.shape
     x = torch.reshape(x, (m, n // BLOCK_SIZE, BLOCK_SIZE))
-    vec_max = torch.max(torch.abs(x), dim=-1,
-                        keepdim=True)[0].to(torch.float32)
+    vec_max = torch.max(torch.abs(x), dim=-1, keepdim=True)[0].to(torch.float32)
     scale = global_scale * (vec_max * get_reciprocal(FLOAT4_E2M1_MAX))
     scale = scale.to(torch.float8_e4m3fn).to(torch.float32)
     output_scale = get_reciprocal(scale * get_reciprocal(global_scale))

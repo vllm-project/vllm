@@ -126,8 +126,7 @@ class RejectionSampler(nn.Module):
         valid_mask = ((output_token_ids_np != PLACEHOLDER_TOKEN_ID) &
                       (output_token_ids_np < vocab_size))
         outputs = [
-            row[valid_mask[i]].tolist()
-            for i, row in enumerate(output_token_ids_np)
+            row[valid_mask[i]].tolist() for i, row in enumerate(output_token_ids_np)
         ]
         return outputs
 
@@ -465,9 +464,8 @@ def rejection_greedy_sample_kernel(
     if not rejected:
         # If all tokens are accepted, append the bonus token.
         bonus_token_id = tl.load(bonus_token_ids_ptr + req_idx)
-        tl.store(
-            output_token_ids_ptr + req_idx * (max_spec_len + 1) +
-            num_draft_tokens, bonus_token_id)
+        tl.store(output_token_ids_ptr + req_idx * (max_spec_len + 1) + num_draft_tokens,
+                 bonus_token_id)
 
 
 # NOTE(woosuk): Avoid specialization to prevent unnecessary recompilation.
@@ -503,11 +501,9 @@ def rejection_random_sample_kernel(
             if NO_DRAFT_PROBS:
                 draft_prob = 1
             else:
-                draft_prob = tl.load(draft_probs_ptr +
-                                     (start_idx + pos) * vocab_size +
+                draft_prob = tl.load(draft_probs_ptr + (start_idx + pos) * vocab_size +
                                      draft_token_id)
-            target_prob = tl.load(target_probs_ptr +
-                                  (start_idx + pos) * vocab_size +
+            target_prob = tl.load(target_probs_ptr + (start_idx + pos) * vocab_size +
                                   draft_token_id)
             uniform_prob = tl.load(uniform_probs_ptr + start_idx + pos)
             # NOTE(woosuk): While the draft probability should never be 0,
@@ -525,9 +521,8 @@ def rejection_random_sample_kernel(
     if not rejected:
         # If all tokens are accepted, append the bonus token.
         bonus_token_id = tl.load(bonus_token_ids_ptr + req_idx)
-        tl.store(
-            output_token_ids_ptr + req_idx * (max_spec_len + 1) +
-            num_draft_tokens, bonus_token_id)
+        tl.store(output_token_ids_ptr + req_idx * (max_spec_len + 1) + num_draft_tokens,
+                 bonus_token_id)
 
 
 # NOTE(woosuk): Avoid specialization to prevent unnecessary recompilation.
@@ -551,9 +546,7 @@ def expand_kernel(
     src_val = tl.load(input_ptr + req_idx)
     src_val = tl.where(src_val == replace_from, replace_to, src_val)
     offset = tl.arange(0, MAX_NUM_TOKENS)
-    tl.store(output_ptr + start_idx + offset,
-             src_val,
-             mask=offset < num_tokens)
+    tl.store(output_ptr + start_idx + offset, src_val, mask=offset < num_tokens)
 
 
 @triton.jit
@@ -586,11 +579,8 @@ def sample_recovered_tokens_kernel(
         # Temporarily zero out the probability of the draft token.
         # This is essentially the same as target_prob - draft_prob, except that
         # n-gram does not have draft_prob. We regard it as 1.
-        tl.store(
-            target_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id,
-            0)
-        prob = tl.load(target_probs_ptr + (start_idx + pos) * vocab_size +
-                       vocab_offset,
+        tl.store(target_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id, 0)
+        prob = tl.load(target_probs_ptr + (start_idx + pos) * vocab_size + vocab_offset,
                        mask=vocab_offset < vocab_size,
                        other=0)
     else:
@@ -598,8 +588,8 @@ def sample_recovered_tokens_kernel(
                              vocab_offset,
                              mask=vocab_offset < vocab_size,
                              other=0)
-        target_prob = tl.load(target_probs_ptr +
-                              (start_idx + pos) * vocab_size + vocab_offset,
+        target_prob = tl.load(target_probs_ptr + (start_idx + pos) * vocab_size +
+                              vocab_offset,
                               mask=vocab_offset < vocab_size,
                               other=0)
         prob = tl.maximum(target_prob - draft_prob, 0)
@@ -614,6 +604,5 @@ def sample_recovered_tokens_kernel(
 
     if NO_DRAFT_PROBS:
         # Restore the original probability.
-        tl.store(
-            target_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id,
-            orig_prob)
+        tl.store(target_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id,
+                 orig_prob)

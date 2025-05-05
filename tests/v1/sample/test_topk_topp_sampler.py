@@ -22,10 +22,8 @@ def test_topk_impl_equivalance():
 
         # Set k=vocab_size for ~50% of requests in the batch (top-k disabled).
         k.masked_fill_(
-            torch.randint(0,
-                          2, (BATCH_SIZE, ),
-                          generator=generator,
-                          dtype=bool), VOCAB_SIZE)
+            torch.randint(0, 2, (BATCH_SIZE, ), generator=generator, dtype=bool),
+            VOCAB_SIZE)
 
         # Top-k only implementation
         result1 = apply_top_k_top_p(logits=logits.clone(), k=k, p=None)

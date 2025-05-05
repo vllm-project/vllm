@@ -8,8 +8,7 @@ from ...utils import fork_new_process_for_each_test
 
 
 @fork_new_process_for_each_test
-@pytest.mark.parametrize("attn_backend",
-                         ["FLASH_ATTN_VLLM_V1", "FLASHINFER_VLLM_V1"])
+@pytest.mark.parametrize("attn_backend", ["FLASH_ATTN_VLLM_V1", "FLASHINFER_VLLM_V1"])
 def test_cascade_attention(example_system_message, monkeypatch, attn_backend):
     prompt = "\n<User>: Implement fibonacci sequence in Python.\n<Claude>:"
 

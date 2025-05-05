@@ -10,8 +10,7 @@ from ....conftest import ImageTestAssets
 from ...utils import build_model_context
 
 
-@pytest.mark.parametrize("model_id",
-                         ["meta-llama/Llama-4-Scout-17B-16E-Instruct"])
+@pytest.mark.parametrize("model_id", ["meta-llama/Llama-4-Scout-17B-16E-Instruct"])
 @pytest.mark.parametrize("mm_processor_kwargs", [{}])
 @pytest.mark.parametrize("num_imgs", [1, 5])
 @pytest.mark.parametrize("disable_mm_preprocessor_cache", [True, False])
@@ -41,10 +40,8 @@ def test_processor_override(
         + "<|image|>" * num_imgs \
         + "<|eot|><|header_start|>assistant<|header_end|>"
     mm_data = {
-        "image": [
-            image_assets[(i % len(image_assets))].pil_image
-            for i in range(num_imgs)
-        ]
+        "image":
+        [image_assets[(i % len(image_assets))].pil_image for i in range(num_imgs)]
     }
     if tokenized_prompt:
         prompt = encode_tokens(tokenizer, prompt)
@@ -76,8 +73,7 @@ def test_processor_override(
         if v == config.boi_token_index]
 
     # patch sizes and masks
-    num_patches_per_chunk = processor.info.get_patch_per_chunk(
-        config.vision_config)
+    num_patches_per_chunk = processor.info.get_patch_per_chunk(config.vision_config)
     assert prompt_token_ids.count(config.image_token_index) \
         == mm_kwargs["patches_per_image"].sum() * num_patches_per_chunk
     assert mm_kwargs["pixel_values"].shape[0] \

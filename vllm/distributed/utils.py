@@ -85,17 +85,14 @@ def get_pp_indices(num_hidden_layers: int, pp_rank: int,
     partition_list_str = envs.VLLM_PP_LAYER_PARTITION
     if partition_list_str is not None:
         try:
-            partitions = [
-                int(layer) for layer in partition_list_str.split(",")
-            ]
+            partitions = [int(layer) for layer in partition_list_str.split(",")]
         except ValueError as err:
-            raise ValueError("Invalid partition string: {}".format(
-                partition_list_str)) from err
+            raise ValueError(
+                "Invalid partition string: {}".format(partition_list_str)) from err
         if len(partitions) != pp_size:
             raise ValueError(f"{len(partitions)=} does not match {pp_size=}.")
         if sum(partitions) != num_hidden_layers:
-            raise ValueError(
-                f"{sum(partitions)=} does not match {num_hidden_layers=}.")
+            raise ValueError(f"{sum(partitions)=} does not match {num_hidden_layers=}.")
     else:
         layers_per_partition = num_hidden_layers // pp_size
         partitions = [layers_per_partition for _ in range(pp_size)]
@@ -135,21 +132,16 @@ class StatelessProcessGroup:
     # src rank -> counter
     recv_src_counter: Dict[int, int] = dataclasses.field(default_factory=dict)
     broadcast_send_counter: int = 0
-    broadcast_recv_src_counter: Dict[int, int] = dataclasses.field(
-        default_factory=dict)
+    broadcast_recv_src_counter: Dict[int, int] = dataclasses.field(default_factory=dict)
 
     # A deque to store the data entries, with key and timestamp.
-    entries: Deque[Tuple[str,
-                         float]] = dataclasses.field(default_factory=deque)
+    entries: Deque[Tuple[str, float]] = dataclasses.field(default_factory=deque)
 
     def __post_init__(self):
         assert self.rank < self.world_size
         self.send_dst_counter = {i: 0 for i in range(self.world_size)}
         self.recv_src_counter = {i: 0 for i in range(self.world_size)}
-        self.broadcast_recv_src_counter = {
-            i: 0
-            for i in range(self.world_size)
-        }
+        self.broadcast_recv_src_counter = {i: 0 for i in range(self.world_size)}
 
     def send_obj(self, obj: Any, dst: int):
         """Send an object to a destination rank."""
@@ -173,8 +165,7 @@ class StatelessProcessGroup:
     def recv_obj(self, src: int) -> Any:
         """Receive an object from a source rank."""
         obj = pickle.loads(
-            self.store.get(
-                f"send_to/{self.rank}/{self.recv_src_counter[src]}"))
+            self.store.get(f"send_to/{self.rank}/{self.recv_src_counter[src]}"))
         self.recv_src_counter[src] += 1
         return obj
 
@@ -261,17 +252,16 @@ class StatelessProcessGroup:
             master_listen_fd=listen_fd,
         )
 
-        return StatelessProcessGroup(
-            rank=rank,
-            world_size=world_size,
-            store=store,
-            socket=listen_socket,
-            data_expiration_seconds=data_expiration_seconds)
+        return StatelessProcessGroup(rank=rank,
+                                     world_size=world_size,
+                                     store=store,
+                                     socket=listen_socket,
+                                     data_expiration_seconds=data_expiration_seconds)
 
 
-def stateless_init_torch_distributed_process_group(
-        host: str, port: int, rank: int, world_size: int,
-        backend: str) -> ProcessGroup:
+def stateless_init_torch_distributed_process_group(host: str, port: int, rank: int,
+                                                   world_size: int,
+                                                   backend: str) -> ProcessGroup:
     """
     A replacement for `torch.distributed.init_process_group` that does not
     pollute the global state. The created ProcessGroup object can be used for
@@ -354,8 +344,7 @@ def stateless_init_torch_distributed_process_group(
     return pg
 
 
-def stateless_destroy_torch_distributed_process_group(
-        pg: ProcessGroup) -> None:
+def stateless_destroy_torch_distributed_process_group(pg: ProcessGroup) -> None:
     """
     Destroy ProcessGroup returned by
         stateless_init_torch_distributed_process_group().

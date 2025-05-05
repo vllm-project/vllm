@@ -25,8 +25,7 @@ if TYPE_CHECKING:
 else:
     llguidance = LazyLoader("llguidance", globals(), "llguidance")
     llguidance_hf = LazyLoader("llguidance.hf", globals(), "llguidance.hf")
-    llguidance_torch = LazyLoader("llguidance.torch", globals(),
-                                  "llguidance.torch")
+    llguidance_torch = LazyLoader("llguidance.torch", globals(), "llguidance.torch")
 
 logger = init_logger(__name__)
 
@@ -71,8 +70,7 @@ class GuidanceBackend(StructuredOutputBackend):
             vllm_config.decoding_config.disable_additional_properties
 
         tokenizer = tokenizer_group.get_lora_tokenizer(None)
-        self.ll_tokenizer = llguidance_hf.from_tokenizer(
-            tokenizer, self.vocab_size)
+        self.ll_tokenizer = llguidance_hf.from_tokenizer(tokenizer, self.vocab_size)
 
     def compile_grammar(self, request_type: StructuredOutputOptions,
                         grammar_spec: str) -> StructuredOutputGrammar:
@@ -96,8 +94,8 @@ class GuidanceBackend(StructuredOutputBackend):
         return r
 
     def allocate_token_bitmask(self, max_num_seqs: int):
-        return llguidance_torch.allocate_token_bitmask(
-            max_num_seqs, self.ll_tokenizer.vocab_size)
+        return llguidance_torch.allocate_token_bitmask(max_num_seqs,
+                                                       self.ll_tokenizer.vocab_size)
 
     def destroy(self):
         pass
@@ -231,8 +229,7 @@ def serialize_guidance_grammar(
                         end=s["end"],
                     ))
             if not tags:
-                raise ValueError(
-                    "No structural tags found in the grammar spec.")
+                raise ValueError("No structural tags found in the grammar spec.")
             return llguidance.StructTag.to_grammar(tags)
         else:
             logger.error("Validation should have already occurred. "

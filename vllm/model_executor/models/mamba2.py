@@ -76,8 +76,7 @@ class Mamba2DecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.norm(hidden_states, residual)
 
-        hidden_states = self.mixer(hidden_states, mamba_cache_params,
-                                   mamba2_metadata)
+        hidden_states = self.mixer(hidden_states, mamba_cache_params, mamba2_metadata)
         return hidden_states, residual
 
 
@@ -106,15 +105,12 @@ class Mamba2Model(nn.Module):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: Mamba2DecoderLayer(config,
-                                              quant_config=quant_config),
+            lambda prefix: Mamba2DecoderLayer(config, quant_config=quant_config),
             prefix=f"{prefix}.layers")
 
-        self.norm_f = RMSNorm(config.hidden_size,
-                              eps=config.layer_norm_epsilon)
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size))
+        self.norm_f = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
+        self.make_empty_intermediate_tensors = (make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embeddings(input_ids)
@@ -153,8 +149,8 @@ class Mamba2Model(nn.Module):
                 positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
-                mamba_cache_params=mamba_cache_params.at_layer_idx(
-                    i - self.start_layer),
+                mamba_cache_params=mamba_cache_params.at_layer_idx(i -
+                                                                   self.start_layer),
                 mamba2_metadata=mamba2_metadata)
 
         if not get_pp_group().is_last_rank:
@@ -168,8 +164,7 @@ class Mamba2Model(nn.Module):
         return hidden_states
 
 
-class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree,
-                        SupportsV0Only):
+class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsV0Only):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
@@ -223,9 +218,10 @@ class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree,
         if self.mamba_cache is None:
             num_mamba_layers = self.model_config.get_num_layers_by_block_type(
                 self.vllm_config.parallel_config, LayerBlockType.mamba)
-            self.mamba_cache = MambaCacheManager(
-                self.vllm_config, self.lm_head.weight.dtype, num_mamba_layers,
-                *self._get_mamba_cache_shape())
+            self.mamba_cache = MambaCacheManager(self.vllm_config,
+                                                 self.lm_head.weight.dtype,
+                                                 num_mamba_layers,
+                                                 *self._get_mamba_cache_shape())
 
         mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
 
@@ -235,27 +231,23 @@ class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree,
         return hidden_states
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
-        return self.mamba_cache.copy_inputs_before_cuda_graphs(
-            input_buffers, **kwargs)
+        return self.mamba_cache.copy_inputs_before_cuda_graphs(input_buffers, **kwargs)
 
     def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
         return self.mamba_cache.get_seqlen_agnostic_capture_inputs(batch_size)
 
-    def _get_mamba_cache_shape(
-            self) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+    def _get_mamba_cache_shape(self) -> Tuple[Tuple[int, int], Tuple[int, int]]:
         world_size = get_tensor_model_parallel_world_size()
 
         conv_state_shape, temporal_state_shape = None, None
 
-        intermediate_size = getattr(
-            self.config, "intermediate_size",
-            self.config.expand * self.config.hidden_size)
+        intermediate_size = getattr(self.config, "intermediate_size",
+                                    self.config.expand * self.config.hidden_size)
 
         # if n_groups is not divisible by world_size, need to extend the shards
         # to ensure all groups needed by a head is sharded along with it
-        n_groups = (
-            self.config.n_groups +
-            extra_groups_for_head_shards(self.config.n_groups, world_size))
+        n_groups = (self.config.n_groups +
+                    extra_groups_for_head_shards(self.config.n_groups, world_size))
 
         # - heads and n_groups are TP-ed
         conv_dim = (intermediate_size + 2 * n_groups * self.config.state_size)
@@ -276,12 +268,10 @@ class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree,
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
@@ -295,8 +285,7 @@ class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree,
                 continue
 
             param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params

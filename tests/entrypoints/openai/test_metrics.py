@@ -93,39 +93,35 @@ EXPECTED_VALUES = {
     "vllm:request_inference_time_seconds": [("_count", _NUM_REQUESTS)],
     "vllm:request_prefill_time_seconds": [("_count", _NUM_REQUESTS)],
     "vllm:request_decode_time_seconds": [("_count", _NUM_REQUESTS)],
-    "vllm:request_prompt_tokens":
-    [("_sum", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST),
-     ("_count", _NUM_REQUESTS)],
+    "vllm:request_prompt_tokens": [("_sum",
+                                    _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST),
+                                   ("_count", _NUM_REQUESTS)],
     "vllm:request_generation_tokens":
     [("_sum", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST),
      ("_count", _NUM_REQUESTS)],
     "vllm:request_params_n": [("_count", _NUM_REQUESTS)],
-    "vllm:request_params_max_tokens": [
-        ("_sum", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST),
-        ("_count", _NUM_REQUESTS)
-    ],
+    "vllm:request_params_max_tokens":
+    [("_sum", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST),
+     ("_count", _NUM_REQUESTS)],
     "vllm:iteration_tokens_total":
     [("_sum", _NUM_REQUESTS *
       (_NUM_PROMPT_TOKENS_PER_REQUEST + _NUM_GENERATION_TOKENS_PER_REQUEST)),
      ("_count", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST)],
-    "vllm:prompt_tokens": [("_total",
-                            _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST)],
-    "vllm:generation_tokens": [
-        ("_total", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST)
-    ],
+    "vllm:prompt_tokens": [("_total", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST)],
+    "vllm:generation_tokens": [("_total",
+                                _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST)],
     "vllm:request_success": [("_total", _NUM_REQUESTS)],
 }
 
 
 @pytest.mark.asyncio
-async def test_metrics_counts(server: RemoteOpenAIServer,
-                              client: openai.AsyncClient, use_v1: bool):
+async def test_metrics_counts(server: RemoteOpenAIServer, client: openai.AsyncClient,
+                              use_v1: bool):
     for _ in range(_NUM_REQUESTS):
         # sending a request triggers the metrics to be logged.
-        await client.completions.create(
-            model=MODEL_NAME,
-            prompt=_TOKENIZED_PROMPT,
-            max_tokens=_NUM_GENERATION_TOKENS_PER_REQUEST)
+        await client.completions.create(model=MODEL_NAME,
+                                        prompt=_TOKENIZED_PROMPT,
+                                        max_tokens=_NUM_GENERATION_TOKENS_PER_REQUEST)
 
     response = requests.get(server.url_for("metrics"))
     print(response.text)
@@ -162,8 +158,7 @@ async def test_metrics_counts(server: RemoteOpenAIServer,
                                 f"{sample.value}")
                             break
                     assert found_suffix, (
-                        f"Did not find {metric_name_w_suffix} in prom endpoint"
-                    )
+                        f"Did not find {metric_name_w_suffix} in prom endpoint")
                 break
 
         assert found_metric, (f"Did not find {metric_family} in prom endpoint")
@@ -281,8 +276,8 @@ HIDDEN_DEPRECATED_METRICS = [
 
 
 @pytest.mark.asyncio
-async def test_metrics_exist(server: RemoteOpenAIServer,
-                             client: openai.AsyncClient, use_v1: bool):
+async def test_metrics_exist(server: RemoteOpenAIServer, client: openai.AsyncClient,
+                             use_v1: bool):
     # sending a request triggers the metrics to be logged.
     await client.completions.create(model=MODEL_NAME,
                                     prompt="Hello, my name is",
@@ -293,8 +288,7 @@ async def test_metrics_exist(server: RemoteOpenAIServer,
     assert response.status_code == HTTPStatus.OK
 
     for metric in (EXPECTED_METRICS_V1 if use_v1 else EXPECTED_METRICS):
-        if (not server.show_hidden_metrics
-                and metric not in HIDDEN_DEPRECATED_METRICS):
+        if (not server.show_hidden_metrics and metric not in HIDDEN_DEPRECATED_METRICS):
             assert metric in response.text
 
 
@@ -307,9 +301,8 @@ def test_metrics_exist_run_batch(use_v1: bool):
     port = "8001"
     server_url = f"http://{base_url}:{port}"
 
-    with tempfile.NamedTemporaryFile(
-            "w") as input_file, tempfile.NamedTemporaryFile(
-                "r") as output_file:
+    with tempfile.NamedTemporaryFile("w") as input_file, tempfile.NamedTemporaryFile(
+            "r") as output_file:
         input_file.write(input_batch)
         input_file.flush()
         proc = subprocess.Popen([

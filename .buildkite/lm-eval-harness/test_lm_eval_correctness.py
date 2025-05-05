@@ -44,8 +44,7 @@ def launch_lm_eval(eval_config):
 
 
 def test_lm_eval_correctness():
-    eval_config = yaml.safe_load(
-        Path(TEST_DATA_FILE).read_text(encoding="utf-8"))
+    eval_config = yaml.safe_load(Path(TEST_DATA_FILE).read_text(encoding="utf-8"))
 
     if eval_config[
             "model_name"] == "nm-testing/Meta-Llama-3-70B-Instruct-FBGEMM-nonuniform":  #noqa: E501
@@ -62,8 +61,7 @@ def test_lm_eval_correctness():
             measured_value = results["results"][task["name"]][metric["name"]]
             print(f'{task["name"]} | {metric["name"]}: '
                   f'ground_truth={ground_truth} | measured={measured_value}')
-            success = success and numpy.isclose(
-                ground_truth, measured_value, rtol=RTOL)
+            success = success and numpy.isclose(ground_truth, measured_value, rtol=RTOL)
 
     # Assert at the end, print all scores even on failure for debugging.
     assert success

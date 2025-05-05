@@ -61,9 +61,8 @@ class KVLookupBufferBase(KVCacheBufferBase):
     """
 
     @abstractmethod
-    def insert(self, input_tokens: torch.Tensor, roi: torch.Tensor,
-               key: torch.Tensor, value: torch.Tensor,
-               hidden: torch.Tensor) -> None:
+    def insert(self, input_tokens: torch.Tensor, roi: torch.Tensor, key: torch.Tensor,
+               value: torch.Tensor, hidden: torch.Tensor) -> None:
         """Insert into the lookup buffer.
         
         The functionality is similar to the following python statement
@@ -91,9 +90,8 @@ class KVLookupBufferBase(KVCacheBufferBase):
         raise NotImplementedError
 
     @abstractmethod
-    def drop_select(
-            self, input_tokens: Optional[torch.Tensor],
-            roi: Optional[torch.Tensor]) -> List[Optional[torch.Tensor]]:
+    def drop_select(self, input_tokens: Optional[torch.Tensor],
+                    roi: Optional[torch.Tensor]) -> List[Optional[torch.Tensor]]:
         """Select and *drop* KV cache entries from the lookup buffer.
         
         The functionality is similar to the following python statements

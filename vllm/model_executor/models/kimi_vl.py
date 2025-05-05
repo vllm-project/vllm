@@ -99,19 +99,15 @@ class KimiVLMultiModalProjector(nn.Module):
                             config.vision_config.merge_kernel_size[0] *
                             config.vision_config.merge_kernel_size[1])
 
-        self.pre_norm = torch.nn.LayerNorm(config.vision_config.hidden_size,
-                                           eps=1e-5)
-        self.linear_1 = nn.Linear(self.hidden_size,
-                                  self.hidden_size,
-                                  bias=True)
+        self.pre_norm = torch.nn.LayerNorm(config.vision_config.hidden_size, eps=1e-5)
+        self.linear_1 = nn.Linear(self.hidden_size, self.hidden_size, bias=True)
         self.act = GELUActivation()
         self.linear_2 = nn.Linear(self.hidden_size,
                                   config.text_config.hidden_size,
                                   bias=True)
 
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
-        hidden_states = self.pre_norm(image_features).view(
-            -1, self.hidden_size)
+        hidden_states = self.pre_norm(image_features).view(-1, self.hidden_size)
         hidden_states = self.linear_1(hidden_states)
         hidden_states = self.act(hidden_states)
         hidden_states = self.linear_2(hidden_states)
@@ -154,10 +150,8 @@ class KimiVLProcessingInfo(BaseProcessingInfo):
         in_token_limit = hf_processor.image_processor.in_token_limit
         height = image_height
         width = image_width
-        assert isinstance(height,
-                          int), f"height must be int, current height {height}"
-        assert isinstance(width,
-                          int), f"width must be int, current width {width}"
+        assert isinstance(height, int), f"height must be int, current height {height}"
+        assert isinstance(width, int), f"width must be int, current width {width}"
         assert kernel_size is not None, "kernel_size must be specified"
 
         if (width // patch_size) * (height // patch_size) > in_token_limit:
@@ -169,8 +163,7 @@ class KimiVLProcessingInfo(BaseProcessingInfo):
         kernel_height, kernel_width = kernel_size
 
         pad_height = (kernel_height * patch_size - height %
-                      (kernel_height * patch_size)) % (kernel_height *
-                                                       patch_size)
+                      (kernel_height * patch_size)) % (kernel_height * patch_size)
         pad_width = (kernel_width * patch_size - width %
                      (kernel_width * patch_size)) % (kernel_width * patch_size)
 
@@ -236,8 +229,8 @@ class KimiVLMultiModalProcessor(BaseMultiModalProcessor[KimiVLProcessingInfo]):
         image_token_id = self.info.image_token_id
 
         def get_replacement(item_idx: int):
-            images = mm_items.get_items(
-                "image", (ImageEmbeddingItems, ImageProcessorItems))
+            images = mm_items.get_items("image",
+                                        (ImageEmbeddingItems, ImageProcessorItems))
 
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
@@ -352,28 +345,24 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     # perform vt on processored pixel_values
     @torch.inference_mode()
-    def _process_image_pixels(self,
-                              inputs: KimiVLImagePixelInputs) -> torch.Tensor:
+    def _process_image_pixels(self, inputs: KimiVLImagePixelInputs) -> torch.Tensor:
         assert self.vision_tower is not None
 
         pixel_values = inputs["pixel_values"]
         image_grid_hws = inputs["image_grid_hws"]
         return self.vision_tower(pixel_values, image_grid_hws)
 
-    def _process_image_input(self,
-                             image_input: KimiVLImageInputs) -> torch.Tensor:
+    def _process_image_input(self, image_input: KimiVLImageInputs) -> torch.Tensor:
         assert image_input["type"] == "pixel_values"
         image_features = self._process_image_pixels(image_input)
         assert isinstance(image_features, list)
         lengths = [x.shape[0] for x in image_features]
-        return self.multi_modal_projector(
-            torch.cat(image_features)).split(lengths)
+        return self.multi_modal_projector(torch.cat(image_features)).split(lengths)
 
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(self,
-                                  **kwargs: object) -> Optional[NestedTensors]:
+    def get_multimodal_embeddings(self, **kwargs: object) -> Optional[NestedTensors]:
         # Validate the multimodal input keyword arguments
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
@@ -426,8 +415,7 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal):
                     input_ids,
                     inputs_embeds,
                     image_embeds,
-                    placeholder_token_id=self.config.
-                    media_placeholder_token_id,
+                    placeholder_token_id=self.config.media_placeholder_token_id,
                 )
                 input_ids = None
 
@@ -441,10 +429,9 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal):
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata,
-                       **kwargs) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata, **kwargs)
+                       sampling_metadata: SamplingMetadata, **kwargs) -> torch.Tensor:
+        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata,
+                                       **kwargs)
         return logits
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
@@ -487,8 +474,7 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal):
             if spec_layer is not None:
                 continue  # skip spec decode layers for main model
 
-            if ("rotary_emb.cos_cached" in name
-                    or "rotary_emb.sin_cached" in name):
+            if ("rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
@@ -502,8 +488,7 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal):
                     # not vision model for now.
                     use_default_weight_loading = True
             else:
-                for (param_name, weight_name,
-                     shard_id) in stacked_params_mapping:
+                for (param_name, weight_name, shard_id) in stacked_params_mapping:
                     if weight_name not in name:
                         continue
                     # We have mlp.experts[0].gate_proj in the checkpoint.
@@ -560,16 +545,14 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal):
                     continue
 
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight, **kwargs)
 
 
 def get_spec_layer_idx_from_weight_name(config: DeepseekV2Config,
                                         weight_name: str) -> Optional[int]:
-    if hasattr(config,
-               "num_nextn_predict_layers") and (config.num_nextn_predict_layers
-                                                > 0):
+    if hasattr(config, "num_nextn_predict_layers") and (config.num_nextn_predict_layers
+                                                        > 0):
         layer_idx = config.num_hidden_layers
         for i in range(config.num_nextn_predict_layers):
             if weight_name.startswith(f"model.layers.{layer_idx+i}."):

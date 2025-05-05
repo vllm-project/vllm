@@ -36,8 +36,7 @@ class RobertaEmbedding(nn.Module):
 
         self.token_type_embeddings = nn.Embedding(config.type_vocab_size,
                                                   config.hidden_size)
-        self.LayerNorm = nn.LayerNorm(config.hidden_size,
-                                      eps=config.layer_norm_eps)
+        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.position_ids = nn.Parameter(
             torch.empty((1, config.max_position_embeddings)), )
 
@@ -123,11 +122,8 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
        _pooler: An instance of Pooler used for pooling operations.
    """
 
-    def _build_model(self,
-                     vllm_config: VllmConfig,
-                     prefix: str = "") -> BertModel:
-        if (vllm_config.model_config.hf_config.position_embedding_type ==
-                "rotary"):
+    def _build_model(self, vllm_config: VllmConfig, prefix: str = "") -> BertModel:
+        if (vllm_config.model_config.hf_config.position_embedding_type == "rotary"):
             config = vllm_config.model_config.hf_config
             head_dim = config.hidden_size // config.num_attention_heads
 
@@ -204,8 +200,7 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding,
         for name, loaded_weight in task_weights:
             if name.startswith("classifier"):
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
 
     def pooler(
@@ -256,8 +251,7 @@ def create_position_ids_from_input_ids(input_ids,
 
 def roberta_task_weights_filter(
     all_weights: Iterable[Tuple[str, torch.Tensor]]
-) -> Tuple[Iterable[Tuple[str, torch.Tensor]], Iterable[Tuple[str,
-                                                              torch.Tensor]]]:
+) -> Tuple[Iterable[Tuple[str, torch.Tensor]], Iterable[Tuple[str, torch.Tensor]]]:
     """
     Separate task-specific weights that are applied on top
     of the encoder-decoder bert base.

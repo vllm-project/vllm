@@ -63,39 +63,35 @@ def bench_int8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
     timers = []
     # pytorch impl - bfloat16
     timers.append(
-        bench_fn(label, sub_label, "pytorch_bf16_bf16_bf16_matmul-no-scales",
-                 torch.mm, a.to(dtype=torch.bfloat16),
-                 b.to(dtype=torch.bfloat16)))
+        bench_fn(label, sub_label, "pytorch_bf16_bf16_bf16_matmul-no-scales", torch.mm,
+                 a.to(dtype=torch.bfloat16), b.to(dtype=torch.bfloat16)))
 
     # pytorch impl - float16
     timers.append(
-        bench_fn(label, sub_label,
-                 "pytorch_fp16_fp16_fp16_matmul-no-scales", torch.mm,
+        bench_fn(label, sub_label, "pytorch_fp16_fp16_fp16_matmul-no-scales", torch.mm,
                  a.to(dtype=torch.float16), b.to(dtype=torch.float16)))
 
     # cutlass impl
     timers.append(
         bench_fn(label, sub_label, "cutlass_i8_i8_bf16_scaled_mm",
-                 ops.cutlass_scaled_mm, a, b, scale_a, scale_b,
-                 torch.bfloat16))
+                 ops.cutlass_scaled_mm, a, b, scale_a, scale_b, torch.bfloat16))
 
     # cutlass with bias
     timers.append(
         bench_fn(label, sub_label, "cutlass_i8_i8_bf16_scaled_mm_bias",
-                 ops.cutlass_scaled_mm, a, b, scale_a, scale_b, torch.bfloat16,
-                 bias))
+                 ops.cutlass_scaled_mm, a, b, scale_a, scale_b, torch.bfloat16, bias))
 
     # cutlass sparse impl
     timers.append(
         bench_fn(label, sub_label, "cutlass_i8_i8_bf16_scaled_sparse_mm",
-                 ops.cutlass_scaled_sparse_mm, a, b_compressed, e, scale_a,
-                 scale_b, torch.bfloat16))
+                 ops.cutlass_scaled_sparse_mm, a, b_compressed, e, scale_a, scale_b,
+                 torch.bfloat16))
 
     # cutlass sparse with bias
     timers.append(
         bench_fn(label, sub_label, "cutlass_i8_i8_bf16_scaled_sparse_mm_bias",
-                 ops.cutlass_scaled_sparse_mm, a, b_compressed, e, scale_a,
-                 scale_b, torch.bfloat16, bias))
+                 ops.cutlass_scaled_sparse_mm, a, b_compressed, e, scale_a, scale_b,
+                 torch.bfloat16, bias))
 
     return timers
 
@@ -103,8 +99,7 @@ def bench_int8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
 def bench_fp8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
               sub_label: str) -> Iterable[TMeasurement]:
     assert dtype == torch.float8_e4m3fn
-    b_compressed, e, a, b = make_rand_sparse_tensors(torch.float8_e4m3fn, m, n,
-                                                     k)
+    b_compressed, e, a, b = make_rand_sparse_tensors(torch.float8_e4m3fn, m, n, k)
     scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
     scale_b = torch.tensor(1.0, device="cuda", dtype=torch.float32)
     bias = torch.zeros((n, ), device="cuda", dtype=torch.bfloat16)
@@ -124,8 +119,8 @@ def bench_fp8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
 
     # pytorch impl w. bf16
     timers.append(
-        bench_fn(label, sub_label, "pytorch_bf16_bf16_bf16_matmul-no-scales",
-                 torch.mm, a.to(dtype=torch.bfloat16, device="cuda"),
+        bench_fn(label, sub_label, "pytorch_bf16_bf16_bf16_matmul-no-scales", torch.mm,
+                 a.to(dtype=torch.bfloat16, device="cuda"),
                  b.to(dtype=torch.bfloat16, device="cuda")))
 
     # pytorch impl: bf16 output, without fp8 fast accum
@@ -181,34 +176,31 @@ def bench_fp8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
     # cutlass impl: bf16 output
     timers.append(
         bench_fn(label, sub_label, "cutlass_fp8_fp8_bf16_scaled_mm",
-                 ops.cutlass_scaled_mm, a, b, scale_a, scale_b,
-                 torch.bfloat16))
+                 ops.cutlass_scaled_mm, a, b, scale_a, scale_b, torch.bfloat16))
 
     # cutlass impl: bf16 output
     timers.append(
         bench_fn(label, sub_label, "cutlass_fp8_fp8_bf16_scaled_sparse_mm",
-                 ops.cutlass_scaled_sparse_mm, a, b_compressed, e, scale_a,
-                 scale_b, torch.bfloat16))
+                 ops.cutlass_scaled_sparse_mm, a, b_compressed, e, scale_a, scale_b,
+                 torch.bfloat16))
 
     # cutlass impl: fp16 output
     timers.append(
         bench_fn(label, sub_label, "cutlass_fp8_fp8_fp16_scaled_sparse_mm",
-                 ops.cutlass_scaled_sparse_mm, a, b_compressed, e, scale_a,
-                 scale_b, torch.float16))
+                 ops.cutlass_scaled_sparse_mm, a, b_compressed, e, scale_a, scale_b,
+                 torch.float16))
 
     # cutlass impl: bf16 output, with bias
     timers.append(
-        bench_fn(label, sub_label,
-                 "cutlass_fp8_fp8_bf16_scaled_sparse_mm_bias",
-                 ops.cutlass_scaled_sparse_mm, a, b_compressed, e, scale_a,
-                 scale_b, torch.bfloat16, bias))
+        bench_fn(label, sub_label, "cutlass_fp8_fp8_bf16_scaled_sparse_mm_bias",
+                 ops.cutlass_scaled_sparse_mm, a, b_compressed, e, scale_a, scale_b,
+                 torch.bfloat16, bias))
 
     # cutlass impl: fp16 output, with bias
     timers.append(
-        bench_fn(label, sub_label,
-                 "cutlass_fp8_fp8_fp16_scaled_sparse_mm_bias",
-                 ops.cutlass_scaled_sparse_mm, a, b_compressed, e, scale_a,
-                 scale_b, torch.float16, bias.to(dtype=torch.float16)))
+        bench_fn(label, sub_label, "cutlass_fp8_fp8_fp16_scaled_sparse_mm_bias",
+                 ops.cutlass_scaled_sparse_mm, a, b_compressed, e, scale_a, scale_b,
+                 torch.float16, bias.to(dtype=torch.float16)))
 
     return timers
 
@@ -228,12 +220,11 @@ def print_timers(timers: Iterable[TMeasurement]):
     compare.print()
 
 
-def run(dtype: torch.dtype,
-        MKNs: Iterable[tuple[int, int, int]]) -> Iterable[TMeasurement]:
+def run(dtype: torch.dtype, MKNs: Iterable[tuple[int, int,
+                                                 int]]) -> Iterable[TMeasurement]:
     results = []
     for m, k, n in MKNs:
-        timers = bench(dtype, m, k, n, f"scaled-{dtype}-gemm",
-                       f"MKN=({m}x{k}x{n})")
+        timers = bench(dtype, m, k, n, f"scaled-{dtype}-gemm", f"MKN=({m}x{k}x{n})")
         print_timers(timers)
         results.extend(timers)
 
@@ -258,8 +249,7 @@ def make_output(data: Iterable[TMeasurement],
 
 
 def run_square_bench(args):
-    dim_sizes = list(
-        range(args.dim_start, args.dim_end + 1, args.dim_increment))
+    dim_sizes = list(range(args.dim_start, args.dim_end + 1, args.dim_increment))
     MKNs = list(zip(dim_sizes, dim_sizes, dim_sizes))
     data = run(args.dtype, MKNs)
 

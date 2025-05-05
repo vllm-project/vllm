@@ -159,19 +159,16 @@ if __name__ == "__main__":
     # remapping the key, for visualization purpose
     if not latency_results.empty:
         latency_results = latency_results[list(
-            latency_column_mapping.keys())].rename(
-                columns=latency_column_mapping)
+            latency_column_mapping.keys())].rename(columns=latency_column_mapping)
     if not serving_results.empty:
         serving_results = serving_results[list(
-            serving_column_mapping.keys())].rename(
-                columns=serving_column_mapping)
+            serving_column_mapping.keys())].rename(columns=serving_column_mapping)
     if not throughput_results.empty:
         throughput_results = throughput_results[list(
             throughput_results_column_mapping.keys())].rename(
                 columns=throughput_results_column_mapping)
 
-    processed_results_json = results_to_json(latency_results,
-                                             throughput_results,
+    processed_results_json = results_to_json(latency_results, throughput_results,
                                              serving_results)
 
     for df in [latency_results, serving_results, throughput_results]:

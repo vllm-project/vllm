@@ -38,8 +38,7 @@ speech_question = os.path.join(model_path, "examples",
 models = [model_path]
 
 
-def vllm_to_hf_output(vllm_output: tuple[list[int], str,
-                                         Optional[SampleLogprobs]],
+def vllm_to_hf_output(vllm_output: tuple[list[int], str, Optional[SampleLogprobs]],
                       model: str):
     """Sanitize vllm output to be comparable with hf output."""
     _, output_str, out_logprobs = vllm_output
@@ -70,8 +69,7 @@ if current_platform.is_rocm():
 def run_test(
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
-    inputs: Sequence[tuple[list[str], PromptImageInput,
-                           Optional[PromptAudioInput]]],
+    inputs: Sequence[tuple[list[str], PromptImageInput, Optional[PromptAudioInput]]],
     model: str,
     *,
     max_model_len: int,
@@ -122,8 +120,7 @@ def run_test(
         ]
 
     hf_model_kwargs = {"_attn_implementation": "sdpa"}
-    with hf_runner(model, dtype=dtype,
-                   model_kwargs=hf_model_kwargs) as hf_model:
+    with hf_runner(model, dtype=dtype, model_kwargs=hf_model_kwargs) as hf_model:
 
         hf_processor = hf_model.processor
         eos_token_id = hf_processor.tokenizer.eos_token_id
@@ -156,8 +153,7 @@ def run_test(
             for prompts, images, audios in inputs
         ]
 
-    for hf_outputs, vllm_outputs in zip(hf_outputs_per_case,
-                                        vllm_outputs_per_case):
+    for hf_outputs, vllm_outputs in zip(hf_outputs_per_case, vllm_outputs_per_case):
         check_logprobs_close(
             outputs_0_lst=hf_outputs,
             outputs_1_lst=vllm_outputs,
@@ -184,9 +180,8 @@ def run_test(
 @pytest.mark.parametrize("max_model_len", [12800])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
-def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
-                dtype: str, max_model_len: int, max_tokens: int,
-                num_logprobs: int) -> None:
+def test_models(hf_runner, vllm_runner, image_assets, model, size_factors, dtype: str,
+                max_model_len: int, max_tokens: int, num_logprobs: int) -> None:
     images = [asset.pil_image for asset in image_assets]
 
     inputs_per_image = [(
@@ -228,9 +223,9 @@ def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
 @pytest.mark.parametrize("max_model_len", [25600])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
-def test_multi_images_models(hf_runner, vllm_runner, image_assets, model,
-                             size_factors, dtype: str, max_model_len: int,
-                             max_tokens: int, num_logprobs: int) -> None:
+def test_multi_images_models(hf_runner, vllm_runner, image_assets, model, size_factors,
+                             dtype: str, max_model_len: int, max_tokens: int,
+                             num_logprobs: int) -> None:
     images = [asset.pil_image for asset in image_assets]
 
     inputs_per_case = [

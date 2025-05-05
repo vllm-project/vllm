@@ -80,21 +80,15 @@ def _test_processing_correctness(
         "image":
         partial(random_image, rng, min_wh=128, max_wh=256),
         "video":
-        partial(random_video,
-                rng,
-                min_frames=2,
-                max_frames=8,
-                min_wh=128,
-                max_wh=256),
+        partial(random_video, rng, min_frames=2, max_frames=8, min_wh=128, max_wh=256),
         "audio":
         partial(random_audio, rng, min_len=512, max_len=1024, sr=16000),
     }
 
     for batch_idx in range(num_batches):
         mm_data = {
-            k:
-            [(input_to_hit[k] if rng.rand() < hit_rate else input_factory[k]())
-             for _ in range(rng.randint(limit + 1))]
+            k: [(input_to_hit[k] if rng.rand() < hit_rate else input_factory[k]())
+                for _ in range(rng.randint(limit + 1))]
             for k, limit in limit_mm_per_prompt.items()
         }
 

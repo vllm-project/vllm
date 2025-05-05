@@ -180,8 +180,8 @@ class LlavaNextVideoMultiModalProcessor(
         video_token_id = hf_config.video_token_index
 
         def get_replacement(item_idx: int):
-            videos = mm_items.get_items(
-                "video", (VideoEmbeddingItems, VideoProcessorItems))
+            videos = mm_items.get_items("video",
+                                        (VideoEmbeddingItems, VideoProcessorItems))
 
             if isinstance(videos, VideoEmbeddingItems):
                 num_video_tokens = videos.get_feature_size(item_idx)
@@ -227,8 +227,7 @@ class LlavaNextVideoPooler(nn.Module):
 
     def forward(self, image_features: torch.Tensor):
         ori_width = int(
-            math.sqrt(image_features.shape[1] * self.image_size //
-                      self.image_size))
+            math.sqrt(image_features.shape[1] * self.image_size // self.image_size))
         ori_height = int(ori_width * self.image_size // self.image_size)
 
         batch_size, _, dim = image_features.shape
@@ -266,8 +265,7 @@ class LlavaNextMultiModalProjector(nn.Module):
     info=LlavaNextVideoProcessingInfo,
     dummy_inputs=LlavaNextVideoDummyInputsBuilder,
 )
-class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                             SupportsPP):
+class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -279,11 +277,11 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.multimodal_config = multimodal_config
 
         # Initialize the vision tower only up to the required feature layer
-        self.vision_tower = init_vision_tower_for_llava(
-            config,
-            quant_config,
-            require_post_norm=False,
-            prefix=maybe_prefix(prefix, "vision_tower"))
+        self.vision_tower = init_vision_tower_for_llava(config,
+                                                        quant_config,
+                                                        require_post_norm=False,
+                                                        prefix=maybe_prefix(
+                                                            prefix, "vision_tower"))
         self.vision_resampler = LlavaNextVideoPooler(config)
         self.multi_modal_projector = LlavaNextMultiModalProjector(
             vision_hidden_size=config.vision_config.hidden_size,
@@ -378,8 +376,7 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
             # TODO: support multiple videos per input
             b, num_videos, num_frames, c, h, w = video_pixels.shape
             assert (num_videos == 1)
-            stacked_pixels = video_pixels.view(b * num_videos * num_frames, c,
-                                               h, w)
+            stacked_pixels = video_pixels.view(b * num_videos * num_frames, c, h, w)
             stacked_embeddings = self._video_pixels_to_features(
                 self.vision_tower, stacked_pixels)
             embeds = stacked_embeddings.view(b, num_frames,
@@ -392,16 +389,15 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
                 self.vision_tower, stacked_pixels)
             embeds = torch.split(stacked_embeddings, frames_per_videos, dim=0)
         else:
-            raise ValueError(
-                f"Unsupported type of video input {type(video_pixels)}")
+            raise ValueError(f"Unsupported type of video input {type(video_pixels)}")
 
         return [e.flatten(0, 1) for e in embeds]
 
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> Optional[MultiModalEmbeddings]:
         video_input = self._parse_and_validate_video_input(**kwargs)
         if video_input is None:
             return None
@@ -415,9 +411,9 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                self.config.video_token_index)
+            inputs_embeds = merge_multimodal_embeddings(input_ids, inputs_embeds,
+                                                        multimodal_embeddings,
+                                                        self.config.video_token_index)
         return inputs_embeds
 
     def forward(
@@ -441,8 +437,7 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
         # condition is for v0 compatibility.
         elif inputs_embeds is None:
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
+            inputs_embeds = self.get_input_embeddings(input_ids, vision_embeddings)
             input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
@@ -457,11 +452,9 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states, sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(
             self,
             # This model doesn't support images for now

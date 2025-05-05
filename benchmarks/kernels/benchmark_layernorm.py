@@ -57,8 +57,7 @@ def main(num_tokens: int,
 
 
 if __name__ == '__main__':
-    parser = FlexibleArgumentParser(
-        description="Benchmark the layernorm kernel.")
+    parser = FlexibleArgumentParser(description="Benchmark the layernorm kernel.")
     parser.add_argument("--num-tokens", type=int, default=4096)
     parser.add_argument("--hidden-size", type=int, default=8192)
     parser.add_argument("--add-residual", action="store_true")

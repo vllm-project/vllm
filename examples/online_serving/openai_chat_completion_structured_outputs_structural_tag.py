@@ -58,26 +58,25 @@ and San Francisco?
 """
     }]
 
-    response = client.chat.completions.create(
-        model="meta-llama/Llama-3.1-8B-Instruct",
-        messages=messages,
-        response_format={
-            "type":
-            "structural_tag",
-            "structures": [{
-                "begin": "<function=get_weather>",
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "city": {
-                            "type": "string"
-                        }
-                    }
-                },
-                "end": "</function>"
-            }],
-            "triggers": ["<function="]
-        })
+    response = client.chat.completions.create(model="meta-llama/Llama-3.1-8B-Instruct",
+                                              messages=messages,
+                                              response_format={
+                                                  "type":
+                                                  "structural_tag",
+                                                  "structures": [{
+                                                      "begin": "<function=get_weather>",
+                                                      "schema": {
+                                                          "type": "object",
+                                                          "properties": {
+                                                              "city": {
+                                                                  "type": "string"
+                                                              }
+                                                          }
+                                                      },
+                                                      "end": "</function>"
+                                                  }],
+                                                  "triggers": ["<function="]
+                                              })
     print(response)
 
 

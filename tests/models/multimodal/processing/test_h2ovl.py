@@ -163,10 +163,7 @@ def test_processor_override(
 
     _run_check(
         processor,
-        [
-            rescale_image_size(image_assets[0].pil_image, f)
-            for f in size_factors
-        ],
+        [rescale_image_size(image_assets[0].pil_image, f) for f in size_factors],
         min_num,
         max_num,
         hf_processor_mm_kwargs,

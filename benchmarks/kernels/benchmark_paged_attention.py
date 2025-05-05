@@ -48,9 +48,7 @@ def main(
     assert num_query_heads % num_kv_heads == 0
     alibi_slopes = None
     if use_alibi:
-        alibi_slopes = torch.randn(num_query_heads,
-                                   dtype=torch.float,
-                                   device=device)
+        alibi_slopes = torch.randn(num_query_heads, dtype=torch.float, device=device)
 
     seq_lens = [seq_len for _ in range(num_seqs)]
     max_seq_len = max(seq_lens)
@@ -61,14 +59,11 @@ def main(
     block_tables_lst: list[list[int]] = []
     for _ in range(num_seqs):
         block_table = [
-            random.randint(0, NUM_BLOCKS - 1)
-            for _ in range(max_num_blocks_per_seq)
+            random.randint(0, NUM_BLOCKS - 1) for _ in range(max_num_blocks_per_seq)
         ]
         block_tables_lst.append(block_table)
 
-    block_tables = torch.tensor(block_tables_lst,
-                                dtype=torch.int,
-                                device=device)
+    block_tables = torch.tensor(block_tables_lst, dtype=torch.int, device=device)
 
     # Create the KV cache.
     key_caches, value_caches = create_kv_caches_with_random(NUM_BLOCKS,
@@ -107,9 +102,7 @@ def main(
         start_time = time.perf_counter()
 
         # Using default kv_scale
-        k_scale = v_scale = torch.tensor(1.0,
-                                         dtype=torch.float32,
-                                         device=device)
+        k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
 
         for _ in range(num_iters):
             if version == "v1":
@@ -196,12 +189,8 @@ if __name__ == '__main__':
     logger.warning("This script benchmarks the paged attention kernel. "
                    "By default this is no longer used in vLLM inference.")
 
-    parser = FlexibleArgumentParser(
-        description="Benchmark the paged attention kernel.")
-    parser.add_argument("--version",
-                        type=str,
-                        choices=["v1", "v2"],
-                        default="v2")
+    parser = FlexibleArgumentParser(description="Benchmark the paged attention kernel.")
+    parser.add_argument("--version", type=str, choices=["v1", "v2"], default="v2")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--seq-len", type=int, default=4096)
     parser.add_argument("--num-query-heads", type=int, default=64)

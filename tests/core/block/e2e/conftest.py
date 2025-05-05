@@ -18,8 +18,8 @@ def baseline_llm_generator(common_llm_kwargs, per_test_common_llm_kwargs,
 
 
 @pytest.fixture
-def test_llm_generator(common_llm_kwargs, per_test_common_llm_kwargs,
-                       test_llm_kwargs, seed):
+def test_llm_generator(common_llm_kwargs, per_test_common_llm_kwargs, test_llm_kwargs,
+                       seed):
     return create_llm_generator(common_llm_kwargs, per_test_common_llm_kwargs,
                                 test_llm_kwargs, seed)
 
@@ -49,8 +49,7 @@ def create_llm_generator(common_llm_kwargs, per_test_common_llm_kwargs,
 def get_text_from_llm_generator(llm_generator: Iterable[LLM],
                                 prompts,
                                 sampling_params,
-                                llm_cb: Optional[Callable[[LLM],
-                                                          None]] = None):
+                                llm_cb: Optional[Callable[[LLM], None]] = None):
     for llm in llm_generator:
         if llm_cb:
             llm_cb(llm)

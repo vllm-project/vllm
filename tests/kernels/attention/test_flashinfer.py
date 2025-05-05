@@ -107,8 +107,7 @@ def test_flashinfer_decode_with_paged_kv(
 
     max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
     block_tables = torch.randint(0,
-                                 NUM_BLOCKS,
-                                 (num_seqs, max_num_blocks_per_seq),
+                                 NUM_BLOCKS, (num_seqs, max_num_blocks_per_seq),
                                  dtype=torch.int32)
 
     kv_indptr = [0]
@@ -169,9 +168,8 @@ def test_flashinfer_decode_with_paged_kv(
 @pytest.mark.parametrize("soft_cap", [None, 30.0, 50.0])
 @torch.inference_mode
 def test_flashinfer_prefill_with_paged_kv(seq_lens: list[tuple[int, int]],
-                                          num_heads: tuple[int, int],
-                                          head_size: int, dtype: torch.dtype,
-                                          block_size: int,
+                                          num_heads: tuple[int, int], head_size: int,
+                                          dtype: torch.dtype, block_size: int,
                                           soft_cap: Optional[float]) -> None:
     torch.set_default_device("cuda")
     current_platform.seed_everything(0)
@@ -184,10 +182,7 @@ def test_flashinfer_prefill_with_paged_kv(seq_lens: list[tuple[int, int]],
     max_kv_len = max(kv_lens)
     scale = head_size**-0.5
 
-    query = torch.randn(sum(query_lens),
-                        num_query_heads,
-                        head_size,
-                        dtype=dtype)
+    query = torch.randn(sum(query_lens), num_query_heads, head_size, dtype=dtype)
     key_value_cache = torch.randn(NUM_BLOCKS,
                                   2,
                                   block_size,
@@ -204,8 +199,7 @@ def test_flashinfer_prefill_with_paged_kv(seq_lens: list[tuple[int, int]],
 
     max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
     block_tables = torch.randint(0,
-                                 NUM_BLOCKS,
-                                 (num_seqs, max_num_blocks_per_seq),
+                                 NUM_BLOCKS, (num_seqs, max_num_blocks_per_seq),
                                  dtype=torch.int32)
 
     qo_indptr = [0]
@@ -230,8 +224,7 @@ def test_flashinfer_prefill_with_paged_kv(seq_lens: list[tuple[int, int]],
     kv_last_page_lens = torch.tensor(kv_last_page_lens, dtype=torch.int32)
 
     workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.int8)
-    wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
-        workspace_buffer, "NHD")
+    wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(workspace_buffer, "NHD")
     wrapper.plan(
         qo_indptr,
         kv_indptr,
@@ -269,10 +262,11 @@ def test_flashinfer_prefill_with_paged_kv(seq_lens: list[tuple[int, int]],
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("soft_cap", [None, 30.0, 50.0])
-def test_flashinfer_prefill_with_paged_fp8_kv(
-        seq_lens: list[tuple[int, int]], num_heads: tuple[int, int],
-        head_size: int, dtype: torch.dtype, block_size: int,
-        soft_cap: Optional[float]) -> None:
+def test_flashinfer_prefill_with_paged_fp8_kv(seq_lens: list[tuple[int, int]],
+                                              num_heads: tuple[int,
+                                                               int], head_size: int,
+                                              dtype: torch.dtype, block_size: int,
+                                              soft_cap: Optional[float]) -> None:
     pytest.skip("TODO: fix the accuracy issue")
     torch.set_default_device("cuda")
     current_platform.seed_everything(0)
@@ -287,10 +281,7 @@ def test_flashinfer_prefill_with_paged_fp8_kv(
 
     kv_cache_dtype = torch.float8_e4m3fn
 
-    query = torch.randn(sum(query_lens),
-                        num_query_heads,
-                        head_size,
-                        dtype=dtype)
+    query = torch.randn(sum(query_lens), num_query_heads, head_size, dtype=dtype)
     NUM_BLOCKS_FP8 = 2048
     key_value_cache = torch.randn(NUM_BLOCKS_FP8,
                                   2,
@@ -311,8 +302,7 @@ def test_flashinfer_prefill_with_paged_fp8_kv(
     assert (kv_cache_fp8.shape == key_value_cache.shape)
     max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
     block_tables = torch.randint(0,
-                                 NUM_BLOCKS_FP8,
-                                 (num_seqs, max_num_blocks_per_seq),
+                                 NUM_BLOCKS_FP8, (num_seqs, max_num_blocks_per_seq),
                                  dtype=torch.int32)
 
     qo_indptr = [0]
@@ -337,8 +327,7 @@ def test_flashinfer_prefill_with_paged_fp8_kv(
     kv_last_page_lens = torch.tensor(kv_last_page_lens, dtype=torch.int32)
 
     workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.int8)
-    wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
-        workspace_buffer, "NHD")
+    wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(workspace_buffer, "NHD")
     wrapper.plan(
         qo_indptr,
         kv_indptr,
@@ -420,8 +409,7 @@ def test_flashinfer_decode_with_paged_fp8_kv(
 
     max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
     block_tables = torch.randint(0,
-                                 NUM_BLOCKS_FP8,
-                                 (num_seqs, max_num_blocks_per_seq),
+                                 NUM_BLOCKS_FP8, (num_seqs, max_num_blocks_per_seq),
                                  dtype=torch.int32)
 
     kv_indptr = [0]

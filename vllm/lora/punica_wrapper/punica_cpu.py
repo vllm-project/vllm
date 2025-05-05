@@ -22,8 +22,7 @@ class PunicaWrapperCPU(PunicaWrapperBase):
 
     def __init__(self, max_num_batched_tokens: int, max_batches: int,
                  device: Union[torch.device, str], **kwargs):
-        PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches,
-                                   device)
+        PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches, device)
 
     def _shrink_prefill(
         self,
@@ -129,12 +128,11 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         """
 
         expand_slice_fun: Callable = (self._expand_slice_prefill
-                                      if self.is_prefill else
-                                      self._expand_slice_decode)
+                                      if self.is_prefill else self._expand_slice_decode)
         expand_slice_fun(y, x, w_t_all, y_offset, y_slice_size, add_inputs)
 
-    def _apply_shrink(self, y: torch.Tensor, x: torch.Tensor,
-                      w_t_all: torch.Tensor, scale: float):
+    def _apply_shrink(self, y: torch.Tensor, x: torch.Tensor, w_t_all: torch.Tensor,
+                      scale: float):
         """
         Perform the ` y+=x@w_t_all` computation, which is suitable for the
         GEMM of lora'a.
@@ -151,8 +149,8 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         y = y.view_as(y_org)
 
     def add_shrink(self, y: Union[Tuple[torch.Tensor, ...], torch.Tensor],
-                   x: torch.Tensor, lora_a_stacked: Tuple[torch.Tensor, ...],
-                   scale: float, **kwargs):
+                   x: torch.Tensor, lora_a_stacked: Tuple[torch.Tensor,
+                                                          ...], scale: float, **kwargs):
         """
         Performs GEMM  for multiple slices of lora_a.
         When `is_prefill is` true, it indicates that it is currently the
@@ -174,8 +172,7 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         x = x.view(-1, x.shape[-1])
         # TODO fuse these kernels
         for slice_idx in range(len(lora_a_stacked)):
-            self._apply_shrink(y[slice_idx], x, lora_a_stacked[slice_idx],
-                               scale)
+            self._apply_shrink(y[slice_idx], x, lora_a_stacked[slice_idx], scale)
 
     def add_expand(self,
                    y: torch.Tensor,
@@ -292,8 +289,7 @@ class PunicaWrapperCPU(PunicaWrapperBase):
             # We set the buffer to be float32 by default, consistent with the
             # triton op
             buffer = tuple(
-                torch.zeros(
-                    (x.size(0), r), dtype=torch.float32, device=x.device)
+                torch.zeros((x.size(0), r), dtype=torch.float32, device=x.device)
                 for _ in range(len(output_slices)))
         self.add_shrink(buffer, x, lora_a_stacked, scale, **kwargs)
         self.add_expand(y,
@@ -335,14 +331,8 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         if buffer is None:
             # We set the buffer to be float32 by default, consistent with the
             # triton op
-            buffer = torch.zeros((x.size(0), r),
-                                 dtype=torch.float32,
-                                 device=x.device)
+            buffer = torch.zeros((x.size(0), r), dtype=torch.float32, device=x.device)
         # LogitsProcessorWithLoRA always using bgmv.
         bgmv_shrink(x, lora_a_stacked, buffer, self.sampler_indices, scale)
-        bgmv_expand(buffer,
-                    lora_b_stacked,
-                    y,
-                    self.sampler_indices,
-                    add_inputs=True)
+        bgmv_expand(buffer, lora_b_stacked, y, self.sampler_indices, add_inputs=True)
         y = y.view_as(y_org)

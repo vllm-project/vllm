@@ -142,8 +142,7 @@ class MiniCPMMoE(nn.Module):
                                         inplace=True)
 
         if self.tp_size > 1:
-            final_hidden_states = tensor_model_parallel_all_reduce(
-                final_hidden_states)
+            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
 
         return final_hidden_states.view(num_tokens, hidden_size)
 
@@ -159,10 +158,10 @@ class MiniCPMMLP(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
-        self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size, [intermediate_size] * 2,
-            bias=False,
-            quant_config=quant_config)
+        self.gate_up_proj = MergedColumnParallelLinear(hidden_size,
+                                                       [intermediate_size] * 2,
+                                                       bias=False,
+                                                       quant_config=quant_config)
         self.down_proj = RowParallelLinear(intermediate_size,
                                            hidden_size,
                                            bias=False,
@@ -242,8 +241,7 @@ class MiniCPMAttention(nn.Module):
             rope_scaling=rope_scaling,
         )
         # set rope as fp32 instead of bf16
-        self.rotary_emb.cos_sin_cache = self.rotary_emb._compute_cos_sin_cache(
-        )
+        self.rotary_emb.cos_sin_cache = self.rotary_emb._compute_cos_sin_cache()
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.scaling,
@@ -284,8 +282,7 @@ class MiniCPMDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         self.rope_theta = getattr(config, "rope_theta", 10000)
         self.rope_scaling = getattr(config, "rope_scaling", None)
-        self.max_position_embeddings = getattr(config,
-                                               "max_position_embeddings", 8192)
+        self.max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.prefix = prefix
         self._init_attn_block()
         self._init_ffn_block()
@@ -318,11 +315,10 @@ class MiniCPMDecoderLayer(nn.Module):
                 quant_config=self.quant_config,
             )
         else:
-            self.mlp = MiniCPMMoE(
-                num_experts=self.config.num_experts,
-                top_k=self.config.num_experts_per_tok,
-                hidden_size=self.config.hidden_size,
-                intermediate_size=self.config.intermediate_size)
+            self.mlp = MiniCPMMoE(num_experts=self.config.num_experts,
+                                  top_k=self.config.num_experts_per_tok,
+                                  hidden_size=self.config.hidden_size,
+                                  intermediate_size=self.config.intermediate_size)
 
     def forward(
         self,
@@ -376,9 +372,8 @@ class MiniCPMModel(nn.Module):
         self.num_experts = getattr(self.config, "num_experts", 0)
         self._init_layers(prefix, config, cache_config, quant_config)
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], self.config.hidden_size))
+        self.make_empty_intermediate_tensors = (make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], self.config.hidden_size))
 
     def _init_layers(
         self,
@@ -428,8 +423,7 @@ class MiniCPMModel(nn.Module):
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -450,8 +444,7 @@ class MiniCPMModel(nn.Module):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
-            if ("rotary_emb.cos_cached" in name
-                    or "rotary_emb.sin_cached" in name):
+            if ("rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
@@ -550,8 +543,7 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         self.scale_width = self.config.hidden_size / self.config.dim_model_base
 
-        self.logits_processor = LogitsProcessor(unpadded_vocab_size,
-                                                config.vocab_size)
+        self.logits_processor = LogitsProcessor(unpadded_vocab_size, config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
@@ -578,15 +570,12 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
         hidden_states = hidden_states / self.scale_width
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(
             self,
-            skip_prefixes=(["lm_head."]
-                           if self.config.tie_word_embeddings else None),
+            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)

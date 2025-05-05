@@ -84,8 +84,7 @@ def multihead_attention(
     """
     # Unified format legal check
     assert q.dim() == k.dim() == v.dim() == 3, "q, k, v must have 3 dims"
-    assert q_cu_seqlens[-1] == q.shape[
-        0], "q_cu_seqlens must sum to q.shape[0]"
+    assert q_cu_seqlens[-1] == q.shape[0], "q_cu_seqlens must sum to q.shape[0]"
     assert (k_cu_seqlens[-1] == k.shape[0] ==
             v.shape[0]), "k_cu_seqlens must sum to k.shape[0]"
     assert q.dtype in [
@@ -136,11 +135,7 @@ def sdpa_attention(
     q = q.transpose(0, 1)
     k = k.transpose(0, 1)
     v = v.transpose(0, 1)
-    attn_output = F.scaled_dot_product_attention(q,
-                                                 k,
-                                                 v,
-                                                 attention_mask,
-                                                 dropout_p=0.0)
+    attn_output = F.scaled_dot_product_attention(q, k, v, attention_mask, dropout_p=0.0)
     attn_output = attn_output.transpose(0, 1)
     attn_output = attn_output.reshape(seq_length, -1)
     return attn_output
@@ -176,10 +171,8 @@ def apply_rope(xq: torch.Tensor, xk: torch.Tensor,
     # ..., num_heads, head_dim/2
     xq_ = torch.view_as_complex(xq.float().view(*xq.shape[:-1], -1, 2))
     xk_ = torch.view_as_complex(xk.float().view(*xq.shape[:-1], -1, 2))
-    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(
-        -2)  # ..., num_heads, head_dim
-    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(
-        -2)  # ..., num_heads, head_dim
+    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(-2)  # ..., num_heads, head_dim
+    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(-2)  # ..., num_heads, head_dim
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
@@ -228,8 +221,7 @@ class MoonVisionPatchEmbed(nn.Module):
     ):
         super().__init__()
         assert isinstance(
-            patch_size,
-            (int, Sequence)), f"Invalid patch_size type: {type(patch_size)}"
+            patch_size, (int, Sequence)), f"Invalid patch_size type: {type(patch_size)}"
         if isinstance(patch_size, int):
             patch_size = (patch_size, patch_size)
         assert (len(patch_size) == 2
@@ -313,8 +305,7 @@ class Rope2DPosEmb(nn.Module):
         x_pos = flat_pos % self.max_width
         y_pos = flat_pos // self.max_width
         dim_range = (torch.arange(0, self.dim,
-                                  4)[:(self.dim // 4)].float().to(self.device)
-                     )  # C/4
+                                  4)[:(self.dim // 4)].float().to(self.device))  # C/4
         freqs = 1.0 / (self.theta_base**(dim_range / self.dim))
         x_freqs = torch.outer(x_pos, freqs).float()  # N, C/4
         y_freqs = torch.outer(y_pos, freqs).float()  # N, C/4
@@ -322,8 +313,7 @@ class Rope2DPosEmb(nn.Module):
         y_cis = torch.polar(torch.ones_like(y_freqs), y_freqs)  # N, C/4
         # N, C/4, 2
         freqs_cis = torch.cat(
-            [x_cis.unsqueeze(dim=-1),
-             y_cis.unsqueeze(dim=-1)], dim=-1)
+            [x_cis.unsqueeze(dim=-1), y_cis.unsqueeze(dim=-1)], dim=-1)
         # max_height, max_width, C/2
         freqs_cis = freqs_cis.reshape(self.max_height, self.max_width, -1)
         return freqs_cis
@@ -361,16 +351,18 @@ class Rope2DPosEmb(nn.Module):
         Return:
             freqs_cis: tensor of shape (..., dim//2)
         """
-        assert (pos_idx.shape[:-1] == pos_idx_mask.shape
-                and pos_idx.shape[-1] == 2 and pos_idx.ndim
-                == pos_idx_mask.ndim + 1), (pos_idx.shape, pos_idx_mask.shape)
+        assert (pos_idx.shape[:-1] == pos_idx_mask.shape and pos_idx.shape[-1] == 2
+                and pos_idx.ndim == pos_idx_mask.ndim + 1), (pos_idx.shape,
+                                                             pos_idx_mask.shape)
         assert pos_idx_mask.dtype == torch.bool, pos_idx_mask.dtype
 
         shp = pos_idx_mask.shape + (self.dim // 2, )  # ..., head_dim/2
         freqs_cis = torch.ones(shp, dtype=torch.complex64,
                                device=self.device)  # ..., head_dim/2
-        freqs_cis[pos_idx_mask] = self.precomputed_freqs_cis[pos_idx[
-            ..., 0][pos_idx_mask], pos_idx[..., 1][pos_idx_mask]]
+        freqs_cis[pos_idx_mask] = self.precomputed_freqs_cis[pos_idx[...,
+                                                                     0][pos_idx_mask],
+                                                             pos_idx[...,
+                                                                     1][pos_idx_mask]]
         return freqs_cis
 
 
@@ -495,16 +487,15 @@ class MoonVitEncoder(nn.Module):
     ) -> None:
         super().__init__()
 
-        self.rope_2d = Rope2DPosEmb(
-            block_cfg["hidden_dim"] // block_cfg["num_heads"], 512, 512)
+        self.rope_2d = Rope2DPosEmb(block_cfg["hidden_dim"] // block_cfg["num_heads"],
+                                    512, 512)
         self.blocks = nn.ModuleList(
             [MoonVitEncoderLayer(**block_cfg) for _ in range(num_layers)])
         self.final_layernorm = nn.LayerNorm(hidden_dim)
 
     def forward(self, hidden_states: torch.Tensor,
                 grid_hw: torch.Tensor) -> torch.Tensor:
-        rope_freqs_cis = self.rope_2d.get_freqs_cis_by_seqlens(
-            grid_hws=grid_hw)
+        rope_freqs_cis = self.rope_2d.get_freqs_cis_by_seqlens(grid_hws=grid_hw)
 
         lengths = torch.cat((
             torch.zeros(1, device=hidden_states.device, dtype=grid_hw.dtype),
@@ -538,8 +529,8 @@ def patch_merger(
         # Reshape along self.merge_kernel_size and concat to the last dimension
         kernel_height, kernel_width = merge_kernel_size
         new_height, new_width = height // kernel_height, width // kernel_width
-        reshaped_seq = seq.view(new_height, kernel_height, new_width,
-                                kernel_width, d_model)
+        reshaped_seq = seq.view(new_height, kernel_height, new_width, kernel_width,
+                                d_model)
         reshaped_seq = reshaped_seq.permute(0, 2, 1, 3, 4).contiguous()
         padded_seq = reshaped_seq.view(new_height * new_width,
                                        kernel_height * kernel_width, -1)
@@ -560,13 +551,10 @@ class MoonVitVLProjector(nn.Module):
         out_dim: int = 4096,
     ):
         super().__init__()
-        self.hidden_size = in_channels * merge_kernel_size[
-            0] * merge_kernel_size[1]
+        self.hidden_size = in_channels * merge_kernel_size[0] * merge_kernel_size[1]
 
         self.pre_norm = nn.nn.LayerNorm(in_channels, eps=ln_eps)
-        self.linear_1 = nn.Linear(self.hidden_size,
-                                  self.hidden_size,
-                                  bias=True)
+        self.linear_1 = nn.Linear(self.hidden_size, self.hidden_size, bias=True)
         self.act = ACT2FN[hidden_act]
         self.linear_2 = nn.Linear(self.hidden_size, out_dim, bias=True)
 

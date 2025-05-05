@@ -102,8 +102,7 @@ direct_register_custom_op(
 
 def input_to_float8(
         x: torch.Tensor,
-        dtype: Optional[torch.dtype] = None
-) -> Tuple[torch.Tensor, torch.Tensor]:
+        dtype: Optional[torch.dtype] = None) -> Tuple[torch.Tensor, torch.Tensor]:
     """This function quantizes input values to float8 values "
     "with tensor-wise quantization."""
     dtype = current_platform.fp8_dtype() if dtype is None else dtype
@@ -265,8 +264,7 @@ def per_token_group_quant_fp8(
     N = group_size
     if column_major_scales:
         shape = (x.shape[-1] // group_size, ) + x.shape[:-1]
-        x_s = torch.empty(shape, device=x.device,
-                          dtype=torch.float32).permute(-1, -2)
+        x_s = torch.empty(shape, device=x.device, dtype=torch.float32).permute(-1, -2)
     else:
         shape = x.shape[:-1] + (x.shape[-1] // group_size, )
         x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
@@ -369,12 +367,8 @@ def _w8a8_block_fp8_matmul(
 
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        a = tl.load(a_ptrs,
-                    mask=offs_k[None, :] < K - k * BLOCK_SIZE_K,
-                    other=0.0)
-        b = tl.load(b_ptrs,
-                    mask=offs_k[:, None] < K - k * BLOCK_SIZE_K,
-                    other=0.0)
+        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
+        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
 
         k_start = k * BLOCK_SIZE_K
         offs_ks = k_start // group_k
@@ -415,8 +409,8 @@ def get_w8a8_block_fp8_configs(N: int, K: int, block_n: int,
     device_name = current_platform.get_device_name().replace(" ", "_")
     json_file_name = f"N={N},K={K},device_name={device_name},dtype=fp8_w8a8,block_shape=[{block_n},{block_k}].json"  # noqa: E501
 
-    config_file_path = os.path.join(
-        os.path.dirname(os.path.realpath(__file__)), "configs", json_file_name)
+    config_file_path = os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                                    "configs", json_file_name)
     if os.path.exists(config_file_path):
         with open(config_file_path) as f:
             logger.info(

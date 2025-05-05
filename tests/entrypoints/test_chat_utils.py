@@ -208,8 +208,7 @@ def test_parse_chat_messages_empty_system(
             "text": ""
         }]
     }, {
-        "role":
-        "user",
+        "role": "user",
         "content": [{
             "type": "text",
             "text": "Who are you?"
@@ -335,7 +334,8 @@ def test_parse_chat_messages_placeholder_already_in_prompt(
         [{
             "role":
             "user",
-            "content": [{
+            "content":
+            [{
                 "type": "image_url",
                 "image_url": {
                     "url": image_url
@@ -346,10 +346,8 @@ def test_parse_chat_messages_placeholder_already_in_prompt(
                     "url": image_url
                 }
             }, {
-                "type":
-                "text",
-                "text":
-                "What's in <|image_1|> and how does it compare to <|image_2|>?"
+                "type": "text",
+                "text": "What's in <|image_1|> and how does it compare to <|image_2|>?"
             }]
         }],
         phi3v_model_config,
@@ -521,12 +519,10 @@ def test_parse_chat_messages_rejects_too_many_images_in_one_message(
 ):
     with warnings.catch_warnings():
         warnings.filterwarnings(
-            "ignore",
-            message="coroutine 'async_get_and_parse_image' was never awaited")
+            "ignore", message="coroutine 'async_get_and_parse_image' was never awaited")
         with pytest.raises(
                 ValueError,
-                match="At most 2 image\\(s\\) may be provided in one request\\."
-        ):
+                match="At most 2 image\\(s\\) may be provided in one request\\."):
             parse_chat_messages(
                 [{
                     "role":
@@ -564,12 +560,10 @@ def test_parse_chat_messages_rejects_too_many_images_across_messages(
 ):
     with warnings.catch_warnings():
         warnings.filterwarnings(
-            "ignore",
-            message="coroutine 'async_get_and_parse_image' was never awaited")
+            "ignore", message="coroutine 'async_get_and_parse_image' was never awaited")
         with pytest.raises(
                 ValueError,
-                match="At most 2 image\\(s\\) may be provided in one request\\."
-        ):
+                match="At most 2 image\\(s\\) may be provided in one request\\."):
             parse_chat_messages(
                 [{
                     "role":
@@ -857,8 +851,7 @@ def test_resolve_hf_chat_template(sample_json_schema, model, use_tools):
 )
 # yapf: enable
 def test_resolve_content_format_hf_defined(model, expected_format):
-    if model == QWEN25VL_MODEL_ID and Version(TRANSFORMERS_VERSION) < Version(
-            "4.49.0"):
+    if model == QWEN25VL_MODEL_ID and Version(TRANSFORMERS_VERSION) < Version("4.49.0"):
         pytest.skip("Qwen2.5-VL requires transformers>=4.49.0")
 
     tokenizer_group = TokenizerGroup(

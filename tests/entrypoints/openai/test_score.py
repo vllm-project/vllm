@@ -29,9 +29,7 @@ def run_transformers(hf_model, model, text_pairs):
     if model["is_cross_encoder"]:
         return hf_model.predict(text_pairs).tolist()
     else:
-        hf_embeddings = [
-            hf_model.encode(text_pair) for text_pair in text_pairs
-        ]
+        hf_embeddings = [hf_model.encode(text_pair) for text_pair in text_pairs]
         return [
             F.cosine_similarity(tensor(pair[0]), tensor(pair[1]), dim=0)
             for pair in hf_embeddings
@@ -69,8 +67,7 @@ class TestModel:
                                     model: dict[str, Any], runner):
         text_1 = "What is the capital of France?"
         text_2 = [
-            "The capital of Brazil is Brasilia.",
-            "The capital of France is Paris."
+            "The capital of Brazil is Brasilia.", "The capital of France is Paris."
         ]
 
         score_response = requests.post(server.url_for("score"),
@@ -101,8 +98,7 @@ class TestModel:
             "What is the capital of France?"
         ]
         text_2 = [
-            "The capital of Brazil is Brasilia.",
-            "The capital of France is Paris."
+            "The capital of Brazil is Brasilia.", "The capital of France is Paris."
         ]
 
         score_response = requests.post(server.url_for("score"),
@@ -152,13 +148,12 @@ class TestModel:
         for i in range(len(vllm_outputs)):
             assert math.isclose(hf_outputs[i], vllm_outputs[i], rel_tol=0.01)
 
-    def test_score_max_model_len(self, server: RemoteOpenAIServer,
-                                 model: dict[str, Any]):
+    def test_score_max_model_len(self, server: RemoteOpenAIServer, model: dict[str,
+                                                                               Any]):
 
         text_1 = "What is the capital of France?" * 20
         text_2 = [
-            "The capital of Brazil is Brasilia.",
-            "The capital of France is Paris."
+            "The capital of Brazil is Brasilia.", "The capital of France is Paris."
         ]
 
         score_response = requests.post(server.url_for("score"),

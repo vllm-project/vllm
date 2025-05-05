@@ -30,8 +30,7 @@ def set_default_torch_dtype(dtype: torch.dtype):
     torch.set_default_dtype(old_dtype)
 
 
-def resolve_transformers_arch(model_config: ModelConfig,
-                              architectures: list[str]):
+def resolve_transformers_arch(model_config: ModelConfig, architectures: list[str]):
     for i, arch in enumerate(architectures):
         if arch == "TransformersForCausalLM":
             continue
@@ -66,9 +65,8 @@ def resolve_transformers_arch(model_config: ModelConfig,
         # perhaps handled them in _ModelRegistry._raise_for_unsupported?
         if model_config.model_impl == ModelImpl.TRANSFORMERS:
             if not model_module.is_backend_compatible():
-                raise ValueError(
-                    f"The Transformers implementation of {arch} is not "
-                    "compatible with vLLM.")
+                raise ValueError(f"The Transformers implementation of {arch} is not "
+                                 "compatible with vLLM.")
             architectures[i] = "TransformersForCausalLM"
         if model_config.model_impl == ModelImpl.AUTO:
             if not model_module.is_backend_compatible():
@@ -84,15 +82,12 @@ def resolve_transformers_arch(model_config: ModelConfig,
     return architectures
 
 
-def get_model_architecture(
-        model_config: ModelConfig) -> Tuple[Type[nn.Module], str]:
+def get_model_architecture(model_config: ModelConfig) -> Tuple[Type[nn.Module], str]:
     architectures = getattr(model_config.hf_config, "architectures", [])
 
     # Special handling for quantized Mixtral.
     # FIXME(woosuk): This is a temporary hack.
-    mixtral_supported = [
-        "fp8", "compressed-tensors", "gptq_marlin", "awq_marlin"
-    ]
+    mixtral_supported = ["fp8", "compressed-tensors", "gptq_marlin", "awq_marlin"]
 
     if (model_config.quantization is not None
             and model_config.quantization not in mixtral_supported
@@ -100,10 +95,9 @@ def get_model_architecture(
         architectures = ["QuantMixtralForCausalLM"]
 
     vllm_supported_archs = ModelRegistry.get_supported_archs()
-    vllm_not_supported = not any(arch in vllm_supported_archs
-                                 for arch in architectures)
-    if (model_config.model_impl == ModelImpl.TRANSFORMERS or
-            model_config.model_impl != ModelImpl.VLLM and vllm_not_supported):
+    vllm_not_supported = not any(arch in vllm_supported_archs for arch in architectures)
+    if (model_config.model_impl == ModelImpl.TRANSFORMERS
+            or model_config.model_impl != ModelImpl.VLLM and vllm_not_supported):
         architectures = resolve_transformers_arch(model_config, architectures)
 
     model_cls, arch = ModelRegistry.resolve_model_cls(architectures)
@@ -129,8 +123,7 @@ class ParamMapping:
     constituent parts.
     """
     packed_mapping: Dict[str, List[str]]
-    inverse_packed_mapping: Dict[str, Tuple[str,
-                                            int]] = field(default_factory=dict)
+    inverse_packed_mapping: Dict[str, Tuple[str, int]] = field(default_factory=dict)
 
     def __post_init__(self):
         for packed_name, sub_params in self.packed_mapping.items():
@@ -143,8 +136,7 @@ class ParamMapping:
                     index,
                 )
 
-    def get_sub_modules(self,
-                        module_name: str) -> Optional[Tuple[str, List[str]]]:
+    def get_sub_modules(self, module_name: str) -> Optional[Tuple[str, List[str]]]:
         for key, value in self.packed_mapping.items():
             if module_name.endswith(key):
                 return key, value

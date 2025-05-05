@@ -47,16 +47,15 @@ def create_dummy_prompt(
         request_id=request_id,
         seqs=[prompt],
         arrival_time=time.time(),
-        sampling_params=SamplingParams(max_tokens=max_tokens,
-                                       min_tokens=min_tokens),
+        sampling_params=SamplingParams(max_tokens=max_tokens, min_tokens=min_tokens),
         lora_request=lora_request,
     )
 
     return prompt, seq_group
 
 
-def create_dummy_lora_sequence(request_id: int, token_ids: list[int],
-                               block_size: int, lora_int_id: int) -> Sequence:
+def create_dummy_lora_sequence(request_id: int, token_ids: list[int], block_size: int,
+                               lora_int_id: int) -> Sequence:
     return Sequence(seq_id=request_id,
                     inputs=token_inputs(token_ids),
                     block_size=block_size,
@@ -93,10 +92,8 @@ def create_dummy_prompt_encoder_decoder(
     encoder_prompt_str = " ".join([str(t) for t in encoder_prompt_tokens])
 
     inputs: EncoderDecoderInputs = {
-        "decoder": token_inputs(decoder_prompt_tokens,
-                                prompt=decoder_prompt_str),
-        "encoder": token_inputs(encoder_prompt_tokens,
-                                prompt=encoder_prompt_str),
+        "decoder": token_inputs(decoder_prompt_tokens, prompt=decoder_prompt_str),
+        "encoder": token_inputs(encoder_prompt_tokens, prompt=encoder_prompt_str),
     }
 
     decoder_prompt = Sequence(int(request_id),
@@ -116,12 +113,11 @@ def create_dummy_prompt_encoder_decoder(
     return decoder_prompt, encoder_prompt, seq_group
 
 
-def create_seq_group(
-        seq_prompt_len: int = 1024,
-        seq_output_lens: GenericSequence[int] = (128, ),
-        request_id: str = '0',
-        seq_id_start: int = 0,
-        sampling_params: Optional[SamplingParams] = None) -> SequenceGroup:
+def create_seq_group(seq_prompt_len: int = 1024,
+                     seq_output_lens: GenericSequence[int] = (128, ),
+                     request_id: str = '0',
+                     seq_id_start: int = 0,
+                     sampling_params: Optional[SamplingParams] = None) -> SequenceGroup:
 
     assert len(seq_output_lens) > 0
 

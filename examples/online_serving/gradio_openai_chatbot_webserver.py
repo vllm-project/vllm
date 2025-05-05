@@ -30,10 +30,7 @@ def format_history_to_openai(history):
     }]
     for human, assistant in history:
         history_openai_format.append({"role": "user", "content": human})
-        history_openai_format.append({
-            "role": "assistant",
-            "content": assistant
-        })
+        history_openai_format.append({"role": "assistant", "content": assistant})
     return history_openai_format
 
 
@@ -93,8 +90,7 @@ def parse_args():
 def build_gradio_interface(client, model_name, temp, stop_token_ids):
 
     def chat_predict(message, history):
-        return predict(message, history, client, model_name, temp,
-                       stop_token_ids)
+        return predict(message, history, client, model_name, temp, stop_token_ids)
 
     return gr.ChatInterface(fn=chat_predict,
                             title="Chatbot Interface",

@@ -47,8 +47,7 @@ class StructuredOutputRequest:
     @grammar.setter
     def grammar(
         self, grammar: Union[StructuredOutputGrammar,
-                             Future[StructuredOutputGrammar]]
-    ) -> None:
+                             Future[StructuredOutputGrammar]]) -> None:
         self._grammar = grammar
 
     @functools.cached_property
@@ -56,8 +55,7 @@ class StructuredOutputRequest:
         return get_structured_output_key(self.sampling_params)
 
 
-def get_structured_output_key(
-        sampling_params: SamplingParams) -> StructuredOutputKey:
+def get_structured_output_key(sampling_params: SamplingParams) -> StructuredOutputKey:
     params = sampling_params.guided_decoding
     assert params is not None, "params can't be None."
     if params.json is not None:

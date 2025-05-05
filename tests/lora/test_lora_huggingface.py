@@ -10,8 +10,7 @@ from vllm.model_executor.models.llama import LlamaForCausalLM
 # Provide absolute path and huggingface lora ids
 lora_fixture_name = ["sql_lora_files", "sql_lora_huggingface_id"]
 LLAMA_LORA_MODULES = [
-    "qkv_proj", "o_proj", "gate_up_proj", "down_proj", "embed_tokens",
-    "lm_head"
+    "qkv_proj", "o_proj", "gate_up_proj", "down_proj", "embed_tokens", "lm_head"
 ]
 
 

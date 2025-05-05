@@ -110,13 +110,12 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def get_common_computed_block_ids(
-            self, seqs: List[Sequence]) -> GenericSequence[int]:
+    def get_common_computed_block_ids(self,
+                                      seqs: List[Sequence]) -> GenericSequence[int]:
         pass
 
     @abstractmethod
-    def mark_blocks_as_computed(self, seq_group: SequenceGroup,
-                                token_chunk_size: int):
+    def mark_blocks_as_computed(self, seq_group: SequenceGroup, token_chunk_size: int):
         pass
 
     @abstractmethod

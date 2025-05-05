@@ -75,8 +75,7 @@ class MOETensors8Bit(MOETensors):
     w2_d: Optional[torch.Tensor] = None  # w2 -> w2_q -> w2_d
 
     @staticmethod
-    def make_moe_tensors_8bit(m: int, k: int, n: int, e: int,
-                              per_act_token: bool,
+    def make_moe_tensors_8bit(m: int, k: int, n: int, e: int, per_act_token: bool,
                               per_out_channel: bool) -> "MOETensors8Bit":
         dtype = torch.half
         q_dtype = torch.float8_e4m3fn
@@ -87,27 +86,21 @@ class MOETensors8Bit(MOETensors):
         n_b_scales = 2 * n if per_out_channel else 1
         k_b_scales = k if per_out_channel else 1
         # Get the right scale for tests.
-        _, a_scale = ops.scaled_fp8_quant(
-            moe_tensors_fp16.a, use_per_token_if_dynamic=per_act_token)
+        _, a_scale = ops.scaled_fp8_quant(moe_tensors_fp16.a,
+                                          use_per_token_if_dynamic=per_act_token)
         a_q, _ = ops.scaled_fp8_quant(moe_tensors_fp16.a,
                                       a_scale,
                                       use_per_token_if_dynamic=per_act_token)
         w1_q = torch.empty((e, 2 * n, k), device="cuda", dtype=q_dtype)
         w2_q = torch.empty((e, k, n), device="cuda", dtype=q_dtype)
 
-        w1_scale = torch.empty((e, n_b_scales, 1),
-                               device="cuda",
-                               dtype=torch.float32)
-        w2_scale = torch.empty((e, k_b_scales, 1),
-                               device="cuda",
-                               dtype=torch.float32)
+        w1_scale = torch.empty((e, n_b_scales, 1), device="cuda", dtype=torch.float32)
+        w2_scale = torch.empty((e, k_b_scales, 1), device="cuda", dtype=torch.float32)
         for expert in range(e):
             w1_q[expert], w1_scale[expert] = ops.scaled_fp8_quant(
-                moe_tensors_fp16.w1[expert],
-                use_per_token_if_dynamic=per_out_channel)
+                moe_tensors_fp16.w1[expert], use_per_token_if_dynamic=per_out_channel)
             w2_q[expert], w2_scale[expert] = ops.scaled_fp8_quant(
-                moe_tensors_fp16.w2[expert],
-                use_per_token_if_dynamic=per_out_channel)
+                moe_tensors_fp16.w2[expert], use_per_token_if_dynamic=per_out_channel)
 
         # a_q -> a_d, w1_q -> w1_d, w2_q -> w2_d
         a_d = a_q.float().mul(a_scale).to(dtype)
@@ -140,8 +133,8 @@ def run_with_expert_maps(num_experts: int, num_local_experts: int,
 
     def slice_experts():
         slice_params = [
-            "w1_q", "w2_q", "ab_strides1", "ab_strides2", "c_strides1",
-            "c_strides2", "w1_scale", "w2_scale"
+            "w1_q", "w2_q", "ab_strides1", "ab_strides2", "c_strides1", "c_strides2",
+            "w1_scale", "w2_scale"
         ]
         full_tensors = {
             k: v
@@ -155,9 +148,7 @@ def run_with_expert_maps(num_experts: int, num_local_experts: int,
             # make expert map
             expert_map = [-1] * num_experts
             expert_map[s:e] = list(range(num_local_experts))
-            expert_map = torch.tensor(expert_map,
-                                      dtype=torch.int32,
-                                      device="cuda")
+            expert_map = torch.tensor(expert_map, dtype=torch.int32, device="cuda")
 
             # update cutlass moe arg with expert_map
             cutlass_moe_kwargs["expert_map"] = expert_map
@@ -232,29 +223,20 @@ def test_cutlass_moe_8_bit_no_graph(
 ):
     current_platform.seed_everything(7)
     with set_current_vllm_config(
-            VllmConfig(parallel_config=ParallelConfig(
-                pipeline_parallel_size=1))):
+            VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))):
 
-        mt = MOETensors8Bit.make_moe_tensors_8bit(m, k, n, e, per_act_token,
-                                                  per_out_ch)
+        mt = MOETensors8Bit.make_moe_tensors_8bit(m, k, n, e, per_act_token, per_out_ch)
 
         score = torch.randn((m, e), device="cuda", dtype=torch.half)
-        topk_weights, topk_ids = fused_topk(mt.a,
-                                            score,
-                                            topk,
-                                            renormalize=False)
+        topk_weights, topk_ids = fused_topk(mt.a, score, topk, renormalize=False)
 
         # Note that we are using the dequantized versions of the tensors.
         # Using a, w1 and w2 directly results in minor output differences.
-        triton_output = fused_experts(mt.a_d, mt.w1_d, mt.w2_d, topk_weights,
-                                      topk_ids)
+        triton_output = fused_experts(mt.a_d, mt.w1_d, mt.w2_d, topk_weights, topk_ids)
 
         cutlass_output = run_8_bit(mt, topk_weights, topk_ids)
 
-        torch.testing.assert_close(triton_output,
-                                   cutlass_output,
-                                   atol=5e-2,
-                                   rtol=1e-2)
+        torch.testing.assert_close(triton_output, cutlass_output, atol=5e-2, rtol=1e-2)
 
 
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
@@ -277,24 +259,18 @@ def test_cutlass_moe_8_bit_cuda_graph(
 ):
     current_platform.seed_everything(7)
     with set_current_vllm_config(
-            VllmConfig(parallel_config=ParallelConfig(
-                pipeline_parallel_size=1))):
+            VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))):
 
         dtype = torch.half
 
-        mt = MOETensors8Bit.make_moe_tensors_8bit(m, k, n, e, per_act_token,
-                                                  per_out_ch)
+        mt = MOETensors8Bit.make_moe_tensors_8bit(m, k, n, e, per_act_token, per_out_ch)
 
         score = torch.randn((m, e), device="cuda", dtype=dtype)
-        topk_weights, topk_ids = fused_topk(mt.a,
-                                            score,
-                                            topk,
-                                            renormalize=False)
+        topk_weights, topk_ids = fused_topk(mt.a, score, topk, renormalize=False)
 
         # Note that we are using the dequantized versions of the tensors.
         # Using a, w1 and w2 directly results in minor output differences.
-        triton_output = fused_experts(mt.a_d, mt.w1_d, mt.w2_d, topk_weights,
-                                      topk_ids)
+        triton_output = fused_experts(mt.a_d, mt.w1_d, mt.w2_d, topk_weights, topk_ids)
 
         stream = torch.cuda.Stream()
         graph = torch.cuda.CUDAGraph()
@@ -305,10 +281,7 @@ def test_cutlass_moe_8_bit_cuda_graph(
         graph.replay()
         torch.cuda.synchronize()
 
-        torch.testing.assert_close(triton_output,
-                                   cutlass_output,
-                                   atol=9e-2,
-                                   rtol=1e-2)
+        torch.testing.assert_close(triton_output, cutlass_output, atol=9e-2, rtol=1e-2)
 
 
 @pytest.mark.parametrize("m", [64])
@@ -335,22 +308,17 @@ def test_cutlass_moe_8_bit_EP(
 ):
     current_platform.seed_everything(7)
     with set_current_vllm_config(
-            VllmConfig(parallel_config=ParallelConfig(
-                pipeline_parallel_size=1))):
+            VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))):
 
         mt = MOETensors8Bit.make_moe_tensors_8bit(m, k, n, e, per_act_token,
                                                   per_out_channel)
 
         score = torch.randn((m, e), device="cuda", dtype=torch.half)
-        topk_weights, topk_ids = fused_topk(mt.a,
-                                            score,
-                                            topk,
-                                            renormalize=False)
+        topk_weights, topk_ids = fused_topk(mt.a, score, topk, renormalize=False)
 
         # Note that we are using the dequantized versions of the tensors.
         # Using a, w1 and w2 directly results in minor output differences.
-        triton_output = fused_experts(mt.a_d, mt.w1_d, mt.w2_d, topk_weights,
-                                      topk_ids)
+        triton_output = fused_experts(mt.a_d, mt.w1_d, mt.w2_d, topk_weights, topk_ids)
 
         assert e % ep_size == 0, "Cannot distribute experts evenly"
         cutlass_output = run_8_bit(mt,
@@ -358,7 +326,4 @@ def test_cutlass_moe_8_bit_EP(
                                    topk_ids,
                                    num_local_experts=e // ep_size)
 
-        torch.testing.assert_close(triton_output,
-                                   cutlass_output,
-                                   atol=5e-2,
-                                   rtol=1e-2)
+        torch.testing.assert_close(triton_output, cutlass_output, atol=5e-2, rtol=1e-2)

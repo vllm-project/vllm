@@ -63,17 +63,15 @@ def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
     slopes = torch.pow(base, powers)
 
     if closest_power_of_2 != total_num_heads:
-        extra_base = torch.tensor(
-            2**(-(2**-(math.log2(2 * closest_power_of_2) - 3))),
-            dtype=torch.float32)
+        extra_base = torch.tensor(2**(-(2**-(math.log2(2 * closest_power_of_2) - 3))),
+                                  dtype=torch.float32)
         num_remaining_heads = min(closest_power_of_2,
                                   total_num_heads - closest_power_of_2)
         extra_powers = torch.arange(1,
                                     1 + 2 * num_remaining_heads,
                                     2,
                                     dtype=torch.int32)
-        slopes = torch.cat(
-            [slopes, torch.pow(extra_base, extra_powers)], dim=0)
+        slopes = torch.cat([slopes, torch.pow(extra_base, extra_powers)], dim=0)
 
     return slopes
 
@@ -133,23 +131,21 @@ class FalconAttention(nn.Module):
         self.inv_norm_factor = 1.0 / math.sqrt(self.head_dim)
         self.reduce_row_parallel_results = not (config.new_decoder_architecture
                                                 or config.parallel_attn)
-        self.dense = RowParallelLinear(
-            self.hidden_size,
-            self.hidden_size,
-            bias=config.bias,
-            skip_bias_add=True,
-            quant_config=quant_config,
-            reduce_results=self.reduce_row_parallel_results)
+        self.dense = RowParallelLinear(self.hidden_size,
+                                       self.hidden_size,
+                                       bias=config.bias,
+                                       skip_bias_add=True,
+                                       quant_config=quant_config,
+                                       reduce_results=self.reduce_row_parallel_results)
 
         self.use_rotary = config.rotary
         self.use_alibi = config.alibi
-        assert not (self.use_rotary and self.use_alibi), (
-            "Rotary and alibi are mutually exclusive.")
+        assert not (self.use_rotary
+                    and self.use_alibi), ("Rotary and alibi are mutually exclusive.")
 
         if self.use_rotary:
             rope_theta = getattr(config, "rope_theta", 10000)
-            max_position_embeddings = getattr(config,
-                                              "max_position_embeddings", 8192)
+            max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
             self.rotary_emb = get_rope(
                 self.head_dim,
                 rotary_dim=self.head_dim,
@@ -249,34 +245,29 @@ class FalconDecoderLayer(nn.Module):
         super().__init__()
         hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
-        self.self_attention = FalconAttention(
-            config,
-            cache_config,
-            quant_config,
-            prefix=f"{prefix}.self_attention")
+        self.self_attention = FalconAttention(config,
+                                              cache_config,
+                                              quant_config,
+                                              prefix=f"{prefix}.self_attention")
         self.mlp = FalconMLP(config, quant_config)
         self.config = config
 
         if (not hasattr(config, "num_ln_in_parallel_attn")):
             config.num_ln_in_parallel_attn = None
 
-        if (config.num_ln_in_parallel_attn is None
-                and config.new_decoder_architecture):
+        if (config.num_ln_in_parallel_attn is None and config.new_decoder_architecture):
             config.num_ln_in_parallel_attn = 2
 
         if not config.parallel_attn:
-            self.post_attention_layernorm = LayerNorm(
-                hidden_size, eps=config.layer_norm_epsilon)
-            self.input_layernorm = LayerNorm(hidden_size,
-                                             eps=config.layer_norm_epsilon)
+            self.post_attention_layernorm = LayerNorm(hidden_size,
+                                                      eps=config.layer_norm_epsilon)
+            self.input_layernorm = LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
         else:
             if config.num_ln_in_parallel_attn == 2:
                 # The layer norm before self-attention
-                self.ln_attn = LayerNorm(hidden_size,
-                                         eps=config.layer_norm_epsilon)
+                self.ln_attn = LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
                 # The layer norm before the MLP
-                self.ln_mlp = LayerNorm(hidden_size,
-                                        eps=config.layer_norm_epsilon)
+                self.ln_mlp = LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
             else:
                 self.input_layernorm = LayerNorm(hidden_size,
                                                  eps=config.layer_norm_epsilon)
@@ -366,9 +357,8 @@ class FalconModel(nn.Module):
 
         # Final Layer Norm
         self.ln_f = LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(["hidden_states"],
-                                                    config.hidden_size))
+        self.make_empty_intermediate_tensors = (make_empty_intermediate_tensors_factory(
+            ["hidden_states"], config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.word_embeddings(input_ids)
@@ -394,8 +384,7 @@ class FalconModel(nn.Module):
         hidden_states = self.ln_f(hidden_states)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         total_num_heads = self.config.num_attention_heads
         if self.config.new_decoder_architecture:
             total_num_kv_heads = self.config.num_kv_heads
@@ -419,25 +408,24 @@ class FalconModel(nn.Module):
                 if output_dim is not None:
                     loaded_weight = loaded_weight.view(
                         loaded_weight_shape[:output_dim] +
-                        (total_num_kv_heads, num_query_heads_per_kv_head + 2,
-                         -1) + loaded_weight_shape[output_dim + 1:])
-                    wq = loaded_weight.narrow(
-                        output_dim + 1, 0,
-                        num_query_heads_per_kv_head).reshape(
-                            *loaded_weight_shape[:output_dim], -1,
-                            *loaded_weight_shape[output_dim + 1:])
-                    wk = loaded_weight.narrow(
-                        output_dim + 1, num_query_heads_per_kv_head,
-                        1).reshape(*loaded_weight_shape[:output_dim], -1,
-                                   *loaded_weight_shape[output_dim + 1:])
-                    wv = loaded_weight.narrow(
-                        output_dim + 1, num_query_heads_per_kv_head + 1,
-                        1).reshape(*loaded_weight_shape[:output_dim], -1,
-                                   *loaded_weight_shape[output_dim + 1:])
+                        (total_num_kv_heads, num_query_heads_per_kv_head + 2, -1) +
+                        loaded_weight_shape[output_dim + 1:])
+                    wq = loaded_weight.narrow(output_dim + 1, 0,
+                                              num_query_heads_per_kv_head).reshape(
+                                                  *loaded_weight_shape[:output_dim], -1,
+                                                  *loaded_weight_shape[output_dim + 1:])
+                    wk = loaded_weight.narrow(output_dim + 1,
+                                              num_query_heads_per_kv_head, 1).reshape(
+                                                  *loaded_weight_shape[:output_dim], -1,
+                                                  *loaded_weight_shape[output_dim + 1:])
+                    wv = loaded_weight.narrow(output_dim + 1,
+                                              num_query_heads_per_kv_head + 1,
+                                              1).reshape(
+                                                  *loaded_weight_shape[:output_dim], -1,
+                                                  *loaded_weight_shape[output_dim + 1:])
                     loaded_weight = torch.cat([wq, wk, wv], dim=output_dim)
 
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
@@ -455,14 +443,12 @@ class FalconForCausalLM(nn.Module, SupportsPP):
         self.config = config
         self.quant_config = quant_config
         self.transformer = FalconModel(vllm_config=vllm_config,
-                                       prefix=maybe_prefix(
-                                           prefix, "transformer"))
+                                       prefix=maybe_prefix(prefix, "transformer"))
         # only Falcon-11B doesn't share lm_head weight with word embeddings
         # and previous Falcon model doesn't have tie_word_embeddings config
         # so we set tie_word_embeddings to True by default
         self.tie_word_embeddings = (config.tie_word_embeddings
-                                    if config.tie_word_embeddings is not None
-                                    else True)
+                                    if config.tie_word_embeddings is not None else True)
         if self.tie_word_embeddings:
             self.lm_head = self.transformer.word_embeddings
         else:
@@ -485,8 +471,8 @@ class FalconForCausalLM(nn.Module, SupportsPP):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        hidden_states = self.transformer(input_ids, positions,
-                                         intermediate_tensors, inputs_embeds)
+        hidden_states = self.transformer(input_ids, positions, intermediate_tensors,
+                                         inputs_embeds)
         return hidden_states
 
     def compute_logits(
@@ -494,15 +480,12 @@ class FalconForCausalLM(nn.Module, SupportsPP):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(
             self,
-            skip_prefixes=(["lm_head."]
-                           if self.config.tie_word_embeddings else None),
+            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)

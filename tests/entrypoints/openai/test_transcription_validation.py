@@ -39,12 +39,11 @@ async def test_basic_audio(mary_had_lamb):
     prompt = "THE FIRST WORDS I SPOKE"
     with RemoteOpenAIServer(model_name, server_args) as remote_server:
         client = remote_server.get_async_client()
-        transcription = await client.audio.transcriptions.create(
-            model=model_name,
-            file=mary_had_lamb,
-            language="en",
-            response_format="text",
-            temperature=0.0)
+        transcription = await client.audio.transcriptions.create(model=model_name,
+                                                                 file=mary_had_lamb,
+                                                                 language="en",
+                                                                 response_format="text",
+                                                                 temperature=0.0)
         out = json.loads(transcription)['text']
         assert "Mary had a little lamb," in out
         # This should "force" whisper to continue prompt in all caps
@@ -110,12 +109,13 @@ async def test_completion_endpoints():
     server_args = ["--enforce-eager"]
     with RemoteOpenAIServer(model_name, server_args) as remote_server:
         client = remote_server.get_async_client()
-        res = await client.chat.completions.create(
-            model=model_name,
-            messages=[{
-                "role": "system",
-                "content": "You are a helpful assistant."
-            }])
+        res = await client.chat.completions.create(model=model_name,
+                                                   messages=[{
+                                                       "role":
+                                                       "system",
+                                                       "content":
+                                                       "You are a helpful assistant."
+                                                   }])
         assert res.code == 400
         assert res.message == "The model does not support Chat Completions API"
 
@@ -131,12 +131,11 @@ async def test_streaming_response(winning_call):
     transcription = ""
     with RemoteOpenAIServer(model_name, server_args) as remote_server:
         client = remote_server.get_async_client()
-        res_no_stream = await client.audio.transcriptions.create(
-            model=model_name,
-            file=winning_call,
-            response_format="json",
-            language="en",
-            temperature=0.0)
+        res_no_stream = await client.audio.transcriptions.create(model=model_name,
+                                                                 file=winning_call,
+                                                                 response_format="json",
+                                                                 language="en",
+                                                                 temperature=0.0)
         # Unfortunately this only works when the openai client is patched
         # to use streaming mode, not exposed in the transcription api.
         original_post = AsyncAPIClient.post
@@ -147,12 +146,11 @@ async def test_streaming_response(winning_call):
 
         with patch.object(AsyncAPIClient, "post", new=post_with_stream):
             client = remote_server.get_async_client()
-            res = await client.audio.transcriptions.create(
-                model=model_name,
-                file=winning_call,
-                language="en",
-                temperature=0.0,
-                extra_body=dict(stream=True))
+            res = await client.audio.transcriptions.create(model=model_name,
+                                                           file=winning_call,
+                                                           language="en",
+                                                           temperature=0.0,
+                                                           extra_body=dict(stream=True))
             # Reconstruct from chunks and validate
             async for chunk in res:
                 # just a chunk

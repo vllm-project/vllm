@@ -63,8 +63,7 @@ class CompilerManager:
                 # do not use eval(), it is unsafe.
                 self.cache = ast.literal_eval(f.read())
 
-        self.compiler.initialize_cache(cache_dir=cache_dir,
-                                       disable_cache=disable_cache)
+        self.compiler.initialize_cache(cache_dir=cache_dir, disable_cache=disable_cache)
 
     def save_to_file(self):
         if self.disable_cache or not self.is_cache_updated:
@@ -82,12 +81,11 @@ class CompilerManager:
         if (runtime_shape, graph_index, self.compiler.name) not in self.cache:
             return None
         handle = self.cache[(runtime_shape, graph_index, self.compiler.name)]
-        compiled_graph = self.compiler.load(handle, graph, example_inputs,
-                                            graph_index, runtime_shape)
+        compiled_graph = self.compiler.load(handle, graph, example_inputs, graph_index,
+                                            runtime_shape)
         logger.debug(
             "Directly load the %s-th graph for shape %s from %s via "
-            "handle %s", graph_index, str(runtime_shape), self.compiler.name,
-            handle)
+            "handle %s", graph_index, str(runtime_shape), self.compiler.name, handle)
         return compiled_graph
 
     def compile(self,
@@ -108,8 +106,7 @@ class CompilerManager:
         compiled_graph = None
 
         # try to load from the cache
-        compiled_graph = self.load(graph, example_inputs, graph_index,
-                                   runtime_shape)
+        compiled_graph = self.load(graph, example_inputs, graph_index, runtime_shape)
         if compiled_graph is not None:
             if graph_index == num_graphs - 1:
                 # after loading the last graph for this shape, record the time.
@@ -123,23 +120,22 @@ class CompilerManager:
 
         # no compiler cached the graph, or the cache is disabled,
         # we need to compile it
-        compiled_graph, handle = self.compiler.compile(
-            graph, example_inputs, additional_inductor_config, runtime_shape)
+        compiled_graph, handle = self.compiler.compile(graph, example_inputs,
+                                                       additional_inductor_config,
+                                                       runtime_shape)
 
         assert compiled_graph is not None, "Failed to compile the graph"
 
         # store the artifact in the cache
         if handle is not None:
-            self.cache[(runtime_shape, graph_index,
-                        self.compiler.name)] = handle
+            self.cache[(runtime_shape, graph_index, self.compiler.name)] = handle
             self.is_cache_updated = True
             if graph_index == 0:
                 # adds some info logging for the first graph
                 logger.info("Cache the graph of shape %s for later use",
                             str(runtime_shape))
-            logger.debug(
-                "store the %s-th graph for shape %s from %s via handle %s",
-                graph_index, str(runtime_shape), self.compiler.name, handle)
+            logger.debug("store the %s-th graph for shape %s from %s via handle %s",
+                         graph_index, str(runtime_shape), self.compiler.name, handle)
 
         # after compiling the last graph, record the end time
         if graph_index == num_graphs - 1:
@@ -147,8 +143,7 @@ class CompilerManager:
             elapsed = now - compilation_start_time
             compilation_config.compilation_time += elapsed
             if runtime_shape is None:
-                logger.info("Compiling a graph for general shape takes %.2f s",
-                            elapsed)
+                logger.info("Compiling a graph for general shape takes %.2f s", elapsed)
             else:
                 logger.info("Compiling a graph for shape %s takes %.2f s",
                             runtime_shape, elapsed)
@@ -186,10 +181,7 @@ def split_graph(graph: fx.GraphModule,
     # the semantics of the graph will change when we
     # have mutations in the graph
     split_gm = torch.fx.passes.split_module.split_module(
-        graph,
-        None,
-        lambda node: node_to_subgraph_id[node],
-        keep_original_order=True)
+        graph, None, lambda node: node_to_subgraph_id[node], keep_original_order=True)
 
     outputs = []
 
@@ -203,8 +195,7 @@ def split_graph(graph: fx.GraphModule,
         module = getattr(split_gm, name)
 
         graph_id = int(name.replace("submod_", ""))
-        outputs.append(
-            SplitItem(name, graph_id, (graph_id in split_op_graphs), module))
+        outputs.append(SplitItem(name, graph_id, (graph_id in split_op_graphs), module))
 
     # sort by intetger graph_id, rather than string name
     outputs.sort(key=lambda x: x.graph_id)
@@ -230,9 +221,8 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
     has some special cudagraph output handling.
     """
 
-    def __init__(self, module: torch.fx.GraphModule,
-                 compile_submod_names: List[str], vllm_config: VllmConfig,
-                 graph_pool, vllm_backend: "VllmBackend"):
+    def __init__(self, module: torch.fx.GraphModule, compile_submod_names: List[str],
+                 vllm_config: VllmConfig, graph_pool, vllm_backend: "VllmBackend"):
         super().__init__(module)
         from torch._guards import detect_fake_mode
         self.fake_mode = detect_fake_mode()
@@ -251,8 +241,8 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
             return super().run(*fake_args)
 
     def call_module(self, target: torch.fx.node.Target,
-                    args: Tuple[torch.fx.node.Argument,
-                                ...], kwargs: Dict[str, Any]) -> Any:
+                    args: Tuple[torch.fx.node.Argument, ...], kwargs: Dict[str,
+                                                                           Any]) -> Any:
         assert isinstance(target, str)
         output = super().call_module(target, args, kwargs)
 
@@ -379,12 +369,10 @@ class VllmBackend:
 
             # 2. factors come from the code files that are traced by Dynamo (
             #    it mainly summarizes how the model is used in forward pass)
-            forward_code_files = list(
-                sorted(self.compilation_config.traced_files))
+            forward_code_files = list(sorted(self.compilation_config.traced_files))
             self.compilation_config.traced_files.clear()
-            logger.debug(
-                "Traced files (to be considered for compilation cache):\n%s",
-                "\n".join(forward_code_files))
+            logger.debug("Traced files (to be considered for compilation cache):\n%s",
+                         "\n".join(forward_code_files))
             hash_content = []
             for filepath in forward_code_files:
                 hash_content.append(filepath)
@@ -462,8 +450,7 @@ class VllmBackend:
         lazy_format_graph_code("before split", self.graph)
         lazy_format_graph_code("after split", self.split_gm)
 
-        compilation_counter.num_piecewise_graphs_seen += len(
-            self.piecewise_graphs)
+        compilation_counter.num_piecewise_graphs_seen += len(self.piecewise_graphs)
         submod_names_to_compile = [
             item.submod_name for item in self.piecewise_graphs
             if not item.is_splitting_graph
@@ -555,11 +542,10 @@ class ConcreteSizeEntry:
 
 class PiecewiseBackend:
 
-    def __init__(self, graph: fx.GraphModule, vllm_config: VllmConfig,
-                 graph_pool: Any, piecewise_compile_index: int,
-                 total_piecewise_compiles: int, sym_shape_indices: List[int],
-                 compiled_graph_for_general_shape: Callable,
-                 vllm_backend: VllmBackend):
+    def __init__(self, graph: fx.GraphModule, vllm_config: VllmConfig, graph_pool: Any,
+                 piecewise_compile_index: int, total_piecewise_compiles: int,
+                 sym_shape_indices: List[int],
+                 compiled_graph_for_general_shape: Callable, vllm_backend: VllmBackend):
         """
         The backend for piecewise compilation.
         It mainly handles the compilation and cudagraph capturing.
@@ -582,11 +568,9 @@ class PiecewiseBackend:
         self.vllm_backend = vllm_backend
 
         self.is_first_graph = piecewise_compile_index == 0
-        self.is_last_graph = (
-            piecewise_compile_index == total_piecewise_compiles - 1)
+        self.is_last_graph = (piecewise_compile_index == total_piecewise_compiles - 1)
 
-        self.compile_sizes: Set[int] = set(
-            self.compilation_config.compile_sizes)
+        self.compile_sizes: Set[int] = set(self.compilation_config.compile_sizes)
         self.cudagraph_capture_sizes: Set[int] = set(
             self.compilation_config.cudagraph_capture_sizes
         ) if self.compilation_config.use_cudagraph else set()
@@ -660,19 +644,17 @@ class PiecewiseBackend:
             if entry.num_finished_warmup < self.compilation_config.cudagraph_num_of_warmups:  # noqa
                 entry.num_finished_warmup += 1
                 if self.is_first_graph:
-                    logger.debug(
-                        "Warming up %s/%s for shape %s",
-                        entry.num_finished_warmup,
-                        self.compilation_config.cudagraph_num_of_warmups,
-                        runtime_shape)
+                    logger.debug("Warming up %s/%s for shape %s",
+                                 entry.num_finished_warmup,
+                                 self.compilation_config.cudagraph_num_of_warmups,
+                                 runtime_shape)
                 return entry.runnable(*args)
 
             if self.is_first_graph:
                 # Since we capture cudagraph for many different shapes and
                 # capturing is fast, we don't need to log it for every shape.
                 # We only log it in the debug mode.
-                logger.debug("Capturing a cudagraph for shape %s",
-                             runtime_shape)
+                logger.debug("Capturing a cudagraph for shape %s", runtime_shape)
 
             input_addresses = [
                 x.data_ptr() for x in args if isinstance(x, torch.Tensor)
@@ -689,8 +671,7 @@ class PiecewiseBackend:
                     # therefore, we only run gc for the first graph,
                     # and disable gc for the rest of the graphs.
                     stack.enter_context(patch("gc.collect", lambda: None))
-                    stack.enter_context(
-                        patch("torch.cuda.empty_cache", lambda: None))
+                    stack.enter_context(patch("torch.cuda.empty_cache", lambda: None))
 
                 # mind-exploding: carefully manage the reference and memory.
                 with torch.cuda.graph(cudagraph, pool=self.graph_pool):
@@ -723,8 +704,7 @@ class PiecewiseBackend:
             ]
             assert new_input_addresses == entry.input_addresses, (
                 "Input addresses for cudagraphs are different during replay."
-                f" Expected {entry.input_addresses}, got {new_input_addresses}"
-            )
+                f" Expected {entry.input_addresses}, got {new_input_addresses}")
 
         entry.cudagraph.replay()
         return entry.output

@@ -63,16 +63,15 @@ def adaptive_enc_mask(x_len, chunk_start_idx, left_window=0, right_window=0):
                     [False., True., True., False.],
                     [False., False., True., True.]])
     """
-    chunk_start_idx = torch.Tensor(chunk_start_idx).long(
-    )  # first idx of each chunk, such as [0,18,36,48].
+    chunk_start_idx = torch.Tensor(
+        chunk_start_idx).long()  # first idx of each chunk, such as [0,18,36,48].
     start_pad = torch.nn.functional.pad(
         chunk_start_idx,
         (1, 0))  # append 0 to the beginning, so it becomes [0, 0, 18, 36, 48]
     end_pad = torch.nn.functional.pad(
-        chunk_start_idx, (0, 1), value=x_len
-    )  # append x_len to the end, so it becomes [0,18,36,48, x_len]
-    seq_range = torch.arange(0,
-                             x_len).unsqueeze(-1)  # seq_range size: [x_len, 1]
+        chunk_start_idx, (0, 1),
+        value=x_len)  # append x_len to the end, so it becomes [0,18,36,48, x_len]
+    seq_range = torch.arange(0, x_len).unsqueeze(-1)  # seq_range size: [x_len, 1]
     idx = ((seq_range < end_pad) &
            (seq_range >= start_pad)).nonzero()[:, 1]  # idx size: [x_len]
     # boundary = end_pad[idx]  # boundary size: [x_len]
@@ -228,8 +227,8 @@ class GLUPointWiseConv(nn.Module):
         x = self.ext_pw_conv_1d(x)
         if self.glu_type == "bilinear":
             if self.bias_in_glu:
-                x = (x[:, 0:self.output_dim, :] + self.b1) * (
-                    x[:, self.output_dim:self.output_dim * 2, :] + self.b2)
+                x = (x[:, 0:self.output_dim, :] +
+                     self.b1) * (x[:, self.output_dim:self.output_dim * 2, :] + self.b2)
             else:
                 x = (x[:, 0:self.output_dim, :]) * (
                     x[:, self.output_dim:self.output_dim * 2, :])
@@ -429,12 +428,10 @@ class ConvModule(nn.Module):
 
         if depthwise_seperable_out_channel != 0:
             if input_dim != depthwise_seperable_out_channel:
-                self.ln2 = nn.Linear(depthwise_seperable_out_channel,
-                                     input_dim)
+                self.ln2 = nn.Linear(depthwise_seperable_out_channel, input_dim)
         else:
             if depthwise_multiplier != 1:
-                self.ln2 = nn.Linear(input_dim * depthwise_multiplier,
-                                     input_dim)
+                self.ln2 = nn.Linear(input_dim * depthwise_multiplier, input_dim)
 
     def _add_ext_pw_layer(self):
         """
@@ -442,8 +439,8 @@ class ConvModule(nn.Module):
         and dedicated to the convolution module creation
         of the conformer.
         """
-        self.ln1 = self.glu = self.bn_layer = self.ext_pw_conv_1d = (
-            nn.Identity())  # jit hacks.
+        self.ln1 = self.glu = self.bn_layer = self.ext_pw_conv_1d = (nn.Identity()
+                                                                     )  # jit hacks.
         self.squeeze_excitation = nn.Identity()  # jit.
         self.apply_ln1 = self.fix_len1 = False  # jit.
 
@@ -706,11 +703,7 @@ class T5RelativeAttentionLogitBias(nn.Module):
             found to be better for the encoder.
     """
 
-    def __init__(self,
-                 num_heads,
-                 num_buckets=-1,
-                 max_distance=1000,
-                 symmetric=False):
+    def __init__(self, num_heads, num_buckets=-1, max_distance=1000, symmetric=False):
         super().__init__()
         self.num_heads = num_heads
         self.num_buckets = num_buckets
@@ -729,11 +722,9 @@ class T5RelativeAttentionLogitBias(nn.Module):
     def forward(self, x):
         # instantiate bias compatible with shape of x
         maxpos = x.size(1)
-        context_position = torch.arange(maxpos,
-                                        device=x.device,
-                                        dtype=torch.long)[:, None]
-        memory_position = torch.arange(maxpos,
-                                       device=x.device,
+        context_position = torch.arange(maxpos, device=x.device, dtype=torch.long)[:,
+                                                                                   None]
+        memory_position = torch.arange(maxpos, device=x.device,
                                        dtype=torch.long)[None, :]
         relative_position = memory_position - context_position
         # clipping to a maximum distance using ops that play well with ONNX
@@ -754,8 +745,7 @@ class T5RelativeAttentionLogitBias(nn.Module):
             bias_idx += self.num_buckets // 2
 
         t5_rel_att_bias = self.bias_values(bias_idx)  # [L, L, H]
-        t5_rel_att_bias = t5_rel_att_bias.permute(2, 0, 1).unsqueeze(
-            0)  # [1, H, L, L]
+        t5_rel_att_bias = t5_rel_att_bias.permute(2, 0, 1).unsqueeze(0)  # [1, H, L, L]
 
         return t5_rel_att_bias
 
@@ -920,8 +910,7 @@ class CausalConv1D(nn.Conv1d):
             self._right_padding = stride - 1
         else:
             if stride != 1 and padding != kernel_size - 1:
-                raise ValueError(
-                    "No striding allowed for non-symmetric convolutions!")
+                raise ValueError("No striding allowed for non-symmetric convolutions!")
             if isinstance(padding, int):
                 self._left_padding = padding
                 self._right_padding = padding
@@ -994,8 +983,7 @@ class CausalConv2D(nn.Conv2d):
         dtype=None,
     ) -> None:
         if padding is not None:
-            raise ValueError(
-                "Argument padding should be set to None for CausalConv2D.")
+            raise ValueError("Argument padding should be set to None for CausalConv2D.")
         self._left_padding = kernel_size - 1
         self._right_padding = stride - 1
 
@@ -1269,8 +1257,8 @@ class NemoConvSubsampling(torch.nn.Module):
                 ),
                 torch.nn.Conv1d(
                     in_channels=in_channels,
-                    out_channels=(feat_out if self._sampling_num == 1 else
-                                  conv_channels),
+                    out_channels=(feat_out
+                                  if self._sampling_num == 1 else conv_channels),
                     kernel_size=1,
                     stride=1,
                     padding=0,
@@ -1316,8 +1304,7 @@ class NemoConvSubsampling(torch.nn.Module):
                 ceil_mode=self._ceil_mode,
                 repeat_num=self._sampling_num,
             )
-            self.out = torch.nn.Linear(conv_channels * int(out_length),
-                                       feat_out)
+            self.out = torch.nn.Linear(conv_channels * int(out_length), feat_out)
             self.conv2d_subsampling = True
         elif subsampling in ["striding_conv1d", "dw_striding_conv1d"]:
             self.out = None
@@ -1354,16 +1341,14 @@ class NemoConvSubsampling(torch.nn.Module):
         x = x.unsqueeze(1) if self.conv2d_subsampling else x.transpose(1, 2)
 
         # split inputs if chunking_factor is set
-        if (self.subsampling_conv_chunking_factor != -1
-                and self.conv2d_subsampling):
+        if (self.subsampling_conv_chunking_factor != -1 and self.conv2d_subsampling):
             if self.subsampling_conv_chunking_factor == 1:
                 # if subsampling_conv_chunking_factor is 1, we split only
                 # if needed.
                 # avoiding a bug / feature limiting indexing of tensors
                 # to 2**31.
                 # see https://github.com/pytorch/pytorch/issues/80020
-                x_ceil = (2**31 / self._conv_channels * self._stride *
-                          self._stride)
+                x_ceil = (2**31 / self._conv_channels * self._stride * self._stride)
                 need_to_split = torch.numel(x) > x_ceil
             else:
                 # if subsampling_conv_chunking_factor > 1 we always split
@@ -1415,20 +1400,15 @@ class NemoConvSubsampling(torch.nn.Module):
                 torch.nn.init.uniform_(self.conv[0].bias, -scale, scale)
 
                 for idx in range(2, len(self.conv), 3):
-                    torch.nn.init.uniform_(self.conv[idx].weight, -dw_max,
-                                           dw_max)
-                    torch.nn.init.uniform_(self.conv[idx].bias, -dw_max,
-                                           dw_max)
-                    torch.nn.init.uniform_(self.conv[idx + 1].weight, -pw_max,
-                                           pw_max)
-                    torch.nn.init.uniform_(self.conv[idx + 1].bias, -pw_max,
-                                           pw_max)
+                    torch.nn.init.uniform_(self.conv[idx].weight, -dw_max, dw_max)
+                    torch.nn.init.uniform_(self.conv[idx].bias, -dw_max, dw_max)
+                    torch.nn.init.uniform_(self.conv[idx + 1].weight, -pw_max, pw_max)
+                    torch.nn.init.uniform_(self.conv[idx + 1].bias, -pw_max, pw_max)
 
                 # init fc (80 * 64 = 5120 from https://github.com/kssteven418/
                 # Squeezeformer/blob/13c97d6cf92f2844d2cb3142b4c5bfa9ad1a8951/
                 # src/models/conformer_encoder.py#L487
-                fc_scale = (self._feat_out * self._feat_in /
-                            self._sampling_num)**-0.5
+                fc_scale = (self._feat_out * self._feat_in / self._sampling_num)**-0.5
                 torch.nn.init.uniform_(self.out.weight, -fc_scale, fc_scale)
                 torch.nn.init.uniform_(self.out.bias, -fc_scale, fc_scale)
 
@@ -1452,10 +1432,8 @@ class NemoConvSubsampling(torch.nn.Module):
             return x, False
 
         return (
-            torch.cat([
-                self.conv(chunk)
-                for chunk in torch.split(x, new_batch_size, 0)
-            ]),
+            torch.cat([self.conv(chunk)
+                       for chunk in torch.split(x, new_batch_size, 0)]),
             True,
         )
 
@@ -1490,10 +1468,7 @@ class NemoConvSubsampling(torch.nn.Module):
 
             # splitting pointwise convs by time
             x = torch.cat(
-                [
-                    self.conv[i * 3 + 3](chunk)
-                    for chunk in torch.split(x, new_t, 2)
-                ],
+                [self.conv[i * 3 + 3](chunk) for chunk in torch.split(x, new_t, 2)],
                 2,
             )  # conv2D, pointwise
             x = self.conv[i * 3 + 4](x)  # activation
@@ -1539,8 +1514,8 @@ class NemoConvSubsampling(torch.nn.Module):
 
         return torch.cat(out_chunks, 1)
 
-    def change_subsampling_conv_chunking_factor(
-            self, subsampling_conv_chunking_factor: int):
+    def change_subsampling_conv_chunking_factor(self,
+                                                subsampling_conv_chunking_factor: int):
         if (subsampling_conv_chunking_factor != -1
                 and subsampling_conv_chunking_factor != 1
                 and subsampling_conv_chunking_factor % 2 != 0):
@@ -1551,19 +1526,13 @@ class NemoConvSubsampling(torch.nn.Module):
         self.subsampling_conv_chunking_factor = subsampling_conv_chunking_factor
 
 
-def calc_length(lengths,
-                all_paddings,
-                kernel_size,
-                stride,
-                ceil_mode,
-                repeat_num=1):
+def calc_length(lengths, all_paddings, kernel_size, stride, ceil_mode, repeat_num=1):
     """Calculates the output length of a Tensor passed through a convolution or
       max pooling layer"""
     add_pad: float = all_paddings - kernel_size
     one: float = 1.0
     for i in range(repeat_num):
-        lengths = (torch.div(lengths.to(dtype=torch.float) + add_pad, stride) +
-                   one)
+        lengths = (torch.div(lengths.to(dtype=torch.float) + add_pad, stride) + one)
         lengths = torch.ceil(lengths) if ceil_mode else torch.floor(lengths)
     return lengths.to(dtype=torch.int)
 
@@ -1617,8 +1586,9 @@ def masked_softmax(
     if mask is not None:
         mask = mask.unsqueeze(1).eq(0)  # (batch, 1, time1, time2)
         scores = scores.masked_fill(mask, -torch.inf)
-        attn = torch.softmax(scores, dim=-1).masked_fill(
-            mask, 0.0)  # (batch, head, time1, time2)
+        attn = torch.softmax(scores,
+                             dim=-1).masked_fill(mask,
+                                                 0.0)  # (batch, head, time1, time2)
     else:
         attn = torch.softmax(scores, dim=-1)  # (batch, head, time1, time2)
     return attn
@@ -1698,8 +1668,7 @@ class MultiHeadedAttention(nn.Module):
         self.attn = torch.jit.Attribute(None, Optional[Tensor])
         self.dropout = nn.Dropout(p=dropout_rate)
         self.dropout_rate = dropout_rate
-        self.use_pt_scaled_dot_product_attention = (
-            use_pt_scaled_dot_product_attention)
+        self.use_pt_scaled_dot_product_attention = (use_pt_scaled_dot_product_attention)
 
         if use_pt_scaled_dot_product_attention and group_size > 1:
             raise ValueError("Cannot use PT Scaled Attention with GQA")
@@ -1743,10 +1712,8 @@ class MultiHeadedAttention(nn.Module):
         """
         n_batch = query.size(0)
 
-        q = self.linear_q(query).view(n_batch, -1, self.h,
-                                      self.d_k)  # (b, t, d)
-        k = self.linear_k(key).view(n_batch, -1, self.h_k,
-                                    self.d_k)  # (b, t, d)
+        q = self.linear_q(query).view(n_batch, -1, self.h, self.d_k)  # (b, t, d)
+        k = self.linear_k(key).view(n_batch, -1, self.h_k, self.d_k)  # (b, t, d)
         v = self.linear_v(value).view(n_batch, -1, self.h_k, self.d_k)
         q = (q.transpose(1, 2) if self.use_pt_scaled_dot_product_attention
              and not torch.jit.is_scripting() else q.transpose(1, 2) *
@@ -1754,8 +1721,7 @@ class MultiHeadedAttention(nn.Module):
         k = k.transpose(1, 2)  # (batch, head_k, time2, d_k)
         v = v.transpose(1, 2)  # (batch, head_k, time2, d_k)
 
-        if (self.use_pt_scaled_dot_product_attention
-                and not torch.jit.is_scripting()):
+        if (self.use_pt_scaled_dot_product_attention and not torch.jit.is_scripting()):
             attn_mask = None
             if mask is not None:
                 mask = mask.unsqueeze(1)
@@ -1793,8 +1759,7 @@ class MultiHeadedAttention(nn.Module):
                                                      self.d_k).transpose(0, 1)
                                  )  # (t1,nh,dk)
                     B = torch.matmul(reshape_q,
-                                     pos_k.transpose(-2,
-                                                     -1))  # pos_k: (t1,dk,t2)
+                                     pos_k.transpose(-2, -1))  # pos_k: (t1,dk,t2)
                     B = B.transpose(0, 1).view(n_batch, self.h, pos_k.size(0),
                                                pos_k.size(1))
                 scores = A + B
@@ -1809,19 +1774,18 @@ class MultiHeadedAttention(nn.Module):
             self.attn = attn
 
             p_attn = self.dropout(attn)
-            x = torch.matmul(p_attn.to(v.dtype),
-                             v)  # (batch, head, time1, d_k)
+            x = torch.matmul(p_attn.to(v.dtype), v)  # (batch, head, time1, d_k)
             if pos_v is not None:
-                reshape_attn = (p_attn.contiguous().view(
-                    n_batch * self.h, pos_v.size(0),
-                    pos_v.size(1)).transpose(0, 1))  # (t1, bh, t2)
+                reshape_attn = (p_attn.contiguous().view(n_batch * self.h,
+                                                         pos_v.size(0),
+                                                         pos_v.size(1)).transpose(0, 1)
+                                )  # (t1, bh, t2)
 
-                attn_v = (torch.matmul(reshape_attn, pos_v).transpose(
-                    0, 1).contiguous().view(n_batch, self.h, pos_v.size(0),
-                                            self.d_k))
+                attn_v = (torch.matmul(reshape_attn,
+                                       pos_v).transpose(0, 1).contiguous().view(
+                                           n_batch, self.h, pos_v.size(0), self.d_k))
                 x = x + attn_v
-        x = (x.transpose(1, 2).contiguous().view(n_batch, -1,
-                                                 self.h_k * self.d_k)
+        x = (x.transpose(1, 2).contiguous().view(n_batch, -1, self.h_k * self.d_k)
              )  # (batch, time1, d_model)
 
         return self.linear_out(x)  # (batch, time1, d_model)

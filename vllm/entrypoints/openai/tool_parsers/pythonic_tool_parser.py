@@ -134,8 +134,7 @@ class PythonicToolParser(ToolParser):
                 if new_call_complete:
                     self.current_tool_index += 1
 
-                withheld_suffix = (added_text[:-2]
-                                   if not new_call_complete else "")
+                withheld_suffix = (added_text[:-2] if not new_call_complete else "")
                 if not new_call_complete and added_text[-2] == ")":
                     # Function call is incomplete. Withhold the closing bracket.
                     withheld_suffix = withheld_suffix + "}"
@@ -149,8 +148,7 @@ class PythonicToolParser(ToolParser):
                     tool_deltas.append(delta)
                     if (delta.function is not None
                             and delta.function.arguments is not None):
-                        self.streamed_args_for_tool[
-                            index] += delta.function.arguments
+                        self.streamed_args_for_tool[index] += delta.function.arguments
 
             # HACK: serving_chat.py inspects the internal state of tool parsers
             # when determining it's final streaming delta, automatically
@@ -170,9 +168,8 @@ class PythonicToolParser(ToolParser):
                 return None
         except Exception:
             logger.exception("Error trying to handle streaming tool call.")
-            logger.debug(
-                "Skipping chunk as a result of tool streaming extraction "
-                "error")
+            logger.debug("Skipping chunk as a result of tool streaming extraction "
+                         "error")
             return None
 
 
@@ -181,8 +178,7 @@ def _get_parameter_value(val: ast.expr) -> Any:
         return val.value
     elif isinstance(val, ast.Dict):
         if not all(isinstance(k, ast.Constant) for k in val.keys):
-            raise _UnexpectedAstError(
-                "Dict tool call arguments must have literal keys")
+            raise _UnexpectedAstError("Dict tool call arguments must have literal keys")
         return {
             k.value: _get_parameter_value(v)  # type: ignore
             for k, v in zip(val.keys, val.values)
@@ -271,8 +267,7 @@ def _make_valid_python(text: str) -> Union[tuple[str, str], None]:
     return text + added_text, added_text
 
 
-def _compute_tool_delta(previously_sent_args: str, new_call: ToolCall,
-                        index: int,
+def _compute_tool_delta(previously_sent_args: str, new_call: ToolCall, index: int,
                         withheld_suffix: str) -> Union[DeltaToolCall, None]:
     new_call_args = new_call.function.arguments
     if withheld_suffix:

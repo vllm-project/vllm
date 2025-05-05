@@ -55,8 +55,7 @@ def test_prefix_caching_from_cli():
 
 def test_defaults_with_usage_context():
     engine_args = EngineArgs(model="facebook/opt-125m")
-    vllm_config: VllmConfig = engine_args.create_engine_config(
-        UsageContext.LLM_CLASS)
+    vllm_config: VllmConfig = engine_args.create_engine_config(UsageContext.LLM_CLASS)
 
     from vllm.platforms import current_platform
     device_name = current_platform.get_device_name().lower()
@@ -74,7 +73,6 @@ def test_defaults_with_usage_context():
     assert vllm_config.scheduler_config.max_num_batched_tokens == default_llm_tokens  # noqa: E501
 
     engine_args = EngineArgs(model="facebook/opt-125m")
-    vllm_config = engine_args.create_engine_config(
-        UsageContext.OPENAI_API_SERVER)
+    vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
     assert vllm_config.scheduler_config.max_num_seqs == default_max_num_seqs
     assert vllm_config.scheduler_config.max_num_batched_tokens == default_server_tokens  # noqa: E501

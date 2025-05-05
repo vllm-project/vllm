@@ -20,8 +20,7 @@ def add_seq_group_to_engine(engine: LLMEngine, seq_group: SequenceGroup):
 @pytest.mark.parametrize("enable_chunked_prefill", [False, True])
 @pytest.mark.parametrize("enforce_eager", [False, True])
 def test_num_computed_tokens_update(num_scheduler_steps: int,
-                                    enable_chunked_prefill: bool,
-                                    enforce_eager: bool):
+                                    enable_chunked_prefill: bool, enforce_eager: bool):
 
     is_multi_step = num_scheduler_steps > 1
     is_multi_step_chunked_prefill = is_multi_step and enable_chunked_prefill
@@ -78,5 +77,4 @@ def test_num_computed_tokens_update(num_scheduler_steps: int,
                     decode_step_counter += 1
 
         # Test correctness of num_computed_tokens after the sequence finish.
-        assert seq.data.get_num_computed_tokens(
-        ) == prompt_len + num_output_tokens - 1
+        assert seq.data.get_num_computed_tokens() == prompt_len + num_output_tokens - 1

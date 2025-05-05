@@ -15,20 +15,17 @@ from vllm import LLM, SamplingParams
 from vllm.sampling_params import GuidedDecodingParams
 
 # Guided decoding by Choice (list of possible options)
-guided_decoding_params_choice = GuidedDecodingParams(
-    choice=["Positive", "Negative"])
-sampling_params_choice = SamplingParams(
-    guided_decoding=guided_decoding_params_choice)
+guided_decoding_params_choice = GuidedDecodingParams(choice=["Positive", "Negative"])
+sampling_params_choice = SamplingParams(guided_decoding=guided_decoding_params_choice)
 prompt_choice = "Classify this sentiment: vLLM is wonderful!"
 
 # Guided decoding by Regex
 guided_decoding_params_regex = GuidedDecodingParams(regex=r"\w+@\w+\.com\n")
-sampling_params_regex = SamplingParams(
-    guided_decoding=guided_decoding_params_regex, stop=["\n"])
-prompt_regex = (
-    "Generate an email address for Alan Turing, who works in Enigma."
-    "End in .com and new line. Example result:"
-    "alan.turing@enigma.com\n")
+sampling_params_regex = SamplingParams(guided_decoding=guided_decoding_params_regex,
+                                       stop=["\n"])
+prompt_regex = ("Generate an email address for Alan Turing, who works in Enigma."
+                "End in .com and new line. Example result:"
+                "alan.turing@enigma.com\n")
 
 
 # Guided decoding by JSON using Pydantic schema
@@ -47,8 +44,7 @@ class CarDescription(BaseModel):
 
 json_schema = CarDescription.model_json_schema()
 guided_decoding_params_json = GuidedDecodingParams(json=json_schema)
-sampling_params_json = SamplingParams(
-    guided_decoding=guided_decoding_params_json)
+sampling_params_json = SamplingParams(guided_decoding=guided_decoding_params_json)
 prompt_json = ("Generate a JSON with the brand, model and car_type of"
                "the most iconic car from the 90's")
 
@@ -61,10 +57,8 @@ table ::= "table_1 " | "table_2 "
 condition ::= column "= " number
 number ::= "1 " | "2 "
 """
-guided_decoding_params_grammar = GuidedDecodingParams(
-    grammar=simplified_sql_grammar)
-sampling_params_grammar = SamplingParams(
-    guided_decoding=guided_decoding_params_grammar)
+guided_decoding_params_grammar = GuidedDecodingParams(grammar=simplified_sql_grammar)
+sampling_params_grammar = SamplingParams(guided_decoding=guided_decoding_params_grammar)
 prompt_grammar = ("Generate an SQL query to show the 'username' and 'email'"
                   "from the 'users' table.")
 
@@ -90,8 +84,7 @@ def main():
     json_output = generate_output(prompt_json, sampling_params_json, llm)
     format_output("Guided decoding by JSON", json_output)
 
-    grammar_output = generate_output(prompt_grammar, sampling_params_grammar,
-                                     llm)
+    grammar_output = generate_output(prompt_grammar, sampling_params_grammar, llm)
     format_output("Guided decoding by Grammar", grammar_output)
 
 

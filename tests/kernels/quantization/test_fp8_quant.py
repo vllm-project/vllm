@@ -64,11 +64,7 @@ def test_dynamic_per_token_fp8_quant(num_tokens: int, hidden_size: int,
     torch.testing.assert_close(ref_out.to(dtype=torch.float32),
                                ops_out.to(dtype=torch.float32))
 
-    opcheck_fp8_quant(ops_out,
-                      x,
-                      None,
-                      scale_ub,
-                      use_per_token_if_dynamic=True)
+    opcheck_fp8_quant(ops_out, x, None, scale_ub, use_per_token_if_dynamic=True)
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)

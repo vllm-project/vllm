@@ -104,8 +104,7 @@ class Olmo2Attention(nn.Module):
             self.total_num_kv_heads * self.head_dim,
             eps=self.config.rms_norm_eps,
         )
-        self.q_norm = RMSNorm(self.config.hidden_size,
-                              eps=self.config.rms_norm_eps)
+        self.q_norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
 
         # Rotary embeddings.
         self.rotary_emb = get_rope(
@@ -142,8 +141,7 @@ class Olmo2Attention(nn.Module):
         q = self.q_norm.forward_native(q)
         k = self.k_norm.forward_native(k)
         if self.tp_size > 1:
-            splitter = partial(split_tensor_along_last_dim,
-                               num_partitions=self.tp_size)
+            splitter = partial(split_tensor_along_last_dim, num_partitions=self.tp_size)
             q = splitter(q)[self.tp_rank]
             k = splitter(k)[self.tp_rank]
         return q, k
@@ -265,17 +263,15 @@ class Olmo2Model(nn.Module):
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             self.config.num_hidden_layers,
-            lambda prefix: Olmo2DecoderLayer(vllm_config=vllm_config,
-                                             prefix=prefix),
+            lambda prefix: Olmo2DecoderLayer(vllm_config=vllm_config, prefix=prefix),
             prefix=f"{prefix}.layers",
         )
         self.norm = RMSNorm(
             self.config.hidden_size,
             eps=self.config.rms_norm_eps,
         )
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(["hidden_states"],
-                                                    self.config.hidden_size))
+        self.make_empty_intermediate_tensors = (make_empty_intermediate_tensors_factory(
+            ["hidden_states"], self.config.hidden_size))
 
     def forward(
         self,
@@ -361,8 +357,7 @@ class Olmo2ForCausalLM(nn.Module, SupportsPP):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
         return logits
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
@@ -379,8 +374,7 @@ class Olmo2ForCausalLM(nn.Module, SupportsPP):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
-            if ("rotary_emb.cos_cached" in name
-                    or "rotary_emb.sin_cached" in name):
+            if ("rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
@@ -407,6 +401,5 @@ class Olmo2ForCausalLM(nn.Module, SupportsPP):
                 if name.endswith(".bias") and name not in params_dict:
                     continue
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)

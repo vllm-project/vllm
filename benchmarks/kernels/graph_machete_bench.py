@@ -38,11 +38,7 @@ if __name__ == "__main__":
             raise Exception("MKN not found")
 
         kernel = v.task_spec.description
-        results[KN].append({
-            "kernel": kernel,
-            "batch_size": M,
-            "median": v.median
-        })
+        results[KN].append({"kernel": kernel, "batch_size": M, "median": v.median})
 
     rows = int(math.ceil(len(results) / 2))
     fig, axs = plt.subplots(rows, 2, figsize=(12, 5 * rows))

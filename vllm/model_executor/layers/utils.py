@@ -28,8 +28,7 @@ def get_token_bin_counts_and_mask(
 
 def apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
                     output_tokens_tensor: torch.Tensor,
-                    presence_penalties: torch.Tensor,
-                    frequency_penalties: torch.Tensor,
+                    presence_penalties: torch.Tensor, frequency_penalties: torch.Tensor,
                     repetition_penalties: torch.Tensor) -> torch.Tensor:
     """
     Applies penalties in place to the logits tensor
@@ -45,16 +44,14 @@ def apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
     repetition_penalties: The repetition penalties of shape (num_seqs, )
     """
     num_seqs, vocab_size = logits.shape
-    _, prompt_mask = get_token_bin_counts_and_mask(prompt_tokens_tensor,
-                                                   vocab_size, num_seqs)
+    _, prompt_mask = get_token_bin_counts_and_mask(prompt_tokens_tensor, vocab_size,
+                                                   num_seqs)
     output_bin_counts, output_mask = get_token_bin_counts_and_mask(
         output_tokens_tensor, vocab_size, num_seqs)
-    repetition_penalties = repetition_penalties.unsqueeze(dim=1).repeat(
-        1, vocab_size)
+    repetition_penalties = repetition_penalties.unsqueeze(dim=1).repeat(1, vocab_size)
 
     # If token appears in prompt or output, apply, otherwise use 1.0 for no-op.
-    penalties = torch.where(prompt_mask | output_mask, repetition_penalties,
-                            1.0)
+    penalties = torch.where(prompt_mask | output_mask, repetition_penalties, 1.0)
 
     # If logits are positive, divide by penalty, otherwise multiply by penalty.
     scaling = torch.where(logits > 0, 1.0 / penalties, penalties)

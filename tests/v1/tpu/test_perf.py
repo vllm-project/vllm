@@ -100,9 +100,8 @@ def test_perf(
         prompt = tokenizer.decode(prefix_token_ids)
         prompts.append(prompt)
 
-    print(
-        "-- Running: num_prompts = {} prefix_len = {} decode_len = {}".format(
-            len(prompts), params.prefix_len, params.decode_len))
+    print("-- Running: num_prompts = {} prefix_len = {} decode_len = {}".format(
+        len(prompts), params.prefix_len, params.decode_len))
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
@@ -139,7 +138,6 @@ def test_perf(
             if diff < -params.err_tol:
                 print("  !! WARNING !! Performance has improved by {}, "
                       "it may be necessary to fine-tune the "
-                      "expected_avg_time = {}".format(
-                          -diff, params.expected_avg_time))
+                      "expected_avg_time = {}".format(-diff, params.expected_avg_time))
 
             assert ok, " !! ERROR !! Regression detected"

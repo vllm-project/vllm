@@ -41,11 +41,11 @@ async def test_async_llm_delete(model: str, tensor_parallel_size: int,
     # initialization; then delete instance
     async_llm = AsyncLLM.from_engine_args(engine_args)
     if send_one_request:
-        async for _ in async_llm.generate(
-                "Hello my name is",
-                request_id="abc",
-                sampling_params=SamplingParams(
-                    max_tokens=1, output_kind=RequestOutputKind.DELTA)):
+        async for _ in async_llm.generate("Hello my name is",
+                                          request_id="abc",
+                                          sampling_params=SamplingParams(
+                                              max_tokens=1,
+                                              output_kind=RequestOutputKind.DELTA)):
             pass
     del async_llm
 
@@ -62,8 +62,7 @@ async def test_async_llm_delete(model: str, tensor_parallel_size: int,
 @pytest.mark.parametrize("enable_multiprocessing", [True])
 @pytest.mark.parametrize("send_one_request", [False, True])
 def test_llm_delete(monkeypatch, model: str, tensor_parallel_size: int,
-                    enable_multiprocessing: bool,
-                    send_one_request: bool) -> None:
+                    enable_multiprocessing: bool, send_one_request: bool) -> None:
     """Test that LLM frees GPU memory upon deletion.
     TODO(andy) - LLM without multiprocessing.
 

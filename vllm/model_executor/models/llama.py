@@ -132,8 +132,7 @@ class LlamaAttention(nn.Module):
             head_dim = self.hidden_size // self.total_num_heads
         self.head_dim = head_dim
         # Phi models introduced a partial_rotary_factor parameter in the config
-        self.partial_rotary_factor = getattr(config, "partial_rotary_factor",
-                                             1)
+        self.partial_rotary_factor = getattr(config, "partial_rotary_factor", 1)
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
@@ -227,8 +226,7 @@ class LlamaDecoderLayer(nn.Module):
                 config, "original_max_position_embeddings", None):
             rope_scaling["original_max_position_embeddings"] = (
                 config.original_max_position_embeddings)
-        max_position_embeddings = getattr(config, "max_position_embeddings",
-                                          8192)
+        max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         # Support abacusai/Smaug-72B-v0.1 with attention_bias
         # Support internlm/internlm-7b with bias
         attention_bias = getattr(config, "attention_bias", False) or getattr(
@@ -261,8 +259,7 @@ class LlamaDecoderLayer(nn.Module):
             bias=getattr(config, "mlp_bias", False),
             prefix=f"{prefix}.mlp",
         )
-        self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
 
@@ -277,14 +274,11 @@ class LlamaDecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(
-                hidden_states, residual)
-        hidden_states = self.self_attn(positions=positions,
-                                       hidden_states=hidden_states)
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
 
         # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual)
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
@@ -335,9 +329,8 @@ class LlamaModel(nn.Module):
 
         self.aux_hidden_state_layers: tuple[int] = tuple()
 
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size))
+        self.make_empty_intermediate_tensors = (make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -362,8 +355,7 @@ class LlamaModel(nn.Module):
             residual = intermediate_tensors["residual"]
 
         aux_hidden_states = []
-        for idx, layer in enumerate(
-                self.layers[self.start_layer:self.end_layer]):
+        for idx, layer in enumerate(self.layers[self.start_layer:self.end_layer]):
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states + residual)
             hidden_states, residual = layer(positions, hidden_states, residual)
@@ -380,8 +372,7 @@ class LlamaModel(nn.Module):
             return hidden_states, aux_hidden_states
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -395,19 +386,17 @@ class LlamaModel(nn.Module):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
-            if ("rotary_emb.cos_cached" in name
-                    or "rotary_emb.sin_cached" in name):
+            if ("rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
-            if (self.quant_config is not None and
-                (scale_name := self.quant_config.get_cache_scale(name))):
+            if (self.quant_config is not None
+                    and (scale_name := self.quant_config.get_cache_scale(name))):
                 # Loading kv cache quantization scales
                 param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
-                                 loaded_weight[0])
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                loaded_weight = (loaded_weight
+                                 if loaded_weight.dim() == 0 else loaded_weight[0])
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
@@ -440,8 +429,7 @@ class LlamaModel(nn.Module):
                     continue
 
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
@@ -511,19 +499,16 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                     DEFAULT_VOCAB_PADDING_SIZE
                     # We need bigger padding if using lora for kernel
                     # compatibility
-                    if not lora_config else
-                    lora_config.lora_vocab_padding_size),
+                    if not lora_config else lora_config.lora_vocab_padding_size),
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
             if config.tie_word_embeddings:
-                self.lm_head = self.lm_head.tie_weights(
-                    self.model.embed_tokens)
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
 
             logit_scale = getattr(config, "logit_scale", 1.0)
             self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                    config.vocab_size,
-                                                    logit_scale)
+                                                    config.vocab_size, logit_scale)
         else:
             self.lm_head = PPMissingLayer()
 
@@ -541,9 +526,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                     vllm_config: VllmConfig,
                     prefix: str = "",
                     layer_type: type[nn.Module] = LlamaDecoderLayer):
-        return LlamaModel(vllm_config=vllm_config,
-                          prefix=prefix,
-                          layer_type=layer_type)
+        return LlamaModel(vllm_config=vllm_config, prefix=prefix, layer_type=layer_type)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -564,16 +547,13 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(
             self,
-            skip_prefixes=(["lm_head."]
-                           if self.config.tie_word_embeddings else None),
+            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(
             self.maybe_remap_mistral(name, loaded_weight)
@@ -599,19 +579,16 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
         # rotary embeds should be sliced
         if "wk" in modules and modules[-1] == "weight":
-            loaded_weight = permute(loaded_weight,
-                                    self.config.num_key_value_heads)
+            loaded_weight = permute(loaded_weight, self.config.num_key_value_heads)
         elif "wq" in modules and modules[-1] == "weight":
-            loaded_weight = permute(loaded_weight,
-                                    self.config.num_attention_heads)
+            loaded_weight = permute(loaded_weight, self.config.num_attention_heads)
 
         num_modules = len(modules)
         for i in range(num_modules):
             item = modules[i]
             next_item = modules[i + 1] if i < num_modules - 1 else None
 
-            combined_item = (f"{item}.{next_item}"
-                             if next_item is not None else None)
+            combined_item = (f"{item}.{next_item}" if next_item is not None else None)
 
             if combined_item in mapping:
                 name = name.replace(combined_item, mapping[combined_item])

@@ -13,9 +13,8 @@ from .vllm_inductor_pass import VllmInductorPass
 logger = init_logger(__name__)
 
 
-def silu_mul_pattern_static(result: torch.Tensor,
-                            result_silu_mul: torch.Tensor, input: torch.Tensor,
-                            scale: torch.Tensor):
+def silu_mul_pattern_static(result: torch.Tensor, result_silu_mul: torch.Tensor,
+                            input: torch.Tensor, scale: torch.Tensor):
     at1 = auto_functionalized(torch.ops._C.silu_and_mul.default,
                               result=result_silu_mul,
                               input=input)
@@ -26,8 +25,7 @@ def silu_mul_pattern_static(result: torch.Tensor,
     return at2[1]
 
 
-def silu_mul_replacement_static(result: torch.Tensor,
-                                result_silu_mul: torch.Tensor,
+def silu_mul_replacement_static(result: torch.Tensor, result_silu_mul: torch.Tensor,
                                 input: torch.Tensor, scale: torch.Tensor):
     at = auto_functionalized(torch.ops._C.silu_and_mul_quant.default,
                              result=result,
@@ -71,17 +69,15 @@ class ActivationQuantFusionPass(VllmInductorPass):
             empty_bf16(5, 4),  # Input
             empty_fp32(1, 1)  # Scale
         ]
-        register_replacement(silu_mul_pattern_static,
-                             silu_mul_replacement_static, inputs, fwd_only,
-                             self.patterns)
+        register_replacement(silu_mul_pattern_static, silu_mul_replacement_static,
+                             inputs, fwd_only, self.patterns)
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
         self.dump_graph(graph, "before_act_quant_fusion")
 
         count = self.patterns.apply(graph)
-        logger.debug("Replaced %s patterns in ActivationQuantFusionPass",
-                     count)
+        logger.debug("Replaced %s patterns in ActivationQuantFusionPass", count)
 
         self.dump_graph(graph, "after_act_quant_fusion")
         self.end_and_log()

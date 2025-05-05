@@ -32,10 +32,9 @@ class DeepSpeedFPConfig(QuantizationConfig):
         self.valid_types = [torch.bfloat16, torch.float16]
 
         if self.weight_bits not in (6, 8):
-            raise ValueError(
-                "Currently, only 6-bit or 8-bit weight quantization are "
-                f"supported for DeepSpeed FP quantizaiton, but got "
-                f"{self.weight_bits} bits.")
+            raise ValueError("Currently, only 6-bit or 8-bit weight quantization are "
+                             f"supported for DeepSpeed FP quantizaiton, but got "
+                             f"{self.weight_bits} bits.")
 
     def __repr__(self) -> str:
         return (f"DeepSpeedFPConfig(weight_bits={self.weight_bits}), "
@@ -178,8 +177,9 @@ class DeepSpeedFPParameter(nn.Parameter):
         Return a tensor containing the dequantized weights of this parameter.
         """
         assert self.data.device.type == "cuda" and self.data.dtype == torch.int8
-        return self.fp_quantizer.dequantize(
-            self.data, fp_out=fp_out, q_bits=self.quant_config.weight_bits)
+        return self.fp_quantizer.dequantize(self.data,
+                                            fp_out=fp_out,
+                                            q_bits=self.quant_config.weight_bits)
 
     def ds_selective_dequantize(self, indices, fp_out=None) -> torch.Tensor:
         """
@@ -188,7 +188,4 @@ class DeepSpeedFPParameter(nn.Parameter):
         """
         assert self.data.device.type == "cuda" and self.data.dtype == torch.int8
         return self.fp_quantizer.selective_dequantize(
-            self.data,
-            indices,
-            fp_out=fp_out,
-            q_bits=self.quant_config.weight_bits)
+            self.data, indices, fp_out=fp_out, q_bits=self.quant_config.weight_bits)

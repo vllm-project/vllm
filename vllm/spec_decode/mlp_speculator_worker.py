@@ -42,9 +42,10 @@ class MLPSpeculatorWorker(NonLLMProposerWorkerBase, MultiStepWorker):
 
         generators = self.model_runner.get_generators(
             execute_model_req.finished_requests_ids)
-        sampling_metadata = SamplingMetadata.prepare(
-            seq_group_metadata_list, seq_lens, query_lens, self.device,
-            self.model_runner.pin_memory, generators)
+        sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list, seq_lens,
+                                                     query_lens, self.device,
+                                                     self.model_runner.pin_memory,
+                                                     generators)
 
         model_outputs = self.model_runner.model.generate_proposals(
             input_ids=input_tokens,
@@ -75,9 +76,8 @@ class MLPSpeculatorWorker(NonLLMProposerWorkerBase, MultiStepWorker):
                 seq_data_len = seq_data.get_len()
                 if is_prompt:
                     context_len = seq_data.get_num_computed_tokens()
-                    seq_len = min(
-                        seq_data_len,
-                        context_len + seq_group_metadata.token_chunk_size)
+                    seq_len = min(seq_data_len,
+                                  context_len + seq_group_metadata.token_chunk_size)
                     tokens = seq_data.get_token_ids()[context_len:seq_len]
                     seq_lens.append(seq_len)
                     input_tokens.extend(tokens)

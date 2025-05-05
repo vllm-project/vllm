@@ -67,8 +67,7 @@ def prepare_fp8_layer_for_marlin(layer: torch.nn.Module,
 
     # WEIGHT
     # Repack weights to marlin format
-    marlin_qweight = ops.gptq_marlin_repack(b_q_weight=pack_fp8_to_int32(
-        layer.weight),
+    marlin_qweight = ops.gptq_marlin_repack(b_q_weight=pack_fp8_to_int32(layer.weight),
                                             perm=torch.empty(0,
                                                              dtype=torch.int,
                                                              device=device),
@@ -106,5 +105,4 @@ def pack_fp8_to_int32(fp8_tensor: torch.Tensor) -> torch.Tensor:
               (byte_tensor[:, 2].to(torch.int32) << 16) |
               (byte_tensor[:, 3].to(torch.int32) << 24))
 
-    return packed.view(fp8_tensor.shape[0] // 4,
-                       *fp8_tensor.shape[1:]).contiguous()
+    return packed.view(fp8_tensor.shape[0] // 4, *fp8_tensor.shape[1:]).contiguous()

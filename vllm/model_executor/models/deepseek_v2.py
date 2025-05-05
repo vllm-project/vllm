@@ -69,11 +69,11 @@ class DeepseekV2MLP(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size, [intermediate_size] * 2,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.gate_up_proj")
+        self.gate_up_proj = MergedColumnParallelLinear(hidden_size,
+                                                       [intermediate_size] * 2,
+                                                       bias=False,
+                                                       quant_config=quant_config,
+                                                       prefix=f"{prefix}.gate_up_proj")
         self.down_proj = RowParallelLinear(intermediate_size,
                                            hidden_size,
                                            bias=False,
@@ -136,8 +136,7 @@ class DeepseekV2MoE(nn.Module):
             e_score_correction_bias=self.gate.e_score_correction_bias)
 
         if config.n_shared_experts is not None:
-            intermediate_size = (config.moe_intermediate_size *
-                                 config.n_shared_experts)
+            intermediate_size = (config.moe_intermediate_size * config.n_shared_experts)
             self.shared_experts = DeepseekV2MLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=intermediate_size,
@@ -172,8 +171,7 @@ class DeepseekV2MoE(nn.Module):
                 final_hidden_states = final_hidden_states + shared_output \
                     * (1. / self.routed_scaling_factor)
         if self.tp_size > 1:
-            final_hidden_states = tensor_model_parallel_all_reduce(
-                final_hidden_states)
+            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 
@@ -226,18 +224,15 @@ class DeepseekV2Attention(nn.Module):
                                              bias=False,
                                              quant_config=quant_config,
                                              prefix=f"{prefix}.q_a_proj")
-            self.q_a_layernorm = RMSNorm(self.q_lora_rank,
-                                         eps=config.rms_norm_eps)
+            self.q_a_layernorm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
             self.q_b_proj = ColumnParallelLinear(q_lora_rank,
-                                                 self.num_heads *
-                                                 self.qk_head_dim,
+                                                 self.num_heads * self.qk_head_dim,
                                                  bias=False,
                                                  quant_config=quant_config,
                                                  prefix=f"{prefix}.q_b_proj")
         else:
             self.q_proj = ColumnParallelLinear(self.hidden_size,
-                                               self.num_heads *
-                                               self.qk_head_dim,
+                                               self.num_heads * self.qk_head_dim,
                                                bias=False,
                                                quant_config=quant_config,
                                                prefix=f"{prefix}.q_proj")
@@ -248,14 +243,13 @@ class DeepseekV2Attention(nn.Module):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.kv_a_proj_with_mqa")
-        self.kv_a_layernorm = RMSNorm(self.kv_lora_rank,
-                                      eps=config.rms_norm_eps)
-        self.kv_b_proj = ColumnParallelLinear(
-            self.kv_lora_rank,
-            self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.kv_b_proj")
+        self.kv_a_layernorm = RMSNorm(self.kv_lora_rank, eps=config.rms_norm_eps)
+        self.kv_b_proj = ColumnParallelLinear(self.kv_lora_rank,
+                                              self.num_heads *
+                                              (self.qk_nope_head_dim + self.v_head_dim),
+                                              bias=False,
+                                              quant_config=quant_config,
+                                              prefix=f"{prefix}.kv_b_proj")
         # O projection.
         self.o_proj = RowParallelLinear(self.num_heads * self.v_head_dim,
                                         self.hidden_size,
@@ -294,21 +288,17 @@ class DeepseekV2Attention(nn.Module):
         if self.q_lora_rank is not None:
             q = self.q_a_proj(hidden_states)[0]
             q = self.q_a_layernorm(q)
-            q = self.q_b_proj(q)[0].view(-1, self.num_local_heads,
-                                         self.qk_head_dim)
+            q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim)
         else:
             q = self.q_proj(hidden_states)[0].view(-1, self.num_local_heads,
                                                    self.qk_head_dim)
-        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim],
-                               dim=-1)
+        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
-        kv_a, _ = latent_cache.split(
-            [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        kv_a, _ = latent_cache.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         latent_cache = latent_cache.unsqueeze(1)
         kv_a = self.kv_a_layernorm(kv_a.contiguous())
         kv = self.kv_b_proj(kv_a)[0]
-        kv = kv.view(-1, self.num_local_heads,
-                     self.qk_nope_head_dim + self.v_head_dim)
+        kv = kv.view(-1, self.num_local_heads, self.qk_nope_head_dim + self.v_head_dim)
         k_nope, v = kv.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         k_pe = latent_cache[:, :, self.kv_lora_rank:]
 
@@ -319,14 +309,13 @@ class DeepseekV2Attention(nn.Module):
         k[..., :self.qk_nope_head_dim] = k_nope
         k[..., self.qk_nope_head_dim:] = k_pe
         # padding value to qk_head_dim for alignment
-        v = torch.nn.functional.pad(
-            v, [0, self.qk_head_dim - self.v_head_dim],
-            value=0).view(-1, self.num_local_heads * self.qk_head_dim)
+        v = torch.nn.functional.pad(v, [0, self.qk_head_dim - self.v_head_dim],
+                                    value=0).view(
+                                        -1, self.num_local_heads * self.qk_head_dim)
         attn_output = self.attn(q, k, v)
-        attn_output = attn_output.view(
-            -1, self.num_local_heads,
-            self.qk_head_dim)[..., :self.v_head_dim].reshape(
-                -1, self.num_local_heads * self.v_head_dim)
+        attn_output = attn_output.view(-1, self.num_local_heads,
+                                       self.qk_head_dim)[..., :self.v_head_dim].reshape(
+                                           -1, self.num_local_heads * self.v_head_dim)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -381,18 +370,15 @@ class DeepseekV2MLAAttention(nn.Module):
                                              bias=False,
                                              quant_config=quant_config,
                                              prefix=f"{prefix}.q_a_proj")
-            self.q_a_layernorm = RMSNorm(self.q_lora_rank,
-                                         eps=config.rms_norm_eps)
+            self.q_a_layernorm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
             self.q_b_proj = ColumnParallelLinear(q_lora_rank,
-                                                 self.num_heads *
-                                                 self.qk_head_dim,
+                                                 self.num_heads * self.qk_head_dim,
                                                  bias=False,
                                                  quant_config=quant_config,
                                                  prefix=f"{prefix}.q_b_proj")
         else:
             self.q_proj = ColumnParallelLinear(self.hidden_size,
-                                               self.num_heads *
-                                               self.qk_head_dim,
+                                               self.num_heads * self.qk_head_dim,
                                                bias=False,
                                                quant_config=quant_config,
                                                prefix=f"{prefix}.q_proj")
@@ -403,14 +389,13 @@ class DeepseekV2MLAAttention(nn.Module):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.kv_a_proj_with_mqa")
-        self.kv_a_layernorm = RMSNorm(self.kv_lora_rank,
-                                      eps=config.rms_norm_eps)
-        self.kv_b_proj = ColumnParallelLinear(
-            self.kv_lora_rank,
-            self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.kv_b_proj")
+        self.kv_a_layernorm = RMSNorm(self.kv_lora_rank, eps=config.rms_norm_eps)
+        self.kv_b_proj = ColumnParallelLinear(self.kv_lora_rank,
+                                              self.num_heads *
+                                              (self.qk_nope_head_dim + self.v_head_dim),
+                                              bias=False,
+                                              quant_config=quant_config,
+                                              prefix=f"{prefix}.kv_b_proj")
         self.o_proj = RowParallelLinear(self.num_heads * self.v_head_dim,
                                         self.hidden_size,
                                         bias=False,
@@ -475,12 +460,11 @@ class DeepseekV2MLAAttention(nn.Module):
             [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
 
-        attn_out = self.mla_attn(
-            q,
-            kv_c_normed,
-            k_pe,
-            output_shape=(hidden_states.shape[0],
-                          self.num_local_heads * self.v_head_dim))
+        attn_out = self.mla_attn(q,
+                                 kv_c_normed,
+                                 k_pe,
+                                 output_shape=(hidden_states.shape[0],
+                                               self.num_local_heads * self.v_head_dim))
         return self.o_proj(attn_out)[0]
 
 
@@ -498,8 +482,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
-        max_position_embeddings = getattr(config, "max_position_embeddings",
-                                          8192)
+        max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         # DecoderLayers are created with `make_layers` which passes the prefix
         # with the layer's index.
         layer_idx = int(prefix.split(sep='.')[-1])
@@ -515,8 +498,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             qk_nope_head_dim=config.qk_nope_head_dim,
             qk_rope_head_dim=config.qk_rope_head_dim,
             v_head_dim=config.v_head_dim,
-            q_lora_rank=config.q_lora_rank
-            if hasattr(config, "q_lora_rank") else None,
+            q_lora_rank=config.q_lora_rank if hasattr(config, "q_lora_rank") else None,
             kv_lora_rank=config.kv_lora_rank,
             rope_theta=rope_theta,
             rope_scaling=rope_scaling,
@@ -542,8 +524,7 @@ class DeepseekV2DecoderLayer(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
             )
-        self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
         self.routed_scaling_factor = config.routed_scaling_factor
@@ -559,8 +540,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(
-                hidden_states, residual)
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
@@ -577,12 +557,10 @@ class DeepseekV2DecoderLayer(nn.Module):
                 residual *= 1. / self.routed_scaling_factor
 
         # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual)
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
 
-        if isinstance(self.mlp,
-                      DeepseekV2MLP) and hidden_states.dtype == torch.float16:
+        if isinstance(self.mlp, DeepseekV2MLP) and hidden_states.dtype == torch.float16:
             # Fix FP16 overflow
             # Scaling the DeepseekV2MLP output, it is the input of
             # input_layernorm of next decoder layer.
@@ -610,11 +588,10 @@ class DeepseekV2Model(nn.Module):
         self.vocab_size = config.vocab_size
 
         if get_pp_group().is_first_rank:
-            self.embed_tokens = VocabParallelEmbedding(
-                config.vocab_size,
-                config.hidden_size,
-                quant_config=quant_config,
-                prefix=f"{prefix}.embed_tokens")
+            self.embed_tokens = VocabParallelEmbedding(config.vocab_size,
+                                                       config.hidden_size,
+                                                       quant_config=quant_config,
+                                                       prefix=f"{prefix}.embed_tokens")
         else:
             self.embed_tokens = PPMissingLayer()
 
@@ -633,9 +610,8 @@ class DeepseekV2Model(nn.Module):
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size))
+        self.make_empty_intermediate_tensors = (make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -710,13 +686,11 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
         return logits
 
-    def make_empty_intermediate_tensors(
-            self, batch_size: int, dtype: torch.dtype,
-            device: torch.device) -> IntermediateTensors:
+    def make_empty_intermediate_tensors(self, batch_size: int, dtype: torch.dtype,
+                                        device: torch.device) -> IntermediateTensors:
         return IntermediateTensors({
             "hidden_states":
             torch.zeros((batch_size, self.config.hidden_size),
@@ -728,8 +702,7 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
                         device=device),
         })
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "gate_proj", 0),
@@ -823,9 +796,8 @@ class DeepseekV3ForCausalLM(DeepseekV2ForCausalLM):
 
 def get_spec_layer_idx_from_weight_name(config: PretrainedConfig,
                                         weight_name: str) -> Optional[int]:
-    if hasattr(config,
-               "num_nextn_predict_layers") and (config.num_nextn_predict_layers
-                                                > 0):
+    if hasattr(config, "num_nextn_predict_layers") and (config.num_nextn_predict_layers
+                                                        > 0):
         layer_idx = config.num_hidden_layers
         for i in range(config.num_nextn_predict_layers):
             if weight_name.startswith(f"model.layers.{layer_idx+i}."):

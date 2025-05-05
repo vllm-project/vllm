@@ -84,10 +84,9 @@ class TestModel(torch.nn.Module):
 @pytest.mark.parametrize("seq_len", [16])
 @pytest.mark.parametrize("hidden_size", [16])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"],
-                    reason="Only test on CUDA")
-def test_sequence_parallelism_pass(batch_size: int, seq_len: int,
-                                   hidden_size: int, dtype: torch.dtype):
+@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
+def test_sequence_parallelism_pass(batch_size: int, seq_len: int, hidden_size: int,
+                                   dtype: torch.dtype):
     num_processes = 2
 
     def run_torch_spawn(fn, nprocs):
@@ -103,8 +102,7 @@ def test_sequence_parallelism_pass(batch_size: int, seq_len: int,
 
 def sequence_parallelism_pass_on_test_model(local_rank: int, world_size: int,
                                             batch_size: int, seq_len: int,
-                                            hidden_size: int,
-                                            dtype: torch.dtype):
+                                            hidden_size: int, dtype: torch.dtype):
     current_platform.seed_everything(0)
 
     device = torch.device(f"cuda:{local_rank}")
@@ -127,8 +125,7 @@ def sequence_parallelism_pass_on_test_model(local_rank: int, world_size: int,
     # configure vllm config for SequenceParallelismPass
     vllm_config = VllmConfig()
     vllm_config.compilation_config = CompilationConfig(
-        pass_config=CompilationConfig.PassConfig(
-            enable_sequence_parallelism=True, ), )
+        pass_config=CompilationConfig.PassConfig(enable_sequence_parallelism=True, ), )
     vllm_config.device_config = DeviceConfig(device=torch.device("cuda"))
 
     # this is a fake model name to construct the model config
@@ -148,8 +145,7 @@ def sequence_parallelism_pass_on_test_model(local_rank: int, world_size: int,
     backend_func = TestBackend(sequence_parallelism_pass, func_pass)
 
     model = TestModel(hidden_size, hidden_size * 2)
-    hidden_states = torch.randn((batch_size * seq_len, hidden_size),
-                                dtype=dtype)
+    hidden_states = torch.randn((batch_size * seq_len, hidden_size), dtype=dtype)
     residual = torch.randn((batch_size * seq_len, hidden_size), dtype=dtype)
 
     compiled_model_no_func = torch.compile(model, backend=backend_no_func)

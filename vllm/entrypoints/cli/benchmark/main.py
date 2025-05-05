@@ -30,15 +30,12 @@ class BenchmarkSubcommand(CLISubcommand):
             self.cmds[args.bench_type].validate(args)
 
     def subparser_init(
-            self,
-            subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
-        bench_parser = subparsers.add_parser(
-            "bench",
-            help="vLLM bench subcommand.",
-            description="vLLM bench subcommand.",
-            usage="vllm bench <bench_type> [options]")
-        bench_subparsers = bench_parser.add_subparsers(required=True,
-                                                       dest="bench_type")
+            self, subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
+        bench_parser = subparsers.add_parser("bench",
+                                             help="vLLM bench subcommand.",
+                                             description="vLLM bench subcommand.",
+                                             usage="vllm bench <bench_type> [options]")
+        bench_subparsers = bench_parser.add_subparsers(required=True, dest="bench_type")
         self.cmds = {}
         for cmd_module in BENCHMARK_CMD_MODULES:
             new_cmds = cmd_module.cmd_init()

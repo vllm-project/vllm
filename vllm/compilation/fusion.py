@@ -59,8 +59,7 @@ kFp8DynamicTokenSym = QuantKey(FP8_DTYPE, False, False, True)
 
 QUANT_OPS: Dict[QuantKey, OpOverload] = {
     kFp8StaticTensorSym: torch.ops._C.static_scaled_fp8_quant.default,  # noqa
-    kFp8DynamicTensorSym:
-    torch.ops._C.dynamic_scaled_fp8_quant.default,  # noqa
+    kFp8DynamicTensorSym: torch.ops._C.dynamic_scaled_fp8_quant.default,  # noqa
     kFp8DynamicTokenSym:
     torch.ops._C.dynamic_per_token_scaled_fp8_quant.default,  # noqa
 }
@@ -101,8 +100,7 @@ class QuantMultiOutputMatch(MultiOutputMatch):
         self.QUANT_OP = quant_op  # in-place quant op
         self.FUSED_OP = fused_op  # in-place fused quant op
 
-    def insert_fused_node(self, fused_return_mapping: Dict[int, Tuple[fx.Node,
-                                                                      int]],
+    def insert_fused_node(self, fused_return_mapping: Dict[int, Tuple[fx.Node, int]],
                           **kwargs):
         """
         This utility function inserts an auto-functionalized node for FUSED_OP.
@@ -171,10 +169,7 @@ class RMSNormQuantPattern:
 
 class RMSNormStaticQuantPattern(RMSNormQuantPattern):
 
-    def __init__(self,
-                 epsilon: float,
-                 quant_dtype: torch.dtype,
-                 symmetric=True):
+    def __init__(self, epsilon: float, quant_dtype: torch.dtype, symmetric=True):
         fused_key = FusedRMSQuantKey(fused_add=False,
                                      quant=QuantKey(dtype=quant_dtype,
                                                     static=True,
@@ -184,9 +179,8 @@ class RMSNormStaticQuantPattern(RMSNormQuantPattern):
 
     def register(self, pm_pass: PatternMatcherPass):
         # Cannot use methods, as the self argument affects tracing
-        def pattern(result: torch.Tensor, result_rms: torch.Tensor,
-                    input: torch.Tensor, weight: torch.Tensor,
-                    scale: torch.Tensor):
+        def pattern(result: torch.Tensor, result_rms: torch.Tensor, input: torch.Tensor,
+                    weight: torch.Tensor, scale: torch.Tensor):
             at1 = auto_functionalized(RMS_OP,
                                       result=result_rms,
                                       input=input,
@@ -201,8 +195,7 @@ class RMSNormStaticQuantPattern(RMSNormQuantPattern):
             return at2[1]
 
         def replacement(result: torch.Tensor, result_rms: torch.Tensor,
-                        input: torch.Tensor, weight: torch.Tensor,
-                        scale: torch.Tensor):
+                        input: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor):
             at = auto_functionalized(self.FUSED_OP,
                                      result=result,
                                      input=input,
@@ -221,16 +214,12 @@ class RMSNormStaticQuantPattern(RMSNormQuantPattern):
             empty_fp32(1, 1)  # scale
         ]
 
-        pm.register_replacement(pattern, replacement, inputs, pm.fwd_only,
-                                pm_pass)
+        pm.register_replacement(pattern, replacement, inputs, pm.fwd_only, pm_pass)
 
 
 class FusedAddRMSNormStaticQuantPattern(RMSNormQuantPattern):
 
-    def __init__(self,
-                 epsilon: float,
-                 quant_dtype: torch.dtype,
-                 symmetric=True):
+    def __init__(self, epsilon: float, quant_dtype: torch.dtype, symmetric=True):
         key = FusedRMSQuantKey(fused_add=True,
                                quant=QuantKey(dtype=quant_dtype,
                                               static=True,
@@ -241,9 +230,8 @@ class FusedAddRMSNormStaticQuantPattern(RMSNormQuantPattern):
     def register(self, pm_pass: PatternMatcherPass,
                  record_match: Callable[[MultiOutputMatch], bool]):
 
-        def pattern(result: torch.Tensor, input: torch.Tensor,
-                    residual: torch.Tensor, weight: torch.Tensor,
-                    scale: torch.Tensor):
+        def pattern(result: torch.Tensor, input: torch.Tensor, residual: torch.Tensor,
+                    weight: torch.Tensor, scale: torch.Tensor):
             at = auto_functionalized(RMS_ADD_OP,
                                      input=input,
                                      residual=residual,
@@ -279,14 +267,13 @@ class FusedAddRMSNormStaticQuantPattern(RMSNormQuantPattern):
             empty_fp32(1, 1)  # scale
         ]
 
-        pm.register_replacement(
-            pattern,
-            replacement,
-            inputs,
-            pm.fwd_only,
-            pm_pass,
-            extra_check=lambda m: record_match(
-                self.Match(m, self.QUANT_OP, self.FUSED_OP)))
+        pm.register_replacement(pattern,
+                                replacement,
+                                inputs,
+                                pm.fwd_only,
+                                pm_pass,
+                                extra_check=lambda m: record_match(
+                                    self.Match(m, self.QUANT_OP, self.FUSED_OP)))
 
     class Match(QuantMultiOutputMatch):
 
@@ -334,9 +321,8 @@ class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
     def register(self, pm_pass: PatternMatcherPass,
                  record_match: Callable[[MultiOutputMatch], bool]):
 
-        def pattern(result: torch.Tensor, result_rms: torch.Tensor,
-                    input: torch.Tensor, weight: torch.Tensor,
-                    scale: torch.Tensor):
+        def pattern(result: torch.Tensor, result_rms: torch.Tensor, input: torch.Tensor,
+                    weight: torch.Tensor, scale: torch.Tensor):
             at1 = auto_functionalized(RMS_OP,
                                       result=result_rms,
                                       input=input,
@@ -352,8 +338,7 @@ class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
             return at2[1], at2[2]
 
         def replacement(result: torch.Tensor, result_rms: torch.Tensor,
-                        input: torch.Tensor, weight: torch.Tensor,
-                        scale: torch.Tensor):
+                        input: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor):
             at = auto_functionalized(self.FUSED_OP,
                                      result=result,
                                      input=input,
@@ -374,14 +359,13 @@ class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
             empty_fp32(1, 1)  # scale
         ]
 
-        pm.register_replacement(
-            pattern,
-            replacement,
-            inputs,
-            pm.fwd_only,
-            pm_pass,
-            extra_check=lambda m: record_match(
-                self.Match(m, self.QUANT_OP, self.FUSED_OP)))
+        pm.register_replacement(pattern,
+                                replacement,
+                                inputs,
+                                pm.fwd_only,
+                                pm_pass,
+                                extra_check=lambda m: record_match(
+                                    self.Match(m, self.QUANT_OP, self.FUSED_OP)))
 
     class Match(QuantMultiOutputMatch):
 
@@ -432,9 +416,8 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
     def register(self, pm_pass: PatternMatcherPass,
                  record_match: Callable[[MultiOutputMatch], bool]):
 
-        def pattern(result: torch.Tensor, input: torch.Tensor,
-                    residual: torch.Tensor, weight: torch.Tensor,
-                    scale: torch.Tensor):
+        def pattern(result: torch.Tensor, input: torch.Tensor, residual: torch.Tensor,
+                    weight: torch.Tensor, scale: torch.Tensor):
             at = auto_functionalized(RMS_ADD_OP,
                                      input=input,
                                      residual=residual,
@@ -472,14 +455,13 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
             empty_fp32(1, 1)  # scale
         ]
 
-        pm.register_replacement(
-            pattern,
-            replacement,
-            inputs,
-            pm.fwd_only,
-            pm_pass,
-            extra_check=lambda m: record_match(
-                self.Match(m, self.QUANT_OP, self.FUSED_OP)))
+        pm.register_replacement(pattern,
+                                replacement,
+                                inputs,
+                                pm.fwd_only,
+                                pm_pass,
+                                extra_check=lambda m: record_match(
+                                    self.Match(m, self.QUANT_OP, self.FUSED_OP)))
 
     class Match(QuantMultiOutputMatch):
 
@@ -549,13 +531,11 @@ class FusionPass(VllmInductorPass):
         super().__init__(config)
 
         self.matches: List[MultiOutputMatch] = []
-        self.patterns: PatternMatcherPass = PatternMatcherPass(
-            pass_name="fusion_pass")
+        self.patterns: PatternMatcherPass = PatternMatcherPass(pass_name="fusion_pass")
 
         for epsilon in [1e-5, 1e-6]:
             # Fuse rms_norm + static fp8 quant
-            RMSNormStaticQuantPattern(epsilon,
-                                      FP8_DTYPE).register(self.patterns)
+            RMSNormStaticQuantPattern(epsilon, FP8_DTYPE).register(self.patterns)
 
             # Matches for patterns below have 2 or more outputs,
             # so we need to process them manually (see process_matches)
@@ -565,16 +545,13 @@ class FusionPass(VllmInductorPass):
                 self.patterns, self.record_match)
 
             # Fuse rms_norm + dynamic per-token fp8 quant
-            RMSNormDynamicQuantPattern(epsilon, FP8_DTYPE,
-                                       per_tensor=False).register(
-                                           self.patterns, self.record_match)
+            RMSNormDynamicQuantPattern(epsilon, FP8_DTYPE, per_tensor=False).register(
+                self.patterns, self.record_match)
 
             # Fuse fused_add_rms_norm + dynamic per-token fp8 quant
-            FusedAddRMSNormDynamicQuantPattern(epsilon,
-                                               FP8_DTYPE,
+            FusedAddRMSNormDynamicQuantPattern(epsilon, FP8_DTYPE,
                                                per_tensor=False).register(
-                                                   self.patterns,
-                                                   self.record_match)
+                                                   self.patterns, self.record_match)
 
             # WARNING: This is a hack to clear the pattern matcher cache
             # and allow multiple values of epsilon.

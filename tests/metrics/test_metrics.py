@@ -44,9 +44,7 @@ def test_metric_counter_prompt_tokens(
                      disable_log_stats=False,
                      gpu_memory_utilization=0.4) as vllm_model:
         tokenizer = vllm_model.model.get_tokenizer()
-        prompt_token_counts = [
-            len(tokenizer.encode(p)) for p in example_prompts
-        ]
+        prompt_token_counts = [len(tokenizer.encode(p)) for p in example_prompts]
         # This test needs at least 2 prompts in a batch of different lengths to
         # verify their token count is correct despite padding.
         assert len(example_prompts) > 1, "at least 2 prompts are required"
@@ -196,8 +194,7 @@ async def test_async_engine_log_metrics_regression(
         async for _ in results:
             pass
 
-    assert_metrics(model, async_engine.engine, disable_log_stats,
-                   len(example_prompts))
+    assert_metrics(model, async_engine.engine, disable_log_stats, len(example_prompts))
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -266,8 +263,7 @@ def test_metric_spec_decode(
             "gauge_spec_decode_efficiency": lambda v: 0 <= v <= 1,
             "counter_spec_decode_num_accepted_tokens": lambda v: 0 <= v <= k,
             "counter_spec_decode_num_draft_tokens": lambda v: v == k,
-            "counter_spec_decode_num_emitted_tokens":
-            lambda v: 0 <= v <= k + 1,
+            "counter_spec_decode_num_emitted_tokens": lambda v: 0 <= v <= k + 1,
         }
 
         # Use one request to better inspect the metrics.
@@ -275,9 +271,8 @@ def test_metric_spec_decode(
 
         _ = vllm_model.generate_greedy(prompts, max_tokens)
         for metric_name, is_expected in metric_name_to_expected_fn.items():
-            metric_val = getattr(
-                stat_logger.metrics,
-                metric_name).labels(**stat_logger.labels)._value.get()
+            metric_val = getattr(stat_logger.metrics,
+                                 metric_name).labels(**stat_logger.labels)._value.get()
             assert is_expected(metric_val), (
                 f"the value of metric {metric_name} ({metric_val}) "
                 "does not meet expectation")
@@ -357,14 +352,12 @@ def test_metric_spec_decode_interval(
             "gauge_spec_decode_efficiency": lambda v: 0 <= v <= 1,
             "counter_spec_decode_num_accepted_tokens": lambda v: 0 <= v <= k,
             "counter_spec_decode_num_draft_tokens": lambda v: v == k,
-            "counter_spec_decode_num_emitted_tokens":
-            lambda v: 0 <= v <= k + 1,
+            "counter_spec_decode_num_emitted_tokens": lambda v: 0 <= v <= k + 1,
         }
 
         for metric_name, is_expected in metric_name_to_expected_fn.items():
-            metric_val = getattr(
-                stat_logger.metrics,
-                metric_name).labels(**stat_logger.labels)._value.get()
+            metric_val = getattr(stat_logger.metrics,
+                                 metric_name).labels(**stat_logger.labels)._value.get()
             assert is_expected(metric_val), (
                 f"the value of metric {metric_name} ({metric_val}) "
                 "does not meet expectation")
@@ -380,8 +373,7 @@ def assert_metrics(model: str, engine: LLMEngine, disable_log_stats: bool,
         with pytest.raises(AttributeError):
             _ = engine.stat_loggers
     else:
-        assert (engine.stat_loggers
-                is not None), "engine.stat_loggers should be set"
+        assert (engine.stat_loggers is not None), "engine.stat_loggers should be set"
         # Ensure the count bucket of request-level histogram metrics matches
         # the number of requests as a simple sanity check to ensure metrics are
         # generated
@@ -394,10 +386,8 @@ def assert_metrics(model: str, engine: LLMEngine, disable_log_stats: bool,
             "vllm:request_params_max_tokens",
         ]
         for metric_name in request_histogram_metrics:
-            metric_value = REGISTRY.get_sample_value(f"{metric_name}_count",
-                                                     labels)
-            assert (
-                metric_value == num_requests), "Metrics should be collected"
+            metric_value = REGISTRY.get_sample_value(f"{metric_name}_count", labels)
+            assert (metric_value == num_requests), "Metrics should be collected"
 
 
 @pytest.mark.parametrize("model", MODELS)

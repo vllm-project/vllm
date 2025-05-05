@@ -119,9 +119,8 @@ class CustomChatCompletionContentSimpleVideoParam(TypedDict, total=False):
 
 ChatCompletionContentPartParam: TypeAlias = Union[
     OpenAIChatCompletionContentPartParam, ChatCompletionContentPartAudioParam,
-    ChatCompletionContentPartInputAudioParam,
-    ChatCompletionContentPartVideoParam, ChatCompletionContentPartRefusalParam,
-    CustomChatCompletionContentSimpleImageParam,
+    ChatCompletionContentPartInputAudioParam, ChatCompletionContentPartVideoParam,
+    ChatCompletionContentPartRefusalParam, CustomChatCompletionContentSimpleImageParam,
     ChatCompletionContentPartImageEmbedsParam,
     CustomChatCompletionContentSimpleAudioParam,
     CustomChatCompletionContentSimpleVideoParam, str]
@@ -188,8 +187,7 @@ def _is_var_access(node: jinja2.nodes.Node, varname: str) -> bool:
 def _is_attr_access(node: jinja2.nodes.Node, varname: str, key: str) -> bool:
     if isinstance(node, jinja2.nodes.Getitem):
         return (_is_var_access(node.node, varname)
-                and isinstance(node.arg, jinja2.nodes.Const)
-                and node.arg.value == key)
+                and isinstance(node.arg, jinja2.nodes.Const) and node.arg.value == key)
 
     if isinstance(node, jinja2.nodes.Getattr):
         return _is_var_access(node.node, varname) and node.attr == key

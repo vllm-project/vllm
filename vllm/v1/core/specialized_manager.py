@@ -35,8 +35,8 @@ class SpecializedManager(ABC):
         self.use_eagle = use_eagle
 
     @abstractmethod
-    def find_longest_cache_hit(
-            self, block_hashes: list[BlockHashType]) -> list[KVCacheBlock]:
+    def find_longest_cache_hit(self,
+                               block_hashes: list[BlockHashType]) -> list[KVCacheBlock]:
         """
         Get the longest cache hit prefix of the blocks. If no cache hit is 
         found, return an empty list. if eagle is enabled, drop the last matched 
@@ -74,8 +74,8 @@ class SpecializedManager(ABC):
 
 class FullAttentionManager(SpecializedManager):
 
-    def find_longest_cache_hit(
-            self, block_hashes: list[BlockHashType]) -> list[KVCacheBlock]:
+    def find_longest_cache_hit(self,
+                               block_hashes: list[BlockHashType]) -> list[KVCacheBlock]:
         computed_blocks: list[KVCacheBlock] = []
         for block_hash in block_hashes:
             # block_hashes is a chain of block hashes. If a block hash is not
@@ -103,8 +103,8 @@ class SlidingWindowManager(SpecializedManager):
         self.sliding_window = kv_cache_spec.sliding_window
         # The number of contiguous blocks needed for prefix cache hit.
         # -1 since the input token itself is also included in the window
-        self.sliding_window_contiguous_blocks = cdiv(
-            (kv_cache_spec.sliding_window - 1), self.block_size)
+        self.sliding_window_contiguous_blocks = cdiv((kv_cache_spec.sliding_window - 1),
+                                                     self.block_size)
         if self.use_eagle:
             # Need to drop the last matched block if eagle is enabled. For
             # sliding window layer, we achieve this by increasing the number of
@@ -113,8 +113,8 @@ class SlidingWindowManager(SpecializedManager):
             self.sliding_window_contiguous_blocks += 1
         self._null_block = block_pool.null_block
 
-    def find_longest_cache_hit(
-            self, block_hashes: list[BlockHashType]) -> list[KVCacheBlock]:
+    def find_longest_cache_hit(self,
+                               block_hashes: list[BlockHashType]) -> list[KVCacheBlock]:
         # TODO: reduce i by sliding_window_contiguous_blocks when cache miss, to
         # optimize the time complexity from O(len(block_hashes)) to
         # O(len(block_hashes) / sliding_window_contiguous_blocks +
@@ -126,12 +126,10 @@ class SlidingWindowManager(SpecializedManager):
         match_found = False
         # Search from right to left and early stop when a match is found.
         for i in range(len(block_hashes) - 1, -1, -1):
-            if cached_block := self.block_pool.get_cached_block(
-                    block_hashes[i]):
+            if cached_block := self.block_pool.get_cached_block(block_hashes[i]):
                 computed_blocks[i] = cached_block
                 num_contiguous_blocks += 1
-                if (num_contiguous_blocks
-                        >= self.sliding_window_contiguous_blocks):
+                if (num_contiguous_blocks >= self.sliding_window_contiguous_blocks):
                     # Trim the trailing blocks.
                     # E.g., [NULL, NULL, 8, 3, NULL, 9] -> [NULL, NULL, 8, 3]
                     # when sliding_window_contiguous_blocks=2.
@@ -173,8 +171,7 @@ spec_manager_map: dict[type[KVCacheSpec], type[SpecializedManager]] = {
 }
 
 
-def get_specialized_manager(kv_cache_spec: KVCacheSpec,
-                            **kwargs) -> SpecializedManager:
+def get_specialized_manager(kv_cache_spec: KVCacheSpec, **kwargs) -> SpecializedManager:
     manager_class = spec_manager_map[type(kv_cache_spec)]
     manager = manager_class(kv_cache_spec, **kwargs)
     return manager

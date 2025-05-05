@@ -24,9 +24,7 @@ GPTQ_MARLIN_24_MIN_THREAD_N = 128
 GPTQ_MARLIN_24_MIN_THREAD_K = 128
 GPTQ_MARLIN_24_MAX_PARALLEL = 64
 
-GPTQ_MARLIN_24_SUPPORTED_QUANT_TYPES = [
-    scalar_types.uint4b8, scalar_types.uint8b128
-]
+GPTQ_MARLIN_24_SUPPORTED_QUANT_TYPES = [scalar_types.uint4b8, scalar_types.uint8b128]
 GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES = [-1, 128]
 
 
@@ -109,10 +107,9 @@ class GPTQMarlin24Config(QuantizationConfig):
         return cls(weight_bits, group_size)
 
     @classmethod
-    def override_quantization_method(
-            cls, hf_quant_cfg, user_quant) -> Optional[QuantizationMethods]:
-        is_marlin_24_format = (
-            hf_quant_cfg.get("checkpoint_format") == "marlin_24")
+    def override_quantization_method(cls, hf_quant_cfg,
+                                     user_quant) -> Optional[QuantizationMethods]:
+        is_marlin_24_format = (hf_quant_cfg.get("checkpoint_format") == "marlin_24")
 
         is_valid_user_quant = (user_quant is None or user_quant == "gptq"
                                or user_quant == "gptq_marlin_24")
@@ -161,50 +158,45 @@ class GPTQMarlin24LinearMethod(LinearMethodBase):
         # Validate output_size_per_partition
         output_size_per_partition = sum(output_partition_sizes)
         if output_size_per_partition % self.quant_config.min_n_threads != 0:
-            raise ValueError(
-                f"Weight output_size_per_partition = "
-                f"{output_size_per_partition} is not divisible by "
-                f"min_n_threads = {self.quant_config.min_n_threads}.")
+            raise ValueError(f"Weight output_size_per_partition = "
+                             f"{output_size_per_partition} is not divisible by "
+                             f"min_n_threads = {self.quant_config.min_n_threads}.")
         if output_size_per_partition % self.quant_config.pack_factor != 0:
-            raise ValueError(
-                f"Weight output_size_per_partition = "
-                f"{output_size_per_partition} is not divisible by "
-                f"pack_factor = {self.quant_config.pack_factor}.")
+            raise ValueError(f"Weight output_size_per_partition = "
+                             f"{output_size_per_partition} is not divisible by "
+                             f"pack_factor = {self.quant_config.pack_factor}.")
 
         # Validate input_size_per_partition
         if input_size_per_partition % self.quant_config.min_k_threads != 0:
-            raise ValueError(
-                f"Weight input_size_per_partition = "
-                f"{input_size_per_partition} is not divisible by "
-                f"min_k_threads = {self.quant_config.min_k_threads}.")
-        if (self.quant_config.group_size != -1 and
-                input_size_per_partition % self.quant_config.group_size != 0):
+            raise ValueError(f"Weight input_size_per_partition = "
+                             f"{input_size_per_partition} is not divisible by "
+                             f"min_k_threads = {self.quant_config.min_k_threads}.")
+        if (self.quant_config.group_size != -1
+                and input_size_per_partition % self.quant_config.group_size != 0):
             raise ValueError(f"Weight input_size_per_partition = "
                              f"{input_size_per_partition} is not divisible by "
                              f"group_size = {self.quant_config.group_size}.")
 
         # Check that we have at least 4 tiles horizontally in the shard
-        num_tiles_per_perm = self.quant_config.perm_len // (
-            self.quant_config.tile_size**2)
+        num_tiles_per_perm = self.quant_config.perm_len // (self.quant_config.tile_size
+                                                            **2)
         if output_size_per_partition % num_tiles_per_perm != 0:
-            raise ValueError(
-                "Each permutation group must reside on the same gpu")
+            raise ValueError("Each permutation group must reside on the same gpu")
 
         # Quantized 4Bit weights packed into Int32.
-        qweight = PackedvLLMParameter(
-            data=torch.empty(
-                input_size_per_partition // self.quant_config.tile_size // 2,
-                output_size_per_partition * self.quant_config.tile_size //
-                self.quant_config.pack_factor,
-                device="cuda",
-                dtype=torch.int32,
-            ),
-            input_dim=0,
-            output_dim=1,
-            packed_dim=1,
-            packed_factor=self.quant_config.pack_factor,
-            marlin_tile_size=self.quant_config.tile_size,
-            weight_loader=weight_loader)
+        qweight = PackedvLLMParameter(data=torch.empty(
+            input_size_per_partition // self.quant_config.tile_size // 2,
+            output_size_per_partition * self.quant_config.tile_size //
+            self.quant_config.pack_factor,
+            device="cuda",
+            dtype=torch.int32,
+        ),
+                                      input_dim=0,
+                                      output_dim=1,
+                                      packed_dim=1,
+                                      packed_factor=self.quant_config.pack_factor,
+                                      marlin_tile_size=self.quant_config.tile_size,
+                                      weight_loader=weight_loader)
 
         # Meta
         meta = PackedvLLMParameter(data=torch.empty(
@@ -222,8 +214,7 @@ class GPTQMarlin24LinearMethod(LinearMethodBase):
 
         # Determine if channelwise or not
         input_groups = (1 if self.quant_config.group_size == -1 else
-                        input_size_per_partition //
-                        self.quant_config.group_size)
+                        input_size_per_partition // self.quant_config.group_size)
 
         weight_scale_args = {
             "data":
@@ -237,8 +228,7 @@ class GPTQMarlin24LinearMethod(LinearMethodBase):
             weight_loader
         }
         if input_groups == 1:
-            scales = ChannelQuantScaleParameter(output_dim=1,
-                                                **weight_scale_args)
+            scales = ChannelQuantScaleParameter(output_dim=1, **weight_scale_args)
         else:
             scales = GroupQuantScaleParameter(output_dim=1,
                                               input_dim=0,
@@ -283,10 +273,9 @@ class GPTQMarlin24LinearMethod(LinearMethodBase):
         size_k = x_2d.shape[1]
         size_n = scales.shape[1]
 
-        output_2d = ops.gptq_marlin_24_gemm(x_2d, qweight, meta, scales,
-                                            workspace,
-                                            self.quant_config.quant_type,
-                                            size_m, size_n, size_k)
+        output_2d = ops.gptq_marlin_24_gemm(x_2d, qweight, meta, scales, workspace,
+                                            self.quant_config.quant_type, size_m,
+                                            size_n, size_k)
 
         output = output_2d.view(x.shape[:-1] + (output_2d.shape[1], ))
 

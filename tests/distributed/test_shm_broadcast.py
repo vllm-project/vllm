@@ -67,14 +67,13 @@ def worker_fn():
         dist.broadcast_object_list(recv, src=0)
         ip, port = recv
 
-    stateless_pg = StatelessProcessGroup.create(ip, port, rank,
-                                                dist.get_world_size())
+    stateless_pg = StatelessProcessGroup.create(ip, port, rank, dist.get_world_size())
 
     for pg in [dist.group.WORLD, stateless_pg]:
 
         writer_rank = 2
-        broadcaster = MessageQueue.create_from_process_group(
-            pg, 40 * 1024, 2, writer_rank)
+        broadcaster = MessageQueue.create_from_process_group(pg, 40 * 1024, 2,
+                                                             writer_rank)
         if rank == writer_rank:
             seed = random.randint(0, 1000)
             dist.broadcast_object_list([seed], writer_rank)

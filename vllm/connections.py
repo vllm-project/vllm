@@ -76,9 +76,7 @@ class HTTPConnection:
         client = await self.get_async_client()
         extra_headers = extra_headers or {}
 
-        return client.get(url,
-                          headers=self._headers(**extra_headers),
-                          timeout=timeout)
+        return client.get(url, headers=self._headers(**extra_headers), timeout=timeout)
 
     def get_bytes(self, url: str, *, timeout: Optional[float] = None) -> bytes:
         with self.get_response(url, timeout=timeout) as r:

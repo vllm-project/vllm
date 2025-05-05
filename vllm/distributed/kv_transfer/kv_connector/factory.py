@@ -21,8 +21,7 @@ class KVConnectorFactory:
     _registry: Dict[str, Callable[[], Type[KVConnectorBaseType]]] = {}
 
     @classmethod
-    def register_connector(cls, name: str, module_path: str,
-                           class_name: str) -> None:
+    def register_connector(cls, name: str, module_path: str, class_name: str) -> None:
         """Register a connector with a lazy-loading module and class name."""
         if name in cls._registry:
             raise ValueError(f"Connector '{name}' is already registered.")
@@ -77,18 +76,15 @@ class KVConnectorFactory:
 # The registration should not be done in each individual file, as we want to
 # only load the files corresponding to the current connector.
 KVConnectorFactory.register_connector(
-    "PyNcclConnector",
-    "vllm.distributed.kv_transfer.kv_connector.simple_connector",
+    "PyNcclConnector", "vllm.distributed.kv_transfer.kv_connector.simple_connector",
     "SimpleConnector")
 
 KVConnectorFactory.register_connector(
-    "MooncakeConnector",
-    "vllm.distributed.kv_transfer.kv_connector.simple_connector",
+    "MooncakeConnector", "vllm.distributed.kv_transfer.kv_connector.simple_connector",
     "SimpleConnector")
 
 KVConnectorFactory.register_connector(
-    "LMCacheConnector",
-    "vllm.distributed.kv_transfer.kv_connector.lmcache_connector",
+    "LMCacheConnector", "vllm.distributed.kv_transfer.kv_connector.lmcache_connector",
     "LMCacheConnector")
 
 KVConnectorFactory.register_connector(

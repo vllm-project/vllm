@@ -74,8 +74,7 @@ def set_forward_context(attn_metadata: Any,
     if vllm_config.parallel_config.data_parallel_size > 1:
         dp_size = vllm_config.parallel_config.data_parallel_size
         dp_rank = vllm_config.parallel_config.data_parallel_rank
-        if attn_metadata is not None and hasattr(attn_metadata,
-                                                 "num_prefill_tokens"):
+        if attn_metadata is not None and hasattr(attn_metadata, "num_prefill_tokens"):
             # for v0 attention backends
             batchsize = attn_metadata.num_prefill_tokens + \
                 attn_metadata.num_decode_tokens
@@ -95,16 +94,14 @@ def set_forward_context(attn_metadata: Any,
     global _forward_context
     prev_context = _forward_context
     _forward_context = ForwardContext(
-        no_compile_layers=vllm_config.compilation_config.
-        static_forward_context,
+        no_compile_layers=vllm_config.compilation_config.static_forward_context,
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
         dp_metadata=dp_metadata)
 
     # KVConnector: trigger (possibly async) load before forward.
     # Each attn layer will block until the reading is complete.
-    trigger_kv_transfer = (attn_metadata is not None
-                           and has_kv_transfer_group()
+    trigger_kv_transfer = (attn_metadata is not None and has_kv_transfer_group()
                            and is_v1_kv_transfer_group())
     if trigger_kv_transfer:
         kv_connector = get_kv_transfer_group()
@@ -129,8 +126,7 @@ def set_forward_context(attn_metadata: Any,
             torch.cuda.synchronize()
             now = time.perf_counter()
             # time measurement is in milliseconds
-            batchsize_forward_time[batchsize].append(
-                (now - forward_start_time) * 1000)
+            batchsize_forward_time[batchsize].append((now - forward_start_time) * 1000)
             if now - last_logging_time > batchsize_logging_interval:
                 last_logging_time = now
                 forward_stats = []

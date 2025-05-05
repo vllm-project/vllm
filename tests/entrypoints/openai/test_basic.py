@@ -113,9 +113,8 @@ async def test_check_health(server: RemoteOpenAIServer):
     [
         pytest.param(["--max-model-len", "10100"],
                      id="default-frontend-multiprocessing"),
-        pytest.param(
-            ["--disable-frontend-multiprocessing", "--max-model-len", "10100"],
-            id="disable-frontend-multiprocessing")
+        pytest.param(["--disable-frontend-multiprocessing", "--max-model-len", "10100"],
+                     id="disable-frontend-multiprocessing")
     ],
     indirect=True,
 )
@@ -136,8 +135,7 @@ async def test_request_cancellation(server: RemoteOpenAIServer):
                                            extra_body={"min_tokens": 10000}))
         tasks.append(task)
 
-    done, pending = await asyncio.wait(tasks,
-                                       return_when=asyncio.ALL_COMPLETED)
+    done, pending = await asyncio.wait(tasks, return_when=asyncio.ALL_COMPLETED)
 
     # Make sure all requests were sent to the server and timed out
     # (We don't want to hide other errors like 400s that would invalidate this
@@ -168,17 +166,12 @@ async def test_request_wrong_content_type(server: RemoteOpenAIServer):
             messages=chat_input,
             model=MODEL_NAME,
             max_tokens=10000,
-            extra_headers={
-                "Content-Type": "application/x-www-form-urlencoded"
-            })
+            extra_headers={"Content-Type": "application/x-www-form-urlencoded"})
 
 
 @pytest.mark.parametrize(
     "server_args",
-    [
-        pytest.param(["--enable-server-load-tracking"],
-                     id="enable-server-load-tracking")
-    ],
+    [pytest.param(["--enable-server-load-tracking"], id="enable-server-load-tracking")],
     indirect=True,
 )
 @pytest.mark.asyncio

@@ -42,8 +42,7 @@ class NaiveBlockAllocator(BlockAllocator):
         self._all_block_indices = frozenset(block_ids)
         assert len(self._all_block_indices) == num_blocks
 
-        self._refcounter = RefCounter(
-            all_block_indices=self._free_block_indices)
+        self._refcounter = RefCounter(all_block_indices=self._free_block_indices)
         self._block_size = block_size
 
         self._cow_tracker = CopyOnWriteTracker(
@@ -84,12 +83,11 @@ class NaiveBlockAllocator(BlockAllocator):
         block.append_token_ids(token_ids)
         return block
 
-    def allocate_immutable_blocks(
-            self,
-            prev_block: Optional[Block],
-            block_token_ids: List[List[int]],
-            extra_hash: Optional[int] = None,
-            device: Optional[Device] = None) -> List[Block]:
+    def allocate_immutable_blocks(self,
+                                  prev_block: Optional[Block],
+                                  block_token_ids: List[List[int]],
+                                  extra_hash: Optional[int] = None,
+                                  device: Optional[Device] = None) -> List[Block]:
         assert device is None
         num_blocks = len(block_token_ids)
 
@@ -99,11 +97,10 @@ class NaiveBlockAllocator(BlockAllocator):
 
         blocks = []
         for i in range(num_blocks):
-            prev_block = self._block_pool.init_block(
-                prev_block=prev_block,
-                token_ids=block_token_ids[i],
-                block_size=self._block_size,
-                physical_block_id=block_ids[i])
+            prev_block = self._block_pool.init_block(prev_block=prev_block,
+                                                     token_ids=block_token_ids[i],
+                                                     block_size=self._block_size,
+                                                     physical_block_id=block_ids[i])
             blocks.append(prev_block)
 
         return blocks
@@ -183,11 +180,10 @@ class NaiveBlockAllocator(BlockAllocator):
             refcount = self._refcounter.incr(block.block_id)
             assert refcount != 1, "can't fork free'd block"
 
-            forked_block = self._block_pool.init_block(
-                prev_block=prev_block,
-                token_ids=block.token_ids,
-                block_size=self._block_size,
-                physical_block_id=block.block_id)
+            forked_block = self._block_pool.init_block(prev_block=prev_block,
+                                                       token_ids=block.token_ids,
+                                                       block_size=self._block_size,
+                                                       physical_block_id=block.block_id)
 
             forked_blocks.append(forked_block)
             prev_block = forked_blocks[-1]
@@ -255,8 +251,7 @@ class NaiveBlockAllocator(BlockAllocator):
         """
         return self._cow_tracker.clear_cows()
 
-    def mark_blocks_as_accessed(self, block_ids: List[int],
-                                now: float) -> None:
+    def mark_blocks_as_accessed(self, block_ids: List[int], now: float) -> None:
         """Mark blocks as accessed, used in prefix caching.
 
         Since the naive allocator does not implement prefix caching, we do
@@ -316,11 +311,10 @@ class NaiveBlockAllocator(BlockAllocator):
             # and the block_id is assigned to "block" to allow reusing the
             # existing "block" object
             if block.is_full:
-                tmp_block = self.allocate_immutable_block(
-                    prev_block=block.prev_block, token_ids=block.token_ids)
+                tmp_block = self.allocate_immutable_block(prev_block=block.prev_block,
+                                                          token_ids=block.token_ids)
             else:
-                tmp_block = self.allocate_mutable_block(
-                    prev_block=block.prev_block)
+                tmp_block = self.allocate_mutable_block(prev_block=block.prev_block)
                 tmp_block.append_token_ids(block.token_ids)
 
             block_id = tmp_block.block_id
@@ -445,8 +439,7 @@ class NaiveBlock(Block):
 
     @property
     def num_tokens_total(self) -> int:
-        raise NotImplementedError(
-            "num_tokens_total is not used for naive block")
+        raise NotImplementedError("num_tokens_total is not used for naive block")
 
     @property
     def block_size(self) -> int:

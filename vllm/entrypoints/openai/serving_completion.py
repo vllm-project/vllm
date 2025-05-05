@@ -53,13 +53,12 @@ class OpenAIServingCompletion(OpenAIServing):
                          models=models,
                          request_logger=request_logger,
                          return_tokens_as_token_ids=return_tokens_as_token_ids)
-        self.default_sampling_params = (
-            self.model_config.get_diff_sampling_param())
+        self.default_sampling_params = (self.model_config.get_diff_sampling_param())
         if self.default_sampling_params:
             source = self.model_config.generation_config
             source = "model" if source == "auto" else source
-            logger.info("Using default completion sampling params from %s: %s",
-                        source, self.default_sampling_params)
+            logger.info("Using default completion sampling params from %s: %s", source,
+                        self.default_sampling_params)
 
     async def create_completion(
         self,
@@ -87,8 +86,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
         # Return error for unsupported features.
         if request.suffix is not None:
-            return self.create_error_response(
-                "suffix is not currently supported")
+            return self.create_error_response("suffix is not currently supported")
 
         request_id = f"cmpl-{self._base_request_id(raw_request)}"
         created_time = int(time.time())
@@ -137,8 +135,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         default_max_tokens, self.default_sampling_params)
                 else:
                     sampling_params = request.to_sampling_params(
-                        default_max_tokens,
-                        self.model_config.logits_processor_pattern,
+                        default_max_tokens, self.model_config.logits_processor_pattern,
                         self.default_sampling_params)
 
                 request_id_item = f"{request_id}-{i}"
@@ -188,15 +185,14 @@ class OpenAIServingCompletion(OpenAIServing):
 
         # Streaming response
         if stream:
-            return self.completion_stream_generator(
-                request,
-                result_generator,
-                request_id,
-                created_time,
-                model_name,
-                num_prompts=num_prompts,
-                tokenizer=tokenizer,
-                request_metadata=request_metadata)
+            return self.completion_stream_generator(request,
+                                                    result_generator,
+                                                    request_id,
+                                                    created_time,
+                                                    model_name,
+                                                    num_prompts=num_prompts,
+                                                    tokenizer=tokenizer,
+                                                    request_metadata=request_metadata)
 
         # Non-streaming response
         final_res_batch: list[Optional[RequestOutput]] = [None] * num_prompts
@@ -213,8 +209,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 if final_res.prompt is None:
                     final_res.prompt = request_prompts[i]["prompt"]
 
-            final_res_batch_checked = cast(list[RequestOutput],
-                                           final_res_batch)
+            final_res_batch_checked = cast(list[RequestOutput], final_res_batch)
 
             response = self.request_output_to_completion_response(
                 final_res_batch_checked,
@@ -280,8 +275,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     num_prompt_tokens[prompt_idx] = len(res.prompt_token_ids)
 
                 delta_token_ids: GenericSequence[int]
-                out_logprobs: Optional[GenericSequence[Optional[dict[
-                    int, Logprob]]]]
+                out_logprobs: Optional[GenericSequence[Optional[dict[int, Logprob]]]]
 
                 for output in res.outputs:
                     i = output.index + prompt_idx * num_choices
@@ -299,9 +293,7 @@ class OpenAIServingCompletion(OpenAIServing):
                             assert prompt_logprobs is not None
                             # echo the prompt and first token
                             delta_text = prompt_text + output.text
-                            delta_token_ids = [
-                                *prompt_token_ids, *output.token_ids
-                            ]
+                            delta_token_ids = [*prompt_token_ids, *output.token_ids]
                             out_logprobs = [
                                 *prompt_logprobs,
                                 *(output.logprobs or []),
@@ -319,16 +311,14 @@ class OpenAIServingCompletion(OpenAIServing):
                             continue
 
                     if request.logprobs is not None:
-                        assert out_logprobs is not None, (
-                            "Did not output logprobs")
+                        assert out_logprobs is not None, ("Did not output logprobs")
                         logprobs = self._create_completion_logprobs(
                             token_ids=delta_token_ids,
                             top_logprobs=out_logprobs,
                             num_output_top_logprobs=request.logprobs,
                             tokenizer=tokenizer,
                             initial_text_offset=previous_text_lens[i],
-                            return_as_token_id=request.
-                            return_tokens_as_token_ids,
+                            return_as_token_id=request.return_tokens_as_token_ids,
                         )
                     else:
                         logprobs = None
@@ -365,10 +355,10 @@ class OpenAIServingCompletion(OpenAIServing):
 
             total_prompt_tokens = sum(num_prompt_tokens)
             total_completion_tokens = sum(previous_num_tokens)
-            final_usage_info = UsageInfo(
-                prompt_tokens=total_prompt_tokens,
-                completion_tokens=total_completion_tokens,
-                total_tokens=total_prompt_tokens + total_completion_tokens)
+            final_usage_info = UsageInfo(prompt_tokens=total_prompt_tokens,
+                                         completion_tokens=total_completion_tokens,
+                                         total_tokens=total_prompt_tokens +
+                                         total_completion_tokens)
 
             if include_usage:
                 final_usage_chunk = CompletionStreamResponse(
@@ -412,8 +402,7 @@ class OpenAIServingCompletion(OpenAIServing):
             prompt_text = final_res.prompt
 
             token_ids: GenericSequence[int]
-            out_logprobs: Optional[GenericSequence[Optional[dict[int,
-                                                                 Logprob]]]]
+            out_logprobs: Optional[GenericSequence[Optional[dict[int, Logprob]]]]
 
             for output in final_res.outputs:
                 assert request.max_tokens is not None

@@ -212,8 +212,7 @@ def write_to_kv_cache(
     key = key.view(-1, num_kv_heads, head_size)
     value = value.view(-1, num_kv_heads, head_size)
 
-    kv = torch.cat([key, value], axis=-1).reshape(-1, num_combined_kv_heads,
-                                                  head_size)
+    kv = torch.cat([key, value], axis=-1).reshape(-1, num_combined_kv_heads, head_size)
 
     torch.ops.xla.dynamo_set_buffer_donor_(kv_cache, True)
 

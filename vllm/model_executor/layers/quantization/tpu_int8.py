@@ -24,8 +24,7 @@ class Int8TpuConfig(QuantizationConfig):
     ) -> None:
         super().__init__()
         if activation_scheme not in ACTIVATION_SCHEMES:
-            raise ValueError(
-                f"Unsupported activation scheme {activation_scheme}")
+            raise ValueError(f"Unsupported activation scheme {activation_scheme}")
         self.activation_scheme = activation_scheme
 
     def get_name(self) -> QuantizationMethods:
@@ -36,8 +35,7 @@ class Int8TpuConfig(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        raise NotImplementedError(
-            "This function should not be called with TPU Backend")
+        raise NotImplementedError("This function should not be called with TPU Backend")
 
     @staticmethod
     def get_config_filenames() -> List[str]:
@@ -67,17 +65,16 @@ class TPUInt8LinearMethod(LinearMethodBase):
                        **extra_weight_attrs):
 
         weight_loader = extra_weight_attrs.get("weight_loader")
-        weight = ModelWeightParameter(data=torch.empty(
-            sum(output_partition_sizes),
-            input_size_per_partition,
-            dtype=params_dtype),
+        weight = ModelWeightParameter(data=torch.empty(sum(output_partition_sizes),
+                                                       input_size_per_partition,
+                                                       dtype=params_dtype),
                                       input_dim=1,
                                       output_dim=0,
                                       weight_loader=weight_loader)
         layer.register_parameter("weight", weight)
 
-    def _quantize_weight(
-            self, weight: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _quantize_weight(self,
+                         weight: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         weight_dtype = weight.dtype
         weight = weight.cpu().to(torch.float32)
         n_bit = 8

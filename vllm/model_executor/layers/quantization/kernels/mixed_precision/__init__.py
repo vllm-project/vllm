@@ -73,8 +73,7 @@ def choose_mp_linear_kernel(
             return kernel
         else:
             failure_reasons.append(
-                f' {kernel.__name__} cannot implement due to: {failure_reason}'
-            )
+                f' {kernel.__name__} cannot implement due to: {failure_reason}')
 
     raise ValueError(
         "Failed to find a kernel that can implement the "\

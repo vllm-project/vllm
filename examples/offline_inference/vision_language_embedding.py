@@ -48,12 +48,10 @@ def run_e5_v(query: Query) -> ModelRequestData:
 
     if query["modality"] == "text":
         text = query["text"]
-        prompt = llama3_template.format(
-            f"{text}\nSummary above sentence in one word: ")
+        prompt = llama3_template.format(f"{text}\nSummary above sentence in one word: ")
         image = None
     elif query["modality"] == "image":
-        prompt = llama3_template.format(
-            "<image>\nSummary above image in one word: ")
+        prompt = llama3_template.format("<image>\nSummary above image in one word: ")
         image = query["image"]
     else:
         modality = query['modality']

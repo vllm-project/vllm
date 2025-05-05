@@ -18,9 +18,7 @@ NUM_HEADS = [17]  # Arbitrary values for testing
 BATCH_SIZES = [5]  # Arbitrary values for testing
 SEQ_LENS = [11, 8192]  # Arbitrary values for testing
 SEEDS = [0]
-CUDA_DEVICES = [
-    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
-]
+CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
 
 
 def _get_flat_tensor_shape(batch_size: int, seq_len: int, num_heads: int,
@@ -186,10 +184,7 @@ def test_batched_rotary_embedding_multi_lora(
     rope = rope.to(dtype=dtype, device=torch.get_default_device())
 
     positions = torch.randint(0, max_position, (batch_size, seq_len))
-    query = torch.randn(batch_size,
-                        seq_len,
-                        num_heads * head_size,
-                        dtype=dtype)
+    query = torch.randn(batch_size, seq_len, num_heads * head_size, dtype=dtype)
     key = torch.randn_like(query)
 
     offset_map = torch.tensor(
@@ -205,10 +200,8 @@ def test_batched_rotary_embedding_multi_lora(
 
     # NOTE(woosuk): The reference implementation should be executed first
     # because the custom kernel is in-place.
-    ref_query, ref_key = rope.forward_native(positions, query, key,
-                                             query_offsets)
-    out_query, out_key = rope.forward(positions, query, key,
-                                      query_offsets.flatten())
+    ref_query, ref_key = rope.forward_native(positions, query, key, query_offsets)
+    out_query, out_key = rope.forward(positions, query, key, query_offsets.flatten())
     # Compare the results.
     torch.testing.assert_close(out_query,
                                ref_query,
@@ -239,8 +232,8 @@ def test_rope_module_cache():
             is_neox_stype, rope_scaling, dtype = setting
         if rotary_dim is None:
             rotary_dim = head_size
-        rope = get_rope(head_size, rotary_dim, max_position, base,
-                        is_neox_stype, rope_scaling, dtype)
+        rope = get_rope(head_size, rotary_dim, max_position, base, is_neox_stype,
+                        rope_scaling, dtype)
         # different settings cannot share the same rope module
         assert id(rope) not in rope_setting_id_map.values()
         assert all(x.dtype == dtype for x in rope.buffers())
@@ -252,7 +245,7 @@ def test_rope_module_cache():
             is_neox_stype, rope_scaling, dtype = setting
         if rotary_dim is None:
             rotary_dim = head_size
-        rope = get_rope(head_size, rotary_dim, max_position, base,
-                        is_neox_stype, rope_scaling, dtype)
+        rope = get_rope(head_size, rotary_dim, max_position, base, is_neox_stype,
+                        rope_scaling, dtype)
         # check if cache take effect
         assert id(rope) == rope_setting_id_map[str(setting)]

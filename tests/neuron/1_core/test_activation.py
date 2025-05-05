@@ -34,8 +34,7 @@ def test_act_and_mul(
         layer = FastGELU()
         fn = F.gelu
     else:
-        raise NotImplementedError(
-            f"activation {activation} is not implemented.")
+        raise NotImplementedError(f"activation {activation} is not implemented.")
     assert x.is_xla, "input tensor under testing is expected to be XLA tensor."
     out = layer.to(device=device).forward_neuron(x)
     ref_out = fn(x.cpu())

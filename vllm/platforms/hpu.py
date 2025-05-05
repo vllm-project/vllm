@@ -29,8 +29,7 @@ class HpuPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
-                             block_size: int, use_v1: bool,
-                             use_mla: bool) -> str:
+                             block_size: int, use_v1: bool, use_mla: bool) -> str:
         logger.info("Using HPUAttention backend.")
         return "vllm.attention.backends.hpu_attn.HPUAttentionBackend"
 
@@ -52,8 +51,7 @@ class HpuPlatform(Platform):
                 "vllm.worker.multi_step_hpu_worker.MultiStepHPUWorker"
 
         if vllm_config.speculative_config is not None:
-            raise NotImplementedError(
-                "Speculative decoding is not implemented for HPU")
+            raise NotImplementedError("Speculative decoding is not implemented for HPU")
 
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.worker.hpu_worker.HPUWorker"
@@ -65,19 +63,17 @@ class HpuPlatform(Platform):
             cache_config.block_size = 128
         if (parallel_config.distributed_executor_backend == 'mp'
                 and envs.VLLM_WORKER_MULTIPROC_METHOD == 'fork'):
-            if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD",
-                              None) is not None:
+            if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD", None) is not None:
                 logger.warning("On HPU, VLLM_WORKER_MULTIPROC_METHOD=fork "
                                "might cause application hangs on exit. Using "
                                "VLLM_WORKER_MULTIPROC_METHOD=fork anyway, "
                                "as it was explicitly requested.")
             else:
-                logger.warning(
-                    "On HPU, VLLM_WORKER_MULTIPROC_METHOD=fork "
-                    "might cause application hangs on exit. Setting "
-                    "VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
-                    "To override that behavior, please set "
-                    "VLLM_WORKER_MULTIPROC_METHOD=fork explicitly.")
+                logger.warning("On HPU, VLLM_WORKER_MULTIPROC_METHOD=fork "
+                               "might cause application hangs on exit. Setting "
+                               "VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
+                               "To override that behavior, please set "
+                               "VLLM_WORKER_MULTIPROC_METHOD=fork explicitly.")
                 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
     @classmethod

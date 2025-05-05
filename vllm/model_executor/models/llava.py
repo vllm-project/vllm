@@ -243,8 +243,8 @@ class BaseLlavaMultiModalProcessor(BaseMultiModalProcessor[_I]):
         image_token_id = hf_config.image_token_index
 
         def get_replacement(item_idx: int):
-            images = mm_items.get_items(
-                "image", (ImageEmbeddingItems, ImageProcessorItems))
+            images = mm_items.get_items("image",
+                                        (ImageEmbeddingItems, ImageProcessorItems))
 
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
@@ -266,8 +266,7 @@ class BaseLlavaMultiModalProcessor(BaseMultiModalProcessor[_I]):
         ]
 
 
-class LlavaMultiModalProcessor(
-        BaseLlavaMultiModalProcessor[LlavaProcessingInfo]):
+class LlavaMultiModalProcessor(BaseLlavaMultiModalProcessor[LlavaProcessingInfo]):
 
     def _get_mm_fields_config(
         self,
@@ -286,8 +285,7 @@ class PixtralHFProcessingInfo(BaseLlavaProcessingInfo):
         return self.ctx.get_hf_processor(PixtralProcessor, **kwargs)
 
 
-class PixtralHFMultiModalProcessor(
-        BaseMultiModalProcessor[PixtralHFProcessingInfo]):
+class PixtralHFMultiModalProcessor(BaseMultiModalProcessor[PixtralHFProcessingInfo]):
 
     def _call_hf_processor(
         self,
@@ -310,8 +308,7 @@ class PixtralHFMultiModalProcessor(
 
                 # Original output: (1, num_images, C, H, W)
                 # New output: (num_images, C, H, W)
-                assert (isinstance(pixel_values, list)
-                        and len(pixel_values) == 1)
+                assert (isinstance(pixel_values, list) and len(pixel_values) == 1)
                 assert (isinstance(pixel_values[0], list)
                         and len(pixel_values[0]) == len(images))
 
@@ -323,8 +320,7 @@ class PixtralHFMultiModalProcessor(
                 assert len(pixel_values) == len(image_sizes)
 
                 processed_outputs["pixel_values"] = [
-                    p[:, :h, :w]
-                    for p, (h, w) in zip(pixel_values, image_sizes)
+                    p[:, :h, :w] for p, (h, w) in zip(pixel_values, image_sizes)
                 ]
 
         return processed_outputs
@@ -427,8 +423,7 @@ def _get_num_hidden_layers(hf_config: LlavaLikeConfig) -> int:
         return _get_layer_index(feature_layers, num_hidden_layers)
     # If we have multiple feature layers, initialize up to the deepest one
     elif isinstance(feature_layers, (list, tuple)):
-        return max(
-            _get_layer_index(idx, num_hidden_layers) for idx in feature_layers)
+        return max(_get_layer_index(idx, num_hidden_layers) for idx in feature_layers)
     raise TypeError(f"vision_layer_feature type: {type(feature_layers)}"
                     " is not supported")
 
@@ -518,11 +513,11 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             config.projector_hidden_act = "gelu"
 
         # TODO: Optionally initializes this for supporting embeddings.
-        self.vision_tower = init_vision_tower_for_llava(
-            config,
-            quant_config,
-            require_post_norm=False,
-            prefix=maybe_prefix(prefix, "vision_tower"))
+        self.vision_tower = init_vision_tower_for_llava(config,
+                                                        quant_config,
+                                                        require_post_norm=False,
+                                                        prefix=maybe_prefix(
+                                                            prefix, "vision_tower"))
         self.multi_modal_projector = LlavaMultiModalProjector(
             vision_hidden_size=config.vision_config.hidden_size,
             text_hidden_size=config.text_config.hidden_size,
@@ -547,14 +542,13 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
         if actual_dims != expected_dims:
             expected_expr = ("batch_size", *map(str, expected_dims))
-            raise ValueError(
-                f"The expected shape of pixel values is {expected_expr}. "
-                f"You supplied {tuple(data.shape)}.")
+            raise ValueError(f"The expected shape of pixel values is {expected_expr}. "
+                             f"You supplied {tuple(data.shape)}.")
 
         return data
 
-    def _parse_and_validate_image_input(
-            self, **kwargs: object) -> Optional[LlavaImageInputs]:
+    def _parse_and_validate_image_input(self,
+                                        **kwargs: object) -> Optional[LlavaImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
 
@@ -605,8 +599,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
     def _image_pixels_to_features(
         self,
-        vision_tower: Union[CLIPVisionModel, SiglipVisionModel,
-                            PixtralHFVisionModel],
+        vision_tower: Union[CLIPVisionModel, SiglipVisionModel, PixtralHFVisionModel],
         pixel_values: Union[torch.Tensor, list[torch.Tensor]],
     ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
         # NOTE: we skip the step to select the vision feature layer since
@@ -647,9 +640,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         if isinstance(image_features, torch.Tensor):
             return self.multi_modal_projector(image_features)
 
-        feature_sizes = [
-            image_feature.shape[0] for image_feature in image_features
-        ]
+        feature_sizes = [image_feature.shape[0] for image_feature in image_features]
 
         image_embeds = self.multi_modal_projector(torch.cat(image_features))
         image_embeds = torch.split(image_embeds, feature_sizes)
@@ -658,8 +649,8 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
@@ -732,8 +723,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         # condition is for v0 compatibility.
         elif inputs_embeds is None:
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
+            inputs_embeds = self.get_input_embeddings(input_ids, vision_embeddings)
             input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
@@ -748,11 +738,9 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states, sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 

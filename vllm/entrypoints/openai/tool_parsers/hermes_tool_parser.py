@@ -29,8 +29,7 @@ class Hermes2ProToolParser(ToolParser):
         super().__init__(tokenizer)
 
         if isinstance(self.model_tokenizer, MistralTokenizer):
-            logger.error(
-                "Detected Mistral tokenizer when using a Hermes model")
+            logger.error("Detected Mistral tokenizer when using a Hermes model")
             self.model_tokenizer = self.model_tokenizer.tokenizer
 
         self.current_tool_name_sent: bool = False
@@ -44,15 +43,13 @@ class Hermes2ProToolParser(ToolParser):
 
         self.tool_call_regex = re.compile(
             r"<tool_call>(.*?)</tool_call>|<tool_call>(.*)", re.DOTALL)
-        self.scratch_pad_regex = re.compile(
-            r"<scratch_pad>(.*?)</scratch_pad>", re.DOTALL)
+        self.scratch_pad_regex = re.compile(r"<scratch_pad>(.*?)</scratch_pad>",
+                                            re.DOTALL)
 
         if not self.model_tokenizer:
-            raise ValueError(
-                "The model tokenizer must be passed to the ToolParser "
-                "constructor during construction.")
-        self.tool_call_start_token_id = self.vocab.get(
-            self.tool_call_start_token)
+            raise ValueError("The model tokenizer must be passed to the ToolParser "
+                             "constructor during construction.")
+        self.tool_call_start_token_id = self.vocab.get(self.tool_call_start_token)
         self.tool_call_end_token_id = self.vocab.get(self.tool_call_end_token)
         if (self.tool_call_start_token_id is None
                 or self.tool_call_end_token_id is None):
@@ -79,8 +76,7 @@ class Hermes2ProToolParser(ToolParser):
                 # tag and end-of-string so the result of
                 # findall is an array of tuples where one is a function call and
                 # the other is None
-                function_call_tuples = (
-                    self.tool_call_regex.findall(model_output))
+                function_call_tuples = (self.tool_call_regex.findall(model_output))
 
                 # load the JSON, and then use it to build the Function and
                 # Tool Call
@@ -99,16 +95,14 @@ class Hermes2ProToolParser(ToolParser):
                     for function_call in raw_function_calls
                 ]
 
-                content = model_output[:model_output.
-                                       find(self.tool_call_start_token)]
+                content = model_output[:model_output.find(self.tool_call_start_token)]
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=tool_calls,
                     content=content if content else None)
 
             except Exception:
-                logger.exception(
-                    "Error in extracting tool call from response.")
+                logger.exception("Error in extracting tool call from response.")
                 return ExtractedToolCallInformation(tools_called=False,
                                                     tool_calls=[],
                                                     content=model_output)
@@ -137,12 +131,10 @@ class Hermes2ProToolParser(ToolParser):
             # start & end tags
             prev_tool_start_count = previous_token_ids.count(
                 self.tool_call_start_token_id)
-            prev_tool_end_count = previous_token_ids.count(
-                self.tool_call_end_token_id)
+            prev_tool_end_count = previous_token_ids.count(self.tool_call_end_token_id)
             cur_tool_start_count = current_token_ids.count(
                 self.tool_call_start_token_id)
-            cur_tool_end_count = current_token_ids.count(
-                self.tool_call_end_token_id)
+            cur_tool_end_count = current_token_ids.count(self.tool_call_end_token_id)
             tool_call_portion = None
             text_portion = None
 
@@ -159,10 +151,8 @@ class Hermes2ProToolParser(ToolParser):
                 tool_call_portion = full_text.split(
                     self.tool_call_start_token)[-1].split(
                         self.tool_call_end_token)[0].rstrip()
-                delta_text = delta_text.split(
-                    self.tool_call_end_token)[0].rstrip()
-                text_portion = delta_text.split(
-                    self.tool_call_end_token)[-1].lstrip()
+                delta_text = delta_text.split(self.tool_call_end_token)[0].rstrip()
+                text_portion = delta_text.split(self.tool_call_end_token)[-1].lstrip()
 
             # case: if tool open & close tag counts don't match, we're doing
             # imaginary "else" block here
@@ -195,8 +185,7 @@ class Hermes2ProToolParser(ToolParser):
                   and cur_tool_start_count == prev_tool_start_count):
 
                 # get the portion of the text that's the tool call
-                tool_call_portion = current_text.split(
-                    self.tool_call_start_token)[-1]
+                tool_call_portion = current_text.split(self.tool_call_start_token)[-1]
                 text_portion = None
 
             # case -- the current tool call is being closed.
@@ -204,11 +193,9 @@ class Hermes2ProToolParser(ToolParser):
                   and cur_tool_end_count >= prev_tool_end_count):
                 if (self.prev_tool_call_arr is None
                         or len(self.prev_tool_call_arr) == 0):
-                    logger.debug(
-                        "attempting to close tool call, but no tool call")
+                    logger.debug("attempting to close tool call, but no tool call")
                     return None
-                diff = self.prev_tool_call_arr[self.current_tool_id].get(
-                    "arguments")
+                diff = self.prev_tool_call_arr[self.current_tool_id].get("arguments")
                 if diff:
                     diff = diff.encode('utf-8').decode(
                         'unicode_escape') if diff is str else diff
@@ -224,8 +211,7 @@ class Hermes2ProToolParser(ToolParser):
                     return DeltaMessage(tool_calls=[
                         DeltaToolCall(index=self.current_tool_id,
                                       function=DeltaFunctionCall(
-                                          arguments=diff).model_dump(
-                                              exclude_none=True))
+                                          arguments=diff).model_dump(exclude_none=True))
                     ])
 
             # case -- otherwise we're just generating text
@@ -238,8 +224,7 @@ class Hermes2ProToolParser(ToolParser):
             try:
 
                 current_tool_call = partial_json_parser.loads(
-                    tool_call_portion or "{}",
-                    flags) if tool_call_portion else None
+                    tool_call_portion or "{}", flags) if tool_call_portion else None
                 logger.debug("Parsed tool call %s", current_tool_call)
             except partial_json_parser.core.exceptions.MalformedJSON:
                 logger.debug('not enough tokens to parse into JSON yet')
@@ -312,10 +297,8 @@ class Hermes2ProToolParser(ToolParser):
             #   autocompleting the JSON
             elif cur_arguments and not prev_arguments:
 
-                cur_arguments_json = json.dumps(cur_arguments,
-                                                ensure_ascii=False)
-                logger.debug("finding %s in %s", delta_text,
-                             cur_arguments_json)
+                cur_arguments_json = json.dumps(cur_arguments, ensure_ascii=False)
+                logger.debug("finding %s in %s", delta_text, cur_arguments_json)
 
                 # get the location where previous args differ from current
                 if (delta_text not in cur_arguments_json[:-2]):
@@ -326,8 +309,7 @@ class Hermes2ProToolParser(ToolParser):
 
                 # use that to find the actual delta
                 arguments_delta = cur_arguments_json[:args_delta_start_loc]
-                logger.debug("First tokens in arguments received: %s",
-                             arguments_delta)
+                logger.debug("First tokens in arguments received: %s", arguments_delta)
 
                 delta = DeltaMessage(tool_calls=[
                     DeltaToolCall(index=self.current_tool_id,
@@ -340,8 +322,8 @@ class Hermes2ProToolParser(ToolParser):
 
             # last case -- we have an update to existing arguments.
             elif cur_arguments and prev_arguments:
-                if isinstance(delta_text, str) and len(delta_text.rstrip(
-                )) >= 1 and delta_text.rstrip()[-1] == '}':
+                if isinstance(delta_text, str) and len(
+                        delta_text.rstrip()) >= 1 and delta_text.rstrip()[-1] == '}':
                     delta_text = delta_text.rstrip()[:-1]
 
                 logger.debug("got diff %s", delta_text)

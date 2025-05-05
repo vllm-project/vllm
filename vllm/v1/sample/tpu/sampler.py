@@ -111,9 +111,7 @@ class Sampler(nn.Module):
           Sampled token rank tensor, (num tokens)
         """
         # Find the topK values.
-        topk_logprobs, topk_indices = torch.topk(logprobs,
-                                                 num_logprobs,
-                                                 dim=-1)
+        topk_logprobs, topk_indices = torch.topk(logprobs, num_logprobs, dim=-1)
 
         # Get with the logprob of the prompt or sampled token.
         token_ids = token_ids.unsqueeze(-1)
@@ -142,9 +140,7 @@ class Sampler(nn.Module):
         # Convert logits to probability distribution
         probability_values = torch.nn.functional.softmax(logits, dim=-1)
         # Calculate maximum probabilities per sequence
-        max_probabilities = torch.amax(probability_values,
-                                       dim=-1,
-                                       keepdim=True)
+        max_probabilities = torch.amax(probability_values, dim=-1, keepdim=True)
         # Reshape min_p for broadcasting
         adjusted_min_p = min_p.unsqueeze(1) * max_probabilities
         # Identify valid tokens using threshold comparison

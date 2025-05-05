@@ -41,12 +41,10 @@ def mm_k(a_ptr, b_ptr, ak_stride, bk_stride, offset_k, K: tl.constexpr,
             tiled_b = tl.load(b_ptr)
         else:
             tiled_a = tl.load(a_ptr,
-                              mask=offset_k[None, :]
-                              < K - k * (BLOCK_K * SPLIT_K),
+                              mask=offset_k[None, :] < K - k * (BLOCK_K * SPLIT_K),
                               other=0)
             tiled_b = tl.load(b_ptr,
-                              mask=offset_k[:, None]
-                              < K - k * (BLOCK_K * SPLIT_K),
+                              mask=offset_k[:, None] < K - k * (BLOCK_K * SPLIT_K),
                               other=0)
         if CAST_TYPE:
             tiled_a = tiled_a.to(b_dtype)
@@ -132,14 +130,13 @@ def do_expand_kernel(
     a_ptr = (cur_input_ptr + ram[:, None] * input_d1_stride +
              offset_k[None, :] * input_d2_stride)
     b_ptr = (cur_lora_ptr + cur_lora_d0_stride * lora_index +
-             offset_k[:, None] * cur_lora_d2_stride +
-             rbn[None, :] * cur_lora_d1_stride)
+             offset_k[:, None] * cur_lora_d2_stride + rbn[None, :] * cur_lora_d1_stride)
 
     # Compute the block matrix product.
     SPLIT_K = 1
-    accumulator = mm_k(a_ptr, b_ptr, input_d2_stride, cur_lora_d2_stride,
-                       offset_k, K, BLOCK_M, BLOCK_N, BLOCK_K, EVEN_K, SPLIT_K,
-                       CAST_TYPE, cur_lora_ptr.dtype.element_ty)
+    accumulator = mm_k(a_ptr, b_ptr, input_d2_stride, cur_lora_d2_stride, offset_k, K,
+                       BLOCK_M, BLOCK_N, BLOCK_K, EVEN_K, SPLIT_K, CAST_TYPE,
+                       cur_lora_ptr.dtype.element_ty)
 
     tiled_c = accumulator.to(cur_lora_ptr.dtype.element_ty)
     if SLICE_NUM == 1:
@@ -152,8 +149,7 @@ def do_expand_kernel(
     offset_cm = tl.arange(0, BLOCK_M)
     c_ptr = (out_ptr + ram[:, None] * output_d0_stride +
              offset_cn[None, :] * output_d1_stride)
-    c_mask = (offset_cm[:, None] < M_LEN) & (offset_cn[None, :]
-                                             < (cur_slice_start + N))
+    c_mask = (offset_cm[:, None] < M_LEN) & (offset_cn[None, :] < (cur_slice_start + N))
 
     if ADD_INPUTS:
         tiled_out = tl.load(c_ptr, mask=c_mask)
@@ -218,19 +214,17 @@ def do_shrink_kernel(
     a_ptr = (input_ptr + ram[:, None] * input_d0_stride +
              offset_k[None, :] * input_d1_stride)
     b_ptr = (cur_lora_ptr + lora_d0_stride * lora_index +
-             rbn[None, :] * lora_d1_stride +
-             offset_k[:, None] * lora_d2_stride)
+             rbn[None, :] * lora_d1_stride + offset_k[:, None] * lora_d2_stride)
 
     # Compute partial/complete block matrix product.
-    accumulator = mm_k(a_ptr, b_ptr, input_d1_stride, lora_d2_stride, offset_k,
-                       K, BLOCK_M, BLOCK_N, BLOCK_K, EVEN_K, SPLIT_K, False,
+    accumulator = mm_k(a_ptr, b_ptr, input_d1_stride, lora_d2_stride, offset_k, K,
+                       BLOCK_M, BLOCK_N, BLOCK_K, EVEN_K, SPLIT_K, False,
                        cur_lora_ptr.dtype.element_ty)
 
     # Identify the C output pointers to store the results of the accumulator.
     offset_cn = tl.arange(0, BLOCK_N) + pid_n * BLOCK_N
     offset_cm = tl.arange(0, BLOCK_M)
-    cur_out_ptr = (out_ptr if SLICE_NUM == 1 else out_ptr +
-                   slice_id * output_d0_stride)
+    cur_out_ptr = (out_ptr if SLICE_NUM == 1 else out_ptr + slice_id * output_d0_stride)
     c_ptr = cur_out_ptr + ram[:, None] * output_d1_stride + offset_cn[
         None, :] * output_d2_stride
     c_mask = (offset_cm[:, None] < M_LEN) & (offset_cn[None, :] < N)

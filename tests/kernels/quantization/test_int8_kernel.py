@@ -13,8 +13,7 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
 from vllm.platforms import current_platform
 
 if current_platform.get_device_capability() < (7, 0):
-    pytest.skip("INT8 Triton requires CUDA 7.0 or higher",
-                allow_module_level=True)
+    pytest.skip("INT8 Triton requires CUDA 7.0 or higher", allow_module_level=True)
 
 
 def native_w8a8_per_token_matmul(A, B, As, Bs, output_dtype=torch.float16):
@@ -24,8 +23,7 @@ def native_w8a8_per_token_matmul(A, B, As, Bs, output_dtype=torch.float16):
     B = B.to(torch.float32)
 
     assert A.shape[-1] == B.shape[-1], "Dimension mismatch"
-    assert B.ndim == 2 and B.is_contiguous(
-    ), "B must be a 2D contiguous tensor"
+    assert B.ndim == 2 and B.is_contiguous(), "B must be a 2D contiguous tensor"
 
     # Reshape input
     M = A.numel() // A.shape[-1]
@@ -143,7 +141,7 @@ def test_w8a8_fp8_fused_moe(M, N, K, E, topk, dtype, seed):
     )
 
     # Check results
-    rel_diff = (torch.mean(
-        torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
-                torch.mean(torch.abs(ref_out.to(torch.float32))))
+    rel_diff = (
+        torch.mean(torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
+        torch.mean(torch.abs(ref_out.to(torch.float32))))
     assert rel_diff < 0.05

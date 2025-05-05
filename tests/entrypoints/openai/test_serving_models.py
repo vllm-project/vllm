@@ -51,8 +51,7 @@ async def test_serving_model_name():
 @pytest.mark.asyncio
 async def test_load_lora_adapter_success():
     serving_models = await _async_serving_models_init()
-    request = LoadLoRAAdapterRequest(lora_name="adapter",
-                                     lora_path="/path/to/adapter2")
+    request = LoadLoRAAdapterRequest(lora_name="adapter", lora_path="/path/to/adapter2")
     response = await serving_models.load_lora_adapter(request)
     assert response == LORA_LOADING_SUCCESS_MESSAGE.format(lora_name='adapter')
     assert len(serving_models.lora_requests) == 1
@@ -75,8 +74,7 @@ async def test_load_lora_adapter_duplicate():
     request = LoadLoRAAdapterRequest(lora_name="adapter1",
                                      lora_path="/path/to/adapter1")
     response = await serving_models.load_lora_adapter(request)
-    assert response == LORA_LOADING_SUCCESS_MESSAGE.format(
-        lora_name='adapter1')
+    assert response == LORA_LOADING_SUCCESS_MESSAGE.format(lora_name='adapter1')
     assert len(serving_models.lora_requests) == 1
 
     request = LoadLoRAAdapterRequest(lora_name="adapter1",
@@ -98,8 +96,7 @@ async def test_unload_lora_adapter_success():
 
     request = UnloadLoRAAdapterRequest(lora_name="adapter1")
     response = await serving_models.unload_lora_adapter(request)
-    assert response == LORA_UNLOADING_SUCCESS_MESSAGE.format(
-        lora_name='adapter1')
+    assert response == LORA_UNLOADING_SUCCESS_MESSAGE.format(lora_name='adapter1')
     assert len(serving_models.lora_requests) == 0
 
 

@@ -23,8 +23,7 @@ def use_v0_only(monkeypatch):
 @pytest.mark.parametrize('tp', [1])
 def test_quark_fp8_w_per_tensor_a_per_tensor(vllm_runner, kv_cache_dtype, tp):
     model_path = "amd/Llama-3.1-8B-Instruct-FP8-KV-Quark-test"
-    with vllm_runner(model_path,
-                     kv_cache_dtype=kv_cache_dtype,
+    with vllm_runner(model_path, kv_cache_dtype=kv_cache_dtype,
                      tensor_parallel_size=tp) as llm:
 
         def check_model(model):

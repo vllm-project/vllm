@@ -27,8 +27,7 @@ def test_topk_equivalence_to_native_impl():
         k = torch.randint(1, 10, (BATCH_SIZE, ))
 
         # Set k=vocab_size for ~50% of requests in the batch (top-k disabled).
-        k.masked_fill_(torch.randint(0, 2, (BATCH_SIZE, ), dtype=bool),
-                       VOCAB_SIZE)
+        k.masked_fill_(torch.randint(0, 2, (BATCH_SIZE, ), dtype=bool), VOCAB_SIZE)
 
         result_tpu = apply_top_k_top_p_tpu(logits=logits.clone(), k=k, p=None)
 
@@ -50,9 +49,7 @@ def test_topp_result_sums_past_p():
         p.masked_fill_(torch.randint(0, 2, (BATCH_SIZE, ), dtype=bool), 1)
 
         no_op_k = torch.tensor([VOCAB_SIZE])
-        logits_masked = apply_top_k_top_p_tpu(logits=logits.clone(),
-                                              k=no_op_k,
-                                              p=p)
+        logits_masked = apply_top_k_top_p_tpu(logits=logits.clone(), k=no_op_k, p=p)
 
         # Verify that the masked logit's probability sums to at least p.
         probs.masked_fill_(logits_masked.isinf(), 0)
@@ -108,10 +105,8 @@ def test_topp_with_ties():
     with torch.device(xm.xla_device()):
         # Input has multiple math.log(0.3).
         logits = torch.tensor(
-            [[math.log(0.3),
-              math.log(0.3),
-              math.log(0.3),
-              math.log(0.1)]])
+            [[math.log(0.3), math.log(0.3),
+              math.log(0.3), math.log(0.1)]])
 
         result = apply_top_k_top_p_tpu(logits=logits.clone(),
                                        k=torch.tensor([4]),

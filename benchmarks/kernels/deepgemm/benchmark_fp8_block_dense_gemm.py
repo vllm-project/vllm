@@ -17,21 +17,19 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 
 # Copied from
 # https://github.com/deepseek-ai/DeepGEMM/blob/78cacf70d41d15d688bd493ebc85845f7f2a3d5d/tests/test_core.py#L9
-def per_token_cast_to_fp8(
-        x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def per_token_cast_to_fp8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Convert tensor to FP8 format with per-token scaling."""
     assert x.dim() == 2 and x.size(1) % 128 == 0
     m, n = x.shape
     x_view = x.view(m, -1, 128)
     x_amax = x_view.abs().float().amax(dim=2).view(m, -1).clamp(1e-4)
-    return (x_view * (448.0 / x_amax.unsqueeze(2))).to(
-        torch.float8_e4m3fn).view(m, n), (x_amax / 448.0).view(m, -1)
+    return (x_view * (448.0 / x_amax.unsqueeze(2))).to(torch.float8_e4m3fn).view(
+        m, n), (x_amax / 448.0).view(m, -1)
 
 
 # Copied from
 # https://github.com/deepseek-ai/DeepGEMM/blob/78cacf70d41d15d688bd493ebc85845f7f2a3d5d/tests/test_core.py#L17
-def per_block_cast_to_fp8(
-        x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def per_block_cast_to_fp8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Convert tensor to FP8 format with per-block scaling."""
     assert x.dim() == 2
     m, n = x.shape
@@ -42,8 +40,8 @@ def per_block_cast_to_fp8(
     x_view = x_padded.view(-1, 128, x_padded.size(1) // 128, 128)
     x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
     x_scaled = (x_view * (448.0 / x_amax)).to(torch.float8_e4m3fn)
-    return x_scaled.view_as(x_padded)[:m, :n].contiguous(), (
-        x_amax / 448.0).view(x_view.size(0), x_view.size(2))
+    return x_scaled.view_as(x_padded)[:m, :n].contiguous(), (x_amax / 448.0).view(
+        x_view.size(0), x_view.size(2))
 
 
 def benchmark_shape(m: int,
@@ -89,8 +87,7 @@ def benchmark_shape(m: int,
         # A_scale_aligned = get_col_major_tma_aligned_tensor(A_scale_deepgemm)
         # C_deepgemm = torch.empty((m, n), device='cuda', dtype=torch.bfloat16)
         deep_gemm.gemm_fp8_fp8_bf16_nt((A_deepgemm, A_scale_deepgemm),
-                                       (B_deepgemm, B_scale_deepgemm),
-                                       C_deepgemm)
+                                       (B_deepgemm, B_scale_deepgemm), C_deepgemm)
         return C_deepgemm
 
     # === vLLM Triton Implementation ===
@@ -142,14 +139,7 @@ def benchmark_shape(m: int,
         "vLLM CUTLASS": vllm_cutlass_gemm
     }
 
-    benchmark_results = {
-        "shape": {
-            "m": m,
-            "n": n,
-            "k": k
-        },
-        "implementations": {}
-    }
+    benchmark_results = {"shape": {"m": m, "n": n, "k": k}, "implementations": {}}
 
     for name, func in implementations.items():
         # Warmup
@@ -181,47 +171,38 @@ def benchmark_shape(m: int,
                 0.0 if name == "DeepGEMM" else calc_diff(func(), C_deepgemm),
                 "Reference":
                 deepgemm_diff if name == "DeepGEMM" else
-                (vllm_triton_diff
-                 if name == "vLLM Triton" else vllm_cutlass_diff)
+                (vllm_triton_diff if name == "vLLM Triton" else vllm_cutlass_diff)
             }
         }
 
         if verbose:
-            print(
-                f"{name}: {avg_time_ms:.3f} ms, {tflops:.2f} TFLOPS, {gb_s:.2f} GB/s"
-            )
+            print(f"{name}: {avg_time_ms:.3f} ms, {tflops:.2f} TFLOPS, {gb_s:.2f} GB/s")
 
     # Calculate speedups
     baseline = benchmark_results["implementations"]["DeepGEMM"]["time_ms"]
     for name, data in benchmark_results["implementations"].items():
         if name != "DeepGEMM":
             speedup = baseline / data["time_ms"]
-            benchmark_results["implementations"][name][
-                "speedup_vs_deepgemm"] = speedup
+            benchmark_results["implementations"][name]["speedup_vs_deepgemm"] = speedup
             if verbose:
                 print(f"DeepGEMM is {1/speedup:.2f}x "
                       f"{'faster' if 1/speedup > 1 else 'slower'} than {name}")
 
-    vllm_triton_time = benchmark_results["implementations"]["vLLM Triton"][
-        "time_ms"]
-    vllm_cutlass_time = benchmark_results["implementations"]["vLLM CUTLASS"][
-        "time_ms"]
+    vllm_triton_time = benchmark_results["implementations"]["vLLM Triton"]["time_ms"]
+    vllm_cutlass_time = benchmark_results["implementations"]["vLLM CUTLASS"]["time_ms"]
     cutlass_vs_triton = vllm_triton_time / vllm_cutlass_time
     benchmark_results["implementations"]["vLLM CUTLASS"][
         "speedup_vs_triton"] = cutlass_vs_triton
     if verbose:
-        print(
-            f"vLLM CUTLASS is {cutlass_vs_triton:.2f}x "
-            f"{'faster' if cutlass_vs_triton > 1 else 'slower'} than vLLM Triton"
-        )
+        print(f"vLLM CUTLASS is {cutlass_vs_triton:.2f}x "
+              f"{'faster' if cutlass_vs_triton > 1 else 'slower'} than vLLM Triton")
 
     return benchmark_results
 
 
 def format_table_row(values, widths):
     """Format a row with specified column widths."""
-    return "| " + " | ".join(f"{val:{w}}"
-                             for val, w in zip(values, widths)) + " |"
+    return "| " + " | ".join(f"{val:{w}}" for val, w in zip(values, widths)) + " |"
 
 
 def print_table(headers, rows, title=None):
@@ -334,14 +315,10 @@ def run_benchmarks(verbose: bool = False):
             f"{impl_data['tflops']:.1f}", f"{impl_data['gb_s']:.1f}"
         ])
 
-    print_table(deepgemm_headers,
-                deepgemm_rows,
-                title="DeepGEMM Implementation:")
+    print_table(deepgemm_headers, deepgemm_rows, title="DeepGEMM Implementation:")
 
     # Print vLLM Triton table
-    triton_headers = [
-        "m", "n", "k", "Time (μs)", "TFLOPS", "GB/s", "vs DeepGEMM"
-    ]
+    triton_headers = ["m", "n", "k", "Time (μs)", "TFLOPS", "GB/s", "vs DeepGEMM"]
     triton_rows = []
     for result in all_results:
         shape = result["shape"]
@@ -353,14 +330,11 @@ def run_benchmarks(verbose: bool = False):
             format_speedup(speedup)
         ])
 
-    print_table(triton_headers,
-                triton_rows,
-                title="vLLM Triton Implementation:")
+    print_table(triton_headers, triton_rows, title="vLLM Triton Implementation:")
 
     # Print vLLM CUTLASS table
     cutlass_headers = [
-        "m", "n", "k", "Time (μs)", "TFLOPS", "GB/s", "vs DeepGEMM",
-        "vs Triton"
+        "m", "n", "k", "Time (μs)", "TFLOPS", "GB/s", "vs DeepGEMM", "vs Triton"
     ]
     cutlass_rows = []
     for result in all_results:
@@ -375,9 +349,7 @@ def run_benchmarks(verbose: bool = False):
             format_speedup(vs_triton)
         ])
 
-    print_table(cutlass_headers,
-                cutlass_rows,
-                title="vLLM CUTLASS Implementation:")
+    print_table(cutlass_headers, cutlass_rows, title="vLLM CUTLASS Implementation:")
 
     # Calculate and print averages
     print("\n===== AVERAGE PERFORMANCE =====")
@@ -407,9 +379,8 @@ def run_benchmarks(verbose: bool = False):
         avg_tflops = avg_metrics[impl]["tflops"] / num_shapes
         avg_mem_bw = avg_metrics[impl]["gb_s"] / num_shapes
         avg_time = avg_metrics[impl]["time_ms"] / num_shapes
-        avg_rows.append([
-            impl, f"{avg_tflops:.2f}", f"{avg_mem_bw:.2f}", f"{avg_time:.2f}"
-        ])
+        avg_rows.append(
+            [impl, f"{avg_tflops:.2f}", f"{avg_mem_bw:.2f}", f"{avg_time:.2f}"])
 
     print_table(avg_headers, avg_rows)
 
@@ -423,13 +394,10 @@ def run_benchmarks(verbose: bool = False):
     for result in all_results:
         deepgemm_time = result["implementations"]["DeepGEMM"]["time_ms"]
         vllm_triton_time = result["implementations"]["vLLM Triton"]["time_ms"]
-        vllm_cutlass_time = result["implementations"]["vLLM CUTLASS"][
-            "time_ms"]
+        vllm_cutlass_time = result["implementations"]["vLLM CUTLASS"]["time_ms"]
 
-        avg_speedups[
-            "DeepGEMM vs vLLM Triton"] += vllm_triton_time / deepgemm_time
-        avg_speedups[
-            "DeepGEMM vs vLLM CUTLASS"] += vllm_cutlass_time / deepgemm_time
+        avg_speedups["DeepGEMM vs vLLM Triton"] += vllm_triton_time / deepgemm_time
+        avg_speedups["DeepGEMM vs vLLM CUTLASS"] += vllm_cutlass_time / deepgemm_time
         avg_speedups[
             "vLLM CUTLASS vs vLLM Triton"] += vllm_triton_time / vllm_cutlass_time
 
@@ -449,8 +417,7 @@ def run_benchmarks(verbose: bool = False):
 
     for result in all_results:
         for impl in implementations:
-            avg_diff[impl] += result["implementations"][impl]["diff"][
-                "Reference"]
+            avg_diff[impl] += result["implementations"][impl]["diff"]["Reference"]
 
     diff_headers = ["Implementation", "Avg Diff vs Reference"]
     diff_rows = []

@@ -50,23 +50,19 @@ class ModernBertEmbeddings(nn.Module):
 
 class ModernBertRotaryEmbedding(RotaryEmbedding):
 
-    def __init__(self, config: ModernBertConfig, head_size: int, dim: int,
-                 base: float):
-        super().__init__(
-            head_size=head_size,
-            rotary_dim=dim,
-            max_position_embeddings=config.max_position_embeddings,
-            base=base,
-            is_neox_style=True,
-            dtype=torch.float16)
+    def __init__(self, config: ModernBertConfig, head_size: int, dim: int, base: float):
+        super().__init__(head_size=head_size,
+                         rotary_dim=dim,
+                         max_position_embeddings=config.max_position_embeddings,
+                         base=base,
+                         is_neox_style=True,
+                         dtype=torch.float16)
         self.config = config
 
 
 class ModernBertAttention(nn.Module):
 
-    def __init__(self,
-                 config: ModernBertConfig,
-                 layer_id: Optional[int] = None):
+    def __init__(self, config: ModernBertConfig, layer_id: Optional[int] = None):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
@@ -92,8 +88,7 @@ class ModernBertAttention(nn.Module):
             self.local_attention = (-1, -1)
 
         rope_theta = config.global_rope_theta
-        if self.local_attention != (
-                -1, -1) and config.local_rope_theta is not None:
+        if self.local_attention != (-1, -1) and config.local_rope_theta is not None:
             rope_theta = config.local_rope_theta
         self.rotary_emb = ModernBertRotaryEmbedding(config=config,
                                                     head_size=self.head_dim,
@@ -212,8 +207,7 @@ class ModernBertModel(nn.Module):
                                        eps=config.norm_eps,
                                        bias=config.norm_bias)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         weights = self.hf_to_vllm_mapper.apply(weights)
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
@@ -221,8 +215,7 @@ class ModernBertModel(nn.Module):
             if name.endswith(".bias") and name not in params_dict:
                 continue
             param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
@@ -295,13 +288,11 @@ class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
         for name, loaded_weight in self_weights:
             if name.startswith("classifier"):
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             if name.startswith("head"):
                 param = params_dict["_pooler.pooler." + name[len("head") + 1:]]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
 
     def pooler(

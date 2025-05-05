@@ -18,12 +18,10 @@ llm_config = LLMConfig(
         # model_source="/path/to/the/model"
         "model_source": "deepseek-ai/DeepSeek-R1",
     },
-    deployment_config={
-        "autoscaling_config": {
-            "min_replicas": 1,
-            "max_replicas": 1,
-        }
-    },
+    deployment_config={"autoscaling_config": {
+        "min_replicas": 1,
+        "max_replicas": 1,
+    }},
     # Change to the accelerator type of the node
     accelerator_type="H100",
     runtime_env={"env_vars": {

@@ -36,11 +36,9 @@ PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
     ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", None),
     #FIXME: This test is flaky on CI thus disabled
     #("Qwen/Qwen2.5-1.5B-Instruct", "guidance", "auto"),
-    ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto",
-     NGRAM_SPEC_CONFIG),
+    ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto", NGRAM_SPEC_CONFIG),
     ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", NGRAM_SPEC_CONFIG),
-    ("meta-llama/Meta-Llama-3.1-8B-Instruct", "xgrammar", "auto",
-     EAGLE_SPEC_CONFIG)
+    ("meta-llama/Meta-Llama-3.1-8B-Instruct", "xgrammar", "auto", EAGLE_SPEC_CONFIG)
 ]
 
 PARAMS_MODELS_TOKENIZER_MODE = [
@@ -172,12 +170,11 @@ def test_structured_output(
                          sampling_params=sampling_params,
                          use_tqdm=True)
     else:
-        outputs = llm.generate(
-            prompts=("Give an example JSON object for a grade "
-                     "that fits this schema: "
-                     f"{unsupported_json_schema}"),
-            sampling_params=sampling_params,
-            use_tqdm=True)
+        outputs = llm.generate(prompts=("Give an example JSON object for a grade "
+                                        "that fits this schema: "
+                                        f"{unsupported_json_schema}"),
+                               sampling_params=sampling_params,
+                               use_tqdm=True)
         assert outputs is not None
         for output in outputs:
             assert output is not None
@@ -215,8 +212,7 @@ def test_structured_output(
         assert generated_text is not None
 
         # remove spaces for comparison b/c we removed them in the grammar
-        ground_truth = "SELECT col_1 from table_1 where col_1 = 1".replace(
-            " ", "")
+        ground_truth = "SELECT col_1 from table_1 where col_1 = 1".replace(" ", "")
 
         assert generated_text.strip() == ground_truth
 
@@ -252,8 +248,7 @@ def test_structured_output(
         parser.parse(generated_text)
 
         # remove spaces for comparison b/c we removed them in the grammar
-        ground_truth = "SELECT col_1 from table_1 where col_1 = 1".replace(
-            " ", "")
+        ground_truth = "SELECT col_1 from table_1 where col_1 = 1".replace(" ", "")
 
         assert generated_text.strip() == ground_truth
 
@@ -283,9 +278,7 @@ def test_structured_output(
         top_p=0.95,
         guided_decoding=GuidedDecodingParams(regex=sample_regex))
     outputs = llm.generate(
-        prompts=[
-            f"Give an example IPv4 address with this regex: {sample_regex}"
-        ] * 2,
+        prompts=[f"Give an example IPv4 address with this regex: {sample_regex}"] * 2,
         sampling_params=sampling_params,
         use_tqdm=True,
     )
@@ -489,8 +482,7 @@ Given the previous instructions, what is the weather in New York City?
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("model_name, tokenizer_mode",
-                         PARAMS_MODELS_TOKENIZER_MODE)
+@pytest.mark.parametrize("model_name, tokenizer_mode", PARAMS_MODELS_TOKENIZER_MODE)
 def test_structured_output_auto_mode(
     monkeypatch: pytest.MonkeyPatch,
     unsupported_json_schema: dict[str, Any],
@@ -520,9 +512,7 @@ def test_structured_output_auto_mode(
     # Make sure `auto` backend handling doesn't mess up sampling_params
     # and that we can reuse it without error.
     outputs.extend(
-        llm.generate(prompts=prompts,
-                     sampling_params=sampling_params,
-                     use_tqdm=True))
+        llm.generate(prompts=prompts, sampling_params=sampling_params, use_tqdm=True))
 
     assert outputs is not None
     for output in outputs:
@@ -563,18 +553,16 @@ def test_guidance_no_additional_properties(monkeypatch: pytest.MonkeyPatch):
         'required': ['a1', 'a2', 'a3'],
     }
 
-    prompt = (
-        "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a "
-        "helpful assistant.<|im_end|>\n<|im_start|>user\nPlease generate a "
-        "large JSON object with key-value pairs a1=b1, a2=b2, ..., a20=b20"
-        "<|im_end|>\n<|im_start|>assistant\n")
+    prompt = ("<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a "
+              "helpful assistant.<|im_end|>\n<|im_start|>user\nPlease generate a "
+              "large JSON object with key-value pairs a1=b1, a2=b2, ..., a20=b20"
+              "<|im_end|>\n<|im_start|>assistant\n")
 
     def generate_with_backend(backend):
-        guided_params = GuidedDecodingParams(
-            json=schema,
-            backend=backend,
-            disable_any_whitespace=True,
-            disable_additional_properties=True)
+        guided_params = GuidedDecodingParams(json=schema,
+                                             backend=backend,
+                                             disable_any_whitespace=True,
+                                             disable_additional_properties=True)
         sampling_params = SamplingParams(temperature=0,
                                          max_tokens=256,
                                          guided_decoding=guided_params)

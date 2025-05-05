@@ -68,9 +68,8 @@ class GPTQConfig(QuantizationConfig):
         self.lm_head_quantized = lm_head_quantized
         self.pack_factor = Fraction(32, self.weight_bits)
         if self.weight_bits not in [2, 3, 4, 8]:
-            raise ValueError(
-                "Currently, only 2/3/4/8-bit weight quantization is "
-                f"supported for GPTQ, but got {self.weight_bits} bits.")
+            raise ValueError("Currently, only 2/3/4/8-bit weight quantization is "
+                             f"supported for GPTQ, but got {self.weight_bits} bits.")
 
     def __repr__(self) -> str:
         return (f"GPTQConfig(weight_bits={self.weight_bits}, "
@@ -104,10 +103,8 @@ class GPTQConfig(QuantizationConfig):
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
         desc_act = cls.get_from_keys(config, ["desc_act"])
-        lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"],
-                                                 default=False)
-        return cls(weight_bits, group_size, desc_act, lm_head_quantized,
-                   dynamic)
+        lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"], default=False)
+        return cls(weight_bits, group_size, desc_act, lm_head_quantized, dynamic)
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["GPTQLinearMethod"]:
@@ -144,17 +141,14 @@ class GPTQLinearMethod(LinearMethodBase):
         del output_size  # Unused.
         weight_loader = extra_weight_attrs.get("weight_loader")
         if input_size_per_partition % self.quant_config.group_size != 0:
-            raise ValueError(
-                "The input size is not aligned with the quantized "
-                "weight shape. This can be caused by too large "
-                "tensor parallel size.")
+            raise ValueError("The input size is not aligned with the quantized "
+                             "weight shape. This can be caused by too large "
+                             "tensor parallel size.")
         output_size_per_partition = sum(output_partition_sizes)
-        if (output_size_per_partition % self.quant_config.pack_factor.numerator
-                != 0):
-            raise ValueError(
-                "The output size is not aligned with the quantized "
-                "weight shape. This can be caused by too large "
-                "tensor parallel size.")
+        if (output_size_per_partition % self.quant_config.pack_factor.numerator != 0):
+            raise ValueError("The output size is not aligned with the quantized "
+                             "weight shape. This can be caused by too large "
+                             "tensor parallel size.")
 
         if self.quant_config.group_size != -1:
             group_size = self.quant_config.group_size
@@ -173,17 +167,16 @@ class GPTQLinearMethod(LinearMethodBase):
                 scale_and_zero_size = input_size_per_partition // group_size
                 scale_and_zero_input_dim = 0
 
-        qweight = PackedvLLMParameter(
-            data=torch.empty(
-                input_size_per_partition // self.quant_config.pack_factor,
-                output_size_per_partition,
-                dtype=torch.int32,
-            ),
-            input_dim=0,
-            output_dim=1,
-            packed_dim=0,
-            packed_factor=self.quant_config.pack_factor,
-            weight_loader=weight_loader)
+        qweight = PackedvLLMParameter(data=torch.empty(
+            input_size_per_partition // self.quant_config.pack_factor,
+            output_size_per_partition,
+            dtype=torch.int32,
+        ),
+                                      input_dim=0,
+                                      output_dim=1,
+                                      packed_dim=0,
+                                      packed_factor=self.quant_config.pack_factor,
+                                      weight_loader=weight_loader)
 
         g_idx = RowvLLMParameter(data=torch.tensor(
             [
@@ -215,24 +208,21 @@ class GPTQLinearMethod(LinearMethodBase):
             weight_loader
         }
         if scale_and_zero_input_dim is None:
-            scales = ChannelQuantScaleParameter(output_dim=1,
-                                                **weight_scale_args)
-            qzeros = PackedColumnParameter(
-                output_dim=1,
-                packed_dim=1,
-                packed_factor=self.quant_config.pack_factor,
-                **qzeros_args)
+            scales = ChannelQuantScaleParameter(output_dim=1, **weight_scale_args)
+            qzeros = PackedColumnParameter(output_dim=1,
+                                           packed_dim=1,
+                                           packed_factor=self.quant_config.pack_factor,
+                                           **qzeros_args)
 
         else:
             scales = GroupQuantScaleParameter(output_dim=1,
                                               input_dim=0,
                                               **weight_scale_args)
-            qzeros = PackedvLLMParameter(
-                input_dim=0,
-                output_dim=1,
-                packed_dim=1,
-                packed_factor=self.quant_config.pack_factor,
-                **qzeros_args)
+            qzeros = PackedvLLMParameter(input_dim=0,
+                                         output_dim=1,
+                                         packed_dim=1,
+                                         packed_factor=self.quant_config.pack_factor,
+                                         **qzeros_args)
 
         layer.register_parameter("qweight", qweight)
         layer.register_parameter("g_idx", g_idx)
@@ -258,8 +248,7 @@ class GPTQLinearMethod(LinearMethodBase):
                                                dtype=torch.int,
                                                device=layer.g_idx.device)
             layer.exllama_state = ExllamaState.READY
-            ops.gptq_shuffle(layer.qweight, layer.g_idx,
-                             self.quant_config.weight_bits)
+            ops.gptq_shuffle(layer.qweight, layer.g_idx, self.quant_config.weight_bits)
 
     def apply(self,
               layer: torch.nn.Module,
@@ -268,9 +257,8 @@ class GPTQLinearMethod(LinearMethodBase):
         out_shape = x.shape[:-1] + (layer.qweight.shape[-1], )
         reshaped_x = x.reshape(-1, x.shape[-1])
 
-        output = ops.gptq_gemm(reshaped_x, layer.qweight, layer.qzeros,
-                               layer.scales, layer.g_idx,
-                               layer.exllama_state == ExllamaState.READY,
+        output = ops.gptq_gemm(reshaped_x, layer.qweight, layer.qzeros, layer.scales,
+                               layer.g_idx, layer.exllama_state == ExllamaState.READY,
                                self.quant_config.weight_bits)
         if bias is not None:
             output.add_(bias)

@@ -142,16 +142,14 @@ def generate_data(
     op_type,
     device,
 ) -> PunicaTensors:
-    seq_len_tensor = torch.randint(seq_length, seq_length + 1,
-                                   (batches, )).to(device)
+    seq_len_tensor = torch.randint(seq_length, seq_length + 1, (batches, )).to(device)
     b_seq_start_loc = torch.cumsum(
         torch.tensor([0] + seq_len_tensor[:-1].tolist(), dtype=torch.long),
         dim=0,
     ).to(device)
     total_tokens = seq_len_tensor.sum()
     if op_type == "shrink":
-        inputs_tensor = torch.rand((total_tokens, hidden_size),
-                                   dtype=dtype).to(device)
+        inputs_tensor = torch.rand((total_tokens, hidden_size), dtype=dtype).to(device)
         lora_weights = torch.rand(
             (lora_nums, max_rank, hidden_size),  # col-major
             dtype=dtype,
@@ -180,15 +178,13 @@ def generate_data(
         ).to(device)
         # Ensure the same input.
         our_out_tensor = ref_out_tensor.clone()
-    lora_indices_tensor = torch.randint(0,
-                                        lora_nums - 1 if lora_nums > 1 else 1,
+    lora_indices_tensor = torch.randint(0, lora_nums - 1 if lora_nums > 1 else 1,
                                         (batches, )).to(device)
     indices = torch.zeros((total_tokens), dtype=torch.long).to(device)
     current_offset = 0
     for b_id in range(batches):
         lora_index = lora_indices_tensor[b_id]
-        indices[current_offset:current_offset +
-                seq_len_tensor[b_id]].copy_(lora_index)
+        indices[current_offset:current_offset + seq_len_tensor[b_id]].copy_(lora_index)
         current_offset += seq_len_tensor[b_id].item()
 
     return PunicaTensors(
@@ -213,8 +209,7 @@ def generate_data_for_expand_nslices(
     nslices,
     device,
 ) -> PunicaTensors:
-    seq_len_tensor = torch.randint(seq_length, seq_length + 1,
-                                   (batches, )).to(device)
+    seq_len_tensor = torch.randint(seq_length, seq_length + 1, (batches, )).to(device)
     b_seq_start_loc = torch.cumsum(
         torch.tensor([0] + seq_len_tensor[:-1].tolist(), dtype=torch.long),
         dim=0,
@@ -237,8 +232,7 @@ def generate_data_for_expand_nslices(
                                 dtype=dtype).to(device)
     # Ensure the same input.
     our_out_tensor = ref_out_tensor.clone()
-    lora_indices_tensor = torch.randint(0,
-                                        lora_nums - 1 if lora_nums > 1 else 1,
+    lora_indices_tensor = torch.randint(0, lora_nums - 1 if lora_nums > 1 else 1,
                                         (batches, ))
     indices = torch.zeros((total_tokens), dtype=torch.long).to(device)
     current_offset = 0
@@ -272,8 +266,7 @@ def generate_data_for_nslices(
     op_type,
     device,
 ) -> PunicaTensors:
-    seq_len_tensor = torch.randint(seq_length, seq_length + 1,
-                                   (batches, )).to(device)
+    seq_len_tensor = torch.randint(seq_length, seq_length + 1, (batches, )).to(device)
     b_seq_start_loc = torch.cumsum(
         torch.tensor([0] + seq_len_tensor[:-1].tolist(), dtype=torch.long),
         dim=0,
@@ -283,8 +276,7 @@ def generate_data_for_nslices(
     lora_weights_lst = []
     if op_type == "shrink":
 
-        inputs_tensor = torch.rand((total_tokens, hidden_size),
-                                   dtype=dtype).to(device)
+        inputs_tensor = torch.rand((total_tokens, hidden_size), dtype=dtype).to(device)
 
         for _ in range(nslices):
             if op_type == "shrink":
@@ -317,8 +309,7 @@ def generate_data_for_nslices(
 
     # Ensure the same input.
     ref_out_tensor = our_out_tensor.clone()
-    lora_indices_tensor = torch.randint(0,
-                                        lora_nums - 1 if lora_nums > 1 else 1,
+    lora_indices_tensor = torch.randint(0, lora_nums - 1 if lora_nums > 1 else 1,
                                         (batches, ))
     indices = torch.zeros((total_tokens), dtype=torch.long).to(device)
     current_offset = 0

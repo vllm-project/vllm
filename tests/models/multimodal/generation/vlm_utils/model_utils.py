@@ -21,8 +21,7 @@ from .types import RunnerOutput
 
 
 ####### vLLM output processors functions
-def blip2_vllm_to_hf_output(vllm_output: RunnerOutput,
-                            model: str) -> RunnerOutput:
+def blip2_vllm_to_hf_output(vllm_output: RunnerOutput, model: str) -> RunnerOutput:
     """Sanitize vllm output [blip2 models] to be comparable with hf output."""
     _, output_str, out_logprobs = vllm_output
 
@@ -36,8 +35,7 @@ def blip2_vllm_to_hf_output(vllm_output: RunnerOutput,
     return hf_output_ids, hf_output_str, out_logprobs
 
 
-def fuyu_vllm_to_hf_output(vllm_output: RunnerOutput,
-                           model: str) -> RunnerOutput:
+def fuyu_vllm_to_hf_output(vllm_output: RunnerOutput, model: str) -> RunnerOutput:
     """Sanitize vllm output [fuyu models] to be comparable with hf output."""
     output_ids, output_str, out_logprobs = vllm_output
 
@@ -145,8 +143,7 @@ def llava_onevision_vllm_to_hf_output(vllm_output: RunnerOutput,
     return hf_output_ids, hf_output_str, out_logprobs
 
 
-def mantis_vllm_to_hf_output(vllm_output: RunnerOutput,
-                             model: str) -> RunnerOutput:
+def mantis_vllm_to_hf_output(vllm_output: RunnerOutput, model: str) -> RunnerOutput:
     """Sanitize vllm output [mantis] to compare with hf output."""
     output_ids, output_str, out_logprobs = vllm_output
 
@@ -155,8 +152,7 @@ def mantis_vllm_to_hf_output(vllm_output: RunnerOutput,
     return output_ids, hf_output_str, out_logprobs
 
 
-def phi3v_vllm_to_hf_output(vllm_output: RunnerOutput,
-                            model: str) -> RunnerOutput:
+def phi3v_vllm_to_hf_output(vllm_output: RunnerOutput, model: str) -> RunnerOutput:
     """Sanitize vllm output [phi3v] to be comparable with hf output."""
     _, output_str, out_logprobs = vllm_output
 
@@ -174,8 +170,7 @@ def phi3v_vllm_to_hf_output(vllm_output: RunnerOutput,
     return hf_output_ids, hf_output_str, out_logprobs
 
 
-def paligemma_vllm_to_hf_output(vllm_output: RunnerOutput,
-                                model: str) -> RunnerOutput:
+def paligemma_vllm_to_hf_output(vllm_output: RunnerOutput, model: str) -> RunnerOutput:
     """Sanitize vllm output to be comparable with hf output."""
     output_ids, output_str, out_logprobs = vllm_output
 
@@ -199,38 +194,33 @@ def paligemma_vllm_to_hf_output(vllm_output: RunnerOutput,
 
 
 ####### Post-processors for HF outputs
-def deepseekvl2_trunc_hf_output(hf_output: RunnerOutput,
-                                model: str) -> RunnerOutput:
+def deepseekvl2_trunc_hf_output(hf_output: RunnerOutput, model: str) -> RunnerOutput:
     output_ids, output_str, out_logprobs = hf_output
     if output_str.endswith("<｜end▁of▁sentence｜>"):
         output_str = output_str.split("<｜end▁of▁sentence｜>")[0]
     return output_ids, output_str, out_logprobs
 
 
-def idefics3_trunc_hf_output(hf_output: RunnerOutput,
-                             model: str) -> RunnerOutput:
+def idefics3_trunc_hf_output(hf_output: RunnerOutput, model: str) -> RunnerOutput:
     output_ids, output_str, out_logprobs = hf_output
     if output_str.endswith("<end_of_utterance>"):
         output_str = output_str.split("<end_of_utterance>")[0]
     return output_ids, output_str, out_logprobs
 
 
-def smolvlm_trunc_hf_output(hf_output: RunnerOutput,
-                            model: str) -> RunnerOutput:
+def smolvlm_trunc_hf_output(hf_output: RunnerOutput, model: str) -> RunnerOutput:
     # Based on Idefics3
     return idefics3_trunc_hf_output(hf_output, model)
 
 
-def minicpmv_trunc_hf_output(hf_output: RunnerOutput,
-                             model: str) -> RunnerOutput:
+def minicpmv_trunc_hf_output(hf_output: RunnerOutput, model: str) -> RunnerOutput:
     output_ids, output_str, out_logprobs = hf_output
     if output_str.endswith("<|eot_id|>"):
         output_str = output_str.split("<|eot_id|>")[0]
     return output_ids, output_str, out_logprobs
 
 
-def minimax_vl_01_hf_output(hf_output: RunnerOutput,
-                            model: str) -> RunnerOutput:
+def minimax_vl_01_hf_output(hf_output: RunnerOutput, model: str) -> RunnerOutput:
     output_ids, output_str, out_logprobs = hf_output
     if output_str.endswith("<end_of_sentence>"):
         output_str = output_str.split("<end_of_sentence>")[0]
@@ -243,9 +233,8 @@ def get_llava_embeddings(image_assets: ImageTestAssets):
 
 
 ####### Prompt path encoders for models that need models on disk
-def qwen_prompt_path_encoder(
-        tmp_path: PosixPath, prompt: str,
-        assets: Union[list[ImageAsset], ImageTestAssets]) -> str:
+def qwen_prompt_path_encoder(tmp_path: PosixPath, prompt: str,
+                             assets: Union[list[ImageAsset], ImageTestAssets]) -> str:
     """Given a temporary dir path, export one or more image assets into the
     tempdir & replace its contents with the local path to the string so that
     the HF version of Qwen-VL can resolve the path and load the image in its
@@ -366,8 +355,7 @@ def h2ovl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
             self.max_num = self.config.max_dynamic_patch
             self.image_size = self.vision_config.image_size
 
-        def __call__(self, text: str, images: Union[Image, list[Image]],
-                     **kwargs):
+        def __call__(self, text: str, images: Union[Image, list[Image]], **kwargs):
             # yapf: disable
             from vllm.model_executor.models.h2ovl import (
                 IMG_CONTEXT, IMG_END, IMG_START, image_to_pixel_values_h2ovl)
@@ -384,9 +372,7 @@ def h2ovl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
                     use_msac=self.use_msac,
                 ) for image in images
             ]
-            num_patches_list = [
-                pixel_value.shape[0] for pixel_value in pixel_values
-            ]
+            num_patches_list = [pixel_value.shape[0] for pixel_value in pixel_values]
             pixel_values = torch.cat(pixel_values, dim=0)
             for num_patches in num_patches_list:
                 context_tokens = IMG_CONTEXT * self.num_image_token \
@@ -397,14 +383,12 @@ def h2ovl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
             prompt.update({"pixel_values": pixel_values})
             return prompt
 
-    img_context_token_id = hf_model.tokenizer.convert_tokens_to_ids(
-        "<IMG_CONTEXT>")
+    img_context_token_id = hf_model.tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
     hf_model.model.img_context_token_id = img_context_token_id
     hf_model.processor = H2OVLProcessor(hf_model)
     hf_model.model.get_output_embeddings = lambda: \
         hf_model.model.language_model.get_output_embeddings()
-    hf_model.model.generate = types.MethodType(_internvl_generate,
-                                               hf_model.model)
+    hf_model.model.generate = types.MethodType(_internvl_generate, hf_model.model)
     return hf_model
 
 
@@ -426,8 +410,7 @@ def skyworkr1v_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
             self.max_num = self.config.max_dynamic_patch
             self.image_size = self.vision_config.image_size
 
-        def __call__(self, text: str, images: Union[Image, list[Image]],
-                     **kwargs):
+        def __call__(self, text: str, images: Union[Image, list[Image]], **kwargs):
             from vllm.model_executor.models.skyworkr1v import (
                 IMG_CONTEXT, IMG_END, IMG_START,
                 image_to_pixel_values_skyworkr1v)
@@ -441,9 +424,7 @@ def skyworkr1v_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
                     use_thumbnail=self.use_thumbnail,
                 ) for image in images
             ]
-            num_patches_list = [
-                pixel_value.shape[0] for pixel_value in pixel_values
-            ]
+            num_patches_list = [pixel_value.shape[0] for pixel_value in pixel_values]
             pixel_values = torch.cat(pixel_values, dim=0)
             for num_patches in num_patches_list:
                 context_tokens = IMG_CONTEXT * self.num_image_token \
@@ -454,14 +435,12 @@ def skyworkr1v_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
             prompt.update({"pixel_values": pixel_values})
             return prompt
 
-    img_context_token_id = hf_model.tokenizer.convert_tokens_to_ids(
-        "<IMG_CONTEXT>")
+    img_context_token_id = hf_model.tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
     hf_model.model.img_context_token_id = img_context_token_id
     hf_model.processor = SkyworkR1VProcessor(hf_model)
     hf_model.model.get_output_embeddings = lambda: \
         hf_model.model.language_model.get_output_embeddings()
-    hf_model.model.generate = types.MethodType(_internvl_generate,
-                                               hf_model.model)
+    hf_model.model.generate = types.MethodType(_internvl_generate, hf_model.model)
     return hf_model
 
 
@@ -483,8 +462,7 @@ def internvl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
             self.max_num = self.config.max_dynamic_patch
             self.image_size = self.vision_config.image_size
 
-        def __call__(self, text: str, images: Union[Image, list[Image]],
-                     **kwargs):
+        def __call__(self, text: str, images: Union[Image, list[Image]], **kwargs):
             from vllm.model_executor.models.internvl import (
                 IMG_CONTEXT, IMG_END, IMG_START,
                 image_to_pixel_values_internvl)
@@ -498,9 +476,7 @@ def internvl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
                     use_thumbnail=self.use_thumbnail,
                 ) for image in images
             ]
-            num_patches_list = [
-                pixel_value.shape[0] for pixel_value in pixel_values
-            ]
+            num_patches_list = [pixel_value.shape[0] for pixel_value in pixel_values]
             pixel_values = torch.cat(pixel_values, dim=0)
             for num_patches in num_patches_list:
                 context_tokens = IMG_CONTEXT * self.num_image_token \
@@ -511,14 +487,12 @@ def internvl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
             prompt.update({"pixel_values": pixel_values})
             return prompt
 
-    img_context_token_id = hf_model.tokenizer.convert_tokens_to_ids(
-        "<IMG_CONTEXT>")
+    img_context_token_id = hf_model.tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
     hf_model.model.img_context_token_id = img_context_token_id
     hf_model.processor = InternVLProcessor(hf_model)
     hf_model.model.get_output_embeddings = lambda: \
         hf_model.model.language_model.get_output_embeddings()
-    hf_model.model.generate = types.MethodType(_internvl_generate,
-                                               hf_model.model)
+    hf_model.model.generate = types.MethodType(_internvl_generate, hf_model.model)
     return hf_model
 
 

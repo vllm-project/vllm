@@ -63,16 +63,14 @@ class Mistral3PatchMerger(nn.Module):
         self.vision_hidden_size = vision_hidden_size
         self.spatial_merge_size = spatial_merge_size
         self.patch_size = patch_size
-        self.merging_layer = nn.Linear(vision_hidden_size *
-                                       self.spatial_merge_size**2,
+        self.merging_layer = nn.Linear(vision_hidden_size * self.spatial_merge_size**2,
                                        vision_hidden_size,
                                        bias=False)
 
     def forward(self, image_features: torch.Tensor,
                 image_sizes: torch.Tensor) -> torch.Tensor:
         image_sizes = [(image_size[0] // self.patch_size,
-                        image_size[1] // self.patch_size)
-                       for image_size in image_sizes]
+                        image_size[1] // self.patch_size) for image_size in image_sizes]
 
         tokens_per_image = [h * w for h, w in image_sizes]
         d = image_features.shape[-1]
@@ -82,12 +80,10 @@ class Mistral3PatchMerger(nn.Module):
                 image_features.split(tokens_per_image)):
             # Reshape image_tokens into a 2D grid
             h, w = image_sizes[image_index]
-            image_grid = image_tokens.view(h, w, d).permute(2, 0,
-                                                            1).unsqueeze(0)
-            grid = torch.nn.functional.unfold(
-                image_grid,
-                kernel_size=self.spatial_merge_size,
-                stride=self.spatial_merge_size)
+            image_grid = image_tokens.view(h, w, d).permute(2, 0, 1).unsqueeze(0)
+            grid = torch.nn.functional.unfold(image_grid,
+                                              kernel_size=self.spatial_merge_size,
+                                              stride=self.spatial_merge_size)
             grid = grid.view(d * self.spatial_merge_size**2, -1).t()
             permuted_tensor.append(grid)
 
@@ -110,10 +106,9 @@ class Mistral3MultiModalProjector(nn.Module):
         super().__init__()
 
         self.norm = RMSNorm(vision_hidden_size, eps=1e-5)
-        self.patch_merger = Mistral3PatchMerger(
-            vision_hidden_size=vision_hidden_size,
-            spatial_merge_size=spatial_merge_size,
-            patch_size=patch_size)
+        self.patch_merger = Mistral3PatchMerger(vision_hidden_size=vision_hidden_size,
+                                                spatial_merge_size=spatial_merge_size,
+                                                patch_size=patch_size)
 
         self.linear_1 = ColumnParallelLinear(vision_hidden_size,
                                              text_hidden_size,
@@ -218,8 +213,7 @@ class Mistral3ProcessingInfo(BaseLlavaProcessingInfo):
         return self.ctx.get_hf_processor(PixtralProcessor, **kwargs)
 
 
-class Mistral3MultiModalProcessor(
-        BaseMultiModalProcessor[Mistral3ProcessingInfo]):
+class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo]):
 
     def _call_hf_processor(
         self,
@@ -298,8 +292,7 @@ class Mistral3MultiModalProcessor(
         ]
 
 
-def _build_mistral3_info(
-    ctx: InputProcessingContext, ) -> BaseLlavaProcessingInfo:
+def _build_mistral3_info(ctx: InputProcessingContext, ) -> BaseLlavaProcessingInfo:
     hf_config = ctx.get_hf_config(Mistral3Config)
     assert isinstance(hf_config.vision_config, PixtralVisionConfig)
     return Mistral3ProcessingInfo(ctx)
@@ -333,8 +326,7 @@ def _get_num_hidden_layers(hf_config: LlavaLikeConfig) -> int:
         return _get_layer_index(feature_layers, num_hidden_layers)
     # If we have multiple feature layers, initialize up to the deepest one
     elif isinstance(feature_layers, (list, tuple)):
-        return max(
-            _get_layer_index(idx, num_hidden_layers) for idx in feature_layers)
+        return max(_get_layer_index(idx, num_hidden_layers) for idx in feature_layers)
     raise TypeError(f"vision_layer_feature type: {type(feature_layers)}"
                     " is not supported")
 
@@ -376,12 +368,11 @@ def init_vision_tower_for_llava(
     )
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    _build_mistral3_processor,
-    info=_build_mistral3_info,
-    dummy_inputs=Mistral3DummyInputsBuilder)
-class Mistral3ForConditionalGeneration(nn.Module, SupportsLoRA,
-                                       SupportsMultiModal, SupportsPP):
+@MULTIMODAL_REGISTRY.register_processor(_build_mistral3_processor,
+                                        info=_build_mistral3_info,
+                                        dummy_inputs=Mistral3DummyInputsBuilder)
+class Mistral3ForConditionalGeneration(nn.Module, SupportsLoRA, SupportsMultiModal,
+                                       SupportsPP):
 
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -408,11 +399,11 @@ class Mistral3ForConditionalGeneration(nn.Module, SupportsLoRA,
             config.projector_hidden_act = "gelu"
 
         # TODO: Optionally initializes this for supporting embeddings.
-        self.vision_tower = init_vision_tower_for_llava(
-            config,
-            quant_config,
-            require_post_norm=False,
-            prefix=maybe_prefix(prefix, "vision_tower"))
+        self.vision_tower = init_vision_tower_for_llava(config,
+                                                        quant_config,
+                                                        require_post_norm=False,
+                                                        prefix=maybe_prefix(
+                                                            prefix, "vision_tower"))
         self.multi_modal_projector = Mistral3MultiModalProjector(
             vision_hidden_size=config.vision_config.hidden_size,
             text_hidden_size=config.text_config.hidden_size,
@@ -439,9 +430,8 @@ class Mistral3ForConditionalGeneration(nn.Module, SupportsLoRA,
 
         if actual_dims != expected_dims:
             expected_expr = ("batch_size", *map(str, expected_dims))
-            raise ValueError(
-                f"The expected shape of pixel values is {expected_expr}. "
-                f"You supplied {tuple(data.shape)}.")
+            raise ValueError(f"The expected shape of pixel values is {expected_expr}. "
+                             f"You supplied {tuple(data.shape)}.")
 
         return data
 
@@ -494,8 +484,8 @@ class Mistral3ForConditionalGeneration(nn.Module, SupportsLoRA,
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
@@ -570,8 +560,7 @@ class Mistral3ForConditionalGeneration(nn.Module, SupportsLoRA,
         # condition is for v0 compatibility.
         elif inputs_embeds is None:
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
+            inputs_embeds = self.get_input_embeddings(input_ids, vision_embeddings)
             input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
@@ -586,11 +575,9 @@ class Mistral3ForConditionalGeneration(nn.Module, SupportsLoRA,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states, sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 
@@ -598,7 +585,6 @@ class Mistral3ForConditionalGeneration(nn.Module, SupportsLoRA,
         """
         Get the module prefix in multimodal models
         """
-        return MultiModelKeys.from_string_field(
-            language_model="language_model",
-            connector="multi_modal_projector",
-            tower_model="vision_tower")
+        return MultiModelKeys.from_string_field(language_model="language_model",
+                                                connector="multi_modal_projector",
+                                                tower_model="vision_tower")

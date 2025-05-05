@@ -74,11 +74,10 @@ class AsyncLLM(EngineClient):
             None
         """
         if not envs.VLLM_USE_V1:
-            raise ValueError(
-                "Using V1 AsyncLLMEngine, but envs.VLLM_USE_V1=False. "
-                "This should not happen. As a workaround, try using "
-                "AsyncLLMEngine.from_vllm_config(...) or explicitly set "
-                "VLLM_USE_V1=0 or 1 and report this issue on Github.")
+            raise ValueError("Using V1 AsyncLLMEngine, but envs.VLLM_USE_V1=False. "
+                             "This should not happen. As a workaround, try using "
+                             "AsyncLLMEngine.from_vllm_config(...) or explicitly set "
+                             "VLLM_USE_V1=0 or 1 and report this issue on Github.")
 
         self.model_config = vllm_config.model_config
         self.vllm_config = vllm_config
@@ -112,8 +111,7 @@ class AsyncLLM(EngineClient):
 
         # EngineCore (starts the engine in background process).
         core_client_class = AsyncMPClient if (
-            vllm_config.parallel_config.data_parallel_size
-            == 1) else DPAsyncMPClient
+            vllm_config.parallel_config.data_parallel_size == 1) else DPAsyncMPClient
 
         self.engine_core = core_client_class(
             vllm_config=vllm_config,
@@ -141,11 +139,10 @@ class AsyncLLM(EngineClient):
         disable_log_stats: bool = False,
     ) -> "AsyncLLM":
         if not envs.VLLM_USE_V1:
-            raise ValueError(
-                "Using V1 AsyncLLMEngine, but envs.VLLM_USE_V1=False. "
-                "This should not happen. As a workaround, try using "
-                "AsyncLLMEngine.from_vllm_config(...) or explicitly set "
-                "VLLM_USE_V1=0 or 1 and report this issue on Github.")
+            raise ValueError("Using V1 AsyncLLMEngine, but envs.VLLM_USE_V1=False. "
+                             "This should not happen. As a workaround, try using "
+                             "AsyncLLMEngine.from_vllm_config(...) or explicitly set "
+                             "VLLM_USE_V1=0 or 1 and report this issue on Github.")
 
         # Create the LLMEngine.
         return cls(
@@ -220,9 +217,8 @@ class AsyncLLM(EngineClient):
 
         # Convert Input --> Request.
         prompt_str, request = self.processor.process_inputs(
-            request_id, prompt, params, arrival_time, lora_request,
-            tokenization_kwargs, trace_headers, prompt_adapter_request,
-            priority)
+            request_id, prompt, params, arrival_time, lora_request, tokenization_kwargs,
+            trace_headers, prompt_adapter_request, priority)
 
         if params.n == 1:
             await self._add_request(request, prompt_str, None, 0, queue)
@@ -235,18 +231,16 @@ class AsyncLLM(EngineClient):
             child_request = request if idx == params.n - 1 else copy(request)
             child_request.request_id = request_id
             child_request.sampling_params = params
-            await self._add_request(child_request, prompt_str, parent_request,
-                                    idx, queue)
+            await self._add_request(child_request, prompt_str, parent_request, idx,
+                                    queue)
         return queue
 
-    async def _add_request(self, request: EngineCoreRequest,
-                           prompt: Optional[str],
+    async def _add_request(self, request: EngineCoreRequest, prompt: Optional[str],
                            parent_req: Optional[ParentRequest], index: int,
                            queue: RequestOutputCollector):
 
         # Add the request to OutputProcessor (this process).
-        self.output_processor.add_request(request, prompt, parent_req, index,
-                                          queue)
+        self.output_processor.add_request(request, prompt, parent_req, index, queue)
 
         # Add the EngineCoreRequest to EngineCore (separate process).
         await self.engine_core.add_request_async(request)
@@ -360,8 +354,8 @@ class AsyncLLM(EngineClient):
                     outputs = await engine_core.get_output_async()
                     num_outputs = len(outputs.outputs)
 
-                    iteration_stats = IterationStats() if (
-                        log_stats and num_outputs) else None
+                    iteration_stats = IterationStats() if (log_stats
+                                                           and num_outputs) else None
 
                     # Split outputs into chunks of at most
                     # VLLM_V1_OUTPUT_PROC_CHUNK_SIZE, so that we don't block the
@@ -475,8 +469,7 @@ class AsyncLLM(EngineClient):
     async def stop_profile(self) -> None:
         await self.engine_core.profile_async(False)
 
-    async def reset_prefix_cache(self,
-                                 device: Optional[Device] = None) -> None:
+    async def reset_prefix_cache(self, device: Optional[Device] = None) -> None:
         if device == Device.CPU:
             raise ValueError("Not supported on CPU.")
         await self.engine_core.reset_prefix_cache_async()
@@ -514,8 +507,8 @@ class AsyncLLM(EngineClient):
         """
         Perform a collective RPC call to the given path.
         """
-        return await self.engine_core.collective_rpc_async(
-            method, timeout, args, kwargs)
+        return await self.engine_core.collective_rpc_async(method, timeout, args,
+                                                           kwargs)
 
     @property
     def is_running(self) -> bool:

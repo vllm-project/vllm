@@ -13,8 +13,8 @@ def deactivate_adapter(adapter_id: int, active_adapters: Dict[int, None],
     return False
 
 
-def add_adapter(adapter: Any, registered_adapters: Dict[int, Any],
-                capacity: int, add_func: Callable) -> bool:
+def add_adapter(adapter: Any, registered_adapters: Dict[int, Any], capacity: int,
+                add_func: Callable) -> bool:
     if adapter.id not in registered_adapters:
         if len(registered_adapters) >= capacity:
             raise RuntimeError('No free adapter slots.')
@@ -42,22 +42,19 @@ def list_adapters(registered_adapters: Dict[int, Any]) -> Dict[int, Any]:
     return dict(registered_adapters)
 
 
-def get_adapter(adapter_id: int,
-                registered_adapters: Dict[int, Any]) -> Optional[Any]:
+def get_adapter(adapter_id: int, registered_adapters: Dict[int, Any]) -> Optional[Any]:
     return registered_adapters.get(adapter_id)
 
 
 ## worker functions
 def set_active_adapters_worker(requests: Set[Any], mapping: Optional[Any],
-                               apply_adapters_func,
-                               set_adapter_mapping_func) -> None:
+                               apply_adapters_func, set_adapter_mapping_func) -> None:
     apply_adapters_func(requests)
     set_adapter_mapping_func(mapping)
 
 
-def add_adapter_worker(adapter_request: Any, list_adapters_func,
-                       load_adapter_func, add_adapter_func,
-                       activate_adapter_func) -> bool:
+def add_adapter_worker(adapter_request: Any, list_adapters_func, load_adapter_func,
+                       add_adapter_func, activate_adapter_func) -> bool:
     if adapter_request.adapter_id in list_adapters_func():
         return False
     loaded_adapter = load_adapter_func(adapter_request)
@@ -75,10 +72,9 @@ def apply_adapters_worker(adapter_requests: Set[Any], list_adapters_func,
         for adapter_request in adapter_requests if adapter_request
     }
     if len(models_map) > adapter_slots:
-        raise RuntimeError(
-            f"Number of requested models ({len(models_map)}) is greater "
-            f"than the number of GPU model slots "
-            f"({adapter_slots}).")
+        raise RuntimeError(f"Number of requested models ({len(models_map)}) is greater "
+                           f"than the number of GPU model slots "
+                           f"({adapter_slots}).")
     new_models = set(models_map)
     models_to_add = new_models - models_that_exist
     models_to_remove = models_that_exist - new_models

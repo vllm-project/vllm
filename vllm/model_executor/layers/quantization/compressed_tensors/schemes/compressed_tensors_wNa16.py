@@ -26,10 +26,7 @@ from vllm.scalar_type import scalar_types
 logger = init_logger(__name__)
 
 __all__ = ["CompressedTensorsWNA16"]
-WNA16_SUPPORTED_TYPES_MAP = {
-    4: scalar_types.uint4b8,
-    8: scalar_types.uint8b128
-}
+WNA16_SUPPORTED_TYPES_MAP = {4: scalar_types.uint4b8, 8: scalar_types.uint8b128}
 WNA16_ZP_SUPPORTED_TYPES_MAP = {4: scalar_types.uint4, 8: scalar_types.uint8}
 WNA16_SUPPORTED_BITS = list(WNA16_SUPPORTED_TYPES_MAP.keys())
 
@@ -56,24 +53,20 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                              "size and strategy is not channelwise.")
 
         if num_bits not in WNA16_SUPPORTED_TYPES_MAP:
-            raise ValueError(
-                f"Unsupported num_bits = {num_bits}. "
-                f"Supported num_bits = {WNA16_SUPPORTED_TYPES_MAP.keys()}")
+            raise ValueError(f"Unsupported num_bits = {num_bits}. "
+                             f"Supported num_bits = {WNA16_SUPPORTED_TYPES_MAP.keys()}")
 
-        self.quant_type = (WNA16_ZP_SUPPORTED_TYPES_MAP[num_bits]
-                           if not self.symmetric else
-                           WNA16_SUPPORTED_TYPES_MAP[num_bits])
+        self.quant_type = (WNA16_ZP_SUPPORTED_TYPES_MAP[num_bits] if not self.symmetric
+                           else WNA16_SUPPORTED_TYPES_MAP[num_bits])
 
     @classmethod
     def get_min_capability(cls) -> int:
         # ampere and up
         return 80
 
-    def create_weights(self, layer: torch.nn.Module, output_size: int,
-                       input_size: int, output_partition_sizes: List[int],
-                       input_size_per_partition: int,
-                       params_dtype: torch.dtype, weight_loader: Callable,
-                       **kwargs):
+    def create_weights(self, layer: torch.nn.Module, output_size: int, input_size: int,
+                       output_partition_sizes: List[int], input_size_per_partition: int,
+                       params_dtype: torch.dtype, weight_loader: Callable, **kwargs):
 
         output_size_per_partition = sum(output_partition_sizes)
 
@@ -91,8 +84,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
 
         if kernel_type.__name__ not in self._kernel_backends_being_used:
-            logger.info("Using %s for CompressedTensorsWNA16",
-                        kernel_type.__name__)
+            logger.info("Using %s for CompressedTensorsWNA16", kernel_type.__name__)
             self._kernel_backends_being_used.add(kernel_type.__name__)
 
         # If group_size is -1, we are in channelwise case.
@@ -114,8 +106,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                                      packed_dim=1,
                                      data=torch.empty(
                                          output_size_per_partition,
-                                         input_size_per_partition //
-                                         self.pack_factor,
+                                         input_size_per_partition // self.pack_factor,
                                          dtype=torch.int32,
                                      ))
 
@@ -142,8 +133,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         }
 
         if not partition_scales:
-            weight_scale = ChannelQuantScaleParameter(output_dim=0,
-                                                      **weight_scale_args)
+            weight_scale = ChannelQuantScaleParameter(output_dim=0, **weight_scale_args)
 
             if not self.symmetric:
                 qzeros = PackedColumnParameter(output_dim=0,
@@ -163,8 +153,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
 
         # A 2D array defining the original shape of the weights
         # before packing
-        weight_shape = BasevLLMParameter(data=torch.empty(2,
-                                                          dtype=torch.int64),
+        weight_shape = BasevLLMParameter(data=torch.empty(2, dtype=torch.int64),
                                          weight_loader=weight_loader)
 
         layer.register_parameter("weight_packed", weight)

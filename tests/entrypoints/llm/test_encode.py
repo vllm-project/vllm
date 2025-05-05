@@ -52,8 +52,7 @@ def assert_outputs_equal(o1: list[PoolingRequestOutput],
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize('prompt_token_ids', TOKEN_IDS)
-def test_v1_v2_api_consistency_single_prompt_tokens(llm: LLM,
-                                                    prompt_token_ids):
+def test_v1_v2_api_consistency_single_prompt_tokens(llm: LLM, prompt_token_ids):
     pooling_params = PoolingParams()
 
     with pytest.warns(DeprecationWarning, match="'prompt_token_ids'"):

@@ -91,8 +91,8 @@ def dequantize_to_dtype(tensor_fp4,
     return out
 
 
-def get_ref_results(a_fp4, b_fp4, a_sf, b_sf, a_global_scale, b_global_scale,
-                    m, n, dtype, block_size, device):
+def get_ref_results(a_fp4, b_fp4, a_sf, b_sf, a_global_scale, b_global_scale, m, n,
+                    dtype, block_size, device):
     _, m_k = a_fp4.shape
     _, n_k = b_fp4.shape
     assert (m_k == n_k)
@@ -138,13 +138,9 @@ def test_nvfp4_gemm(
     b_fp4, b_scale_interleaved = ops.scaled_fp4_quant(b_dtype, b_global_scale)
 
     expected_out = get_ref_results(a_fp4, b_fp4, a_scale_interleaved,
-                                   b_scale_interleaved, a_global_scale,
-                                   b_global_scale, m, n, dtype, block_size,
-                                   device)
+                                   b_scale_interleaved, a_global_scale, b_global_scale,
+                                   m, n, dtype, block_size, device)
     out = ops.cutlass_scaled_fp4_mm(a_fp4, b_fp4, a_scale_interleaved,
                                     b_scale_interleaved, alpha, dtype)
 
-    torch.testing.assert_close(out,
-                               expected_out.to(dtype=dtype),
-                               atol=1e-1,
-                               rtol=1e-1)
+    torch.testing.assert_close(out, expected_out.to(dtype=dtype), atol=1e-1, rtol=1e-1)

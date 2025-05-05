@@ -23,8 +23,7 @@ def test_custom_dispatcher(monkeypatch: pytest.MonkeyPatch):
                              ],
                              arg2=[
                                  "--max-model-len=256", "--max-num-seqs=32",
-                                 "--enforce-eager",
-                                 f"-O{CompilationLevel.DYNAMO_AS_IS}"
+                                 "--enforce-eager", f"-O{CompilationLevel.DYNAMO_AS_IS}"
                              ],
                              env1={},
                              env2={})

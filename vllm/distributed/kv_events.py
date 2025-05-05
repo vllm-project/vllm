@@ -231,8 +231,7 @@ class ZmqEventPublisher(EventPublisher):
 
                 payload = self._pack.encode(event)
                 seq_bytes = seq.to_bytes(8, "big")
-                self._pub.send_multipart(
-                    (self._topic_bytes, seq_bytes, payload))
+                self._pub.send_multipart((self._topic_bytes, seq_bytes, payload))
 
                 self._buffer.append((seq, payload))
                 self._event_queue.task_done()
@@ -258,8 +257,8 @@ class ZmqEventPublisher(EventPublisher):
                 # [identity, empty_delim, seq_bytes, payload]
                 # (identity, empty_delim) are stripped off by the router
                 # receiving payload is (seq_bytes, payload)
-                self._replay.send_multipart(
-                    (client_id, b"", seq.to_bytes(8, "big"), buf))
+                self._replay.send_multipart((client_id, b"", seq.to_bytes(8,
+                                                                          "big"), buf))
         # Send end of sequence marker
         # receiving payload is (-1, b""")
         self._replay.send_multipart((client_id, b"", self.END_SEQ, b""))
@@ -272,8 +271,7 @@ class EventPublisherFactory:
     }
 
     @classmethod
-    def register_publisher(cls, name: str,
-                           ctor: Callable[..., EventPublisher]) -> None:
+    def register_publisher(cls, name: str, ctor: Callable[..., EventPublisher]) -> None:
         if name in cls._registry:
             raise KeyError(f"publisher '{name}' already registered")
         cls._registry[name] = ctor

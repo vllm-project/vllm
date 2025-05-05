@@ -118,8 +118,8 @@ def _is_req_state_block_table_match(model_runner, req_id: str) -> bool:
     if block_table.num_blocks_per_row[req_index] != len(req_state.block_ids):
         return False
     num_blocks = block_table.num_blocks_per_row[req_index]
-    return (block_table.block_table_np[req_index, :num_blocks] ==
-            req_state.block_ids).all()
+    return (block_table.block_table_np[req_index, :num_blocks] == req_state.block_ids
+            ).all()
 
 
 def test_update_states_new_request(model_runner):
@@ -296,27 +296,23 @@ def test_get_paddings():
     # Bucketed padding
     min_token_size, max_token_size, padding_gap = 16, 512, 64
     expected_paddings = [16, 32, 64, 128, 192, 256, 320, 384, 448, 512]
-    actual_paddings = _get_token_paddings(min_token_size, max_token_size,
-                                          padding_gap)
+    actual_paddings = _get_token_paddings(min_token_size, max_token_size, padding_gap)
 
     # Bucketed padding with max_token_size not a power of two.
     max_token_size = 317
     expected_paddings = [16, 32, 64, 128, 192, 256, 320]
-    actual_paddings = _get_token_paddings(min_token_size, max_token_size,
-                                          padding_gap)
+    actual_paddings = _get_token_paddings(min_token_size, max_token_size, padding_gap)
     assert actual_paddings == expected_paddings
 
     # Exponential padding.
     max_token_size, padding_gap = 1024, 0
     expected_paddings = [16, 32, 64, 128, 256, 512, 1024]
-    actual_paddings = _get_token_paddings(min_token_size, max_token_size,
-                                          padding_gap)
+    actual_paddings = _get_token_paddings(min_token_size, max_token_size, padding_gap)
     assert actual_paddings == expected_paddings
     # Exponential padding with max_token_size not a power of two.
     max_token_size = 317
     expected_paddings = [16, 32, 64, 128, 256, 512]
-    actual_paddings = _get_token_paddings(min_token_size, max_token_size,
-                                          padding_gap)
+    actual_paddings = _get_token_paddings(min_token_size, max_token_size, padding_gap)
     assert actual_paddings == expected_paddings
 
 

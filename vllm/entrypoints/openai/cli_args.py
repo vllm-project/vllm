@@ -47,12 +47,10 @@ class LoRAParserAction(argparse.Action):
                     lora = LoRAModulePath(**lora_dict)
                     lora_list.append(lora)
                 except json.JSONDecodeError:
-                    parser.error(
-                        f"Invalid JSON format for --lora-modules: {item}")
+                    parser.error(f"Invalid JSON format for --lora-modules: {item}")
                 except TypeError as e:
                     parser.error(
-                        f"Invalid fields for --lora-modules: {item} - {str(e)}"
-                    )
+                        f"Invalid fields for --lora-modules: {item} - {str(e)}")
         setattr(namespace, self.dest, lora_list)
 
 
@@ -112,26 +110,24 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
                         default=None,
                         help="If provided, the server will require this key "
                         "to be presented in the header.")
-    parser.add_argument(
-        "--lora-modules",
-        type=optional_type(str),
-        default=None,
-        nargs='+',
-        action=LoRAParserAction,
-        help="LoRA module configurations in either 'name=path' format"
-        "or JSON format. "
-        "Example (old format): ``'name=path'`` "
-        "Example (new format): "
-        "``{\"name\": \"name\", \"path\": \"lora_path\", "
-        "\"base_model_name\": \"id\"}``")
-    parser.add_argument(
-        "--prompt-adapters",
-        type=optional_type(str),
-        default=None,
-        nargs='+',
-        action=PromptAdapterParserAction,
-        help="Prompt adapter configurations in the format name=path. "
-        "Multiple adapters can be specified.")
+    parser.add_argument("--lora-modules",
+                        type=optional_type(str),
+                        default=None,
+                        nargs='+',
+                        action=LoRAParserAction,
+                        help="LoRA module configurations in either 'name=path' format"
+                        "or JSON format. "
+                        "Example (old format): ``'name=path'`` "
+                        "Example (new format): "
+                        "``{\"name\": \"name\", \"path\": \"lora_path\", "
+                        "\"base_model_name\": \"id\"}``")
+    parser.add_argument("--prompt-adapters",
+                        type=optional_type(str),
+                        default=None,
+                        nargs='+',
+                        action=PromptAdapterParserAction,
+                        help="Prompt adapter configurations in the format name=path. "
+                        "Multiple adapters can be specified.")
     parser.add_argument("--chat-template",
                         type=optional_type(str),
                         default=None,
@@ -167,35 +163,31 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
                         type=optional_type(str),
                         default=None,
                         help="The CA certificates file.")
-    parser.add_argument(
-        "--enable-ssl-refresh",
-        action="store_true",
-        default=False,
-        help="Refresh SSL Context when SSL certificate files change")
+    parser.add_argument("--enable-ssl-refresh",
+                        action="store_true",
+                        default=False,
+                        help="Refresh SSL Context when SSL certificate files change")
     parser.add_argument(
         "--ssl-cert-reqs",
         type=int,
         default=int(ssl.CERT_NONE),
-        help="Whether client certificate is required (see stdlib ssl module's)."
-    )
+        help="Whether client certificate is required (see stdlib ssl module's).")
     parser.add_argument(
         "--root-path",
         type=optional_type(str),
         default=None,
-        help="FastAPI root_path when app is behind a path based routing proxy."
-    )
-    parser.add_argument(
-        "--middleware",
-        type=optional_type(str),
-        action="append",
-        default=[],
-        help="Additional ASGI middleware to apply to the app. "
-        "We accept multiple --middleware arguments. "
-        "The value should be an import path. "
-        "If a function is provided, vLLM will add it to the server "
-        "using ``@app.middleware('http')``. "
-        "If a class is provided, vLLM will add it to the server "
-        "using ``app.add_middleware()``. ")
+        help="FastAPI root_path when app is behind a path based routing proxy.")
+    parser.add_argument("--middleware",
+                        type=optional_type(str),
+                        action="append",
+                        default=[],
+                        help="Additional ASGI middleware to apply to the app. "
+                        "We accept multiple --middleware arguments. "
+                        "The value should be an import path. "
+                        "If a function is provided, vLLM will add it to the server "
+                        "using ``@app.middleware('http')``. "
+                        "If a class is provided, vLLM will add it to the server "
+                        "using ``app.add_middleware()``. ")
     parser.add_argument(
         "--return-tokens-as-token-ids",
         action="store_true",
@@ -207,17 +199,15 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         action="store_true",
         help="If specified, will run the OpenAI frontend server in the same "
         "process as the model serving engine.")
-    parser.add_argument(
-        "--enable-request-id-headers",
-        action="store_true",
-        help="If specified, API server will add X-Request-Id header to "
-        "responses. Caution: this hurts performance at high QPS.")
-    parser.add_argument(
-        "--enable-auto-tool-choice",
-        action="store_true",
-        default=False,
-        help="Enable auto tool choice for supported models. Use "
-        "``--tool-call-parser`` to specify which parser to use.")
+    parser.add_argument("--enable-request-id-headers",
+                        action="store_true",
+                        help="If specified, API server will add X-Request-Id header to "
+                        "responses. Caution: this hurts performance at high QPS.")
+    parser.add_argument("--enable-auto-tool-choice",
+                        action="store_true",
+                        default=False,
+                        help="Enable auto tool choice for supported models. Use "
+                        "``--tool-call-parser`` to specify which parser to use.")
 
     valid_tool_parsers = ToolParserManager.tool_parsers.keys()
     parser.add_argument(
@@ -226,8 +216,7 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         metavar="{" + ",".join(valid_tool_parsers) + "} or name registered in "
         "--tool-parser-plugin",
         default=None,
-        help=
-        "Select the tool call parser depending on the model that you're using."
+        help="Select the tool call parser depending on the model that you're using."
         " This is used to parse the model-generated tool call into OpenAI API "
         "format. Required for ``--enable-auto-tool-choice``.")
 
@@ -235,8 +224,7 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "--tool-parser-plugin",
         type=str,
         default="",
-        help=
-        "Special the tool parser plugin write to parse the model-generated tool"
+        help="Special the tool parser plugin write to parse the model-generated tool"
         " into OpenAI API format, the name register in this plugin can be used "
         "in ``--tool-call-parser``.")
 
@@ -253,20 +241,16 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "--disable-fastapi-docs",
         action='store_true',
         default=False,
-        help="Disable FastAPI's OpenAPI schema, Swagger UI, and ReDoc endpoint."
-    )
-    parser.add_argument(
-        "--enable-prompt-tokens-details",
-        action='store_true',
-        default=False,
-        help="If set to True, enable prompt_tokens_details in usage.")
+        help="Disable FastAPI's OpenAPI schema, Swagger UI, and ReDoc endpoint.")
+    parser.add_argument("--enable-prompt-tokens-details",
+                        action='store_true',
+                        default=False,
+                        help="If set to True, enable prompt_tokens_details in usage.")
     parser.add_argument(
         "--enable-server-load-tracking",
         action='store_true',
         default=False,
-        help=
-        "If set to True, enable tracking server_load_metrics in the app state."
-    )
+        help="If set to True, enable tracking server_load_metrics in the app state.")
 
     return parser
 

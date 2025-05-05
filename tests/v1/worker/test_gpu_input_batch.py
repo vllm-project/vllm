@@ -16,18 +16,14 @@ from vllm.v1.worker.gpu_input_batch import (BlockTable, CachedRequestState,
 VOCAB_SIZE = 1024
 NUM_OUTPUT_TOKENS = 20
 MAX_PROMPT_SIZE = 100
-CUDA_DEVICES = [
-    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
-]
+CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
 MAX_NUM_PROMPT_TOKENS = 64
 
 
 def _compare_objs(obj1, obj2):
     attrs = inspect.getmembers(obj1, lambda a: not (inspect.isroutine(a)))
-    attr_names = set([
-        a[0] for a in attrs
-        if not (a[0].startswith('__') and a[0].endswith('__'))
-    ])
+    attr_names = set(
+        [a[0] for a in attrs if not (a[0].startswith('__') and a[0].endswith('__'))])
     for attr_name in attr_names:
         a = getattr(obj1, attr_name)
         b = getattr(obj2, attr_name)
@@ -50,9 +46,8 @@ def _compare_objs(obj1, obj2):
             f" in {obj1} and {obj2}: {a} != {b}"
 
 
-def _remove_requests(
-        input_batch: InputBatch, batch_size: int,
-        reqs: list[CachedRequestState]) -> tuple[set[str], list[int]]:
+def _remove_requests(input_batch: InputBatch, batch_size: int,
+                     reqs: list[CachedRequestState]) -> tuple[set[str], list[int]]:
     """
     Remove some requests randomly from the batch and returns a tuple
     of 1) set of request removed 2) indices of the requests removed
@@ -107,8 +102,7 @@ def _construct_expected_sampling_metadata(
         index_in_input_batch = req_id_index_in_input_batch[req.req_id]
         output_token_ids[index_in_input_batch] = req.output_token_ids
         prompt_token_ids[index_in_input_batch] = req.prompt_token_ids
-        presence_penalties[
-            index_in_input_batch] = req.sampling_params.presence_penalty
+        presence_penalties[index_in_input_batch] = req.sampling_params.presence_penalty
         frequency_penalties[index_in_input_batch] = (
             req.sampling_params.frequency_penalty)
         repetition_penalties[index_in_input_batch] = (
@@ -117,9 +111,8 @@ def _construct_expected_sampling_metadata(
         top_p[index_in_input_batch] = req.sampling_params.top_p
         min_p[index_in_input_batch] = req.sampling_params.min_p
         temperature[index_in_input_batch] = req.sampling_params.temperature
-        min_tokens[index_in_input_batch] = (
-            req.sampling_params.min_tokens,
-            req.sampling_params.all_stop_token_ids)
+        min_tokens[index_in_input_batch] = (req.sampling_params.min_tokens,
+                                            req.sampling_params.all_stop_token_ids)
         logit_bias[index_in_input_batch] = req.sampling_params.logit_bias
         if req.sampling_params.allowed_token_ids:
             allowed_token_ids_mask[index_in_input_batch][
@@ -129,16 +122,18 @@ def _construct_expected_sampling_metadata(
                 index_in_input_batch] = req.sampling_params.bad_words_token_ids
 
     return SamplingMetadata(
-        temperature=torch.tensor(temperature, dtype=torch.float,
-                                 device=device),
+        temperature=torch.tensor(temperature, dtype=torch.float, device=device),
         all_greedy=False,
         all_random=True,
-        top_p=None if all(x == 1.0 for x in top_p) else torch.tensor(
-            top_p, dtype=torch.float, device=device),
-        top_k=None if all(x == 0 for x in top_k) else torch.tensor(
-            top_k, dtype=torch.int, device=device),
-        min_p=None if all(x == 0.0 for x in min_p) else torch.tensor(
-            min_p, dtype=torch.float, device=device),
+        top_p=None if all(
+            x == 1.0
+            for x in top_p) else torch.tensor(top_p, dtype=torch.float, device=device),
+        top_k=None if all(
+            x == 0
+            for x in top_k) else torch.tensor(top_k, dtype=torch.int, device=device),
+        min_p=None if all(
+            x == 0.0
+            for x in min_p) else torch.tensor(min_p, dtype=torch.float, device=device),
         generators={},
         max_num_logprobs=0,
         prompt_token_ids=make_tensor_with_pad(
@@ -176,8 +171,7 @@ def _create_sampling_params():
         frequency_penalty=np.random.uniform(-2.0, 2.0),
         min_tokens=np.random.randint(1, 10),
         stop_token_ids=[
-            np.random.randint(0, VOCAB_SIZE)
-            for _ in range(np.random.randint(10))
+            np.random.randint(0, VOCAB_SIZE) for _ in range(np.random.randint(10))
         ],
         logit_bias={0: np.random.uniform(-3.0, 3.0)},
     )
@@ -255,9 +249,8 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
         device=torch.device(device))
 
     def same(t1: Optional[torch.Tensor], t2: Optional[torch.Tensor]) -> bool:
-        return (t1 is None
-                and t2 is None) or (t1 is not None and t2 is not None
-                                    and torch.allclose(t1, t2))
+        return (t1 is None and t2 is None) or (t1 is not None and t2 is not None
+                                               and torch.allclose(t1, t2))
 
     # Assert the actual and expected output.
     assert torch.allclose(expected_sampling_metadata.temperature,
@@ -285,9 +278,8 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
            sampling_metadata.no_penalties
     assert expected_sampling_metadata.logit_bias == sampling_metadata.logit_bias
     if sampling_metadata.allowed_token_ids_mask:
-        assert torch.allclose(
-            expected_sampling_metadata.allowed_token_ids_mask,
-            sampling_metadata.allowed_token_ids_mask)
+        assert torch.allclose(expected_sampling_metadata.allowed_token_ids_mask,
+                              sampling_metadata.allowed_token_ids_mask)
     assert expected_sampling_metadata.bad_words_token_ids == \
         sampling_metadata.bad_words_token_ids
 
@@ -295,8 +287,7 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("batch_size", [32])
 @pytest.mark.parametrize("swap_list", [((0, 1), )])
-def test_swap_states_in_input_batch(device: str, batch_size: int,
-                                    swap_list: list):
+def test_swap_states_in_input_batch(device: str, batch_size: int, swap_list: list):
     """
     Tests the logic for managing sampling metadata in the InputBatch.
 

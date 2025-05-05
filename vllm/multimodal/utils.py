@@ -46,13 +46,11 @@ class MediaConnector:
             allowed_local_media_path_ = Path(allowed_local_media_path)
 
             if not allowed_local_media_path_.exists():
-                raise ValueError(
-                    "Invalid `--allowed-local-media-path`: The path "
-                    f"{allowed_local_media_path_} does not exist.")
+                raise ValueError("Invalid `--allowed-local-media-path`: The path "
+                                 f"{allowed_local_media_path_} does not exist.")
             if not allowed_local_media_path_.is_dir():
-                raise ValueError(
-                    "Invalid `--allowed-local-media-path`: The path "
-                    f"{allowed_local_media_path_} must be a directory.")
+                raise ValueError("Invalid `--allowed-local-media-path`: The path "
+                                 f"{allowed_local_media_path_} must be a directory.")
         else:
             allowed_local_media_path_ = None
 
@@ -327,18 +325,18 @@ def merge_and_sort_multimodal_metadata(
         modality = modalities[0]
         placeholder_list = list(mm_positions[modality])
 
-        return [modality] * len(
-            placeholder_list
-        ), placeholder_list, None if not mm_hashes else mm_hashes[modality]
+        return [
+            modality
+        ] * len(placeholder_list
+                ), placeholder_list, None if not mm_hashes else mm_hashes[modality]
 
     # Create a list of (modality, placeholder, hash) tuples for all placeholders
     all_items = []
     for modality in modalities:
         placeholder_list = list(mm_positions[modality])
         hash_list: list[Optional[str]] = list(
-            mm_hashes[modality]) if mm_hashes and modality in mm_hashes else [
-                None
-            ] * len(placeholder_list)
+            mm_hashes[modality]
+        ) if mm_hashes and modality in mm_hashes else [None] * len(placeholder_list)
 
         for placeholder, hash_value in zip(placeholder_list, hash_list):
             all_items.append((modality, placeholder, hash_value))
@@ -386,6 +384,4 @@ def group_mm_inputs_by_modality(
         else:
             return ""
 
-    return [
-        list(group) for _, group in groupby(mm_inputs, key=modality_group_func)
-    ]
+    return [list(group) for _, group in groupby(mm_inputs, key=modality_group_func)]

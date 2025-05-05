@@ -49,8 +49,7 @@ COMPLETE_REASONING = {
     "content": None,
 }
 MULTILINE_REASONING = {
-    "output":
-    "<think>This is a reasoning\nsection</think>This is the rest\nThat",
+    "output": "<think>This is a reasoning\nsection</think>This is the rest\nThat",
     "reasoning_content": "This is a reasoning\nsection",
     "content": "This is the rest\nThat",
 }
@@ -130,8 +129,8 @@ def test_reasoning(
     output_tokens: list[str] = [
         qwen3_tokenizer.convert_tokens_to_string([token]) for token in output
     ]
-    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(
-        parser_name)(qwen3_tokenizer)
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        qwen3_tokenizer)
 
     reasoning, content = run_reasoning_extraction(parser,
                                                   output_tokens,

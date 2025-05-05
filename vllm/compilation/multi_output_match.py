@@ -104,5 +104,4 @@ class MultiOutputMatch(abc.ABC):
         """
         Insert an auto_functionalized node with the given op and kwargs.
         """
-        return self.graph.call_function(auto_functionalized, (op, ),
-                                        kwargs=kwargs)
+        return self.graph.call_function(auto_functionalized, (op, ), kwargs=kwargs)

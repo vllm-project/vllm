@@ -41,11 +41,10 @@ class TopKTopPSampler(nn.Module):
                     # earlier design.
                     # https://github.com/flashinfer-ai/flashinfer/releases/
                     # tag/v0.2.3
-                    logger.info(
-                        "Currently, FlashInfer top-p & top-k sampling sampler "
-                        "is disabled because FlashInfer>=v0.2.3 is not "
-                        "backward compatible. Falling back to the PyTorch-"
-                        "native implementation of top-p & top-k sampling.")
+                    logger.info("Currently, FlashInfer top-p & top-k sampling sampler "
+                                "is disabled because FlashInfer>=v0.2.3 is not "
+                                "backward compatible. Falling back to the PyTorch-"
+                                "native implementation of top-p & top-k sampling.")
                     self.forward = self.forward_native
                 elif envs.VLLM_USE_FLASHINFER_SAMPLER is not False:
                     # NOTE(woosuk): The V0 sampler doesn't use FlashInfer for
@@ -282,8 +281,7 @@ def flashinfer_sample(
     assert not (k is None and p is None)
     max_top_k_round = 32
     batch_size = probs.shape[0]
-    uniform_samples = torch.empty((max_top_k_round, batch_size),
-                                  device=probs.device)
+    uniform_samples = torch.empty((max_top_k_round, batch_size), device=probs.device)
     if len(generators) != batch_size:
         uniform_samples.uniform_()
     if generators:
@@ -300,9 +298,8 @@ def flashinfer_sample(
             probs, uniform_samples, k, deterministic=True)
     else:
         # Both top-k and top-p.
-        next_token_ids, success = (
-            flashinfer.sampling.top_k_top_p_sampling_from_probs(
-                probs, uniform_samples, k, p, deterministic=True))
+        next_token_ids, success = (flashinfer.sampling.top_k_top_p_sampling_from_probs(
+            probs, uniform_samples, k, p, deterministic=True))
 
     # NOTE: CPU-GPU synchronization happens here.
     if not success.all():
@@ -310,6 +307,7 @@ def flashinfer_sample(
             probs = flashinfer.sampling.top_k_renorm_prob(probs, k)
         if p is not None:
             probs = flashinfer.sampling.top_p_renorm_prob(probs, p)
-        next_token_ids = flashinfer.sampling.sampling_from_probs(
-            probs, uniform_samples[0], deterministic=True)
+        next_token_ids = flashinfer.sampling.sampling_from_probs(probs,
+                                                                 uniform_samples[0],
+                                                                 deterministic=True)
     return next_token_ids.view(-1)

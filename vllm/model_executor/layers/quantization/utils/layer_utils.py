@@ -35,5 +35,4 @@ def replace_parameter(mod: torch.nn.Module, name: str,
         # parameters for `torch.compile` compatibility
         if not isinstance(new, torch.nn.Parameter):
             new = torch.nn.Parameter(new, requires_grad=False)
-        mod.register_parameter(name,
-                               torch.nn.Parameter(new, requires_grad=False))
+        mod.register_parameter(name, torch.nn.Parameter(new, requires_grad=False))
