@@ -12,17 +12,14 @@ from vllm.config import config
 from vllm.engine.arg_utils import (EngineArgs, contains_type, get_kwargs,
                                    get_type, is_not_builtin, is_type,
                                    literal_to_kwargs, nullable_kvs,
-                                   optional_type)
+                                   optional_type, parse_type)
 from vllm.utils import FlexibleArgumentParser
 
 
 @pytest.mark.parametrize(("type", "value", "expected"), [
     (int, "42", 42),
-    (int, "None", None),
     (float, "3.14", 3.14),
-    (float, "None", None),
     (str, "Hello World!", "Hello World!"),
-    (str, "None", None),
     (json.loads, '{"foo":1,"bar":2}', {
         "foo": 1,
         "bar": 2
@@ -31,15 +28,20 @@ from vllm.utils import FlexibleArgumentParser
         "foo": 1,
         "bar": 2
     }),
-    (json.loads, "None", None),
 ])
-def test_optional_type(type, value, expected):
-    optional_type_func = optional_type(type)
+def test_parse_type(type, value, expected):
+    parse_type_func = parse_type(type)
     context = nullcontext()
     if value == "foo=1,bar=2":
         context = pytest.warns(DeprecationWarning)
     with context:
-        assert optional_type_func(value) == expected
+        assert parse_type_func(value) == expected
+
+
+def test_optional_type():
+    optional_type_func = optional_type(int)
+    assert optional_type_func("None") is None
+    assert optional_type_func("42") == 42
 
 
 @pytest.mark.parametrize(("type_hint", "type", "expected"), [
