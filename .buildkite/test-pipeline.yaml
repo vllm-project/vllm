@@ -470,10 +470,15 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/models/language
-  commands:
+  command: |
+    echo "TORCH_NIGHTLY is $TORCH_NIGHTLY"
     # Install causal-conv1d for plamo2 models here, as it is not compatible with pip-compile.
-    - pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8'
-    - pytest -v -s models/language -m 'not core_model'
+    if [ "$TORCH_NIGHTLY" = "true" ]; then
+      pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8' --no-build-isolation
+    else
+      pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8'
+    fi
+    pytest -v -s models/language -m core_model
 
 - label: Multi-Modal Models Test (Standard)
   #mirror_hardwares: [amd]
