@@ -807,14 +807,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     logger.warning(
                         "Regarding multimodal models, vLLM currently "
                         "only supports adding LoRA to language model.")
-                # It's necessary to distinguish between the
-                # max_position_embeddings of VLMs and LLMs.
-                if hasattr(self.model.config, "max_position_embeddings"):
-                    max_pos_embeddings = (
-                        self.model.config.max_position_embeddings)
-                else:
-                    max_pos_embeddings = (
-                        self.model.config.text_config.max_position_embeddings)
 
                 # Use get_text_config() in case of multimodal models
                 text_config = self.model_config.hf_config.get_text_config()
