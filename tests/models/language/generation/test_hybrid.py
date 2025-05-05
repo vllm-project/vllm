@@ -23,9 +23,9 @@ SSM_MODELS = [
 
 HYBRID_MODELS = [
     "ai21labs/Jamba-tiny-dev",
-    # NOTE: ibm-research/granite-4.0-tiny-test are skipped currently as
-    # the HF model URLs not available yet
-    # "ibm-research/granite-4.0-tiny-test",
+    # NOTE: ibm-granite/granite-4.0-tiny-preview are skipped currently as
+    # the HF model is in the HF main yet
+    # "ibm-granite/granite-4.0-tiny-preview",
     # NOTE: Running Plamo2 in transformers implementation requires to install
     # causal-conv1d package, which is not listed as a test dependency as it's
     # not compatible with pip-compile.

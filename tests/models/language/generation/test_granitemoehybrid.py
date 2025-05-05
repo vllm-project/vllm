@@ -6,11 +6,11 @@ from ...utils import check_logprobs_close
 
 # Path of the checkpoints
 MODELS = [
-    "ibm-research/granite-4.0-tiny-test",
+    "ibm-granite/granite-4.0-tiny-preview",
 ]
 
 
-@pytest.mark.skip(reason="HF model URLs not available yet")
+@pytest.mark.skip(reason="HF model is in the HF main yet")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float16", "bfloat16"])
 @pytest.mark.parametrize("max_tokens", [64])
