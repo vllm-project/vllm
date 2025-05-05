@@ -3531,14 +3531,17 @@ class CompilationConfig(BaseModel):
         - dump_graph_dir: directory to dump the graphs. Default is .
         - enable_fusion: whether to enable the custom fusion pass.
         - enable_noop: whether to enable the custom no-op elimination pass.
-            TODO(luka) better pass enabling system.
         - enable_sequence_parallelism: whether to enable sequence parallelism.
+        - enable_async_tp: whether to enable async TP.
+            TODO(luka) better pass enabling system.
+        
         """
         dump_graph_stages: list[str] = Field(default_factory=list)
         dump_graph_dir: Path = Field(default=Path("."))
         enable_fusion: bool = True
         enable_noop: bool = True
         enable_sequence_parallelism: bool = False
+        enable_async_tp: bool = False
 
         def uuid(self):
             """
@@ -3548,7 +3551,7 @@ class CompilationConfig(BaseModel):
             compilation.
             """
             dict_ = self.model_dump(include={"enable_fusion", "enable_noop", \
-                "enable_sequence_parallelism"})
+                "enable_sequence_parallelism", "enable_async_tp"})
             return InductorPass.hash_dict(dict_)
 
         def model_post_init(self, __context: Any) -> None:
@@ -3970,6 +3973,12 @@ class VllmConfig:
 
         if self.compilation_config is None:
             self.compilation_config = CompilationConfig()
+
+        # async tp is built on top of sequence parallelism
+        # and requires it to be enabled.
+        if self.compilation_config.pass_config.enable_async_tp:
+            self.compilation_config.pass_config.enable_sequence_parallelism = \
+                True
         if self.compilation_config.pass_config.enable_sequence_parallelism:
             self.compilation_config.custom_ops.append("+rms_norm")
         if envs.VLLM_USE_V1 and self.model_config is not None and \
@@ -4000,6 +4009,16 @@ class VllmConfig:
                 "parallelism. Disabling sequence parallelism.")
             self.compilation_config.pass_config.\
                 enable_sequence_parallelism = False
+        if self.parallel_config is not None and \
+            self.parallel_config.tensor_parallel_size > 1 and \
+            self.parallel_config.pipeline_parallel_size > 1 and \
+            self.compilation_config is not None and \
+                self.compilation_config.pass_config is not None and \
+            self.compilation_config.pass_config.enable_async_tp:
+            logger.warning_once("Async TP is not supported with pipeline "
+                                "parallelism. Disabling Async TP.")
+            self.compilation_config.pass_config.\
+                enable_async_tp = False
 
         self._set_cudagraph_sizes()
 
