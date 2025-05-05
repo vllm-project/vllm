@@ -52,7 +52,7 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
         ]
         if any(unsupported_features):
             raise NotImplementedError(
-                "TritonMLAImpl does not support one of the following: "
+                "CutlassMLAImpl does not support one of the following: "
                 "alibi_slopes, sliding_window, blocksparse_params, "
                 "logits_soft_cap")
 
@@ -60,11 +60,11 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
             raise NotImplementedError("Encoder self-attention and "
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
-                                      "TritonMLAImpl")
+                                      "CutlassMLAImpl")
 
         if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError(
-                "TritonMLA V1 with FP8 KV cache not yet supported")
+                "CutlassMLA V1 with FP8 KV cache not yet supported")
 
     def _forward_decode(
         self,
@@ -77,7 +77,7 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
         assert attn_metadata.decode is not None
 
         if self.kv_cache_dtype.startswith("fp8"):
-            raise NotImplementedError("FP8 Triton MLA not yet supported")
+            raise NotImplementedError("FP8 Cutlass MLA not yet supported")
 
         B = q_nope.shape[0]
 
