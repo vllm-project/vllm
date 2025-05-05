@@ -384,6 +384,7 @@ class DefaultModelLoader(BaseModelLoader):
             weights_iterator = pt_weights_iterator(
                 hf_weights_files,
                 self.load_config.use_tqdm_on_load,
+                self.load_config.pt_load_map_location,
             )
 
         if current_platform.is_tpu():
@@ -890,6 +891,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             iterator = pt_weights_iterator(
                 hf_weights_files,
                 self.load_config.use_tqdm_on_load,
+                self.load_config.pt_load_map_location,
             )
         for org_name, param in iterator:
             # mapping weight names from transformers to vllm while preserving

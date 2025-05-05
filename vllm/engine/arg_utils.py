@@ -64,6 +64,13 @@ def optional_type(
     return _optional_type
 
 
+def union_dict_and_str(val: str) -> Optional[Union[str, dict[str, str]]]:
+    if not re.match("^{.*}$", val):
+        return str(val)
+    else:
+        return optional_type(json.loads)(val)
+
+
 @deprecated(
     "Passing a JSON argument as a string containing comma separated key=value "
     "pairs is deprecated. This will be removed in v0.10.0. Please use a JSON "
@@ -143,7 +150,7 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
 
         # Get the help text for the field
         name = field.name
-        help = cls_docs[name]
+        help = cls_docs[name].strip()
         # Escape % for argparse
         help = help.replace("%", "%%")
 
@@ -158,6 +165,7 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
             type_hints.add(field.type)
 
         # Set other kwargs based on the type hints
+        json_tip = "\n\nShould be a valid JSON string."
         if contains_type(type_hints, bool):
             # Creates --no-<name> and --<name> flags
             kwargs[name]["action"] = argparse.BooleanOptionalAction
@@ -187,9 +195,14 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
                 kwargs[name]["type"] = human_readable_int
         elif contains_type(type_hints, float):
             kwargs[name]["type"] = float
+        elif contains_type(type_hints,
+                           dict) and (contains_type(type_hints, str) or any(
+                               is_not_builtin(th) for th in type_hints)):
+            kwargs[name]["type"] = union_dict_and_str
         elif contains_type(type_hints, dict):
             # Dict arguments will always be optional
             kwargs[name]["type"] = optional_type(json.loads)
+            kwargs[name]["help"] += json_tip
         elif (contains_type(type_hints, str)
               or any(is_not_builtin(th) for th in type_hints)):
             kwargs[name]["type"] = str
@@ -221,6 +234,7 @@ class EngineArgs:
     hf_config_path: Optional[str] = ModelConfig.hf_config_path
     task: TaskOption = ModelConfig.task
     skip_tokenizer_init: bool = ModelConfig.skip_tokenizer_init
+    enable_prompt_embeds: bool = ModelConfig.enable_prompt_embeds
     tokenizer_mode: TokenizerMode = ModelConfig.tokenizer_mode
     trust_remote_code: bool = ModelConfig.trust_remote_code
     allowed_local_media_path: str = ModelConfig.allowed_local_media_path
@@ -371,6 +385,7 @@ class EngineArgs:
     reasoning_parser: str = DecodingConfig.reasoning_backend
 
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
+    pt_load_map_location: str = LoadConfig.pt_load_map_location
 
     def __post_init__(self):
         self.enable_reasoning = self.reasoning_parser is not None
@@ -432,6 +447,8 @@ class EngineArgs:
                                  **model_kwargs["disable_cascade_attn"])
         model_group.add_argument("--skip-tokenizer-init",
                                  **model_kwargs["skip_tokenizer_init"])
+        model_group.add_argument("--enable-prompt-embeds",
+                                 **model_kwargs["enable_prompt_embeds"])
         model_group.add_argument("--served-model-name",
                                  **model_kwargs["served_model_name"])
         # This one is a special case because it is the
@@ -492,6 +509,8 @@ class EngineArgs:
                                 type=str,
                                 default=None,
                                 help='Name or path of the QLoRA adapter.')
+        load_group.add_argument('--pt-load-map-location',
+                                **load_kwargs["pt_load_map_location"])
 
         # Guided decoding arguments
         guided_decoding_kwargs = get_kwargs(DecodingConfig)
@@ -859,6 +878,7 @@ class EngineArgs:
             disable_sliding_window=self.disable_sliding_window,
             disable_cascade_attn=self.disable_cascade_attn,
             skip_tokenizer_init=self.skip_tokenizer_init,
+            enable_prompt_embeds=self.enable_prompt_embeds,
             served_model_name=self.served_model_name,
             limit_mm_per_prompt=self.limit_mm_per_prompt,
             use_async_output_proc=not self.disable_async_output_proc,
@@ -884,12 +904,14 @@ class EngineArgs:
 
         if self.quantization == "bitsandbytes":
             self.load_format = "bitsandbytes"
+
         return LoadConfig(
             load_format=self.load_format,
             download_dir=self.download_dir,
             model_loader_extra_config=self.model_loader_extra_config,
             ignore_patterns=self.ignore_patterns,
             use_tqdm_on_load=self.use_tqdm_on_load,
+            pt_load_map_location=self.pt_load_map_location,
         )
 
     def create_speculative_config(
@@ -1216,6 +1238,12 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
+        # No text embedding inputs so far.
+        if self.enable_prompt_embeds:
+            _raise_or_fallback(feature_name="--enable-prompt-embeds",
+                               recommend_to_remove=False)
+            return False
+
         # Only Fp16 and Bf16 dtypes since we only support FA.
         V1_SUPPORTED_DTYPES = [torch.bfloat16, torch.float16]
         if model_config.dtype not in V1_SUPPORTED_DTYPES:
@@ -1424,8 +1452,8 @@ class EngineArgs:
         # as the platform that vLLM is running on (e.g. the case of scaling
         # vLLM with Ray) and has no GPUs. In this case we use the default
         # values for non-H100/H200 GPUs.
+        from vllm.platforms import current_platform
         try:
-            from vllm.platforms import current_platform
             device_memory = current_platform.get_device_total_memory()
         except Exception:
             # This is only used to set default_max_num_batched_tokens
@@ -1446,11 +1474,37 @@ class EngineArgs:
             }
             default_max_num_seqs = 256
 
+        # tpu specific default values.
+        if current_platform.is_tpu():
+            default_max_num_batched_tokens_tpu = {
+                UsageContext.LLM_CLASS: {
+                    'V6E': 2048,
+                    'V5E': 1024,
+                    'V5P': 512,
+                },
+                UsageContext.OPENAI_API_SERVER: {
+                    'V6E': 1024,
+                    'V5E': 512,
+                    'V5P': 256,
+                }
+            }
+
         use_context_value = usage_context.value if usage_context else None
         if (self.max_num_batched_tokens is None
                 and usage_context in default_max_num_batched_tokens):
-            self.max_num_batched_tokens = default_max_num_batched_tokens[
-                usage_context]
+            if current_platform.is_tpu():
+                chip_name = current_platform.get_device_name()
+                if chip_name in default_max_num_batched_tokens_tpu[
+                        usage_context]:
+                    self.max_num_batched_tokens = \
+                        default_max_num_batched_tokens_tpu[
+                            usage_context][chip_name]
+                else:
+                    self.max_num_batched_tokens = \
+                        default_max_num_batched_tokens[usage_context]
+            else:
+                self.max_num_batched_tokens = default_max_num_batched_tokens[
+                    usage_context]
             logger.debug(
                 "Setting max_num_batched_tokens to %d for %s usage context.",
                 self.max_num_batched_tokens, use_context_value)
