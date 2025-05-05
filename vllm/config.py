@@ -3711,8 +3711,9 @@ class CompilationConfig:
     """not configurable, computed after init"""
     local_cache_dir: str = field(default=None, init=False)  # type: ignore
     """local cache dir for each rank"""
-    bs_to_padded_graph_size: list[int] = field(default=None,
-                                               init=False)  # type: ignore
+    bs_to_padded_graph_size: list[int] = field(
+        default=None,  # type: ignore
+        init=False)
     """optimization:
     Intuitively, bs_to_padded_graph_size should be dict[int, int].
     since we know all keys are in a range [0, max_capture_size],
