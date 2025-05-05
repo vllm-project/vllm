@@ -128,7 +128,7 @@ class AllToAllCache:
 
         with self._lock:
             instance = self._cache.get(key)
-            if instance is None:
+            if True or instance is None:
                 # TODO: should be intranode
                 instance = pplx.AllToAll.internode(**kwargs)
                 self._cache[key] = instance
@@ -152,6 +152,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         super().__init__()
         self.fused_experts = fused_experts
         self.moe = moe
+        self.using_pplx = False
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -256,6 +257,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
         experts: Optional[FusedMoEPermuteExpertsUnpermute] = None
 
+        self.using_pplx = False
+
         if isinstance(dispatch_combine,
                       (BatchedDispatchCombine, PplxDispatchCombine)):
             logger.debug("BatchedTritonExperts %s", self.moe)
@@ -267,6 +270,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 use_int4_w4a16=False,
                 block_shape=None,
             )
+            self.using_pplx = isinstance(dispatch_combine, PplxDispatchCombine)
         else:
             logger.debug("TritonExperts %s", self.moe)
             experts = TritonExperts(
@@ -313,7 +317,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias)
+            e_score_correction_bias=e_score_correction_bias,
+            indices_type=torch.uint32 if self.using_pplx else None)
 
         return self.fused_experts(
             hidden_states=x,
@@ -661,7 +666,7 @@ class FusedMoE(torch.nn.Module):
         max_num_tokens = MOE_DP_CHUNK_SIZE
         world_size = moe.ep_size
 
-        if False and self.dp_size > 1 and has_pplx:
+        if self.dp_size > 1 and has_pplx:
             logger.debug("using pplx dispatch")
             dp_size = moe.ep_size // moe.dp_size  # dp_size actually means TP.
             rank = moe.ep_rank
@@ -977,7 +982,8 @@ class FusedMoE(torch.nn.Module):
                        num_expert_group: Optional[int] = None,
                        custom_routing_function: Optional[Callable] = None,
                        scoring_func: str = "softmax",
-                       e_score_correction_bias: Optional[torch.Tensor] = None):
+                       e_score_correction_bias: Optional[torch.Tensor] = None,
+                       indices_type: Optional[torch.dtype] = None):
         from vllm.model_executor.layers.fused_moe.fused_moe import (
             fused_topk, grouped_topk)
 
@@ -985,6 +991,7 @@ class FusedMoE(torch.nn.Module):
         if use_grouped_topk:
             assert topk_group is not None
             assert num_expert_group is not None
+            assert indices_type is None or indices_type == torch.int32
             topk_weights, topk_ids = grouped_topk(
                 hidden_states=hidden_states,
                 gating_output=router_logits,
@@ -999,10 +1006,10 @@ class FusedMoE(torch.nn.Module):
                                                 gating_output=router_logits,
                                                 topk=top_k,
                                                 renormalize=renormalize,
-                                                # XXXXX how to do this?
-                                                #indices_type=torch.uint32,
+                                                indices_type=indices_type,
                                                 )
         else:
+            assert indices_type is None or indices_type == torch.int32
             topk_weights, topk_ids = custom_routing_function(
                 hidden_states=hidden_states,
                 gating_output=router_logits,

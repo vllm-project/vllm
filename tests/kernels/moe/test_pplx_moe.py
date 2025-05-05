@@ -515,6 +515,50 @@ def pplx_moe(pgi, dp_size, a, w1, w2, topk_weight, topk_ids):
     return out
 
 
+def _batched_moe(pgi, dp_size, a, w1, w2, topk_weight, topk_ids):
+    assert torch.cuda.current_device() == pgi.local_rank
+
+    hidden_dim = a.shape[1]
+    num_experts = w1.shape[0]
+    block_size = 128
+    device = pgi.device
+    rank = pgi.rank
+    world_size = pgi.world_size
+    topk = topk_ids.shape[1]
+    max_num_tokens = rank_chunk(a.shape[0], 0, world_size)
+
+    dispatch_combine = BatchedDispatchCombine(
+        max_num_tokens=max_num_tokens,
+        world_size=world_size,
+        dp_size=dp_size,
+        rank=rank,
+    )
+
+    experts = BatchedExperts(a.shape[0])
+
+    fused_experts = FusedMoEModularKernel(
+        dispatch_combine,
+        experts,
+    )
+
+    # TODO: workers with the same dp_rank must use the exact same inputs.
+
+    a_chunk = chunk_by_rank(a, rank, world_size).to(device)
+    chunk_topk_weight = chunk_by_rank(topk_weight, rank, world_size).to(device)
+    chunk_topk_ids = chunk_by_rank(topk_ids, rank, world_size).to(device)
+
+    out = fused_experts(
+        a_chunk,
+        # Chunking weights like this only works for batched format
+        chunk_by_rank(w1, rank, world_size).to(device),
+        chunk_by_rank(w2, rank, world_size).to(device),
+        chunk_topk_weight,
+        chunk_topk_ids,
+        global_num_experts=num_experts)
+
+    return out
+
+
 def _pplx_moe(
     pgi: ProcessGroupInfo,
     dp_size: int,
@@ -536,11 +580,13 @@ def _pplx_moe(
         topk_weight, topk_ids = fused_topk(a, score, topk, False)
         torch_output = torch_moe2(a, w1, w2, topk_weight, topk_ids)
         pplx_output = pplx_moe(pgi, dp_size, a, w1, w2, topk_weight, topk_ids)
+        batched_output = _batched_moe(pgi, dp_size, a, w1, w2, topk_weight, topk_ids)
 
     torch_output = chunk_by_rank(torch_output, pgi.rank,
                                  pgi.world_size).to(pplx_output.device)
 
     torch.testing.assert_close(pplx_output, torch_output, atol=2e-2, rtol=0)
+    torch.testing.assert_close(batched_output, torch_output, atol=2e-2, rtol=0)
 
     nvshmem_finalize()
 

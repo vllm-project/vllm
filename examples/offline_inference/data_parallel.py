@@ -114,9 +114,11 @@ def main(model, dp_size, local_dp_rank, global_dp_rank, dp_master_ip,
 
     # Create an LLM.
     cconfig = CompilationConfig(
-        level=0,
+        level=3,
         #cudagraph_capture_sizes=[512,504,496,488,480,472,464,456,448,440,432,424,416,408,400,392,384,376,368,360,352,344,336,328,320,312,304,296,288,280,272,264,256,248,240,232,224,216,208],
         #cudagraph_capture_sizes=[512,256,1],
+        #cudagraph_capture_sizes=[192,184,176,168,160,152,144,136,128,120,112,104,96,88,80,72,64,56,48,40,32,24,16,8,4,2,1]
+        #cudagraph_capture_sizes=[128,120,112,104,96,88,80,72,64,56,48,40,32,24,16,8,4,2,1]
     )
     llm = LLM(model=model,
               tensor_parallel_size=GPUs_per_dp_rank,
@@ -171,7 +173,7 @@ if __name__ == "__main__":
         procs.append(proc)
     exit_code = 0
     for proc in procs:
-        proc.join(timeout=300)
+        proc.join(timeout=3000)
         if proc.exitcode is None:
             print(f"Killing process {proc.pid} that "
                   f"didn't stop within 5 minutes.")
