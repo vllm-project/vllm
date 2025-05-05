@@ -37,7 +37,6 @@ def run_test(
     hf_model_kwargs: Optional[dict[str, Any]],
     patch_hf_runner: Optional[Callable[[HfRunner], HfRunner]],
     task: TaskOption = "auto",
-    runner_mm_key: str = "images",
     distributed_executor_backend: Optional[str] = None,
     tensor_parallel_size: int = 1,
     vllm_embeddings: Optional[torch.Tensor] = None,

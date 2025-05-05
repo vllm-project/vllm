@@ -83,8 +83,6 @@ class SizeType(Enum):
 class CustomTestOptions(NamedTuple):
     inputs: list[PromptWithMultiModalInput]
     limit_mm_per_prompt: dict[str, int]
-    # kwarg to pass multimodal data in as to vllm/hf runner instances.
-    runner_mm_key: str = "images"
 
 
 class ImageSizeWrapper(NamedTuple):

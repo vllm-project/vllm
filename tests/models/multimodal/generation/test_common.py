@@ -393,7 +393,6 @@ VLM_TEST_SETTINGS = {
                 formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",   # noqa: E501
             ),
             limit_mm_per_prompt={"video": 4},
-            runner_mm_key="videos",
         )],
     ),
     "llava_next_video": VLMTestInfo(
