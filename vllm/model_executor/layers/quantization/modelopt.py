@@ -487,7 +487,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         block_size = 16
 
         # quantize input to FP4
-        """
+        # """
         dynamic_scale = 1 / layer.input_scale
         x_fp4, x_blockscale = ref_nvfp4_quant(x, dynamic_scale, block_size)
 
@@ -497,7 +497,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         x_blockscale = x_blockscale.unsqueeze(-1).to(torch.float32) / dynamic_scale
         x_dq = (x_fp4 * x_blockscale).reshape(x_m, x_k).to(output_dtype)
         del x_fp4, x_blockscale
-        """
+        # """
 
         # dequantize weight
         w_fp4 = layer.weight.data.view(torch.uint8)
@@ -507,8 +507,8 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
                                    output_dtype, x.device, block_size)
 
         # matmul
-        # out = torch.matmul(x_dq, w_dq.t())
-        out = torch.matmul(x, w_dq.t())
+        out = torch.matmul(x_dq, w_dq.t())
+        #out = torch.matmul(x, w_dq.t())
 
         if bias is not None:
             out = out + bias
