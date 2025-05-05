@@ -730,11 +730,10 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
       "qr_all_reduce(int fa, Tensor inp, Tensor out, int algo_int) -> ()");
   custom_ar.impl("qr_all_reduce", torch::kCUDA, &qr_all_reduce);
 
-  custom_ar.def("init_custom_qr(int rank, int world_size) -> int");
+  custom_ar.def("init_custom_qr", &init_custom_qr);
   custom_ar.def("qr_destroy", &qr_destroy);
 
-  custom_ar.def("qr_get_handle(int fa) -> Tensor");
-  custom_ar.impl("qr_get_handle", torch::kCPU, &qr_get_handle);
+  custom_ar.def("qr_get_handle", &qr_get_handle);
 
   custom_ar.def("qr_open_handles(int _fa, Tensor[](b!) handles) -> ()");
   custom_ar.impl("qr_open_handles", torch::kCPU, &qr_open_handles);

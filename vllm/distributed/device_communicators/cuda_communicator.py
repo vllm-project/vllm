@@ -61,6 +61,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             )
         self.use_quick_allreduce = os.environ.get("VLLM_USE_QUICK_ALLREDUCE",
                                                   "0") == "1"
+        self.qr_comm: Optional[QuickAllReduce] = None
         if self.use_quick_allreduce and self.world_size > 1:
             # Initialize a custom fast all-reduce implementation.
             qr_comm_algo = os.environ.get("VLLM_QUICK_ALLREDUCE_ALGO",
