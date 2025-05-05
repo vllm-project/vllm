@@ -237,6 +237,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 dtype=torch.int64,
                 device="cpu",
                 pin_memory=self.pin_memory)
+            self.mrope_positions_np = self.mrope_positions_cpu.numpy()
 
         # Only relevant for models using ALiBi (e.g, MPT)
         self.use_alibi = check_use_alibi(model_config)
@@ -678,8 +679,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def _calc_mrope_positions(self, scheduler_output: "SchedulerOutput"):
         from vllm.model_executor.layers.mrope_positions import (
-            mrope_get_input_positions_and_delta,
-            mrope_get_next_input_positions_tensor)
+            mrope_assign_next_input_positions,
+            mrope_get_input_positions_and_delta)
 
         mrope_pos_ptr = 0
         for index, req_id in enumerate(self.input_batch.req_ids):
@@ -752,17 +753,27 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if completion_part_len > 0:
                 # compute completion's mrope_positions on-the-fly
                 dst_start = mrope_pos_ptr
-                dst_end = mrope_pos_ptr + completion_part_len
 
-                self.mrope_positions_cpu[:, dst_start:dst_end] = \
-                    mrope_get_next_input_positions_tensor(
-                        req.mrope_position_delta,
-                        context_len=num_computed_tokens +
-                        prompt_part_len,
-                        seq_len=num_computed_tokens +
-                        prompt_part_len +
-                        completion_part_len,
-                    )
+                # keep them for benchmarking purpose temporarily
+                #dst_end = mrope_pos_ptr + completion_part_len
+
+                mrope_assign_next_input_positions(
+                    out=self.mrope_positions_np,
+                    out_offset=dst_start,
+                    mrope_position_delta=req.mrope_position_delta,
+                    context_len=num_computed_tokens + prompt_part_len,
+                    num_new_tokens=completion_part_len,
+                )
+
+                # self.mrope_positions_cpu[:, dst_start:dst_end] = \
+                #     mrope_get_next_input_positions_tensor(
+                #         req.mrope_position_delta,
+                #         context_len=num_computed_tokens +
+                #         prompt_part_len,
+                #         seq_len=num_computed_tokens +
+                #         prompt_part_len +
+                #         completion_part_len,
+                #     )
 
                 mrope_pos_ptr += completion_part_len
 

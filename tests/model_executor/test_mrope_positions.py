@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 
 from vllm.model_executor.layers.mrope_positions import (
-    mrope_get_input_positions_and_delta)
+    mrope_assign_next_input_positions, mrope_get_input_positions_and_delta,
+    mrope_get_next_input_positions_tensor)
 
 IMAGE = 101
 VIDEO = 102
@@ -630,3 +632,49 @@ def test_unused_mm_items_error(is_omni, modality):
         )
 
     assert f"{modality} has 1 unused item" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "mrope_position_delta, context_len, seq_len, expected_output", [
+        (0, 0, 1, [[0], [0], [0]]),
+        (0, 5, 7, [[5, 6], [5, 6], [5, 6]]),
+        (-10, 160, 163, [[150, 151, 152], [150, 151, 152], [150, 151, 152]]),
+        (-10, 200, 201, [[190], [190], [190]]),
+    ])
+def test_mrope_get_next_input_positions_tensor(mrope_position_delta,
+                                               context_len, seq_len,
+                                               expected_output):
+    input_positions = mrope_get_next_input_positions_tensor(
+        mrope_position_delta=mrope_position_delta,
+        context_len=context_len,
+        seq_len=seq_len,
+    )
+
+    assert torch.equal(input_positions,
+                       torch.tensor(expected_output, dtype=torch.int64))
+
+
+@pytest.mark.parametrize(
+    "mrope_position_delta, out_offset, context_len, seq_len, expected_output",
+    [
+        (0, 0, 0, 1, [[0], [0], [0]]),
+        (0, 1, 5, 7, [[0, 5, 6], [0, 5, 6], [0, 5, 6]]),
+        (-10, 2, 160, 163, [[0, 0, 150, 151, 152], [0, 0, 150, 151, 152],
+                            [0, 0, 150, 151, 152]]),
+        (-10, 4, 200, 201, [[0, 0, 0, 0, 190], [0, 0, 0, 0, 190],
+                            [0, 0, 0, 0, 190]]),
+    ])
+def test_mrope_assign_next_input_positions(mrope_position_delta, out_offset,
+                                           context_len, seq_len,
+                                           expected_output):
+    out = np.zeros((3, out_offset + seq_len - context_len), dtype=np.int64)
+    mrope_assign_next_input_positions(
+        out=out,
+        out_offset=out_offset,
+        mrope_position_delta=mrope_position_delta,
+        context_len=context_len,
+        num_new_tokens=seq_len - context_len,
+    )
+
+    assert torch.equal(torch.from_numpy(out),
+                       torch.tensor(expected_output, dtype=torch.int64))

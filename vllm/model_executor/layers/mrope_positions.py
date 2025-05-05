@@ -156,6 +156,20 @@ def mrope_get_next_input_positions_tensor(
     ).expand(3, -1)
 
 
+@numba.jit(nopython=True)
+def mrope_assign_next_input_positions(
+    out: np.ndarray,
+    out_offset: int,
+    mrope_position_delta: int,
+    context_len: int,
+    num_new_tokens: int,
+):
+    for dim in range(3):
+        for idx in range(num_new_tokens):
+            out[dim,
+                out_offset + idx] = mrope_position_delta + context_len + idx
+
+
 def omni_get_updates_use_audio_in_video(
     thinker_config: PretrainedConfig,
     audio_len: int,
