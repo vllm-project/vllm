@@ -255,12 +255,13 @@ class SequenceParallelismPass(VllmInductorPass):
             torch._inductor.pattern_matcher._seen_patterns.clear()
 
     def is_applicable_for_shape(self, shape: Optional[int]) -> bool:
-        # only do replace for specific shapes
         tp_size = get_tensor_model_parallel_world_size()
         return shape is not None and shape % tp_size == 0
 
     def __call__(self, graph: fx.Graph):
+        self.begin()
         self.dump_graph(graph, "before_sequence_parallelism_pass")
         count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", count)
         self.dump_graph(graph, "after_sequence_parallelism_pass")
+        self.end_and_log()
