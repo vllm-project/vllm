@@ -25,7 +25,7 @@ The available APIs depend on the type of model that is being run:
 Please refer to the above pages for more details about each API.
 
 :::{seealso}
-[API Reference](/api/offline_inference/index)
+[API Reference](#offline-inference-api)
 :::
 
 (configuration-options)=
@@ -33,7 +33,7 @@ Please refer to the above pages for more details about each API.
 ## Configuration Options
 
 This section lists the most common options for running the vLLM engine.
-For a full list, refer to the [Engine Arguments](#engine-args) page.
+For a full list, refer to the <project:#configuration> page.
 
 (model-resolution)=
 

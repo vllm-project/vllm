@@ -2,5 +2,7 @@
 -r common.txt
 
 # Dependencies for Neuron devices
+packaging>=24.2
+setuptools>=77.0.3,<80.0.0
 torch-neuronx >= 2.5.0
 neuronx-cc
