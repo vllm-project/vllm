@@ -187,6 +187,7 @@ class LLM:
         task: TaskOption = "auto",
         override_pooler_config: Optional[PoolerConfig] = None,
         compilation_config: Optional[Union[int, dict[str, Any]]] = None,
+        single_worker: bool = False,
         **kwargs,
     ) -> None:
         '''
@@ -241,6 +242,7 @@ class LLM:
             mm_processor_kwargs=mm_processor_kwargs,
             override_pooler_config=override_pooler_config,
             compilation_config=compilation_config_instance,
+            single_worker=single_worker,
             **kwargs,
         )
 

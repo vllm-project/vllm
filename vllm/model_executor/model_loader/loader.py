@@ -26,7 +26,6 @@ from torch import nn
 from transformers import AutoModelForCausalLM
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
-import vllm.envs as envs
 from vllm.attention import Attention
 from vllm.config import (LoadConfig, LoadFormat, ModelConfig, ParallelConfig,
                          VllmConfig, set_current_vllm_config)
@@ -450,9 +449,8 @@ class DefaultModelLoader(BaseModelLoader):
         device_config = vllm_config.device_config
         model_config = vllm_config.model_config
         target_device = torch.device(device_config.device)
-        # TODO read use_spmd from a env var.
-        use_spmd = envs.VLLM_USE_SINGLE_WORKER
-        if use_spmd:
+        use_single_worker = vllm_config.parallel_config.single_worker
+        if use_single_worker:
             target_device = torch.device("cpu")
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
@@ -478,24 +476,6 @@ class DefaultModelLoader(BaseModelLoader):
                         f"checkpoint: {weights_not_loaded}")
 
             _process_weights_after_loading(model, model_config, target_device)
-
-            if use_spmd:
-                # import torch_xla.distributed.spmd as xs
-                # from torch_xla import runtime as xr
-                model = model.to('xla')
-                # num_devices = xr.global_runtime_device_count()
-                # mesh_shape = (num_devices, 1)
-                # device_ids = np.array(range(num_devices))
-                # mesh = xs.Mesh(device_ids, mesh_shape, ('x', 'y'))
-
-                # backbone_lm = model.model
-                # for layer in backbone_lm.layers:
-                #     w13 = layer.mlp.gate_up_proj.weight
-                #     w2 = layer.mlp.down_proj.weight
-                #     xs.mark_sharding(w13, mesh, ('x', None))
-                #     xs.mark_sharding(w2, mesh, (None, 'x'))
-
-                # model.model = torch.compile(model.model, backend="openxla")
 
         return model.eval()
 

@@ -1613,6 +1613,9 @@ class ParallelConfig:
     class is dynamically inherited by the worker class. This is used to inject
     new attributes and methods to the worker class for use in collective_rpc
     calls."""
+    single_worker: bool = False
+    """Whether to use single worker mode. In this mode, one 1 worker is used
+    to control multiple chips."""
 
     world_size: int = field(init=False)
     """world_size is TPxPP, it affects the number of workers we create."""
@@ -1720,6 +1723,8 @@ class ParallelConfig:
             ray_found = ray_utils.ray_is_available()
             if current_platform.is_neuron():
                 # neuron uses single process to control multiple devices
+                backend = "uni"
+            elif current_platform.is_tpu() and self.single_worker:
                 backend = "uni"
             elif (current_platform.is_cuda()
                   and cuda_device_count_stateless() < self.world_size):

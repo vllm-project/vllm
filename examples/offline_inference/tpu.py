@@ -28,6 +28,7 @@ def main():
         gpu_memory_utilization=0.95,
         max_model_len=512,
         tensor_parallel_size=8,
+        single_worker=True,
         enforce_eager=False)
     outputs = llm.generate(prompts, sampling_params)
     print("-" * 50)

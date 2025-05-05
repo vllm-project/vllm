@@ -47,6 +47,10 @@ class TPUWorker:
         self.lora_config = vllm_config.lora_config
         self.load_config = vllm_config.load_config
         self.parallel_config = vllm_config.parallel_config
+        if self.parallel_config.single_worker:
+            self.parallel_config.tensor_parallel_size = 1
+            self.parallel_config.pipeline_parallel_size = 1
+            self.parallel_config.world_size = 1
         self.scheduler_config = vllm_config.scheduler_config
         self.device_config = vllm_config.device_config
         self.speculative_config = vllm_config.speculative_config
@@ -96,13 +100,11 @@ class TPUWorker:
         torch.set_grad_enabled(False)
         torch.set_default_dtype(self.model_config.dtype)
 
-        use_spmd = envs.VLLM_USE_SINGLE_WORKER
         # Initialize the distributed environment.
         init_tpu_worker_distributed_environment(self.parallel_config,
                                                 self.rank,
                                                 self.distributed_init_method,
-                                                self.local_rank,
-                                                use_spmd=use_spmd)
+                                                self.local_rank)
 
         # Device initialization should happen after initializing
         # the distributed runtime.
@@ -246,10 +248,9 @@ def init_tpu_worker_distributed_environment(
     rank: int,
     distributed_init_method: Optional[str] = None,
     local_rank: int = -1,
-    use_spmd: bool = False,
 ) -> None:
     """Initialize the distributed environment."""
-    use_spmd = envs.VLLM_USE_SINGLE_WORKER
+    use_spmd = parallel_config.single_worker
     if use_spmd:
         xr.use_spmd()
     # NOTE(woosuk): This is just to initialize the TP group and broadcast

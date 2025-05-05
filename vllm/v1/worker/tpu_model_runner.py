@@ -117,7 +117,7 @@ class TPUModelRunner:
         self.check_recompilation = envs.VLLM_XLA_CHECK_RECOMPILATION
 
         # SPMD Related
-        self.use_spmd = envs.VLLM_USE_SINGLE_WORKER
+        self.use_spmd = parallel_config.single_worker
         if self.use_spmd:
             num_devices = xr.global_runtime_device_count()
             mesh_shape = (num_devices, 1)
@@ -853,6 +853,7 @@ class TPUModelRunner:
         xm.wait_device_ops()
 
         if self.use_spmd:
+            model = model.to('xla')
             shard_model(model, self.mesh)
             # torch compile after model sharding are done
             model.model = torch.compile(model.model, backend="openxla")
