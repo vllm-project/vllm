@@ -15,7 +15,7 @@ class INCConfig(QuantizationConfig):
     """Config class for FP8 using Intel Neural Compressor."""
 
     @classmethod
-    def get_name(cls) -> str:
+    def get_name(cls) -> QuantizationMethods:
         return "inc"
 
     @classmethod
