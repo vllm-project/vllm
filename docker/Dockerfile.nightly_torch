@@ -310,6 +310,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements/nightly_torch_test.txt
 
 # Logging to confirm the torch versions
-RUN uv pip freeze | grep -E 'torch|xformers|vllm|flashinfer'
+RUN pip freeze | grep -E 'torch|xformers|vllm|flashinfer'
 
 #################### UNITTEST IMAGE #############################
