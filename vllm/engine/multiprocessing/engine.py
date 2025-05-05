@@ -11,6 +11,7 @@ import zmq
 from vllm import AsyncEngineArgs, SamplingParams
 from vllm.config import VllmConfig
 from vllm.engine.llm_engine import LLMEngine
+from vllm.engine.metrics_types import StatLoggerBase
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
@@ -402,6 +403,12 @@ class MQLLMEngine:
         """Log and set errored status if this is the first issue."""
         if self._errored_with is None:
             self._errored_with = e
+
+    def add_logger(self, logger_name: str, logger: StatLoggerBase) -> None:
+        self.engine.add_logger(logger_name=logger_name, logger=logger)
+
+    def remove_logger(self, logger_name: str) -> None:
+        self.engine.remove_logger(logger_name=logger_name)
 
     def start_profile(self) -> None:
         self.engine.start_profile()
