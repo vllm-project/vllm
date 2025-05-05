@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from unittest.mock import Mock
 
-import numpy as np
 import pytest
 import torch
 
@@ -667,14 +666,15 @@ def test_mrope_get_next_input_positions_tensor(mrope_position_delta,
 def test_mrope_assign_next_input_positions(mrope_position_delta, out_offset,
                                            context_len, seq_len,
                                            expected_output):
-    out = np.zeros((3, out_offset + seq_len - context_len), dtype=np.int64)
+    out = torch.zeros((3, out_offset + seq_len - context_len),
+                      dtype=torch.int64)
+    out_np = out.numpy()
     mrope_assign_next_input_positions(
-        out=out,
+        out=out_np,
         out_offset=out_offset,
         mrope_position_delta=mrope_position_delta,
         context_len=context_len,
         num_new_tokens=seq_len - context_len,
     )
 
-    assert torch.equal(torch.from_numpy(out),
-                       torch.tensor(expected_output, dtype=torch.int64))
+    assert torch.equal(out, torch.tensor(expected_output, dtype=torch.int64))
