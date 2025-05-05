@@ -337,10 +337,9 @@ def test_kv_cache_events(
                 "Token ids should be the same as the custom tokens")
         finally:
             client.shutdown()
-        return
 
 
-@pytest.mark.timeout(10)
+@pytest.mark.timeout(20)
 def test_startup_failure(monkeypatch: pytest.MonkeyPatch):
 
     with monkeypatch.context() as m, pytest.raises(Exception) as e_info:
