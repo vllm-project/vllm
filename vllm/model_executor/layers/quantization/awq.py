@@ -7,6 +7,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.parameter import (GroupQuantScaleParameter,
@@ -44,7 +45,7 @@ class AWQConfig(QuantizationConfig):
                 f"zero_point={self.zero_point}, "
                 f"modules_to_not_convert={self.modules_to_not_convert})")
 
-    def get_name(self) -> str:
+    def get_name(self) -> QuantizationMethods:
         return "awq"
 
     def get_supported_act_dtypes(self) -> List[torch.dtype]:

@@ -34,7 +34,6 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -146,8 +145,8 @@ class Gemma2Attention(nn.Module):
         # reference:
         # https://github.com/huggingface/transformers/blob/54be2d7ae87e873482b984cc956e165ca4dc0ba3/src/transformers/models/gemma2/modeling_gemma2.py#L312 # noqa
         layer_idx = extract_layer_index(prefix)
-        use_sliding_window = (layer_idx % 2 == 0 and
-                              config.interleaved_sliding_window is not None)
+        use_sliding_window = (layer_idx % 2 == 0 and getattr(
+            config, "interleaved_sliding_window", None) is not None)
         sliding_window = config.interleaved_sliding_window if \
             use_sliding_window else None
         self.attn = Attention(self.num_heads,
@@ -388,7 +387,6 @@ class Gemma2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                  prefix=maybe_prefix(prefix, "model"))
         self.logits_processor = LogitsProcessor(
             config.vocab_size, soft_cap=config.final_logit_softcapping)
-        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
@@ -414,14 +412,6 @@ class Gemma2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         logits = self.logits_processor(self.model.embed_tokens, hidden_states,
                                        sampling_metadata)
         return logits
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:

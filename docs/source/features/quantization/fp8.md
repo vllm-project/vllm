@@ -30,6 +30,7 @@ from vllm import LLM
 model = LLM("facebook/opt-125m", quantization="fp8")
 # INFO 06-10 17:55:42 model_runner.py:157] Loading model weights took 0.1550 GB
 result = model.generate("Hello, my name is")
+print(result[0].outputs[0].text)
 ```
 
 :::{warning}
@@ -42,6 +43,12 @@ To produce performant FP8 quantized models with vLLM, you'll need to install the
 
 ```console
 pip install llmcompressor
+```
+
+Additionally, install `vllm` and `lm-evaluation-harness` for evaluation:
+
+```console
+pip install vllm lm-eval==0.4.4
 ```
 
 ## Quantization Process
@@ -86,7 +93,7 @@ recipe = QuantizationModifier(
 # Apply the quantization algorithm.
 oneshot(model=model, recipe=recipe)
 
-# Save the model.
+# Save the model: Meta-Llama-3-8B-Instruct-FP8-Dynamic
 SAVE_DIR = MODEL_ID.split("/")[1] + "-FP8-Dynamic"
 model.save_pretrained(SAVE_DIR)
 tokenizer.save_pretrained(SAVE_DIR)
@@ -94,18 +101,13 @@ tokenizer.save_pretrained(SAVE_DIR)
 
 ### 3. Evaluating Accuracy
 
-Install `vllm` and `lm-evaluation-harness`:
-
-```console
-pip install vllm lm-eval==0.4.4
-```
-
 Load and run the model in `vllm`:
 
 ```python
 from vllm import LLM
 model = LLM("./Meta-Llama-3-8B-Instruct-FP8-Dynamic")
-model.generate("Hello my name is")
+result = model.generate("Hello my name is")
+print(result[0].outputs[0].text)
 ```
 
 Evaluate accuracy with `lm_eval` (for example on 250 samples of `gsm8k`):
@@ -188,4 +190,5 @@ from vllm import LLM
 model = LLM(model="Meta-Llama-3-8B-Instruct-FP8/")
 # INFO 06-10 21:15:41 model_runner.py:159] Loading model weights took 8.4596 GB
 result = model.generate("Hello, my name is")
+print(result[0].outputs[0].text)
 ```

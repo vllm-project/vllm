@@ -13,6 +13,8 @@ from tests.v1.engine.utils import (NUM_PROMPT_LOGPROBS_UNDER_TEST,
 from vllm.engine.arg_utils import EngineArgs
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 
+from ...distributed.conftest import publisher_config, random_port  # noqa: F401
+
 from tests.v1.engine.utils import FULL_STRINGS  # isort: skip
 
 EngineCoreSampleLogprobsType = list[tuple[torch.Tensor, torch.Tensor]]
@@ -47,7 +49,7 @@ def _build_test_vectors_no_logprobs() -> DummyOutputProcessorTestVectors:
         tokenizer=tokenizer,
         tokenizer_group=init_tokenizer_from_configs(
             vllm_config.model_config, vllm_config.scheduler_config,
-            vllm_config.parallel_config, vllm_config.lora_config),
+            vllm_config.lora_config),
         vllm_config=vllm_config,
         full_tokens=[tokenizer(text).input_ids for text in FULL_STRINGS],
         prompt_tokens=prompt_tokens,

@@ -3,12 +3,13 @@
 
 # Dependencies for TPU
 cmake>=3.26
-packaging
+packaging>=24.2
 setuptools-scm>=8
 wheel
 jinja2>=3.1.6
 ray[default]
 ray[data]
+setuptools==78.1.0
 
 # Install torch_xla
 --pre
