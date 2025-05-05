@@ -211,8 +211,6 @@ from vllm.attention.utils.fa_utils import get_flash_attn_version
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase,
                                                UnquantizedLinearMethod)
-from vllm.model_executor.layers.rotary_embedding import (
-    DeepseekScalingRotaryEmbedding, RotaryEmbedding)
 from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
@@ -1033,7 +1031,6 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         qk_rope_head_dim: int,
         qk_head_dim: int,
         v_head_dim: int,
-        rotary_emb: RotaryEmbedding,
         kv_b_proj: ColumnParallelLinear,
     ) -> None:
         self.num_heads = num_heads
@@ -1048,10 +1045,6 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         self.qk_rope_head_dim = qk_rope_head_dim
         self.qk_head_dim = qk_head_dim
         self.v_head_dim = v_head_dim
-
-        self.rotary_emb = rotary_emb
-        self.use_yarn_rope = isinstance(rotary_emb,
-                                        DeepseekScalingRotaryEmbedding)
         self.kv_b_proj = kv_b_proj
 
         self.triton_fa_func = triton_attention
@@ -1375,32 +1368,10 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         q = q.view(-1, self.num_heads, self.qk_head_dim)
 
         decode_q = q[num_prefill_tokens:]
-        decode_k_pe = k_pe[num_prefill_tokens:]
-        decode_input_positions = \
-            attn_metadata.input_positions[num_prefill_tokens:]
 
         prefill_q = q[:num_prefill_tokens]
         prefill_k_pe = k_pe[:num_prefill_tokens]
-        prefill_input_positions = \
-            attn_metadata.input_positions[:num_prefill_tokens]
         prefill_k_c_normed = k_c_normed[:num_prefill_tokens]
-
-        if has_decode:
-            decode_q_nope, decode_q_pe = decode_q.split(
-                [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-            # Convert from (B, N, P) to (N, B, P)
-            decode_q_nope = decode_q_nope.transpose(0, 1)
-            # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
-            decode_ql_nope = torch.bmm(decode_q_nope, self.W_UK_T)
-            # Convert from (N, B, L) to (B, N, L)
-            decode_ql_nope = decode_ql_nope.transpose(0, 1)
-            decode_q_pe[...], decode_k_pe[...] = self.rotary_emb(
-                decode_input_positions, decode_q_pe, decode_k_pe)
-
-        if has_prefill:
-            prefill_q_pe = prefill_q[..., self.qk_nope_head_dim:]
-            prefill_q_pe[...], prefill_k_pe[...] = self.rotary_emb(
-                prefill_input_positions, prefill_q_pe, prefill_k_pe)
 
         # write the latent and rope to kv cache
         if kv_cache.numel() > 0:
@@ -1424,6 +1395,15 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 attn_metadata)
 
         if has_decode:
+            decode_q_nope, decode_q_pe = decode_q.split(
+                [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+            # Convert from (B, N, P) to (N, B, P)
+            decode_q_nope = decode_q_nope.transpose(0, 1)
+            # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
+            decode_ql_nope = torch.bmm(decode_q_nope, self.W_UK_T)
+            # Convert from (N, B, L) to (B, N, L)
+            decode_ql_nope = decode_ql_nope.transpose(0, 1)
+
             output[num_prefill_tokens:] = self._forward_decode(
                 decode_ql_nope, decode_q_pe, kv_cache, attn_metadata)
 

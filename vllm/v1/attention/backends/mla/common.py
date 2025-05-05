@@ -204,7 +204,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase,
                                                UnquantizedLinearMethod)
-from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform
 from vllm.utils import cdiv, round_down
 
@@ -268,9 +267,6 @@ class MLACommonPrefillMetadata:
         max_seq_lens: list[int]
         workspace: torch.Tensor
 
-    # Input positions for rotrary embeddings since for MLA the rotary
-    # position embeddings are applied inside the attention backend
-    input_positions: torch.Tensor
     block_table: torch.Tensor
     query_start_loc: torch.Tensor
     max_query_len: int
@@ -279,9 +275,6 @@ class MLACommonPrefillMetadata:
 
 @dataclass
 class MLACommonDecodeMetadata:
-    # Input positions for rotrary embeddings since for MLA the rotary
-    # position embeddings are applied inside the attention backend
-    input_positions: torch.Tensor
     block_table: torch.Tensor
     seq_lens: torch.Tensor
 
@@ -442,10 +435,8 @@ class MLACommonMetadataBuilder(Generic[M]):
 
         return modified_batch
 
-    def _build_decode(self, input_positions: torch.Tensor,
-                      block_table: torch.Tensor, seq_lens: torch.Tensor):
+    def _build_decode(self, block_table: torch.Tensor, seq_lens: torch.Tensor):
         return MLACommonDecodeMetadata(
-            input_positions=input_positions,
             block_table=block_table,
             seq_lens=seq_lens,
         )
@@ -464,8 +455,6 @@ class MLACommonMetadataBuilder(Generic[M]):
             device, non_blocking=True)
         slot_mapping = self.runner.slot_mapping_cpu[:num_actual_tokens].to(
             device, non_blocking=True).long()
-        input_positions = self.runner.positions_cpu[:num_actual_tokens].to(
-            device, non_blocking=True).long()
 
         seq_lens_cpu = self.runner.seq_lens_cpu[:num_reqs]
         seq_lens = seq_lens_cpu.to(device, non_blocking=True)
@@ -473,7 +462,6 @@ class MLACommonMetadataBuilder(Generic[M]):
         prefill_metadata = None
         if self._num_prefills > 0:
             reqs_start = self._num_decodes  # prefill_start
-            tokens_start = self._num_decode_tokens
 
             context_lens_cpu = self.runner.input_batch.\
                 num_computed_tokens_cpu_tensor[reqs_start:num_reqs]
@@ -541,7 +529,6 @@ class MLACommonMetadataBuilder(Generic[M]):
                     self.chunked_prefill_workspace_size
 
             prefill_metadata = MLACommonPrefillMetadata(
-                input_positions=input_positions[tokens_start:],
                 block_table=block_table[reqs_start:, ...],
                 query_start_loc=prefill_query_start_loc,
                 max_query_len=max_query_len,
@@ -551,7 +538,6 @@ class MLACommonMetadataBuilder(Generic[M]):
         decode_metadata = None
         if self._num_decodes > 0:
             decode_metadata = self._build_decode(
-                input_positions=input_positions[:self._num_decode_tokens],
                 block_table=block_table[:self._num_decodes, ...],
                 seq_lens=seq_lens[:self._num_decodes],
             )
@@ -598,7 +584,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         qk_rope_head_dim: int,
         qk_head_dim: int,
         v_head_dim: int,
-        rotary_emb: RotaryEmbedding,
         kv_b_proj: ColumnParallelLinear,
     ) -> None:
         self.num_heads = num_heads
@@ -613,15 +598,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         self.qk_rope_head_dim = qk_rope_head_dim
         self.qk_head_dim = qk_head_dim
         self.v_head_dim = v_head_dim
-
-        # Hack for V1 for now to avoid torch library overhead (since we are
-        # already inside an attention custom op), pull out the forward
-        # method from the rotary embedding and call it directly
-        # TODO(lucas): we should probably find a cleaner way to do this
-        self.rotary_emb = rotary_emb.forward_native
-        if current_platform.is_cuda():
-            self.rotary_emb = rotary_emb.forward_cuda
-
         self.kv_b_proj = kv_b_proj
         self.vllm_flash_attn_version = get_flash_attn_version()
 
@@ -906,32 +882,10 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
         q = q.view(-1, self.num_heads, self.qk_head_dim)
         decode_q = q[:num_decode_tokens]
-        decode_k_pe = k_pe[:num_decode_tokens]
 
         prefill_q = q[num_decode_tokens:]
         prefill_k_pe = k_pe[num_decode_tokens:]
         prefill_k_c_normed = k_c_normed[num_decode_tokens:]
-
-        if has_decode:
-            assert attn_metadata.decode is not None
-            decode_q_nope, decode_q_pe = decode_q.split(
-                [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-            # Convert from (B, N, P) to (N, B, P)
-            decode_q_nope = decode_q_nope.transpose(0, 1)
-            # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
-            decode_ql_nope = torch.bmm(decode_q_nope, self.W_UK_T)
-            # Convert from (N, B, L) to (B, N, L)
-            decode_ql_nope = decode_ql_nope.transpose(0, 1)
-            decode_q_pe[...], decode_k_pe[...] = self.rotary_emb(
-                attn_metadata.decode.input_positions, decode_q_pe, decode_k_pe)
-
-        if has_prefill:
-            assert attn_metadata.prefill is not None
-            prefill_q_pe = prefill_q[..., self.qk_nope_head_dim:]
-
-            prefill_q_pe[...], prefill_k_pe[...] = self.rotary_emb(
-                attn_metadata.prefill.input_positions, prefill_q_pe,
-                prefill_k_pe)
 
         # write the latent and rope to kv cache
         if kv_cache.numel() > 0:
@@ -950,6 +904,16 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 attn_metadata)
 
         if has_decode:
+            assert attn_metadata.decode is not None
+            decode_q_nope, decode_q_pe = decode_q.split(
+                [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+            # Convert from (B, N, P) to (N, B, P)
+            decode_q_nope = decode_q_nope.transpose(0, 1)
+            # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
+            decode_ql_nope = torch.bmm(decode_q_nope, self.W_UK_T)
+            # Convert from (N, B, L) to (B, N, L)
+            decode_ql_nope = decode_ql_nope.transpose(0, 1)
+
             output[:num_decode_tokens] = self._forward_decode(
                 decode_ql_nope, decode_q_pe, kv_cache, attn_metadata)
 
