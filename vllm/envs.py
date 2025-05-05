@@ -67,6 +67,7 @@ if TYPE_CHECKING:
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_RPC_TIMEOUT: int = 10000  # ms
+    VLLM_EXECUTE_MODEL_TIMEOUT: int = 40  #s
     VLLM_PLUGINS: Optional[list[str]] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
     VLLM_USE_TRITON_AWQ: bool = False
@@ -487,6 +488,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # server for simple data operations
     "VLLM_RPC_TIMEOUT":
     lambda: int(os.getenv("VLLM_RPC_TIMEOUT", "10000")),
+
+    # Time in seconds for the model execution.
+    "VLLM_EXECUTE_MODEL_TIMEOUT":
+    lambda: int(os.getenv("VLLM_EXECUTE_MODEL_TIMEOUT", "40")),
 
     # a list of plugin names to load, separated by commas.
     # if this is not set, it means all plugins will be loaded
