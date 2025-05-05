@@ -67,7 +67,6 @@ if TYPE_CHECKING:
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_RPC_TIMEOUT: int = 10000  # ms
-    VLLM_EXECUTE_MODEL_TIMEOUT: int = 40  #s
     VLLM_PLUGINS: Optional[list[str]] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
     VLLM_USE_TRITON_AWQ: bool = False
@@ -85,6 +84,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_CUSTOM_PAGED_ATTN: bool = True
+    VLLM_ROCM_EXECUTE_MODEL_TIMEOUT: int = 250  #s
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -489,9 +489,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_RPC_TIMEOUT":
     lambda: int(os.getenv("VLLM_RPC_TIMEOUT", "10000")),
 
-    # Time in seconds for the model execution.
-    "VLLM_EXECUTE_MODEL_TIMEOUT":
-    lambda: int(os.getenv("VLLM_EXECUTE_MODEL_TIMEOUT", "40")),
+    # Time in seconds for the model execution in ROCm platforms.
+    "VLLM_ROCM_EXECUTE_MODEL_TIMEOUT":
+    lambda: int(os.getenv("VLLM_ROCM_EXECUTE_MODEL_TIMEOUT", "250")),
 
     # a list of plugin names to load, separated by commas.
     # if this is not set, it means all plugins will be loaded
