@@ -204,7 +204,7 @@ def get_field(cls: ConfigType, name: str) -> Field:
     cls_fields = {f.name: f for f in fields(cls)}
     if name not in cls_fields:
         raise ValueError(f"Field '{name}' not found in {cls.__name__}.")
-    named_field: Field = cls_fields.get(name)
+    named_field: Field = cls_fields[name]
     if (default_factory := named_field.default_factory) is not MISSING:
         return field(default_factory=default_factory)
     if (default := named_field.default) is not MISSING:
@@ -2819,8 +2819,8 @@ class PromptAdapterConfig:
 class MultiModalConfig:
     """Controls the behavior of multimodal models."""
 
-    limit_per_prompt: dict[str, int] = get_field(ModelConfig,
-                                                 "limit_mm_per_prompt")
+    limit_per_prompt: dict[str, int] = \
+        cast(dict[str, int], get_field(ModelConfig, "limit_mm_per_prompt"))
     """
     The maximum number of input items allowed per prompt for each modality.
     Defaults to 1 (V0) or 999 (V1) for each modality.
@@ -3693,11 +3693,12 @@ class CompilationConfig:
     pass_config: PassConfig = field(default_factory=PassConfig)
     """Custom inductor passes, see PassConfig for more details"""
 
-    max_capture_size: int = field(default=None, init=False)
+    max_capture_size: int = field(default=None, init=False)  # type: ignore
     """not configurable, computed after init"""
-    local_cache_dir: str = field(default=None, init=False)
+    local_cache_dir: str = field(default=None, init=False)  # type: ignore
     """local cache dir for each rank"""
-    bs_to_padded_graph_size: list[int] = field(default=None, init=False)
+    bs_to_padded_graph_size: list[int] = field(default=None,
+                                               init=False)  # type: ignore
     """optimization:
     Intuitively, bs_to_padded_graph_size should be dict[int, int].
     since we know all keys are in a range [0, max_capture_size],
@@ -3758,9 +3759,10 @@ class CompilationConfig:
         for k, v in asdict(self).items():
             if k in exclude:
                 continue
-            f = get_field(self, k)
-            d = f.default_factory() if f.default is MISSING else f.default
-            if d == v:
+            f = get_field(CompilationConfig, k)
+            if (d := f.default) is not MISSING and d == v:
+                continue
+            if (df := f.default_factory) is not MISSING and df() == v:
                 continue
             include[k] = v
         return json.dumps(include)

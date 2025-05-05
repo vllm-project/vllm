@@ -107,7 +107,7 @@ class TpuPlatform(Platform):
                     vllm_config.cache_config.block_size,
                     min_page_size,
                 )
-                vllm_config.cache_config.block_size = min_page_size
+                vllm_config.cache_config.block_size = min_page_size  # type: ignore[assignment]
 
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config

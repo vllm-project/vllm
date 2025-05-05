@@ -186,7 +186,8 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
             dataclass_init = lambda x, f=dataclass_cls: f(**json.loads(x))
             # Special case for configs with a from_cli method
             if hasattr(dataclass_cls, "from_cli"):
-                dataclass_init = lambda x, f=dataclass_cls.from_cli: f(x)
+                from_cli = dataclass_cls.from_cli
+                dataclass_init = lambda x, f=from_cli: f(x)
             kwargs[name]["type"] = dataclass_init
             kwargs[name]["help"] += json_tip
         elif contains_type(type_hints, bool):
