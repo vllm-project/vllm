@@ -187,6 +187,13 @@ def get_prompt(model_config: ModelConfig, modality: ModalityStr) -> str:
         content_format,
     )
 
+    for message in conversation:
+        contents = message.get("content")
+        if isinstance(contents, list):
+            for content in contents:
+                if content["type"] in get_args(ModalityStr):
+                    content[content["type"]] = None
+
     return apply_hf_chat_template(
         tokenizer,
         conversation,
@@ -200,7 +207,7 @@ def get_benchmark_data(modality: ModalityStr):
     rng = np.random.RandomState(0)
 
     if modality == "audio":
-        return [random_audio(rng, 1024, 4096, 16000) for _ in range(100)]
+        return [random_audio(rng, 1024, 4096, 16000) for _ in range(200)]
     if modality == "image":
         return [random_image(rng, 256, 1024) for _ in range(200)]
     if modality == "video":
