@@ -22,6 +22,7 @@ from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
 
 import torch
 from pydantic import BaseModel
+from pydantic import Field as PydanticField
 from torch.distributed import ProcessGroup, ReduceOp
 from transformers import PretrainedConfig
 from typing_extensions import deprecated
@@ -3666,7 +3667,7 @@ class CompilationConfig:
             TODO(luka) better pass enabling system.
         - enable_sequence_parallelism: whether to enable sequence parallelism.
         """
-        dump_graph_stages: list[str] = field(default_factory=list)
+        dump_graph_stages: list[str] = PydanticField(default_factory=list)
         dump_graph_dir: Path = Path(".")
         enable_fusion: bool = True
         enable_noop: bool = True
