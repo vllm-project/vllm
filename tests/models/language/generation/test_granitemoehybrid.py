@@ -10,7 +10,8 @@ MODELS = [
 ]
 
 
-@pytest.mark.skip(reason="HF model is in the HF main yet")
+@pytest.mark.skip(
+    reason="Granite 4.0 is not yet available in huggingface transformers")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float16", "bfloat16"])
 @pytest.mark.parametrize("max_tokens", [64])
