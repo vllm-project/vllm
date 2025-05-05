@@ -599,10 +599,6 @@ class EngineArgs:
             help=('Use padding-aware scheduling. If True, the scheduler '
                   'will consider padded tokens in prefill. '
                   'By default this is set to False on non-HPU devices. '))
-        parser.add_argument('--seed',
-                            type=int,
-                            default=EngineArgs.seed,
-                            help='Random seed for operations.')
         parser.add_argument(
             '--max-num-prefill-seqs',
             type=int,
