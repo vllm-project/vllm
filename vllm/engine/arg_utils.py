@@ -184,10 +184,10 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
         json_tip = "\n\nShould be a valid JSON string."
         if dataclass_cls is not None:
             dataclass_init = lambda x, f=dataclass_cls: f(**json.loads(x))
-            kwargs[name]["type"] = dataclass_init
             # Special case for configs with a from_cli method
             if hasattr(dataclass_cls, "from_cli"):
-                kwargs[name]["type"] = dataclass_cls.from_cli
+                dataclass_init = lambda x, f=dataclass_cls.from_cli: f(x)
+            kwargs[name]["type"] = dataclass_init
             kwargs[name]["help"] += json_tip
         elif contains_type(type_hints, bool):
             # Creates --no-<name> and --<name> flags
