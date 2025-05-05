@@ -52,7 +52,7 @@ class StructuredOutputManager:
         ).get_lora_tokenizer(None)
         # yapf: disable
         reasoning_backend = vllm_config.decoding_config.reasoning_backend
-        if reasoning_backend is not None:
+        if reasoning_backend:
             self.reasoner = ReasoningParserManager.get_reasoning_parser(reasoning_backend)(tokenizer=self.tokenizer)  # noqa: E501
         # yapf: enable
 

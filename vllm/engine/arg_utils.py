@@ -388,7 +388,6 @@ class EngineArgs:
     pt_load_map_location: str = LoadConfig.pt_load_map_location
 
     def __post_init__(self):
-        self.enable_reasoning = self.reasoning_parser is not None
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
         # CompilationConfig object
