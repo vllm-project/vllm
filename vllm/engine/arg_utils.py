@@ -1430,7 +1430,12 @@ class EngineArgs:
         # V1 should use the new scheduler by default.
         # Swap it only if this arg is set to the original V0 default
         if self.scheduler_cls == EngineArgs.scheduler_cls:
-            self.scheduler_cls = "vllm.v1.core.sched.scheduler.Scheduler"
+            if self.kv_transfer_config:
+                self.scheduler_cls = (
+                    "vllm.v1.core.sched.scheduler_disagg.DisaggregatedScheduler"
+                )
+            else:
+                self.scheduler_cls = "vllm.v1.core.sched.scheduler.Scheduler"
 
         # When no user override, set the default values based on the usage
         # context.

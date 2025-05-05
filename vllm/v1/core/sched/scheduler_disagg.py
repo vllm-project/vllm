@@ -41,8 +41,8 @@ class DisaggregatedScheduler(Scheduler):
                 "LoRA is not yet supported with KV Disaggregation.")
 
         # Create KVConnector for the Scheduler.
-        if self.vllm_config.kv_transfer_config is not None:
-            raise ValueError("Using DisaggregatedScheduler but found unset "
+        if self.vllm_config.kv_transfer_config is None:
+            raise ValueError("Using Disaggregated Scheduler but found unset "
                              "kv_transfer_config.")
         self.connector = KVConnectorFactory.create_connector_v1(
             config=self.vllm_config, role=KVConnectorRole.SCHEDULER)
