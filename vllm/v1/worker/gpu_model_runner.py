@@ -1064,10 +1064,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return output
 
         # Prepare the decoder inputs.
-        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-
         attn_metadata, logits_indices, spec_decode_metadata = (
             self._prepare_inputs(scheduler_output))
+        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
             # Use piecewise CUDA graphs.
@@ -1141,7 +1140,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                  num_tokens=num_input_tokens):
             maybe_setup_kv_connector()
 
-            model_output = self.model(
+            output = self.model(
                 input_ids=input_ids,
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
@@ -1152,9 +1151,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             finished_sending, finished_recving = maybe_get_finished()
 
         if self.use_aux_hidden_state_outputs:
-            hidden_states, aux_hidden_states = model_output
+            hidden_states, aux_hidden_states = output
         else:
-            hidden_states = model_output
+            hidden_states = output
 
         if not get_pp_group().is_last_rank:
             # For mid-pipeline stages, return the hidden states.
