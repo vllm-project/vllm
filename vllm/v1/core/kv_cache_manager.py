@@ -271,13 +271,9 @@ class KVCacheManager:
         if not self.enable_caching:
             return new_blocks
 
+        # For disaggregated, avoid caching until KVs are recved.
         if skip_cache_blocks:
-            # NOTE(rob): this assert is valid because we only call
-            # skip_cache_blocks=True on the first time of WAITING
-            # during a P/D setup.
             assert request.request_id not in self.num_cached_block
-            # NOTE(rob): this is necessary so we don't double
-            # cache a block after is has finished recving.
             self.num_cached_block[request.request_id] = len(
                 new_computed_blocks)
             return new_blocks
