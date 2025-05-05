@@ -481,8 +481,7 @@ class Scheduler(SchedulerInterface):
         # 3. If some tokens (e.g. spec tokens) are rejected later, the number of
         #    computed tokens will be adjusted in update_from_output.
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
-            if req := self.requests.get(req_id):
-                req.num_computed_tokens += num_scheduled_token
+            self.requests[req_id].num_computed_tokens += num_scheduled_token
 
         self.finished_req_ids = set()
         return scheduler_output
