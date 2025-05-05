@@ -807,10 +807,10 @@ class ModelConfig:
             overrides = [
                 "marlin",
                 "bitblas",
+                "gptq_hpu",
                 "gptq_marlin_24",
                 "gptq_marlin",
                 "gptq_bitblas",
-                "gptq_hpu",
                 "awq_hpu",
                 "awq_marlin",
                 "ipex",
