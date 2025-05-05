@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """
+# MLA Common Components
+
 This file implements common components for MLA implementations.
 
 First we define:
@@ -205,8 +207,9 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
 from vllm.attention.ops.merge_attn_states import merge_attn_states
+from vllm.attention.utils.fa_utils import get_flash_attn_version
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               LinearBase, RowParallelLinear,
+                                               LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, RotaryEmbedding)
@@ -214,7 +217,6 @@ from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils import async_tensor_h2d, cdiv, make_tensor_with_pad, round_down
-from vllm.vllm_flash_attn.fa_utils import get_flash_attn_version
 
 if HAS_TRITON:
     from vllm.attention.ops.triton_flash_attention import triton_attention
@@ -711,12 +713,24 @@ class MLACommonMetadata(AttentionMetadata):
             self.seq_lens[i] += 1
         self.max_decode_seq_len = max(self.seq_lens)
 
+        self._ops_advance_step(num_seqs=num_seqs,
+                               num_queries=num_queries,
+                               block_size=block_size,
+                               input_tokens=model_input.input_tokens,
+                               sampled_token_ids=sampled_token_ids,
+                               input_positions=model_input.input_positions)
+
+    def _ops_advance_step(self, num_seqs: int, num_queries: int,
+                          block_size: int, input_tokens: torch.Tensor,
+                          sampled_token_ids: torch.Tensor,
+                          input_positions: torch.Tensor) -> None:
+        # here we use advance_step_flashinfo to update the paged_kv_* tensors
         ops.advance_step_flashattn(num_seqs=num_seqs,
                                    num_queries=num_queries,
                                    block_size=block_size,
-                                   input_tokens=model_input.input_tokens,
+                                   input_tokens=input_tokens,
                                    sampled_token_ids=sampled_token_ids,
-                                   input_positions=model_input.input_positions,
+                                   input_positions=input_positions,
                                    seq_lens=self.seq_lens_tensor,
                                    slot_mapping=self.slot_mapping,
                                    block_tables=self.block_tables)
@@ -727,6 +741,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
     NOTE: Please read the comment at the top of the file before trying to 
     understand this class
     """
+    BLOCK_TABLE_EXTENDER: list[list[int]] = []
 
     def __init__(self, input_builder: "ModelInputForGPUBuilder"):
         self.input_builder = input_builder
@@ -877,8 +892,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
         num_seqs = len(seq_lens)
         if use_captured_graph:
             self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
-            self.block_tables.extend([] * cuda_graph_pad_size)
+            self.block_tables.extend(self.__class__.BLOCK_TABLE_EXTENDER *
+                                     cuda_graph_pad_size)
             num_decode_tokens = batch_size - self.num_prefill_tokens
+
             block_tables = self._get_graph_runner_block_tables(
                 num_seqs, self.block_tables)
         else:
@@ -1017,12 +1034,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         qk_head_dim: int,
         v_head_dim: int,
         rotary_emb: RotaryEmbedding,
-        # q_proj should be q_b_proj if q_lora_rank is not None, but from an
-        # attention backend perspective we rely on the layer to pass in the
-        # correct matrix
-        q_proj: ColumnParallelLinear,
         kv_b_proj: ColumnParallelLinear,
-        o_proj: RowParallelLinear,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -1040,9 +1052,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         self.rotary_emb = rotary_emb
         self.use_yarn_rope = isinstance(rotary_emb,
                                         DeepseekScalingRotaryEmbedding)
-        self.q_proj = q_proj
         self.kv_b_proj = kv_b_proj
-        self.o_proj = o_proj
 
         self.triton_fa_func = triton_attention
         # Handle the differences between the flash_attn_varlen from flash_attn
@@ -1076,7 +1086,14 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 q,
                 k,
                 maybe_padded_v,
-                **kwargs,
+                None,  # output
+                kwargs["cu_seqlens_q"],
+                kwargs["cu_seqlens_k"],
+                kwargs["max_seqlen_q"],
+                kwargs["max_seqlen_k"],
+                kwargs["causal"],
+                softmax_scale,
+                None,  # bias
             )
         if is_vllm_fa:
             attn_out = self.flash_attn_varlen_func(
@@ -1119,27 +1136,13 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             return attn_out, rest[0]
         return attn_out
 
-    def _v_up_proj_and_o_proj(self, x):
+    def _v_up_proj(self, x):
         # Convert from (B, N, L) to (N, B, L)
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
         # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
         x = torch.bmm(x, self.W_UV)
         # Convert from (N, B, V) to (B, N * V)
-        x = x.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
-        return self.o_proj(x)[0]
-
-    # Return `ql_nope`, `q_pe`
-    def _q_proj_and_k_up_proj(self, x):
-        q_nope, q_pe = self.q_proj(x)[0]\
-            .view(-1, self.num_heads, self.qk_head_dim)\
-            .split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-
-        # Convert from (B, N, P) to (N, B, P)
-        q_nope = q_nope.transpose(0, 1)
-        # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
-        ql_nope = torch.bmm(q_nope, self.W_UK_T)
-        # Convert from (N, B, L) to (B, N, L)
-        return ql_nope.transpose(0, 1), q_pe
+        return x.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
 
@@ -1323,7 +1326,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 suffix_lse=suffix_lse,
             )
 
-        return self.o_proj(output.flatten(start_dim=-2))[0]
+        return output.flatten(start_dim=-2)
 
     @abstractmethod
     def _forward_decode(
@@ -1338,7 +1341,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
     def forward(
         self,
         layer: AttentionLayer,
-        hidden_states_or_q_c: torch.Tensor,  # query in unified attn
+        q: torch.Tensor,  # query in unified attn
         k_c_normed: torch.Tensor,  # key in unified attn
         k_pe: torch.Tensor,  # value in unified attn
         kv_cache: torch.Tensor,
@@ -1369,27 +1372,32 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         assert hasattr(attn_metadata, "input_positions")
 
         num_prefill_tokens: int = attn_metadata.num_prefill_tokens
+        q = q.view(-1, self.num_heads, self.qk_head_dim)
 
-        decode_hs_or_q_c = hidden_states_or_q_c[num_prefill_tokens:]
+        decode_q = q[num_prefill_tokens:]
         decode_k_pe = k_pe[num_prefill_tokens:]
         decode_input_positions = \
             attn_metadata.input_positions[num_prefill_tokens:]
 
-        prefill_hs_or_q_c = hidden_states_or_q_c[:num_prefill_tokens]
+        prefill_q = q[:num_prefill_tokens]
         prefill_k_pe = k_pe[:num_prefill_tokens]
         prefill_input_positions = \
             attn_metadata.input_positions[:num_prefill_tokens]
         prefill_k_c_normed = k_c_normed[:num_prefill_tokens]
 
         if has_decode:
-            decode_ql_nope, decode_q_pe = \
-                self._q_proj_and_k_up_proj(decode_hs_or_q_c)
+            decode_q_nope, decode_q_pe = decode_q.split(
+                [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+            # Convert from (B, N, P) to (N, B, P)
+            decode_q_nope = decode_q_nope.transpose(0, 1)
+            # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
+            decode_ql_nope = torch.bmm(decode_q_nope, self.W_UK_T)
+            # Convert from (N, B, L) to (B, N, L)
+            decode_ql_nope = decode_ql_nope.transpose(0, 1)
             decode_q_pe[...], decode_k_pe[...] = self.rotary_emb(
                 decode_input_positions, decode_q_pe, decode_k_pe)
 
         if has_prefill:
-            prefill_q = self.q_proj(prefill_hs_or_q_c)[0]\
-                .view(-1, self.num_heads, self.qk_head_dim)
             prefill_q_pe = prefill_q[..., self.qk_nope_head_dim:]
             prefill_q_pe[...], prefill_k_pe[...] = self.rotary_emb(
                 prefill_input_positions, prefill_q_pe, prefill_k_pe)
@@ -1407,9 +1415,9 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
         output = torch.empty(attn_metadata.num_prefill_tokens +
                              attn_metadata.num_decode_tokens,
-                             self.o_proj.output_size,
-                             device=hidden_states_or_q_c.device,
-                             dtype=hidden_states_or_q_c.dtype)
+                             self.v_head_dim * self.num_heads,
+                             device=q.device,
+                             dtype=q.dtype)
         if has_prefill:
             output[:num_prefill_tokens] = self._forward_prefill(
                 prefill_q, prefill_k_c_normed, prefill_k_pe, kv_cache,

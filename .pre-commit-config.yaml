@@ -12,29 +12,29 @@ repos:
   - id: yapf
     args: [--in-place, --verbose]
 - repo: https://github.com/astral-sh/ruff-pre-commit
-  rev: v0.9.3
+  rev: v0.11.7
   hooks:
   - id: ruff
     args: [--output-format, github, --fix]
 - repo: https://github.com/codespell-project/codespell
-  rev: v2.4.0
+  rev: v2.4.1
   hooks:
   - id: codespell
     additional_dependencies: ['tomli']
     args: ['--toml', 'pyproject.toml']
 - repo: https://github.com/PyCQA/isort
-  rev: 0a0b7a830386ba6a31c2ec8316849ae4d1b8240d # 6.0.0
+  rev: 6.0.1
   hooks:
   - id: isort
 - repo: https://github.com/pre-commit/mirrors-clang-format
-  rev: v19.1.7
+  rev: v20.1.3
   hooks:
   - id: clang-format
     exclude: 'csrc/(moe/topk_softmax_kernels.cu|quantization/gguf/(ggml-common.h|dequantize.cuh|vecdotq.cuh|mmq.cuh|mmvq.cuh))|vllm/third_party/.*'
     types_or: [c++, cuda]
     args: [--style=file, --verbose]
 - repo: https://github.com/jackdewinter/pymarkdown
-  rev: v0.9.27
+  rev: v0.9.29
   hooks:
   - id: pymarkdown
     args: [fix]
@@ -43,10 +43,10 @@ repos:
   hooks:
   - id: actionlint
 - repo: https://github.com/astral-sh/uv-pre-commit
-  rev: 0.6.2
+  rev: 0.6.17
   hooks:
     - id: pip-compile
-      args: [requirements/test.in, -o, requirements/test.txt]
+      args: [requirements/test.in, -o, requirements/test.txt, --index-strategy, unsafe-best-match, --torch-backend, cu128]
       files: ^requirements/test\.(in|txt)$
 - repo: local
   hooks:

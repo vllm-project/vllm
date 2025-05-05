@@ -3,6 +3,7 @@
 from typing import TYPE_CHECKING, Optional, Union
 
 import torch
+from tpu_info import device
 
 import vllm.envs as envs
 from vllm.inputs import ProcessorInputs, PromptType
@@ -30,9 +31,7 @@ class TpuPlatform(Platform):
     ray_device_key: str = "TPU"
     device_control_env_var: str = "TPU_VISIBLE_CHIPS"
 
-    supported_quantization: list[str] = [
-        "tpu_int8", "compressed-tensors", "compressed_tensors"
-    ]
+    supported_quantization: list[str] = ["tpu_int8", "compressed-tensors"]
 
     additional_env_vars: list[str] = [
         "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS"
@@ -56,7 +55,8 @@ class TpuPlatform(Platform):
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
-        return "tpu"
+        chip_type, _ = device.get_local_chips()
+        return f"TPU {chip_type.name}"
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
@@ -168,9 +168,9 @@ class TpuPlatform(Platform):
     ) -> None:
         """Raises if this request is unsupported on this platform"""
         if isinstance(params, SamplingParams):
-            if params.guided_decoding is not None:
+            if params.guided_decoding is not None and not envs.VLLM_USE_V1:
                 raise ValueError("Structured output is not supported on "
-                                 f"{cls.device_name}.")
+                                 f"{cls.device_name} V0.")
             if params.sampling_type == SamplingType.RANDOM_SEED:
                 raise ValueError(
                     "Torch XLA does not support per-request seed.")

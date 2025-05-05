@@ -725,6 +725,34 @@ def run_nvlm_d(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Ovis2
+def run_ovis2(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "AIDC-AI/Ovis2-1B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=2,
+        trust_remote_code=True,
+        dtype="half",
+        hf_overrides={"architectures": ["Ovis2ForConditionalGeneration"]},
+        limit_mm_per_prompt={"image": 1},
+    )
+
+    placeholder = "<image>\n"
+    prompts = [("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+                f"<|im_start|>user\n{placeholder}"
+                f"{question}<|im_end|>\n"
+                "<|im_start|>assistant\n") for question in questions]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # PaliGemma
 def run_paligemma(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -1041,6 +1069,7 @@ model_example_map = {
     "llama4": run_llama4,
     "molmo": run_molmo,
     "NVLM_D": run_nvlm_d,
+    "ovis2": run_ovis2,
     "paligemma": run_paligemma,
     "paligemma2": run_paligemma2,
     "phi3_v": run_phi3v,
@@ -1080,7 +1109,7 @@ def get_multi_modal_input(args):
 
     if args.modality == "video":
         # Input video and question
-        video = VideoAsset(name="sample_demo_1.mp4",
+        video = VideoAsset(name="baby_reading",
                            num_frames=args.num_frames).np_ndarrays
         vid_questions = ["Why is this video funny?"]
 
