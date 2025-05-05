@@ -606,12 +606,6 @@ class EngineArgs:
             help=('Maximum number of prefill sequences per '
                   'iteration. Can be used only with padding-aware '
                   'scheduling. Must be <= max_num_seqs.'))
-        parser.add_argument(
-            '--max-logprobs',
-            type=int,
-            default=EngineArgs.max_logprobs,
-            help=('Max number of log probs to return logprobs is specified in'
-                  ' SamplingParams.'))
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='Disable logging statistics.')
