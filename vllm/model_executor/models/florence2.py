@@ -141,10 +141,7 @@ class MySequential(nn.Sequential):
 
     def forward(self, *inputs):
         for module in self._modules.values():
-            if isinstance(inputs, tuple):
-                inputs = module(*inputs)
-            else:
-                inputs = module(inputs)
+            inputs = module(*inputs) if isinstance(inputs, tuple) else module(inputs)
         return inputs
 
 

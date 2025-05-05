@@ -266,10 +266,7 @@ def machete_mm_test_helper(types: TypeConfig,
 def test_machete_all_schedules(shape, types: TypeConfig):
 
     group_sizes: list[Optional[int]] = []
-    if types.group_scale_type is None:
-        group_sizes = [None]
-    else:
-        group_sizes = GROUP_SIZES_TO_TEST
+    group_sizes = [None] if types.group_scale_type is None else GROUP_SIZES_TO_TEST
 
     for group_size in group_sizes:
         if not group_size_valid(shape, group_size):
@@ -295,10 +292,7 @@ def test_machete_all_schedules(shape, types: TypeConfig):
 @pytest.mark.parametrize("types", TEST_TYPES)
 def test_machete_heuristic(shape, types: TypeConfig):
     group_sizes: list[Optional[int]] = []
-    if types.group_scale_type is None:
-        group_sizes = [None]
-    else:
-        group_sizes = GROUP_SIZES_TO_TEST
+    group_sizes = [None] if types.group_scale_type is None else GROUP_SIZES_TO_TEST
 
     for group_size in group_sizes:
         if not group_size_valid(shape, group_size):

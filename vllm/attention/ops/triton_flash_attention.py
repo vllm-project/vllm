@@ -1012,10 +1012,7 @@ def attn_fwd(
             tl.debug_barrier()
             # Remaining blocks, if any, are full / not masked.
             if (masked_blocks > 0):
-                if IS_CAUSAL:
-                    offs_n_causal = offs_n + (seqlen_q - seqlen_k)
-                else:
-                    offs_n_causal = 0
+                offs_n_causal = offs_n + (seqlen_q - seqlen_k) if IS_CAUSAL else 0
                 k_ptrs += n_full_blocks * BLOCK_N * stride_kn
                 v_ptrs += n_full_blocks * BLOCK_N * stride_vk
                 if USE_BIAS:

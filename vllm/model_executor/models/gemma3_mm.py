@@ -646,10 +646,7 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         seq_lens = []
         for i in range(num_seqs):
             start_idx = start_idices[i].item()
-            if i < num_seqs - 1:
-                end_idx = start_idices[i + 1].item()
-            else:
-                end_idx = len(input_ids)
+            end_idx = start_idices[i + 1].item() if i < num_seqs - 1 else len(input_ids)
             seq_lens.append(end_idx - start_idx)
         kwargs["seq_lens"] = seq_lens
 

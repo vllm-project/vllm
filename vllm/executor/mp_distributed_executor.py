@@ -159,10 +159,7 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
                 It will also be run asynchronously and return a list of futures
                 rather than blocking on the results.
         """
-        if isinstance(method, str):
-            sent_method = method
-        else:
-            sent_method = cloudpickle.dumps(method)
+        sent_method = method if isinstance(method, str) else cloudpickle.dumps(method)
         del method
 
         if max_concurrent_workers:

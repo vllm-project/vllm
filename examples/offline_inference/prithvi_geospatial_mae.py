@@ -351,10 +351,7 @@ def run_model(input_data,
         0] > batch_size else 1
     windows = torch.tensor_split(windows, num_batches, dim=0)
 
-    if torch.cuda.is_available():
-        device = torch.device('cuda')
-    else:
-        device = torch.device('cpu')
+    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
     if temporal_coords:
         temporal_coords = torch.tensor(temporal_coords,

@@ -202,10 +202,7 @@ def deep_gemm_moe_fp8(
 
     assert _valid_deep_gemm(hidden_states, w1, w2, expert_map)
 
-    if inplace:
-        out_hidden_states = hidden_states
-    else:
-        out_hidden_states = torch.empty_like(hidden_states)
+    out_hidden_states = hidden_states if inplace else torch.empty_like(hidden_states)
 
     block_m = dg.get_m_alignment_for_contiguous_layout()
     block_shape = [block_m, block_m]
