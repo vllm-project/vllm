@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import logging
-from typing import Enum, Union
+from enum import Enum
+from typing import Union
 
 import torch
 import torch.distributed as dist
