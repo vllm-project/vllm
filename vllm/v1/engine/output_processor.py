@@ -320,7 +320,7 @@ class OutputProcessor:
 
         If you need to touch every element of the batch, do it from
         within the loop below.
-
+        
         **********************************************************
         """
 
