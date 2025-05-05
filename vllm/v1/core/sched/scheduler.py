@@ -787,8 +787,8 @@ class Scheduler(SchedulerInterface):
         self.kv_cache_manager.free_block_hashes(request)
         self.encoder_cache_manager.free(request)
         self._cached_reqs_data.pop(request.request_id, None)
-        self.finished_req_ids.add(request.request_id)
         del self.requests[request.request_id]
+        self.finished_req_ids.add(request.request_id)
 
     def get_num_unfinished_requests(self) -> int:
         return len(self.waiting) + len(self.running)
