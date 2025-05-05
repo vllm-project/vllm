@@ -3704,16 +3704,19 @@ class CompilationConfig:
     we can optimize it to list[int] for better lookup performance."""
 
     # keep track of enabled and disabled custom ops
-    enabled_custom_ops: Counter[str] = field(default_factory=Counter)
+    enabled_custom_ops: Counter[str] = field(default_factory=Counter,
+                                             init=False)
     """custom ops that are enabled"""
-    disabled_custom_ops: Counter[str] = field(default_factory=Counter)
+    disabled_custom_ops: Counter[str] = field(default_factory=Counter,
+                                              init=False)
     """custom ops that are disabled"""
-    traced_files: set[str] = field(default_factory=set)
+    traced_files: set[str] = field(default_factory=set, init=False)
     """files that are traced for compilation"""
-    compilation_time: float = 0.0
+    compilation_time: float = field(default=0.0, init=False)
     """time taken for compilation"""
 
-    static_forward_context: dict[str, Any] = field(default_factory=dict)
+    static_forward_context: dict[str, Any] = field(default_factory=dict,
+                                                   init=False)
     """Per-model forward context
     Map from layer name to layer objects that need to be accessed outside
     model code, e.g., Attention, FusedMOE when dp_size>1."""
