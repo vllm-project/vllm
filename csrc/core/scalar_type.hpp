@@ -334,7 +334,7 @@ static inline constexpr auto kInt8 = kS8;
 static inline constexpr auto kUint8 = kU8;
 static inline constexpr auto kUint8b128 = kU8B128;
 
-static inline constexpr auto kFloat4_e2m1f = kFE2M1f;
+static inline constexpr auto kFloat4_e2m1f = kFE2M1fn;
 static inline constexpr auto kFloat6_e3m2f = kFE3M2f;
 static inline constexpr auto kFloat8_e4m3fn = kFE4M3fn;
 static inline constexpr auto kFloat8_e5m2 = kFE5M2;
