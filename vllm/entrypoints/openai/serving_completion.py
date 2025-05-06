@@ -488,7 +488,6 @@ class OpenAIServingCompletion(OpenAIServing):
             remote_host = None
             remote_port = None
 
-        assert len(final_res_batch) == 1
         return CompletionResponse(
             id=request_id,
             created=created_time,
