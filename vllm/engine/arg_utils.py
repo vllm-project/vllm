@@ -531,6 +531,7 @@ class EngineArgs:
         guided_decoding_group.add_argument(
             "--enable-reasoning",
             action=argparse.BooleanOptionalAction,
+            deprecated=True,
             help="[DEPRECATED] The `--enable-reasoning` flag is deprecated as "
             "of v0.8.6. Use `--reasoning-parser` to specify the reasoning "
             "parser backend insteadThis flag (`--enable-reasoning`) will be "
@@ -1338,11 +1339,10 @@ class EngineArgs:
                 and _warn_or_fallback("Engine in background thread")):
             return False
 
-        # PP is supported on V1 with Ray distributed executor,
-        # but off for MP distributed executor for now.
         if (self.pipeline_parallel_size > 1
-                and self.distributed_executor_backend != "ray"):
-            name = "Pipeline Parallelism without Ray distributed executor"
+                and self.distributed_executor_backend not in ["ray", "mp"]):
+            name = "Pipeline Parallelism without Ray distributed executor " \
+                    "or multiprocessing executor"
             _raise_or_fallback(feature_name=name, recommend_to_remove=False)
             return False
 
@@ -1354,9 +1354,10 @@ class EngineArgs:
         if is_eagle_enabled and _warn_or_fallback("Eagle"):
             return False
 
-        # Non-CUDA is supported on V1, but off by default for now.
-        not_cuda = not current_platform.is_cuda()
-        if not_cuda and _warn_or_fallback(  # noqa: SIM103
+        # Non-[CUDA, TPU] may be supported on V1, but off by default for now.
+        v0_hardware = not any(
+            (current_platform.is_cuda(), current_platform.is_tpu()))
+        if v0_hardware and _warn_or_fallback(  # noqa: SIM103
                 current_platform.device_name):
             return False
         #############################################################
