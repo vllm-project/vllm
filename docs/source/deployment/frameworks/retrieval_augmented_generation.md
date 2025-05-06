@@ -39,12 +39,6 @@ vllm serve qwen/Qwen1.5-0.5B-Chat --port 8001
 
 - Use the script: <gh-file:examples/online_serving/retrieval_augmented_generation_with_langchain.py>
 
-:::{argparse}
-:module: examples.online_serving.retrieval_augmented_generation_with_langchain
-:func: get_parser
-:prog: retrieval_augmented_generation_with_langchain.py
-:::
-
 - Run the script
 
 ```python
@@ -82,12 +76,6 @@ vllm serve qwen/Qwen1.5-0.5B-Chat --port 8001
 ```
 
 - Use the script: <gh-file:examples/online_serving/retrieval_augmented_generation_with_llamaindex.py>
-
-:::{argparse}
-:module: examples.online_serving.retrieval_augmented_generation_with_llamaindex
-:func: get_parser
-:prog: retrieval_augmented_generation_with_llamaindex.py
-:::
 
 - Run the script
 
