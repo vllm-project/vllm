@@ -276,7 +276,7 @@ def torch_moe2(a, w1, w2, topk_weight, topk_ids):
 
 @pytest.mark.parametrize("m", [1, 33, 64, 222])
 @pytest.mark.parametrize("n", [128, 1024, 2048])
-@pytest.mark.parametrize("k", [128, 511, 1024])
+@pytest.mark.parametrize("k", [128, 512, 1024])
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])

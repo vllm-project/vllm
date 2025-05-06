@@ -72,6 +72,7 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
                                                    per_act_token,
                                                    self.block_shape)
 
+        # TODO: does rem_experts need to be 0 for pplx to work properly?
         rem_experts = num_experts % self.world_size
         num_local_experts = ((num_experts // self.world_size) +
                              (1 if self.rank < rem_experts else 0))
