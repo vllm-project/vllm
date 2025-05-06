@@ -373,14 +373,18 @@ def benchmark(
 
         parallel_results = dict[ModalityStr, float]()
         for modality, data in mm_data.items():
-            parallel_results[modality] = benchmark_run(
-                engine,
-                model_config,
-                model_id,
-                parallel_backend,
-                modality,
-                data,
-            )
+            try:
+                parallel_results[modality] = benchmark_run(
+                    engine,
+                    model_config,
+                    model_id,
+                    parallel_backend,
+                    modality,
+                    data,
+                )
+            except Exception as e:
+                print(f"Failed to benchmark {model_id=}, {parallel_backend=}, "
+                      f"{modality=}:\n{e}")
 
         all_results[parallel_backend] = parallel_results
         del engine
@@ -403,14 +407,18 @@ async def benchmark_async(
 
         parallel_results = dict[ModalityStr, float]()
         for modality, data in mm_data.items():
-            parallel_results[modality] = await benchmark_run_async(
-                engine,
-                model_config,
-                model_id,
-                parallel_backend,
-                modality,
-                data,
-            )
+            try:
+                parallel_results[modality] = await benchmark_run_async(
+                    engine,
+                    model_config,
+                    model_id,
+                    parallel_backend,
+                    modality,
+                    data,
+                )
+            except Exception as e:
+                print(f"Failed to benchmark {model_id=}, {parallel_backend=}, "
+                      f"{modality=}:\n{e}")
 
         all_results[parallel_backend] = parallel_results
         del engine
