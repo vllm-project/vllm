@@ -13,7 +13,6 @@ from typing_extensions import deprecated
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 
 logger = init_logger(__name__)
 
@@ -491,13 +490,8 @@ class SamplingParams(
             for add_prefix_space in [False, True]:
                 prefix = " " if add_prefix_space else ""
                 prompt = prefix + bad_word.lstrip()
-
-                if isinstance(tokenizer, MistralTokenizer):
-                    # Mistral tokenizers should not add special tokens
-                    prompt_token_ids = tokenizer.encode(text=prompt)
-                else:
-                    prompt_token_ids = tokenizer.encode(
-                        text=prompt, add_special_tokens=False)
+                prompt_token_ids = tokenizer.encode(text=prompt,
+                                                    add_special_tokens=False)
 
                 # If no space at the beginning
                 # or if prefix space produces a new word token
