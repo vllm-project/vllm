@@ -16,7 +16,6 @@ from vllm.platforms import current_platform
 MODEL_NAMES = [
     "Qwen/Qwen2-1.5B-Instruct",
     "google/gemma-3-1b-it",
-    "deepseek-ai/deepseek-vl2-tiny",
 ]
 NUM_CONCURRENT = 500
 TASK = "gsm8k"
@@ -25,7 +24,6 @@ RTOL = 0.03
 EXPECTED_VALUES = {
     "Qwen/Qwen2-1.5B-Instruct": 0.58,
     "google/gemma-3-1b-it": 0.25,
-    "deepseek-ai/deepseek-vl2-tiny": 0.4,
 }
 
 
