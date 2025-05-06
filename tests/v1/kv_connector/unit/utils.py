@@ -6,7 +6,7 @@ import torch
 from vllm.config import (CacheConfig, DeviceConfig, KVTransferConfig,
                          ModelConfig, SchedulerConfig, VllmConfig)
 from vllm.sampling_params import KVTransferParams, SamplingParams
-from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.sched.scheduler_disagg import DisaggregatedScheduler
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec)
 from vllm.v1.outputs import ModelRunnerOutput
@@ -16,7 +16,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 EOS_TOKEN_ID = 50256
 
 
-def assert_scheduler_empty(scheduler: Scheduler):
+def assert_scheduler_empty(scheduler: DisaggregatedScheduler):
     """Confirm the scheduler is "empty" - i.e. no leaks."""
     # Scheduler Metadata.
     assert len(scheduler.requests) == 0
@@ -88,7 +88,7 @@ def create_vllm_config(
 def create_scheduler(
     vllm_config: VllmConfig,
     num_blocks: int = 10000,
-) -> Scheduler:
+) -> DisaggregatedScheduler:
     """Initialize Scheduler For Testing."""
     block_size = vllm_config.cache_config.block_size
     kv_cache_config = KVCacheConfig(
@@ -101,7 +101,7 @@ def create_scheduler(
         ],
     )
     vllm_config.cache_config.num_gpu_blocks = num_blocks
-    return Scheduler(
+    return DisaggregatedScheduler(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
         log_stats=True,
