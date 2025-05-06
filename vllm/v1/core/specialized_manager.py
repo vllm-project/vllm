@@ -1,16 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-import sys
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Iterable
 from typing import Callable
 
-if sys.version_info >= (3, 12):
-    from typing import override
-else:
-    override = lambda x: x
-
-from vllm.utils import cdiv
+from vllm.utils import cdiv, override
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHashType, KVCacheBlock
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheSpec,
