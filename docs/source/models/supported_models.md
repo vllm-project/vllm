@@ -239,7 +239,9 @@ print(output)
 
 See [this page](#generative-models) for more information on how to use generative models.
 
-#### Text Generation (`--task generate`)
+#### Text Generation
+
+Specified using `--task generate`.
 
 :::{list-table}
 :widths: 25 25 50 5 5
@@ -605,7 +607,9 @@ Since some model architectures support both generative and pooling tasks,
 you should explicitly specify the task type to ensure that the model is used in pooling mode instead of generative mode.
 :::
 
-#### Text Embedding (`--task embed`)
+#### Text Embedding
+
+Specified using `--task embed`.
 
 :::{list-table}
 :widths: 25 25 50 5 5
@@ -670,7 +674,9 @@ If your model is not in the above list, we will try to automatically convert the
 {func}`~vllm.model_executor.models.adapters.as_embedding_model`. By default, the embeddings
 of the whole prompt are extracted from the normalized hidden state corresponding to the last token.
 
-#### Reward Modeling (`--task reward`)
+#### Reward Modeling
+
+Specified using `--task reward`.
 
 :::{list-table}
 :widths: 25 25 50 5 5
@@ -711,7 +717,9 @@ For process-supervised reward models such as `peiyi9979/math-shepherd-mistral-7b
 e.g.: `--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 123, "returned_token_ids": [456, 789]}'`.
 :::
 
-#### Classification (`--task classify`)
+#### Classification
+
+Specified using `--task classify`.
 
 :::{list-table}
 :widths: 25 25 50 5 5
@@ -737,7 +745,9 @@ e.g.: `--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 123, "r
 If your model is not in the above list, we will try to automatically convert the model using
 {func}`~vllm.model_executor.models.adapters.as_classification_model`. By default, the class probabilities are extracted from the softmaxed hidden state corresponding to the last token.
 
-#### Sentence Pair Scoring (`--task score`)
+#### Sentence Pair Scoring
+
+Specified using `--task score`.
 
 :::{list-table}
 :widths: 25 25 50 5 5
@@ -824,7 +834,9 @@ vLLM currently only supports adding LoRA to the language backbone of multimodal 
 
 See [this page](#generative-models) for more information on how to use generative models.
 
-#### Text Generation (`--task generate`)
+#### Text Generation
+
+Specified using `--task generate`.
 
 :::{list-table}
 :widths: 25 25 15 20 5 5 5
@@ -1200,7 +1212,9 @@ Since some model architectures support both generative and pooling tasks,
 you should explicitly specify the task type to ensure that the model is used in pooling mode instead of generative mode.
 :::
 
-#### Text Embedding (`--task embed`)
+#### Text Embedding
+
+Specified using `--task embed`.
 
 Any text generation model can be converted into an embedding model by passing `--task embed`.
 
@@ -1240,7 +1254,9 @@ The following table lists those that are tested in vLLM.
   * ✅︎
 :::
 
-#### Transcription (`--task transcription`)
+#### Transcription
+
+Specified using `--task transcription`.
 
 Speech2Text models trained specifically for Automatic Speech Recognition.
 
