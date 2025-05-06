@@ -23,7 +23,7 @@ def get_aiter_mla_metadata(max_batch_size: int, block_size: int,
     return paged_kv_indices, paged_kv_indptr, paged_kv_last_page_lens
 
 
-def aiter_mla_decode_forward(
+def aiter_mla_decode_fwd(
     q: torch.Tensor,
     kv_buffer: torch.Tensor,
     o: torch.Tensor,

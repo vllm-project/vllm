@@ -6,7 +6,7 @@ from typing import Any, Optional
 import torch
 
 import vllm.envs as envs
-from vllm.attention.ops.rocm_aiter_mla import aiter_mla_decode_forward
+from vllm.attention.ops.rocm_aiter_mla import aiter_mla_decode_fwd
 # yapf conflicts with isort for this docstring
 # yapf: disable
 from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
@@ -188,9 +188,9 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         kv_buffer = kv_c_and_k_pe_cache.unsqueeze(2)
 
-        aiter_mla_decode_forward(q, kv_buffer, o, self.scale,
-                                 attn_metadata.decode.paged_kv_indptr,
-                                 attn_metadata.decode.paged_kv_indices,
-                                 attn_metadata.decode.paged_kv_last_page_len)
+        aiter_mla_decode_fwd(q, kv_buffer, o, self.scale,
+                             attn_metadata.decode.paged_kv_indptr,
+                             attn_metadata.decode.paged_kv_indices,
+                             attn_metadata.decode.paged_kv_last_page_len)
 
         return self._v_up_proj(o)
