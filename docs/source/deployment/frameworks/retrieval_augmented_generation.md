@@ -39,40 +39,11 @@ vllm serve qwen/Qwen1.5-0.5B-Chat --port 8001
 
 - Use the script: <gh-file:examples/online_serving/retrieval_augmented_generation_with_langchain.py>
 
-```python
-python retrieval_augmented_generation_with_langchain.py --help
-usage: retrieval_augmented_generation_with_langchain.py [-h] [--vllm-api-key VLLM_API_KEY]
-                                                        [--vllm-embedding-endpoint VLLM_EMBEDDING_ENDPOINT]
-                                                        [--vllm-chat-endpoint VLLM_CHAT_ENDPOINT]
-                                                        [--uri URI] [--url URL]
-                                                        [--embedding-model EMBEDDING_MODEL]
-                                                        [--chat-model CHAT_MODEL] [-i] [-k TOP_K]
-                                                        [-c CHUNK_SIZE] [-o CHUNK_OVERLAP]
-
-RAG Demo with vLLM and langchain
-
-options:
-  -h, --help            show this help message and exit
-  --vllm-api-key VLLM_API_KEY
-                        API key for vLLM compatible services
-  --vllm-embedding-endpoint VLLM_EMBEDDING_ENDPOINT
-                        Base URL for embedding service
-  --vllm-chat-endpoint VLLM_CHAT_ENDPOINT
-                        Base URL for chat service
-  --uri URI             URI for Milvus database
-  --url URL             URL of the document to process
-  --embedding-model EMBEDDING_MODEL
-                        Model name for embeddings
-  --chat-model CHAT_MODEL
-                        Model name for chat
-  -i, --interactive     Enable interactive Q&A mode
-  -k TOP_K, --top-k TOP_K
-                        Number of top results to retrieve
-  -c CHUNK_SIZE, --chunk-size CHUNK_SIZE
-                        Chunk size for document splitting
-  -o CHUNK_OVERLAP, --chunk-overlap CHUNK_OVERLAP
-                        Chunk overlap for document splitting
-```
+:::{argparse}
+:module: examples.online_serving.retrieval_augmented_generation_with_langchain
+:func: get_parser
+:prog: retrieval_augmented_generation_with_langchain.py
+:::
 
 - Run the script
 
@@ -112,34 +83,11 @@ vllm serve qwen/Qwen1.5-0.5B-Chat --port 8001
 
 - Use the script: <gh-file:examples/online_serving/retrieval_augmented_generation_with_llamaindex.py>
 
-```python
-python retrieval_augmented_generation_with_llamaindex.py --help
-usage: retrieval_augmented_generation_with_llamaindex.py [-h] [--url URL]
-                                                         [--embedding-model EMBEDDING_MODEL]
-                                                         [--chat-model CHAT_MODEL]
-                                                         [--vllm-api-key VLLM_API_KEY]
-                                                         [--embedding-endpoint EMBEDDING_ENDPOINT]
-                                                         [--chat-endpoint CHAT_ENDPOINT]
-                                                         [--db-path DB_PATH] [-i]
-
-RAG with vLLM and LlamaIndex
-
-options:
-  -h, --help            show this help message and exit
-  --url URL             URL of the document to process
-  --embedding-model EMBEDDING_MODEL
-                        Model name for embeddings
-  --chat-model CHAT_MODEL
-                        Model name for chat
-  --vllm-api-key VLLM_API_KEY
-                        API key for vLLM compatible services
-  --embedding-endpoint EMBEDDING_ENDPOINT
-                        Base URL for embedding service
-  --chat-endpoint CHAT_ENDPOINT
-                        Base URL for chat service
-  --db-path DB_PATH     Path to Milvus database
-  -i, --interactive     Enable interactive Q&A mode
-```
+:::{argparse}
+:module: examples.online_serving.retrieval_augmented_generation_with_llamaindex
+:func: get_parser
+:prog: retrieval_augmented_generation_with_llamaindex.py
+:::
 
 - Run the script
 

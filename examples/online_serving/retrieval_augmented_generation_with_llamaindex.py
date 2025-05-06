@@ -115,7 +115,7 @@ def query_document(index: VectorStoreIndex, question: str, top_k: int):
     return query_engine.query(question)
 
 
-def parse_args():
+def get_parser() -> argparse.ArgumentParser:
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(
         description='RAG with vLLM and LlamaIndex')
@@ -164,12 +164,12 @@ def parse_args():
                         default=3,
                         help='Number of top results to retrieve')
 
-    return parser.parse_args()
+    return parser
 
 
 def main():
     # Parse command line arguments
-    args = parse_args()
+    args = get_parser().parse_args()
 
     # Initialize configuration
     config = init_config(args)

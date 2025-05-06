@@ -130,7 +130,7 @@ def create_qa_chain(retriever: Any, llm: ChatOpenAI, prompt: PromptTemplate):
             | StrOutputParser())
 
 
-def parse_args():
+def get_parser() -> argparse.ArgumentParser:
     """
     Parse command line arguments
     """
@@ -180,7 +180,7 @@ def parse_args():
                         default=200,
                         help='Chunk overlap for document splitting')
 
-    return parser.parse_args()
+    return parser
 
 
 def init_config(args: Namespace):
@@ -204,7 +204,7 @@ def init_config(args: Namespace):
 
 def main():
     # Parse command line arguments
-    args = parse_args()
+    args = get_parser().parse_args()
 
     # Initialize configuration
     config = init_config(args)
