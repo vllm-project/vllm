@@ -80,6 +80,7 @@ instance/
 # Sphinx documentation
 docs/_build/
 docs/source/getting_started/examples/
+docs/source/api/vllm
 
 # PyBuilder
 .pybuilder/

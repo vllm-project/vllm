@@ -8,7 +8,8 @@ from collections import defaultdict
 from pathlib import PosixPath
 
 import pytest
-from transformers import AutoModelForImageTextToText, AutoModelForVision2Seq
+from transformers import (AutoModelForImageTextToText,
+                          AutoModelForTextToWaveform, AutoModelForVision2Seq)
 
 from vllm.platforms import current_platform
 from vllm.utils import identity
@@ -140,7 +141,7 @@ VLM_TEST_SETTINGS = {
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
     "qwen2_5_omni": VLMTestInfo(
-        models=["Qwen/Qwen2.5-Omni-7B"],
+        models=["Qwen/Qwen2.5-Omni-3B"],
         test_type=(
             VLMTestType.IMAGE,
             VLMTestType.MULTI_IMAGE,
@@ -151,8 +152,9 @@ VLM_TEST_SETTINGS = {
         video_idx_to_prompt=lambda idx: "<|vision_bos|><|VIDEO|><|vision_eos|>", # noqa: E501
         max_model_len=4096,
         max_num_seqs=2,
-        auto_cls=AutoModelForVision2Seq,
+        auto_cls=AutoModelForTextToWaveform,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
+        patch_hf_runner=model_utils.qwen2_5_omni_patch_hf_runner,
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),

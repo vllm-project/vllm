@@ -43,6 +43,7 @@ def test_prepare_prompt(batch_size, use_prompt_embeds, monkeypatch):
         max_num_batched_tokens=100000,
         max_num_seqs=100000,
         enable_chunked_prefill=False,
+        enable_prompt_embeds=True,
     )
 
     seq_lens: list[int] = []
@@ -179,6 +180,7 @@ def test_prepare_decode_cuda_graph(batch_size, use_prompt_embeds, monkeypatch):
         max_num_batched_tokens=100000,
         max_num_seqs=100000,
         enable_chunked_prefill=False,
+        enable_prompt_embeds=True,
     )
 
     context_lens: list[int] = []
@@ -359,6 +361,7 @@ def test_hybrid_batches(batch_size, enforce_eager, use_prompt_embeds,
         max_num_batched_tokens=100000,
         max_num_seqs=100000,
         enable_chunked_prefill=True,
+        enable_prompt_embeds=True,
     )
 
     # Add prefill requests.
