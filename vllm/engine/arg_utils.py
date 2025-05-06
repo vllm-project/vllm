@@ -531,6 +531,7 @@ class EngineArgs:
         guided_decoding_group.add_argument(
             "--enable-reasoning",
             action=argparse.BooleanOptionalAction,
+            deprecated=True,
             help="[DEPRECATED] The `--enable-reasoning` flag is deprecated as "
             "of v0.8.6. Use `--reasoning-parser` to specify the reasoning "
             "parser backend insteadThis flag (`--enable-reasoning`) will be "
