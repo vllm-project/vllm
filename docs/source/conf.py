@@ -246,6 +246,10 @@ autodoc_mock_imports = [
     # docs/source/deployment/frameworks/retrieval_augmented_generation.md's
     # examples.online_serving.retrieval_augmented_generation_with_langchain
     "langchain_community",
+    "langchain_core",
+    "langchain_milvus",
+    "langchain_openai",
+    "langchain_text_splitters",
     "llama_index",
 ]
 
