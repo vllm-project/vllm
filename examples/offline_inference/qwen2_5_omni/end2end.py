@@ -262,7 +262,7 @@ def make_inputs_qwen2_omni(
                 elif 'video' in ele:
                     audio_key = 'video'
                     audios.append(librosa.load(ele[audio_key], sr=16000)[0])
-                    videos.append(fetch_and_read_video(audio_key))
+                    videos.append(fetch_and_read_video(ele[audio_key]))
                 else:
                     raise ValueError("Unknown ele {}".format(ele))
                 # insert a audio after the video
