@@ -345,69 +345,59 @@ async def benchmark_run_async(
 
 def benchmark(
     model_id: str,
-    parallel_backends: list[ParallelProcessorBackend],
+    parallel_backend: ParallelProcessorBackend,
 ) -> dict[ParallelProcessorBackend, dict[ModalityStr, float]]:
     supported_modalities = get_supported_modalities(model_id)
     mm_data = get_benchmark_mm_data(supported_modalities)
 
-    all_results = dict[ParallelProcessorBackend, dict[ModalityStr, float]]()
-    for parallel_backend in parallel_backends:
-        engine = get_engine(model_id, supported_modalities, parallel_backend)
-        model_config = engine.get_model_config()
+    engine = get_engine(model_id, supported_modalities, parallel_backend)
+    model_config = engine.get_model_config()
 
-        parallel_results = dict[ModalityStr, float]()
-        for modality, data in mm_data.items():
-            try:
-                parallel_results[modality] = benchmark_run(
-                    engine,
-                    model_config,
-                    model_id,
-                    parallel_backend,
-                    modality,
-                    data,
-                )
-            except Exception as e:
-                print(f"Failed to benchmark {model_id=}, {parallel_backend=}, "
-                      f"{modality=}:\n{e}")
+    results = dict[ModalityStr, float]()
+    for modality, data in mm_data.items():
+        try:
+            results[modality] = benchmark_run(
+                engine,
+                model_config,
+                model_id,
+                parallel_backend,
+                modality,
+                data,
+            )
+        except Exception as e:
+            print(f"Failed to benchmark {model_id=}, {parallel_backend=}, "
+                  f"{modality=}:\n{e}")
 
-        all_results[parallel_backend] = parallel_results
-        del engine
-
-    return all_results
+    return {parallel_backend: results}
 
 
 async def benchmark_async(
     model_id: str,
-    parallel_backends: list[ParallelProcessorBackend],
+    parallel_backend: ParallelProcessorBackend,
 ) -> dict[ParallelProcessorBackend, dict[ModalityStr, float]]:
     supported_modalities = get_supported_modalities(model_id)
     mm_data = get_benchmark_mm_data(supported_modalities)
 
-    all_results = dict[ParallelProcessorBackend, dict[ModalityStr, float]]()
-    for parallel_backend in parallel_backends:
-        engine = await get_async_engine(model_id, supported_modalities,
-                                        parallel_backend)
-        model_config = await engine.get_model_config()
+    engine = await get_async_engine(model_id, supported_modalities,
+                                    parallel_backend)
+    model_config = await engine.get_model_config()
 
-        parallel_results = dict[ModalityStr, float]()
-        for modality, data in mm_data.items():
-            try:
-                parallel_results[modality] = await benchmark_run_async(
-                    engine,
-                    model_config,
-                    model_id,
-                    parallel_backend,
-                    modality,
-                    data,
-                )
-            except Exception as e:
-                print(f"Failed to benchmark {model_id=}, {parallel_backend=}, "
-                      f"{modality=}:\n{e}")
+    results = dict[ModalityStr, float]()
+    for modality, data in mm_data.items():
+        try:
+            results[modality] = await benchmark_run_async(
+                engine,
+                model_config,
+                model_id,
+                parallel_backend,
+                modality,
+                data,
+            )
+        except Exception as e:
+            print(f"Failed to benchmark {model_id=}, {parallel_backend=}, "
+                  f"{modality=}:\n{e}")
 
-        all_results[parallel_backend] = parallel_results
-        del engine
-
-    return all_results
+    return {parallel_backend: results}
 
 
 def resolve_output_path(output_dir: str):
@@ -489,26 +479,26 @@ def save_results(
 
 def main(
     model_id: Union[str, Literal["all"]],
-    parallel_backends: list[ParallelProcessorBackend],
+    parallel_backend: ParallelProcessorBackend,
     output_dir: str,
     append: bool,
 ) -> None:
     output_path = resolve_output_path(output_dir)
 
-    all_results = benchmark(model_id, parallel_backends)
+    all_results = benchmark(model_id, parallel_backend)
 
     save_results(all_results, model_id, output_path, append=append)
 
 
 async def main_async(
     model_id: Union[str, Literal["all"]],
-    parallel_backends: list[ParallelProcessorBackend],
+    parallel_backend: ParallelProcessorBackend,
     output_dir: str,
     append: bool,
 ) -> None:
     output_path = resolve_output_path(output_dir)
 
-    all_results = await benchmark_async(model_id, parallel_backends)
+    all_results = await benchmark_async(model_id, parallel_backend)
 
     save_results(all_results, model_id, output_path, append=append)
 
@@ -522,12 +512,11 @@ if __name__ == "__main__":
                         default="HuggingFaceTB/SmolVLM-256M-Instruct",
                         help="Name of the model")
     parser.add_argument("-p",
-                        "--parallel-backends",
+                        "--parallel-backend",
                         type=str,
-                        nargs="+",
                         choices=["uni", "mp", "mt"],
-                        default=["uni", "mp", "mt"],
-                        help="Parallel backends to test")
+                        default="uni",
+                        help="Parallel backend to test")
     parser.add_argument("-o",
                         "--output-dir",
                         type=str,
@@ -544,12 +533,12 @@ if __name__ == "__main__":
 
     if args.sync:
         main(args.model,
-             args.parallel_backends,
+             args.parallel_backend,
              args.output_dir,
              append=args.append)
     else:
         coro = main_async(args.model,
-                          args.parallel_backends,
+                          args.parallel_backend,
                           args.output_dir,
                           append=args.append)
         asyncio.run(coro)

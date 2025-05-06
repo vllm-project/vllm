@@ -9,13 +9,13 @@ MODELS = [
     "CohereForAI/aya-vision-8b",
     "Salesforce/blip2-opt-6.7b",
     "facebook/chameleon-7b",
-    # "deepseek-ai/deepseek-vl2-tiny",
+    "deepseek-ai/deepseek-vl2-tiny",
     # "microsoft/Florence-2-base",
-    # "adept/fuyu-8b",
+    "adept/fuyu-8b",
     "google/gemma-3-4b-it",
-    # "THUDM/glm-4v-9b",
+    "THUDM/glm-4v-9b",
     # "ibm-granite/granite-speech-3.3-8b",
-    # "h2oai/h2ovl-mississippi-800m",
+    "h2oai/h2ovl-mississippi-800m",
     "OpenGVLab/InternVL2-1B",
     "HuggingFaceTB/SmolVLM-256M-Instruct",
     "HuggingFaceTB/SmolVLM2-2.2B-Instruct",
@@ -54,21 +54,24 @@ MODELS = [
 
 def main(output_dir: str, sync: bool):
     for model in MODELS:
-        args = [
-            sys.executable,
-            "benchmark_processing.py",
-            "-m",
-            model,
-            "-o",
-            output_dir,
-        ]
-        if sync:
-            args.extend(["--async"])
-        args.extend(["--append"])
+        for parallel_backend in ("uni", "mt", "mp"):
+            args = [
+                sys.executable,
+                "benchmark_processing.py",
+                "-m",
+                model,
+                "-p",
+                parallel_backend,
+                "-o",
+                output_dir,
+            ]
+            if sync:
+                args.extend(["--async"])
+            args.extend(["--append"])
 
-        res = subprocess.run(args)
-        if res.returncode != 0:
-            print(f"Failed to benchmark {model}")
+            res = subprocess.run(args, timeout=5 * 60)
+            if res.returncode != 0:
+                print(f"Failed to benchmark {model}")
 
 
 if __name__ == "__main__":
