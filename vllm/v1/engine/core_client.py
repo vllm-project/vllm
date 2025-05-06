@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import contextlib
+import json
 import queue
 import uuid
 import weakref
@@ -362,6 +363,7 @@ class MPClient(EngineCoreClient):
         executor_class: type[Executor],
         log_stats: bool,
     ):
+        self.vllm_config = vllm_config
         # Serialization setup.
         self.encoder = MsgpackEncoder()
         self.decoder = MsgpackDecoder(EngineCoreOutputs)
@@ -430,14 +432,19 @@ class MPClient(EngineCoreClient):
                 raise RuntimeError("Engine core initialization failed. "
                                    "See root cause above.")
 
-            eng_id_bytes, msg = sync_input_socket.recv_multipart()
+            eng_id_bytes, data = sync_input_socket.recv_multipart()
             eng_id = int.from_bytes(eng_id_bytes, byteorder="little")
             if eng_id not in identities:
                 raise RuntimeError(f"Unexpected or duplicate engine: {eng_id}")
-            if msg != b'READY':
-                raise RuntimeError(f"Engine {eng_id} failed: {msg.decode()}")
+            message_dict = json.loads(data.decode('utf-8'))
+            if message_dict['type'] != 'READY':
+                raise RuntimeError(f"Engine {eng_id} failed: {data.decode()}")
             logger.info("Core engine process %d ready.", eng_id)
             identities.discard(eng_id)
+            # Setup KV cache config with initialization state from
+            # engine core process.
+            self.vllm_config.cache_config.num_gpu_blocks = message_dict[
+                'num_gpu_blocks']
 
     def _init_core_engines(
         self,
@@ -583,9 +590,6 @@ class SyncMPClient(MPClient):
         return future.result()
 
     def add_request(self, request: EngineCoreRequest) -> None:
-        # NOTE: text prompt is not needed in the core engine as it has been
-        # tokenized.
-        request.prompt = None
         self._send_input(EngineCoreRequestType.ADD, request)
 
     def abort_requests(self, request_ids: list[str]) -> None:
@@ -772,9 +776,6 @@ class AsyncMPClient(MPClient):
         return await future
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
-        # NOTE: text prompt is not needed in the core engine as it has been
-        # tokenized.
-        request.prompt = None
         await self._send_input(EngineCoreRequestType.ADD, request)
         self._ensure_output_queue_task()
 
@@ -867,9 +868,6 @@ class DPAsyncMPClient(AsyncMPClient):
         ]))[0]
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
-        # NOTE: text prompt is not needed in the core engine as it has been
-        # tokenized.
-        request.prompt = None
         request.current_wave = self.current_wave
 
         chosen_engine = self.get_core_engine_for_request()

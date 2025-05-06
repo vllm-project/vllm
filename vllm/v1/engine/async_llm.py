@@ -2,7 +2,7 @@
 import asyncio
 from collections.abc import AsyncGenerator, Mapping
 from copy import copy
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import numpy as np
 
@@ -120,7 +120,8 @@ class AsyncLLM(EngineClient):
             executor_class=executor_class,
             log_stats=self.log_stats,
         )
-
+        for stat_logger in self.stat_loggers[0]:
+            stat_logger.log_engine_initialized()
         self.output_handler: Optional[asyncio.Task] = None
         try:
             # Start output handler eagerly if we are in the asyncio eventloop.
@@ -201,6 +202,7 @@ class AsyncLLM(EngineClient):
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
@@ -217,14 +219,13 @@ class AsyncLLM(EngineClient):
         queue = RequestOutputCollector(output_kind=params.output_kind)
 
         # Convert Input --> Request.
-        request = self.processor.process_inputs(request_id, prompt, params,
-                                                arrival_time, lora_request,
-                                                trace_headers,
-                                                prompt_adapter_request,
-                                                priority)
+        prompt_str, request = self.processor.process_inputs(
+            request_id, prompt, params, arrival_time, lora_request,
+            tokenization_kwargs, trace_headers, prompt_adapter_request,
+            priority)
 
         if params.n == 1:
-            await self._add_request(request, None, 0, queue)
+            await self._add_request(request, prompt_str, None, 0, queue)
             return queue
 
         # Fan out child requests (for n>1).
@@ -234,15 +235,18 @@ class AsyncLLM(EngineClient):
             child_request = request if idx == params.n - 1 else copy(request)
             child_request.request_id = request_id
             child_request.sampling_params = params
-            await self._add_request(child_request, parent_request, idx, queue)
+            await self._add_request(child_request, prompt_str, parent_request,
+                                    idx, queue)
         return queue
 
     async def _add_request(self, request: EngineCoreRequest,
+                           prompt: Optional[str],
                            parent_req: Optional[ParentRequest], index: int,
                            queue: RequestOutputCollector):
 
         # Add the request to OutputProcessor (this process).
-        self.output_processor.add_request(request, parent_req, index, queue)
+        self.output_processor.add_request(request, prompt, parent_req, index,
+                                          queue)
 
         # Add the EngineCoreRequest to EngineCore (separate process).
         await self.engine_core.add_request_async(request)

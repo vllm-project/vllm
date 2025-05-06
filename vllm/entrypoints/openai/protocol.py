@@ -2,9 +2,9 @@
 
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
+import json
 import re
 import time
-from argparse import Namespace
 from typing import Annotated, Any, ClassVar, Literal, Optional, Union
 
 import torch
@@ -13,6 +13,7 @@ from pydantic import (BaseModel, ConfigDict, Field, TypeAdapter,
                       ValidationInfo, field_validator, model_validator)
 from typing_extensions import TypeAlias
 
+from vllm import envs
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.logger import init_logger
 from vllm.pooling_params import PoolingParams
@@ -23,23 +24,7 @@ from vllm.utils import random_uuid, resolve_obj_by_qualname
 
 logger = init_logger(__name__)
 
-# torch is mocked during docs generation,
-# so we have to provide the values as literals
-_MOCK_LONG_INFO = Namespace(min=-9223372036854775808, max=9223372036854775807)
-_LONG_INFO: Union["torch.iinfo", Namespace]
-
-try:
-    from sphinx.ext.autodoc.mock import _MockModule
-
-    if isinstance(torch, _MockModule):
-        _LONG_INFO = _MOCK_LONG_INFO
-    else:
-        _LONG_INFO = torch.iinfo(torch.long)
-except ModuleNotFoundError:
-    _LONG_INFO = torch.iinfo(torch.long)
-
-assert _LONG_INFO.min == _MOCK_LONG_INFO.min
-assert _LONG_INFO.max == _MOCK_LONG_INFO.max
+_LONG_INFO = torch.iinfo(torch.long)
 
 
 class OpenAIBaseModel(BaseModel):
@@ -139,10 +124,28 @@ class JsonSchemaResponseFormat(OpenAIBaseModel):
     strict: Optional[bool] = None
 
 
+class StructuralTag(OpenAIBaseModel):
+    begin: str
+    # schema is the field, but that causes conflicts with pydantic so
+    # instead use structural_tag_schema with an alias
+    structural_tag_schema: Optional[dict[str, Any]] = Field(default=None,
+                                                            alias="schema")
+    end: str
+
+
+class StructuralTagResponseFormat(OpenAIBaseModel):
+    type: Literal["structural_tag"]
+    structures: list[StructuralTag]
+    triggers: list[str]
+
+
 class ResponseFormat(OpenAIBaseModel):
-    # type must be "json_schema", "json_object" or "text"
+    # type must be "json_schema", "json_object", or "text"
     type: Literal["text", "json_object", "json_schema"]
     json_schema: Optional[JsonSchemaResponseFormat] = None
+
+
+AnyResponseFormat = Union[ResponseFormat, StructuralTagResponseFormat]
 
 
 class StreamOptions(OpenAIBaseModel):
@@ -227,7 +230,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     max_completion_tokens: Optional[int] = None
     n: Optional[int] = 1
     presence_penalty: Optional[float] = 0.0
-    response_format: Optional[ResponseFormat] = None
+    response_format: Optional[AnyResponseFormat] = None
     seed: Optional[int] = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
     stop: Optional[Union[str, list[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
@@ -340,6 +343,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
         description=(
             "If specified, the output will follow the context free grammar."),
     )
+    structural_tag: Optional[str] = Field(
+        default=None,
+        description=(
+            "If specified, the output will follow the structural tag schema."),
+    )
     guided_decoding_backend: Optional[str] = Field(
         default=None,
         description=(
@@ -384,6 +392,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "If specified with 'logprobs', tokens are represented "
             " as strings of the form 'token_id:{token_id}' so that tokens "
             "that are not JSON-encodable can be identified."))
+    cache_salt: Optional[str] = Field(
+        default=None,
+        description=(
+            "If specified, the prefix cache will be salted with the provided "
+            "string to prevent an attacker to guess prompts in multi-user "
+            "environments. The salt should be random, protected from "
+            "access by 3rd parties, and long enough to be "
+            "unpredictable (e.g., 43 characters base64-encoded, corresponding "
+            "to 256 bit). Not supported by vLLM engine V0."))
 
     # doc: end-chat-completion-extra-params
 
@@ -476,6 +493,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 json_schema = self.response_format.json_schema
                 assert json_schema is not None
                 self.guided_json = json_schema.json_schema
+            elif self.response_format.type == "structural_tag":
+                structural_tag = self.response_format
+                assert structural_tag is not None and isinstance(
+                    structural_tag, StructuralTagResponseFormat)
+                s_tag_obj = structural_tag.model_dump(by_alias=True)
+                self.structural_tag = json.dumps(s_tag_obj)
 
         guided_decoding = GuidedDecodingParams.from_optional(
             json=self._get_guided_json_from_tool() or self.guided_json,
@@ -485,6 +508,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             json_object=guided_json_object,
             backend=self.guided_decoding_backend,
             whitespace_pattern=self.guided_whitespace_pattern,
+            structural_tag=self.structural_tag,
         )
 
         return SamplingParams.from_optional(
@@ -695,6 +719,20 @@ class ChatCompletionRequest(OpenAIBaseModel):
                              "`add_generation_prompt` to True.")
         return data
 
+    @model_validator(mode="before")
+    @classmethod
+    def check_cache_salt_support(cls, data):
+        if data.get("cache_salt") is not None:
+            if not envs.VLLM_USE_V1:
+                raise ValueError(
+                    "Parameter 'cache_salt' is not supported with "
+                    "this instance of vLLM, which uses engine V0.")
+            if not isinstance(data["cache_salt"],
+                              str) or not data["cache_salt"]:
+                raise ValueError("Parameter 'cache_salt' must be a "
+                                 "non-empty string if provided.")
+        return data
+
 
 class CompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
@@ -742,12 +780,13 @@ class CompletionRequest(OpenAIBaseModel):
             "If true (the default), special tokens (e.g. BOS) will be added to "
             "the prompt."),
     )
-    response_format: Optional[ResponseFormat] = Field(
+    response_format: Optional[AnyResponseFormat] = Field(
         default=None,
-        description=
-        ("Similar to chat completion, this parameter specifies the format of "
-         "output. Only {'type': 'json_object'}, {'type': 'json_schema'} or "
-         "{'type': 'text' } is supported."),
+        description=(
+            "Similar to chat completion, this parameter specifies the format "
+            "of output. Only {'type': 'json_object'}, {'type': 'json_schema'}"
+            ", {'type': 'structural_tag'}, or {'type': 'text' } is supported."
+        ),
     )
     guided_json: Optional[Union[str, dict, BaseModel]] = Field(
         default=None,
@@ -982,7 +1021,7 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
     encoding_format: Literal["float", "base64"] = "float"
     dimensions: Optional[int] = None
     user: Optional[str] = None
-    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
 
     # doc: begin-embedding-pooling-params
     additional_data: Optional[Any] = None
@@ -1017,7 +1056,7 @@ class EmbeddingChatRequest(OpenAIBaseModel):
     encoding_format: Literal["float", "base64"] = "float"
     dimensions: Optional[int] = None
     user: Optional[str] = None
-    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
 
     # doc: begin-chat-embedding-pooling-params
     additional_data: Optional[Any] = None
@@ -1084,7 +1123,7 @@ class ScoreRequest(OpenAIBaseModel):
     model: Optional[str] = None
     text_1: Union[list[str], str]
     text_2: Union[list[str], str]
-    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
 
     # doc: begin-score-pooling-params
     additional_data: Optional[Any] = None
@@ -1110,7 +1149,7 @@ class RerankRequest(OpenAIBaseModel):
     query: str
     documents: list[str]
     top_n: int = Field(default_factory=lambda: 0)
-    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
 
     # doc: begin-rerank-pooling-params
     additional_data: Optional[Any] = None
@@ -1590,9 +1629,9 @@ class TranscriptionRequest(OpenAIBaseModel):
 
     # doc: begin-transcription-extra-params
     stream: Optional[bool] = False
-    """Custom field not present in the original OpenAI definition. When set, 
+    """Custom field not present in the original OpenAI definition. When set,
     it will enable output to be streamed in a similar fashion as the Chat
-    Completion endpoint. 
+    Completion endpoint.
     """
     # Flattened stream option to simplify form data.
     stream_include_usage: Optional[bool] = False
@@ -1610,7 +1649,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     """
 
     top_p: Optional[float] = None
-    """Enables nucleus (top-p) sampling, where tokens are selected from the 
+    """Enables nucleus (top-p) sampling, where tokens are selected from the
     smallest possible set whose cumulative probability exceeds `p`.
     """
 
@@ -1618,7 +1657,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     """Limits sampling to the `k` most probable tokens at each step."""
 
     min_p: Optional[float] = None
-    """Filters out tokens with a probability lower than `min_p`, ensuring a 
+    """Filters out tokens with a probability lower than `min_p`, ensuring a
     minimum likelihood threshold during sampling.
     """
 

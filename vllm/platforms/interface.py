@@ -146,7 +146,7 @@ class Platform:
         return self._enum == PlatformEnum.OOT
 
     def is_cuda_alike(self) -> bool:
-        """Stateless version of :func:`torch.cuda.is_available`."""
+        """Stateless version of {func}`torch.cuda.is_available`."""
         return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
 
     def is_sleep_mode_available(self) -> bool:
@@ -165,7 +165,7 @@ class Platform:
         cls,
         device_id: int = 0,
     ) -> Optional[DeviceCapability]:
-        """Stateless version of :func:`torch.cuda.get_device_capability`."""
+        """Stateless version of {func}`torch.cuda.get_device_capability`."""
         return None
 
     @classmethod
@@ -180,7 +180,7 @@ class Platform:
         The ``capability`` argument can either be:
 
         - A tuple ``(major, minor)``.
-        - An integer ``<major><minor>``. (See :meth:`DeviceCapability.to_int`)
+        - An integer ``<major><minor>``. (See {meth}`DeviceCapability.to_int`)
         """
         current_capability = cls.get_device_capability(device_id=device_id)
         if current_capability is None:
@@ -406,12 +406,12 @@ class Platform:
         """Raises if this request is unsupported on this platform"""
 
     def __getattr__(self, key: str):
-        device = getattr(torch, self.device_name, None)
+        device = getattr(torch, self.device_type, None)
         if device is not None and hasattr(device, key):
             return getattr(device, key)
         else:
-            logger.warning("Current platform %s doesn't has '%s' attribute.",
-                           self.device_name, key)
+            logger.warning("Current platform %s does not have '%s'" \
+            " attribute.", self.device_type, key)
             return None
 
     @classmethod
