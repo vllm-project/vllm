@@ -476,8 +476,6 @@ class MLACommonMetadataBuilder(Generic[M]):
 
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
-        query_start_loc = common_attn_metadata.query_start_loc
-        seq_lens = common_attn_metadata.seq_lens
 
         prefill_metadata = None
         if self._num_prefills > 0:

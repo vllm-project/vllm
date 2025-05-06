@@ -143,6 +143,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
 
+        self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
+
         encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
             model_config=model_config,
             scheduler_config=scheduler_config,
@@ -194,8 +196,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             pin_memory=self.pin_memory,
             vocab_size=model_config.get_vocab_size(),
         )
-
-        self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
 
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE

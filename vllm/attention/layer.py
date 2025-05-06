@@ -230,8 +230,6 @@ class Attention(nn.Module):
                 attn_metadata = forward_context.attn_metadata
                 if isinstance(attn_metadata, dict):
                     attn_metadata = attn_metadata[self.layer_name]
-                if isinstance(attn_metadata, dict):
-                    attn_metadata = attn_metadata[self.layer_name]
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
                 return self.impl.forward(self, query, key, value,
                                          self_kv_cache, attn_metadata)
@@ -367,7 +365,6 @@ def maybe_save_kv_layer_to_connector(
     if attn_metadata is None:
         return
     assert isinstance(attn_metadata, dict)
-
     connector.save_kv_layer(layer_name, kv_cache_layer,
                             attn_metadata[layer_name])
 
