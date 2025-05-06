@@ -58,6 +58,15 @@ _ROCM_PARTIALLY_SUPPORTED_MODELS: Dict[str, str] = {
      "excessive use of shared memory. If this happens, disable Triton FA "
      "by setting `VLLM_USE_TRITON_FLASH_ATTN=0`")
 }
+_ROCM_DEVICE_ID_NAME_MAP: Dict[str, str] = {
+    "0x74a0": "AMD_Instinct_MI300A",
+    "0x74a1": "AMD_Instinct_MI300X",
+    "0x74b5": "AMD_Instinct_MI300X",  # MI300X VF
+    "0x74a5": "AMD_Instinct_MI325X",
+    "0x74b9": "AMD_Instinct_MI325X",  # MI325X VF
+    "0x74a9": "AMD_Instinct_MI300X_HF",
+    "0x74bd": "AMD_Instinct_MI300X_HF",
+}
 
 # Prevent use of clashing `{CUDA/HIP}_VISIBLE_DEVICES``
 if "HIP_VISIBLE_DEVICES" in os.environ:
@@ -106,11 +115,14 @@ def use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
                                     max_seq_len: int,
                                     sliding_window: int) -> bool:
 
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    ON_GFX9 = any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
+
     # rocm custom page attention not support on gfx1*
     # custom paged attn always supported on V0. On V1, requires sliding window
     # disabled due to observed numerical discrepancy.
-    return (on_mi250_mi300() and (not envs.VLLM_USE_V1 or sliding_window == 0
-                                  or sliding_window == (-1, -1))
+    return (ON_GFX9 and (not envs.VLLM_USE_V1 or sliding_window == 0
+                         or sliding_window == (-1, -1))
             and (qtype == torch.half or qtype == torch.bfloat16)
             and (head_size == 64 or head_size == 128)
             and (block_size == 16 or block_size == 32)
@@ -222,7 +234,11 @@ class RocmPlatform(Platform):
     def get_device_name(cls, device_id: int = 0) -> str:
         physical_device_id = device_id_to_physical_device_id(device_id)
         handle = amdsmi_get_processor_handles()[physical_device_id]
-        return amdsmi_get_gpu_asic_info(handle)["market_name"]
+        asic_info = amdsmi_get_gpu_asic_info(handle)
+        device_name: str = asic_info["device_id"]
+        if device_name in _ROCM_DEVICE_ID_NAME_MAP:
+            return _ROCM_DEVICE_ID_NAME_MAP[device_name]
+        return asic_info["market_name"]
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
@@ -337,7 +353,7 @@ class RocmPlatform(Platform):
     def use_custom_allreduce(cls) -> bool:
         # We only enable custom allreduce for MI300 series
         gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
-        supported_archs = ['gfx94']
+        supported_archs = ['gfx94', 'gfx95']
         return any(gfx in gcn_arch for gfx in supported_archs)
 
     @classmethod

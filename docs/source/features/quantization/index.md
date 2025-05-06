@@ -18,6 +18,7 @@ gptqmodel
 int4
 int8
 fp8
+modelopt
 quark
 quantized_kvcache
 torchao

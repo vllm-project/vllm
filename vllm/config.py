@@ -14,6 +14,7 @@ from collections import Counter
 from contextlib import contextmanager
 from dataclasses import (MISSING, dataclass, field, fields, is_dataclass,
                          replace)
+from functools import cached_property
 from importlib.util import find_spec
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
@@ -26,6 +27,7 @@ from transformers import PretrainedConfig
 from typing_extensions import deprecated
 
 import vllm.envs as envs
+from vllm import version
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
@@ -266,7 +268,7 @@ class ModelConfig:
     It can be a branch name, a tag name, or a commit id. If unspecified, will
     use the default version."""
     rope_scaling: dict[str, Any] = field(default_factory=dict)
-    """RoPE scaling configuration in JSON format. For example,
+    """RoPE scaling configuration. For example,
     `{"rope_type":"dynamic","factor":2.0}`."""
     rope_theta: Optional[float] = None
     """RoPE theta. Use with `rope_scaling`. In some cases, changing the RoPE
@@ -319,6 +321,10 @@ class ModelConfig:
     """Skip initialization of tokenizer and detokenizer. Expects valid
     `prompt_token_ids` and `None` for prompt from the input. The generated
     output will contain token ids."""
+    enable_prompt_embeds: bool = False
+    """If `True`, enables passing text embeddings as inputs via the
+    `prompt_embeds` key. Note that enabling this will double the time required
+    for graph compilation."""
     served_model_name: Optional[Union[str, list[str]]] = None
     """The model name(s) used in the API. If multiple names are provided, the
     server will respond to any of the provided names. The model name in the
@@ -344,14 +350,13 @@ class ModelConfig:
     (stored in `~/.huggingface`)."""
     hf_overrides: HfOverrides = field(default_factory=dict)
     """If a dictionary, contains arguments to be forwarded to the Hugging Face
-    config. If a callable, it is called to update the HuggingFace config. When
-    specified via CLI, the argument must be a valid JSON string."""
+    config. If a callable, it is called to update the HuggingFace config."""
     mm_processor_kwargs: Optional[dict[str, Any]] = None
     """Arguments to be forwarded to the model's processor for multi-modal data,
     e.g., image processor. Overrides for the multi-modal processor obtained
     from `AutoProcessor.from_pretrained`. The available overrides depend on the
     model that is being run. For example, for Phi-3-Vision: `{"num_crops": 4}`.
-    When specified via CLI, the argument must be a valid JSON string."""
+    """
     disable_mm_preprocessor_cache: bool = False
     """If `True`, disable caching of the multi-modal preprocessor/mapper (not
     recommended)."""
@@ -359,15 +364,14 @@ class ModelConfig:
     """Initialize non-default neuron config or override default neuron config
     that are specific to Neuron devices, this argument will be used to
     configure the neuron config that can not be gathered from the vllm
-    arguments. e.g. `{"cast_logits_dtype": "bloat16"}`. When specified via CLI,
-    the argument must be a valid JSON string."""
+    arguments. e.g. `{"cast_logits_dtype": "bloat16"}`."""
     pooler_config: Optional["PoolerConfig"] = field(init=False)
     """Pooler config which controls the behaviour of output pooling in pooling
     models."""
     override_pooler_config: Optional[Union[dict, "PoolerConfig"]] = None
     """Initialize non-default pooling config or override default pooling config
     for the pooling model. e.g. `{"pooling_type": "mean", "normalize": false}`.
-    When specified via CLI, the argument must be a valid JSON string."""
+    """
     logits_processor_pattern: Optional[str] = None
     """Optional regex pattern specifying valid logits processor qualified names
     that can be passed with the `logits_processors` extra completion argument.
@@ -383,8 +387,7 @@ class ModelConfig:
     """Overrides or sets generation config. e.g. `{"temperature": 0.5}`. If
     used with `--generation-config auto`, the override parameters will be
     merged with the default config from the model. If used with
-    `--generation-config vllm`, only the override parameters are used.
-    When specified via CLI, the argument must be a valid JSON string."""
+    `--generation-config vllm`, only the override parameters are used."""
     enable_sleep_mode: bool = False
     """Enable sleep mode for the engine (only cuda platform is supported)."""
     model_impl: Union[str, ModelImpl] = ModelImpl.AUTO.value
@@ -1045,8 +1048,10 @@ class ModelConfig:
         if self.is_attention_free:
             return 0
 
-        if hasattr(self.hf_text_config, "head_dim"):
+        # NOTE: Some configs may set head_dim=None in the config
+        if getattr(self.hf_text_config, "head_dim", None) is not None:
             return self.hf_text_config.head_dim
+
         # FIXME(woosuk): This may not be true for all models.
         return (self.hf_text_config.hidden_size //
                 self.hf_text_config.num_attention_heads)
@@ -1560,14 +1565,23 @@ class LoadConfig:
             device_config.device"""
     model_loader_extra_config: dict = field(default_factory=dict)
     """Extra config for model loader. This will be passed to the model loader
-    corresponding to the chosen load_format. This should be a JSON string that
-    will be parsed into a dictionary."""
+    corresponding to the chosen load_format."""
     ignore_patterns: Optional[Union[list[str], str]] = None
     """The list of patterns to ignore when loading the model. Default to
     "original/**/*" to avoid repeated loading of llama's checkpoints."""
     use_tqdm_on_load: bool = True
     """Whether to enable tqdm for showing progress bar when loading model
     weights."""
+    pt_load_map_location: Union[str, dict[str, str]] = "cpu"
+    """
+    pt_load_map_location: the map location for loading pytorch checkpoint, to
+    support loading checkpoints can only be loaded on certain devices like
+    "cuda", this is equivalent to {"": "cuda"}. Another supported format is
+    mapping from different devices like from GPU 1 to GPU 0:
+    {"cuda:1": "cuda:0"}. Note that when passed from command line, the strings
+    in dictionary needs to be double quoted for json parsing. For more details,
+    see original doc for `map_location` in https://pytorch.org/docs/stable/generated/torch.load.html
+    """
 
     def compute_hash(self) -> str:
         """
@@ -1641,7 +1655,7 @@ class ParallelConfig:
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
 
     max_parallel_loading_workers: Optional[int] = None
-    """Maximum number of parallal loading workers when loading model
+    """Maximum number of parallel loading workers when loading model
     sequentially in multiple batches. To avoid RAM OOM when using tensor
     parallel and large models."""
 
@@ -1902,6 +1916,13 @@ class SchedulerConfig:
 
     NOTE: This will be replaced by speculative config in the future; it is
     present to enable correctness tests until then."""
+
+    cuda_graph_sizes: list[int] = field(default_factory=lambda: [512])
+    """Cuda graph capture sizes, default is 512.
+    1. if one value is provided, then the capture list would follow the
+    pattern: [1, 2, 4] + [i for i in range(8, cuda_graph_sizes + 1, 8)]
+    2. more than one value (e.g. 1 2 128) is provided, then the capture list
+    will follow the provided list."""
 
     delay_factor: float = 0.0
     """Apply a delay (of delay factor multiplied by previous
@@ -2832,7 +2853,6 @@ class MultiModalConfig:
                                                  "limit_mm_per_prompt")
     """
     The maximum number of input items allowed per prompt for each modality.
-    This should be a JSON string that will be parsed into a dictionary.
     Defaults to 1 (V0) or 999 (V1) for each modality.
 
     For example, to allow up to 16 images and 2 videos per prompt:
@@ -2895,7 +2915,7 @@ class PoolerConfig:
     pooling_type: Optional[str] = None
     """
     The pooling method of the pooling model. This should be a key in
-    :class:`vllm.model_executor.layers.pooler.PoolingType`.
+    {class}`vllm.model_executor.layers.pooler.PoolingType`.
     """
 
     normalize: Optional[bool] = None
@@ -2961,10 +2981,12 @@ def _get_and_verify_dtype(
 ) -> torch.dtype:
     # NOTE: getattr(config, "torch_dtype", torch.float32) is not correct
     # because config.torch_dtype can be None.
-    config_dtype = getattr(config.get_text_config(), "torch_dtype", None)
+    config_dtype = getattr(config, "torch_dtype", None)
 
-    # Fallback for multi-modal models if the root config
+    # Fallbacks for multi-modal models if the root config
     # does not define torch_dtype
+    if config_dtype is None:
+        config_dtype = getattr(config.get_text_config(), "torch_dtype", None)
     if config_dtype is None and hasattr(config, "vision_config"):
         config_dtype = getattr(config.vision_config, "torch_dtype", None)
 
@@ -3151,6 +3173,14 @@ def _get_and_verify_max_len(
     # derived length from the HF model config.
     if max_model_len is None:
         max_model_len = int(derived_max_model_len)
+        if current_platform.is_tpu():
+            logger.warning(
+                "--max-model-len is not specified, "
+                "it's currently using model's default length %s, "
+                "which might be too large."
+                "Please input with --max-model-len based on your "
+                "request input length and output length, to avoid "
+                "unnecessary degradation.", max_model_len)
     elif max_model_len > derived_max_model_len:
         # Some models might have a separate key for specifying model_max_length
         # that will be bigger than derived_max_model_len. We compare user input
@@ -3248,10 +3278,9 @@ class DecodingConfig:
     in the JSON schema. This is only supported for the `guidance` backend and
     is used to better align its behaviour with `outlines` and `xgrammar`."""
 
-    reasoning_backend: Optional[str] = None
+    reasoning_backend: str = ""
     """Select the reasoning parser depending on the model that you're using.
-    This is used to parse the reasoning content into OpenAI API format.
-    Required for `--enable-reasoning`."""
+    This is used to parse the reasoning content into OpenAI API format."""
 
     def compute_hash(self) -> str:
         """
@@ -3310,20 +3339,55 @@ class DecodingConfig:
             self.disable_additional_properties = True
 
 
+DetailedTraceModules = Literal["model", "worker", "all"]
+
+
+@config
 @dataclass
 class ObservabilityConfig:
     """Configuration for observability - metrics and tracing."""
-    show_hidden_metrics: bool = False
+
+    show_hidden_metrics_for_version: Optional[str] = None
+    """Enable deprecated Prometheus metrics that have been hidden since the
+    specified version. For example, if a previously deprecated metric has been
+    hidden since the v0.7.0 release, you use
+    `--show-hidden-metrics-for-version=0.7` as a temporary escape hatch while
+    you migrate to new metrics. The metric is likely to be removed completely
+    in an upcoming release."""
+
+    @cached_property
+    def show_hidden_metrics(self) -> bool:
+        """Check if the hidden metrics should be shown."""
+        if self.show_hidden_metrics_for_version is None:
+            return False
+        return version._prev_minor_version_was(
+            self.show_hidden_metrics_for_version)
 
     otlp_traces_endpoint: Optional[str] = None
+    """Target URL to which OpenTelemetry traces will be sent."""
 
-    # Collecting detailed timing information for each request can be expensive.
+    collect_detailed_traces: Optional[list[DetailedTraceModules]] = None
+    """It makes sense to set this only if `--otlp-traces-endpoint` is set. If
+    set, it will collect detailed traces for the specified modules. This
+    involves use of possibly costly and or blocking operations and hence might
+    have a performance impact.
 
-    # If set, collects the model forward time for the request.
-    collect_model_forward_time: bool = False
+    Note that collecting detailed timing information for each request can be
+    expensive."""
 
-    # If set, collects the model execute time for the request.
-    collect_model_execute_time: bool = False
+    @cached_property
+    def collect_model_forward_time(self) -> bool:
+        """Whether to collect model forward time for the request."""
+        return (self.collect_detailed_traces is not None
+                and ("model" in self.collect_detailed_traces
+                     or "all" in self.collect_detailed_traces))
+
+    @cached_property
+    def collect_model_execute_time(self) -> bool:
+        """Whether to collect model execute time for the request."""
+        return (self.collect_detailed_traces is not None
+                and ("worker" in self.collect_detailed_traces
+                     or "all" in self.collect_detailed_traces))
 
     def compute_hash(self) -> str:
         """
@@ -3345,11 +3409,22 @@ class ObservabilityConfig:
         return hash_str
 
     def __post_init__(self):
+        if (self.collect_detailed_traces is not None
+                and len(self.collect_detailed_traces) == 1
+                and "," in self.collect_detailed_traces[0]):
+            self._parse_collect_detailed_traces()
+
         if not is_otel_available() and self.otlp_traces_endpoint is not None:
             raise ValueError(
                 "OpenTelemetry is not available. Unable to configure "
                 "'otlp_traces_endpoint'. Ensure OpenTelemetry packages are "
                 f"installed. Original error:\n{otel_import_error_traceback}")
+
+    def _parse_collect_detailed_traces(self):
+        assert isinstance(self.collect_detailed_traces, list)
+        self.collect_detailed_traces = cast(
+            list[DetailedTraceModules],
+            self.collect_detailed_traces[0].split(","))
 
 
 class KVTransferConfig(BaseModel):
@@ -4214,13 +4289,19 @@ class VllmConfig:
             batch_size_capture_list = []
             if self.model_config is not None and \
                 not self.model_config.enforce_eager:
-                batch_size_capture_list = [1, 2, 4
-                                           ] + [i for i in range(8, 513, 8)]
+                cuda_graph_sizes = self.scheduler_config.cuda_graph_sizes
+                if len(cuda_graph_sizes) == 1:
+                    batch_size_capture_list = [1, 2, 4] + [
+                        i for i in range(8, cuda_graph_sizes[0] + 1, 8)
+                    ]
+                elif len(cuda_graph_sizes) > 1:
+                    batch_size_capture_list = sorted(cuda_graph_sizes)
+                else:
+                    raise TypeError(f"Invalid value for {cuda_graph_sizes=}.")
                 if self.parallel_config.tensor_parallel_size > 1 and \
                     self.compilation_config.pass_config.enable_sequence_parallelism:
                     batch_size_capture_list = \
                         self.update_sizes_for_sequence_parallelism(batch_size_capture_list)
-
                 max_num_tokens = self.scheduler_config.max_num_batched_tokens
                 batch_size_capture_list = [
                     size for size in batch_size_capture_list
