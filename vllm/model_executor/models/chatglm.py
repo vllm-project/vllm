@@ -10,6 +10,7 @@ from torch import nn
 from torch.nn import LayerNorm
 
 from vllm.attention import Attention
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -20,7 +21,6 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -28,7 +28,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import ChatGLMConfig
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import SupportsLoRA, SupportsPP, SupportsQuant
 from .utils import (AutoWeightsLoader, WeightsMapper, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -293,7 +293,12 @@ class GLMTransformer(nn.Module):
         return hidden_states
 
 
-class ChatGLMModel(nn.Module):
+@support_torch_compile
+class ChatGLMModel(nn.Module, SupportsQuant):
+    packed_modules_mapping = {
+        "linear_proj.merged_proj":
+        ["linear_proj.gate_proj", "linear_proj.dense_h_to_4h"]
+    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -393,7 +398,6 @@ class ChatGLMModel(nn.Module):
 
 
 class ChatGLMBaseModel(nn.Module):
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={".word_embeddings": ""}, )
 
@@ -424,7 +428,6 @@ class ChatGLMBaseModel(nn.Module):
                 self.transformer.embedding.weight)
         self.lm_head = self.transformer.output_layer
         self.logits_processor = LogitsProcessor(config.padded_vocab_size)
-        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.transformer.make_empty_intermediate_tensors)
 
@@ -437,20 +440,13 @@ class ChatGLMBaseModel(nn.Module):
                                        sampling_metadata)
         return logits
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
-
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
-class ChatGLMForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP):
+class ChatGLMForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
+                         SupportsQuant):
     packed_modules_mapping = {
         "query_key_value": ["query_key_value"],
         "dense_h_to_4h": ["dense_h_to_4h"]

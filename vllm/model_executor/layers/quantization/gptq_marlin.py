@@ -11,16 +11,17 @@ from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                set_weight_attrs)
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kernels.mixed_precision import (
     MPLinearLayerConfig, choose_mp_linear_kernel)
-from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     get_linear_quant_method)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    check_marlin_supported, marlin_moe_permute_scales,
+    check_marlin_supported, check_moe_marlin_supports_layer,
+    marlin_make_workspace_new, marlin_moe_permute_scales,
     marlin_repeat_scales_on_all_ranks, verify_marlin_supported)
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            GroupQuantScaleParameter,
@@ -100,7 +101,7 @@ class GPTQMarlinConfig(QuantizationConfig):
                 f"dynamic={self.dynamic}")
 
     @classmethod
-    def get_name(cls) -> str:
+    def get_name(cls) -> QuantizationMethods:
         return "gptq_marlin"
 
     @classmethod
@@ -130,8 +131,8 @@ class GPTQMarlinConfig(QuantizationConfig):
                    lm_head_quantized, dynamic, config)
 
     @classmethod
-    def override_quantization_method(cls, hf_quant_cfg,
-                                     user_quant) -> Optional[str]:
+    def override_quantization_method(
+            cls, hf_quant_cfg, user_quant) -> Optional[QuantizationMethods]:
         can_convert = cls.is_gptq_marlin_compatible(hf_quant_cfg)
 
         is_valid_user_quant = (user_quant is None or user_quant == "marlin"
@@ -153,12 +154,15 @@ class GPTQMarlinConfig(QuantizationConfig):
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         if isinstance(layer, FusedMoE):
-            if layer.local_num_experts > 32:
-                # For MoEs with many experts the moe_wna16 kernel is faster
+            from vllm.model_executor.layers.quantization.moe_wna16 import (
+                MoeWNA16Config)
+            if not check_moe_marlin_supports_layer(layer, self.group_size):
+                logger.warning_once(
+                    f"Layer '{prefix}' is not supported by GPTQMoeMarlin. "
+                    "Falling back to Moe WNA16 kernels.")
                 return MoeWNA16Config.from_config(
                     self.full_config).get_quant_method(layer, prefix)
-            else:
-                return GPTQMarlinMoEMethod(self)
+            return GPTQMarlinMoEMethod(self)
         return get_linear_quant_method(self, layer, prefix,
                                        GPTQMarlinLinearMethod)
 
@@ -346,6 +350,13 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
 
     def __init__(self, quant_config: GPTQMarlinConfig) -> None:
         self.quant_config = quant_config
+        if self.quant_config.quant_type.size_bits == 4:
+            self.quant_type = scalar_types.uint4b8
+        elif self.quant_config.quant_type.size_bits == 8:
+            self.quant_type = scalar_types.uint8b128
+        else:
+            raise ValueError(
+                "GPTQMarlinMoEMethod only supports int4 and int8 now.")
 
     def create_weights(
         self,
@@ -408,7 +419,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             torch.empty(num_experts,
                         scales_size13,
                         2 * intermediate_size_per_partition,
-                        dtype=torch.half),
+                        dtype=params_dtype),
             requires_grad=False,
         )
         layer.register_parameter("w13_scales", w13_scales)
@@ -418,7 +429,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             torch.empty(num_experts,
                         scales_size2,
                         hidden_size,
-                        dtype=torch.half),
+                        dtype=params_dtype),
             requires_grad=False,
         )
         layer.register_parameter("w2_scales", w2_scales)
@@ -492,6 +503,9 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         layer.register_parameter("w2_g_idx_sort_indices",
                                  w2_g_idx_sort_indices)
         set_weight_attrs(w2_g_idx_sort_indices, extra_weight_attrs)
+
+        device = layer.w13_qweight.device
+        layer.workspace = marlin_make_workspace_new(device, 4)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
 
@@ -592,13 +606,14 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
         activation: str = "silu",
     ) -> torch.Tensor:
         assert activation == "silu", "Only SiLU activation is supported."
-
-        # The input must currently be float16
-        orig_dtype = x.dtype
-        x = x.half()
+        if apply_router_weight_on_input is not None:
+            raise NotImplementedError(
+                "Apply router weight on input is not supported for"
+                "fused Marlin MoE method.")
 
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
@@ -621,9 +636,12 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             router_logits,
             topk_weights,
             topk_ids,
+            quant_type_id=self.quant_type.id,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
             g_idx1=layer.w13_g_idx,
             g_idx2=layer.w2_g_idx,
             sort_indices1=layer.w13_g_idx_sort_indices,
             sort_indices2=layer.w2_g_idx_sort_indices,
-            num_bits=self.quant_config.quant_type.size_bits,
-            is_k_full=self.is_k_full).to(orig_dtype)
+            workspace=layer.workspace,
+            is_k_full=self.is_k_full)

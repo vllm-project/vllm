@@ -4,21 +4,21 @@ from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
 
 import torch
 import torch._inductor.pattern_matcher as pm
-# TODO(luka) use vllm.utils once #10836 landed
-from compressed_tensors.quantization import FP8_DTYPE
 from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch._ops import OpOverload
 
-from vllm.config import CompilationConfig
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 from .fx_utils import find_getitem_maybe
 from .multi_output_match import MultiOutputMatch
 from .vllm_inductor_pass import VllmInductorPass
 
 logger = init_logger(__name__)
+FP8_DTYPE = current_platform.fp8_dtype()
 
 
 def empty_bf16(*args, **kwargs):
@@ -531,7 +531,7 @@ class FusionPass(VllmInductorPass):
     _instance: 'Optional[FusionPass]' = None
 
     @classmethod
-    def instance(cls, config: CompilationConfig.PassConfig):
+    def instance(cls, config: VllmConfig):
         """
         Get the singleton instance of the FusionPass.
         If the instance exists, the config is updated but
@@ -540,10 +540,10 @@ class FusionPass(VllmInductorPass):
         if cls._instance is None:
             cls._instance = FusionPass(config)
         else:
-            cls._instance.config = config
+            cls._instance.pass_config = config.compilation_config.pass_config
         return cls._instance
 
-    def __init__(self, config: CompilationConfig.PassConfig):
+    def __init__(self, config: VllmConfig):
         assert self.__class__._instance is None, \
             "FusionPass singleton instance already exists"
         super().__init__(config)

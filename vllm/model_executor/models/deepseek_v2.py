@@ -44,7 +44,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -160,14 +159,16 @@ class DeepseekV2MoE(nn.Module):
                 hidden_states=hidden_states,
                 router_logits=router_logits) * self.routed_scaling_factor
         else:
-            # This is a special case to avoid FP16 overflow
+            # Fix FP16 overflow
+            # See DeepseekV2DecoderLayer for more details.
             final_hidden_states = self.experts(hidden_states=hidden_states,
                                                router_logits=router_logits)
         if shared_output is not None:
             if hidden_states.dtype != torch.float16:
                 final_hidden_states = final_hidden_states + shared_output
             else:
-                # This is a special case to avoid FP16 overflow
+                # Fix FP16 overflow
+                # See DeepseekV2DecoderLayer for more details.
                 final_hidden_states = final_hidden_states + shared_output \
                     * (1. / self.routed_scaling_factor)
         if self.tp_size > 1:
@@ -453,9 +454,7 @@ class DeepseekV2MLAAttention(nn.Module):
             qk_head_dim=self.qk_head_dim,
             v_head_dim=self.v_head_dim,
             rotary_emb=self.rotary_emb,
-            q_proj=self.q_proj if self.q_lora_rank is None else self.q_b_proj,
             kv_b_proj=self.kv_b_proj,
-            o_proj=self.o_proj,
         )
 
         self.prefix = prefix
@@ -467,17 +466,22 @@ class DeepseekV2MLAAttention(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         if self.q_lora_rank is not None:
-            ckq = self.q_a_proj(hidden_states)[0]
-            hidden_states_or_q_c = self.q_a_layernorm(ckq)
+            q_c = self.q_a_proj(hidden_states)[0]
+            q_c = self.q_a_layernorm(q_c)
+            q = self.q_b_proj(q_c)[0]
         else:
-            hidden_states_or_q_c = hidden_states
+            q = self.q_proj(hidden_states)[0]
         kv_c, k_pe = self.kv_a_proj_with_mqa(hidden_states)[0].split(
             [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
-        return self.mla_attn(hidden_states_or_q_c,
-                             kv_c_normed,
-                             k_pe,
-                             output_shape=hidden_states.shape)
+
+        attn_out = self.mla_attn(
+            q,
+            kv_c_normed,
+            k_pe,
+            output_shape=(hidden_states.shape[0],
+                          self.num_local_heads * self.v_head_dim))
+        return self.o_proj(attn_out)[0]
 
 
 class DeepseekV2DecoderLayer(nn.Module):
@@ -499,6 +503,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         # DecoderLayers are created with `make_layers` which passes the prefix
         # with the layer's index.
         layer_idx = int(prefix.split(sep='.')[-1])
+        self.layer_idx = layer_idx
         if model_config.use_mla:
             attn_cls = DeepseekV2MLAAttention
         else:
@@ -561,19 +566,30 @@ class DeepseekV2DecoderLayer(nn.Module):
             hidden_states=hidden_states,
         )
 
-        # Fully Connected
-        if isinstance(self.mlp, DeepseekV2MoE) and \
-            hidden_states.dtype == torch.float16:
-            # This is a special case to avoid FP16 overflow
+        if hidden_states.dtype == torch.float16:
+            # Fix FP16 overflow
+            # We scale both hidden_states and residual before
+            # rmsnorm, and rmsnorm result would not affect by scale.
             hidden_states *= 1. / self.routed_scaling_factor
+            if self.layer_idx == 0:
+                # The residual is shared by all layers, we only scale it on
+                # first layer.
+                residual *= 1. / self.routed_scaling_factor
+
+        # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
-        if isinstance(self.mlp, DeepseekV2MLP) and \
-            hidden_states.dtype == torch.float16:
-            # This is a special case to avoid FP16 overflow
+
+        if isinstance(self.mlp,
+                      DeepseekV2MLP) and hidden_states.dtype == torch.float16:
+            # Fix FP16 overflow
+            # Scaling the DeepseekV2MLP output, it is the input of
+            # input_layernorm of next decoder layer.
+            # The scaling of DeepseekV2MOE output would be done in the forward
+            # of DeepseekV2MOE
             hidden_states *= 1. / self.routed_scaling_factor
-            residual *= 1. / self.routed_scaling_factor
+
         return hidden_states, residual
 
 
@@ -672,7 +688,6 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
         else:
             self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
@@ -698,14 +713,6 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
-
-    def sample(
-        self,
-        logits: Optional[torch.Tensor],
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
 
     def make_empty_intermediate_tensors(
             self, batch_size: int, dtype: torch.dtype,

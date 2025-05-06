@@ -98,6 +98,13 @@ def truncate_tool_call_ids(request: "ChatCompletionRequest"):
                 request.messages[i]["tool_call_id"] = tool_call_id
 
 
+def validate_request_params(request: "ChatCompletionRequest"):
+    if (request.skip_special_tokens is not None
+            and not request.skip_special_tokens):
+        raise ValueError("skip_special_tokens=False is not supported "
+                         "for Mistral tokenizers.")
+
+
 def list_local_repo_files(repo_id: str, revision: Optional[str]) -> List[str]:
     repo_cache = os.path.join(
         huggingface_hub.constants.HF_HUB_CACHE,
@@ -124,13 +131,15 @@ def find_tokenizer_file(files: List[str]):
 
     matched_files = [file for file in files if file_pattern.match(file)]
     if len(matched_files) > 1:
-        raise OSError(f"Found {len(matched_files)} files matching the "
-                      f"pattern: {file_pattern}. Make sure only one Mistral "
-                      f"tokenizer is present in {files}.")
+        raise OSError(
+            f"Found {len(matched_files)} files matching the "
+            f"pattern: `{file_pattern.pattern}`. Make sure only one Mistral "
+            f"tokenizer is present in {files}.")
     elif len(matched_files) == 0:
-        raise OSError(f"Found {len(matched_files)} files matching the "
-                      f"pattern: {file_pattern}. Make sure that a Mistral "
-                      f"tokenizer is present in {files}.")
+        raise OSError(
+            f"Found {len(matched_files)} files matching the "
+            f"pattern: `{file_pattern.pattern}`. Make sure that a Mistral "
+            f"tokenizer is present in {files}.")
 
     return matched_files[0]
 
@@ -218,6 +227,7 @@ class MistralTokenizer(TokenizerBase):
         else:
             assert Path(
                 path_or_repo_id).is_file(), f"Invalid path: {path_or_repo_id}"
+            tokenizer_file = str(Path(path_or_repo_id))
 
         from mistral_common.tokens.tokenizers.mistral import (
             MistralTokenizer as PublicMistralTokenizer)
@@ -248,7 +258,7 @@ class MistralTokenizer(TokenizerBase):
     # the following attributes are set to fit vLLM's design and are used
     # by the guided structured output backends.
     @property
-    def all_special_tokens_extended(self) -> List[str]:
+    def all_special_tokens_extended(self) -> list[str]:
         from mistral_common.tokens.tokenizers.base import SpecialTokens
 
         # tekken defines its own extended special tokens list
@@ -262,11 +272,11 @@ class MistralTokenizer(TokenizerBase):
         ]
 
     @property
-    def all_special_tokens(self) -> List[str]:
+    def all_special_tokens(self) -> list[str]:
         return self.all_special_tokens_extended
 
     @property
-    def all_special_ids(self) -> List[int]:
+    def all_special_ids(self) -> list[int]:
         return [
             self.all_special_tokens.index(t) for t in self.all_special_tokens
         ]
@@ -326,12 +336,12 @@ class MistralTokenizer(TokenizerBase):
             input_ids = self.encode_one(text, truncation, max_length)
         return Encoding(input_ids=input_ids)
 
-    def get_vocab(self) -> Dict[str, int]:
+    def get_vocab(self) -> dict[str, int]:
         # NB: the dictionary form of the vocabulary collapses token ids that map
         # to the same string but have different bytes
         return self._vocab_dict
 
-    def get_added_vocab(self) -> Dict[str, int]:
+    def get_added_vocab(self) -> dict[str, int]:
         # Mistral tokenizers have no added vocabulary
         return {}
 
@@ -350,6 +360,8 @@ class MistralTokenizer(TokenizerBase):
 
     def encode(self,
                text: str,
+               truncation: Optional[bool] = None,
+               max_length: Optional[int] = None,
                add_special_tokens: Optional[bool] = None) -> List[int]:
         # `encode` should only be used for prompt completion
         # it should never be used for chat_completion.

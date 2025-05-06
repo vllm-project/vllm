@@ -464,7 +464,7 @@ def fastsafetensors_weights_iterator(
     hf_weights_files: List[str],
     use_tqdm_on_load: bool,
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
-    """Iterate over the weights in the model safetensor files 
+    """Iterate over the weights in the model safetensor files
     using fastsafetensor library."""
     if torch.distributed.is_initialized():
         pg = torch.distributed.group.WORLD
@@ -502,6 +502,7 @@ def fastsafetensors_weights_iterator(
 def pt_weights_iterator(
     hf_weights_files: List[str],
     use_tqdm_on_load: bool,
+    pt_load_map_location: Union[str, dict[str, str]] = "cpu",
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model bin/pt files."""
     for bin_file in tqdm(
@@ -510,7 +511,9 @@ def pt_weights_iterator(
             disable=not enable_tqdm(use_tqdm_on_load),
             bar_format=_BAR_FORMAT,
     ):
-        state = torch.load(bin_file, map_location="cpu", weights_only=True)
+        state = torch.load(bin_file,
+                           map_location=pt_load_map_location,
+                           weights_only=True)
         yield from state.items()
         del state
 
@@ -658,8 +661,21 @@ def initialize_dummy_weights(
     for param in model.state_dict().values():
         if torch.is_floating_point(param):
             if current_platform.is_tpu():
-                # XLA device does not support torch.Generator()
-                param.uniform_(low, high)
+                generator = torch.Generator(device="cpu")
+                generator.manual_seed(seed)
+                # Note: The param.uniform_ function cannot be used in this
+                # context because it demands more TPU HBM than directly copying
+                # from a CPU tensor.
+                # Note: We avoid using torch.rank_like as it doesn't currently
+                # support the generator argument.
+                param.copy_((high - low) *
+                            torch.rand(*param.shape,
+                                       generator=generator,
+                                       dtype=param.dtype,
+                                       layout=param.layout,
+                                       requires_grad=param.requires_grad,
+                                       device="cpu") + low)
+                torch._sync(param)
                 continue
 
             generator = torch.Generator(device=param.data.device)
@@ -703,10 +719,10 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
         remapped_name = name.replace(".kv_scale", ".attn.k_scale")
         if remapped_name not in params_dict:
             logger.warning_once(
-                f"Found kv_scale in the checkpoint (e.g. {name}), "
-                "but not found the expected name in the model "
-                f"(e.g. {remapped_name}). kv_scale is "
-                "not loaded.")
+                "Found kv_scale in the checkpoint (e.g. %s), but not found the expected name in the model (e.g. %s). kv_scale is not loaded.",  #  noqa: E501
+                name,
+                remapped_name,
+            )
             return None
         return remapped_name
 
@@ -725,10 +741,12 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
                 remapped_name = name.replace(scale_name, f".attn{scale_name}")
             if remapped_name not in params_dict:
                 logger.warning_once(
-                    f"Found {scale_name} in the checkpoint (e.g. {name}), "
-                    "but not found the expected name in the model "
-                    f"(e.g. {remapped_name}). {scale_name} is "
-                    "not loaded.")
+                    "Found %s in the checkpoint (e.g. %s), but not found the expected name in the model (e.g. %s). %s is not loaded.",  # noqa: E501
+                    scale_name,
+                    name,
+                    remapped_name,
+                    scale_name,
+                )
                 return None
             return remapped_name
 

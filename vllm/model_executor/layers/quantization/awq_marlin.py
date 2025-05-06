@@ -13,16 +13,17 @@ from vllm.model_executor.layers.fused_moe.layer import (
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod,
                                                set_weight_attrs)
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.awq import (AWQConfig,
                                                          is_layer_skipped_awq)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
-from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     apply_awq_marlin_linear, awq_to_marlin_zero_points, check_marlin_supported,
-    check_marlin_supports_layer, marlin_make_empty_g_idx,
-    marlin_make_workspace, marlin_moe_permute_scales, marlin_permute_scales,
+    check_marlin_supports_layer, check_moe_marlin_supports_layer,
+    marlin_make_empty_g_idx, marlin_make_workspace_new,
+    marlin_moe_permute_scales, marlin_permute_scales,
     moe_awq_to_marlin_zero_points, verify_marlin_supported,
     verify_marlin_supports_shape)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
@@ -74,7 +75,7 @@ class AWQMarlinConfig(QuantizationConfig):
                 f"modules_to_not_convert={self.modules_to_not_convert})")
 
     @classmethod
-    def get_name(cls) -> str:
+    def get_name(cls) -> QuantizationMethods:
         return "awq_marlin"
 
     @classmethod
@@ -102,8 +103,8 @@ class AWQMarlinConfig(QuantizationConfig):
                    modules_to_not_convert, config)
 
     @classmethod
-    def override_quantization_method(cls, hf_quant_cfg,
-                                     user_quant) -> Optional[str]:
+    def override_quantization_method(
+            cls, hf_quant_cfg, user_quant) -> Optional[QuantizationMethods]:
         can_convert = cls.is_awq_marlin_compatible(hf_quant_cfg)
         is_valid_user_quant = (user_quant is None or user_quant == "marlin"
                                or user_quant == "awq_marlin")
@@ -130,18 +131,22 @@ class AWQMarlinConfig(QuantizationConfig):
             # Check if the layer is supported by AWQMarlin.
             if not check_marlin_supports_layer(layer, self.group_size):
                 logger.warning_once(
-                    f"Layer '{prefix}' is not supported by AWQMarlin. "
-                    "Falling back to unoptimized AWQ kernels.")
+                    "Layer '%s' is not supported by AWQMarlin. Falling back to unoptimized AWQ kernels.",  # noqa: E501
+                    prefix,
+                )
                 return AWQConfig.from_config(
                     self.full_config).get_quant_method(layer, prefix)
             return AWQMarlinLinearMethod(self)
         elif isinstance(layer, FusedMoE):
-            if layer.local_num_experts > 32:
-                # For MoEs with many experts the moe_wna16 kernel is faster
+            from vllm.model_executor.layers.quantization.moe_wna16 import (
+                MoeWNA16Config)
+            if not check_moe_marlin_supports_layer(layer, self.group_size):
+                logger.warning_once(
+                    f"Layer '{prefix}' is not supported by AWQMoeMarlin. "
+                    "Falling back to Moe WNA16 kernels.")
                 return MoeWNA16Config.from_config(
                     self.full_config).get_quant_method(layer, prefix)
-            else:
-                return AWQMoEMethod(self)
+            return AWQMoEMethod(self)
         return None
 
     @classmethod
@@ -263,8 +268,7 @@ class AWQMarlinLinearMethod(LinearMethodBase):
                                           requires_grad=False)
 
         # Allocate marlin workspace
-        layer.workspace = marlin_make_workspace(
-            layer.output_size_per_partition, device)
+        layer.workspace = marlin_make_workspace_new(device)
 
         # Repack weights from AWQ format to marlin format.
         marlin_qweight = ops.awq_marlin_repack(
@@ -318,6 +322,9 @@ class AWQMoEMethod(FusedMoEMethodBase):
 
     def __init__(self, quant_config: AWQMarlinConfig):
         self.quant_config = quant_config
+        if self.quant_config.weight_bits != 4:
+            raise ValueError("AWQMoEMethod only supports 4bit now.")
+        self.quant_type = scalar_types.uint4
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -390,6 +397,9 @@ class AWQMoEMethod(FusedMoEMethodBase):
                               requires_grad=False)
         layer.register_parameter("w2_qzeros", w2_qzeros)
         set_weight_attrs(w2_qzeros, extra_weight_attrs)
+
+        device = layer.w13_qweight.device
+        layer.workspace = marlin_make_workspace_new(device, 4)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         num_experts = layer.w13_qweight.shape[0]
@@ -469,12 +479,14 @@ class AWQMoEMethod(FusedMoEMethodBase):
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
         activation: str = "silu",
     ) -> torch.Tensor:
         assert activation == "silu", "Only SiLU activation is supported."
-        if expert_map is not None:
+
+        if apply_router_weight_on_input:
             raise NotImplementedError(
-                "Expert Parallelism is not supported for "
+                "Apply router weight on input is not supported for"
                 "fused Marlin MoE method.")
 
         topk_weights, topk_ids = FusedMoE.select_experts(
@@ -498,7 +510,9 @@ class AWQMoEMethod(FusedMoEMethodBase):
             router_logits,
             topk_weights,
             topk_ids,
+            quant_type_id=self.quant_type.id,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
             w1_zeros=layer.w13_qzeros,
             w2_zeros=layer.w2_qzeros,
-            num_bits=self.quant_config.weight_bits,
-        )
+            workspace=layer.workspace)

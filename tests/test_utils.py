@@ -2,19 +2,24 @@
 # ruff: noqa
 
 import asyncio
+import hashlib
+import pickle
 import socket
 from collections.abc import AsyncIterator
 from unittest.mock import patch
 
 import pytest
 import torch
-from vllm_test_utils import monitor
+import zmq
+from vllm_test_utils.monitor import monitor
 
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
-from vllm.utils import (FlexibleArgumentParser, MemorySnapshot,
-                        PlaceholderModule, StoreBoolean, bind_kv_cache,
-                        deprecate_kwargs, get_open_port, memory_profiling,
-                        merge_async_iterators, supports_kw, swap_dict_values)
+from vllm.utils import (CacheInfo, FlexibleArgumentParser, LRUCache,
+                        MemorySnapshot, PlaceholderModule, StoreBoolean,
+                        bind_kv_cache, deprecate_kwargs, get_open_port,
+                        make_zmq_socket, memory_profiling,
+                        merge_async_iterators, sha256, split_zmq_path,
+                        supports_kw, swap_dict_values)
 
 from .utils import create_new_process_for_each_test, error_on_warning
 
@@ -140,7 +145,8 @@ def parser():
 def parser_with_config():
     parser = FlexibleArgumentParser()
     parser.add_argument('serve')
-    parser.add_argument('model_tag')
+    parser.add_argument('model_tag', nargs='?')
+    parser.add_argument('--model', type=str)
     parser.add_argument('--served-model-name', type=str)
     parser.add_argument('--config', type=str)
     parser.add_argument('--port', type=int)
@@ -196,29 +202,29 @@ def test_missing_required_argument(parser):
         parser.parse_args([])
 
 
-def test_cli_override_to_config(parser_with_config):
+def test_cli_override_to_config(parser_with_config, cli_config_file):
     args = parser_with_config.parse_args([
-        'serve', 'mymodel', '--config', './data/test_config.yaml',
+        'serve', 'mymodel', '--config', cli_config_file,
         '--tensor-parallel-size', '3'
     ])
     assert args.tensor_parallel_size == 3
     args = parser_with_config.parse_args([
         'serve', 'mymodel', '--tensor-parallel-size', '3', '--config',
-        './data/test_config.yaml'
+        cli_config_file
     ])
     assert args.tensor_parallel_size == 3
     assert args.port == 12312
     args = parser_with_config.parse_args([
         'serve', 'mymodel', '--tensor-parallel-size', '3', '--config',
-        './data/test_config.yaml', '--port', '666'
+        cli_config_file, '--port', '666'
     ])
     assert args.tensor_parallel_size == 3
     assert args.port == 666
 
 
-def test_config_args(parser_with_config):
+def test_config_args(parser_with_config, cli_config_file):
     args = parser_with_config.parse_args(
-        ['serve', 'mymodel', '--config', './data/test_config.yaml'])
+        ['serve', 'mymodel', '--config', cli_config_file])
     assert args.tensor_parallel_size == 2
     assert args.trust_remote_code
     assert not args.multi_step_stream_outputs
@@ -240,10 +246,9 @@ def test_config_file(parser_with_config):
         ])
 
 
-def test_no_model_tag(parser_with_config):
+def test_no_model_tag(parser_with_config, cli_config_file):
     with pytest.raises(ValueError):
-        parser_with_config.parse_args(
-            ['serve', '--config', './data/test_config.yaml'])
+        parser_with_config.parse_args(['serve', '--config', cli_config_file])
 
 
 # yapf: enable
@@ -414,6 +419,129 @@ def test_bind_kv_cache_pp():
         assert ctx['layers.0.self_attn'].kv_cache[1] is kv_cache[1][0]
 
 
+class TestLRUCache(LRUCache):
+
+    def _on_remove(self, key, value):
+        if not hasattr(self, "_remove_counter"):
+            self._remove_counter = 0
+        self._remove_counter += 1
+
+
+def test_lru_cache():
+    cache = TestLRUCache(3)
+    assert cache.stat() == CacheInfo(hits=0, total=0)
+    assert cache.stat(delta=True) == CacheInfo(hits=0, total=0)
+
+    cache.put(1, 1)
+    assert len(cache) == 1
+
+    cache.put(1, 1)
+    assert len(cache) == 1
+
+    cache.put(2, 2)
+    assert len(cache) == 2
+
+    cache.put(3, 3)
+    assert len(cache) == 3
+    assert set(cache.cache) == {1, 2, 3}
+
+    cache.put(4, 4)
+    assert len(cache) == 3
+    assert set(cache.cache) == {2, 3, 4}
+    assert cache._remove_counter == 1
+
+    assert cache.get(2) == 2
+    assert cache.stat() == CacheInfo(hits=1, total=1)
+    assert cache.stat(delta=True) == CacheInfo(hits=1, total=1)
+
+    assert cache[2] == 2
+    assert cache.stat() == CacheInfo(hits=2, total=2)
+    assert cache.stat(delta=True) == CacheInfo(hits=1, total=1)
+
+    cache.put(5, 5)
+    assert set(cache.cache) == {2, 4, 5}
+    assert cache._remove_counter == 2
+
+    assert cache.pop(5) == 5
+    assert len(cache) == 2
+    assert set(cache.cache) == {2, 4}
+    assert cache._remove_counter == 3
+
+    assert cache.get(-1) is None
+    assert cache.stat() == CacheInfo(hits=2, total=3)
+    assert cache.stat(delta=True) == CacheInfo(hits=0, total=1)
+
+    cache.pop(10)
+    assert len(cache) == 2
+    assert set(cache.cache) == {2, 4}
+    assert cache._remove_counter == 3
+
+    cache.get(10)
+    assert len(cache) == 2
+    assert set(cache.cache) == {2, 4}
+    assert cache._remove_counter == 3
+
+    cache.put(6, 6)
+    assert len(cache) == 3
+    assert set(cache.cache) == {2, 4, 6}
+    assert 2 in cache
+    assert 4 in cache
+    assert 6 in cache
+
+    cache.remove_oldest()
+    assert len(cache) == 2
+    assert set(cache.cache) == {2, 6}
+    assert cache._remove_counter == 4
+
+    cache.clear()
+    assert len(cache) == 0
+    assert cache._remove_counter == 6
+    assert cache.stat() == CacheInfo(hits=0, total=0)
+    assert cache.stat(delta=True) == CacheInfo(hits=0, total=0)
+
+    cache._remove_counter = 0
+
+    cache[1] = 1
+    assert len(cache) == 1
+
+    cache[1] = 1
+    assert len(cache) == 1
+
+    cache[2] = 2
+    assert len(cache) == 2
+
+    cache[3] = 3
+    assert len(cache) == 3
+    assert set(cache.cache) == {1, 2, 3}
+
+    cache[4] = 4
+    assert len(cache) == 3
+    assert set(cache.cache) == {2, 3, 4}
+    assert cache._remove_counter == 1
+    assert cache[2] == 2
+
+    cache[5] = 5
+    assert set(cache.cache) == {2, 4, 5}
+    assert cache._remove_counter == 2
+
+    del cache[5]
+    assert len(cache) == 2
+    assert set(cache.cache) == {2, 4}
+    assert cache._remove_counter == 3
+
+    cache.pop(10)
+    assert len(cache) == 2
+    assert set(cache.cache) == {2, 4}
+    assert cache._remove_counter == 3
+
+    cache[6] = 6
+    assert len(cache) == 3
+    assert set(cache.cache) == {2, 4, 6}
+    assert 2 in cache
+    assert 4 in cache
+    assert 6 in cache
+
+
 def test_placeholder_module_error_handling():
     placeholder = PlaceholderModule("placeholder_1234")
 
@@ -476,3 +604,113 @@ def test_swap_dict_values(obj, key1, key2):
         assert obj[key1] == original_obj[key2]
     else:
         assert key1 not in obj
+
+
+def test_model_specification(parser_with_config,
+                             cli_config_file,
+                             cli_config_file_with_model):
+    # Test model in CLI takes precedence over config
+    args = parser_with_config.parse_args([
+        'serve', 'cli-model', '--config', cli_config_file_with_model
+    ])
+    assert args.model_tag == 'cli-model'
+    assert args.served_model_name == 'mymodel'
+
+    # Test model from config file works
+    args = parser_with_config.parse_args([
+        'serve', '--config', cli_config_file_with_model,
+    ])
+    assert args.model == 'config-model'
+    assert args.served_model_name == 'mymodel'
+
+    # Test no model specified anywhere raises error
+    with pytest.raises(ValueError, match="No model specified!"):
+        parser_with_config.parse_args(['serve', '--config', cli_config_file])
+
+    # Test using --model option raises error
+    with pytest.raises(
+        ValueError,
+        match=(
+            "With `vllm serve`, you should provide the model as a positional "
+            "argument or in a config file instead of via the `--model` option."
+        ),
+    ):
+        parser_with_config.parse_args(['serve', '--model', 'my-model'])
+
+    # Test other config values are preserved
+    args = parser_with_config.parse_args([
+        'serve', 'cli-model', '--config', cli_config_file_with_model,
+    ])
+    assert args.tensor_parallel_size == 2
+    assert args.trust_remote_code is True
+    assert args.multi_step_stream_outputs is False
+    assert args.port == 12312
+
+
+@pytest.mark.parametrize("input", [(), ("abc", ), (None, ),
+                                    (None, bool, [1, 2, 3])])
+@pytest.mark.parametrize("output", [0, 1, 2])
+def test_sha256(input: tuple, output: int):
+    hash = sha256(input)
+    assert hash is not None
+    assert isinstance(hash, int)
+    assert hash != 0
+
+    bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
+    assert hash == int.from_bytes(hashlib.sha256(bytes).digest(), byteorder="big")
+
+    # hashing again, returns the same value
+    assert hash == sha256(input)
+
+    # hashing different input, returns different value
+    assert hash != sha256(input + (1, ))
+
+
+@pytest.mark.parametrize(
+    "path,expected",
+    [
+        ("ipc://some_path", ("ipc", "some_path", "")),
+        ("tcp://127.0.0.1:5555", ("tcp", "127.0.0.1", "5555")),
+        ("tcp://[::1]:5555", ("tcp", "::1", "5555")),  # IPv6 address
+        ("inproc://some_identifier", ("inproc", "some_identifier", "")),
+    ]
+)
+def test_split_zmq_path(path, expected):
+    assert split_zmq_path(path) == expected
+
+
+@pytest.mark.parametrize(
+    "invalid_path",
+    [
+        "invalid_path",  # Missing scheme
+        "tcp://127.0.0.1",  # Missing port
+        "tcp://[::1]",  # Missing port for IPv6
+        "tcp://:5555",  # Missing host
+    ]
+)
+def test_split_zmq_path_invalid(invalid_path):
+    with pytest.raises(ValueError):
+        split_zmq_path(invalid_path)
+
+
+def test_make_zmq_socket_ipv6():
+    # Check if IPv6 is supported by trying to create an IPv6 socket
+    try:
+        sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        sock.close()
+    except socket.error:
+        pytest.skip("IPv6 is not supported on this system")
+
+    ctx = zmq.Context()
+    ipv6_path = "tcp://[::]:5555"  # IPv6 loopback address
+    socket_type = zmq.REP  # Example socket type
+
+    # Create the socket
+    zsock: zmq.Socket = make_zmq_socket(ctx, ipv6_path, socket_type)
+
+    # Verify that the IPV6 option is set
+    assert zsock.getsockopt(zmq.IPV6) == 1, "IPV6 option should be enabled for IPv6 addresses"
+
+    # Clean up
+    zsock.close()
+    ctx.term()

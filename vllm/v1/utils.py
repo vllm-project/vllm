@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import multiprocessing
 import os
 import weakref
 from collections import defaultdict
 from collections.abc import Sequence
+from multiprocessing import Process
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Optional, TypeVar,
                     Union, overload)
 
@@ -12,6 +12,8 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.models.utils import extract_layer_index
+from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
+                                  usage_message)
 from vllm.utils import get_mp_context, kill_process_tree
 
 if TYPE_CHECKING:
@@ -105,25 +107,22 @@ class BackgroundProcHandle:
         process_kwargs: dict[Any, Any],
     ):
         context = get_mp_context()
-        reader, writer = context.Pipe(duplex=False)
 
-        assert ("ready_pipe" not in process_kwargs
-                and "input_path" not in process_kwargs
+        assert ("input_path" not in process_kwargs
                 and "output_path" not in process_kwargs)
-        process_kwargs["ready_pipe"] = writer
         process_kwargs["input_path"] = input_path
         process_kwargs["output_path"] = output_path
 
         # Run busy loop in background process.
-        self.proc = context.Process(target=target_fn, kwargs=process_kwargs)
+        self.proc: Process = context.Process(target=target_fn,
+                                             kwargs=process_kwargs,
+                                             name=process_name)
         self._finalizer = weakref.finalize(self, shutdown, self.proc,
                                            input_path, output_path)
         self.proc.start()
 
-        # Wait for startup.
-        if reader.recv()["status"] != "READY":
-            raise RuntimeError(f"{process_name} initialization failed. "
-                               "See root cause above.")
+    def fileno(self):
+        return self.proc.sentinel
 
     def shutdown(self):
         self._finalizer()
@@ -131,14 +130,14 @@ class BackgroundProcHandle:
 
 # Note(rob): shutdown function cannot be a bound method,
 # else the gc cannot collect the object.
-def shutdown(proc: multiprocessing.Process, input_path: str, output_path: str):
+def shutdown(proc: Process, input_path: str, output_path: str):
     # Shutdown the process.
     if proc.is_alive():
         proc.terminate()
         proc.join(5)
 
-        if proc.is_alive():
-            kill_process_tree(proc.pid)
+        if proc.is_alive() and (pid := proc.pid) is not None:
+            kill_process_tree(pid)
 
     # Remove zmq ipc socket files.
     ipc_sockets = [output_path, input_path]
@@ -204,3 +203,47 @@ def copy_slice(from_tensor: torch.Tensor, to_tensor: torch.Tensor,
     Returns the sliced target tensor.
     """
     return to_tensor[:length].copy_(from_tensor[:length], non_blocking=True)
+
+
+def report_usage_stats(
+        vllm_config,
+        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT) -> None:
+    """Report usage statistics if enabled."""
+
+    if not is_usage_stats_enabled():
+        return
+
+    from vllm.model_executor.model_loader import get_architecture_class_name
+
+    usage_message.report_usage(
+        get_architecture_class_name(vllm_config.model_config),
+        usage_context,
+        extra_kvs={
+            # Common configuration
+            "dtype":
+            str(vllm_config.model_config.dtype),
+            "tensor_parallel_size":
+            vllm_config.parallel_config.tensor_parallel_size,
+            "block_size":
+            vllm_config.cache_config.block_size,
+            "gpu_memory_utilization":
+            vllm_config.cache_config.gpu_memory_utilization,
+
+            # Quantization
+            "quantization":
+            vllm_config.model_config.quantization,
+            "kv_cache_dtype":
+            str(vllm_config.cache_config.cache_dtype),
+
+            # Feature flags
+            "enable_lora":
+            bool(vllm_config.lora_config),
+            "enable_prompt_adapter":
+            bool(vllm_config.prompt_adapter_config),
+            "enable_prefix_caching":
+            vllm_config.cache_config.enable_prefix_caching,
+            "enforce_eager":
+            vllm_config.model_config.enforce_eager,
+            "disable_custom_all_reduce":
+            vllm_config.parallel_config.disable_custom_all_reduce,
+        })

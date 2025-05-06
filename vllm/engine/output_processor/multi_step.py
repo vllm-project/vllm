@@ -56,8 +56,8 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         scheduled computation.
 
         Args:
-          seq_group: the outputs are associated with this :class:`SequenceGroup`
-          outputs: the :class:`SequenceGroupOutput`s for all scheduler steps
+          seq_group: the outputs are associated with this {class}`SequenceGroup`
+          outputs: the {class}`SequenceGroupOutput`s for all scheduler steps
         """
         for output in outputs:
             # Concatenate single-step prompt logprob processing results.
@@ -93,7 +93,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             externally (before the next schedule() call)
         """
         # Sequences can be in RUNNING or FINISHED_ABORTED state
-        # once scheduled, as a sequence is moved to FINSIHED_ABORTED
+        # once scheduled, as a sequence is moved to FINISHED_ABORTED
         # if a client disconnects from the api server.
         seqs = sequence_group.get_seqs(status=SequenceStatus.RUNNING)
         if seqs is None:
@@ -167,6 +167,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
                              sampling_params: SamplingParams) -> None:
         output_token_ids = [sample.output_token for sample in valid_samples]
         output_logprobs = [sample.logprobs for sample in valid_samples]
+        output_embeds = [sample.output_embed for sample in valid_samples]
 
         # Truncate to max_tokens if necessary.
         remaining_tokens = sampling_params.max_tokens - (seq.get_output_len() +
@@ -178,7 +179,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         # generates a fixed number of tokens without evaluating stopping
         # conditions within the block. This can cause an eos token to be
         # unintentionally ignored.
-        if not sampling_params.ignore_eos:
+        if not sampling_params.ignore_eos and self.detokenizer:
             eos_token_id = self.get_tokenizer_for_seq(seq).eos_token_id
             # Avoiding .index calls as exception throwing in the happy path
             # is expensive.
@@ -190,11 +191,12 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         is_prefill_sampled_token = seq.data.get_num_uncomputed_tokens() == 0
         # Incrementally append tokens to the sequence, as if we had only one new
         # token.
-        for output_token_id, output_logprob in zip(output_token_ids,
-                                                   output_logprobs):
+        for output_token_id, output_logprob, output_embed in zip(
+                output_token_ids, output_logprobs, output_embeds):
             seq.append_token_id(
                 token_id=output_token_id,
                 logprobs=output_logprob,
+                token_embed=output_embed,
             )
 
             if is_prefill_sampled_token:

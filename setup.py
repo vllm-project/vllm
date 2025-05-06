@@ -54,7 +54,7 @@ elif (sys.platform.startswith("linux") and torch.version.cuda is None
     # fallback to cpu
     VLLM_TARGET_DEVICE = "cpu"
 
-MAIN_CUDA_VERSION = "12.4"
+MAIN_CUDA_VERSION = "12.8"
 
 
 def is_sccache_available() -> bool:
@@ -201,6 +201,9 @@ class cmake_build_ext(build_ext):
         else:
             # Default build tool to whatever cmake picks.
             build_tool = []
+        # Make sure we use the nvcc from CUDA_HOME
+        if _is_cuda():
+            cmake_args += [f'-DCMAKE_CUDA_COMPILER={CUDA_HOME}/bin/nvcc']
         subprocess.check_call(
             ['cmake', ext.cmake_lists_dir, *build_tool, *cmake_args],
             cwd=self.build_temp)
@@ -266,15 +269,17 @@ class cmake_build_ext(build_ext):
         # First, run the standard build_ext command to compile the extensions
         super().run()
 
-        # copy vllm/vllm_flash_attn/*.py from self.build_lib to current
+        # copy vllm/vllm_flash_attn/**/*.py from self.build_lib to current
         # directory so that they can be included in the editable build
         import glob
-        files = glob.glob(
-            os.path.join(self.build_lib, "vllm", "vllm_flash_attn", "*.py"))
+        files = glob.glob(os.path.join(self.build_lib, "vllm",
+                                       "vllm_flash_attn", "**", "*.py"),
+                          recursive=True)
         for file in files:
             dst_file = os.path.join("vllm/vllm_flash_attn",
-                                    os.path.basename(file))
+                                    file.split("vllm/vllm_flash_attn/")[-1])
             print(f"Copying {file} to {dst_file}")
+            os.makedirs(os.path.dirname(dst_file), exist_ok=True)
             self.copy_file(file, dst_file)
 
 
@@ -374,13 +379,22 @@ class repackage_wheel(build_ext):
                 "vllm/_flashmla_C.abi3.so",
                 "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
                 "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
-                "vllm/vllm_flash_attn/flash_attn_interface.py",
-                "vllm/vllm_flash_attn/__init__.py",
                 "vllm/cumem_allocator.abi3.so",
                 # "vllm/_version.py", # not available in nightly wheels yet
             ]
-            file_members = filter(lambda x: x.filename in files_to_copy,
-                                  wheel.filelist)
+
+            file_members = list(
+                filter(lambda x: x.filename in files_to_copy, wheel.filelist))
+
+            # vllm_flash_attn python code:
+            # Regex from
+            #  `glob.translate('vllm/vllm_flash_attn/**/*.py', recursive=True)`
+            import re
+            compiled_regex = re.compile(
+                r"vllm/vllm_flash_attn/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py")
+            file_members += list(
+                filter(lambda x: compiled_regex.match(x.filename),
+                       wheel.filelist))
 
             for file in file_members:
                 print(f"Extracting and including {file.filename} "
@@ -592,9 +606,8 @@ def get_requirements() -> list[str]:
         for line in requirements:
             if line.startswith("-r "):
                 resolved_requirements += _read_requirements(line.split()[1])
-            elif line.startswith("--"):
-                continue
-            else:
+            elif not line.startswith("--") and not line.startswith(
+                    "#") and line.strip() != "":
                 resolved_requirements.append(line)
         return resolved_requirements
 
@@ -640,11 +653,10 @@ if _is_hip():
 
 if _is_cuda():
     ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa2_C"))
-    if envs.VLLM_USE_PRECOMPILED or get_nvcc_cuda_version() >= Version("12.0"):
-        # FA3 requires CUDA 12.0 or later
+    if envs.VLLM_USE_PRECOMPILED or get_nvcc_cuda_version() >= Version("12.3"):
+        # FA3 requires CUDA 12.3 or later
         ext_modules.append(
             CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa3_C"))
-    if envs.VLLM_USE_PRECOMPILED or get_nvcc_cuda_version() >= Version("12.3"):
         # Optional since this doesn't get built (produce an .so file) when
         # not targeting a hopper system
         ext_modules.append(
@@ -683,7 +695,7 @@ setup(
         "fastsafetensors": ["fastsafetensors >= 0.1.10"],
         "runai": ["runai-model-streamer", "runai-model-streamer-s3", "boto3"],
         "audio": ["librosa", "soundfile"],  # Required for audio processing
-        "video": ["decord"]  # Required for video processing
+        "video": []  # Kept for backwards compatibility
     },
     cmdclass=cmdclass,
     package_data=package_data,

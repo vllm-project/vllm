@@ -8,6 +8,7 @@ from torch.nn.parameter import Parameter
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
@@ -63,7 +64,7 @@ class MarlinConfig(QuantizationConfig):
                 f"lm_head_quantized={self.lm_head_quantized})")
 
     @classmethod
-    def get_name(cls) -> str:
+    def get_name(cls) -> QuantizationMethods:
         return "marlin"
 
     @classmethod
@@ -87,8 +88,8 @@ class MarlinConfig(QuantizationConfig):
         return cls(group_size, lm_head_quantized)
 
     @classmethod
-    def override_quantization_method(cls, hf_quant_cfg,
-                                     user_quant) -> Optional[str]:
+    def override_quantization_method(
+            cls, hf_quant_cfg, user_quant) -> Optional[QuantizationMethods]:
         # compat: autogptq >=0.8.0 use checkpoint_format: str
         # compat: autogptq <=0.7.1 is_marlin_format: bool
         is_marlin_format = (hf_quant_cfg.get("checkpoint_format") == "marlin"

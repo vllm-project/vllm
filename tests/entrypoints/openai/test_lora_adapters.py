@@ -53,7 +53,20 @@ def zephyr_lora_files():
 
 
 @pytest.fixture(scope="module")
-def server_with_lora_modules_json(zephyr_lora_files):
+def monkeypatch_module():
+    from _pytest.monkeypatch import MonkeyPatch
+    mpatch = MonkeyPatch()
+    yield mpatch
+    mpatch.undo()
+
+
+@pytest.fixture(scope="module", params=[False, True])
+def server_with_lora_modules_json(request, monkeypatch_module,
+                                  zephyr_lora_files):
+
+    use_v1 = request.param
+    monkeypatch_module.setenv('VLLM_USE_V1', '1' if use_v1 else '0')
+
     # Define the json format LoRA module configurations
     lora_module_1 = {
         "name": "zephyr-lora",

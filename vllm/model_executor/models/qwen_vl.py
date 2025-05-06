@@ -32,12 +32,13 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.resampler import Resampler2, get_abs_pos
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalKwargs)
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate, PromptUpdateDetails)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
@@ -382,7 +383,7 @@ def _get_tokenizer_without_image_pad(
         tokenizer: PreTrainedTokenizer) -> PreTrainedTokenizer:
     """
     The logic of adding image pad tokens should only be applied in
-    :class:`QwenVLProcessor`, so they are patched out here.
+    {class}`QwenVLProcessor`, so they are patched out here.
 
     The definition of the wrapped tokenizer can be found here:
     https://huggingface.co/Qwen/Qwen-VL/blob/main/tokenization_qwen.py
@@ -530,13 +531,6 @@ class QwenVLProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {"image": self.get_num_image_tokens()}
-
     def get_num_image_tokens(self) -> int:
         hf_config = self.get_hf_config()
         vision_config = hf_config.visual
@@ -549,33 +543,33 @@ class QwenVLProcessingInfo(BaseProcessingInfo):
 
 class QwenVLDummyInputsBuilder(BaseDummyInputsBuilder[QwenVLProcessingInfo]):
 
-    def get_dummy_processor_inputs(
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        num_images = mm_counts.get("image", 0)
+
+        hf_processor = self.info.get_hf_processor()
+        img_start = hf_processor.image_start_tag
+        img_end = hf_processor.image_end_tag
+
+        return "".join(f"Picture {i}: {img_start}{img_end}\n"
+                       for i in range(1, num_images + 1))
+
+    def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    ) -> MultiModalDataDict:
         hf_config = self.info.get_hf_config()
         vision_config = hf_config.visual
-
-        processor = self.info.get_hf_processor()
-        img_start = processor.image_start_tag
-        img_end = processor.image_end_tag
 
         target_width = target_height = vision_config["image_size"]
         num_images = mm_counts.get("image", 0)
 
-        mm_data = {
+        return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
                                    num_images=num_images)
         }
-
-        return ProcessorInputs(
-            prompt_text="".join(f"Picture {i}: {img_start}{img_end}\n"
-                                for i in range(1, num_images + 1)),
-            mm_data=mm_data,
-        )
 
 
 class QwenVLMultiModalProcessor(BaseMultiModalProcessor[QwenVLProcessingInfo]):
@@ -647,9 +641,9 @@ class QwenVLMultiModalProcessor(BaseMultiModalProcessor[QwenVLProcessingInfo]):
             PromptReplacement(
                 modality="image",
                 target=[img_start_id, img_end_id],
-                replacement=PromptUpdateDetails(
-                    full=[img_start_id] + image_tokens + [img_end_id],
-                    features=image_tokens,
+                replacement=PromptUpdateDetails.select_token_id(
+                    [img_start_id] + image_tokens + [img_end_id],
+                    embed_token_id=img_pad_id,
                 ),
             )
         ]
@@ -739,6 +733,9 @@ class QwenVLForConditionalGeneration(QWenBaseModel, SupportsPP, SupportsLoRA,
             return image_input["data"]
 
         return self.transformer.visual(image_input["data"])
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.transformer
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
