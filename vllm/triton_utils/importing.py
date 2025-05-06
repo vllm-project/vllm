@@ -32,12 +32,12 @@ class TritonPlaceholder(types.ModuleType):
 
     def _dummy_decorator(self, name):
 
-        def decorator(func=None, **kwargs):
-            if func is None:
-                return lambda f: f
-            return func
+        def wrapper(*args, **kwargs):
+            if args and callable(args[0]):
+                return args[0]
+            return lambda f: f
 
-        return decorator
+        return wrapper
 
 
 class TritonLanguagePlaceholder(types.ModuleType):
