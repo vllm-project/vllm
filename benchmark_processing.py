@@ -12,10 +12,10 @@ import pandas as pd
 from tqdm import tqdm
 
 import vllm.envs as envs
+from tests.models.registry import HF_EXAMPLE_MODELS
 from tests.multimodal.utils import random_audio, random_image, random_video
 from vllm import AsyncEngineArgs, EngineArgs, SamplingParams
 from vllm.config import ModelConfig, ParallelProcessorBackend
-from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.llm_engine import LLMEngine
 from vllm.engine.protocol import EngineClient
@@ -41,6 +41,8 @@ ModalityStr = Literal["audio", "image", "video"]
 def get_supported_modalities(model_id: str) -> list[ModalityStr]:
     model_config = ModelConfig(
         model_id,
+        tokenizer=get_hf_tokenizer(model_id),
+        hf_overrides=get_hf_overrides(model_id),
         task="auto",
         trust_remote_code=True,
         seed=0,
@@ -84,17 +86,22 @@ def async_engine_from_args(engine_args: AsyncEngineArgs) -> EngineClient:
     )
 
 
-_engine = None
+def get_hf_tokenizer(model_id: str):
+    try:
+        model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
+    except Exception:
+        return model_id
+    else:
+        return model_info.tokenizer or model_id
 
 
-def _reset_engine():
-    global _engine
-
-    _engine = None
-
-    cleanup_dist_env_and_memory()
-
-    time.sleep(10)
+def get_hf_overrides(model_id: str):
+    try:
+        model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
+    except Exception:
+        return {}
+    else:
+        return model_info.hf_overrides
 
 
 def get_engine(
@@ -102,33 +109,21 @@ def get_engine(
     modalities: list[ModalityStr],
     parallel_backend: ParallelProcessorBackend,
 ) -> LLMEngine:
-    global _engine
+    args = EngineArgs(
+        model=model_id,
+        tokenizer=get_hf_tokenizer(model_id),
+        hf_overrides=get_hf_overrides(model_id),
+        trust_remote_code=True,
+        parallel_processor_backend=parallel_backend,
+        limit_mm_per_prompt={
+            m: m in modalities
+            for m in get_args(ModalityStr)
+        },
+        disable_mm_preprocessor_cache=True,
+        enforce_eager=True,
+    )
 
-    if _engine is None:
-        args = EngineArgs(
-            model=model_id,
-            trust_remote_code=True,
-            parallel_processor_backend=parallel_backend,
-            limit_mm_per_prompt={
-                m: m in modalities
-                for m in get_args(ModalityStr)
-            },
-            disable_mm_preprocessor_cache=True,
-            enforce_eager=True,
-        )
-
-        if _engine is not None:
-            _reset_engine()
-
-        engine = engine_from_args(args)
-        _engine = engine
-    else:
-        model_config = _engine.get_model_config()
-        model_config.parallel_processor_backend = parallel_backend
-        model_config.multimodal_config.parallel_processor_backend = \
-            parallel_backend
-
-    return _engine
+    return engine_from_args(args)
 
 
 async def get_async_engine(
@@ -136,34 +131,22 @@ async def get_async_engine(
     modalities: list[ModalityStr],
     parallel_backend: ParallelProcessorBackend,
 ) -> EngineClient:
-    global _engine
+    args = AsyncEngineArgs(
+        model=model_id,
+        tokenizer=get_hf_tokenizer(model_id),
+        hf_overrides=get_hf_overrides(model_id),
+        trust_remote_code=True,
+        parallel_processor_backend=parallel_backend,
+        limit_mm_per_prompt={
+            m: m in modalities
+            for m in get_args(ModalityStr)
+        },
+        disable_mm_preprocessor_cache=True,
+        enforce_eager=True,
+        disable_log_requests=True,
+    )
 
-    if _engine is None:
-        args = AsyncEngineArgs(
-            model=model_id,
-            trust_remote_code=True,
-            parallel_processor_backend=parallel_backend,
-            limit_mm_per_prompt={
-                m: m in modalities
-                for m in get_args(ModalityStr)
-            },
-            disable_mm_preprocessor_cache=True,
-            enforce_eager=True,
-            disable_log_requests=True,
-        )
-
-        if _engine is not None:
-            _reset_engine()
-
-        engine = async_engine_from_args(args)
-        _engine = engine
-    else:
-        model_config = await _engine.get_model_config()
-        model_config.parallel_processor_backend = parallel_backend
-        model_config.multimodal_config.parallel_processor_backend = \
-            parallel_backend
-
-    return _engine
+    return async_engine_from_args(args)
 
 
 def get_prompt(model_config: ModelConfig, modality: ModalityStr) -> str:
