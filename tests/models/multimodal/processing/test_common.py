@@ -74,7 +74,7 @@ async def _test_processing_correctness(
     input_to_hit = {
         "image": Image.new("RGB", size=(128, 128)),
         "video": np.zeros((4, 128, 128, 3), dtype=np.uint8),
-        "audio": (np.zeros((512, )), 16000),
+        "audio": (np.zeros((16384, )), 16000),
     }
     input_factory = {
         "image":
@@ -87,7 +87,7 @@ async def _test_processing_correctness(
                 min_wh=128,
                 max_wh=256),
         "audio":
-        partial(random_audio, rng, min_len=512, max_len=1024, sr=16000),
+        partial(random_audio, rng, min_len=16384, max_len=32768, sr=16000),
     }
 
     for batch_idx in range(num_batches):

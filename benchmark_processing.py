@@ -191,7 +191,7 @@ def get_prompt(model_config: ModelConfig, modality: ModalityStr) -> str:
     rng = np.random.RandomState(0)
     if modality == "audio":
         audio_base64 = encode_audio_base64(
-            *random_audio(rng, 1024, 4096, 16000))
+            *random_audio(rng, 8192, 32768, 16000))
         mm_content = {
             "type": "audio_url",
             "audio_url": {
@@ -254,7 +254,7 @@ def get_benchmark_data(modality: ModalityStr):
     rng = np.random.RandomState(0)
 
     if modality == "audio":
-        return [random_audio(rng, 1024, 4096, 16000) for _ in range(200)]
+        return [random_audio(rng, 32768, 131072, 16000) for _ in range(200)]
     if modality == "image":
         return [random_image(rng, 256, 1024) for _ in range(200)]
     if modality == "video":
