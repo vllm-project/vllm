@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -87,10 +88,25 @@ class XgrammarBackend(StructuredOutputBackend):
             )
         self.compiler = xgr.GrammarCompiler(
             tokenizer_info,
-            max_threads=8,
+            max_threads=self._get_grammar_compiler_threads(),
             cache_enabled=True,
             cache_limit_bytes=vllm.envs.VLLM_XGRAMMAR_CACHE_MB * 1024 * 1024,
         )
+
+    def _get_grammar_compiler_threads(self) -> int:
+        """Get the number of threads to use for the grammar compiler. Half
+        of the total thread count is chosen here to avoid occupying all CPU
+        resources. 32 is an estimate of the effective number of compilation
+        threads needed for common schemas, and using more threads may not
+        provide additional benefits.
+
+        Returns:
+            int: The number of threads to use for the grammar compiler.
+        """
+        num_cpus = os.cpu_count()
+        if num_cpus is None:
+            return 8
+        return min(num_cpus // 2, 32)
 
     def compile_grammar(self, request_type: StructuredOutputOptions,
                         grammar_spec: str) -> StructuredOutputGrammar:
