@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, cast
 import torch
 
 from vllm.logger import init_logger
+import vllm.envs as envs
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
@@ -324,6 +325,7 @@ class QuarkConfig(QuantizationConfig):
                                  is_static_input_scheme=True,
                                  input_symmetric=input_config.get("symmetric"))
         elif self._is_mx_fp4(weight_config, input_config):
+            logger.info(f"Using VLLM_QUARK_MXFP4_Q_DQ_QDQ_IMPLEM='{envs.VLLM_QUARK_MXFP4_Q_DQ_QDQ_IMPLEM}'.")
             return QuarkW4A4MXFP4(weight_config, input_config)
 
         raise NotImplementedError("No quark compatible scheme was found. "

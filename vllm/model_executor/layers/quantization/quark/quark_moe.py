@@ -16,6 +16,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d, normalize_e4m3fn_to_e4m3fnuz, per_tensor_dequantize)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import SUPPORTED_IMPLEMS
 
 logger = init_logger(__name__)
 
@@ -262,6 +263,9 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
         self.static_input_scales = not self.input_quant.get("is_dynamic")
         self.emulate = not current_platform.supports_mx()
 
+        if envs.VLLM_QUARK_MXFP4_Q_DQ_QDQ_IMPLEM not in SUPPORTED_IMPLEMS:
+            raise ValueError(f"VLLM_QUARK_MXFP4_Q_DQ_QDQ_IMPLEM='{envs.VLLM_QUARK_MXFP4_Q_DQ_QDQ_IMPLEM}' is not supported, only {SUPPORTED_IMPLEMS} are.")
+
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
@@ -282,8 +286,6 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
                                         requires_grad=False)
         layer.register_parameter("w13_weight", w13_weight)
 
-        print("set w13_weight", w13_weight.shape, w13_weight.dtype)
-
         set_weight_attrs(w13_weight, extra_weight_attrs)
 
         w2_weight = torch.nn.Parameter(torch.empty(
@@ -293,8 +295,6 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
             dtype=params_dtype),
                                        requires_grad=False)
         layer.register_parameter("w2_weight", w2_weight)
-
-        print("set w2_weight", w2_weight.shape, w2_weight.dtype)
 
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
@@ -320,8 +320,6 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
         set_weight_attrs(w2_weight_scale, extra_weight_attrs)
         set_weight_attrs(w13_weight_scale, extra_weight_attrs)
 
-        print("set w2_weight_scale", w2_weight_scale.shape)
-        print("set w13_weight_scale", w13_weight_scale.shape)
         layer.register_parameter("w13_weight_scale", w13_weight_scale)
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
 
