@@ -119,10 +119,10 @@ def run_test(
         assert output.outputs[0].text == expected
 
 
-@create_new_process_for_each_test("spawn")
 @pytest.mark.core_model
 @pytest.mark.parametrize(
     "model", ["openai/whisper-small", "openai/whisper-large-v3-turbo"])
+@create_new_process_for_each_test()
 def test_models(vllm_runner, model) -> None:
     run_test(
         vllm_runner,
@@ -131,11 +131,11 @@ def test_models(vllm_runner, model) -> None:
     )
 
 
-@create_new_process_for_each_test("spawn")
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.core_model
 @pytest.mark.parametrize("model", ["openai/whisper-large-v3-turbo"])
 @pytest.mark.parametrize("distributed_executor_backend", ["ray", "mp"])
+@create_new_process_for_each_test()
 def test_models_distributed(
     vllm_runner,
     model,
