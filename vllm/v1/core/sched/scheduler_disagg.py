@@ -540,8 +540,6 @@ class DisaggregatedScheduler(Scheduler):
                 # NOTE(rob): req is not freed (or preempted) in the EngineCore
                 # until the xfer is done to ensure we do not free the KV blocks.
                 kv_transfer_params = None
-                # TODO(rob): edge case where we get a stop for stop_strings
-                # inside AsyncLLM.
                 if request.do_remote_decode and not stopped:
                     request.status = RequestStatus.FINISHED_REMOTE_DECODE
                     self._free_request(request, skip_free_blocks=True)
