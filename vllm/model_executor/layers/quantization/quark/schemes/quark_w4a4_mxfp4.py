@@ -7,8 +7,7 @@ import torch.nn.functional as F
 
 import vllm.envs as envs
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-    OCP_MX_BLOCK_SIZE, per_token_group_quant_mxfp4)
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import OCP_MX_BLOCK_SIZE, per_token_group_quant_mxfp4, per_token_group_dequant_mxfp4
 from vllm.model_executor.parameter import (GroupQuantScaleParameter,
                                            PackedvLLMParameter)
 from vllm.platforms import current_platform
@@ -25,10 +24,6 @@ class QuarkW4A4MXFP4(QuarkScheme):
         self.weight_quant_spec = weight_quant_spec
         self.input_quant_spec = input_quant_spec
         self.emulate = not current_platform.supports_mx()
-
-        from quark.torch.kernel.hw_emulation.extensions import kernel_ext
-
-        self.kernel_ext = kernel_ext
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -74,8 +69,6 @@ class QuarkW4A4MXFP4(QuarkScheme):
 
                 # This call is necessary to release the scales memory.
                 torch.cuda.empty_cache()
-            else:
-                self.weight_quantizer = weight_quantizer
 
     def create_weights(self, layer: torch.nn.Module,
                        output_partition_sizes: List[int],
@@ -120,16 +113,11 @@ class QuarkW4A4MXFP4(QuarkScheme):
 
         if self.emulate:
             if envs.VLLM_QUARK_EMU_MEM_OPT:
-                # dq_w = self.weight_quantizer(layer.weight).to(self.out_dtype)
-
-                dequant_weight_shape = (*layer.weight.shape[:-1], layer.weight.shape[-1] * 2)
-                dq_w = torch.empty(dequant_weight_shape, device=layer.weight.device, dtype=x.dtype)
-
-                self.kernel_ext.dq_uint8_mxfp4_to_half(layer.weight, layer.weight_scale, dq_w, OCP_MX_BLOCK_SIZE)
+                dq_w = per_token_group_dequant_mxfp4(layer.weight, layer.weight_scale, OCP_MX_BLOCK_SIZE, x.dtype)
             else:
                 dq_w = layer.weight
-            # qdq_x, _ = per_token_group_quant_mxfp4(x, OCP_MX_BLOCK_SIZE)
-            self.kernel_ext.qdq_mxfp4(x, OCP_MX_BLOCK_SIZE)
+            
+            x = per_token_group_quant_mxfp4(x, OCP_MX_BLOCK_SIZE)
 
             return F.linear(x, dq_w, bias)
         else:
