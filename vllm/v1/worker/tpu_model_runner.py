@@ -168,8 +168,6 @@ class TPUModelRunner:
         # Lazy initialization
         # self.model: nn.Module  # Set after load_model
         self.kv_caches: list[torch.Tensor] = []
-        # self.kv_cache_config: KVCacheConfig
-
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: dict[str, dict[int, torch.Tensor]] = {}
 
@@ -1245,7 +1243,6 @@ class TPUModelRunner:
             raise NotImplementedError(
                 "Hybrid models with more than one KV cache type are not "
                 "supported yet.")
-        self.kv_cache_config = kv_cache_config
 
         kv_caches: dict[str, torch.Tensor] = {}
 
