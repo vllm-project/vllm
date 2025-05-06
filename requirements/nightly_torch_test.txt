@@ -31,6 +31,6 @@ bitsandbytes>=0.45.3
 vector_quantize_pytorch
 vocos
 
-# basic correctness tests
+# Basic Models Test
 blobfile # required for kimi-vl test
 matplotlib # required for qwen-vl test
