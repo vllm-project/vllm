@@ -7,11 +7,10 @@
 #  - Thomas Parnell <tpa@zurich.ibm.com>
 
 import torch
-import triton
-import triton.language as tl
 
 from vllm import _custom_ops as ops
 from vllm.platforms.rocm import use_rocm_custom_paged_attention
+from vllm.triton_utils import tl, triton
 
 from .prefix_prefill import context_attention_fwd
 

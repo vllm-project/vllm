@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import torch
 import torch.nn as nn
-import triton
-import triton.language as tl
 
 from vllm.config import CompilationLevel, VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
@@ -11,6 +9,7 @@ from vllm.model_executor.model_loader.loader import get_model_loader
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
 

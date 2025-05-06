@@ -8,10 +8,9 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
-import triton
-import triton.language as tl
 
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 
 logger = logging.getLogger(__name__)
 
