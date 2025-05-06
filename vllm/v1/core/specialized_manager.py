@@ -342,6 +342,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             blocks[i] = self._null_block
         self.block_pool.free_blocks(removed_blocks)
 
+    @override
     def get_num_common_prefix_blocks(self, request_id: str,
                                      num_running_requests: int) -> int:
         """
@@ -361,6 +362,5 @@ spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
 def get_manager_for_kv_cache_spec(kv_cache_spec: KVCacheSpec,
                                   **kwargs) -> SingleTypeKVCacheManager:
     manager_class = spec_manager_map[type(kv_cache_spec)]
-    manager = manager_class(kv_cache_spec, **kwargs)
     manager = manager_class(kv_cache_spec, **kwargs)
     return manager
