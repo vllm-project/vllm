@@ -315,13 +315,13 @@ bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
     BIGGROUP_GET_IF_M234(W_TYPE, 8, 4, 128)  \
     BIGGROUP_GET_IF_M234(W_TYPE, 4, 8, 128)
 
-  #define FP4_GET_IF_M1(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)       \
+  #define FP4_GET_IF_M1(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)        \
     _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, 1, NUM_THREADS, false) \
     _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false)
 
-  #define FP4_GET_IF_M234(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)   \
-    _GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false)  \
-    _GET_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false)  \
+  #define FP4_GET_IF_M234(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)       \
+    _GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false) \
+    _GET_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false) \
     _GET_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false)
 
   #define FP4_GET_IF(W_TYPE)            \
@@ -467,8 +467,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
         "q_type must be u4 or u8 when has_zp = True. Got = ", q_type.str());
   } else {
     TORCH_CHECK(q_type == vllm::kU4B8 || q_type == vllm::kU8B128 ||
-                    q_type == vllm::kFE4M3fn ||
-                    q_type == vllm::kFE2M1fn,
+                    q_type == vllm::kFE4M3fn || q_type == vllm::kFE2M1fn,
                 "q_type must be uint4b8, uint8b128 or float8_e4m3fn when "
                 "has_zp = False. Got = ",
                 q_type.str());
@@ -795,8 +794,7 @@ torch::Tensor gptq_marlin_gemm(
         "b_q_type must be u4 or u8 when has_zp = True. Got = ", b_q_type.str());
   } else {
     TORCH_CHECK(b_q_type == vllm::kU4B8 || b_q_type == vllm::kU8B128 ||
-                    b_q_type == vllm::kFE4M3fn ||
-                    b_q_type == vllm::kFE2M1fn,
+                    b_q_type == vllm::kFE4M3fn || b_q_type == vllm::kFE2M1fn,
                 "b_q_type must be uint4b8, uint8b128 or float8_e4m3fn when "
                 "has_zp = False. Got = ",
                 b_q_type.str());

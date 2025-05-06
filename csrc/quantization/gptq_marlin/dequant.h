@@ -34,7 +34,7 @@ If has float zero points:
   = bit_op(weight) - (fzp + bias)
 
 where the `fzp + bias` can be computed at weight loading. But this
-may have accurary issue, so we should not use this in most cases.
+may have accuracy issue, so we should not use this in most cases.
 
 If has not zero points:
 
@@ -43,7 +43,7 @@ If has not zero points:
   = scale(bit_op(weight)) - scale(bias)
   = fma(bit_op(weight), scale_factor, scale(bias))
 
-where the `scale(bias)` can be cached. But this may have accurary issue,
+where the `scale(bias)` can be cached. But this may have accuracy issue,
 so we should not use this in most cases.
 
 
@@ -56,10 +56,10 @@ We cannot fused byte_perm with scaling.
 ## FP4/FP8 => FP16/BF16
 
     scale(flop(bit_op(weight)))
-  = scale(mul(bit_op(weight), multipiler))
-  = mul(bit_op(weight), scale_factor * multipiler)
+  = scale(mul(bit_op(weight), multiplier))
+  = mul(bit_op(weight), scale_factor * multiplier)
 
-where `scale_factor * multipiler` can be computed at weight loading.
+where `scale_factor * multiplier` can be computed at weight loading.
 
 */
 
