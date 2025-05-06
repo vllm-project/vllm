@@ -23,8 +23,8 @@ steps:
 
   # Note(simon): We can always build CUDA 11.8 wheel to ensure the build is working.
   # However, this block can be uncommented to save some compute hours.
-  # - block: "Build CUDA 11.8 wheel"
-  #   key: block-build-cu118-wheel
+  - block: "Build CUDA 11.8 wheel"
+    key: block-build-cu118-wheel
 
   - label: "Build wheel - CUDA 11.8"
     # depends_on: block-build-cu118-wheel
