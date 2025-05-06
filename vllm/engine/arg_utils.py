@@ -858,19 +858,6 @@ class EngineArgs:
             help='The configurations for event publishing.')
 
         parser.add_argument(
-            '--worker-cls',
-            type=str,
-            default="auto",
-            help='The worker class to use for distributed execution.')
-        parser.add_argument(
-            '--worker-extension-cls',
-            type=str,
-            default="",
-            help='The worker extension class on top of the worker cls, '
-            'it is useful if you just want to add new functions to the worker '
-            'class without changing the existing functions.')
-
-        parser.add_argument(
             '--split-qkv',
             action='store_true',
             default=EngineArgs.split_qkv,
