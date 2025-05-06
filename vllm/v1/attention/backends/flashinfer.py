@@ -409,7 +409,7 @@ class FlashInferMetadataBuilder:
         device = self.runner.device
         qo_indptr = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
-        block_table_tensor = (self.block_table.get_device_tensor()[:num_reqs])
+        block_table_tensor = self.block_table.get_device_tensor()[:num_reqs]
         slot_mapping = self.block_table.slot_mapping_cpu[:num_actual_tokens].to(
             self.runner.device, non_blocking=True).long()
 
