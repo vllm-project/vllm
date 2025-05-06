@@ -273,7 +273,7 @@ def init_vllm_registered_model(
     Helper function to initialize an inner model registered to vLLM,
     based on the arguments passed to the outer vLLM model.
     """
-    from vllm.model_executor.model_loader.loader import _initialize_model
+    from vllm.model_executor.model_loader.utils import _initialize_model
 
     if hf_config is None and architectures is not None:
         # So that the architectures field is overridden
