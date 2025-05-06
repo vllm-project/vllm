@@ -227,6 +227,7 @@ class MistralTokenizer(TokenizerBase):
         else:
             assert Path(
                 path_or_repo_id).is_file(), f"Invalid path: {path_or_repo_id}"
+            tokenizer_file = str(Path(path_or_repo_id))
 
         from mistral_common.tokens.tokenizers.mistral import (
             MistralTokenizer as PublicMistralTokenizer)
@@ -257,7 +258,7 @@ class MistralTokenizer(TokenizerBase):
     # the following attributes are set to fit vLLM's design and are used
     # by the guided structured output backends.
     @property
-    def all_special_tokens_extended(self) -> List[str]:
+    def all_special_tokens_extended(self) -> list[str]:
         from mistral_common.tokens.tokenizers.base import SpecialTokens
 
         # tekken defines its own extended special tokens list
@@ -271,11 +272,11 @@ class MistralTokenizer(TokenizerBase):
         ]
 
     @property
-    def all_special_tokens(self) -> List[str]:
+    def all_special_tokens(self) -> list[str]:
         return self.all_special_tokens_extended
 
     @property
-    def all_special_ids(self) -> List[int]:
+    def all_special_ids(self) -> list[int]:
         return [
             self.all_special_tokens.index(t) for t in self.all_special_tokens
         ]
@@ -335,12 +336,12 @@ class MistralTokenizer(TokenizerBase):
             input_ids = self.encode_one(text, truncation, max_length)
         return Encoding(input_ids=input_ids)
 
-    def get_vocab(self) -> Dict[str, int]:
+    def get_vocab(self) -> dict[str, int]:
         # NB: the dictionary form of the vocabulary collapses token ids that map
         # to the same string but have different bytes
         return self._vocab_dict
 
-    def get_added_vocab(self) -> Dict[str, int]:
+    def get_added_vocab(self) -> dict[str, int]:
         # Mistral tokenizers have no added vocabulary
         return {}
 
@@ -359,6 +360,8 @@ class MistralTokenizer(TokenizerBase):
 
     def encode(self,
                text: str,
+               truncation: Optional[bool] = None,
+               max_length: Optional[int] = None,
                add_special_tokens: Optional[bool] = None) -> List[int]:
         # `encode` should only be used for prompt completion
         # it should never be used for chat_completion.

@@ -10,12 +10,12 @@ from typing import Any, TypedDict
 
 import ray
 import torch
-import triton
 from ray.experimental.tqdm_ray import tqdm
 from transformers import AutoConfig
 
 from vllm.model_executor.layers.fused_moe.fused_moe import *
 from vllm.platforms import current_platform
+from vllm.triton_utils import triton
 from vllm.utils import FlexibleArgumentParser
 
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -115,8 +115,8 @@ def benchmark_config(config: BenchmarkConfig,
         from vllm.model_executor.layers.fused_moe import override_config
         with override_config(config):
             if use_deep_gemm:
-                topk_weights, topk_ids = fused_topk(x, input_gating, topk,
-                                                    False)
+                topk_weights, topk_ids, token_expert_indices = fused_topk(
+                    x, input_gating, topk, False)
                 return fused_experts(
                     x,
                     w1,
@@ -442,8 +442,14 @@ class BenchmarkWorker:
                                                    hidden_size, search_space,
                                                    is_fp16, topk)
 
-        with torch.cuda.device(self.device_id) if current_platform.is_rocm(
-        ) else nullcontext():
+        need_device_guard = False
+        if current_platform.is_rocm():
+            visible_device = os.environ.get("ROCR_VISIBLE_DEVICES", None)
+            if visible_device != f"{self.device_id}":
+                need_device_guard = True
+
+        with torch.cuda.device(
+                self.device_id) if need_device_guard else nullcontext():
             for config in tqdm(search_space):
                 try:
                     kernel_time = benchmark_config(
@@ -527,7 +533,7 @@ def get_weight_block_size_safety(config, default_value=None):
 
 def main(args: argparse.Namespace):
     print(args)
-    block_quant_shape = None
+
     config = AutoConfig.from_pretrained(
         args.model, trust_remote_code=args.trust_remote_code)
     if config.architectures[0] == "DbrxForCausalLM":
@@ -546,16 +552,16 @@ def main(args: argparse.Namespace):
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
         shard_intermediate_size = 2 * intermediate_size // args.tp_size
-        block_quant_shape = get_weight_block_size_safety(config)
-    elif config.architectures[0] == "Qwen2MoeForCausalLM":
+    elif config.architectures[0] in [
+            "Qwen2MoeForCausalLM", "Qwen3MoeForCausalLM"
+    ]:
         E = config.num_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
         shard_intermediate_size = 2 * intermediate_size // args.tp_size
     else:
-        if not hasattr(config, "hidden_size"):
-            # Support for llama4
-            config = config.text_config
+        # Support for llama4
+        config = config.get_text_config()
         # Default: Mixtral.
         E = config.num_local_experts
         topk = config.num_experts_per_tok
@@ -566,6 +572,7 @@ def main(args: argparse.Namespace):
     dtype = torch.float16 if current_platform.is_rocm() else config.torch_dtype
     use_fp8_w8a8 = args.dtype == "fp8_w8a8"
     use_int8_w8a16 = args.dtype == "int8_w8a16"
+    block_quant_shape = get_weight_block_size_safety(config)
 
     if args.batch_size is None:
         batch_sizes = [
@@ -576,6 +583,15 @@ def main(args: argparse.Namespace):
         batch_sizes = [args.batch_size]
 
     use_deep_gemm = bool(args.use_deep_gemm)
+
+    if current_platform.is_rocm() and "HIP_VISIBLE_DEVICES" in os.environ:
+        # Ray will set ROCR_VISIBLE_DEVICES for device visibility
+        logger.warning(
+            "Ray uses ROCR_VISIBLE_DEVICES to control device accessibility."
+            "Replacing HIP_VISIBLE_DEVICES with ROCR_VISIBLE_DEVICES.")
+        val = os.environ["HIP_VISIBLE_DEVICES"]
+        os.environ["ROCR_VISIBLE_DEVICES"] = val
+        del os.environ["HIP_VISIBLE_DEVICES"]
 
     ray.init()
     num_gpus = int(ray.available_resources()["GPU"])

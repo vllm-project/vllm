@@ -221,6 +221,16 @@ output = llm.encode("Hello, my name is")
 print(output)
 ```
 
+(feature-status-legend)=
+
+## Feature Status Legend
+
+- ✅︎ indicates that the feature is supported for the model.
+
+- 🚧 indicates that the feature is planned but not yet supported for the model.
+
+- ⚠️ indicates that the feature is available but may have known issues or limitations.
+
 (supported-text-models)=
 
 ## List of Text-only Language Models
@@ -229,7 +239,9 @@ print(output)
 
 See [this page](#generative-models) for more information on how to use generative models.
 
-#### Text Generation (`--task generate`)
+#### Text Generation
+
+Specified using `--task generate`.
 
 :::{list-table}
 :widths: 25 25 50 5 5
@@ -322,7 +334,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
 - * `GemmaForCausalLM`
   * Gemma
-  * `google/gemma-2b`, `google/gemma-7b`, etc.
+  * `google/gemma-2b`, `google/gemma-1.1-2b-it`, etc.
   * ✅︎
   * ✅︎
 - * `Gemma2ForCausalLM`
@@ -373,6 +385,11 @@ See [this page](#generative-models) for more information on how to use generativ
 - * `GraniteMoeForCausalLM`
   * Granite 3.0 MoE, PowerMoE
   * `ibm-granite/granite-3.0-1b-a400m-base`, `ibm-granite/granite-3.0-3b-a800m-instruct`, `ibm/PowerMoE-3b`, etc.
+  * ✅︎
+  * ✅︎
+- * `GraniteMoeHybridForCausalLM`
+  * Granite 4.0 MoE Hybrid
+  * `ibm-granite/granite-4.0-tiny-preview`, etc.
   * ✅︎
   * ✅︎
 - * `GraniteMoeSharedForCausalLM`
@@ -532,8 +549,8 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
 - * `Qwen3MoeForCausalLM`
   * Qwen3MoE
-  * `Qwen/Qwen3-MoE-15B-A2B`, etc.
-  * ✅︎
+  * `Qwen/Qwen3-30B-A3B`, etc.
+  *
   * ✅︎
 - * `StableLmForCausalLM`
   * StableLM
@@ -590,7 +607,9 @@ Since some model architectures support both generative and pooling tasks,
 you should explicitly specify the task type to ensure that the model is used in pooling mode instead of generative mode.
 :::
 
-#### Text Embedding (`--task embed`)
+#### Text Embedding
+
+Specified using `--task embed`.
 
 :::{list-table}
 :widths: 25 25 50 5 5
@@ -655,7 +674,9 @@ If your model is not in the above list, we will try to automatically convert the
 {func}`~vllm.model_executor.models.adapters.as_embedding_model`. By default, the embeddings
 of the whole prompt are extracted from the normalized hidden state corresponding to the last token.
 
-#### Reward Modeling (`--task reward`)
+#### Reward Modeling
+
+Specified using `--task reward`.
 
 :::{list-table}
 :widths: 25 25 50 5 5
@@ -696,7 +717,9 @@ For process-supervised reward models such as `peiyi9979/math-shepherd-mistral-7b
 e.g.: `--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 123, "returned_token_ids": [456, 789]}'`.
 :::
 
-#### Classification (`--task classify`)
+#### Classification
+
+Specified using `--task classify`.
 
 :::{list-table}
 :widths: 25 25 50 5 5
@@ -722,7 +745,9 @@ e.g.: `--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 123, "r
 If your model is not in the above list, we will try to automatically convert the model using
 {func}`~vllm.model_executor.models.adapters.as_classification_model`. By default, the class probabilities are extracted from the softmaxed hidden state corresponding to the last token.
 
-#### Sentence Pair Scoring (`--task score`)
+#### Sentence Pair Scoring
+
+Specified using `--task score`.
 
 :::{list-table}
 :widths: 25 25 50 5 5
@@ -783,6 +808,8 @@ or `--limit-mm-per-prompt` (online serving). For example, to enable passing up t
 Offline inference:
 
 ```python
+from vllm import LLM
+
 llm = LLM(
     model="Qwen/Qwen2-VL-7B-Instruct",
     limit_mm_per_prompt={"image": 4},
@@ -807,7 +834,9 @@ vLLM currently only supports adding LoRA to the language backbone of multimodal 
 
 See [this page](#generative-models) for more information on how to use generative models.
 
-#### Text Generation (`--task generate`)
+#### Text Generation
+
+Specified using `--task generate`.
 
 :::{list-table}
 :widths: 25 25 15 20 5 5 5
@@ -880,6 +909,13 @@ See [this page](#generative-models) for more information on how to use generativ
   * GLM-4V
   * T + I
   * `THUDM/glm-4v-9b`, `THUDM/cogagent-9b-20241220` etc.
+  * ✅︎
+  * ✅︎
+  * ✅︎
+- * `GraniteSpeechForConditionalGeneration`
+  * Granite Speech
+  * T + A
+  * `ibm-granite/granite-speech-3.3-8b`
   * ✅︎
   * ✅︎
   * ✅︎
@@ -960,11 +996,18 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
   * ✅︎
   * ✅︎
+- * `MiniMaxVL01ForConditionalGeneration`
+  * MiniMax-VL
+  * T + I<sup>E+</sup>
+  * `MiniMaxAI/MiniMax-VL-01`, etc.
+  *
+  * ✅︎
+  * ✅︎
 - * `Mistral3ForConditionalGeneration`
   * Mistral3
   * T + I<sup>+</sup>
   * `mistralai/Mistral-Small-3.1-24B-Instruct-2503`, etc.
-  *
+  * ✅︎
   * ✅︎
   * ✅︎
 - * `MllamaForConditionalGeneration`
@@ -987,6 +1030,13 @@ See [this page](#generative-models) for more information on how to use generativ
   * `nvidia/NVLM-D-72B`, etc.
   *
   * ✅︎
+  * ✅︎
+- * `Ovis2ForConditionalGeneration`<sup>^</sup>
+  * Ovis2
+  * T + I<sup>+</sup>
+  * `AIDC-AI/Ovis2-1B`, `AIDC-AI/Ovis2-2B`, etc.
+  *
+  *
   * ✅︎
 - * `PaliGemmaForConditionalGeneration`
   * PaliGemma, PaliGemma 2
@@ -1080,11 +1130,6 @@ See [this page](#generative-models) for more information on how to use generativ
 <sup>E</sup> Pre-computed embeddings can be inputted for this modality.  
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 
-:::{important}
-Pan-and-scan image pre-processing is currently supported on V0 (but not V1).
-You can enable it by passing `--mm-processor-kwargs '{"do_pan_and_scan": true}'`.
-:::
-
 :::{warning}
 Both V0 and V1 support `Gemma3ForConditionalGeneration` for text-only inputs.
 However, there are differences in how they handle text + image inputs:
@@ -1104,7 +1149,7 @@ This limitation exists because the model's mixed attention pattern (bidirectiona
 :::
 
 :::{note}
-`h2oai/h2ovl-mississippi-2b` will be available in V1 once we support backends other than FlashAttention.
+`h2oai/h2ovl-mississippi-2b` will be available in V1 once we support head size 80.
 :::
 
 :::{note}
@@ -1112,7 +1157,33 @@ To use `TIGER-Lab/Mantis-8B-siglip-llama3`, you have to pass `--hf_overrides '{"
 :::
 
 :::{warning}
-For improved output quality of `AllenAI/Molmo-7B-D-0924` (especially in object localization tasks), we recommend using the pinned dependency versions listed in <gh-file:requirements/molmo.txt> (including `vllm==0.7.0`). These versions match the environment that achieved consistent results on both A10 and L40 GPUs.
+The output quality of `AllenAI/Molmo-7B-D-0924` (especially in object localization tasks) has deteriorated in recent updates.
+
+For the best results, we recommend using the following dependency versions (tested on A10 and L40):
+
+```text
+# Core vLLM-compatible dependencies with Molmo accuracy setup (tested on L40)
+torch==2.5.1
+torchvision==0.20.1
+transformers==4.48.1
+tokenizers==0.21.0
+tiktoken==0.7.0
+vllm==0.7.0
+
+# Optional but recommended for improved performance and stability
+triton==3.1.0
+xformers==0.0.28.post3
+uvloop==0.21.0
+protobuf==5.29.3
+openai==1.60.2
+opencv-python-headless==4.11.0.86
+pillow==10.4.0
+
+# Installed FlashAttention (for float16 only)
+flash-attn>=2.5.6  # Not used in float32, but should be documented
+```
+
+**Note:** Make sure you understand the security implications of using outdated packages.
 :::
 
 :::{note}
@@ -1141,7 +1212,9 @@ Since some model architectures support both generative and pooling tasks,
 you should explicitly specify the task type to ensure that the model is used in pooling mode instead of generative mode.
 :::
 
-#### Text Embedding (`--task embed`)
+#### Text Embedding
+
+Specified using `--task embed`.
 
 Any text generation model can be converted into an embedding model by passing `--task embed`.
 
@@ -1181,7 +1254,9 @@ The following table lists those that are tested in vLLM.
   * ✅︎
 :::
 
-#### Transcription (`--task transcription`)
+#### Transcription
+
+Specified using `--task transcription`.
 
 Speech2Text models trained specifically for Automatic Speech Recognition.
 
