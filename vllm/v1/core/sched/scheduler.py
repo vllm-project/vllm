@@ -614,7 +614,6 @@ class Scheduler(SchedulerInterface):
         new_running: list[Request] = []
         outputs: list[EngineCoreOutput] = []
         spec_decoding_stats: Optional[SpecDecodingStats] = None
-        send_kv_no_op: list[str] = []
 
         # NOTE(woosuk): As len(self.running) can be up to 1K or more, the below
         # loop can be a performance bottleneck. We should do our best to avoid
@@ -706,36 +705,6 @@ class Scheduler(SchedulerInterface):
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             if new_token_ids:
-                # Stop request after the first token if doing a remote_decode.
-                # NOTE(rob): req is not freed (or preempted) in the EngineCore
-                # until the xfer is done to ensure we do not free the KV blocks.
-                kv_transfer_params = None
-                # TODO(rob): edge case where we get a stop for stop_strings
-                # inside AsyncLLM.
-                if request.do_remote_decode and not stopped:
-                    request.status = RequestStatus.FINISHED_REMOTE_DECODE
-                    self._free_request(request, skip_free_blocks=True)
-                    stopped = True
-
-                    remote_blocks = [
-                        block.block_id for block in
-                        self.kv_cache_manager.req_to_blocks[request.request_id]
-                        if block._block_hash is not None
-                    ]
-                    # If prompt < block_size, then there will be no KV xfer.
-                    # Free these requests so we don't have a mem leak.
-                    if len(remote_blocks) == 0:
-                        send_kv_no_op.append(request.request_id)
-
-                    engine_id = self.vllm_config.kv_transfer_config.engine_id
-                    kv_transfer_params = KVTransferParams(
-                        do_remote_prefill=True,
-                        remote_block_ids=remote_blocks,
-                        remote_engine_id=engine_id,
-                        remote_host=envs.VLLM_NIXL_SIDE_CHANNEL_HOST,
-                        remote_port=envs.VLLM_NIXL_SIDE_CHANNEL_PORT,
-                    )
-
                 # Add EngineCoreOutput for this Request.
                 outputs.append(
                     EngineCoreOutput(
