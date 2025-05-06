@@ -304,7 +304,7 @@ class EagleProposer:
             get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
             target_attn_layer_names)
         assert len(draft_attn_layer_names) == 1
-        self.attn_layer_name = iter(draft_attn_layer_names).__next__()
+        self.attn_layer_name = next(iter(draft_attn_layer_names))
         loaded_weights = self.model.load_weights(
             loader.get_all_weights(draft_model_config, self.model))
         if self.vllm_config.speculative_config.method == "eagle3":
