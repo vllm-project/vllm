@@ -97,6 +97,9 @@ void batched_rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
 
 void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
 
+void silu_and_mul_quant(torch::Tensor& out, torch::Tensor& input,
+                        torch::Tensor& scale);
+
 void mul_and_silu(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_and_mul(torch::Tensor& out, torch::Tensor& input);
@@ -127,6 +130,12 @@ void advance_step_flashinfer(
     torch::Tensor& slot_mapping, torch::Tensor& block_tables,
     torch::Tensor& paged_kv_indices, torch::Tensor& paged_kv_indptr,
     torch::Tensor& paged_kv_last_page_len, torch::Tensor& block_table_bounds);
+
+void cutlass_mla_decode(torch::Tensor const& out, torch::Tensor const& q_nope,
+                        torch::Tensor const& q_pe,
+                        torch::Tensor const& kv_c_and_k_pe_cache,
+                        torch::Tensor const& seq_lens,
+                        torch::Tensor const& page_table, double scale);
 
 torch::Tensor get_cuda_view_from_cpu_tensor(torch::Tensor& cpu_tensor);
 
