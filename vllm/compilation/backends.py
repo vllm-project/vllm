@@ -241,6 +241,8 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
         self.graph_pool = graph_pool
         self.vllm_config = vllm_config
         self.vllm_backend = vllm_backend
+        # When True, it annoyingly dumps the torch.fx.Graph on errors.
+        self.extra_traceback = False
 
     def run(self, *args):
         fake_args = [
