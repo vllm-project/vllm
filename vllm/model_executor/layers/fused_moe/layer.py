@@ -262,7 +262,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         if isinstance(dispatch_combine,
                       (BatchedDispatchCombine, PplxDispatchCombine)):
             logger.debug("BatchedTritonExperts %s", self.moe)
-            experts = BatchedTritonExperts(
+            experts = BatchedExperts(
                 max_num_tokens=MOE_DP_CHUNK_SIZE,
                 use_fp8_w8a8=False,
                 use_int8_w8a8=False,
@@ -695,8 +695,6 @@ class FusedMoE(torch.nn.Module):
                 rank,
                 moe.in_dtype,
             )
-        elif False:
-            return None
         elif self.dp_size > 1:
             logger.debug("using batched dispatch")
             dp_size = moe.ep_size // moe.dp_size  # dp_size actually means TP.
@@ -707,6 +705,8 @@ class FusedMoE(torch.nn.Module):
                 dp_size=dp_size,
                 rank=rank,
             )
+        elif False:
+            return None
         else:
             logger.debug("using standard dispatch")
             return StandardDispatchCombine(

@@ -491,6 +491,7 @@ class BatchedDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        assert a1.dim() == 2
         assert topk_ids.dim() == 2
         assert topk_ids.shape[0] == a1.shape[0]
 
@@ -504,11 +505,13 @@ class BatchedDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         num_tokens, hidden_dim = a1.shape
         topk = topk_ids.shape[1]
 
-        tokens_per_expert = torch.bincount(topk_ids.view(-1),
-                                           minlength=num_experts)
-
         if self.max_num_tokens is None:
+            tokens_per_expert = torch.bincount(topk_ids.view(-1),
+                                               minlength=num_experts)
             self.max_num_tokens = int(tokens_per_expert.max().item())
+        else:
+            tokens_per_expert = torch.zeros(num_experts, dtype=torch.int,
+                                            device=a1.device)
 
         rem_experts = num_experts % self.world_size
         num_local_experts = ((num_experts // self.world_size) +
@@ -518,23 +521,27 @@ class BatchedDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
                            dtype=a1.dtype,
                            device=a1.device)
 
-        token_counts = torch.zeros(num_local_experts,
-                                   dtype=torch.int,
-                                   device=a1.device)
-
         first_expert = (((num_experts // self.world_size) * self.rank) +
                         rem_experts - self.rank)
         last_expert = first_expert + num_local_experts
-        #expert_id_range = range(first_expert, last_expert)
 
-        for token in range(num_tokens):
-            for j in range(topk):
-                expert_id = topk_ids[token, j]
-                if expert_id >= first_expert and expert_id < last_expert:
-                    rel_index = expert_id - first_expert
-                    idx = token_counts[rel_index]
-                    b_a1[rel_index, idx:idx + 1, :] = a1[token, :]
-                    token_counts[rel_index] = token_counts[rel_index] + 1
+        # rhs = torch.empty((self.max_num_tokens, hidden_dim),
+        #                   dtype=a1.dtype, device=a1.device)
+
+        # for expert_id in range(first_expert, last_expert):
+        #     topks = torch.any(topk_ids == expert_id, dim=1).flatten()
+        #     rows = torch.count_nonzero(topks.flatten())
+        #     #rhs[:rows] = a1[:topks.numel()][topks]
+        #     topks_idx = topks.nonzero()
+        #     torch.index_select(a1, dim=0, index=topks_idx.flatten(), out=rhs[:rows])
+        #     b_a1[expert_id - first_expert, :rows, :] = rhs[:rows]
+        #     tokens_per_expert[expert_id - first_expert] = rows
+
+        for expert_id in range(first_expert, last_expert):
+            topks = torch.any(topk_ids == expert_id, dim=1).flatten()
+            rows = torch.count_nonzero(topks.flatten())
+            b_a1[expert_id - first_expert, :rows, :] = a1[:topks.numel()][topks]
+            tokens_per_expert[expert_id - first_expert] = rows
 
         return b_a1, a1_scale, tokens_per_expert
 
@@ -548,31 +555,32 @@ class BatchedDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
     ) -> None:
         num_tokens = topk_ids.shape[0]
         num_local_experts = fused_expert_output.shape[0]
-        num_experts = num_local_experts * self.world_size # NOT QUITE RIGHT
+        topk = topk_weights.shape[1]
         K = fused_expert_output.shape[-1]
         assert output.shape[0] == num_tokens and output.shape[1] == K
-        expert_counts = torch.zeros(
-            num_experts,
-            dtype=torch.int,
-            device=fused_expert_output.device)
 
         output.fill_(0)
 
         first_expert = num_local_experts * self.rank # NOT QUITE RIGHT
         last_expert = first_expert + num_local_experts
 
-        for token in range(num_tokens):
-            expert_ids = topk_ids[token]
-            for i in range(expert_ids.numel()):
-                expert_id = expert_ids[i]
-                if expert_id >= first_expert and expert_id < last_expert:
-                    assert expert_id < num_experts
-                    idx = expert_counts[expert_id]
-                    accum = fused_expert_output[expert_id - first_expert, idx:idx + 1, :]
-                    if not apply_router_weight_on_input:
-                        accum = accum * topk_weights[token, i]
-                    output[token, :] = output[token, :] + accum
-                    expert_counts[expert_id] = expert_counts[expert_id] + 1
+        # for expert_id in range(first_expert, last_expert):
+        #     topkws = topk_ids == expert_id
+        #     topks = torch.any(topkws, dim=1).flatten()
+        #     outrhs = output[topks]
+        #     rhs = fused_expert_output[expert_id - first_expert, :outrhs.shape[0], :]
+        #     if not apply_router_weight_on_input:
+        #         rhs.mul_(topk_weights[topkws].view(rhs.shape[0], 1))
+        #     output[topks] = outrhs + rhs
+
+        for expert_id in range(first_expert, last_expert):
+            topkws = topk_ids == expert_id
+            topks = torch.any(topkws, dim=1).flatten()
+            rows = torch.count_nonzero(topks)
+            rhs = fused_expert_output[expert_id - first_expert, :rows, :]
+            if not apply_router_weight_on_input:
+                rhs.mul_(topk_weights[topkws].view(rhs.shape[0], 1))
+            output[topks] = output[topks] + rhs
 
 
 class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
