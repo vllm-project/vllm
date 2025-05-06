@@ -590,7 +590,16 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
-@router.post("/v1/embeddings", dependencies=[Depends(validate_json_request)])
+@router.post("/v1/embeddings",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 status.HTTP_400_BAD_REQUEST: {
+                     "model": ErrorResponse
+                 },
+                 status.HTTP_500_INTERNAL_SERVER_ERROR: {
+                     "model": ErrorResponse
+                 },
+             })
 @with_cancellation
 @load_aware_call
 async def create_embedding(request: EmbeddingRequest, raw_request: Request):
@@ -637,7 +646,16 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
     assert_never(generator)
 
 
-@router.post("/pooling", dependencies=[Depends(validate_json_request)])
+@router.post("/pooling",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 status.HTTP_400_BAD_REQUEST: {
+                     "model": ErrorResponse
+                 },
+                 status.HTTP_500_INTERNAL_SERVER_ERROR: {
+                     "model": ErrorResponse
+                 },
+             })
 @with_cancellation
 @load_aware_call
 async def create_pooling(request: PoolingRequest, raw_request: Request):
@@ -656,7 +674,16 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
     assert_never(generator)
 
 
-@router.post("/score", dependencies=[Depends(validate_json_request)])
+@router.post("/score",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 status.HTTP_400_BAD_REQUEST: {
+                     "model": ErrorResponse
+                 },
+                 status.HTTP_500_INTERNAL_SERVER_ERROR: {
+                     "model": ErrorResponse
+                 },
+             })
 @with_cancellation
 @load_aware_call
 async def create_score(request: ScoreRequest, raw_request: Request):
@@ -675,7 +702,16 @@ async def create_score(request: ScoreRequest, raw_request: Request):
     assert_never(generator)
 
 
-@router.post("/v1/score", dependencies=[Depends(validate_json_request)])
+@router.post("/v1/score",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 status.HTTP_400_BAD_REQUEST: {
+                     "model": ErrorResponse
+                 },
+                 status.HTTP_500_INTERNAL_SERVER_ERROR: {
+                     "model": ErrorResponse
+                 },
+             })
 @with_cancellation
 @load_aware_call
 async def create_score_v1(request: ScoreRequest, raw_request: Request):
@@ -725,7 +761,16 @@ async def create_transcriptions(
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
-@router.post("/rerank", dependencies=[Depends(validate_json_request)])
+@router.post("/rerank",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 status.HTTP_400_BAD_REQUEST: {
+                     "model": ErrorResponse
+                 },
+                 status.HTTP_500_INTERNAL_SERVER_ERROR: {
+                     "model": ErrorResponse
+                 },
+             })
 @with_cancellation
 @load_aware_call
 async def do_rerank(request: RerankRequest, raw_request: Request):
@@ -743,7 +788,16 @@ async def do_rerank(request: RerankRequest, raw_request: Request):
     assert_never(generator)
 
 
-@router.post("/v1/rerank", dependencies=[Depends(validate_json_request)])
+@router.post("/v1/rerank",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 status.HTTP_400_BAD_REQUEST: {
+                     "model": ErrorResponse
+                 },
+                 status.HTTP_500_INTERNAL_SERVER_ERROR: {
+                     "model": ErrorResponse
+                 },
+             })
 @with_cancellation
 async def do_rerank_v1(request: RerankRequest, raw_request: Request):
     logger.warning_once(
@@ -754,7 +808,16 @@ async def do_rerank_v1(request: RerankRequest, raw_request: Request):
     return await do_rerank(request, raw_request)
 
 
-@router.post("/v2/rerank", dependencies=[Depends(validate_json_request)])
+@router.post("/v2/rerank",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 status.HTTP_400_BAD_REQUEST: {
+                     "model": ErrorResponse
+                 },
+                 status.HTTP_500_INTERNAL_SERVER_ERROR: {
+                     "model": ErrorResponse
+                 },
+             })
 @with_cancellation
 async def do_rerank_v2(request: RerankRequest, raw_request: Request):
     return await do_rerank(request, raw_request)
