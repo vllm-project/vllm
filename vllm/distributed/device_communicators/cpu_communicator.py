@@ -6,13 +6,10 @@ from typing import List, Optional
 import torch
 from torch.distributed import ProcessGroup
 
-from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 
 from .base_device_communicator import DeviceCommunicatorBase
-
-logger = init_logger(__name__)
 
 
 class CpuCommunicator(DeviceCommunicatorBase):
@@ -25,13 +22,9 @@ class CpuCommunicator(DeviceCommunicatorBase):
         super().__init__(cpu_group, device, device_group, unique_name)
         self.dist_module = torch.distributed
 
-        if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
-            try:
-                self.dist_module = _CPUSHMDistributed(self)
-            except AttributeError:
-                logger.warning_once(
-                    "CPUSHM is unavailable for non-avx512 CPUs yet. "
-                    "Falling back to torch native CPU communicator.")
+        if (current_platform.get_cpu_architecture() == CpuArchEnum.X86) \
+            and hasattr(torch.ops._C, "init_shm_manager"):
+            self.dist_module = _CPUSHMDistributed(self)
 
     def all_reduce(self, input_):
         self.dist_module.all_reduce(input_, group=self.device_group)
