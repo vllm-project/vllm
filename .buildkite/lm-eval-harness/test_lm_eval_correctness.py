@@ -1,37 +1,60 @@
 # SPDX-License-Identifier: Apache-2.0
-"""
-LM eval harness on model to compare vs HF baseline computed offline.
-Configs are found in configs/$MODEL.yaml
-
-* export LM_EVAL_TEST_DATA_FILE=configs/Meta-Llama-3-70B-Instruct.yaml
-* export LM_EVAL_TP_SIZE=4 
-* pytest -s test_lm_eval_correctness.py
-"""
-
-import os
 from pathlib import Path
 
 import lm_eval
-import numpy
+import numpy as np
 import pytest
 import yaml
 
 RTOL = 0.08
-TEST_DATA_FILE = os.environ.get(
-    "LM_EVAL_TEST_DATA_FILE",
-    ".buildkite/lm-eval-harness/configs/Meta-Llama-3-8B-Instruct.yaml")
-
-TP_SIZE = os.environ.get("LM_EVAL_TP_SIZE", 1)
 
 
-def launch_lm_eval(eval_config):
+def pytest_addoption(parser):
+    parser.addoption(
+        "--config-list-file",
+        action="store",
+        help="Path to the file listing model config YAMLs (one per line)")
+    parser.addoption("--tp-size",
+                     action="store",
+                     default="1",
+                     help="Tensor parallel size to use for evaluation")
+
+
+@pytest.fixture(scope="session")
+def config_dir():
+    # Directory containing this script
+    return Path(__file__).parent.resolve()
+
+
+@pytest.fixture(scope="session")
+def config_list_file(pytestconfig, config_dir):
+    # Relative to the script's directory
+    rel_path = pytestconfig.getoption("--config-list-file")
+    return config_dir / rel_path
+
+
+@pytest.fixture(scope="session")
+def tp_size(pytestconfig):
+    return pytestconfig.getoption("--tp-size")
+
+
+def get_model_configs(config_list_file):
+    """Read the list of model config YAML filenames."""
+    with open(config_list_file, encoding="utf-8") as f:
+        configs = [
+            line.strip() for line in f
+            if line.strip() and not line.startswith("#")
+        ]
+    return configs
+
+
+def launch_lm_eval(eval_config, tp_size):
     trust_remote_code = eval_config.get('trust_remote_code', False)
-
     model_args = f"pretrained={eval_config['model_name']}," \
-                 f"tensor_parallel_size={TP_SIZE}," \
+                 f"tensor_parallel_size={tp_size}," \
+                 f"enforce_eager=true," \
                  f"add_bos_token=true," \
                  f"trust_remote_code={trust_remote_code}"
-
     results = lm_eval.simple_evaluate(
         model="vllm",
         model_args=model_args,
@@ -39,22 +62,26 @@ def launch_lm_eval(eval_config):
         num_fewshot=eval_config["num_fewshot"],
         limit=eval_config["limit"],
         batch_size="auto")
-
     return results
 
 
-def test_lm_eval_correctness():
-    eval_config = yaml.safe_load(
-        Path(TEST_DATA_FILE).read_text(encoding="utf-8"))
+def pytest_generate_tests(metafunc):
+    if "config_filename" in metafunc.fixturenames:
+        config_list_file = metafunc.config._store.get("config_list_file")
+        if config_list_file is None:
+            # fallback to fixture
+            config_list_file = metafunc.config._conftest.getfixturevalue(
+                "config_list_file")
+        configs = get_model_configs(config_list_file)
+        metafunc.parametrize("config_filename", configs)
 
-    if eval_config[
-            "model_name"] == "nm-testing/Meta-Llama-3-70B-Instruct-FBGEMM-nonuniform":  #noqa: E501
-        pytest.skip("FBGEMM is currently failing on main.")
 
-    # Launch eval requests.
-    results = launch_lm_eval(eval_config)
+def test_lm_eval_correctness_param(config_filename, config_dir, tp_size):
+    config_path = config_dir / config_filename
+    eval_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
 
-    # Confirm scores match ground truth.
+    results = launch_lm_eval(eval_config, tp_size)
+
     success = True
     for task in eval_config["tasks"]:
         for metric in task["metrics"]:
@@ -62,8 +89,7 @@ def test_lm_eval_correctness():
             measured_value = results["results"][task["name"]][metric["name"]]
             print(f'{task["name"]} | {metric["name"]}: '
                   f'ground_truth={ground_truth} | measured={measured_value}')
-            success = success and numpy.isclose(
+            success = success and np.isclose(
                 ground_truth, measured_value, rtol=RTOL)
 
-    # Assert at the end, print all scores even on failure for debugging.
     assert success
