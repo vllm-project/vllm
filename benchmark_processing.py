@@ -448,16 +448,16 @@ def save_results(
     if append:
         csv_filepaths = sorted(output_path.glob("processing_*.csv"))
         if csv_filepaths:
-            prev_filepath = csv_filepaths[-1]
-            with prev_filepath.open("r") as f:
+            csv_filepath = csv_filepaths[-1]
+            with csv_filepath.open("r") as f:
                 csv_reader = csv.DictReader(f)
                 prev_rows = list(csv_reader)
         else:
             prev_rows = []
+            csv_filepath = output_path / f"processing_{timestamp}.csv"
     else:
         prev_rows = []
-
-    csv_filepath = output_path / f"processing_{timestamp}.csv"
+        csv_filepath = output_path / f"processing_{timestamp}.csv"
 
     with csv_filepath.open("w") as f:
         csv_writer = csv.DictWriter(
