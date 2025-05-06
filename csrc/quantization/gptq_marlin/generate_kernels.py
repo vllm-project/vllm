@@ -77,7 +77,7 @@ def generate_new_kernels():
             if scalar_type == "vllm::kFE4M3fn" and group_blocks not in [-1, 8]:
                 continue
             # nvfp4 only supports group_size == 16
-            if scalar_type == "vllm::kFE2M1f" ^ group_blocks != 1:
+            if (scalar_type == "vllm::kFE2M1f") ^ (group_blocks != 1):
                 continue
 
             k_blocks = thread_configs[0] // 16

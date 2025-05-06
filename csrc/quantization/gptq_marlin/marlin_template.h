@@ -325,12 +325,13 @@ __global__ void Marlin(
 
   static constexpr auto w_type = vllm::ScalarType::from_id(w_type_id);
   constexpr bool has_zp = w_type == vllm::kU4 || w_type == vllm::kU8;
-  constexpr bool is_int_type = w_type == vllm::kU4 || w_type == vllm::kU8 || \
-    w_type == vllm::kU4B8 || w_type == vllm::kU8B128;
+  constexpr bool is_int_type = w_type == vllm::kU4 || w_type == vllm::kU8 ||
+                               w_type == vllm::kU4B8 || w_type == vllm::kU8B128;
   // see comments of dequant.h for more details
-  constexpr bool dequant_skip_flop = !is_int_type || \
-    has_zp && !is_zp_float && !std::is_same<scalar_t, nv_bfloat16>::value || \
-    has_zp && !is_zp_float && !(w_type == vllm::kU8);
+  constexpr bool dequant_skip_flop =
+      !is_int_type ||
+      has_zp && !is_zp_float && !std::is_same<scalar_t, nv_bfloat16>::value ||
+      has_zp && !is_zp_float && !(w_type == vllm::kU8);
 
   constexpr bool has_act_order = group_blocks == 0;
   constexpr int m_block_size = m_block_size_8 ? 8 : (16 * thread_m_blocks);
@@ -1146,7 +1147,8 @@ __global__ void Marlin(
                          act_frag_s[k2][2][j], act_frag_s[k2][3][j], 0);
         scale4<scalar_t>(frag_b1, act_frag_s[k2][0][j], act_frag_s[k2][1][j],
                          act_frag_s[k2][2][j], act_frag_s[k2][3][j], 1);
-      } else if constexpr (!dequant_skip_flop && has_zp && !is_zp_float && group_blocks == -1) {
+      } else if constexpr (!dequant_skip_flop && has_zp && !is_zp_float &&
+                           group_blocks == -1) {
         int idx = (threadIdx.x / 4) % 2;
         scalar_t2 s2 = Dtype::nums2num2(
             reinterpret_cast<scalar_t*>(&frag_s[j / 2][j % 2 * 2 + 0])[idx],
@@ -1154,7 +1156,7 @@ __global__ void Marlin(
         if (is_new_zp) frag_zp[j] = __hmul2(frag_zp[j], s2);
         scale_and_sub<scalar_t>(frag_b0, s2.x, frag_zp[j].x);
         scale_and_sub<scalar_t>(frag_b1, s2.y, frag_zp[j].y);
-      } else if constexpr(!dequant_skip_flop && has_zp && group_blocks != -1) {
+      } else if constexpr (!dequant_skip_flop && has_zp && group_blocks != -1) {
         if (is_new_zp)
           frag_zp[j] = __hmul2(frag_zp[j],
                                *reinterpret_cast<scalar_t2*>(&frag_s[k2][j]));
@@ -1409,7 +1411,8 @@ __global__ void Marlin(
       // For per-column quantization we finally apply the scale here (only for
       // 4-bit)
       if constexpr (!has_act_order && group_blocks == -1 &&
-                    w_type.size_bits() == 4 && (has_zp && dequant_skip_flop || !has_zp)) {
+                    w_type.size_bits() == 4 &&
+                    (has_zp && dequant_skip_flop || !has_zp)) {
         res = __hmul2(res, s[0]);
       }
 
@@ -1489,7 +1492,7 @@ __global__ void Marlin(
       if constexpr (has_zp && !is_zp_float && group_blocks == -1) {
         if (i == 0) {
           fetch_col_zp_to_shared();
-          if constexpr(!dequant_skip_flop) {
+          if constexpr (!dequant_skip_flop) {
             fetch_col_scale_to_shared();
           }
         }
@@ -1566,7 +1569,8 @@ __global__ void Marlin(
       bool last = slice_idx == slice_count - 1;
       // For per-column scales, we only fetch them here in the final step before
       // write-out
-      if constexpr (!has_act_order && group_blocks == -1 && (has_zp && dequant_skip_flop || !has_zp)) {
+      if constexpr (!has_act_order && group_blocks == -1 &&
+                    (has_zp && dequant_skip_flop || !has_zp)) {
         if (w_type.size_bits() == 8 || (last || use_atomic_add)) {
           if (s_sh_wr_pred) {
             cp_async4(&sh_s[s_sh_wr], &scales_ptr[s_gl_rd]);
@@ -1576,7 +1580,8 @@ __global__ void Marlin(
       }
 
       thread_block_reduce();
-      if constexpr (!has_act_order && group_blocks == -1 && (has_zp && dequant_skip_flop || !has_zp)) {
+      if constexpr (!has_act_order && group_blocks == -1 &&
+                    (has_zp && dequant_skip_flop || !has_zp)) {
         if (w_type.size_bits() == 8 || (last || use_atomic_add)) {
           cp_async_wait<0>();
           __syncthreads();
@@ -1600,7 +1605,8 @@ __global__ void Marlin(
       // that converts the fp32 results to fp16 (so that we avoid possible
       // overflow in fp16)
       if constexpr (!has_act_order && group_blocks == -1 &&
-                    w_type.size_bits() == 8 && (has_zp && dequant_skip_flop || !has_zp)) {
+                    w_type.size_bits() == 8 &&
+                    (has_zp && dequant_skip_flop || !has_zp)) {
         if (threadIdx.x / 32 < thread_n_blocks / 4) {
   #pragma unroll
           for (int i = 0; i < thread_m_blocks; i++) {
