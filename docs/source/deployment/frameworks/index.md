@@ -11,7 +11,7 @@ helm
 lws
 modal
 open-webui
-retrieval-augmented-generation
+retrieval_augmented_generation
 skypilot
 streamlit
 triton
