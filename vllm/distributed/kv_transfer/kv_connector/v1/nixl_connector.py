@@ -331,20 +331,32 @@ class NixlConnectorWorker:
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
 
-        first_layer_name = next(iter(kv_caches))
-        first_kv_cache = kv_caches[first_layer_name]
+        first_layer_name, first_kv_cache = next(iter(kv_caches.items()))
+        kv_elem_size = first_kv_cache.element_size()
 
-        # [2 (k and v), num_blocks, ...]
-        # TODO(tms): num_blocks will be in a different spot for MLA.
-        num_blocks = first_kv_cache.shape[1]
-        kv_elem_size = first_kv_cache[0].element_size()
+        # TODO(tms): Find a more robust way to detect and handle MLA
+        use_mla = len(first_kv_cache.shape) == 3
+        if use_mla:
+            # MLA case.
+            self.num_blocks = first_kv_cache.shape[0]
+            block_rank = 2  # [block_size, latent_dim]
+            block_shape = first_kv_cache.shape[-block_rank:]
+        else:
+            # [2 (k and v), num_blocks, ...]
+            self.num_blocks = first_kv_cache.shape[1]
+            block_rank = 3  # [block_size, kv_heads, head_dim]
+            block_shape = first_kv_cache.shape[-block_rank:]
+
         # TODO(tms): self.block_len needs to be per-layer for sliding window,
         # hybrid attn, etc
-        self.block_len = kv_elem_size * math.prod(first_kv_cache.shape[-3:])
+        self.block_len = kv_elem_size * math.prod(block_shape)
 
-        logger.debug("Per layer kv cache size: %s", first_kv_cache[0].shape)
-        self.num_blocks = num_blocks
-        self.dst_num_blocks[self.engine_id] = num_blocks
+        logger.debug("Registering KV_Caches. use_mla: %s, shape %s", use_mla,
+                     first_kv_cache.shape)
+        logger.debug("num_blocks: %s, block_shape: %s", self.num_blocks,
+                     block_shape)
+        logger.debug("Per layer kv cache size: %s", first_kv_cache.shape)
+        self.dst_num_blocks[self.engine_id] = self.num_blocks
         self.kv_caches = kv_caches
         kv_caches_base_addr = []
         caches_data = []
@@ -355,10 +367,12 @@ class NixlConnectorWorker:
         # are non-contiguous (it's not locally guaranteed that they will be)
         # Disadvantage is that the encoded NixlAgentMetadata is now larger
         # (roughly 8KB vs 5KB).
-        for layer_name in kv_caches:
-            for cache in kv_caches[layer_name]:
+        for cache_or_caches in kv_caches.values():
+            # Normalize to always be a list of caches
+            cache_list = [cache_or_caches] if use_mla else cache_or_caches
+            for cache in cache_list:
                 base_addr = cache.data_ptr()
-                region_len = num_blocks * self.block_len
+                region_len = self.num_blocks * self.block_len
                 caches_data.append((base_addr, region_len, self.rank, ""))
                 kv_caches_base_addr.append(base_addr)
         self.kv_caches_base_addr[self.engine_id] = kv_caches_base_addr
@@ -438,10 +452,10 @@ class NixlConnectorWorker:
         In TP>1 setup, each rank exchanges KVs with its counterpart
         ranks independently. get_finished() runs in a worker creates
         the done_sending and done_recving sets that are sent to the
-        scheduler via ModelRunnerOutput by Rank 0. To avoid race
-        ensure trnxs are done before adding to finished, Ranks 1 to
-        N-1 communicate to Rank 0 once their transaction is done.
-        Rank 0 only returns finished once all ranks are complete.
+        scheduler via ModelRunnerOutput by Rank 0. To ensure trnxs
+        are done before adding to finished, Ranks 1 to N-1 communicate
+        to Rank 0 once their transaction is done + Rank 0 returns
+        finished sets to Scheduler only once all ranks are done.
         """
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
@@ -579,17 +593,8 @@ class NixlConnectorWorker:
         # saturate IB with heterogeneous TP sizes. We should remove the staging
         # blocks until we are ready.
 
-        # NOTE(rob): we could potentially do the rearranging during the load_kv!
-
-        # Note(tms): The remote_block_ids only contain full computed blocks,
-        # while the local_block_ids are all blocks allocated for this request,
-        # so truncate the local_block_ids to account for this.
-        del local_block_ids[len(remote_block_ids):]
+        assert len(local_block_ids) > 0
         assert len(local_block_ids) == len(remote_block_ids)
-
-        # NOTE(rob): this can cause the remote blocks to not be freed?
-        if len(local_block_ids) == 0:
-            return
 
         # Get side handles.
         local_xfer_side_handle = self.src_xfer_side_handle
@@ -621,7 +626,6 @@ class NixlConnectorWorker:
     def _get_block_descs_ids(self, engine_id: str,
                              block_ids: list[int]) -> list[int]:
         """Get the descs ids for a set of block ids."""
-        # TODO(rob): should we precompute this?
 
         # range(1) for MLA, range(2) otherwise.
         region_ids = range(self.num_regions)

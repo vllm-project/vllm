@@ -462,6 +462,7 @@ class DisaggregatedScheduler(Scheduler):
 
         new_running: list[Request] = []
         outputs: list[EngineCoreOutput] = []
+        send_kv_no_op: list[str] = []
 
         # NOTE(woosuk): As len(self.running) can be up to 1K or more, the below
         # loop can be a performance bottleneck. We should do our best to avoid
@@ -548,8 +549,13 @@ class DisaggregatedScheduler(Scheduler):
                     # TODO(rob): do this on a per-Connector basis.
                     remote_blocks = [
                         block.block_id for block in
-                        self.kv_cache_manager.get_computed_blocks(request)[0]
+                        self.kv_cache_manager.req_to_blocks[request.request_id]
+                        if block._block_hash is not None
                     ]
+                    # If prompt < block_size, then there will be no KV xfer.
+                    # Free these requests so we don't have a mem leak.
+                    if len(remote_blocks) == 0:
+                        send_kv_no_op.append(request.request_id)
 
                     engine_id = self.vllm_config.kv_transfer_config.engine_id
                     kv_transfer_params = KVTransferParams(
@@ -581,11 +587,14 @@ class DisaggregatedScheduler(Scheduler):
                 new_running.append(request)
 
         # P/D: update recv and send status from last step.
-        for req_id in (model_runner_output.finished_recving or []):
+        for req_id in (model_runner_output.finished_recving or ()):
             logger.debug("Finished recving KV transfer for request %s", req_id)
             self.finished_recving_kv_req_ids.add(req_id)
-        for req_id in (model_runner_output.finished_sending or []):
+        for req_id in (model_runner_output.finished_sending or ()):
             logger.debug("Finished sending KV transfer for request %s", req_id)
+            self._free_blocks(self.requests[req_id])
+        for req_id in send_kv_no_op:
+            logger.debug("No op sending KV transfer for request %s", req_id)
             self._free_blocks(self.requests[req_id])
 
         # Return the cached request data to the queue so they can
