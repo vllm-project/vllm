@@ -17,7 +17,7 @@ PAD_SHAPES = [(90, 64), (150, 64), (128, 48), (128, 80), (150, 80), (90, 48),
 SEEDS = [42]
 CUDA_DEVICES = ['cuda:0']
 
-FLOAT4_E2M1_MAX = scalar_types.float4_e2m1fn.max()
+FLOAT4_E2M1_MAX = scalar_types.float4_e2m1f.max()
 FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
 
 # E2M1 to float
