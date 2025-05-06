@@ -93,6 +93,9 @@ class MsgpackEncoder:
         if isinstance(obj, np.ndarray) and obj.dtype.kind not in ('O', 'V'):
             return self._encode_ndarray(obj)
 
+        if isinstance(obj, slice):
+            return obj.start, obj.stop, obj.step
+
         if isinstance(obj, MultiModalKwargs):
             mm: MultiModalKwargs = obj
             if not mm.modalities:
@@ -219,6 +222,8 @@ class MsgpackDecoder:
                 return self._decode_ndarray(obj)
             if issubclass(t, torch.Tensor):
                 return self._decode_tensor(obj)
+            if t is slice:
+                return slice(*obj)
             if issubclass(t, MultiModalKwargs):
                 if isinstance(obj, list):
                     return MultiModalKwargs.from_items(
@@ -260,6 +265,12 @@ class MsgpackDecoder:
                 factory_meth_name, *field_args = v["field"]
                 factory_meth = getattr(MultiModalFieldConfig,
                                        factory_meth_name)
+
+                # Special case: decode the union "slices" field of
+                # MultiModalFlatField
+                if factory_meth_name == "flat":
+                    field_args[0] = self._decode_nested_slices(field_args[0])
+
                 v["field"] = factory_meth(None, *field_args).field
                 elems.append(MultiModalFieldElem(**v))
             decoded_items.append(MultiModalKwargsItem.from_elems(elems))
@@ -275,6 +286,11 @@ class MsgpackDecoder:
         if obj and isinstance(obj[0], str):
             return self._decode_tensor(obj)
         return [self._decode_nested_tensors(x) for x in obj]
+
+    def _decode_nested_slices(self, obj: Any) -> Any:
+        if obj and isinstance(obj[0], int):
+            return slice(*obj)
+        return [self._decode_nested_slices(x) for x in obj]
 
     def ext_hook(self, code: int, data: memoryview) -> Any:
         if code == CUSTOM_TYPE_RAW_VIEW:
