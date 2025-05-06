@@ -1016,7 +1016,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> Union[ModelRunnerOutput, torch.Tensor]:
+    ) -> Union[ModelRunnerOutput, IntermediateTensors]:
         # Update KVConnector with the KVConnector metadata forward().
         if has_kv_transfer_group():
             get_kv_transfer_group().bind_connector_metadata(
