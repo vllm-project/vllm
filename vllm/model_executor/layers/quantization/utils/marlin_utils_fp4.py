@@ -14,7 +14,6 @@ from vllm.scalar_type import scalar_types
 
 FP4_MARLIN_SUPPORTED_GROUP_SIZES = [16]
 
-
 logger = init_logger(__name__)
 
 
