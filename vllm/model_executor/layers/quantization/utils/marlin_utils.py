@@ -33,7 +33,7 @@ USE_FP32_REDUCE_DEFAULT = True
 #  without runtime zero-point. We support common cases, i.e. AWQ and GPTQ.
 #  TODO: we may want to move this into the C++ so its closer to the actual impl
 def query_marlin_supported_quant_types(
-    has_zp: bool = None,
+    has_zp: Optional[bool] = None,
     include_fp_type: bool = True,
     device_capability: Optional[int] = None,
 ):
