@@ -869,9 +869,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         k_c_normed = k_c_normed[:num_actual_toks, ...]
         k_pe = k_pe[:num_actual_toks, ...]
 
-        # Restore head dim (for rotary embedding)
-        k_pe = k_pe.unsqueeze(1)
-
         assert attn_metadata.num_decodes is not None and \
             attn_metadata.num_prefills is not None and \
             attn_metadata.num_decode_tokens is not None
@@ -880,7 +877,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         has_prefill = attn_metadata.num_prefills > 0
         num_decode_tokens = attn_metadata.num_decode_tokens
 
-        q = q.view(-1, self.num_heads, self.qk_head_dim)
         decode_q = q[:num_decode_tokens]
 
         prefill_q = q[num_decode_tokens:]
