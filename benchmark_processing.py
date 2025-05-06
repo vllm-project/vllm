@@ -146,7 +146,8 @@ async def get_async_engine(
         disable_log_requests=True,
     )
 
-    return async_engine_from_args(args)
+    async with asyncio.timeout(3 * 60):
+        return async_engine_from_args(args)
 
 
 def get_prompt(model_config: ModelConfig, modality: ModalityStr) -> str:
