@@ -35,6 +35,9 @@ Notes:
     - Default ports: 8000 (embedding), 8001 (chat)
     - First run may take time to download models
 """
+import argparse
+from argparse import Namespace
+from typing import Any
 
 from llama_index.core import Settings, StorageContext, VectorStoreIndex
 from llama_index.core.node_parser import SentenceSplitter
@@ -44,27 +47,39 @@ from llama_index.readers.web import SimpleWebPageReader
 from llama_index.vector_stores.milvus import MilvusVectorStore
 
 
+def init_config(args: Namespace):
+    """Initialize configuration with command line arguments"""
+    return {
+        "url": args.url,
+        "embedding_model": args.embedding_model,
+        "chat_model": args.chat_model,
+        "vllm_api_key": args.vllm_api_key,
+        "embedding_endpoint": args.embedding_endpoint,
+        "chat_endpoint": args.chat_endpoint,
+        "db_path": args.db_path,
+        "chunk_size": args.chunk_size,
+        "chunk_overlap": args.chunk_overlap,
+        "top_k": args.top_k
+    }
+
+
 def load_documents(url: str) -> list:
     """Load and process web documents"""
     return SimpleWebPageReader(html_to_text=True).load_data([url])
 
 
-def setup_models(embedding_endpoint: str,
-                 chat_endpoint: str,
-                 embedding_model: str,
-                 chat_model: str,
-                 api_key: str = "EMPTY"):
+def setup_models(config: dict[str, Any]):
     """Configure embedding and chat models"""
     Settings.embed_model = OpenAILikeEmbedding(
-        api_base=embedding_endpoint,
-        api_key=api_key,
-        model_name=embedding_model,
+        api_base=config["embedding_endpoint"],
+        api_key=config["vllm_api_key"],
+        model_name=config["embedding_model"],
     )
 
     Settings.llm = OpenAILike(
-        model=chat_model,
-        api_key=api_key,
-        api_base=chat_endpoint,
+        model=config["chat_model"],
+        api_key=config["vllm_api_key"],
+        api_base=config["chat_endpoint"],
         context_window=128000,
         is_chat_model=True,
         is_function_calling_model=False,
@@ -72,8 +87,8 @@ def setup_models(embedding_endpoint: str,
 
     Settings.transformations = [
         SentenceSplitter(
-            chunk_size=1024,
-            chunk_overlap=200,
+            chunk_size=config["chunk_size"],
+            chunk_overlap=config["chunk_overlap"],
         )
     ]
 
@@ -94,7 +109,7 @@ def create_index(documents: list, vector_store: MilvusVectorStore):
     )
 
 
-def query_document(index: VectorStoreIndex, question: str, top_k: int = 3):
+def query_document(index: VectorStoreIndex, question: str, top_k: int):
     """Query document with given question"""
     query_engine = index.as_query_engine(similarity_top_k=top_k)
     return query_engine.query(question)
@@ -102,7 +117,6 @@ def query_document(index: VectorStoreIndex, question: str, top_k: int = 3):
 
 def parse_args():
     """Parse command line arguments"""
-    import argparse
     parser = argparse.ArgumentParser(
         description='RAG with vLLM and LlamaIndex')
 
@@ -134,6 +148,21 @@ def parse_args():
                         '--interactive',
                         action='store_true',
                         help='Enable interactive Q&A mode')
+    parser.add_argument('-c',
+                        '--chunk-size',
+                        type=int,
+                        default=1000,
+                        help='Chunk size for document splitting')
+    parser.add_argument('-o',
+                        '--chunk-overlap',
+                        type=int,
+                        default=200,
+                        help='Chunk overlap for document splitting')
+    parser.add_argument('-k',
+                        '--top-k',
+                        type=int,
+                        default=3,
+                        help='Number of top results to retrieve')
 
     return parser.parse_args()
 
@@ -142,15 +171,17 @@ def main():
     # Parse command line arguments
     args = parse_args()
 
+    # Initialize configuration
+    config = init_config(args)
+
     # Load documents
-    documents = load_documents(args.url)
+    documents = load_documents(config["url"])
 
     # Setup models
-    setup_models(args.embedding_endpoint, args.chat_endpoint,
-                 args.embedding_model, args.chat_model, args.vllm_api_key)
+    setup_models(config)
 
     # Setup vector store
-    vector_store = setup_vector_store(args.db_path)
+    vector_store = setup_vector_store(config["db_path"])
 
     # Create index
     index = create_index(documents, vector_store)
@@ -169,13 +200,13 @@ def main():
             # Get and print response
             print("\n" + "-" * 50)
             print("Response:\n")
-            response = query_document(index, question)
+            response = query_document(index, question, config["top_k"])
             print(response)
             print("-" * 50)
     else:
         # Single query mode
         question = "How to install vLLM?"
-        response = query_document(index, question)
+        response = query_document(index, question, config["top_k"])
         print("-" * 50)
         print("Response:\n")
         print(response)

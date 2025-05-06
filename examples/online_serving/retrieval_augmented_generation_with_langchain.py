@@ -50,21 +50,21 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 
-def load_and_split_documents(url: str, args: Namespace):
+def load_and_split_documents(config: dict[str, Any]):
     """
     Load and split documents from web URL
     """
     try:
-        loader = WebBaseLoader(web_paths=(url, ))
+        loader = WebBaseLoader(web_paths=(config["url"], ))
         docs = loader.load()
 
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=args.chunk_size,
-            chunk_overlap=args.chunk_overlap,
+            chunk_size=config["chunk_size"],
+            chunk_overlap=config["chunk_overlap"],
         )
         return text_splitter.split_documents(docs)
     except Exception as e:
-        print(f"Error loading document from {url}: {str(e)}")
+        print(f"Error loading document from {config['url']}: {str(e)}")
         raise
 
 
@@ -195,7 +195,10 @@ def init_config(args: Namespace):
         "uri": args.uri,
         "embedding_model": args.embedding_model,
         "chat_model": args.chat_model,
-        "url": args.url
+        "url": args.url,
+        "chunk_size": args.chunk_size,
+        "chunk_overlap": args.chunk_overlap,
+        "top_k": args.top_k
     }
 
 
@@ -207,11 +210,11 @@ def main():
     config = init_config(args)
 
     # Load and split documents
-    documents = load_and_split_documents(config["url"], args)
+    documents = load_and_split_documents(config)
 
     # Initialize vector store and retriever
     vectorstore = init_vectorstore(config, documents)
-    retriever = vectorstore.as_retriever(search_kwargs={"k": args.top_k})
+    retriever = vectorstore.as_retriever(search_kwargs={"k": config["top_k"]})
 
     # Initialize llm and prompt
     llm = init_llm(config)
