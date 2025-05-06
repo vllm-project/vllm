@@ -462,7 +462,8 @@ steps:
   commands:
     # Install causal-conv1d for plamo2 models here, as it is not compatible with pip-compile.
     - echo 'TORCH_NIGHTLY is $TORCH_NIGHTLY'
-    - ([ '$TORCH_NIGHTLY' = '1' ] && pip install --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8' || pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8')
+    - pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8'
+    - pip freeze | grep -E 'torch|xformers|vllm|flashinfer'
     - pytest -v -s models/language -m core_model
 
 - label: Language Models Test (Extended)
