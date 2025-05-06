@@ -341,6 +341,8 @@ def pplx_dispatch_combine(pgi, dp_size, a, topk_weight, topk_ids, num_experts):
                                  torch.float32.itemsize)),
     )
 
+    topk_ids = topk_ids.to(dtype=torch.uint32)
+
     dispatch_combine = PplxDispatchCombine(
         ata,
         max_num_tokens,
@@ -477,6 +479,8 @@ def pplx_moe(pgi, dp_size, a, w1, w2, topk_weight, topk_ids):
                                 ((hidden_dim + block_size - 1) // block_size *
                                  torch.float32.itemsize)),
     )
+
+    topk_ids = topk_ids.to(dtype=torch.uint32)
 
     dispatch_combine = PplxDispatchCombine(
         ata,
