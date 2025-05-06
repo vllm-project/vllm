@@ -45,6 +45,8 @@ class TestSharedStorageConnector(SharedStorageConnector):
             return object.__getattribute__(self, name)
         attr = getattr(self._connector, name)
 
+        # Intercept calls to the connector interface and write an event
+        # for each one to a file, which can be read back in the main test proc.
         if callable(attr):
 
             def wrapper(*args, **kwargs):
