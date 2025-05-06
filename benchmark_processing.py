@@ -169,6 +169,7 @@ def get_prompt(model_config: ModelConfig, modality: ModalityStr) -> str:
             EXAMPLES_DIR / f"template_{model_type.replace('-', '_')}.jinja",
             EXAMPLES_DIR /
             f"template_{model_type.replace('_', '').replace('-', '')}.jinja",
+            EXAMPLES_DIR / f"template_{model_type.replace('_v2', '2')}.jinja",
         ]
 
         for fallback_path in fallback_paths:
