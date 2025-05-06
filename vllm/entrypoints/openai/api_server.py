@@ -391,7 +391,11 @@ def engine_client(request: Request) -> EngineClient:
 @router.get("/health")
 async def health(raw_request: Request) -> Response:
     """Health check."""
-    await engine_client(raw_request).check_health()
+    try:
+        await engine_client(raw_request).check_health()
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return Response(status_code=500, content=f"Health check failed")
     return Response(status_code=200)
 
 
