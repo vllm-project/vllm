@@ -3,6 +3,7 @@
 from typing import TYPE_CHECKING, Optional, Union
 
 import torch
+from tpu_info import device
 
 import vllm.envs as envs
 from vllm.inputs import ProcessorInputs, PromptType
@@ -29,6 +30,7 @@ class TpuPlatform(Platform):
     dispatch_key: str = "XLA"
     ray_device_key: str = "TPU"
     device_control_env_var: str = "TPU_VISIBLE_CHIPS"
+    simple_compile_backend: str = "openxla"
 
     supported_quantization: list[str] = ["tpu_int8", "compressed-tensors"]
 
@@ -54,7 +56,8 @@ class TpuPlatform(Platform):
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
-        return "tpu"
+        chip_type, _ = device.get_local_chips()
+        return f"TPU {chip_type.name}"
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
