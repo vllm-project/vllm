@@ -24,9 +24,9 @@ from vllm.utils import (_run_task_with_lock, get_distributed_init_method,
                         get_ip, get_open_port, make_async)
 
 if ray is not None:
+    from ray._private.state import actors as get_all_actors
     from ray.actor import ActorHandle
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-    from ray._private.state import actors as get_all_actors
 else:
     ActorHandle = None
 
@@ -707,7 +707,8 @@ class RayDistributedExecutor(DistributedExecutorBase):
         for actor_id, info in actors.items():
             if info["JobID"] == current_job_id and info["State"] == "DEAD":
                 death_cause_obj = info.get("DeathCause")
-                error_message = str(death_cause_obj) if death_cause_obj else "Unknown"
+                error_message = str(
+                    death_cause_obj) if death_cause_obj else "Unknown"
 
                 actor_name = info.get("ActorID", "UnknownActorID")
                 dead_actors.append((actor_name, error_message))
