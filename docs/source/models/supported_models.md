@@ -385,6 +385,11 @@ See [this page](#generative-models) for more information on how to use generativ
   * `ibm-granite/granite-3.0-1b-a400m-base`, `ibm-granite/granite-3.0-3b-a800m-instruct`, `ibm/PowerMoE-3b`, etc.
   * ✅︎
   * ✅︎
+- * `GraniteMoeHybridForCausalLM`
+  * Granite 4.0 MoE Hybrid
+  * `ibm-granite/granite-4.0-tiny-preview`, etc.
+  * ✅︎
+  * ✅︎
 - * `GraniteMoeSharedForCausalLM`
   * Granite MoE Shared
   * `ibm-research/moe-7b-1b-active-shared-experts` (test model)
@@ -990,7 +995,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * Mistral3
   * T + I<sup>+</sup>
   * `mistralai/Mistral-Small-3.1-24B-Instruct-2503`, etc.
-  *
+  * ✅︎
   * ✅︎
   * ✅︎
 - * `MllamaForConditionalGeneration`
@@ -1013,6 +1018,13 @@ See [this page](#generative-models) for more information on how to use generativ
   * `nvidia/NVLM-D-72B`, etc.
   *
   * ✅︎
+  * ✅︎
+- * `Ovis2ForConditionalGeneration`<sup>^</sup>
+  * Ovis2
+  * T + I<sup>+</sup>
+  * `AIDC-AI/Ovis2-1B`, `AIDC-AI/Ovis2-2B`, etc.
+  *
+  *
   * ✅︎
 - * `PaliGemmaForConditionalGeneration`
   * PaliGemma, PaliGemma 2
