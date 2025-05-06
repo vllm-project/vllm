@@ -107,6 +107,13 @@ class KVCacheManager:
                 - A list of blocks that are computed for the request.
                 - The number of computed tokens.
         """
+
+        # P/D:
+        request_blocks = self.req_to_blocks.get(request.request_id, None)
+        if request_blocks is not None:
+            assert request_blocks[-1].block_hash is not None
+            return [], len(request_blocks) * self.block_size
+
         if not self.enable_caching:
             # Prefix caching is disabled.
             return [], 0
@@ -274,8 +281,6 @@ class KVCacheManager:
         # For disaggregated, avoid caching until KVs are recved.
         if skip_cache_blocks:
             assert request.request_id not in self.num_cached_block
-            self.num_cached_block[request.request_id] = len(
-                new_computed_blocks)
             return new_blocks
 
         self.cache_blocks(

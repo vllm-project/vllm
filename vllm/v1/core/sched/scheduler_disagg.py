@@ -196,18 +196,22 @@ class DisaggregatedScheduler(Scheduler):
                 # for the requests to arrive.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                     if request.request_id in self.finished_recving_kv_req_ids:
-                        assert self.kv_cache_manager.enable_caching
                         # Now that the KVs have been recved, we can cache
                         # them and set num_computed_tokens.
+                        blocks = self.kv_cache_manager.req_to_blocks[
+                            request.request_id]
+                        num_computed_tokens = len(blocks) * self.block_size
                         self.kv_cache_manager.cache_blocks(
                             request,
                             num_tokens=0,
-                            num_computed_tokens=(len(request.all_token_ids) -
-                                                 1))
+                            num_computed_tokens=num_computed_tokens)
+                        assert blocks[-1].block_hash is not None
+
+                        request.num_computed_tokens = num_computed_tokens
+                        request.status = RequestStatus.WAITING
+
                         self.finished_recving_kv_req_ids.remove(
                             request.request_id)
-                        request.status = RequestStatus.WAITING
-                        self.kv_cache_manager.free(request)
                     else:
                         self.waiting.popleft()
                         skipped_waiting_requests.appendleft(request)
@@ -295,6 +299,9 @@ class DisaggregatedScheduler(Scheduler):
                     encoder_inputs_to_schedule = None
                     new_encoder_budget = encoder_budget
 
+                print(f"{num_new_tokens=}")
+                print(f"{num_external_tokens=}")
+                print(f"{computed_blocks=}")
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens + num_external_tokens,
