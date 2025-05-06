@@ -23,9 +23,7 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
-from .rocm_aiter_fused_moe import (is_rocm_aiter_moe_enabled,
-                                   rocm_aiter_fused_experts,
-                                   rocm_aiter_topk_softmax)
+from .rocm_aiter_fused_moe import is_rocm_aiter_moe_enabled
 
 logger = init_logger(__name__)
 
@@ -846,6 +844,7 @@ def vllm_topk_softmax(topk_weights: torch.Tensor, topk_indices: torch.Tensor,
 
 def dispatch_topk_func() -> Callable[..., tuple[torch.Tensor, ...]]:
     if is_rocm_aiter_moe_enabled():
+        from .rocm_aiter_fused_moe import rocm_aiter_topk_softmax
         return rocm_aiter_topk_softmax
     return vllm_topk_softmax
 
@@ -855,7 +854,7 @@ def fused_topk(
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     assert hidden_states.shape[0] == gating_output.shape[0], (
         "Number of tokens mismatch")
 
@@ -869,20 +868,19 @@ def fused_topk(
                            topk,
                            dtype=torch.int32,
                            device=hidden_states.device)
-    token_expert_indicies = torch.empty(M,
-                                        topk,
-                                        dtype=torch.int32,
-                                        device=hidden_states.device)
+    token_expert_indices = torch.empty(M,
+                                       topk,
+                                       dtype=torch.int32,
+                                       device=hidden_states.device)
 
     gating_output_float = gating_output.float()  # TODO(woosuk): Optimize this.
 
     topk_func = dispatch_topk_func()
     topk_weights, topk_ids = topk_func(topk_weights, topk_ids,
-                                       token_expert_indicies,
+                                       token_expert_indices,
                                        gating_output_float, renormalize)
 
-    del token_expert_indicies  # Not used. Will be used in the future.
-    return topk_weights, topk_ids
+    return topk_weights, topk_ids, token_expert_indices
 
 
 # This is used by the Deepseek-V2 and Deepseek-V3 model
@@ -1102,6 +1100,7 @@ def torch_vllm_outplace_fused_experts(**kwargs) -> torch.Tensor:
 
 def dispatch_fused_experts_func(inplace: bool) -> Callable[..., torch.Tensor]:
     if is_rocm_aiter_moe_enabled():
+        from .rocm_aiter_fused_moe import rocm_aiter_fused_experts
         return rocm_aiter_fused_experts
     if inplace:
         return torch_vllm_inplace_fused_experts
@@ -1510,8 +1509,8 @@ def fused_moe(
                                               topk, renormalize,
                                               num_expert_group, topk_group)
     elif custom_routing_function is None:
-        topk_weights, topk_ids = fused_topk(hidden_states, gating_output, topk,
-                                            renormalize)
+        topk_weights, topk_ids, token_expert_indices = fused_topk(
+            hidden_states, gating_output, topk, renormalize)
     else:
         topk_weights, topk_ids = custom_routing_function(
             hidden_states, gating_output, topk, renormalize)

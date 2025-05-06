@@ -25,13 +25,15 @@ The available APIs depend on the type of model that is being run:
 Please refer to the above pages for more details about each API.
 
 :::{seealso}
-[API Reference](/api/offline_inference/index)
+[API Reference](#offline-inference-api)
 :::
+
+(configuration-options)=
 
 ## Configuration Options
 
 This section lists the most common options for running the vLLM engine.
-For a full list, refer to the [Engine Arguments](#engine-args) page.
+For a full list, refer to the <project:#configuration> page.
 
 (model-resolution)=
 
@@ -93,7 +95,7 @@ You can convert the model checkpoint to a sharded checkpoint using <gh-file:exam
 
 Quantized models take less memory at the cost of lower precision.
 
-Statically quantized models can be downloaded from HF Hub (some popular ones are available at [Neural Magic](https://huggingface.co/neuralmagic))
+Statically quantized models can be downloaded from HF Hub (some popular ones are available at [Red Hat AI](https://huggingface.co/RedHatAI))
 and used directly without extra configuration.
 
 Dynamic quantization is also supported via the `quantization` option -- see [here](#quantization-index) for more details.
@@ -182,6 +184,29 @@ from vllm import LLM
 # Don't accept images. Just text.
 llm = LLM(model="google/gemma-3-27b-it",
           limit_mm_per_prompt={"image": 0})
+```
+
+#### Multi-modal processor arguments
+
+For certain models, you can adjust the multi-modal processor arguments to
+reduce the size of the processed multi-modal inputs, which in turn saves memory.
+
+Here are some examples:
+
+```python
+from vllm import LLM
+
+# Available for Qwen2-VL series models
+llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
+          mm_processor_kwargs={
+              "max_pixels": 768 * 768,  # Default is 1280 * 28 * 28
+          })
+
+# Available for InternVL series models
+llm = LLM(model="OpenGVLab/InternVL2-2B",
+          mm_processor_kwargs={
+              "max_dynamic_patch": 4,  # Default is 12
+          })
 ```
 
 ### Performance optimization and tuning
