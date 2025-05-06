@@ -2,7 +2,9 @@
 import torch
 import torch.nn as nn
 
-from vllm.config import CompilationLevel, VllmConfig, set_current_vllm_config
+from vllm.attention.layer import Attention
+from vllm.config import (CompilationLevel, VllmConfig,
+                         get_layers_from_vllm_config, set_current_vllm_config)
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.loader import get_model_loader
@@ -276,6 +278,8 @@ class EagleProposer:
         loader = get_model_loader(self.vllm_config.load_config)
         target_layer_num = self.vllm_config.model_config.get_num_layers(
             self.vllm_config.parallel_config)
+        target_attn_layer_names = set(
+            get_layers_from_vllm_config(self.vllm_config, Attention).keys())
 
         draft_model_config = \
             self.vllm_config.speculative_config.draft_model_config
@@ -292,6 +296,11 @@ class EagleProposer:
                 vllm_config=self.vllm_config,
                 start_layer_id=target_layer_num).to(target_device)
 
+        draft_attn_layer_names = (
+            get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
+            target_attn_layer_names)
+        assert len(draft_attn_layer_names) == 1
+        self.attn_layer_name = next(iter(draft_attn_layer_names))
         loaded_weights = self.model.load_weights(
             loader.get_all_weights(draft_model_config, self.model))
         if self.vllm_config.speculative_config.method == "eagle3":
