@@ -398,7 +398,7 @@ class EngineArgs:
         if self.qlora_adapter_name_or_path is not None:
             warnings.warn(
                 "The `qlora_adapter_name_or_path` is deprecated "
-                "and will be removed in a future release. ",
+                "and will be removed in v0.10.0. ",
                 DeprecationWarning,
                 stacklevel=2,
             )
@@ -516,7 +516,7 @@ class EngineArgs:
             type=str,
             default=None,
             help="The `--qlora-adapter-name-or-path` has no effect, do not set"
-            " it, and it  will be removed in a future release.",
+            " it, and it  will be removed in v0.10.0.",
         )
         load_group.add_argument('--pt-load-map-location',
                                 **load_kwargs["pt_load_map_location"])
