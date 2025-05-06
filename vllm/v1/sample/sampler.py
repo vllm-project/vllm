@@ -14,15 +14,14 @@ from vllm.v1.sample.ops.penalties import (apply_all_penalties,
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 
 _SAMPLING_EPS = 1e-5
-# Placeholder; implement server-side flag
-POST_PROCESS_LOGPROBS = True
 
 
 class Sampler(nn.Module):
 
-    def __init__(self):
+    def __init__(self, post_process_logprobs: bool = False):
         super().__init__()
         self.topk_topp_sampler = TopKTopPSampler()
+        self.post_process_logprobs = post_process_logprobs
 
     def forward(
         self,
@@ -36,10 +35,10 @@ class Sampler(nn.Module):
         # TODO(rob): provide option for logprobs post sampling.
         # See https://vllm-dev.slack.com/archives/C07UUL8E61Z/p1735907856007919 # noqa: E501
         num_logprobs = sampling_metadata.max_num_logprobs
-        if num_logprobs is not None and not POST_PROCESS_LOGPROBS:
+        if num_logprobs is not None and not self.post_process_logprobs:
             raw_logprobs = self.compute_logprobs(logits)
         # Return logits to get logprobs at the end.
-        return_logits = num_logprobs is not None and POST_PROCESS_LOGPROBS
+        return_logits = num_logprobs is not None and self.post_process_logprobs
 
         # Use float32 for the logits.
         logits = logits.to(torch.float32)
@@ -128,7 +127,7 @@ class Sampler(nn.Module):
             sampling_metadata.generators,
             sampling_metadata.top_k,
             sampling_metadata.top_p,
-            POST_PROCESS_LOGPROBS,
+            return_logits,
         )
 
         if greedy_sampled is None:
