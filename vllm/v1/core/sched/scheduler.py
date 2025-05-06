@@ -647,7 +647,8 @@ class Scheduler(SchedulerInterface):
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
-        new_additional_head_outputs = model_runner_output.additional_head_outputs
+        new_additional_head_outputs = \
+            model_runner_output.additional_head_outputs
 
         new_running: list[Request] = []
         outputs: list[EngineCoreOutput] = []
@@ -667,16 +668,10 @@ class Scheduler(SchedulerInterface):
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = sampled_token_ids[req_index]
             if new_additional_head_outputs:
-                additional_head_outputs_per_request = new_additional_head_outputs.additional_head_outputs[
-                    req_index]
-                assert isinstance(
-                    additional_head_outputs_per_request.
-                    additional_head_outputs, list
-                ), f"{type(additional_head_outputs_per_request.additional_head_outputs)}"
-                assert isinstance(
-                    additional_head_outputs_per_request.
-                    additional_head_outputs[0], float
-                ), f"{type(additional_head_outputs_per_request.additional_head_outputs[0])}"
+                head_outputs_list = \
+                    new_additional_head_outputs.additional_head_outputs
+                additional_head_outputs_per_request = \
+                    head_outputs_list[req_index]
             else:
                 additional_head_outputs_per_request = None
 
@@ -766,7 +761,8 @@ class Scheduler(SchedulerInterface):
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         stop_reason=request.stop_reason,
                         events=request.take_events(),
-                        new_additional_head_outputs=additional_head_outputs_per_request,
+                        new_additional_head_outputs=
+                        additional_head_outputs_per_request,
                     ))
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.

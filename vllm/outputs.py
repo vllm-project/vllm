@@ -29,6 +29,8 @@ class CompletionOutput:
             output text.
         logprobs: The log probabilities of the top probability words at each
             position if the logprobs are requested.
+        additional_heads: The additional head outputs of the generated output 
+            text.
         finish_reason: The reason why the sequence is finished.
         stop_reason: The stop string or token id that caused the completion
             to stop, None if the completion finished for some other reason
@@ -41,10 +43,10 @@ class CompletionOutput:
     token_ids: GenericSequence[int]
     cumulative_logprob: Optional[float]
     logprobs: Optional[SampleLogprobs]
-    additional_heads: Optional[AdditionalHeads]
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
     lora_request: Optional[LoRARequest] = None
+    additional_heads: Optional[AdditionalHeads] = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None

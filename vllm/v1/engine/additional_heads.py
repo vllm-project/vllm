@@ -1,11 +1,11 @@
-from vllm.logger import init_logger
+# SPDX-License-Identifier: Apache-2.0
 from dataclasses import dataclass
-from typing import Optional
 
+from vllm.logger import init_logger
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
-from vllm.v1.outputs import AdditionalHeadOutputsPerRequest
 
 logger = init_logger(__name__)
+
 
 @dataclass
 class AdditionalHeadsProcessor:
@@ -16,7 +16,7 @@ class AdditionalHeadsProcessor:
     """
 
     # Additional head outputs for this request
-    additional_head_outputs: Optional[list[list[float]]]
+    additional_head_outputs: list[list[float]]
 
     @classmethod
     def from_new_request(
@@ -28,15 +28,15 @@ class AdditionalHeadsProcessor:
         Args:
             request: The engine core request to process additional heads for.
         """
-        return cls(
-            additional_head_outputs=[],
-        )
+        return cls(additional_head_outputs=[], )
 
     def update_from_output(self, output: EngineCoreOutput) -> None:
         """Update with additional head outputs from EngineCore.
         
         Args:
-            output: The engine core output containing new additional head outputs.
+            output: The engine core output containing new additional 
+                head outputs.
         """
         if output.new_additional_head_outputs is not None:
-            self.additional_head_outputs.append(output.new_additional_head_outputs.additional_head_outputs) 
+            self.additional_head_outputs.append(
+                output.new_additional_head_outputs.additional_head_outputs)

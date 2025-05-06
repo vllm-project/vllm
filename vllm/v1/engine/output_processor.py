@@ -133,9 +133,8 @@ class RequestState:
                 tokenizer=tokenizer,
                 request=request,
             ),
-            additional_heads_processor=AdditionalHeadsProcessor.from_new_request(
-                request=request,
-            ),
+            additional_heads_processor=AdditionalHeadsProcessor.
+            from_new_request(request=request, ),
             detokenizer=IncrementalDetokenizer.from_new_request(
                 tokenizer=tokenizer,
                 request=request,
@@ -218,8 +217,8 @@ class RequestState:
             logprobs = logprobs[-len(token_ids):]
 
         # Prepare additional heads, based on delta mode
-        additional_heads = self.additional_heads_processor.additional_head_outputs
-        assert additional_heads
+        additional_heads = (
+            self.additional_heads_processor.additional_head_outputs or None)
         if delta and additional_heads:
             additional_heads = additional_heads[-len(token_ids):]
 
@@ -358,9 +357,11 @@ class OutputProcessor:
                 finish_reason = FinishReason.STOP
                 stop_reason = stop_string
 
-            # 3) Compute sample and prompt logprobs as well as additional heads for request, if required.
+            # 3) Compute sample and prompt logprobs as well as additional heads
+            # for request, if required.
             req_state.logprobs_processor.update_from_output(engine_core_output)
-            req_state.additional_heads_processor.update_from_output(engine_core_output)
+            req_state.additional_heads_processor.update_from_output(
+                engine_core_output)
 
             # 4) Create and handle RequestOutput objects.
             if request_output := req_state.make_request_output(

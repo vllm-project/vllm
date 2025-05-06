@@ -13,7 +13,7 @@ class AdditionalHeadOutputsPerRequest(NamedTuple):
 
 class AdditionalHeadOutputs(NamedTuple):
     # num_generated_tokens x num_additional_head_outputs
-    additional_head_outputs: list[AdditionalHeadOutputsPerRequest]
+    additional_head_outputs: list[Optional[AdditionalHeadOutputsPerRequest]]
 
 
 class LogprobsLists(NamedTuple):
