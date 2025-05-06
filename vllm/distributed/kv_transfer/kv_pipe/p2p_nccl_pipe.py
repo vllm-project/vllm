@@ -15,7 +15,7 @@ from vllm.config import KVTransferConfig
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     NCCLLibrary, buffer_type, cudaStream_t, ncclComm_t, ncclDataTypeEnum)
 from vllm.distributed.kv_transfer.tensor_memory_pool import (
-    CudaPinnedMemoryPool)
+    TensorMemoryPool)
 from vllm.utils import current_stream, get_ip
 
 logger = logging.getLogger(__name__)
@@ -74,7 +74,7 @@ class P2pNcclPipe:
         self.send_stream = torch.cuda.Stream()
         self.recv_stream = torch.cuda.Stream()
 
-        self.pool = CudaPinnedMemoryPool(max_block_size=100 * 1024**3)  # 100GB
+        self.pool = TensorMemoryPool(max_block_size=100 * 1024**3)  # 100GB
 
         # The sending type includes tree mutually exclusive options:
         # PUT, GET, PUT_ASYNC.
@@ -199,7 +199,6 @@ class P2pNcclPipe:
                 if isinstance(tensor, tuple):
                     addr, dtype, shape = tensor
                     tensor = self.pool.load_tensor(addr, dtype, shape)
-                    self.pool.free(addr)
                 else:
                     self.buffer_size -= (tensor.element_size() *
                                          tensor.numel())
