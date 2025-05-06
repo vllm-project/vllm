@@ -264,8 +264,8 @@ class InternSdpaAttention(nn.Module):
 
         if self.qk_normalization:
             B_, N_, H_, D_ = q.shape
-            q = self.q_norm(q.flatten(-2,-1)).view(B_, N_, H_, D_)
-            k = self.k_norm(k.flatten(-2,-1)).view(B_, N_, H_, D_)
+            q = self.q_norm(q.flatten(-2, -1)).view(B_, N_, H_, D_)
+            k = self.k_norm(k.flatten(-2, -1)).view(B_, N_, H_, D_)
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
