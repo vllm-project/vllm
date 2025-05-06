@@ -38,3 +38,4 @@ matplotlib # required for qwen-vl test
 # required for  Multi-Modal Models Test (Standard)
 num2words # required for smolvlm test
 pqdm
+timm # required for internvl test
