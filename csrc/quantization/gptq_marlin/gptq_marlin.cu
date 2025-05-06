@@ -384,7 +384,7 @@ MarlinFuncPtr get_marlin_kernel(const vllm::ScalarType q_type,
   COMMON_GET_IF(vllm::kU4B8)
   COMMON_GET_IF(vllm::kU8B128)
 
-  FP4_GET_IF(vllm::kFE2M1fn)
+  FP4_GET_IF(vllm::kFE2M1f)
 
   BIGGROUP_GET_IF(vllm::kFE4M3fn)
 
@@ -467,7 +467,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
         "q_type must be u4 or u8 when has_zp = True. Got = ", q_type.str());
   } else {
     TORCH_CHECK(q_type == vllm::kU4B8 || q_type == vllm::kU8B128 ||
-                    q_type == vllm::kFE4M3fn || q_type == vllm::kFE2M1fn,
+                    q_type == vllm::kFE4M3fn || q_type == vllm::kFE2M1f,
                 "q_type must be uint4b8, uint8b128 or float8_e4m3fn when "
                 "has_zp = False. Got = ",
                 q_type.str());
@@ -794,7 +794,7 @@ torch::Tensor gptq_marlin_gemm(
         "b_q_type must be u4 or u8 when has_zp = True. Got = ", b_q_type.str());
   } else {
     TORCH_CHECK(b_q_type == vllm::kU4B8 || b_q_type == vllm::kU8B128 ||
-                    b_q_type == vllm::kFE4M3fn || b_q_type == vllm::kFE2M1fn,
+                    b_q_type == vllm::kFE4M3fn || b_q_type == vllm::kFE2M1f,
                 "b_q_type must be uint4b8, uint8b128 or float8_e4m3fn when "
                 "has_zp = False. Got = ",
                 b_q_type.str());

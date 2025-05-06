@@ -59,7 +59,7 @@ def query_marlin_supported_quant_types(
         # GPTQ style, unsigned + symmetric bias
         res = [scalar_types.uint4b8, scalar_types.uint8b128]
         if include_fp_type:
-            res += [scalar_types.float8_e4m3fn, scalar_types.float4_e2m1fn]
+            res += [scalar_types.float8_e4m3fn, scalar_types.float4_e2m1f]
         return res
 
 

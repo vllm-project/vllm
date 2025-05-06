@@ -66,7 +66,7 @@ def apply_fp4_marlin_linear(
                                   g_idx=None,
                                   perm=None,
                                   workspace=workspace,
-                                  b_q_type=scalar_types.float4_e2m1fn,
+                                  b_q_type=scalar_types.float4_e2m1f,
                                   size_m=reshaped_x.size(0),
                                   size_n=size_n,
                                   size_k=size_k,

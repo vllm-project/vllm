@@ -231,7 +231,7 @@ def test_gptq_marlin_gemm(
     a_input = rand_data((size_m, size_k))
     b_weight = rand_data((size_k, size_n))
 
-    if quant_type == scalar_types.float4_e2m1fn:
+    if quant_type == scalar_types.float4_e2m1f:
         if group_size != 16 or act_order:
             return
         w_ref, marlin_q_w, marlin_s = rand_marlin_weight_fp4_like(

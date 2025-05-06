@@ -395,7 +395,7 @@ __device__ inline void dequant<nv_bfloat162, vllm::kFE4M3fn.id(), false>(
 }
 
 template <>
-__device__ inline void dequant<half2, vllm::kFE2M1fn.id(), true>(
+__device__ inline void dequant<half2, vllm::kFE2M1f.id(), true>(
     int q, half2* frag_b) {
   // Constants for FP4 (E2M1) and FP16 formats
   constexpr int FP4_EXPONENT = 2, FP16_EXPONENT = 5;
@@ -413,9 +413,9 @@ __device__ inline void dequant<half2, vllm::kFE2M1fn.id(), true>(
 }
 
 template <>
-__device__ inline void dequant<half2, vllm::kFE2M1fn.id(), false>(
+__device__ inline void dequant<half2, vllm::kFE2M1f.id(), false>(
     int q, half2* frag_b) {
-  dequant<half2, vllm::kFE2M1fn.id(), true>(q, frag_b);
+  dequant<half2, vllm::kFE2M1f.id(), true>(q, frag_b);
 
   // Constants for FP4 (E2M1) and FP16 formats
   constexpr int FP4_EXPONENT = 2, FP16_EXPONENT = 5;
@@ -431,7 +431,7 @@ __device__ inline void dequant<half2, vllm::kFE2M1fn.id(), false>(
 }
 
 template <>
-__device__ inline void dequant<nv_bfloat162, vllm::kFE2M1fn.id(), true>(
+__device__ inline void dequant<nv_bfloat162, vllm::kFE2M1f.id(), true>(
     int q, nv_bfloat162* frag_b) {
   // Constants for FP4 (E2M1) and FP16 formats
   constexpr int FP4_EXPONENT = 2, BF16_EXPONENT = 8;
@@ -449,9 +449,9 @@ __device__ inline void dequant<nv_bfloat162, vllm::kFE2M1fn.id(), true>(
 }
 
 template <>
-__device__ inline void dequant<nv_bfloat162, vllm::kFE2M1fn.id(), false>(
+__device__ inline void dequant<nv_bfloat162, vllm::kFE2M1f.id(), false>(
     int q, nv_bfloat162* frag_b) {
-  dequant<nv_bfloat162, vllm::kFE2M1fn.id(), true>(q, frag_b);
+  dequant<nv_bfloat162, vllm::kFE2M1f.id(), true>(q, frag_b);
 
   // Constants for FP4 (E2M1) and BF16 formats
   constexpr int FP4_EXPONENT = 2, BF16_EXPONENT = 8;

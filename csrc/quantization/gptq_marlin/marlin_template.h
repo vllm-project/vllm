@@ -1119,7 +1119,7 @@ __global__ void Marlin(
       FragB frag_b1;
       int b_quant_0, b_quant_1;
 
-      if constexpr (w_type_id == vllm::kFE2M1fn.id()) {
+      if constexpr (w_type_id == vllm::kFE2M1f.id()) {
         b_quant_1 = frag_b_quant[k2][0][j];
         b_quant_0 = b_quant_1 << 8;
       } else if constexpr (w_type.size_bits() == 4) {

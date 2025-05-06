@@ -33,7 +33,7 @@ TEMPLATE = ("template __global__ void Marlin<"
 # we don't add it to reduce wheel size.
 SCALAR_TYPES = [
     "vllm::kU4", "vllm::kU4B8", "vllm::kU8B128", "vllm::kFE4M3fn",
-    "vllm::kFE2M1fn"
+    "vllm::kFE2M1f"
 ]
 THREAD_CONFIGS = [(128, 128, 256), (64, 256, 256), (64, 128, 128),
                   (128, 64, 128)]
@@ -77,10 +77,10 @@ def generate_new_kernels():
             if scalar_type == "vllm::kFE4M3fn" and group_blocks not in [-1, 8]:
                 continue
             # nvfp4 only supports group_size == 16
-            if scalar_type == "vllm::kFE2M1fn" and group_blocks != 1:
+            if scalar_type == "vllm::kFE2M1f" and group_blocks != 1:
                 continue
             # other quantization methods don't support group_size = 16
-            if scalar_type != "vllm::kFE2M1fn" and group_blocks == 1:
+            if scalar_type != "vllm::kFE2M1f" and group_blocks == 1:
                 continue
 
             k_blocks = thread_configs[0] // 16
