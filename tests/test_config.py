@@ -5,7 +5,8 @@ from typing import Literal, Union
 
 import pytest
 
-from vllm.config import ModelConfig, PoolerConfig, config, get_field
+from vllm.config import (LoadConfig, ModelConfig, PoolerConfig, VllmConfig,
+                         config, get_field)
 from vllm.model_executor.layers.pooler import PoolingType
 from vllm.platforms import current_platform
 
@@ -185,7 +186,7 @@ def test_get_pooling_config():
         revision=None,
     )
 
-    pooling_config = model_config._init_pooler_config(None)
+    pooling_config = model_config._init_pooler_config()
     assert pooling_config is not None
 
     assert pooling_config.normalize
@@ -205,11 +206,12 @@ def test_get_pooling_config_from_args():
                                dtype="float16",
                                revision=None)
 
-    override_config = PoolerConfig(pooling_type='CLS', normalize=True)
+    override_pooler_config = PoolerConfig(pooling_type='CLS', normalize=True)
+    model_config.override_pooler_config = override_pooler_config
 
-    pooling_config = model_config._init_pooler_config(override_config)
+    pooling_config = model_config._init_pooler_config()
     assert pooling_config is not None
-    assert asdict(pooling_config) == asdict(override_config)
+    assert asdict(pooling_config) == asdict(override_pooler_config)
 
 
 @pytest.mark.skipif(current_platform.is_rocm(),
@@ -409,3 +411,16 @@ def test_generation_config_loading():
         override_generation_config=override_generation_config)
 
     assert model_config.get_diff_sampling_param() == override_generation_config
+
+
+@pytest.mark.parametrize("pt_load_map_location", [
+    "cuda",
+    {
+        "": "cuda"
+    },
+])
+def test_load_config_pt_load_map_location(pt_load_map_location):
+    load_config = LoadConfig(pt_load_map_location=pt_load_map_location)
+    config = VllmConfig(load_config=load_config)
+
+    assert config.load_config.pt_load_map_location == pt_load_map_location

@@ -8,7 +8,7 @@ from typing import Literal, Optional
 
 import pytest
 
-from vllm.config import PoolerConfig, config
+from vllm.config import config
 from vllm.engine.arg_utils import (EngineArgs, contains_type, get_kwargs,
                                    get_type, is_not_builtin, is_type,
                                    literal_to_kwargs, nullable_kvs,
@@ -106,6 +106,8 @@ class DummyConfigClass:
     """List with literal choices"""
     literal_literal: Literal[Literal[1], Literal[2]] = 1
     """Literal of literals with default 1"""
+    json_tip: dict = field(default_factory=dict)
+    """Dict which will be JSON in CLI"""
 
 
 @pytest.mark.parametrize(("type_hint", "expected"), [
@@ -137,6 +139,9 @@ def test_get_kwargs():
     assert kwargs["list_literal"]["choices"] == [1, 2]
     # literals of literals should have merged choices
     assert kwargs["literal_literal"]["choices"] == [1, 2]
+    # dict should have json tip in help
+    json_tip = "\n\nShould be a valid JSON string."
+    assert kwargs["json_tip"]["help"].endswith(json_tip)
 
 
 @pytest.mark.parametrize(("arg", "expected"), [
@@ -220,17 +225,6 @@ def test_prefix_cache_default():
     args = parser.parse_args(["--no-enable-prefix-caching"])
     engine_args = EngineArgs.from_cli_args(args=args)
     assert not engine_args.enable_prefix_caching
-
-
-def test_valid_pooling_config():
-    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
-    args = parser.parse_args([
-        '--override-pooler-config',
-        '{"pooling_type": "MEAN"}',
-    ])
-    engine_args = EngineArgs.from_cli_args(args=args)
-    assert engine_args.override_pooler_config == PoolerConfig(
-        pooling_type="MEAN", )
 
 
 @pytest.mark.parametrize(
