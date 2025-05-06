@@ -250,7 +250,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
 
   # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages when building.
-  set(CUTLASS_REVISION "v3.9.1" CACHE STRING "CUTLASS revision to use")
+  set(CUTLASS_REVISION "v3.9.2" CACHE STRING "CUTLASS revision to use")
 
   # Use the specified CUTLASS source directory for compilation if VLLM_CUTLASS_SRC_DIR is provided
   if (DEFINED ENV{VLLM_CUTLASS_SRC_DIR})
@@ -301,8 +301,52 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # are not supported by Machete yet.
   cuda_archs_loose_intersection(MARLIN_ARCHS "8.0;8.6;8.7;8.9;9.0;10.0;10.1;12.0" "${CUDA_ARCHS}")
   if (MARLIN_ARCHS)
+
+    #
+    # For the Marlin kernels we automatically generate sources for various
+    # preselected input type pairs and schedules.
+    # Generate sources:
+    set(MARLIN_GEN_SCRIPT
+      ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/gptq_marlin/generate_kernels.py)
+    file(MD5 ${MARLIN_GEN_SCRIPT} MARLIN_GEN_SCRIPT_HASH)
+
+    message(STATUS "Marlin generation script hash: ${MARLIN_GEN_SCRIPT_HASH}")
+    message(STATUS "Last run Marlin generate script hash: $CACHE{MARLIN_GEN_SCRIPT_HASH}")
+
+    if (NOT DEFINED CACHE{MARLIN_GEN_SCRIPT_HASH}
+        OR NOT $CACHE{MARLIN_GEN_SCRIPT_HASH} STREQUAL ${MARLIN_GEN_SCRIPT_HASH})
+      execute_process(
+        COMMAND ${CMAKE_COMMAND} -E env
+        PYTHONPATH=$PYTHONPATH
+          ${Python_EXECUTABLE} ${MARLIN_GEN_SCRIPT}
+        RESULT_VARIABLE marlin_generation_result
+        OUTPUT_VARIABLE marlin_generation_result
+        OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/marlin_generation.log
+        ERROR_FILE ${CMAKE_CURRENT_BINARY_DIR}/marlin_generation.log
+      )
+
+      if (NOT marlin_generation_result EQUAL 0)
+        message(FATAL_ERROR "Marlin generation failed."
+                            " Result: \"${marlin_generation_result}\""
+                            "\nCheck the log for details: "
+                            "${CMAKE_CURRENT_BINARY_DIR}/marlin_generation.log")
+      else()
+        set(MARLIN_GEN_SCRIPT_HASH ${MARLIN_GEN_SCRIPT_HASH}
+            CACHE STRING "Last run Marlin generate script hash" FORCE)
+        message(STATUS "Marlin generation completed successfully.")
+      endif()
+    else()
+      message(STATUS "Marlin generation script has not changed, skipping generation.")
+    endif()
+
+    file(GLOB MARLIN_TEMPLATE_KERNEL_SRC "csrc/quantization/gptq_marlin/kernel_*.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${MARLIN_TEMPLATE_KERNEL_SRC}"
+      CUDA_ARCHS "${MARLIN_ARCHS}")
+
+    list(APPEND VLLM_EXT_SRC ${MARLIN_TEMPLATE_KERNEL_SRC})
+
     set(MARLIN_SRCS
-       "csrc/quantization/fp8/fp8_marlin.cu"
        "csrc/quantization/marlin/dense/marlin_cuda_kernel.cu"
        "csrc/quantization/marlin/sparse/marlin_24_cuda_kernel.cu"
        "csrc/quantization/marlin/qqq/marlin_qqq_gemm_kernel.cu"
@@ -644,7 +688,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
         OR NOT $CACHE{MOE_MARLIN_GEN_SCRIPT_HASH} STREQUAL ${MOE_MARLIN_GEN_SCRIPT_HASH})
       execute_process(
         COMMAND ${CMAKE_COMMAND} -E env
-        PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/:${CUTLASS_DIR}/python/:${VLLM_PYTHON_PATH}:$PYTHONPATH
+        PYTHONPATH=$PYTHONPATH
           ${Python_EXECUTABLE} ${MOE_MARLIN_GEN_SCRIPT}
         RESULT_VARIABLE moe_marlin_generation_result
         OUTPUT_VARIABLE moe_marlin_generation_output

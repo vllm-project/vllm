@@ -184,6 +184,7 @@ class KVCacheManager:
                 which will complete in a future step.
 
         Blocks layout:
+        ```
         -----------------------------------------------------------------------
         | < computed > | < new computed > |    < new >    | < pre-allocated > |
         -----------------------------------------------------------------------
@@ -193,6 +194,7 @@ class KVCacheManager:
         ------------------------------------------------
                                           | <new full> |
                                           --------------
+        ```
         The following *_blocks are illustrated in this layout.
 
         Returns:
