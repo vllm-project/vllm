@@ -160,7 +160,7 @@ void moe_unpermute(const torch::Tensor& input,
 
 #endif
 
-bool moe_permute_supported() {
+bool moe_permute_unpermute_supported() {
 #if defined(CUDA_VERSION) && (CUDA_VERSION >= 12000)
   return true;
 #else
@@ -171,5 +171,5 @@ bool moe_permute_supported() {
 TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
   m.impl("moe_permute", &moe_permute);
   m.impl("moe_unpermute", &moe_unpermute);
-  m.impl("moe_permute_unpermute_supported", &moe_permute_supported);
+  m.impl("moe_permute_unpermute_supported", &moe_permute_unpermute_supported);
 }
