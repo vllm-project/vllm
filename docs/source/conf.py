@@ -242,6 +242,11 @@ autodoc_mock_imports = [
     "openai",
     "fastapi",
     "partial_json_parser",
+    # The mocks below are required by
+    # docs/source/deployment/frameworks/retrieval_augmented_generation.md's
+    # examples.online_serving.retrieval_augmented_generation_with_langchain
+    "langchain_community",
+    "llama_index",
 ]
 
 for mock_target in autodoc_mock_imports:
