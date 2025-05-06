@@ -1432,8 +1432,7 @@ class EngineArgs:
         if self.scheduler_cls == EngineArgs.scheduler_cls:
             if self.kv_transfer_config:
                 self.scheduler_cls = (
-                    "vllm.v1.core.sched.scheduler_disagg.DisaggregatedScheduler"
-                )
+                    "vllm.v1.core.sched.scheduler_disagg.DisaggregatedScheduler")
             else:
                 self.scheduler_cls = "vllm.v1.core.sched.scheduler.Scheduler"
 
