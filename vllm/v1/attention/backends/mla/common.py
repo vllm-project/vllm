@@ -349,10 +349,9 @@ class MLACommonMetadataBuilder(Generic[M]):
         self.num_heads = model_config.get_num_attention_heads(
             runner.parallel_config)
         self.mla_dims = get_mla_dims(model_config)
-        self.aot_schedule = current_platform.is_cuda()
 
         # Dont try to access the runner on AMD
-        if self.aot_schedule:
+        if current_platform.is_cuda():
             self.page_size = self.runner.block_size
 
         if self.chunked_prefill_enabled:
