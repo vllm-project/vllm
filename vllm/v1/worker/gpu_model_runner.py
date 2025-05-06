@@ -155,7 +155,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.encoder_cache_size = encoder_cache_size
 
         # Sampler
-        self.sampler = Sampler()
+        self.sampler = Sampler(
+            post_process_logprobs=self.model_config.post_process_logprobs)
 
         # Lazy initialization
         # self.model: nn.Module  # Set after load_model
