@@ -10,8 +10,14 @@ import torch
 import torch.distributed
 import torch.nn as nn
 # TPU XLA related
-import torch_xla.core.xla_model as xm
-import torch_xla.runtime as xr
+import os
+if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "1":
+    import torchax
+    env = torchax.enable_globally()
+    import jax 
+else:
+    import torch_xla.core.xla_model as xm
+    import torch_xla.runtime as xr
 
 import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionType
@@ -660,10 +666,12 @@ class TPUModelRunner:
             # 2. A list or tuple (length: num_items) of tensors, each of shape
             # (feature_size, hidden_size) in case the feature size is dynamic
             # depending on the input multimodal items.
-            xm.mark_step()
+            if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "0":
+                xm.mark_step()
             curr_group_outputs = self.model.get_multimodal_embeddings(
                 **batched_mm_inputs)
-            xm.mark_step()
+            if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "0":
+                xm.mark_step()
 
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
@@ -767,13 +775,15 @@ class TPUModelRunner:
             mm_embeds = self._gather_mm_embeddings(scheduler_output)
         else:
             mm_embeds = []
-        xm.mark_step()
+        if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "0":
+            xm.mark_step()
         # Prepare inputs
         attn_metadata, logits_indices, padded_num_reqs = self._prepare_inputs(
             scheduler_output)
         input_ids, inputs_embeds = self._get_model_inputs(
             self.input_ids, mm_embeds)
-        xm.mark_step()
+        if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "0":
+            xm.mark_step()
         num_reqs = self.input_batch.num_reqs
         # Run the decoder
         with set_forward_context(
@@ -901,7 +911,10 @@ class TPUModelRunner:
         # determine the order of concatenating the output tensors.
         # As a workaround, we use the xm's rank assignment only when loading
         # the embedding weights.
-        xm_tp_rank = xr.global_ordinal()
+        if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "1":
+            xm_tp_rank = jax.process_index()
+        else:
+            xm_tp_rank = xr.global_ordinal()
         with patch(
                 "vllm.model_executor.layers.vocab_parallel_embedding."
                 "get_tensor_model_parallel_rank",
@@ -909,8 +922,9 @@ class TPUModelRunner:
             model = get_model(vllm_config=self.vllm_config)
         # Sync all pending XLA execution during model initialization and weight
         # loading.
-        xm.mark_step()
-        xm.wait_device_ops()
+        if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "0":
+            xm.mark_step()
+            xm.wait_device_ops()
         self.model = model
         self.sampler = TPUSampler()
 
@@ -956,12 +970,13 @@ class TPUModelRunner:
             num_seqs=num_seqs,
         )
 
-        if self.is_multimodal_model:
-            torch._dynamo.mark_dynamic(inputs_embeds, 0)
-        else:
-            torch._dynamo.mark_dynamic(input_ids, 0)
-        torch._dynamo.mark_dynamic(position_ids, 0)
-        torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
+        if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "0":
+            if self.is_multimodal_model:
+                torch._dynamo.mark_dynamic(inputs_embeds, 0)
+            else:
+                torch._dynamo.mark_dynamic(input_ids, 0)
+            torch._dynamo.mark_dynamic(position_ids, 0)
+            torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
 
         layer_names = get_layers_from_vllm_config(self.vllm_config,
                                                   Attention).keys()
@@ -991,10 +1006,12 @@ class TPUModelRunner:
                 batched_dummy_mm_inputs = self._get_mm_dummy_batch(
                     mode, num_items)
                 # Run multimodal encoder.
-                xm.mark_step()
+                if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "0":
+                    xm.mark_step()
                 mm_embeds = self.model.\
                     get_multimodal_embeddings(**batched_dummy_mm_inputs)
-                xm.mark_step()
+                if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "0":
+                    xm.mark_step()
                 num_patches = mm_embeds[0].shape[0]
                 items_size = num_patches * num_items
 
@@ -1019,7 +1036,8 @@ class TPUModelRunner:
                         a, b = self._get_model_inputs(placeholders_ids,
                                                       [mm_embeds])
                         assert a is None
-                        xm.mark_step()
+                        if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "0":
+                            xm.mark_step()
 
             # Pre-compile `get_input_embeddings` when mm_embeddings are not
             # present. Chunk is only made of text, no mm_placeholders.
@@ -1030,9 +1048,11 @@ class TPUModelRunner:
                 placeholders_ids = placeholders_ids.to(self.device)
                 a, b = self._get_model_inputs(placeholders_ids, [])
                 assert a is None
-                xm.mark_step()
+                if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "0":
+                    xm.mark_step()
 
-            xm.wait_device_ops()
+            if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "0":
+                xm.wait_device_ops()
             end = time.perf_counter()
             logger.info(
                 "Multimodal %s Encoder compilation finished in in %.2f "
@@ -1044,7 +1064,8 @@ class TPUModelRunner:
         for num_tokens in self.num_tokens_paddings:
             logger.info("  -- num_tokens: %d", num_tokens)
             self._dummy_run(num_tokens)
-        xm.wait_device_ops()
+        if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "0":
+            xm.wait_device_ops()
         end = time.perf_counter()
         logger.info("Compilation finished in %.2f [secs].", end - start)
         self._update_num_xla_graphs("model backbone")
@@ -1073,7 +1094,8 @@ class TPUModelRunner:
                 # next bigger value in case num_tokens uses bucketed padding.
                 if num_reqs >= min(num_tokens, self.max_num_reqs):
                     break
-        xm.wait_device_ops()
+        if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "0":
+            xm.wait_device_ops()
         end = time.perf_counter()
         logger.info("Compilation finished in %.2f [secs].", end - start)
         self._update_num_xla_graphs("select_hidden_states")
@@ -1089,7 +1111,8 @@ class TPUModelRunner:
             torch._dynamo.mark_dynamic(dummy_hidden, 0)
             self.compute_logits(dummy_hidden)
             logger.info("  -- num_seqs: %d", num_reqs)
-        xm.wait_device_ops()
+        if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "0":
+            xm.wait_device_ops()
         end = time.perf_counter()
         logger.info("Compilation finished in %.2f [secs].", end - start)
         self._update_num_xla_graphs("compute_logits")
@@ -1113,7 +1136,8 @@ class TPUModelRunner:
             self.structured_decode(dummy_require_struct_decoding,
                                    dummy_grammar_bitmask, dummy_logits, arange)
             logger.info("  -- num_seqs: %d", num_reqs)
-        xm.wait_device_ops()
+        if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "0":
+            xm.wait_device_ops()
         end = time.perf_counter()
         logger.info("Compilation finished in %.2f [secs].", end - start)
         self._update_num_xla_graphs("structured_decoding")
@@ -1140,7 +1164,8 @@ class TPUModelRunner:
                 sampling_metadata.all_greedy = all_greedy
                 self.sample_from_logits(dummy_logits, sampling_metadata)
             logger.info("  -- num_seqs: %d", num_reqs)
-        xm.wait_device_ops()
+        if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "0":
+            xm.wait_device_ops()
         end = time.perf_counter()
         logger.info("Compilation finished in %.2f [secs].", end - start)
         self._update_num_xla_graphs("sample_from_logits")
@@ -1204,11 +1229,13 @@ class TPUModelRunner:
             # Isolate encoder graph from post-processing to minimize
             # impact of recompilation until it's fixed.
             start = time.perf_counter()
-            xm.mark_step()
+            if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "0":
+                xm.mark_step()
             dummy_encoder_outputs = self.model.get_multimodal_embeddings(
                 **batched_dummy_mm_inputs)
-            xm.mark_step()
-            xm.wait_device_ops()
+            if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "0":
+                xm.mark_step()
+                xm.wait_device_ops()
             end = time.perf_counter()
             logger.info(
                 "Multimodal Encoder profiling finished in in %.2f [secs].",
@@ -1227,8 +1254,9 @@ class TPUModelRunner:
         # Trigger compilation for general shape.
         self._dummy_run(num_tokens)
 
-        xm.mark_step()
-        xm.wait_device_ops()
+        if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "0":
+            xm.mark_step()
+            xm.wait_device_ops()
         self.encoder_cache.clear()
         gc.collect()
 

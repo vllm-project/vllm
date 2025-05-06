@@ -13,6 +13,7 @@ from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import cdiv
+import os
 
 logger = init_logger(__name__)
 
@@ -214,8 +215,8 @@ def write_to_kv_cache(
 
     kv = torch.cat([key, value], axis=-1).reshape(-1, num_combined_kv_heads,
                                                   head_size)
-
-    torch.ops.xla.dynamo_set_buffer_donor_(kv_cache, True)
+    if os.environ.get("VLLM_TORCHAX_ENABLED", "0") == "0":
+        torch.ops.xla.dynamo_set_buffer_donor_(kv_cache, True)
 
     kv_cache = kv_cache.flatten(0, 1)
     kv_cache.index_copy_(0, slot_mapping, kv)
