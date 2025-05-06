@@ -7,11 +7,11 @@ import sys
 MODELS = [
     # "rhymes-ai/Aria",
     "CohereForAI/aya-vision-8b",
-    # "Salesforce/blip2-opt-6.7b",
-    # "facebook/chameleon-7b",
+    "Salesforce/blip2-opt-6.7b",
+    "facebook/chameleon-7b",
     # "deepseek-ai/deepseek-vl2-tiny",
-    # "microsoft/Florence-2-base",
-    # "adept/fuyu-8b",
+    "microsoft/Florence-2-base",
+    "adept/fuyu-8b",
     "google/gemma-3-4b-it",
     # "THUDM/glm-4v-9b",
     # "ibm-granite/granite-speech-3.3-8b",
@@ -35,8 +35,8 @@ MODELS = [
     # "allenai/Molmo-7B-O-0924",
     # "nvidia/NVLM-D-72B",
     "AIDC-AI/Ovis2-1B",
-    # "google/paligemma-3b-mix-224",
-    # "google/paligemma2-3b-ft-docci-448",
+    "google/paligemma-3b-mix-224",
+    "google/paligemma2-3b-ft-docci-448",
     # "microsoft/Phi-3.5-vision-instruct",
     "microsoft/Phi-4-multimodal-instruct",
     # "mistralai/Pixtral-12B-2409",
@@ -66,7 +66,9 @@ def main(output_dir: str, sync: bool):
             args.extend(["--async"])
         args.extend(["--append"])
 
-        subprocess.run(args, check=True)
+        res = subprocess.run(args)
+        if res.returncode != 0:
+            print(f"Failed to benchmark {model}")
 
 
 if __name__ == "__main__":

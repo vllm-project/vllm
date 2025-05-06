@@ -20,6 +20,7 @@ from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.llm_engine import LLMEngine
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (apply_hf_chat_template,
+                                         load_chat_template,
                                          parse_chat_messages,
                                          resolve_chat_template_content_format,
                                          resolve_hf_chat_template)
@@ -29,6 +30,10 @@ from vllm.multimodal.utils import (encode_audio_base64, encode_image_base64,
                                    encode_video_base64)
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 from vllm.usage.usage_lib import UsageContext
+
+ROOT_DIR = Path(__file__).parent
+EXAMPLES_DIR = ROOT_DIR / "examples"
+assert EXAMPLES_DIR.exists()
 
 ModalityStr = Literal["audio", "image", "video"]
 
@@ -173,6 +178,23 @@ def get_prompt(model_config: ModelConfig, modality: ModalityStr) -> str:
         tools,
         trust_remote_code=True,
     )
+
+    if chat_template is None:
+        model_type = model_config.hf_config.model_type
+        fallback_paths = [
+            EXAMPLES_DIR / f"template_{model_type}.jinja",
+            EXAMPLES_DIR / f"template_{model_type.replace('-', '_')}.jinja",
+            EXAMPLES_DIR /
+            f"template_{model_type.replace('_', '').replace('-', '')}.jinja",
+        ]
+
+        for fallback_path in fallback_paths:
+            if fallback_path.exists():
+                chat_template = load_chat_template(fallback_path)
+                break
+        else:
+            print(f"Failed to find chat template for {model_type=} in: "
+                  f"{fallback_paths}")
 
     content_format = resolve_chat_template_content_format(
         chat_template,
