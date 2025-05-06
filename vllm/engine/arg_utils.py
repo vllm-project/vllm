@@ -515,8 +515,8 @@ class EngineArgs:
             "--qlora-adapter-name-or-path",
             type=str,
             default=None,
-            help="The `--qlora-adapter-name-or-path` is "
-            "deprecated and will be removed in a future release.",
+            help="The `--qlora-adapter-name-or-path` has no effect, do not set"
+            " it, and it  will be removed in a future release.",
         )
         load_group.add_argument('--pt-load-map-location',
                                 **load_kwargs["pt_load_map_location"])
