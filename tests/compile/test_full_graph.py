@@ -20,15 +20,11 @@ def models_list(*, all: bool = True, keywords: Optional[list[str]] = None):
         ("facebook/opt-125m", {}),
         ("nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change", {
             "dtype": torch.float16,
-            "quantization": "compressed-tensors"
         }),
         ("neuralmagic/Llama-3.2-1B-Instruct-FP8-dynamic", {
             "dtype": torch.float16,
-            "quantization": "compressed-tensors"
         }),
-        ("neuralmagic/Llama-3.2-1B-Instruct-quantized.w8a8", {
-            "quantization": "compressed-tensors"
-        }),
+        ("neuralmagic/Llama-3.2-1B-Instruct-quantized.w8a8", {}),
         ("meta-llama/Llama-3.2-1B-Instruct", {}),
     ]
 

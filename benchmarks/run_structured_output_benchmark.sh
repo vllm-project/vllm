@@ -9,13 +9,10 @@ BACKEND=${2:-"vllm"}
 # Define the dataset to use
 DATASET=${3:-"xgrammar_bench"}
 
-# Define the guided decoding backend
-GUIDED_BACKEND=${4:-"xgrammar"}
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OUTPUT_DIR=${5:-"$SCRIPT_DIR/structured_output_benchmark_results"}
+OUTPUT_DIR=${4:-"$SCRIPT_DIR/structured_output_benchmark_results"}
 
-GUIDED_RATIO=${6:-0.5}
+GUIDED_RATIO=${5:-0.5}
 
 # Create output directory if it doesn't exist
 mkdir -p "$OUTPUT_DIR"
@@ -27,7 +24,6 @@ QPS_VALUES=(70 60 50 25 20 15 10)
 COMMON_PARAMS="--backend $BACKEND \
                --model $MODEL \
                --dataset $DATASET \
-               --structured-output-backend $GUIDED_BACKEND \
                --structured-output-ratio $GUIDED_RATIO \
                --save-results \
                --result-dir $OUTPUT_DIR"
@@ -35,7 +31,6 @@ COMMON_PARAMS="--backend $BACKEND \
 echo "Starting structured output benchmark with model: $MODEL"
 echo "Backend: $BACKEND"
 echo "Dataset: $DATASET"
-echo "Structured output backend: $GUIDED_BACKEND"
 echo "Results will be saved to: $OUTPUT_DIR"
 echo "----------------------------------------"
 
@@ -48,7 +43,7 @@ for qps in "${QPS_VALUES[@]}"; do
   GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 
   # Construct filename for this run
-  FILENAME="${GUIDED_BACKEND}_${BACKEND}_${qps}qps_$(basename $MODEL)_${DATASET}_${GIT_HASH}.json"
+  FILENAME="${BACKEND}_${qps}qps_$(basename $MODEL)_${DATASET}_${GIT_HASH}.json"
 
   # Run the benchmark
   python "$SCRIPT_DIR/benchmark_serving_structured_output.py" $COMMON_PARAMS \
