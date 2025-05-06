@@ -21,7 +21,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_make_workspace_new, marlin_permute_scales,
     query_marlin_supported_quant_types)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
-    rand_marlin_weight_fp4_like, FP4_MARLIN_SUPPORTED_GROUP_SIZES)
+    FP4_MARLIN_SUPPORTED_GROUP_SIZES, rand_marlin_weight_fp4_like)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     marlin_quant_fp8_torch)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
@@ -193,9 +193,9 @@ def test_awq_marlin_repack(k_chunk, n_chunk, quant_type, group_size,
 @pytest.mark.parametrize("k_chunk", MARLIN_K_CHUNKS)
 @pytest.mark.parametrize("n_chunk", MARLIN_N_CHUNKS)
 @pytest.mark.parametrize("quant_type", query_marlin_supported_quant_types())
-@pytest.mark.parametrize("group_size",
-                         set(MARLIN_SUPPORTED_GROUP_SIZES +
-                             FP4_MARLIN_SUPPORTED_GROUP_SIZES))
+@pytest.mark.parametrize(
+    "group_size",
+    set(MARLIN_SUPPORTED_GROUP_SIZES + FP4_MARLIN_SUPPORTED_GROUP_SIZES))
 @pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
 @pytest.mark.parametrize("act_order", ACT_ORDER_OPTS)
 @pytest.mark.parametrize("is_k_full", K_FULL_OPTS)

@@ -466,11 +466,12 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
         q_type == vllm::kU4 || q_type == vllm::kU8,
         "q_type must be u4 or u8 when has_zp = True. Got = ", q_type.str());
   } else {
-    TORCH_CHECK(q_type == vllm::kU4B8 || q_type == vllm::kU8B128 ||
-                    q_type == vllm::kFE4M3fn || q_type == vllm::kFE2M1f,
-                "q_type must be uint4b8, uint8b128, float8_e4m3fn or float4_e2m1f when "
-                "has_zp = False. Got = ",
-                q_type.str());
+    TORCH_CHECK(
+        q_type == vllm::kU4B8 || q_type == vllm::kU8B128 ||
+            q_type == vllm::kFE4M3fn || q_type == vllm::kFE2M1f,
+        "q_type must be uint4b8, uint8b128, float8_e4m3fn or float4_e2m1f when "
+        "has_zp = False. Got = ",
+        q_type.str());
   }
 
   TORCH_CHECK(prob_m > 0 && prob_n > 0 && prob_k > 0, "Invalid MNK = [", prob_m,
@@ -795,7 +796,8 @@ torch::Tensor gptq_marlin_gemm(
   } else {
     TORCH_CHECK(b_q_type == vllm::kU4B8 || b_q_type == vllm::kU8B128 ||
                     b_q_type == vllm::kFE4M3fn || b_q_type == vllm::kFE2M1f,
-                "b_q_type must be uint4b8, uint8b128, float8_e4m3fn or float4_e2m1f when "
+                "b_q_type must be uint4b8, uint8b128, float8_e4m3fn or "
+                "float4_e2m1f when "
                 "has_zp = False. Got = ",
                 b_q_type.str());
   }
