@@ -13,7 +13,6 @@ librosa # required by audio tests in entrypoints/openai
 sentence-transformers
 numba == 0.61.2; python_version > '3.9'
 # testing utils
-awscli
 boto3
 botocore
 datasets
@@ -24,5 +23,11 @@ runai-model-streamer-s3==0.11.0
 tensorizer>=2.9.0
 lm-eval==0.4.8
 buildkite-test-collector==0.1.9
-
 lm-eval[api]==0.4.8 # required for model evaluation test
+
+# required for quantization test
+bitsandbytes>=0.45.3
+
+# required for minicpmo_26 test
+vector_quantize_pytorch
+vocos
