@@ -168,7 +168,7 @@ class TPUModelRunner:
         # Lazy initialization
         # self.model: nn.Module  # Set after load_model
         self.kv_caches: list[torch.Tensor] = []
-        self.kv_cache_config = cast(KVCacheConfig, None)
+        # self.kv_cache_config: KVCacheConfig
 
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: dict[str, dict[int, torch.Tensor]] = {}
