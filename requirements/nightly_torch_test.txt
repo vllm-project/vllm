@@ -36,3 +36,4 @@ vocos
 num2words # required for smolvlm test
 pqdm
 blobfile # required for kimi-vl test
+matplotlib
