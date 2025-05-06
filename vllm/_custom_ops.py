@@ -496,6 +496,9 @@ if hasattr(torch.ops._C, "ggml_dequantize"):
                            dtype=torch.float16,
                            device=W.device)
 
+
+if hasattr(torch.ops._C, "ggml_moe_a8_vec"):
+
     @register_fake("_C::ggml_moe_a8_vec")
     def _ggml_moe_a8_vec_fake(
         X: torch.Tensor,
