@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import copy
 import os
 from typing import Any, List
 
@@ -34,8 +35,23 @@ class GuidanceLogitsProcessor:
         self.grammar = grammar
         self.tokenizer = tokenizer
         self.tokenizer_name = tokenizer.name_or_path
+        self.ll_tokenizer = None
+        self.ll_matcher = None
+        self.bitmask = None
         self.new_sampling = False
         self.initialized = False
+
+    def clone(self) -> "GuidanceLogitsProcessor":
+        cloned = copy.copy(self)
+        if self.initialized:
+            cloned.ll_matcher = llguidance.LLMatcher(
+                self.ll_tokenizer,
+                self.grammar,
+                log_level=int(os.environ.get("LLGUIDANCE_LOG_LEVEL", "1")),
+            )
+            self.bitmask = llguidance.torch.allocate_token_bitmask(
+                1, self.ll_tokenizer.vocab_size)
+        return cloned
 
     def _initialize(self):
         if self.initialized:
