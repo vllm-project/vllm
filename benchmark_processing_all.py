@@ -15,7 +15,7 @@ MODELS = [
     "google/gemma-3-4b-it",
     # "THUDM/glm-4v-9b",
     # "ibm-granite/granite-speech-3.3-8b",
-    "h2oai/h2ovl-mississippi-800m",
+    # "h2oai/h2ovl-mississippi-800m",
     "OpenGVLab/InternVL2-1B",
     "HuggingFaceTB/SmolVLM-256M-Instruct",
     "HuggingFaceTB/SmolVLM2-2.2B-Instruct",
