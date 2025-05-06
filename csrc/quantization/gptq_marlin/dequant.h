@@ -395,8 +395,8 @@ __device__ inline void dequant<nv_bfloat162, vllm::kFE4M3fn.id(), false>(
 }
 
 template <>
-__device__ inline void dequant<half2, vllm::kFE2M1f.id(), true>(
-    int q, half2* frag_b) {
+__device__ inline void dequant<half2, vllm::kFE2M1f.id(), true>(int q,
+                                                                half2* frag_b) {
   // Constants for FP4 (E2M1) and FP16 formats
   constexpr int FP4_EXPONENT = 2, FP16_EXPONENT = 5;
   constexpr int RIGHT_SHIFT = FP16_EXPONENT - FP4_EXPONENT;
