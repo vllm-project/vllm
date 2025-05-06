@@ -228,10 +228,16 @@ class DisaggregatedScheduler(Scheduler):
                         skipped_waiting_requests.appendleft(request)
                         continue
 
-                # Get already-cached tokens.
-                computed_blocks, num_computed_tokens = \
-                    self.kv_cache_manager.get_computed_blocks(
-                        request)
+                # TODO: comment.
+                request_blocks = self.kv_cache_manager.req_to_blocks.get(
+                    request.request_id, None)
+                if request_blocks:
+                    new_computed_blocks = []
+                    num_computed_tokens = len(request_blocks) * self.block_size
+                else:
+                    # Get already-cached tokens.
+                    new_computed_blocks, num_computed_tokens = (
+                        self.kv_cache_manager.get_computed_blocks(request))
 
                 # Get externally-cached tokens if using a KVConnector.
                 num_external_tokens = (
@@ -248,7 +254,7 @@ class DisaggregatedScheduler(Scheduler):
                     new_blocks = self.kv_cache_manager.allocate_slots(
                         request,
                         num_external_tokens,
-                        computed_blocks,
+                        new_computed_blocks,
                         skip_cache_blocks=True)
                     if new_blocks is None:
                         # Requests cannot be scheduled
@@ -266,7 +272,7 @@ class DisaggregatedScheduler(Scheduler):
                             request,
                             [
                                 b.block_id for b in itertools.chain(
-                                    computed_blocks, new_blocks)
+                                    new_computed_blocks, new_blocks)
                             ],
                             num_external_tokens,
                         )
@@ -278,6 +284,8 @@ class DisaggregatedScheduler(Scheduler):
                 # We use `request.num_tokens` instead of
                 # `request.num_prompt_tokens` to consider the resumed request,
                 # which have output tokens.
+                print(f"{request.num_tokens=}")
+                print(f"{num_computed_tokens=}")
                 num_new_tokens = request.num_tokens - num_computed_tokens
                 if (0 < self.scheduler_config.long_prefill_token_threshold <
                         num_new_tokens):
@@ -299,13 +307,10 @@ class DisaggregatedScheduler(Scheduler):
                     encoder_inputs_to_schedule = None
                     new_encoder_budget = encoder_budget
 
-                print(f"{num_new_tokens=}")
-                print(f"{num_external_tokens=}")
-                print(f"{computed_blocks=}")
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens + num_external_tokens,
-                    computed_blocks,
+                    new_computed_blocks,
                 )
                 if new_blocks is None:
                     # The request cannot be scheduled.
@@ -319,7 +324,7 @@ class DisaggregatedScheduler(Scheduler):
                         request,
                         [
                             b.block_id for b in itertools.chain(
-                                computed_blocks, new_blocks)
+                                new_computed_blocks, new_blocks)
                         ],
                         num_external_tokens,
                     )
@@ -342,7 +347,7 @@ class DisaggregatedScheduler(Scheduler):
                         f"Invalid request status: {request.status}")
 
                 req_to_new_block_ids[request.request_id] = [
-                    b.block_id for b in computed_blocks + new_blocks
+                    b.block_id for b in new_computed_blocks + new_blocks
                 ]
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens

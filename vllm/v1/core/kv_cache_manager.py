@@ -108,12 +108,6 @@ class KVCacheManager:
                 - The number of computed tokens.
         """
 
-        # P/D:
-        request_blocks = self.req_to_blocks.get(request.request_id, None)
-        if request_blocks is not None:
-            assert request_blocks[-1].block_hash is not None
-            return [], len(request_blocks) * self.block_size
-
         if not self.enable_caching:
             # Prefix caching is disabled.
             return [], 0
