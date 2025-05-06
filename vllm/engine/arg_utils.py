@@ -1354,9 +1354,10 @@ class EngineArgs:
         if is_eagle_enabled and _warn_or_fallback("Eagle"):
             return False
 
-        # Non-CUDA is supported on V1, but off by default for now.
-        not_cuda = not current_platform.is_cuda()
-        if not_cuda and _warn_or_fallback(  # noqa: SIM103
+        # Non-[CUDA, TPU] may be supported on V1, but off by default for now.
+        v0_hardware = not any(
+            (current_platform.is_cuda(), current_platform.is_tpu()))
+        if v0_hardware and _warn_or_fallback(  # noqa: SIM103
                 current_platform.device_name):
             return False
         #############################################################
