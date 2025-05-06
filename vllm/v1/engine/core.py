@@ -205,9 +205,6 @@ class EngineCore:
         output = self.model_executor.execute_model(scheduler_output)
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, output)  # type: ignore
-        logger.info("--------------------------------")
-        logger.info(f"engine_core_outputs: {engine_core_outputs.outputs}")
-        logger.info("--------------------------------")
 
         return engine_core_outputs
 

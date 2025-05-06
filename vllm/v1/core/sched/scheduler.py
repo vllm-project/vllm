@@ -766,7 +766,7 @@ class Scheduler(SchedulerInterface):
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         stop_reason=request.stop_reason,
                         events=request.take_events(),
-                        # new_additional_head_outputs=additional_head_outputs_per_request,
+                        new_additional_head_outputs=additional_head_outputs_per_request,
                     ))
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
