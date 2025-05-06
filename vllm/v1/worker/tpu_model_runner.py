@@ -600,7 +600,14 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # Padded to avoid recompiling when `num_reqs` varies.
         logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
         logits_indices = logits_indices.to(self.device)
-        return attn_metadata, logits_indices, padded_num_reqs
+
+        layer_names = get_layers_from_vllm_config(self.vllm_config,
+                                                  Attention).keys()
+        per_layer_attn_metadata = {
+            layer_name: attn_metadata
+            for layer_name in layer_names
+        }
+        return per_layer_attn_metadata, logits_indices, padded_num_reqs
 
     def _scatter_placeholders(
         self,
@@ -973,10 +980,17 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         torch._dynamo.mark_dynamic(position_ids, 0)
         torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
 
+        layer_names = get_layers_from_vllm_config(self.vllm_config,
+                                                  Attention).keys()
+        per_layer_attn_metadata = {
+            layer_name: attn_metadata
+            for layer_name in layer_names
+        }
+
         with self.maybe_dummy_run_with_lora(
                 self.lora_config,
                 np.array([num_tokens], dtype=np.int32)), set_forward_context(
-                    attn_metadata, self.vllm_config, 0):
+                    per_layer_attn_metadata, self.vllm_config, 0):
             out = self.model(input_ids=input_ids,
                              positions=position_ids,
                              inputs_embeds=inputs_embeds)
