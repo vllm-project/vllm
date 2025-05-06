@@ -296,7 +296,7 @@ def test_fused_moe_batched_experts(
     score = torch.randn((m, e), device="cuda", dtype=dtype)
 
     with set_current_vllm_config(vllm_config):
-        topk_weight, topk_ids = fused_topk(a, score, topk, False)
+        topk_weight, topk_ids, _ = fused_topk(a, score, topk, False)
         baseline_output = torch_moe2(a, w1, w2, topk_weight, topk_ids)
         torch_output = torch_batched_moe(a, w1, w2, topk_weight, topk_ids)
         batched_output = batched_moe(a, w1, w2, topk_weight, topk_ids)
@@ -404,7 +404,7 @@ def _pplx_dispatch_combine(
     nvshmem_init(uid, pgi.rank, pgi.world_size)
     device = pgi.device
 
-    topk_weight, topk_ids = fused_topk(a, score, topk, False)
+    topk_weight, topk_ids, _ = fused_topk(a, score, topk, False)
     k = a.shape[1]
 
     a_rep = torch.repeat_interleave(a, topk, dim=0).to(device)
@@ -577,7 +577,7 @@ def _pplx_moe(
     e, _, n = w2.shape
 
     with set_current_vllm_config(vllm_config):
-        topk_weight, topk_ids = fused_topk(a, score, topk, False)
+        topk_weight, topk_ids, _ = fused_topk(a, score, topk, False)
         torch_output = torch_moe2(a, w1, w2, topk_weight, topk_ids)
         pplx_output = pplx_moe(pgi, dp_size, a, w1, w2, topk_weight, topk_ids)
         batched_output = _batched_moe(pgi, dp_size, a, w1, w2, topk_weight, topk_ids)

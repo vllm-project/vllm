@@ -1044,12 +1044,13 @@ class FusedMoE(torch.nn.Module):
                 scoring_func=scoring_func,
                 e_score_correction_bias=e_score_correction_bias)
         elif custom_routing_function is None:
-            topk_weights, topk_ids, token_expert_indices = fused_topk(hidden_states=hidden_states,
-                                                gating_output=router_logits,
-                                                topk=top_k,
-                                                renormalize=renormalize,
-                                                indices_type=indices_type,
-                                                )
+            topk_weights, topk_ids, token_expert_indices = fused_topk(
+                hidden_states=hidden_states,
+                gating_output=router_logits,
+                topk=top_k,
+                renormalize=renormalize,
+                indices_type=indices_type,
+            )
         else:
             assert indices_type is None or indices_type == torch.int32
             topk_weights, topk_ids = custom_routing_function(
