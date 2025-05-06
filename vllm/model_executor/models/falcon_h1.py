@@ -27,7 +27,6 @@ from vllm.model_executor.layers.mamba.mamba_mixer2 import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
@@ -590,7 +589,6 @@ class FalconH1ForCausalLM(
             )
         else:
             self.lm_head = PPMissingLayer()
-        self.sampler = get_sampler()
 
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
@@ -678,13 +676,6 @@ class FalconH1ForCausalLM(
         )
         return logits
 
-    def sample(
-        self,
-        logits: Optional[torch.Tensor],
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
 
     def load_weights(
         self, weights: Iterable[Tuple[str, torch.Tensor]]
