@@ -64,6 +64,7 @@ def main(output_dir: str, sync: bool):
         ]
         if sync:
             args.extend(["--async"])
+        args.extend(["--append"])
 
         subprocess.run(args, check=True)
 
