@@ -104,7 +104,7 @@ def get_engine(
 ) -> LLMEngine:
     global _engine
 
-    if _engine is None or parallel_backend == "mt":
+    if _engine is None:
         args = EngineArgs(
             model=model_id,
             trust_remote_code=True,
@@ -138,7 +138,7 @@ async def get_async_engine(
 ) -> EngineClient:
     global _engine
 
-    if _engine is None or parallel_backend == "mt":
+    if _engine is None:
         args = AsyncEngineArgs(
             model=model_id,
             trust_remote_code=True,
