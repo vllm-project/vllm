@@ -222,15 +222,20 @@ def linkcode_resolve(domain, info):
 
 # Mock out external dependencies here, otherwise sphinx-argparse won't work.
 autodoc_mock_imports = [
+    "huggingface_hub",
     "pydantic",
     "zmq",
+    "cloudpickle",
     "aiohttp",
     "starlette",
     "blake3",
     "cpuinfo",
+    "transformers",
     "psutil",
     "vllm._C",
     "PIL",
+    "numpy",
+    "tqdm",
     # The mocks below are required by
     # docs/source/serving/openai_compatible_server.md's
     # vllm.entrypoints.openai.cli_args

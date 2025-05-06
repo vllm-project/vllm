@@ -13,7 +13,3 @@ commonmark # Required by sphinx-argparse when using :markdownhelp:
 cachetools
 -f https://download.pytorch.org/whl/cpu
 torch
-# Required by sphinx-argparse when default constructing ModelConfig
-transformers
-cloudpickle 
-gguf
