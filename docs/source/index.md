@@ -132,6 +132,7 @@ serving/integrations/index
 :caption: Deployment
 :maxdepth: 1
 
+deployment/security
 deployment/docker
 deployment/k8s
 deployment/nginx
@@ -180,6 +181,7 @@ design/v1/metrics
 :maxdepth: 2
 
 contributing/overview
+contributing/deprecation_policy
 contributing/profiling/profiling_index
 contributing/dockerfile/dockerfile
 contributing/model/index
@@ -192,11 +194,8 @@ contributing/vulnerability_management
 :caption: API Reference
 :maxdepth: 2
 
-api/offline_inference/index
-api/engine/index
-api/inference_params
-api/multimodal/index
-api/model/index
+api/summary
+api/vllm/vllm
 :::
 
 % Latest news and acknowledgements

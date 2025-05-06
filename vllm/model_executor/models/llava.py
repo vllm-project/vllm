@@ -2,7 +2,6 @@
 
 from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
-from functools import cached_property
 from typing import (Final, Literal, Optional, Protocol, Set, Tuple, TypedDict,
                     TypeVar, Union, cast)
 
@@ -23,7 +22,6 @@ from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
@@ -356,9 +354,8 @@ class PixtralHFMultiModalProcessor(
         image_token_id = hf_config.image_token_index
         image_end_id = vocab[processor.image_end_token]
 
-        vision_config = hf_config.vision_config
-        assert isinstance(vision_config, PixtralVisionConfig)
-        encoder_info = PixtralHFEncoderInfo(vision_config)
+        assert isinstance(hf_config.vision_config, PixtralVisionConfig)
+        encoder_info = PixtralHFEncoderInfo(hf_config)
 
         def get_replacement(item_idx: int):
             images = mm_items.get_items("image", ImageProcessorItems)
@@ -398,14 +395,12 @@ def _build_llava_or_pixtral_hf_processor(
     dummy_inputs: BaseDummyInputsBuilder[_I],
     *,
     cache: Optional[ProcessingCache] = None,
-    enable_sanity_checks: bool = True,
 ) -> BaseMultiModalProcessor:
     if isinstance(info, PixtralHFProcessingInfo):
         return PixtralHFMultiModalProcessor(
             info,
             dummy_inputs,  # type: ignore
             cache=cache,
-            enable_sanity_checks=enable_sanity_checks,
         )
 
     if isinstance(info, LlavaProcessingInfo):
@@ -413,7 +408,6 @@ def _build_llava_or_pixtral_hf_processor(
             info,
             dummy_inputs,  # type: ignore
             cache=cache,
-            enable_sanity_checks=enable_sanity_checks,
         )
 
     raise NotImplementedError(type(info))
@@ -545,13 +539,6 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
-
-    @cached_property
-    def sampler(self):
-        if hasattr(self.language_model, "sampler"):
-            return self.language_model.sampler
-
-        return get_sampler()
 
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
         h = w = self.config.vision_config.image_size
@@ -734,8 +721,9 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
                 batch.
             pixel_values: The pixels in each input image.
 
-        See also:
-            :class:`LlavaImageInputs`
+        :::{seealso}
+        {class}`LlavaImageInputs`
+        :::
         """
         if intermediate_tensors is not None:
             inputs_embeds = None
@@ -762,13 +750,6 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> Optional[torch.Tensor]:
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:

@@ -5,6 +5,7 @@ from typing import Optional
 
 import msgspec
 import numpy as np
+import pytest
 import torch
 
 from vllm.multimodal.inputs import (MultiModalBatchedField,
@@ -32,6 +33,7 @@ class MyType:
     large_f_contig_tensor: torch.Tensor
     small_non_contig_tensor: torch.Tensor
     large_non_contig_tensor: torch.Tensor
+    empty_tensor: torch.Tensor
 
 
 def test_encode_decode():
@@ -47,6 +49,10 @@ def test_encode_decode():
             torch.rand((1, 10), dtype=torch.float32),
             torch.rand((3, 5, 4000), dtype=torch.float64),
             torch.tensor(1984),  # test scalar too
+            # Make sure to test bf16 which numpy doesn't support.
+            torch.rand((3, 5, 1000), dtype=torch.bfloat16),
+            torch.tensor([float("-inf"), float("inf")] * 1024,
+                         dtype=torch.bfloat16),
         ],
         numpy_array=np.arange(512),
         unrecognized=UnrecognizedType(33),
@@ -54,6 +60,7 @@ def test_encode_decode():
         large_f_contig_tensor=torch.rand(1024, 4).t(),
         small_non_contig_tensor=torch.rand(2, 4)[:, 1:3],
         large_non_contig_tensor=torch.rand(1024, 512)[:, 10:20],
+        empty_tensor=torch.empty(0),
     )
 
     encoder = MsgpackEncoder(size_threshold=256)
@@ -64,7 +71,7 @@ def test_encode_decode():
     # There should be the main buffer + 4 large tensor buffers
     # + 1 large numpy array. "large" is <= 512 bytes.
     # The two small tensors are encoded inline.
-    assert len(encoded) == 6
+    assert len(encoded) == 8
 
     decoded: MyType = decoder.decode(encoded)
 
@@ -76,7 +83,7 @@ def test_encode_decode():
 
     encoded2 = encoder.encode_into(obj, preallocated)
 
-    assert len(encoded2) == 6
+    assert len(encoded2) == 8
     assert encoded2[0] is preallocated
 
     decoded2: MyType = decoder.decode(encoded2)
@@ -114,15 +121,15 @@ def test_multimodal_kwargs():
 
     total_len = sum(memoryview(x).cast("B").nbytes for x in encoded)
 
-    # expected total encoding length, should be 44536, +-20 for minor changes
-    assert total_len >= 44516 and total_len <= 44556
+    # expected total encoding length, should be 44559, +-20 for minor changes
+    assert total_len >= 44539 and total_len <= 44579
     decoded: MultiModalKwargs = decoder.decode(encoded).mm[0]
     assert all(nested_equal(d[k], decoded[k]) for k in d)
 
 
 def test_multimodal_items_by_modality():
-    e1 = MultiModalFieldElem("audio", "a0", torch.zeros(1000,
-                                                        dtype=torch.int16),
+    e1 = MultiModalFieldElem("audio", "a0",
+                             torch.zeros(1000, dtype=torch.bfloat16),
                              MultiModalBatchedField())
     e2 = MultiModalFieldElem(
         "video",
@@ -189,3 +196,101 @@ def assert_equal(obj1: MyType, obj2: MyType):
                        obj2.small_non_contig_tensor)
     assert torch.equal(obj1.large_non_contig_tensor,
                        obj2.large_non_contig_tensor)
+    assert torch.equal(obj1.empty_tensor, obj2.empty_tensor)
+
+
+@pytest.mark.parametrize("allow_pickle", [True, False])
+def test_dict_serialization(allow_pickle: bool):
+    """Test encoding and decoding of a generic Python object using pickle."""
+    encoder = MsgpackEncoder(allow_pickle=allow_pickle)
+    decoder = MsgpackDecoder(allow_pickle=allow_pickle)
+
+    # Create a sample Python object
+    obj = {"key": "value", "number": 42}
+
+    # Encode the object
+    encoded = encoder.encode(obj)
+
+    # Decode the object
+    decoded = decoder.decode(encoded)
+
+    # Verify the decoded object matches the original
+    assert obj == decoded, "Decoded object does not match the original object."
+
+
+@pytest.mark.parametrize("allow_pickle", [True, False])
+def test_tensor_serialization(allow_pickle: bool):
+    """Test encoding and decoding of a torch.Tensor."""
+    encoder = MsgpackEncoder(allow_pickle=allow_pickle)
+    decoder = MsgpackDecoder(torch.Tensor, allow_pickle=allow_pickle)
+
+    # Create a sample tensor
+    tensor = torch.rand(10, 10)
+
+    # Encode the tensor
+    encoded = encoder.encode(tensor)
+
+    # Decode the tensor
+    decoded = decoder.decode(encoded)
+
+    # Verify the decoded tensor matches the original
+    assert torch.allclose(
+        tensor, decoded), "Decoded tensor does not match the original tensor."
+
+
+@pytest.mark.parametrize("allow_pickle", [True, False])
+def test_numpy_array_serialization(allow_pickle: bool):
+    """Test encoding and decoding of a numpy array."""
+    encoder = MsgpackEncoder(allow_pickle=allow_pickle)
+    decoder = MsgpackDecoder(np.ndarray, allow_pickle=allow_pickle)
+
+    # Create a sample numpy array
+    array = np.random.rand(10, 10)
+
+    # Encode the numpy array
+    encoded = encoder.encode(array)
+
+    # Decode the numpy array
+    decoded = decoder.decode(encoded)
+
+    # Verify the decoded array matches the original
+    assert np.allclose(
+        array,
+        decoded), "Decoded numpy array does not match the original array."
+
+
+class CustomClass:
+
+    def __init__(self, value):
+        self.value = value
+
+    def __eq__(self, other):
+        return isinstance(other, CustomClass) and self.value == other.value
+
+
+def test_custom_class_serialization_allowed_with_pickle():
+    """Test that serializing a custom class succeeds when allow_pickle=True."""
+    encoder = MsgpackEncoder(allow_pickle=True)
+    decoder = MsgpackDecoder(CustomClass, allow_pickle=True)
+
+    obj = CustomClass("test_value")
+
+    # Encode the custom class
+    encoded = encoder.encode(obj)
+
+    # Decode the custom class
+    decoded = decoder.decode(encoded)
+
+    # Verify the decoded object matches the original
+    assert obj == decoded, "Decoded object does not match the original object."
+
+
+def test_custom_class_serialization_disallowed_without_pickle():
+    """Test that serializing a custom class fails when allow_pickle=False."""
+    encoder = MsgpackEncoder(allow_pickle=False)
+
+    obj = CustomClass("test_value")
+
+    with pytest.raises(TypeError):
+        # Attempt to encode the custom class
+        encoder.encode(obj)
