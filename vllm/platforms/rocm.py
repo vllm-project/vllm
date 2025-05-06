@@ -173,11 +173,11 @@ class RocmPlatform(Platform):
                     if use_v1:
                         logger.info("Using AITER MLA backend on V1 engine.")
                         logger.warning(
-                            "Increasing the model execution timeout"
-                            "using the VLLM_ROCM_EXECUTE_MODEL_TIMEOUT"
-                            "environment variable is recommended"
-                            "if timeout error is encountered"
-                            "when running %s"
+                            "Increasing the model execution timeout "
+                            "using the VLLM_ROCM_EXECUTE_MODEL_TIMEOUT "
+                            "environment variable is recommended "
+                            "if timeout error is encountered "
+                            "when running %s "
                             "backend on V1 engine.", selected_backend)
                         return "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
                     else:
