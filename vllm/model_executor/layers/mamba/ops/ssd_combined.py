@@ -6,9 +6,10 @@
 # ruff: noqa: E501
 
 import torch
-import triton
 from einops import rearrange
 from packaging import version
+
+from vllm.triton_utils import triton
 
 from .ssd_bmm import _bmm_chunk_fwd
 from .ssd_chunk_scan import _chunk_scan_fwd
