@@ -140,7 +140,7 @@ class RotaryEmbedding(CustomOp):
         query: torch.Tensor,
         key: Optional[torch.Tensor] = None,
         offsets: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """A PyTorch-native implementation of forward()."""
         if offsets is not None:
             positions = positions + offsets
@@ -174,7 +174,7 @@ class RotaryEmbedding(CustomOp):
         query: torch.Tensor,
         key: Optional[torch.Tensor] = None,
         offsets: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         from vllm import _custom_ops as ops
 
         # __setattr__ in nn.Module (called by `self.cos_sin_cache = ...`)
@@ -202,7 +202,7 @@ class RotaryEmbedding(CustomOp):
         query: torch.Tensor,
         key: Optional[torch.Tensor] = None,
         offsets: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         from vllm._ipex_ops import ipex_ops as ops
 
         self.cos_sin_cache = self.cos_sin_cache.to(positions.device,
@@ -232,7 +232,7 @@ class RotaryEmbedding(CustomOp):
         query: torch.Tensor,
         key: Optional[torch.Tensor] = None,
         offsets: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         from habana_frameworks.torch.hpex.kernels import (
             RotaryPosEmbeddingMode, apply_rotary_pos_emb)
         if offsets is not None:
@@ -290,7 +290,7 @@ class RotaryEmbedding(CustomOp):
         query: torch.Tensor,
         key: Optional[torch.Tensor] = None,
         offsets: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
 
         def _apply_rotary_emb_neuron(
             x: torch.Tensor,
@@ -688,7 +688,7 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
         query: torch.Tensor,
         key: Optional[torch.Tensor] = None,
         offsets: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         assert key is not None
         query = query.view(*query.shape[:-1], -1, self.head_size)
         key = key.view(*key.shape[:-1], -1, self.head_size)
@@ -799,7 +799,7 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         query: torch.Tensor,
         key: Optional[torch.Tensor] = None,
         offsets: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """PyTorch-native implementation equivalent to forward()."""
         assert key is not None
         query_rot = query[..., :self.rotary_dim]
@@ -929,7 +929,7 @@ class Llama4VisionRotaryEmbedding(RotaryEmbedding):
         self,
         query: torch.Tensor,
         key: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         assert key is not None
         self.cos_sin_cache: torch.Tensor = self.cos_sin_cache.to(query.device)
         query_ = torch.view_as_complex(query.float().reshape(
@@ -975,7 +975,7 @@ class MRotaryEmbedding(RotaryEmbedding):
         positions: torch.Tensor,
         query: torch.Tensor,
         key: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """PyTorch-native implementation equivalent to forward().
 
         Args:
