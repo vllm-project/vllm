@@ -30,7 +30,7 @@ class KVCacheBlocks:
     @classmethod
     def create_empty(cls) -> "KVCacheBlocks":
         """Creates a new KVCacheBlocks instance with no blocks."""
-        return KVCacheBlocks([])
+        return cls([])
 
     def to_block_ids(self) -> list[int]:
         """Converts the KVCacheBlocks instance to a list of block IDs."""
