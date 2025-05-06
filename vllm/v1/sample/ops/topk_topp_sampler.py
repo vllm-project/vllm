@@ -113,16 +113,18 @@ class TopKTopPSampler(nn.Module):
             sample = random_sample(probs, generators)
             # Logits aren't changed here!
         else:
-            sample, probs = flashinfer_sample(probs, k, p, generators, return_logits)
+            sample, probs = flashinfer_sample(probs, k, p, generators,
+                                              return_logits)
             if return_logits:
                 assert probs is not None
                 # Set logits to -inf where probs were set to 0.0.
-                mask_value = torch.scalar_tensor(float("-inf"), dtype=logits.dtype, device=logits.device)
+                mask_value = torch.scalar_tensor(float("-inf"),
+                                                 dtype=logits.dtype,
+                                                 device=logits.device)
                 torch.where(probs.eq(0.0), mask_value, logits, out=logits)
         if return_logits:
             return sample, logits
         return sample, None
-
 
     def forward_tpu(
         self,
@@ -311,16 +313,17 @@ def flashinfer_sample(
         for i, generator in generators.items():
             uniform_samples[:, i].uniform_(generator=generator)
 
-
     if not return_probs:
         if k is None:
             # Top-p only.
-            next_token_ids, success = flashinfer.sampling.top_p_sampling_from_probs(
-                probs, uniform_samples, p, deterministic=True)
+            next_token_ids, success = (
+                flashinfer.sampling.top_p_sampling_from_probs(
+                    probs, uniform_samples, p, deterministic=True))
         elif p is None:
             # Top-k only.
-            next_token_ids, success = flashinfer.sampling.top_k_sampling_from_probs(
-                probs, uniform_samples, k, deterministic=True)
+            next_token_ids, success = (
+                flashinfer.sampling.top_k_sampling_from_probs(
+                    probs, uniform_samples, k, deterministic=True))
         else:
             # Both top-k and top-p.
             next_token_ids, success = (

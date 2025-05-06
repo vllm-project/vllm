@@ -15,6 +15,7 @@ _SAMPLING_EPS = 1e-5
 # Placeholder; implement server-side flag
 POST_PROCESS_LOGPROBS = True
 
+
 class Sampler(nn.Module):
 
     def __init__(self):
@@ -102,7 +103,8 @@ class Sampler(nn.Module):
             greedy_sampled = None
         else:
             greedy_sampled = self.greedy_sample(logits)
-        assert not (sampling_metadata.all_greedy and sampling_metadata.all_random)
+        assert not (sampling_metadata.all_greedy
+                    and sampling_metadata.all_random)
         if sampling_metadata.all_greedy:
             if return_logits:
                 return greedy_sampled, logits
@@ -111,7 +113,8 @@ class Sampler(nn.Module):
         if not sampling_metadata.all_greedy:
             assert sampling_metadata.temperature is not None
             # Apply temperature.
-            logits = self.apply_temperature(logits, sampling_metadata.temperature)
+            logits = self.apply_temperature(logits,
+                                            sampling_metadata.temperature)
 
             # Apply min_p.
             if sampling_metadata.min_p is not None:
