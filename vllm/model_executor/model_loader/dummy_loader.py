@@ -5,7 +5,7 @@ import torch.nn as nn
 from vllm.config import LoadConfig, ModelConfig, VllmConfig
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.utils import (
-    _initialize_model, _process_weights_after_loading, set_default_torch_dtype)
+    process_weights_after_loading, initialize_model, set_default_torch_dtype)
 from vllm.model_executor.model_loader.weight_utils import (
     initialize_dummy_weights)
 
@@ -28,10 +28,10 @@ class DummyModelLoader(BaseModelLoader):
         target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
-                model = _initialize_model(vllm_config=vllm_config)
+                model = initialize_model(vllm_config=vllm_config)
             # NOTE(woosuk): For accurate performance evaluation, we assign
             # random values to the weights.
             initialize_dummy_weights(model)
 
-            _process_weights_after_loading(model, model_config, target_device)
+            process_weights_after_loading(model, model_config, target_device)
         return model.eval()

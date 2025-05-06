@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-# ruff: noqa: SIM117
 import collections
 import glob
 import os
@@ -13,7 +12,7 @@ from vllm.config import LoadConfig, ModelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.utils import (
-    _initialize_model, _process_weights_after_loading, set_default_torch_dtype)
+    initialize_model, process_weights_after_loading, set_default_torch_dtype)
 from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf, runai_safetensors_weights_iterator)
 from vllm.transformers_utils.s3_utils import glob as s3_glob
@@ -114,8 +113,8 @@ class ShardedStateLoader(BaseModelLoader):
 
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
-                model = _initialize_model(vllm_config=vllm_config)
-                _process_weights_after_loading(model, model_config,
+                model = initialize_model(vllm_config=vllm_config)
+                process_weights_after_loading(model, model_config,
                                                target_device)
             rank = get_tensor_model_parallel_rank()
             pattern = os.path.join(

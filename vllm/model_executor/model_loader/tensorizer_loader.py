@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-
 # ruff: noqa: SIM117
 import copy
 from typing import Generator, Tuple
@@ -13,8 +12,8 @@ from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig, is_vllm_tensorized, load_with_tensorizer,
     serialize_vllm_model, tensorizer_weights_iterator)
-from vllm.model_executor.model_loader.utils import (_initialize_model,
-                                                    get_model_architecture,
+from vllm.model_executor.model_loader.utils import (get_model_architecture,
+                                                    initialize_model,
                                                     set_default_torch_dtype)
 
 logger = init_logger(__name__)
@@ -56,7 +55,7 @@ class TensorizerLoader(BaseModelLoader):
         model_config = vllm_config.model_config
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
-                model = _initialize_model(vllm_config=vllm_config)
+                model = initialize_model(vllm_config=vllm_config)
 
             model.load_weights(self._get_weights_iterator())
         return model.eval()

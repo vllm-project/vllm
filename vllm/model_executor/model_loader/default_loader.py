@@ -1,6 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# ruff: noqa: SIM117
-
 import dataclasses
 import glob
 import os
@@ -17,7 +15,7 @@ from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.utils import (
-    _initialize_model, _process_weights_after_loading, set_default_torch_dtype)
+    process_weights_after_loading, initialize_model, set_default_torch_dtype)
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
     fastsafetensors_weights_iterator, filter_duplicate_safetensors_files,
@@ -271,7 +269,7 @@ class DefaultModelLoader(BaseModelLoader):
         target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
-                model = _initialize_model(vllm_config=vllm_config)
+                model = initialize_model(vllm_config=vllm_config)
 
             weights_to_load = {name for name, _ in model.named_parameters()}
             loaded_weights = model.load_weights(
@@ -290,6 +288,6 @@ class DefaultModelLoader(BaseModelLoader):
                         "Following weights were not initialized from "
                         f"checkpoint: {weights_not_loaded}")
 
-            _process_weights_after_loading(model, model_config, target_device)
+            process_weights_after_loading(model, model_config, target_device)
 
         return model.eval()

@@ -37,7 +37,7 @@ def set_default_torch_dtype(dtype: torch.dtype):
     torch.set_default_dtype(old_dtype)
 
 
-def _initialize_model(
+def initialize_model(
     vllm_config: VllmConfig,
     *,
     prefix: str = "",
@@ -87,7 +87,7 @@ def _initialize_model(
         return model_class(**kwargs)
 
 
-def _process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
+def process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
                                    target_device: torch.device) -> None:
     for _, module in model.named_modules():
         if isinstance(module, QKVCrossParallelLinear):

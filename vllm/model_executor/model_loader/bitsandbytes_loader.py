@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-
 # ruff: noqa: SIM117
 import copy
 import fnmatch
@@ -29,7 +28,7 @@ from vllm.model_executor.layers.linear import (LinearBase,
                                                RowParallelLinear)
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.utils import (ParamMapping,
-                                                    _initialize_model,
+                                                    initialize_model,
                                                     set_default_torch_dtype)
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
@@ -558,9 +557,11 @@ class BitsAndBytesModelLoader(BaseModelLoader):
     def load_model(self, vllm_config: VllmConfig) -> nn.Module:
         device_config = vllm_config.device_config
         model_config = vllm_config.model_config
+
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
-                model = _initialize_model(vllm_config=vllm_config)
+
+                model = initialize_model(vllm_config=vllm_config)
 
                 self._load_weights(model_config, model)
 

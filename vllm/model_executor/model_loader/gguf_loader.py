@@ -10,7 +10,7 @@ from transformers import AutoModelForCausalLM
 from vllm.config import LoadConfig, ModelConfig, VllmConfig
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.utils import (
-    _initialize_model, _process_weights_after_loading, set_default_torch_dtype)
+    process_weights_after_loading, initialize_model, set_default_torch_dtype)
 from vllm.model_executor.model_loader.weight_utils import (
     get_gguf_extra_tensor_names, gguf_quant_weights_iterator)
 
@@ -105,9 +105,9 @@ class GGUFModelLoader(BaseModelLoader):
         target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
-                model = _initialize_model(vllm_config=vllm_config)
+                model = initialize_model(vllm_config=vllm_config)
             model.load_weights(
                 self._get_weights_iterator(local_model_path, gguf_weights_map))
 
-            _process_weights_after_loading(model, model_config, target_device)
+            process_weights_after_loading(model, model_config, target_device)
         return model
