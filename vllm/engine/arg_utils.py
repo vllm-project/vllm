@@ -543,7 +543,7 @@ class EngineArgs:
             action=argparse.BooleanOptionalAction,
             help="[DEPRECATED] The `--enable-reasoning` flag is deprecated as "
             "of v0.8.6. Use `--reasoning-parser` to specify the reasoning "
-            "parser backend insteadThis flag (`--enable-reasoning`) will be "
+            "parser backend instead. This flag (`--enable-reasoning`) will be "
             "removed in v0.10.0. When `--reasoning-parser` is specified, "
             "reasoning mode is automatically enabled.")
         guided_decoding_group.add_argument(
