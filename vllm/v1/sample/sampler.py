@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """A layer that samples the next tokens from the model's outputs."""
 
+from typing import Union
+
 import torch
 import torch.nn as nn
 
@@ -92,7 +94,7 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
         return_logits: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, Union[torch.Tensor, None]]:
         """Sample logits based on sampling metadata.
 
         The various logits processing functions called in this method

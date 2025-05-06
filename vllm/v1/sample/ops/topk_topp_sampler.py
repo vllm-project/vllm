@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -83,7 +83,7 @@ class TopKTopPSampler(nn.Module):
         k: Optional[torch.Tensor],
         p: Optional[torch.Tensor],
         return_logits: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, Union[torch.Tensor, None]]:
         """
         PyTorch-native implementation of top-k and top-p sampling.
 
@@ -103,7 +103,7 @@ class TopKTopPSampler(nn.Module):
         k: Optional[torch.Tensor],
         p: Optional[torch.Tensor],
         return_logits: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, Union[torch.Tensor, None]]:
         """More optimized implementation for top-k and top-p sampling."""
         probs = logits.softmax(dim=-1, dtype=torch.float32)
         if k is None and p is None:
@@ -133,7 +133,7 @@ class TopKTopPSampler(nn.Module):
         k: Optional[torch.Tensor],
         p: Optional[torch.Tensor],
         return_logits: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, Union[torch.Tensor, None]]:
         logits = apply_top_k_top_p_tpu(logits, k, p)
         probs = logits.softmax(dim=-1, dtype=torch.float32)
         sample = random_sample(probs, generators)
@@ -287,7 +287,7 @@ def flashinfer_sample(
     p: Optional[torch.Tensor],
     generators: dict[int, torch.Generator],
     return_probs: bool,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
+) -> tuple[torch.Tensor, Union[torch.Tensor, None]]:
     """Sample from the probabilities using FlashInfer.
 
     Statistically, this function is equivalent to the `random_sample` function.
