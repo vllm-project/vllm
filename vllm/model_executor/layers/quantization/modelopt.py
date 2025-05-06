@@ -15,6 +15,9 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
+    apply_fp4_marlin_linear, is_fp4_marlin_supported,
+    prepare_fp4_layer_for_marlin)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -194,7 +197,7 @@ class ModelOptNvFp4Config(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 100
+        return 80
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
@@ -264,9 +267,15 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
     def __init__(self, quant_config: ModelOptNvFp4Config):
         self.quant_config = quant_config
         self.cutlass_nvfp4_supported = cutlass_fp4_supported()
+        self.use_marlin = False
+
         if not self.cutlass_nvfp4_supported:
-            raise ValueError("Current platform does not support NVFP4"
-                             " quantization. Please use Blackwell and above.")
+            if is_fp4_marlin_supported():
+                self.use_marlin = True
+            else:
+                raise ValueError("Current platform does not support NVFP4"
+                                 " quantization. Please use Blackwell and"
+                                 " above.")
 
     def create_weights(
         self,
@@ -378,12 +387,28 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         layer.weight_scale_swizzled = Parameter(swizzled_weight_scale,
                                                 requires_grad=False)
 
+        if self.use_marlin:
+            prepare_fp4_layer_for_marlin(layer)
+            del layer.alpha
+            del layer.input_scale
+            del layer.weight_scale_swizzled
+
     def apply(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if self.use_marlin:
+            return apply_fp4_marlin_linear(
+                input=x,
+                weight=layer.weight,
+                weight_scale=layer.weight_scale,
+                workspace=layer.workspace,
+                size_n=layer.output_size_per_partition,
+                size_k=layer.input_size_per_partition,
+                bias=bias)
+
         output_dtype = x.dtype
 
         # for input only the contracting dimension has a constraint.
