@@ -284,11 +284,6 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         raise TypeError("Error: --enable-auto-tool-choice requires "
                         "--tool-call-parser")
 
-    # Enable reasoning needs a reasoning parser to be valid
-    if args.enable_reasoning and not args.reasoning_parser:
-        raise TypeError("Error: --enable-reasoning requires "
-                        "--reasoning-parser")
-
 
 def create_parser_for_docs() -> FlexibleArgumentParser:
     parser_for_docs = FlexibleArgumentParser(

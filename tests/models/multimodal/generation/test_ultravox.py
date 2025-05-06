@@ -11,12 +11,21 @@ from transformers import AutoModel, AutoTokenizer
 from vllm.multimodal.audio import resample_audio_librosa
 from vllm.sequence import SampleLogprobs
 
-from ....conftest import HfRunner, VllmRunner, _AudioAssets
+from ....conftest import AUDIO_ASSETS, AudioTestAssets, HfRunner, VllmRunner
 from ....utils import RemoteOpenAIServer
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import check_logprobs_close
 
 MODEL_NAME = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
+
+AUDIO_PROMPTS = AUDIO_ASSETS.prompts({
+    "mary_had_lamb":
+    "Transcribe this into English.",
+    "winning_call":
+    "What is happening in this audio clip?",
+})
+
+MULTI_AUDIO_PROMPT = "Describe each of the audios above."
 
 AudioTuple = tuple[np.ndarray, int]
 
@@ -29,12 +38,6 @@ CHUNKED_PREFILL_KWARGS = {
     # Use a very small limit to exercise chunked prefill.
     "max_num_batched_tokens": 16
 }
-
-
-@pytest.fixture(scope="module", params=("mary_had_lamb", "winning_call"))
-def audio(request):
-    from vllm.assets.audio import AudioAsset
-    return AudioAsset(request.param)
 
 
 def params_kwargs_to_cli_args(params_kwargs: dict[str, Any]) -> list[str]:
@@ -53,7 +56,7 @@ def params_kwargs_to_cli_args(params_kwargs: dict[str, Any]) -> list[str]:
     pytest.param({}, marks=pytest.mark.cpu_model),
     pytest.param(CHUNKED_PREFILL_KWARGS),
 ])
-def server(request, audio_assets: _AudioAssets):
+def server(request, audio_assets: AudioTestAssets):
     args = [
         "--dtype", "bfloat16", "--max-model-len", "4096", "--enforce-eager",
         "--limit-mm-per-prompt",
@@ -199,15 +202,19 @@ def run_multi_audio_test(
     pytest.param({}, marks=pytest.mark.cpu_model),
     pytest.param(CHUNKED_PREFILL_KWARGS),
 ])
-def test_models(hf_runner, vllm_runner, audio, dtype: str, max_tokens: int,
-                num_logprobs: int, vllm_kwargs: dict) -> None:
+def test_models(hf_runner, vllm_runner, audio_assets: AudioTestAssets,
+                dtype: str, max_tokens: int, num_logprobs: int,
+                vllm_kwargs: dict) -> None:
+    audio_inputs = [(
+        _get_prompt(1, audio, VLLM_PLACEHOLDER),
+        _get_prompt(1, audio, HF_PLACEHOLDER),
+        audio.audio_and_sample_rate,
+    ) for audio in audio_assets]
 
-    vllm_prompt = _get_prompt(1, "Describe the audio above.", VLLM_PLACEHOLDER)
-    hf_prompt = _get_prompt(1, "Describe the audio above.", HF_PLACEHOLDER)
     run_test(
         hf_runner,
         vllm_runner,
-        [(vllm_prompt, hf_prompt, audio.audio_and_sample_rate)],
+        audio_inputs,
         MODEL_NAME,
         dtype=dtype,
         max_tokens=max_tokens,
@@ -224,13 +231,12 @@ def test_models(hf_runner, vllm_runner, audio, dtype: str, max_tokens: int,
     pytest.param({}, marks=pytest.mark.cpu_model),
     pytest.param(CHUNKED_PREFILL_KWARGS),
 ])
-def test_models_with_multiple_audios(vllm_runner, audio_assets: _AudioAssets,
-                                     dtype: str, max_tokens: int,
-                                     num_logprobs: int,
+def test_models_with_multiple_audios(vllm_runner,
+                                     audio_assets: AudioTestAssets, dtype: str,
+                                     max_tokens: int, num_logprobs: int,
                                      vllm_kwargs: dict) -> None:
 
-    vllm_prompt = _get_prompt(len(audio_assets),
-                              "Describe each of the audios above.",
+    vllm_prompt = _get_prompt(len(audio_assets), MULTI_AUDIO_PROMPT,
                               VLLM_PLACEHOLDER)
     run_multi_audio_test(
         vllm_runner,
@@ -245,7 +251,7 @@ def test_models_with_multiple_audios(vllm_runner, audio_assets: _AudioAssets,
 
 
 @pytest.mark.asyncio
-async def test_online_serving(client, audio_assets: _AudioAssets):
+async def test_online_serving(client, audio_assets: AudioTestAssets):
     """Exercises online serving with/without chunked prefill enabled."""
 
     messages = [{

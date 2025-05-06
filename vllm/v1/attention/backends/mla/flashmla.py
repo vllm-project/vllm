@@ -149,4 +149,4 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             causal=True,
         )
 
-        return self._v_up_proj_and_o_proj(o)
+        return self._v_up_proj(o)

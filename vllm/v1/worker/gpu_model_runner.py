@@ -3,7 +3,7 @@
 import gc
 import time
 import weakref
-from typing import TYPE_CHECKING, Optional, Union, cast
+from typing import TYPE_CHECKING, Optional, Union
 
 import numpy as np
 import torch
@@ -11,7 +11,6 @@ import torch.distributed
 import torch.nn as nn
 
 from vllm.attention import AttentionType, get_attn_backend
-from vllm.attention.backends.abstract import AttentionMetadataBuilder
 from vllm.attention.layer import Attention
 from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config)
@@ -159,9 +158,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # self.model: nn.Module  # Set after load_model
         # Initialize in initialize_kv_cache
         self.kv_caches: list[torch.Tensor] = []
-        self.kv_cache_config = cast(KVCacheConfig, None)
-        self.attn_metadata_builder: type[AttentionMetadataBuilder] = cast(
-            type[AttentionMetadataBuilder], None)
+        # self.kv_cache_config: KVCacheConfig
+        # self.attn_metadata_builder: type[AttentionMetadataBuilder]
 
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: dict[str, dict[int, torch.Tensor]] = {}
@@ -1037,7 +1035,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> Union[ModelRunnerOutput, torch.Tensor]:
+    ) -> Union[ModelRunnerOutput, IntermediateTensors]:
         # Update KVConnector with the KVConnector metadata forward().
         if has_kv_transfer_group():
             get_kv_transfer_group().bind_connector_metadata(
