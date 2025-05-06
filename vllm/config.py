@@ -1268,6 +1268,12 @@ class ModelConfig:
             if "max_new_tokens" in diff_sampling_param:
                 diff_sampling_param["max_tokens"] = diff_sampling_param.pop(
                     "max_new_tokens")
+            # Huggingface's definition of `top_k: 0` (disabling top-k sampling)
+            # is equivalent to vLLM's `top_k: -1`.
+            top_k = diff_sampling_param.get("top_k")
+            if top_k is not None and top_k <= 0:
+                # vLLM's top_k is -1 for disabling top-k sampling
+                diff_sampling_param['top_k'] = -1
         else:
             diff_sampling_param = {}
 
