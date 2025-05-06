@@ -2021,7 +2021,7 @@ class LLMEngine:
         if not prompt_ids:
             if prompt_type == "encoder" and model_config.is_multimodal_model:
                 pass  # Mllama may have empty encoder inputs for text-only data
-            if prompt_inputs["type"] == "embeds":
+            elif prompt_inputs["type"] == "embeds":
                 pass
             else:
                 raise ValueError(f"The {prompt_type} prompt cannot be empty")
