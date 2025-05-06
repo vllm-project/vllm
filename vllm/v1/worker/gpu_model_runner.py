@@ -35,7 +35,8 @@ from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
                                         KVCacheConfig, KVCacheSpec,
                                         SlidingWindowSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
-                             ModelRunnerOutput)
+                             ModelRunnerOutput, AdditionalHeadOutputs,
+                             AdditionalHeadOutputsPerRequest)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
@@ -1121,6 +1122,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         sample_hidden_states = hidden_states[logits_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
 
+        if hasattr(self.model, "compute_additional_head"):
+            additional_heads_tensor = self.model.compute_additional_head(
+                hidden_states, )
+            assert len(additional_heads_tensor.shape
+                       ) == 2, f"{additional_heads_tensor.shape}"
+            additional_head_outputs = AdditionalHeadOutputs(
+                additional_head_outputs=[
+                    AdditionalHeadOutputsPerRequest(
+                        additional_head_outputs=
+                        additional_head_outputs_per_request, )
+                    for additional_head_outputs_per_request in
+                    additional_heads_tensor.tolist()
+                ], )
+
+        else:
+            additional_head_outputs = None
+
         # Apply structured output bitmasks if present
         if scheduler_output.grammar_bitmask is not None:
             self.apply_grammar_bitmask(scheduler_output, logits)
@@ -1291,6 +1309,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_token_ids=spec_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
+            additional_head_outputs=additional_head_outputs,
         )
 
     def generate_draft_token_ids(
