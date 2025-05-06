@@ -161,9 +161,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.sampler = Sampler()
 
         # Lazy initializations
+        # Lazy initializations
         # self.model: nn.Module  # Set after load_model
         # Initialize in initialize_kv_cache
+        # Initialize in initialize_kv_cache
         self.kv_caches: list[torch.Tensor] = []
+        # self.kv_cache_config: KVCacheConfig
+
         # self.kv_cache_config: KVCacheConfig
 
         # req_id -> (input_id -> encoder_output)
@@ -495,6 +499,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> tuple[dict[str, FlashAttentionMetadata], torch.Tensor,
+    ) -> tuple[dict[str, FlashAttentionMetadata], torch.Tensor,
                Optional[SpecDecodeMetadata]]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
@@ -615,7 +620,39 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     num_scheduled_tokens,
                     scheduler_output.num_common_prefix_blocks,
                 )
+        query_start_loc = self.query_start_loc_cpu[:num_reqs + 1].to(
+            self.device, non_blocking=True)
+        seq_lens = self.seq_lens_cpu[:num_reqs].to(self.device,
+                                                   non_blocking=True)
+        common_attn_metadata = CommonAttentionMetadata(
+            query_start_loc=query_start_loc, seq_lens=seq_lens)
 
+        attn_metadata: dict[str, FlashAttentionMetadata] = {}
+        # Prepare the attention metadata for each KV cache group and make layers
+        # in the same group share the same metadata.
+        # NOTE(Chen): there is exactly one KV cache group that contains all
+        # attetnion layers in the model for now, so the current logic for
+        # getting attn_metadata is not related to kv_cache_group information.
+        # Will extend this part to support multiple KV cache groups later.
+        for kv_cache_group_id, kv_cache_group_spec in enumerate(
+                self.kv_cache_config.kv_cache_groups):
+
+            # Prepare for cascade attention if enabled & beneficial.
+            common_prefix_len = 0
+            if self.cascade_attn_enabled:
+                common_prefix_len = self._compute_cascade_attn_prefix_len(
+                    num_scheduled_tokens,
+                    scheduler_output.num_common_prefix_blocks,
+                )
+
+            attn_metadata_i = self.attn_metadata_builder.build(
+                num_reqs=num_reqs,
+                num_actual_tokens=total_num_scheduled_tokens,
+                max_query_len=max_num_scheduled_tokens,
+                common_prefix_len=common_prefix_len,
+                common_attn_metadata=common_attn_metadata)
+            for layer_name in kv_cache_group_spec.layer_names:
+                attn_metadata[layer_name] = attn_metadata_i
             attn_metadata_i = self.attn_metadata_builder.build(
                 num_reqs=num_reqs,
                 num_actual_tokens=total_num_scheduled_tokens,
@@ -633,6 +670,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # from these partial requests, we do so for simplicity.
             # We will ignore the sampled tokens from the partial requests.
             # TODO: Support prompt logprobs.
+            logits_indices = query_start_loc[1:] - 1
             logits_indices = query_start_loc[1:] - 1
             spec_decode_metadata = None
         else:
@@ -1296,6 +1334,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                           dtype=torch.int32,
                                           device=self.device)
             eagle_attn_metadata = attn_metadata[self.drafter.attn_layer_name]
+            eagle_attn_metadata = attn_metadata[self.drafter.attn_layer_name]
 
             if spec_decode_metadata is None:
                 # input_ids can be None for multimodal models.
@@ -1307,6 +1346,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         dim=-1)
                 else:
                     target_hidden_states = hidden_states[:num_scheduled_tokens]
+                target_slot_mapping = eagle_attn_metadata.slot_mapping
+                cu_num_tokens = eagle_attn_metadata.query_start_loc
                 target_slot_mapping = eagle_attn_metadata.slot_mapping
                 cu_num_tokens = eagle_attn_metadata.query_start_loc
             else:
@@ -1323,6 +1364,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
                 cu_num_tokens, token_indices = self.drafter.prepare_inputs(
                     eagle_attn_metadata.query_start_loc,
+                    eagle_attn_metadata.query_start_loc,
                     num_rejected_tokens,
                 )
                 target_token_ids = self.input_ids[token_indices]
@@ -1334,6 +1376,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     target_hidden_states = hidden_states[token_indices]
                 target_slot_mapping = eagle_attn_metadata.slot_mapping[
                     token_indices]
+                target_slot_mapping = eagle_attn_metadata.slot_mapping[
+                    token_indices]
 
             draft_token_ids = self.drafter.propose(
                 target_token_ids=target_token_ids,
@@ -1342,6 +1386,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 target_slot_mapping=target_slot_mapping,
                 next_token_ids=next_token_ids,
                 cu_num_tokens=cu_num_tokens,
+                block_table=eagle_attn_metadata.block_table,
                 block_table=eagle_attn_metadata.block_table,
                 sampling_metadata=sampling_metadata,
             )
@@ -1777,6 +1822,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             raise NotImplementedError(
                 "Hybrid models with more than one KV cache type are not "
                 "supported yet.")
+        self.kv_cache_config = kv_cache_config
         self.kv_cache_config = kv_cache_config
 
         kv_caches: dict[str, torch.Tensor] = {}
