@@ -152,7 +152,7 @@ def rocm_aiter_fmoe_fp8_blockscale_g1u1_fake(
         block_shape: List[int],
         smooth_scale: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-    return torch.empty_like(a1, dtype=torch.bf16)
+    return torch.empty_like(a1, dtype=hidden_states_dtype)
 
 
 def rocm_aiter_asm_moe_impl(hidden_states: torch.Tensor,
@@ -365,9 +365,11 @@ def rocm_aiter_fused_experts(
 
         a1, a1_scale = per_token_group_quant_fp8(hidden_states, block_shape[1])
 
+        assert expert_map is None, (
+            "expert_map is not supported for block scaled moe")
         return torch.ops.vllm.rocm_aiter_fmoe_fp8_blockscale_g1u1(
-            topk_ids, topk_weights, hidden_states.dtype, expert_map, a1, w1,
-            w2, w1_scale, w2_scale, a1_scale, block_shape, None)
+            topk_ids, topk_weights, hidden_states.dtype, None, a1, w1, w2,
+            w1_scale, w2_scale, a1_scale, block_shape, None)
 
     # w8a8 per-channel quantization
     elif per_channel_quant and apply_router_weight_on_input and use_fp8_w8a8:

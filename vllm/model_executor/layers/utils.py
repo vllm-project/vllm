@@ -68,36 +68,61 @@ def apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
     return logits
 
 
-def rocm_unquantized_gemm(x: torch.Tensor,
-                          weight: torch.Tensor,
-                          bias: Optional[torch.Tensor] = None):
-    k = weight.shape[1]
-    use_skinny = (envs.VLLM_ROCM_USE_SKINNY_GEMM and \
-                    x.dtype in [torch.float16, torch.bfloat16] \
-                    and k % 8 == 0 and bias is None)
+def rocm_unquantized_gemm_wrapper():
+    """Creates a wrapper function with the signature (x, weight, bias)"""
+    # Get configuration from environment variables
+    use_skinny = envs.VLLM_ROCM_USE_SKINNY_GEMM
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    ON_MI300 = any(arch in GPU_ARCH for arch in ["gfx942"])
+    use_aiter = (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR
+                 and ON_MI300)
 
-    if use_skinny is not True:
+    def inner_function(x: torch.Tensor,
+                       weight: torch.Tensor,
+                       bias: Optional[torch.Tensor] = None):
+        k = weight.shape[1]
+        _use_skinny = (use_skinny and \
+                        x.dtype in [torch.float16, torch.bfloat16] \
+                        and k % 8 == 0 and bias is None)
+
+        if _use_skinny is not True:
+            if use_aiter:
+                return aiter_ops.rocm_aiter_tuned_gemm(x, weight, bias)
+            return torch.nn.functional.linear(x, weight, bias)
+
+        x_view = x.view(-1, x.size(-1))
+        n = x_view.shape[0]
+        m = weight.shape[0]
+        cu_count = current_platform.get_cu_count()
+
+        if m > 8 and 0 < n < 4:
+            out = ops.wvSplitK(weight, x_view, cu_count)
+            return out.view(*x.shape[:-1], weight.shape[0])
+        elif m % 4 == 0 and n == 1 and k <= 8192:
+            out = ops.LLMM1(weight, x_view, 4)
+            return out.view(*x.shape[:-1], weight.shape[0])
+
+        if use_aiter:
+            return aiter_ops.rocm_aiter_tuned_gemm(x, weight, bias)
+
         return torch.nn.functional.linear(x, weight, bias)
 
-    x_view = x.view(-1, x.size(-1))
-    n = x_view.shape[0]
-    m = weight.shape[0]
-    cu_count = current_platform.get_cu_count()
-
-    if m > 8 and 0 < n < 4:
-        out = ops.wvSplitK(weight, x_view, cu_count)
-        return out.view(*x.shape[:-1], weight.shape[0])
-    elif m % 4 == 0 and n == 1 and k <= 8192:
-        out = ops.LLMM1(weight, x_view, 4)
-        return out.view(*x.shape[:-1], weight.shape[0])
-    return torch.nn.functional.linear(x, weight, bias)
+    return inner_function
 
 
-def dispatch_unquantized_gemm(
-) -> Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
+def dispatch_unquantized_gemm() -> Callable[
+    [torch.Tensor, torch.Tensor, Optional[torch.Tensor]], torch.Tensor]:
+    """
+    Dispatcher function that returns a function with signature (x, weight, bias)
+    based on the current platform and environment variables.
+    """
     if current_platform.is_rocm():
-        if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR:
-            return aiter_ops.rocm_aiter_tuned_gemm
-        else:
-            return rocm_unquantized_gemm
-    return torch.nn.functional.linear
+        return rocm_unquantized_gemm_wrapper()
+
+    # Return a simple wrapper around linear to maintain the same signature
+    def linear_wrapper(x: torch.Tensor,
+                       weight: torch.Tensor,
+                       bias: Optional[torch.Tensor] = None):
+        return torch.nn.functional.linear(x, weight, bias)
+
+    return linear_wrapper

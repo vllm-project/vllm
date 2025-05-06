@@ -134,6 +134,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             # reshaping weights is required for aiter moe kernel.
             layout = (32, 32) if self.rocm_aiter_2stage_moe_enabled else (16,
                                                                           16)
+
             shuffled_w13, shuffled_w2 = shuffle_weights(layer.w13_weight.data,
                                                         layer.w2_weight.data,
                                                         layout=layout)
