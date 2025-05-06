@@ -24,7 +24,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.deepspeedfp import (
     DeepSpeedFPConfig, DeepSpeedFPParameter)
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -176,10 +175,8 @@ class ArcticMoE(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
         do_normalize = self.top_k > 1
-        topk_weights, topk_ids = fused_topk(hidden_states,
-                                            router_logits,
-                                            self.top_k,
-                                            renormalize=do_normalize)
+        topk_weights, topk_ids, token_expert_indices = fused_topk(
+            hidden_states, router_logits, self.top_k, renormalize=do_normalize)
         # topk_ids: (num_tokens, k)
         if self.is_quant:
             if 2 * num_tokens <= self.num_experts:
@@ -435,7 +432,6 @@ class ArcticForCausalLM(nn.Module, SupportsPP, SupportsQuant):
         self.unpadded_vocab_size = config.vocab_size
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
-        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
@@ -461,14 +457,6 @@ class ArcticForCausalLM(nn.Module, SupportsPP, SupportsQuant):
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
-
-    def sample(
-        self,
-        logits: Optional[torch.Tensor],
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:

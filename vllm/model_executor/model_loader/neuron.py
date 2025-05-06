@@ -180,7 +180,6 @@ def _get_neuron_config_after_override(default_neuron_config,
                                              NeuronConfig, QuantizationConfig,
                                              SparseAttnConfig)
 
-    overridden_neuron_config = overridden_neuron_config or {}
     sparse_attn = overridden_neuron_config.pop("sparse_attn", {})
     if sparse_attn:
         overridden_neuron_config["sparse_attn"] = SparseAttnConfig(

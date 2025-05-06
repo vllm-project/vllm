@@ -32,15 +32,18 @@ class XgrammarBackend(StructuredOutputBackend):
 
     def __init__(self, vllm_config: VllmConfig):
         self.vllm_config = vllm_config
-        self.disable_any_whitespace = (
-            "disable-any-whitespace"
-            in vllm_config.decoding_config.guided_decoding_backend)
         tokenizer_group = init_tokenizer_from_configs(
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
-            parallel_config=vllm_config.parallel_config,
             lora_config=vllm_config.lora_config)  # type: ignore[arg-type]
-        tokenizer_group.ping()
+
+        self.disable_any_whitespace = \
+            vllm_config.decoding_config.disable_any_whitespace
+
+        self.num_speculative_tokens = 0
+        if self.vllm_config.speculative_config is not None:
+            self.num_speculative_tokens = \
+                self.vllm_config.speculative_config.num_speculative_tokens
 
         tokenizer = tokenizer_group.get_lora_tokenizer(None)
         self.vocab_size = vllm_config.model_config.get_vocab_size()
@@ -102,6 +105,16 @@ class XgrammarBackend(StructuredOutputBackend):
             ctx = self.compiler.compile_grammar(grammar_spec)
         elif request_type == StructuredOutputOptions.REGEX:
             ctx = self.compiler.compile_regex(grammar_spec)
+        elif request_type == StructuredOutputOptions.STRUCTURAL_TAG:
+            s_tag = json.loads(grammar_spec)
+            tags = [
+                xgr.StructuralTagItem(
+                    begin=s["begin"],
+                    schema=json.dumps(s["schema"]),
+                    end=s["end"],
+                ) for s in s_tag["structures"]
+            ]
+            ctx = self.compiler.compile_structural_tag(tags, s_tag["triggers"])
         else:
             logger.error(
                 "Validation should have already occurred. Please file an issue."
@@ -110,13 +123,19 @@ class XgrammarBackend(StructuredOutputBackend):
                 f"grammar is not of valid supported types. ({request_type!s})")
 
         return XgrammarGrammar(
-            matcher=xgr.GrammarMatcher(ctx),
+            matcher=xgr.GrammarMatcher(
+                ctx,
+                max_rollback_tokens=self.num_speculative_tokens,
+            ),
             vocab_size=self.vocab_size,
             ctx=ctx,
         )
 
     def allocate_token_bitmask(self, max_num_seqs: int):
         return xgr.allocate_token_bitmask(max_num_seqs, self.vocab_size)
+
+    def destroy(self):
+        del self.compiler
 
 
 @dataclass
@@ -125,7 +144,6 @@ class XgrammarGrammar(StructuredOutputGrammar):
     # supporting different backends, in the future.
     # For now, just xgrammar.
     #
-    # TODO: support max_rollback_tokens
     # https://xgrammar.mlc.ai/docs/api/python/index.html#xgrammar.GrammarMatcher.find_jump_forward_string
     # for jump-forward decoding
 
@@ -152,6 +170,27 @@ class XgrammarGrammar(StructuredOutputGrammar):
             self.num_processed_tokens += 1
         return True
 
+    def validate_tokens(self, tokens: list[int]) -> list[int]:
+        """Checks if the list of tokens are accepted by the FSM in sequence.
+        Will not advance the FSM.
+
+        Returns the prefix list of tokens that are accepted by the FSM.
+        """
+        accepted_tokens = []
+        for token in tokens:
+            if self.matcher.accept_token(token):
+                accepted_tokens.append(token)
+            else:
+                break
+        if len(accepted_tokens) > 0:
+            # Rollback the FSM to the initial state
+            self.matcher.rollback(len(accepted_tokens))
+        return accepted_tokens
+
+    def rollback(self, num_tokens: int) -> None:
+        self.matcher.rollback(num_tokens)
+        self.num_processed_tokens -= num_tokens
+
     def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> None:
         self.matcher.fill_next_token_bitmask(bitmask, idx)
 
@@ -170,15 +209,8 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         if not isinstance(obj, dict):
             return False
 
-        # Check for pattern restrictions
-        if "pattern" in obj:
-            return True
-
         # Check for numeric ranges
-        if obj.get("type") in ("integer", "number") and any(
-                key in obj
-                for key in ("minimum", "maximum", "exclusiveMinimum",
-                            "exclusiveMaximum", "multipleOf")):
+        if obj.get("type") in ("integer", "number") and ("multipleOf" in obj):
             return True
 
         # Check for array unsupported keywords
@@ -270,3 +302,18 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
             xgr.Grammar.from_ebnf(gd_params.grammar)
         except Exception as e:
             raise ValueError("Invalid grammar specification.") from e
+        return
+
+    if gd_params.structural_tag:
+        try:
+            s_tag = json.loads(gd_params.structural_tag)
+            tags = [
+                xgr.StructuralTagItem(
+                    begin=s["begin"],
+                    schema=json.dumps(s["schema"]),
+                    end=s["end"],
+                ) for s in s_tag["structures"]
+            ]
+            xgr.Grammar.from_structural_tag(tags, s_tag["triggers"])
+        except Exception as e:
+            raise ValueError("Invalid structural tag specification.") from e
