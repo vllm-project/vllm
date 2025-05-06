@@ -8,13 +8,14 @@ from collections import defaultdict
 from pathlib import PosixPath
 
 import pytest
-from transformers import AutoModelForImageTextToText, AutoModelForVision2Seq
+from transformers import (AutoModelForImageTextToText,
+                          AutoModelForTextToWaveform, AutoModelForVision2Seq)
 
 from vllm.platforms import current_platform
 from vllm.utils import identity
 
-from ....conftest import (IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets,
-                          _VideoAssets)
+from ....conftest import (IMAGE_ASSETS, HfRunner, ImageTestAssets,
+                          VideoTestAssets, VllmRunner)
 from ....utils import (create_new_process_for_each_test, large_gpu_mark,
                        multi_gpu_marks)
 from ...utils import check_outputs_equal
@@ -140,7 +141,7 @@ VLM_TEST_SETTINGS = {
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
     "qwen2_5_omni": VLMTestInfo(
-        models=["Qwen/Qwen2.5-Omni-7B"],
+        models=["Qwen/Qwen2.5-Omni-3B"],
         test_type=(
             VLMTestType.IMAGE,
             VLMTestType.MULTI_IMAGE,
@@ -151,8 +152,9 @@ VLM_TEST_SETTINGS = {
         video_idx_to_prompt=lambda idx: "<|vision_bos|><|VIDEO|><|vision_eos|>", # noqa: E501
         max_model_len=4096,
         max_num_seqs=2,
-        auto_cls=AutoModelForVision2Seq,
+        auto_cls=AutoModelForTextToWaveform,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
+        patch_hf_runner=model_utils.qwen2_5_omni_patch_hf_runner,
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
@@ -691,7 +693,7 @@ def test_single_image_models(tmp_path: PosixPath, model_type: str,
                              test_case: ExpandableVLMTestArgs,
                              hf_runner: type[HfRunner],
                              vllm_runner: type[VllmRunner],
-                             image_assets: _ImageAssets, monkeypatch):
+                             image_assets: ImageTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
@@ -716,7 +718,7 @@ def test_multi_image_models(tmp_path: PosixPath, model_type: str,
                             test_case: ExpandableVLMTestArgs,
                             hf_runner: type[HfRunner],
                             vllm_runner: type[VllmRunner],
-                            image_assets: _ImageAssets, monkeypatch):
+                            image_assets: ImageTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
@@ -741,7 +743,7 @@ def test_image_embedding_models(model_type: str,
                                 test_case: ExpandableVLMTestArgs,
                                 hf_runner: type[HfRunner],
                                 vllm_runner: type[VllmRunner],
-                                image_assets: _ImageAssets, monkeypatch):
+                                image_assets: ImageTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
@@ -763,7 +765,7 @@ def test_image_embedding_models(model_type: str,
     ))
 def test_video_models(model_type: str, test_case: ExpandableVLMTestArgs,
                       hf_runner: type[HfRunner], vllm_runner: type[VllmRunner],
-                      video_assets: _VideoAssets, monkeypatch):
+                      video_assets: VideoTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
@@ -814,7 +816,7 @@ def test_single_image_models_heavy(tmp_path: PosixPath, model_type: str,
                                    test_case: ExpandableVLMTestArgs,
                                    hf_runner: type[HfRunner],
                                    vllm_runner: type[VllmRunner],
-                                   image_assets: _ImageAssets, monkeypatch):
+                                   image_assets: ImageTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
@@ -840,7 +842,7 @@ def test_multi_image_models_heavy(tmp_path: PosixPath, model_type: str,
                                   test_case: ExpandableVLMTestArgs,
                                   hf_runner: type[HfRunner],
                                   vllm_runner: type[VllmRunner],
-                                  image_assets: _ImageAssets, monkeypatch):
+                                  image_assets: ImageTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
@@ -866,7 +868,8 @@ def test_image_embedding_models_heavy(model_type: str,
                                       test_case: ExpandableVLMTestArgs,
                                       hf_runner: type[HfRunner],
                                       vllm_runner: type[VllmRunner],
-                                      image_assets: _ImageAssets, monkeypatch):
+                                      image_assets: ImageTestAssets,
+                                      monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
@@ -889,7 +892,7 @@ def test_image_embedding_models_heavy(model_type: str,
 def test_video_models_heavy(model_type: str, test_case: ExpandableVLMTestArgs,
                             hf_runner: type[HfRunner],
                             vllm_runner: type[VllmRunner],
-                            video_assets: _VideoAssets, monkeypatch):
+                            video_assets: VideoTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]

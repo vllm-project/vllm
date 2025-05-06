@@ -65,14 +65,14 @@ class PixtralImagePixelInputs(TypedDict):
     """
     Shape: `(batch_size * num_images, num_channels, image_width, image_height)`
 
-    The result of stacking :attr:`ImageEncoding.tokens` from each prompt.
+    The result of stacking {attr}`ImageEncoding.tokens` from each prompt.
     """
 
 
 class PixtralProcessorAdapter:
     """
     Provide a HF-compatible interface for
-    :class:`mistral_common.tokens.tokenizers.multimodal.ImageEncoder`.
+    {class}`mistral_common.tokens.tokenizers.multimodal.ImageEncoder`.
     """
 
     def __init__(self, tokenizer: MistralTokenizer) -> None:
@@ -916,8 +916,9 @@ class PixtralHFEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
         return self.vision_config.image_size
 
     def get_patch_size(self) -> int:
-        return (self.vision_config.patch_size *
-                self.vision_config.spatial_merge_size)
+        # spatial_merge_size is needed for Mistral3
+        spatial_merge_size = getattr(self.hf_config, "spatial_merge_size", 1)
+        return self.vision_config.patch_size * spatial_merge_size
 
     def get_patch_grid_length(self) -> int:
         image_size, patch_size = self.get_image_size(), self.get_patch_size()
