@@ -78,6 +78,7 @@ def initialize_engine(model: str, quantization: str,
     engine_args = EngineArgs(model=model,
                              quantization=quantization,
                              enable_lora=True,
+                             max_lora_rank=64,
                              max_loras=4)
     return LLMEngine.from_engine_args(engine_args)
 

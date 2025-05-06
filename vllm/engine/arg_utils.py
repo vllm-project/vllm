@@ -397,7 +397,7 @@ class EngineArgs:
                 str(self.compilation_config))
         if self.qlora_adapter_name_or_path is not None:
             warnings.warn(
-                "The 'qlora_adapter_name_or_path' is deprecated "
+                "The `qlora_adapter_name_or_path` is deprecated "
                 "and will be removed in a future release. ",
                 DeprecationWarning,
                 stacklevel=2,
