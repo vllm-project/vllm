@@ -101,16 +101,6 @@ def set_forward_context(attn_metadata: Any,
         attn_metadata=attn_metadata,
         dp_metadata=dp_metadata)
 
-    # KVConnector: trigger (possibly async) load before forward.
-    # Each attn layer will block until the reading is complete.
-    trigger_kv_transfer = (attn_metadata is not None
-                           and has_kv_transfer_group()
-                           and is_v1_kv_transfer_group())
-    if trigger_kv_transfer:
-        kv_connector = get_kv_transfer_group()
-        assert isinstance(kv_connector, KVConnectorBase_V1)
-        kv_connector.start_load_kv(_forward_context)
-
     try:
         yield
     finally:
@@ -146,12 +136,5 @@ def set_forward_context(attn_metadata: Any,
                     logger.info(("Batchsize forward time stats "
                                  "(batchsize, count, median_time(ms)): %s"),
                                 forward_stats)
-
-        # KVConnector: each attn layer triggers (possibly async) save.
-        # Ensure all those operations complete before forward() is done.
-        if trigger_kv_transfer:
-            kv_connector = get_kv_transfer_group()
-            assert isinstance(kv_connector, KVConnectorBase_V1)
-            kv_connector.wait_for_save()
 
         _forward_context = prev_context
