@@ -235,7 +235,7 @@ class Sampler(nn.Module):
         * Defer Pythonization of sampling result & logprobs
           tensor
         * Encapsulate arguments required for deferred Pythonization
-          in the :class:`SamplerOutput` structure
+          in the {class}`SamplerOutput` structure
 
         Args:
             logits: (num_tokens, vocab_size).

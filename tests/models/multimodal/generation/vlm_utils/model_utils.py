@@ -706,3 +706,11 @@ def ovis2_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
     hf_model.processor = processor
     return hf_model
+
+
+def qwen2_5_omni_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    """Patches and returns an instance of the HfRunner for Qwen2.5-Omni."""
+    thinker = hf_model.model.thinker
+    thinker.get_output_embeddings = lambda: thinker.lm_head
+    hf_model.model = thinker
+    return hf_model

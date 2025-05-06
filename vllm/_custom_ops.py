@@ -325,18 +325,18 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
 
     @register_fake("_C::gptq_marlin_gemm")
     def _gptq_marlin_gemm_fake(a: torch.Tensor,
+                               c: Optional[torch.Tensor],
                                b_q_weight: torch.Tensor,
                                b_scales: torch.Tensor,
-                               b_zeros: torch.Tensor,
-                               g_idx: torch.Tensor,
-                               perm: torch.Tensor,
+                               b_zeros: Optional[torch.Tensor],
+                               g_idx: Optional[torch.Tensor],
+                               perm: Optional[torch.Tensor],
                                workspace: torch.Tensor,
-                               b_q_type: ScalarType,
+                               b_q_type_id: int,
                                size_m: torch.SymInt,
                                size_n: torch.SymInt,
                                size_k: torch.SymInt,
-                               is_k_full: bool,
-                               has_zp: bool = False,
+                               is_k_full: bool = True,
                                use_atomic_add: bool = False,
                                use_fp32_reduce: bool = False,
                                is_zp_float: bool = False) -> torch.Tensor:
@@ -406,14 +406,6 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
         return torch.empty((out_features, in_features),
                            dtype=codebooks.dtype,
                            device=codebooks.device)
-
-    @register_fake("_C::fp8_marlin_gemm")
-    def _fp8_marlin_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
-                              b_scales: torch.Tensor, workspace: torch.Tensor,
-                              num_bits: int, size_m: torch.SymInt,
-                              size_n: torch.SymInt,
-                              size_k: torch.SymInt) -> torch.Tensor:
-        return torch.empty((size_m, size_n), dtype=a.dtype, device=a.device)
 
     @register_fake("_C::machete_mm")
     def machete_mm_fake(
@@ -815,35 +807,26 @@ def awq_marlin_moe_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
 
 
 def gptq_marlin_gemm(a: torch.Tensor,
+                     c: Optional[torch.Tensor],
                      b_q_weight: torch.Tensor,
                      b_scales: torch.Tensor,
-                     b_zeros: torch.Tensor,
-                     g_idx: torch.Tensor,
-                     perm: torch.Tensor,
+                     b_zeros: Optional[torch.Tensor],
+                     g_idx: Optional[torch.Tensor],
+                     perm: Optional[torch.Tensor],
                      workspace: torch.Tensor,
                      b_q_type: ScalarType,
                      size_m: int,
                      size_n: int,
                      size_k: int,
-                     is_k_full: bool,
-                     has_zp: bool = False,
+                     is_k_full: bool = True,
                      use_atomic_add: bool = False,
                      use_fp32_reduce: bool = False,
                      is_zp_float: bool = False) -> torch.Tensor:
-    return torch.ops._C.gptq_marlin_gemm(a, b_q_weight, b_scales, b_zeros,
+    return torch.ops._C.gptq_marlin_gemm(a, c, b_q_weight, b_scales, b_zeros,
                                          g_idx, perm, workspace, b_q_type.id,
                                          size_m, size_n, size_k, is_k_full,
-                                         has_zp, use_atomic_add,
-                                         use_fp32_reduce, is_zp_float)
-
-
-# fp8 marlin
-def fp8_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
-                    b_scales: torch.Tensor, workspace: torch.Tensor,
-                    num_bits: int, size_m: int, size_n: int,
-                    size_k: int) -> torch.Tensor:
-    return torch.ops._C.fp8_marlin_gemm(a, b_q_weight, b_scales, workspace,
-                                        num_bits, size_m, size_n, size_k)
+                                         use_atomic_add, use_fp32_reduce,
+                                         is_zp_float)
 
 
 # machete
