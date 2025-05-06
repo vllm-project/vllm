@@ -7,11 +7,13 @@ sphinx-design==0.6.1
 sphinx-togglebutton==0.3.2
 myst-parser==4.0.1
 msgspec
-cloudpickle # Required by sphinx-argparse when default constructing ModelConfig
 commonmark # Required by sphinx-argparse when using :markdownhelp:
 
 # packages to install to build the documentation
 cachetools
 -f https://download.pytorch.org/whl/cpu
 torch
+# Required by sphinx-argparse when default constructing ModelConfig
 transformers
+cloudpickle 
+gguf
