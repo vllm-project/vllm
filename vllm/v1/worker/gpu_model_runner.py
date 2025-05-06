@@ -1087,10 +1087,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return output
 
         # Prepare the decoder inputs.
-        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-
         attn_metadata, logits_indices, spec_decode_metadata = (
             self._prepare_inputs(scheduler_output))
+        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
             # Use piecewise CUDA graphs.
