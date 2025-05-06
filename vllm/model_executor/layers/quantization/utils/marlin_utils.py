@@ -45,7 +45,9 @@ def query_marlin_supported_quant_types(
     if device_capability < 80:
         return []
 
-    # (has_zp is None) means return both quant_types that has zp and has not zp
+    # - has_zp is True: return quant_types that has zero points
+    # - has_zp is False: return quant_types that has not zero points
+    # - has_zp is None: both
     if has_zp is None:
         types0 = query_marlin_supported_quant_types(False, include_fp_type,
                                                     device_capability)
