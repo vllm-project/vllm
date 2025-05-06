@@ -81,9 +81,9 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         B = q_nope.shape[0]
 
-        o = torch.zeros(B,
-                        self.num_heads,
-                        self.kv_lora_rank,
+        o = torch.empty((B,
+                         self.num_heads,
+                         self.kv_lora_rank),
                         dtype=q_nope.dtype,
                         device=q_nope.device)
 
