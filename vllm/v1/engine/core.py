@@ -392,11 +392,11 @@ class EngineCoreProc(EngineCore):
         self.output_thread.start()
 
     @staticmethod
-    def startup_handshake(input_socket: zmq.Socket, on_head_node: bool,
+    def startup_handshake(handshake_socket: zmq.Socket, on_head_node: bool,
                           parallel_config: ParallelConfig) -> dict[str, Any]:
 
         # Send registration message.
-        input_socket.send(
+        handshake_socket.send(
             msgspec.msgpack.encode({
                 "status": "HELLO",
                 "local": on_head_node,
@@ -404,11 +404,11 @@ class EngineCoreProc(EngineCore):
 
         # Receive initialization message.
         logger.info("Waiting for init message from front-end.")
-        if not input_socket.poll(timeout=HANDSHAKE_TIMEOUT_MINS * 60 * 1000):
+        if not handshake_socket.poll(timeout=HANDSHAKE_TIMEOUT_MINS * 60_000):
             raise RuntimeError("Did not receive response from front-end "
                                f"process within {HANDSHAKE_TIMEOUT_MINS} "
                                f"minutes")
-        init_bytes = input_socket.recv()
+        init_bytes = handshake_socket.recv()
         init_message = msgspec.msgpack.decode(init_bytes)
         logger.debug("Received init message: %s", init_message)
 
@@ -617,8 +617,8 @@ class EngineCoreProc(EngineCore):
                 # back to us.
                 input_socket.send(b'')
                 poller.register(input_socket, zmq.POLLIN)
-                if coord_socket is not None:
-                    poller.register(coord_socket, zmq.POLLIN)
+            if coord_socket is not None:
+                poller.register(coord_socket, zmq.POLLIN)
 
             while True:
                 for input_socket, _ in poller.poll():
