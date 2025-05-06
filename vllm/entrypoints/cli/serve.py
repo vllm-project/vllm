@@ -5,7 +5,7 @@ import argparse
 import uvloop
 
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.openai.api_server import run_server
+from vllm.entrypoints.openai.api_server import prepare_plugins, run_server
 from vllm.entrypoints.openai.cli_args import (make_arg_parser,
                                               validate_parsed_serve_args)
 from vllm.utils import FlexibleArgumentParser
@@ -52,7 +52,10 @@ class ServeSubcommand(CLISubcommand):
             "https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html#cli-reference"
         )
 
-        return make_arg_parser(serve_parser)
+        serve_parser = make_arg_parser(serve_parser)
+        serve_parser = prepare_plugins(serve_parser)
+
+        return serve_parser
 
 
 def cmd_init() -> list[CLISubcommand]:
