@@ -241,10 +241,10 @@ def test_cutlass_moe_8_bit_no_graph(
                                                   per_out_ch)
 
         score = torch.randn((m, e), device="cuda", dtype=torch.half)
-        topk_weights, topk_ids = fused_topk(mt.a,
-                                            score,
-                                            topk,
-                                            renormalize=False)
+        topk_weights, topk_ids, _ = fused_topk(mt.a,
+                                               score,
+                                               topk,
+                                               renormalize=False)
 
         # Note that we are using the dequantized versions of the tensors.
         # Using a, w1 and w2 directly results in minor output differences.
@@ -285,10 +285,10 @@ def test_cutlass_moe_8_bit_cuda_graph(
                                                   per_out_ch)
 
         score = torch.randn((m, e), device="cuda", dtype=dtype)
-        topk_weights, topk_ids = fused_topk(mt.a,
-                                            score,
-                                            topk,
-                                            renormalize=False)
+        topk_weights, topk_ids, _ = fused_topk(mt.a,
+                                               score,
+                                               topk,
+                                               renormalize=False)
 
         # Note that we are using the dequantized versions of the tensors.
         # Using a, w1 and w2 directly results in minor output differences.
@@ -338,10 +338,10 @@ def test_cutlass_moe_8_bit_EP(
                                                   per_out_channel)
 
         score = torch.randn((m, e), device="cuda", dtype=torch.half)
-        topk_weights, topk_ids = fused_topk(mt.a,
-                                            score,
-                                            topk,
-                                            renormalize=False)
+        topk_weights, topk_ids, _ = fused_topk(mt.a,
+                                               score,
+                                               topk,
+                                               renormalize=False)
 
         # Note that we are using the dequantized versions of the tensors.
         # Using a, w1 and w2 directly results in minor output differences.
