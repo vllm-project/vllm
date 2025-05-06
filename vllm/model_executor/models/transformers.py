@@ -369,6 +369,15 @@ class TransformersModel(nn.Module):
 
         return hidden_states
 
+    def compute_additional_head(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> Optional[torch.Tensor]:
+        if get_pp_group().is_last_rank and hasattr(self.model,
+                                                   "compute_additional_head"):
+            return self.model.compute_additional_head(hidden_states)
+        return None
+
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters())
@@ -462,6 +471,14 @@ class TransformersForCausalLM(nn.Module, SupportsQuant, SupportsLoRA,
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
+
+    def compute_additional_head(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> Optional[torch.Tensor]:
+        if hasattr(self.model, "compute_additional_head"):
+            return self.model.compute_additional_head(hidden_states)
+        return None
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

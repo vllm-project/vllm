@@ -12,7 +12,7 @@ from vllm.multimodal import MultiModalKwargs
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import SchedulerStats
-from vllm.v1.outputs import LogprobsLists, LogprobsTensors
+from vllm.v1.outputs import LogprobsLists, LogprobsTensors, AdditionalHeadOutputsPerRequest
 
 # These are possible values of RequestOutput.finish_reason,
 # so form part of the external API.
@@ -101,6 +101,8 @@ class EngineCoreOutput(
 
     new_logprobs: Optional[LogprobsLists] = None
     new_prompt_logprobs_tensors: Optional[LogprobsTensors] = None
+    new_additional_head_outputs: Optional[
+        AdditionalHeadOutputsPerRequest] = None
 
     finish_reason: Optional[FinishReason] = None
     stop_reason: Union[int, str, None] = None
