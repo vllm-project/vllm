@@ -33,7 +33,7 @@ TEMPLATE = ("template __global__ void Marlin<"
 # we don't add it to reduce wheel size.
 SCALAR_TYPES = [
     "vllm::kU4", "vllm::kU4B8", "vllm::kU8B128", "vllm::kFE4M3fn",
-    "vllm::kFE2M1f"
+    "vllm::kFE2M1fn"
 ]
 THREAD_CONFIGS = [(128, 128, 256), (64, 256, 256), (64, 128, 128),
                   (128, 64, 128)]
