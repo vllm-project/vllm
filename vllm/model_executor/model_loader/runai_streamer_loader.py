@@ -11,7 +11,7 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 from vllm.config import LoadConfig, ModelConfig, VllmConfig
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.utils import (
-    process_weights_after_loading, initialize_model, set_default_torch_dtype)
+    initialize_model, process_weights_after_loading, set_default_torch_dtype)
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
     runai_safetensors_weights_iterator)

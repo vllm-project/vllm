@@ -115,7 +115,7 @@ class ShardedStateLoader(BaseModelLoader):
             with target_device:
                 model = initialize_model(vllm_config=vllm_config)
                 process_weights_after_loading(model, model_config,
-                                               target_device)
+                                              target_device)
             rank = get_tensor_model_parallel_rank()
             pattern = os.path.join(
                 local_model_path,
