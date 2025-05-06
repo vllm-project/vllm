@@ -21,7 +21,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_make_workspace_new, marlin_permute_scales,
     query_marlin_supported_quant_types)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
-    rand_marlin_weight_fp4_like)
+    rand_marlin_weight_fp4_like, FP4_MARLIN_SUPPORTED_GROUP_SIZES)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     marlin_quant_fp8_torch)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
@@ -193,7 +193,9 @@ def test_awq_marlin_repack(k_chunk, n_chunk, quant_type, group_size,
 @pytest.mark.parametrize("k_chunk", MARLIN_K_CHUNKS)
 @pytest.mark.parametrize("n_chunk", MARLIN_N_CHUNKS)
 @pytest.mark.parametrize("quant_type", query_marlin_supported_quant_types())
-@pytest.mark.parametrize("group_size", MARLIN_SUPPORTED_GROUP_SIZES + [16])
+@pytest.mark.parametrize("group_size",
+                         set(MARLIN_SUPPORTED_GROUP_SIZES +
+                             FP4_MARLIN_SUPPORTED_GROUP_SIZES))
 @pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
 @pytest.mark.parametrize("act_order", ACT_ORDER_OPTS)
 @pytest.mark.parametrize("is_k_full", K_FULL_OPTS)
@@ -264,6 +266,13 @@ def test_gptq_marlin_gemm(
         marlin_zp = None
 
     workspace = marlin_make_workspace_new(w_ref.device)
+
+    opcheck(
+        torch.ops._C.gptq_marlin_gemm,
+        (a_input, None, marlin_q_w, marlin_s, marlin_zp, g_idx, sort_indices,
+         workspace, quant_type.id, a_input.shape[0], b_weight.shape[1],
+         a_input.shape[1], is_k_full, use_atomic_add, use_fp32_reduce, False),
+        test_utils=DEFAULT_OPCHECK_TEST_UTILS)
 
     output = ops.gptq_marlin_gemm(
         a_input,

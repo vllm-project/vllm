@@ -258,7 +258,7 @@ bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
   // BIGGROUP: cases for big group size (group_blocks in [-1, 8])
   // FZP: cases for float-zero-point (is_zp_float = true)
   // ACT: cases for act order case (group_blocks == 0)
-  // FP4: cases for fp4(e2m1) (group_blocks == 1)
+  // FP4: cases for nvfp4(e2m1) (group_blocks == 1)
   #define COMMON_GET_IF_M1(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)       \
     _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, -1, NUM_THREADS, false)  \
     _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, 2, NUM_THREADS, false)   \
@@ -468,7 +468,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
   } else {
     TORCH_CHECK(q_type == vllm::kU4B8 || q_type == vllm::kU8B128 ||
                     q_type == vllm::kFE4M3fn || q_type == vllm::kFE2M1f,
-                "q_type must be uint4b8, uint8b128 or float8_e4m3fn when "
+                "q_type must be uint4b8, uint8b128, float8_e4m3fn or float4_e2m1f when "
                 "has_zp = False. Got = ",
                 q_type.str());
   }
@@ -795,7 +795,7 @@ torch::Tensor gptq_marlin_gemm(
   } else {
     TORCH_CHECK(b_q_type == vllm::kU4B8 || b_q_type == vllm::kU8B128 ||
                     b_q_type == vllm::kFE4M3fn || b_q_type == vllm::kFE2M1f,
-                "b_q_type must be uint4b8, uint8b128 or float8_e4m3fn when "
+                "b_q_type must be uint4b8, uint8b128, float8_e4m3fn or float4_e2m1f when "
                 "has_zp = False. Got = ",
                 b_q_type.str());
   }
