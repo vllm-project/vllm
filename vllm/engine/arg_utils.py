@@ -1338,11 +1338,10 @@ class EngineArgs:
                 and _warn_or_fallback("Engine in background thread")):
             return False
 
-        # PP is supported on V1 with Ray distributed executor,
-        # but off for MP distributed executor for now.
         if (self.pipeline_parallel_size > 1
-                and self.distributed_executor_backend != "ray"):
-            name = "Pipeline Parallelism without Ray distributed executor"
+                and self.distributed_executor_backend not in ["ray", "mp"]):
+            name = "Pipeline Parallelism without Ray distributed executor " \
+                    "or multiprocessing executor"
             _raise_or_fallback(feature_name=name, recommend_to_remove=False)
             return False
 

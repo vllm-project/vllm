@@ -100,9 +100,8 @@ class PPTestSettings:
                               eager_mode=True,
                               chunked_prefill=False),
             ],
-            # only ray is supported for V1
-            distributed_backends=["mp", "ray", "ray"],
-            vllm_major_versions=["0", "0", "1"],
+            distributed_backends=["mp", "mp", "ray", "ray"],
+            vllm_major_versions=["0", "1", "0", "1"],
             task=task,
             test_options=PPTestOptions(multi_node_only=multi_node_only,
                                        load_format=load_format),
@@ -350,6 +349,11 @@ def _compare_tp(
         # Temporary. Currently when zeromq + SPMD is used, it does not properly
         # terminate because of a Ray Compiled Graph issue.
         common_args.append("--disable-frontend-multiprocessing")
+    elif distributed_backend == "mp":
+        # Both V0/V1 of multiprocessing executor support PP
+        pp_env = {
+            "VLLM_USE_V1": vllm_major_version,
+        }
     else:
         pp_env = None
 
