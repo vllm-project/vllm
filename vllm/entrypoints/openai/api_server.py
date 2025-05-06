@@ -400,8 +400,12 @@ def engine_client(request: Request) -> EngineClient:
 @router.get("/health")
 async def health(raw_request: Request) -> JSONResponse:
     """Health check."""
-    await engine_client(raw_request).check_health()
-    return JSONResponse(content={}, status_code=200)
+    try:
+        await engine_client(raw_request).check_health()
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return JSONResponse(content={'status': 'unhealthy'}, status_code=500)
+    return JSONResponse(content={'status': 'healthy'}, status_code=200)
 
 
 @router.get("/load")

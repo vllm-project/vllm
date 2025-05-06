@@ -24,6 +24,7 @@ from vllm.utils import (_run_task_with_lock, get_distributed_init_method,
                         get_ip, get_open_port, make_async)
 
 if ray is not None:
+    from ray._private.state import actors as ray_actors
     from ray.actor import ActorHandle
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 else:
@@ -695,6 +696,30 @@ class RayDistributedExecutor(DistributedExecutorBase):
         return await asyncio.gather(*coros)
 
     def check_health(self) -> None:
-        # Assume that the Ray workers are healthy.
-        # TODO: check the health of the Ray workers
-        return
+        """
+        Checks for any DEAD actors in the current Ray job.
+        If any are found, raises a RuntimeError with their death causes.
+        """
+        current_job_id = ray.get_runtime_context().get_job_id()
+
+        workers = self.workers[:]
+        if not self.use_ray_spmd_worker:
+            workers.append(self.driver_dummy_worker)
+
+        dead_actors = []
+        for worker in workers:
+            info = ray_actors(job_id=current_job_id,
+                              actor_id=worker._ray_actor_id.hex())
+
+            if info is not None and info["State"] == "DEAD":
+                death_cause_obj = info.get("DeathCause")
+                error_message = str(
+                    death_cause_obj) if death_cause_obj else "Unknown"
+
+                dead_actors.append((worker._ray_actor_id.hex(), error_message))
+
+        if dead_actors:
+            msg_lines = ["Dead Ray actors detected:"]
+            for name, cause in dead_actors:
+                msg_lines.append(f" - Actor {name}: {cause}")
+            raise RuntimeError("\n".join(msg_lines))
