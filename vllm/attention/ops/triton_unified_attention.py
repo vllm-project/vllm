@@ -280,6 +280,15 @@ def unified_attention(
     BLOCK_M = 16
     BLOCK_Q = BLOCK_M // num_queries_per_kv
 
+    # Ideally we would launch with kernel with:
+    # \sum_i[ceil(query_len[i] / BLOCK_Q)] blocks.
+    # However, it is slow to realize the query_lens on cpu.
+    # Instead we use upper-bound:
+    # \sum_i[ceil(query_len[i] / BLOCK_Q)]
+    #   <= \sum_i[floor(query_len[i] / BLOCK_Q) + 1]
+    #    = \sum_i[floor(query_len[i] / BLOCK_Q)] + num_seqs
+    #   <= floor(\sum_i(query_len[i]) / BLOCK_Q) + num_seqs
+    #    = floor(q.shape[0] / BLOCK_Q) + num_seqs
     total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
 
     kernel_unified_attention_2d[(
