@@ -126,8 +126,11 @@ class KVCacheManager:
                 - A list of blocks that are computed for the request.
                 - The number of computed tokens.
         """
-        if not self.enable_caching:
-            # Prefix caching is disabled.
+
+        # Prefix caching is disabled or
+        # When the request requires prompt logprobs, we skip prefix caching.
+        if (not self.enable_caching
+                or request.sampling_params.prompt_logprobs is not None):
             return KVCacheBlocks.create_empty(), 0
 
         # The block hashes for the request may already be computed
@@ -141,9 +144,6 @@ class KVCacheManager:
         if self.log_stats:
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.requests += 1
-        # When the request requires prompt logprobs, we skip prefix caching.
-        if request.sampling_params.prompt_logprobs is not None:
-            return KVCacheBlocks.create_empty(), 0
 
         if len(block_hashes) * self.block_size == request.num_tokens:
             # When prompt length is divisible by the block size and all
