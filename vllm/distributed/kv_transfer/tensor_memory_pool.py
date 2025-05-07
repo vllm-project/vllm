@@ -14,9 +14,6 @@ import tensor_store_load_mem as cuda_kernels
 class MemoryBlock:
     size: int
     addr: int
-    is_free: bool = True
-    tensor: Optional[torch.Tensor] = None
-    buddy: Optional['MemoryBlock'] = None
 
 
 class TensorMemoryPool:
@@ -54,6 +51,7 @@ class TensorMemoryPool:
         self.base_address = self.base_tensor.data_ptr()
         initial_block = MemoryBlock(size=self.max_block_size, addr=self.base_address)
         self.free_lists[self.max_block_size][initial_block.addr] = initial_block
+        print("TensorMemoryPool, base_address:", self.base_address, self.base_address % self.max_block_size)
 
     def allocate(self, size: int) -> int:
         if size <= 0:
@@ -66,9 +64,8 @@ class TensorMemoryPool:
         current_size = required_size
         while current_size <= self.max_block_size:
             if self.free_lists[current_size]:
-                addr, block = self.free_lists[current_size].popitem()
+                _, block = self.free_lists[current_size].popitem()
                 self._split_block(block, required_size)
-                block.is_free = False
                 self.allocated_blocks[block.addr] = block
                 return block.addr
             current_size *= 2
@@ -83,9 +80,6 @@ class TensorMemoryPool:
             buddy = MemoryBlock(size=buddy_size, addr=buddy_addr)
             block.size = buddy_size
 
-            block.buddy = buddy
-            buddy.buddy = block
-
             self.free_lists[buddy_size][buddy.addr] = buddy
 
     def free(self, addr: int):
@@ -93,36 +87,26 @@ class TensorMemoryPool:
             raise ValueError("Invalid address to free")
 
         block = self.allocated_blocks.pop(addr)
-        block.is_free = True
         self._merge_buddies(block)
 
     def _merge_buddies(self, block: MemoryBlock):
-        MAX_MERGE_DEPTH = 20
+        MAX_MERGE_DEPTH = 30
         depth = 0
 
-        while block.buddy and block.buddy.is_free and depth < MAX_MERGE_DEPTH:
-            buddy = block.buddy
-
-            if buddy.addr in self.free_lists[buddy.size]:
+        while depth < MAX_MERGE_DEPTH:
+            buddy_offset = block.size if (block.addr - self.base_address) % (2 * block.size) == 0 else -block.size
+            buddy_addr = block.addr + buddy_offset
+            buddy = self.free_lists[block.size].get(buddy_addr)
+            if buddy:
                 del self.free_lists[buddy.size][buddy.addr]
+                merged_addr = min(block.addr, buddy.addr)
+                merged_size = block.size * 2
+                merged_block = MemoryBlock(size=merged_size, addr=merged_addr)
+                block = merged_block
+                depth += 1
             else:
+                self.free_lists[block.size][block.addr] = block
                 break
-
-            merged_addr = min(block.addr, buddy.addr)
-            merged_size = block.size * 2
-            merged_block = MemoryBlock(size=merged_size, addr=merged_addr)
-
-            if merged_block.size < self.max_block_size:
-                buddy_offset = merged_size if merged_addr % (2 * merged_size) == 0 else -merged_size
-                buddy_addr = merged_addr + buddy_offset
-                existing_buddy = self.free_lists[merged_size].get(buddy_addr)
-                if existing_buddy:
-                    merged_block.buddy = existing_buddy
-                    existing_buddy.buddy = merged_block
-
-            self.free_lists[merged_size][merged_block.addr] = merged_block
-            block = merged_block
-            depth += 1
 
     def store_tensor(self, tensor: torch.Tensor) -> int:
         if not tensor.is_cuda:
@@ -147,7 +131,6 @@ class TensorMemoryPool:
             cuda_kernels.store_tensor(tensor, cpu_tensor)
         self.store_stream.synchronize()
 
-        block.tensor = tensor
         return addr
 
     def load_tensor(self, addr: int, dtype: torch.dtype, shape: Tuple[int, ...]) -> torch.Tensor:
