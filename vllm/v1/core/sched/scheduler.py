@@ -315,8 +315,7 @@ class Scheduler(SchedulerInterface):
 
                 request = self.waiting[0]
 
-                # Skip request if the remote KV recv is still waiting
-                # for the requests to arrive.
+                # P/D: skip request if still waiting for remote kvs.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                     is_ready = self._update_waiting_for_remote_kv(
                         request, skipped_waiting_requests)
