@@ -436,10 +436,10 @@ class MiniMaxText01LinearAttention(nn.Module):
             else:
                 _start = attn_metadata.query_start_loc[_prefill_idx]
 
-            if _prefill_idx+1 >= len(attn_metadata.query_end_loc):
+            if _prefill_idx+1 >= len(attn_metadata.query_start_loc):
                 _end = 0
             else:
-                _end = attn_metadata.query_end_loc[_prefill_idx+1]
+                _end = attn_metadata.query_start_loc[_prefill_idx+1]
 
             if _prefill_idx >= len(state_indices_tensor):
                 slot_id = 0
