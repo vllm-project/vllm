@@ -40,6 +40,10 @@ pre-commit install --hook-type pre-commit --hook-type commit-msg
 # You can manually run pre-commit with
 pre-commit run --all-files
 
+# To manually run something from CI that does not run
+# locally by default, you can run:
+pre-commit run mypy-3.9 --hook-stage manual --all-files
+
 # Unit tests
 pytest tests/
 ```
@@ -52,6 +56,12 @@ Therefore, we recommend developing with Python 3.12 to minimise the chance of yo
 
 :::{note}
 Currently, the repository is not fully checked by `mypy`.
+:::
+
+:::{note}
+Currently, not all unit tests pass when run on CPU platforms. If you don't have access to a GPU
+platform to run unit tests locally, rely on the continuous integration system to run the tests for
+now.
 :::
 
 ## Issues

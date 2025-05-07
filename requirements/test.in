@@ -8,7 +8,6 @@ pytest-shard
 pytest-timeout
 
 # testing utils
-awscli
 backoff # required for phi4mm test
 blobfile # required for kimi-vl test
 einops # required for MPT, qwen-vl and Mamba
@@ -23,9 +22,9 @@ sentence-transformers # required for embedding tests
 soundfile # required for audio tests
 jiwer # required for audio tests
 timm # required for internvl test
-torch==2.6.0
-torchaudio==2.6.0
-torchvision==0.21.0
+torch==2.7.0
+torchaudio==2.7.0
+torchvision==0.22.0
 transformers_stream_generator # required for qwen-vl test
 mamba_ssm # required for plamo2 test
 matplotlib # required for qwen-vl test
