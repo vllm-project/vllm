@@ -135,7 +135,7 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
                 "head_size": head_dim,
                 "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
                 "max_position": config.max_position_embeddings,
-                "base": config.rotary_emb_base,
+                "base": getattr(config, "rope_theta", config.rotary_emb_base),
                 "rope_scaling": getattr(config, "rope_scaling", None)
             }
 

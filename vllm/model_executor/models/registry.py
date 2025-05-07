@@ -136,7 +136,7 @@ _EMBEDDING_MODELS = {
         if arch == "LlamaForCausalLM"
     },
     "MistralModel": ("llama", "LlamaForCausalLM"),
-    "NomicBertModel": ("bert", "NomicBertEmbeddingModel"),
+    "NomicBertModel": ("nomic", "NomicBertEmbeddingModel"),
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
     "Qwen2Model": ("qwen2", "Qwen2EmbeddingModel"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
