@@ -344,24 +344,8 @@ class Fp8LinearOp:
             out_dtype = input.dtype
 
         # cutlass_scaled_mm supports per tensor/channel W and per tensor/token A
-        if self.cutlass_fp8_supported:
-            assert input.dtype != current_platform.fp8_dtype(
-            ), "FP8 input to cutlass is not currently implemented"
-            qinput, x_scale = ops.scaled_fp8_quant(
-                input_2d,
-                input_scale,
-                scale_ub=input_scale_ub,
-                use_per_token_if_dynamic=use_per_token_if_dynamic)
-        else:
-            if input.dtype != current_platform.fp8_dtype():
-                # Maybe apply padding to output, see comment in __init__
-                qinput, x_scale = ops.scaled_fp8_quant(
-                    input_2d,
-                    input_scale,
-                    num_token_padding=self.output_padding,
-                    use_per_token_if_dynamic=use_per_token_if_dynamic)
-            else:
-                qinput, x_scale = input_2d, input_scale
+        input_scale = torch.tensor([1.0], dtype=torch.float32, device=input_2d.device)
+        qinput, x_scale = input_2d, input_scale
 
         per_tensor_weights = (weight_scale.numel() == 1)
         per_tensor_activations = (x_scale.numel() == 1)
