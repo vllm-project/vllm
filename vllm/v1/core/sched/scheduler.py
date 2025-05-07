@@ -579,84 +579,6 @@ class Scheduler(SchedulerInterface):
                                                       new_block_ids)
         return req_data
 
-    def _update_waiting_for_remote_kv(
-        self,
-        request: Request,
-        skipped_waiting_requests: deque[Request],
-    ) -> bool:
-        """Update """
-        if request.request_id in self.finished_recving_kv_req_ids:
-            # Now that the KVs have been recved, we can cache
-            # them and set num_computed_tokens.
-            blocks = self.kv_cache_manager.req_to_blocks[request.request_id]
-            num_computed_tokens = len(blocks) * self.block_size
-            self.kv_cache_manager.cache_blocks(
-                request,
-                num_tokens=0,
-                num_computed_tokens=num_computed_tokens,
-                new_computed_block_list=[])
-            request.num_computed_tokens = num_computed_tokens
-            request.status = RequestStatus.WAITING
-            self.finished_recving_kv_req_ids.remove(request.request_id)
-            is_ready = True
-        else:
-            self.waiting.popleft()
-            skipped_waiting_requests.appendleft(request)
-            is_ready = False
-
-        return is_ready
-
-    def _allocate_and_set_waiting_for_remote_kv(
-        self,
-        request: Request,
-        num_external_tokens: int,
-        new_computed_blocks: KVCacheBlocks,
-        skipped_waiting_requests: deque[Request],
-    ) -> Optional[KVCacheBlocks]:
-        """
-        P/D: allocate KV cache blocks for a request and put
-        the request into the WAITING_FOR_REMOTE_KV state and
-        update the KVConnector state.
-
-        The KV caches are allocated but NOT cached. This is
-        to avoid another request getting a cache hit on a
-        block that has not been written to. We will cache
-        the blocks only after the recv is complete.
-
-        The update_state_after_alloc() function passes this
-        request to the KVConnector, which triggers KVConnector
-        to start a read_blocks transaction.
-        """
-
-        # Allocate slots for the external tokens, but skip
-        # caching until after the KV transfer is done to avoid
-        # cache hits on blocks that are still be written to.
-        new_blocks = self.kv_cache_manager.allocate_slots(
-            request,
-            num_external_tokens,
-            new_computed_blocks,
-            delay_cache_blocks=True)
-        if new_blocks is None:
-            return None
-
-        self.waiting.popleft()
-        skipped_waiting_requests.appendleft(request)
-        request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
-
-        # KVConnector: update internal state after allocation.
-        # This information is used to determine if a load is
-        # needed for this request.
-        assert self.connector is not None
-        self.connector.update_state_after_alloc(
-            request,
-            new_computed_blocks + new_blocks,
-            num_external_tokens,
-        )
-        # Only trigger a KV transfer once per request.
-        request.do_remote_prefill = False
-
-        return new_blocks
-
     def _try_schedule_encoder_inputs(
         self,
         request: Request,
@@ -1024,3 +946,85 @@ class Scheduler(SchedulerInterface):
     def shutdown(self) -> None:
         if self.kv_event_publisher:
             self.kv_event_publisher.shutdown()
+
+    ########################################################################
+    # P/D Related Methods
+    ########################################################################
+
+    def _update_waiting_for_remote_kv(
+        self,
+        request: Request,
+        skipped_waiting_requests: deque[Request],
+    ) -> bool:
+        """Update """
+        if request.request_id in self.finished_recving_kv_req_ids:
+            # Now that the KVs have been recved, we can cache
+            # them and set num_computed_tokens.
+            blocks = self.kv_cache_manager.req_to_blocks[request.request_id]
+            num_computed_tokens = len(blocks) * self.block_size
+            self.kv_cache_manager.cache_blocks(
+                request,
+                num_tokens=0,
+                num_computed_tokens=num_computed_tokens,
+                new_computed_block_list=[])
+            request.num_computed_tokens = num_computed_tokens
+            request.status = RequestStatus.WAITING
+            self.finished_recving_kv_req_ids.remove(request.request_id)
+            is_ready = True
+        else:
+            self.waiting.popleft()
+            skipped_waiting_requests.appendleft(request)
+            is_ready = False
+
+        return is_ready
+
+    def _allocate_and_set_waiting_for_remote_kv(
+        self,
+        request: Request,
+        num_external_tokens: int,
+        new_computed_blocks: KVCacheBlocks,
+        skipped_waiting_requests: deque[Request],
+    ) -> Optional[KVCacheBlocks]:
+        """
+        P/D: allocate KV cache blocks for a request and put
+        the request into the WAITING_FOR_REMOTE_KV state and
+        update the KVConnector state.
+
+        The KV caches are allocated but NOT cached. This is
+        to avoid another request getting a cache hit on a
+        block that has not been written to. We will cache
+        the blocks only after the recv is complete.
+
+        The update_state_after_alloc() function passes this
+        request to the KVConnector, which triggers KVConnector
+        to start a read_blocks transaction.
+        """
+
+        # Allocate slots for the external tokens, but skip
+        # caching until after the KV transfer is done to avoid
+        # cache hits on blocks that are still be written to.
+        new_blocks = self.kv_cache_manager.allocate_slots(
+            request,
+            num_external_tokens,
+            new_computed_blocks,
+            delay_cache_blocks=True)
+        if new_blocks is None:
+            return None
+
+        self.waiting.popleft()
+        skipped_waiting_requests.appendleft(request)
+        request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+
+        # KVConnector: update internal state after allocation.
+        # This information is used to determine if a load is
+        # needed for this request.
+        assert self.connector is not None
+        self.connector.update_state_after_alloc(
+            request,
+            new_computed_blocks + new_blocks,
+            num_external_tokens,
+        )
+        # Only trigger a KV transfer once per request.
+        request.do_remote_prefill = False
+
+        return new_blocks
