@@ -662,6 +662,57 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
             f"and if the config file exists.")
     assert isinstance(config_dict, dict)
 
+    # Load standard Hugging Face config.json to get better defaults
+    # if params.json (loaded into config_dict) is missing these specific keys.
+    hf_standard_config_data = get_hf_file_to_dict(
+        "config.json", model, revision
+    )
+
+    ultimate_fallback_max_val = 128_000 # Original hardcoded fallback
+    
+    # Determine the default for max_position_embeddings
+    default_for_max_pos_embed = ultimate_fallback_max_val
+    if hf_standard_config_data:
+        mpe_from_hf = None
+        text_config_data = hf_standard_config_data.get("text_config")
+        if isinstance(text_config_data, dict):
+            mpe_from_hf = text_config_data.get("max_position_embeddings")
+        
+        if mpe_from_hf is None: # If not in text_config or text_config absent
+            mpe_from_hf = hf_standard_config_data.get("max_position_embeddings")
+        
+        if mpe_from_hf is not None:
+            default_for_max_pos_embed = mpe_from_hf
+
+    # Determine the default for max_seq_len
+    default_for_max_seq_len = ultimate_fallback_max_val
+    if hf_standard_config_data:
+        msl_from_hf = None
+        text_config_data = hf_standard_config_data.get("text_config")
+        if isinstance(text_config_data, dict):
+            msl_from_hf = text_config_data.get("max_seq_len")
+
+        if msl_from_hf is None: # If not in text_config or text_config absent
+            msl_from_hf = hf_standard_config_data.get("max_seq_len")
+        
+        if msl_from_hf is not None:
+            default_for_max_seq_len = msl_from_hf
+        elif default_for_max_pos_embed != ultimate_fallback_max_val:
+            # If max_seq_len is not in standard config, but max_pos_embed was found there
+            # (and is not the 128k fallback itself), use it for max_seq_len.
+            default_for_max_seq_len = default_for_max_pos_embed
+            
+    # The following two lines are MODIFIED from the original:
+    # They now use the determined defaults instead of a hardcoded 128_000.
+    # If config_dict (from params.json) has the key, its value is used.
+    # Otherwise, the determined default (from config.json or 128_000) is used.
+    config_dict["max_seq_len"] = config_dict.get(
+        "max_seq_len", default_for_max_seq_len
+    )
+    config_dict["max_position_embeddings"] = config_dict.get(
+        "max_position_embeddings", default_for_max_pos_embed
+    )
+
     config_mapping = {
         "dim": "hidden_size",
         "norm_eps": "rms_norm_eps",
@@ -673,12 +724,13 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
 
     def recurse_elems(elem: Any):
         if isinstance(elem, dict):
-            config_dict = {}
+            # This inner config_dict shadows the outer one, which is fine
+            # for this recursive transformation pattern.
+            mapped_dict = {} 
             for key, value in elem.items():
-                key = config_mapping.get(key, key)
-                config_dict[key] = recurse_elems(value)
-
-            return config_dict
+                mapped_key = config_mapping.get(key, key)
+                mapped_dict[mapped_key] = recurse_elems(value)
+            return mapped_dict
         else:
             return elem
 
@@ -686,9 +738,6 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
     config_dict["hidden_act"] = config_dict.get("activation", "silu")
     config_dict["tie_word_embeddings"] = config_dict.get(
         "tie_embeddings", False)
-    config_dict["max_seq_len"] = config_dict.get("max_seq_len", 128_000)
-    config_dict["max_position_embeddings"] = config_dict.get(
-        "max_position_embeddings", 128_000)
 
     if config_dict.get("quantization") is not None:
         quantization = config_dict.get("quantization", {})
@@ -704,7 +753,6 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
         else:
             raise ValueError(
                 f"Found unknown quantization='{quantization}' in config")
-
         config_dict["quantization_config"] = quantization_config
 
     config_type: Literal["text",
@@ -718,27 +766,39 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
 
     if config_type == "multimodal":
         multimodal_config = config_dict.pop("vision_encoder")
-        quantization_config = config_dict.get("quantization_config", {})
+        # Save quantization_config if it was set from params.json processing,
+        # as the original config_dict (which becomes text_config) might lose it
+        # if it's intended to be a top-level key in the final multimodal config.
+        quantization_config_val = config_dict.get("quantization_config")
 
+        # config_dict is now repurposed to build the multimodal structure
         config_dict = {
-            "text_config": config_dict,
+            "text_config": config_dict, # Original config_dict (now text part)
             "vision_config": multimodal_config
         }
         config_dict["architectures"] = ["PixtralForConditionalGeneration"]
         config_dict["model_type"] = "pixtral"
-        if quantization_config:
-            config_dict["quantization_config"] = quantization_config
+        if quantization_config_val: # Check if it was not None
+            config_dict["quantization_config"] = quantization_config_val
 
     config_dict.update(kwargs)
 
+    # The variable 'config_dict' is rebound by recurse_elems call
     config_dict = recurse_elems(config_dict)
 
     # transform to HF config format
     if config_type == "multimodal":
+        # Ensure text_config and vision_config are dicts before ** unpacking
+        text_c = config_dict.get("text_config", {})
+        vision_c = config_dict.get("vision_config", {})
+        # If recurse_elems already processed them, they should be dicts.
+        # This step is defensive.
         config_dict["text_config"] = PretrainedConfig(
-            **config_dict["text_config"])
+            **(text_c if isinstance(text_c, dict) else {})
+        )
         config_dict["vision_config"] = PretrainedConfig(
-            **config_dict["vision_config"])
+            **(vision_c if isinstance(vision_c, dict) else {})
+        )
 
     return PretrainedConfig(**config_dict)
 
