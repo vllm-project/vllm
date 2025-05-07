@@ -94,7 +94,10 @@ class MsgpackEncoder:
             return self._encode_ndarray(obj)
 
         if isinstance(obj, slice):
-            return obj.start, obj.stop, obj.step
+            # We are assuming only int-based values will be used here.
+            return tuple(
+                int(v) if v is not None else None
+                for v in (obj.start, obj.stop, obj.step))
 
         if isinstance(obj, MultiModalKwargs):
             mm: MultiModalKwargs = obj
