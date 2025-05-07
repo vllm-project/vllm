@@ -289,7 +289,7 @@ def validate_parsed_serve_args(args: argparse.Namespace):
 def log_non_default_args(args: argparse.Namespace, logger: _VllmLogger):
     non_default_args = {}
     parser = make_arg_parser(FlexibleArgumentParser())
-    for arg, default in vars(parser.parse_args("")).items():
+    for arg, default in vars(parser.parse_args([])).items():
         if default != getattr(args, arg):
             non_default_args[arg] = getattr(args, arg)
     logger.info("non-default args: %s", non_default_args)
