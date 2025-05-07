@@ -145,9 +145,9 @@ class DummyConfig:
     """Dict which will be JSON in CLI"""
     nested_config: NestedConfig = field(default_factory=NestedConfig)
     """Nested config"""
-    from_cli_conig1: FromCliConfig1 = field(default_factory=FromCliConfig1)
+    from_cli_config1: FromCliConfig1 = field(default_factory=FromCliConfig1)
     """Config with from_cli method"""
-    from_cli_conig2: FromCliConfig2 = field(default_factory=FromCliConfig2)
+    from_cli_config2: FromCliConfig2 = field(default_factory=FromCliConfig2)
     """Different config with from_cli method"""
 
 
@@ -186,8 +186,8 @@ def test_get_kwargs():
     # nested config should should construct the nested config
     assert kwargs["nested_config"]["type"]('{"field": 2}') == NestedConfig(2)
     # from_cli configs should be constructed with the correct method
-    assert kwargs["from_cli_conig1"]["type"]('{"field": 2}').field == 3
-    assert kwargs["from_cli_conig2"]["type"]('{"field": 2}').field == 4
+    assert kwargs["from_cli_config1"]["type"]('{"field": 2}').field == 3
+    assert kwargs["from_cli_config2"]["type"]('{"field": 2}').field == 4
 
 
 @pytest.mark.parametrize(("arg", "expected"), [
