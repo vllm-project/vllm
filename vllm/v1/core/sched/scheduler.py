@@ -362,11 +362,8 @@ class Scheduler(SchedulerInterface):
                 # into the WAITING_FOR_REMOTE_KV state.
                 if request.do_remote_prefill and num_external_tokens > 0:
                     new_blocks = self._allocate_and_set_waiting_for_remote_kv(
-                        request,
-                        num_external_tokens,
-                        new_computed_blocks,
-                        skipped_waiting_requests,
-                    )
+                        request, num_external_tokens, new_computed_blocks,
+                        skipped_waiting_requests)
                     if new_blocks is None:
                         # Not enough KV cache space
                         break
