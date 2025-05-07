@@ -1232,6 +1232,9 @@ class AsyncLLMEngine(EngineClient):
     async def stop_profile(self) -> None:
         self.engine.stop_profile()
 
+    async def reset_mm_cache(self) -> None:
+        self.engine.reset_mm_cache()
+
     async def reset_prefix_cache(self,
                                  device: Optional[Device] = None) -> None:
         self.engine.reset_prefix_cache(device)

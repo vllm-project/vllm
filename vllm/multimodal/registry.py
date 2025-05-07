@@ -12,6 +12,7 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import (AnyTokenizer,
                                                cached_tokenizer_from_config)
 from vllm.utils import ClassRegistry
+from vllm.v1.metrics.stats import MultiModalCacheStats
 
 from .processing import (BaseMultiModalProcessor, BaseProcessingInfo,
                          ProcessingCache)
@@ -87,6 +88,20 @@ class MultiModalRegistry:
                                                   _ProcessorFactories]()
 
         self._processing_cache = ProcessingCache(VLLM_MM_INPUT_CACHE_GIB)
+
+    def make_processor_cache_stats(self) -> MultiModalCacheStats:
+        """Get (and reset) the multi-modal cache stats.
+
+        Returns:
+            The current multi-modal caching stats.
+        """
+        return self._processing_cache.make_stats()
+
+    def reset_processor_cache(self) -> bool:
+        """Reset the multi-modal processing cache."""
+        self._processing_cache.reset()
+
+        return True  # Success
 
     @deprecated("Legacy input processor/mapper pipeline has been removed. "
                 "Please update your model runner to use "

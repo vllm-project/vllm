@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 import prometheus_client
 
-from vllm.config import SpeculativeConfig
 from vllm.logger import init_logger
+
+if TYPE_CHECKING:
+    from vllm.config import SpeculativeConfig
 
 logger = init_logger(__name__)
 
@@ -114,7 +116,7 @@ class SpecDecodingProm:
       vllm:spec_decode_num_drafts[$interval]
     """
 
-    def __init__(self, speculative_config: Optional[SpeculativeConfig],
+    def __init__(self, speculative_config: Optional["SpeculativeConfig"],
                  labelnames: list[str], labelvalues: list[str]):
         self.spec_decoding_enabled = speculative_config is not None
         if not self.spec_decoding_enabled:

@@ -12,7 +12,6 @@ from vllm.v1.core.kv_cache_manager import KVCacheManager
 # yapf: disable
 from vllm.v1.core.kv_cache_utils import (NONE_HASH, BlockHashType,
                                          FreeKVCacheBlockQueue, KVCacheBlock,
-                                         PrefixCachingMetrics,
                                          estimate_max_model_len,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens,
@@ -20,7 +19,7 @@ from vllm.v1.core.kv_cache_utils import (NONE_HASH, BlockHashType,
                                          unify_kv_cache_configs)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheTensor)
-from vllm.v1.metrics.stats import PrefixCacheStats
+from vllm.v1.metrics.stats import CachingMetrics, PrefixCacheStats
 from vllm.v1.request import Request
 
 # yapf: enable
@@ -351,7 +350,7 @@ def test_metrics():
     def stats(requests, queries, hits):
         return PrefixCacheStats(requests=requests, queries=queries, hits=hits)
 
-    metrics = PrefixCachingMetrics(max_recent_requests=5)
+    metrics = CachingMetrics(max_recent_requests=5)
     assert metrics.hit_rate == 0.0
 
     metrics.observe(stats(1, 20, 9))

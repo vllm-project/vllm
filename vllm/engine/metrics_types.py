@@ -37,6 +37,12 @@ class Stats:
     #   Prefix caching block hit rate
     cpu_prefix_cache_hit_rate: float
     gpu_prefix_cache_hit_rate: float
+    #   Multi-modal cache stats
+    mm_cache_usage: float
+    mm_cache_size_G: float
+    mm_cache_size_items: int
+    mm_cache_queries: int
+    mm_cache_hits: int
 
     # Iteration stats (should have _iter suffix)
     num_prompt_tokens_iter: int
