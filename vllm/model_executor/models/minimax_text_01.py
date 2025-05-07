@@ -835,17 +835,6 @@ class MiniMaxText01Model(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers, layer_fn, prefix=f"{prefix}.layers")
         
-        linear_layer_nums = sum(1 for i in range(config.num_hidden_layers)
-                                if self.decoder_attention_types[i] == 0)
-        max_slots_number = scheduler_config.max_num_seqs
-        self.cache_shape = (linear_layer_nums, max_slots_number,
-                            config.num_attention_heads //
-                            get_tensor_model_parallel_world_size(),
-                            config.head_dim, config.head_dim)
-        _dummy = torch.zeros(1)
-        self._dtype = _dummy.dtype
-        del _dummy
-
         self.minimax_cache: Optional[MinimaxCacheManager] = None
 
         rope_theta = getattr(config, "rope_theta", 10000)
@@ -1009,6 +998,14 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
         flash_layer_count = sum(1 for attn_type in self.config.attn_type_list
                                 if attn_type == 1)
         self.kv_cache = [torch.tensor([]) for _ in range(flash_layer_count)]
+        
+        linear_layer_nums = sum(1 for i in range(config.num_hidden_layers)
+                                if config.attn_type_list[i] == 0)
+        max_slots_number = vllm_config.scheduler_config.max_num_seqs
+        self.cache_shape = (linear_layer_nums, max_slots_number,
+                            config.num_attention_heads //
+                            get_tensor_model_parallel_world_size(),
+                            config.head_dim, config.head_dim)
         return
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
