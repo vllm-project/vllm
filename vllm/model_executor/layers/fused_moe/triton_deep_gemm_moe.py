@@ -21,11 +21,10 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                  block_m: Optional[int] = None,
                  allow_deep_gemm: bool = False):
         super().__init__()
-        self.triton_expert = TritonExperts(use_fp8_w8a8, use_int8_w8a8,
-                                           use_int4_w4a16, use_int8_w8a16,
-                                           per_channel_quant, block_shape,
-                                           block_m)
-        self.deep_gemm_expert = DeepGemmExperts()
+        self.triton_expert: TritonExperts = TritonExperts(
+            use_fp8_w8a8, use_int8_w8a8, use_int4_w4a16, use_int8_w8a16,
+            per_channel_quant, block_shape, block_m)
+        self.deep_gemm_expert: DeepGemmExperts = DeepGemmExperts()
         self.allow_deep_gemm = allow_deep_gemm
         self.use_fp8_w8a8 = use_fp8_w8a8
 

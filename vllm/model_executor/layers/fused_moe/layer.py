@@ -2,11 +2,11 @@
 
 import importlib
 import threading
-import weakref
 from abc import abstractmethod
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, List, Optional, Tuple
+from weakref import WeakValueDictionary
 
 import torch
 import torch.nn.functional as F
@@ -274,7 +274,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 class AllToAllCache:
 
     def __init__(self):
-        self._cache = weakref.WeakValueDictionary()
+        self._cache: WeakValueDictionary = WeakValueDictionary()
         self._lock = threading.RLock()  # Reentrant lock for thread safety
 
     def get_or_create(self, **kwargs):
@@ -828,7 +828,8 @@ class FusedMoE(torch.nn.Module):
         if quant_config is None:
             quant_method = UnquantizedFusedMoEMethod(moe)
         else:
-            quant_method = quant_config.get_quant_method(self, prefix)
+            quant_method = quant_config.get_quant_method(
+                self, prefix)  # type: ignore
             assert isinstance(quant_method, FusedMoEMethodBase)
 
         assert quant_method is not None
@@ -838,7 +839,7 @@ class FusedMoE(torch.nn.Module):
 
         if dispatch_combine is not None:
             world_size = moe.ep_size
-            dp_size = moe.ep_size // moe.dp_size
+            dp_size = int(moe.ep_size // moe.dp_size)
             success = self.quant_method.set_dispatch_combine(
                 dp_size, world_size, dispatch_combine)
             if not success:

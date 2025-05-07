@@ -339,27 +339,24 @@ class FusedMoEModularKernel(torch.nn.Module):
             a1, a1_scale, a2_scale, topk_weights, topk_ids, global_num_experts,
             expert_map, apply_router_weight_on_input)
 
-        if True:
-            fused_out = self.fused_experts.apply(
-                a1q,
-                w1,
-                w2,
-                topk_ids,
-                activation=activation,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
-                w1_scale=w1_scale,
-                w2_scale=w2_scale,
-                w1_zp=w1_zp,
-                w2_zp=w2_zp,
-                a1q_scale=a1q_scale,
-                a2_scale=a2_scale,
-                workspace13=workspace13,
-                workspace2=workspace2,
-                expert_num_tokens=expert_num_tokens,
-            )
-        else:
-            fused_out = torch.empty_like(a1q)
+        fused_out = self.fused_experts.apply(
+            a1q,
+            w1,
+            w2,
+            topk_ids,
+            activation=activation,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            w1_zp=w1_zp,
+            w2_zp=w2_zp,
+            a1q_scale=a1q_scale,
+            a2_scale=a2_scale,
+            workspace13=workspace13,
+            workspace2=workspace2,
+            expert_num_tokens=expert_num_tokens,
+        )
 
         self.dispatch_combine.combine(output, fused_out, topk_weights,
                                       topk_ids, apply_router_weight_on_input)
