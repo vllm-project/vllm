@@ -918,7 +918,7 @@ class MiniMaxText01Model(nn.Module):
             return None
 
         self.minimax_cache = minimax_cache
-        minimax_cache_tensors = minimax_cache_params.minimax_cache_tensors
+        minimax_cache_tensors = minimax_cache_params.state_indices_tensor
 
         if getattr(attn_metadata, "num_prefills", 0) > 0:
             self._clear_prefill_cache(attn_metadata, minimax_cache_tensors,
