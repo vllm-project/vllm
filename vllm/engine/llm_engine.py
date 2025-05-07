@@ -399,10 +399,8 @@ class LLMEngine:
                 self.scheduler,
                 self.seq_counter,
                 get_tokenizer_for_seq,
-                stop_checker=StopChecker(
-                    self.scheduler_config.max_model_len,
-                    get_tokenizer_for_seq,
-                ),
+                stop_checker=StopChecker(self.scheduler_config.max_model_len,
+                                         get_tokenizer_for_seq),
             ))
 
         self.seq_id_to_seq_group: Dict[str, SequenceGroupBase] = {}

@@ -2273,6 +2273,9 @@ class SpeculativeConfig:
     """Scaling factor for entropy-based threshold, applied when using
     `TypicalAcceptanceSampler`."""
 
+    speculative_token_tree: Optional[str] = None
+    """Specifies the tree structure for speculative token generation. 
+    """
     # required configuration params passed from engine
     target_model_config: ModelConfig = field(default=None,
                                              init=True)  # type: ignore
@@ -2447,10 +2450,11 @@ class SpeculativeConfig:
                             "Chunked prefill and EAGLE are not compatible "
                             "when using V0.")
 
+                    from vllm.platforms import current_platform
                     from vllm.transformers_utils.configs.eagle import (
                         EAGLEConfig)
                     if isinstance(self.draft_model_config.hf_config,
-                                  EAGLEConfig):
+                                  EAGLEConfig) or current_platform.is_neuron():
                         pass
                     else:
                         eagle_config = EAGLEConfig(
