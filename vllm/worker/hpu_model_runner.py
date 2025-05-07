@@ -1613,8 +1613,9 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             self.warmup_all_buckets(self.bucketing_ctx.prompt_buckets, True,
                                     kv_caches)
             print("bb")
-            self.warmup_all_buckets(self.bucketing_ctx.decode_buckets, False,
-                                    kv_caches)
+            if not self.is_pooler:
+                self.warmup_all_buckets(self.bucketing_ctx.decode_buckets, False,
+                                        kv_caches)
 
             if not self.enforce_eager and htorch.utils.internal.is_lazy():
                 assert self.mem_margin is not None, \
@@ -1686,7 +1687,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     self.bucketing_ctx.prompt_buckets, True, mem_post_prompt)
                 if not self.is_pooler:
                     self.log_graph_warmup_summary(
-                        self.bucketing_ctx.decode_buckets, False, mem_post_decode)
+                        self.bucketing_ctx.decode_buckets, False,
+                        mem_post_decode)
 
         end_time = time.perf_counter()
         end_mem = HabanaMemoryProfiler.current_device_memory_usage()
