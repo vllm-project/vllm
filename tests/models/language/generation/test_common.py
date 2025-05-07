@@ -1,4 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+import os
+from typing import Optional
+
 import pytest
 import torch
 
@@ -106,9 +109,24 @@ def test_models(hf_runner, vllm_runner, example_prompts, model: str,
         # in parts of the operators
         pytest.skip(f"Skipping '{model}' model test with AITER kernel.")
 
+    use_prompt_embeds = os.getenv("VLLM_USE_V1") == "0"
+
     with hf_runner(model) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs)
+
+        prompt_embeds: Optional[list[torch.Tensor]] = ([] if use_prompt_embeds
+                                                       else None)
+
+        prompt_token_ids = []
+        for prompt in example_prompts:
+            token_ids = hf_model.tokenizer(prompt,
+                                           return_tensors="pt").input_ids.to(
+                                               hf_model.model.device)
+            prompt_token_ids.append(token_ids)
+            if prompt_embeds is not None:
+                prompt_embeds.append(hf_model.model.get_input_embeddings()(
+                    token_ids).squeeze(0))
 
     with vllm_runner(
             model,
@@ -116,9 +134,13 @@ def test_models(hf_runner, vllm_runner, example_prompts, model: str,
             tokenizer_mode=model_info.tokenizer_mode,
             trust_remote_code=model_info.trust_remote_code,
             max_num_seqs=2,
+            enable_prompt_embeds=use_prompt_embeds,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
+        if prompt_embeds is not None:
+            vllm_outputs_from_embeds = vllm_model.generate_greedy_logprobs(
+                prompt_embeds, max_tokens, num_logprobs)
 
     check_logprobs_close(
         outputs_0_lst=hf_outputs,
@@ -126,6 +148,14 @@ def test_models(hf_runner, vllm_runner, example_prompts, model: str,
         name_0="hf",
         name_1="vllm",
     )
+    if prompt_embeds is not None:
+        check_logprobs_close(
+            outputs_0_lst=vllm_outputs,
+            outputs_1_lst=vllm_outputs_from_embeds,
+            name_0="vllm",
+            name_1="vllm_from_embeds",
+        )
+
     if use_rocm_aiter:
         # this is to ensure that vllm engine
         # has deallocated the memory before running the next
