@@ -5,7 +5,6 @@ import re
 from collections.abc import Sequence
 from typing import Union
 
-import partial_json_parser
 from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.openai.protocol import (
@@ -22,18 +21,24 @@ from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParserManager,
 )
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
 """
-'<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather\n```json\n{"location": "Tokyo"}\n```<｜tool▁call▁end｜>\n<｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather\n```json\n{"location": "Paris"}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>'
+
 """
 
 
 @ToolParserManager.register_module("deepseekv3")
 class DeepSeekV3ToolParser(ToolParser):
+    """
+    Tool call parser for DeepSeekV3 model,
+
+    Parse DeepSeekV3 tool call returns like:
+    '<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather\n```json\n{"location": "Beijing"}\n```<｜tool▁call▁end｜>\n<｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather\n```json\n{"location": "Beijing"}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>'
+    """
 
     def __init__(self, tokenizer: AnyTokenizer):
         super().__init__(tokenizer)
@@ -57,6 +62,10 @@ class DeepSeekV3ToolParser(ToolParser):
 
         self.stream_tool_call_portion_regex = re.compile(
             r"(?P<type>.*)<｜tool▁sep｜>(?P<function_name>.*)\n```json\n(?P<function_arguments>.*)\n```"
+        )
+
+        self.stream_tool_call_name_regex = re.compile(
+            r"(?P<type>.*)<｜tool▁sep｜>(?P<function_name>.*)\n"
         )
 
         if not self.model_tokenizer:
@@ -136,9 +145,7 @@ class DeepSeekV3ToolParser(ToolParser):
     ) -> Union[DeltaMessage, None]:
 
         logger.debug("current_text: %s", current_text)
-        print("current_text: %s", current_text)
         logger.debug("delta_text: %s", delta_text)
-        print("delta_text: %s", delta_text)
         logger.debug("delta_token_ids: %s", delta_token_ids)
         # check to see if we should be streaming a tool call - is there a
         if self.tool_call_start_token_id not in current_token_ids:
@@ -267,14 +274,17 @@ class DeepSeekV3ToolParser(ToolParser):
                 )
                 if len(current_tool_call_matches) > 0:
                     tool_type, tool_name, tool_args = current_tool_call_matches[0]
-                    current_tool_call = {
-                        "name": tool_name,
-                        "arguments": tool_args
-                    }
-                    print("current_tool_call:", tool_name, tool_args)
+                    current_tool_call = {"name": tool_name, "arguments": tool_args}
                 else:
-                    logger.debug("not enough tokens")
-                    return None
+                    current_tool_call_name_matches = (
+                        self.stream_tool_call_name_regex.findall(tool_call_portion)
+                    )
+                    if len(current_tool_call_name_matches) > 0:
+                        tool_type, tool_name = current_tool_call_name_matches[0]
+                        current_tool_call = {"name": tool_name, "arguments": ""}
+                    else:
+                        logger.debug("Not enough token")
+                        return None
             except:
                 logger.debug("regex err")
                 return None
