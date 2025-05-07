@@ -308,6 +308,10 @@ class KVCacheManager:
                 num_computed_tokens=num_computed_tokens,
                 new_computed_block_list=new_computed_block_list,
             )
+        else:
+            self.num_cached_block[request.request_id] = len(
+                new_computed_block_list)
+
         return KVCacheBlocks(new_blocks)
 
     def cache_blocks(
