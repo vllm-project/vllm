@@ -236,12 +236,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.seq_lens = torch.zeros(self.max_num_reqs,
                                     dtype=torch.int32,
                                     device=self.device)
-        self.slot_mapping = torch.zeros(
-            self.max_num_tokens,
-            # CPU slot_mapping is int32, but
-            # this one must be int64
-            dtype=torch.int64,
-            device=self.device)
+        self.slot_mapping = torch.zeros(self.max_num_tokens,
+                                        dtype=torch.int64,
+                                        device=self.device)
 
         # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: Optional[IntermediateTensors] = None
@@ -295,7 +292,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                          pin_memory=self.pin_memory)
         self.positions_np = self.positions_cpu.numpy()
         self.slot_mapping_cpu = torch.zeros(self.max_num_tokens,
-                                            dtype=torch.int32,
+                                            dtype=torch.int64,
                                             device="cpu",
                                             pin_memory=self.pin_memory)
         self.slot_mapping_np = self.slot_mapping_cpu.numpy()
@@ -1514,7 +1511,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _dummy_run(
         self,
         num_tokens: int,
-        skip_attn: bool = False,
+        skip_attn: bool = True,
     ) -> torch.Tensor:
 
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
@@ -1534,11 +1531,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if skip_attn:
             attn_metadata = None
         else:
+            query_start_loc = self.query_start_loc[:num_reqs + 1]
+            seq_lens = self.seq_lens[:num_reqs]
+
+            common_attn_metadata = CommonAttentionMetadata(
+                query_start_loc=query_start_loc, seq_lens=seq_lens)
+
             attn_metadata = self.attn_metadata_builder.build(
                 num_reqs=num_tokens,
                 num_actual_tokens=num_tokens,
                 max_query_len=num_tokens,
                 common_prefix_len=0,
+                common_attn_metadata=common_attn_metadata,
             )
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
@@ -1731,7 +1735,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Cache the dummy encoder outputs.
             self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
 
-        hidden_states = self._dummy_run(self.max_num_tokens, skip_attn=True)
+        hidden_states = self._dummy_run(self.max_num_tokens)
         if get_pp_group().is_last_rank:
             sampler_output = self._dummy_sampler_run(hidden_states)
         else:
@@ -1755,11 +1759,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Capture the large shapes first so that the smaller shapes
         # can reuse the memory pool allocated for the large shapes.
         with graph_capture(device=self.device):
+            skip_attn = not self.vllm_config.compilation_config.full_cuda_graph
             for num_tokens in reversed(self.cudagraph_batch_sizes):
                 for _ in range(self.vllm_config.compilation_config.
                                cudagraph_num_of_warmups):
-                    self._dummy_run(num_tokens)
-                self._dummy_run(num_tokens)
+                    self._dummy_run(num_tokens, skip_attn=skip_attn)
+                self._dummy_run(num_tokens, skip_attn=skip_attn)
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]
