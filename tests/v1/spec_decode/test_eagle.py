@@ -115,18 +115,48 @@ def test_prepare_inputs():
         ("eagle3", lambda k: _create_proposer("eagle3", k), eagle3_dir,
          ('model', 'embed_tokens')),
     ])
+@mock.patch('vllm.v1.spec_decode.eagle.get_layers_from_vllm_config')
+@mock.patch('vllm.v1.spec_decode.eagle.ModelRegistry')
+@mock.patch('vllm.v1.spec_decode.eagle.get_model_loader')
 @mock.patch('vllm.v1.spec_decode.eagle.set_default_torch_dtype')
 @mock.patch('vllm.v1.spec_decode.eagle.set_current_vllm_config')
-@mock.patch('vllm.v1.spec_decode.eagle.get_model_loader')
-@mock.patch('vllm.v1.spec_decode.eagle.ModelRegistry')
-def test_load_model(mock_registry, mock_get_loader, mock_set_config,
-                    mock_set_dtype, method, proposer_helper, draft_model_dir,
-                    target_attribute_path):
+def test_load_model(mock_set_config, mock_set_dtype, mock_get_loader,
+                    mock_registry, mock_get_layers, method, proposer_helper,
+                    draft_model_dir, target_attribute_path):
 
     # Setup mock for model class
     mock_model_cls = mock.MagicMock()
     mock_registry.resolve_model_cls.return_value = (mock_model_cls,
                                                     "test_arch")
+
+    # Create a real context manager for mocks
+    class MockContextManager:
+
+        def __init__(self):
+            pass
+
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+    # Make the mocks return actual context manager objects
+    mock_set_dtype.return_value = MockContextManager()
+    mock_set_config.return_value = MockContextManager()
+
+    # Setup mocks for attention layers
+    target_attn_layers = {
+        "target_attn_1": mock.MagicMock(),
+        "target_attn_2": mock.MagicMock()
+    }
+    # Draft model has one extra attention layer compared to target model
+    all_attn_layers = {
+        **target_attn_layers, "draft_extra_attn": mock.MagicMock()
+    }
+
+    # Make mock_get_layers return different values for each call
+    mock_get_layers.side_effect = [target_attn_layers, all_attn_layers]
 
     # Setup model loader mock
     mock_loader = mock.MagicMock()
@@ -195,7 +225,11 @@ def test_propose(num_speculative_tokens):
     seq_len_2 = 3
     total_tokens = seq_len_1 + seq_len_2
     vocab_size = 100
-    hidden_size = 16
+
+    # Create proposer first so we can use its actual hidden_size
+    proposer = _create_proposer("eagle", num_speculative_tokens)
+    # Get the hidden_size from the proposer to ensure consistency
+    hidden_size = proposer.hidden_size
 
     # Helper to create deterministic logits that will produce specific tokens
     def create_deterministic_logits(token_ids):
@@ -209,52 +243,44 @@ def test_propose(num_speculative_tokens):
     # Sequence 2: 60, 61, 62, ...
     base_token_ids = [42, 60]
 
-    # Create proposer using the helper function
-    proposer = _create_proposer("eagle", num_speculative_tokens)
+    # Skip loading the model and replace it with a mock directly
+    # Create the mock model with deterministic outputs
+    model_mock = mock.MagicMock()
 
-    # Mock the model to return deterministic values
-    with mock.patch.object(proposer, 'load_model'):
-        # Create the mock model with deterministic outputs
-        model_mock = mock.MagicMock()
-
-        # Setup for model forward calls
-        forward_returns = []
-        for i in range(num_speculative_tokens):
-            if i == 0:
-                # First call uses all tokens
-                h_logits = torch.zeros(total_tokens,
-                                       hidden_size,
-                                       device=device)
-                h_states = torch.zeros(total_tokens,
-                                       hidden_size,
-                                       device=device)
-            else:
-                # Subsequent calls use batch_size tokens
-                h_logits = torch.zeros(batch_size, hidden_size, device=device)
-                h_states = torch.zeros(batch_size, hidden_size, device=device)
-            forward_returns.append((h_logits, h_states))
-
-        # For single token case, we only need the first item;
-        # for multi-token, we need the sequence
-        if num_speculative_tokens == 1:
-            model_mock.return_value = forward_returns[0]
+    # Setup for model forward calls
+    forward_returns = []
+    for i in range(num_speculative_tokens):
+        if i == 0:
+            # First call uses all tokens
+            h_logits = torch.zeros(total_tokens, hidden_size, device=device)
+            h_states = torch.zeros(total_tokens, hidden_size, device=device)
         else:
-            model_mock.side_effect = forward_returns
+            # Subsequent calls use batch_size tokens
+            h_logits = torch.zeros(batch_size, hidden_size, device=device)
+            h_states = torch.zeros(batch_size, hidden_size, device=device)
+        forward_returns.append((h_logits, h_states))
 
-        # Setup for compute_logits calls
-        logits_returns = []
-        for i in range(num_speculative_tokens):
-            # For each call, increment the base token IDs
-            current_tokens = [base_id + i for base_id in base_token_ids]
-            logits_returns.append(create_deterministic_logits(current_tokens))
+    # For single token case, we only need the first item;
+    # for multi-token, we need the sequence
+    if num_speculative_tokens == 1:
+        model_mock.return_value = forward_returns[0]
+    else:
+        model_mock.side_effect = forward_returns
 
-        if num_speculative_tokens == 1:
-            model_mock.compute_logits.return_value = logits_returns[0]
-        else:
-            model_mock.compute_logits.side_effect = logits_returns
+    # Setup for compute_logits calls
+    logits_returns = []
+    for i in range(num_speculative_tokens):
+        # For each call, increment the base token IDs
+        current_tokens = [base_id + i for base_id in base_token_ids]
+        logits_returns.append(create_deterministic_logits(current_tokens))
 
-        # Assign the mock to the proposer
-        proposer.model = model_mock
+    if num_speculative_tokens == 1:
+        model_mock.compute_logits.return_value = logits_returns[0]
+    else:
+        model_mock.compute_logits.side_effect = logits_returns
+
+    # Assign the mock to the proposer
+    proposer.model = model_mock
 
     # Create input tensors
     cu_num_tokens = torch.tensor([0, seq_len_1, total_tokens],
@@ -276,6 +302,7 @@ def test_propose(num_speculative_tokens):
                                         device=device)
     next_token_ids = torch.randint(0,
                                    vocab_size, (batch_size, ),
+                                   dtype=torch.int32,
                                    device=device)
     block_table = torch.randint(0, 10, (batch_size, 10), device=device)
 
