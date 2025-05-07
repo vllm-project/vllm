@@ -84,7 +84,7 @@ def rocm_unquantized_gemm(x: torch.Tensor,
     m = weight.shape[0]
     cu_count = current_platform.get_cu_count()
 
-    if m > 8 and 0 < n < 4:
+    if m > 8 and 0 < n <= 4:
         out = ops.wvSplitK(weight, x_view, cu_count)
         return out.view(*x.shape[:-1], weight.shape[0])
     elif m % 4 == 0 and n == 1 and k <= 8192:
