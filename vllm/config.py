@@ -54,7 +54,7 @@ if TYPE_CHECKING:
     from vllm.executor.executor_base import ExecutorBase
     from vllm.model_executor.layers.quantization.base_config import (
         QuantizationConfig)
-    from vllm.model_executor.model_loader.loader import BaseModelLoader
+    from vllm.model_executor.model_loader import BaseModelLoader
 
     ConfigType = type[DataclassInstance]
 else:
@@ -2273,6 +2273,9 @@ class SpeculativeConfig:
     """Scaling factor for entropy-based threshold, applied when using
     `TypicalAcceptanceSampler`."""
 
+    speculative_token_tree: Optional[str] = None
+    """Specifies the tree structure for speculative token generation. 
+    """
     # required configuration params passed from engine
     target_model_config: ModelConfig = field(default=None,
                                              init=True)  # type: ignore
@@ -2447,10 +2450,11 @@ class SpeculativeConfig:
                             "Chunked prefill and EAGLE are not compatible "
                             "when using V0.")
 
+                    from vllm.platforms import current_platform
                     from vllm.transformers_utils.configs.eagle import (
                         EAGLEConfig)
                     if isinstance(self.draft_model_config.hf_config,
-                                  EAGLEConfig):
+                                  EAGLEConfig) or current_platform.is_neuron():
                         pass
                     else:
                         eagle_config = EAGLEConfig(
@@ -2690,8 +2694,8 @@ class LoRAConfig:
     lora_extra_vocab_size: int = 256
     """Maximum size of extra vocabulary that can be present in a LoRA adapter
     (added to the base model vocabulary)."""
-    # This is a constant.
-    lora_vocab_padding_size: ClassVar[int] = 256
+    lora_vocab_padding_size: ClassVar[int] = current_platform\
+        .get_lora_vocab_padding_size()
     long_lora_scaling_factors: Optional[tuple[float, ...]] = None
     """Specify multiple scaling factors (which can be different from base model
     scaling factor - see eg. Long LoRA) to allow for multiple LoRA adapters
@@ -2719,6 +2723,7 @@ class LoRAConfig:
         factors.append(self.fully_sharded_loras)
         factors.append(self.lora_dtype)
         factors.append(self.lora_extra_vocab_size)
+        factors.append(self.lora_vocab_padding_size)
         factors.append(self.long_lora_scaling_factors)
         factors.append(self.bias_enabled)
         hash_str = hashlib.md5(str(factors).encode(),
