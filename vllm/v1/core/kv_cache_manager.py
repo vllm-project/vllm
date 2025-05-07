@@ -203,7 +203,7 @@ class KVCacheManager:
             new_computed_blocks: The new computed blocks just hitting the
                 prefix caching.
             num_lookahead_tokens: The number of speculative tokens to allocate.
-                This is used by spec decode proposers with kv-cache such
+                This is used by spec decode proposers with kv-cache such 
                 as eagle.
             delay_cache_blocks: Whether to skip caching the blocks. This is
                 used by P/D when allocating blocks used in a KV transfer
