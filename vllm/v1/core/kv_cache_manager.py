@@ -191,7 +191,7 @@ class KVCacheManager:
         num_tokens: int,
         new_computed_blocks: Optional[KVCacheBlocks] = None,
         num_lookahead_tokens: int = 0,
-        skip_cache_blocks: bool = False,
+        delay_cache_blocks: bool = False,
     ) -> Optional[KVCacheBlocks]:
         """Add slots for a request with new tokens to append.
 
@@ -205,7 +205,7 @@ class KVCacheManager:
             num_lookahead_tokens: The number of speculative tokens to allocate.
                 This is used by spec decode proposers with kv-cache such
                 as eagle.
-            skip_cache_blocks: Whether to skip caching the blocks. This is
+            delay_cache_blocks: Whether to skip caching the blocks. This is
                 used by P/D when allocating blocks used in a KV transfer
                 which will complete in a future step.
 
@@ -303,7 +303,7 @@ class KVCacheManager:
         if not self.enable_caching:
             return KVCacheBlocks(new_blocks)
 
-        if not skip_cache_blocks:
+        if not delay_cache_blocks:
             self.cache_blocks(
                 request=request,
                 num_tokens=num_tokens,

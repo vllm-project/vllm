@@ -639,7 +639,7 @@ class Scheduler(SchedulerInterface):
             request,
             num_external_tokens,
             new_computed_blocks,
-            skip_cache_blocks=True)
+            delay_cache_blocks=True)
         if new_blocks is None:
             return None
 
