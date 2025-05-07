@@ -47,7 +47,9 @@ docker run --privileged --net host --shm-size=16G -it \
     && echo TEST_10 \
     && pytest -s -v /workspace/vllm/tests/v1/tpu/test_pallas.py \
     && echo TEST_11 \
-    && pytest -s -v /workspace/vllm/tests/v1/entrypoints/llm/test_struct_output_generate.py" \
+    && pytest -s -v /workspace/vllm/tests/v1/entrypoints/llm/test_struct_output_generate.py \
+    && echo TEST_12 \
+    && pytest -s -v /workspace/vllm/tests/tpu/test_moe_pallas.py" \
 
 
 # TODO: This test fails because it uses RANDOM_SEED sampling
