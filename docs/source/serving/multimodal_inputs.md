@@ -216,7 +216,7 @@ A chat template is **required** to use Chat Completions API.
 For HF format models, the default chat template is defined inside `chat_template.json` or `tokenizer_config.json`.
 
 If no default chat template is available, we will first look for a built-in fallback in <gh-file:vllm/transformers_utils/chat_templates/registry.py>.
-Otherwise, an error is raised and you have to provide the chat template manually via the `--chat-template` argument.
+If no fallback is available, an error is raised and you have to provide the chat template manually via the `--chat-template` argument.
 
 For certain models, we provide alternative chat templates inside <gh-dir:vllm/examples>.
 For example, VLM2Vec uses <gh-file:examples/template_vlm2vec.jinja> which is different from the default one for Phi-3-Vision.
