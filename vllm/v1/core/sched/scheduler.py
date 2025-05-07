@@ -804,9 +804,7 @@ class Scheduler(SchedulerInterface):
         # P/D: update state for finished KV Transfers.
         self._update_from_kv_xfer_finished(model_runner_output, send_kv_no_op)
 
-        # Return the cached request data to the queue so they can
-        # be reused. Note: we cannot add stopped requests to this
-        # since they are already freed above!
+        # Return the cached request data to the queue so they can be reused.
         for req_data in scheduler_output.scheduled_cached_reqs:
             # NOTE(rob): since we free stopped reqs above, adding stopped reqs
             # to _cached_reqs_data will cause a memory leak.
