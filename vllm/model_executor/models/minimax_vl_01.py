@@ -463,6 +463,12 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             inputs_embeds = self.get_input_embeddings(input_ids,
                                                       vision_embeddings)
             input_ids = None
+
+        if "request_ids_to_seq_ids" not in kwargs:
+            kwargs["request_ids_to_seq_ids"] = {}
+        if "finished_requests_ids" not in kwargs:
+            kwargs["finished_requests_ids"] = []
+        
         if  self.minimax_cache is None:
             self.minimax_cache = MinimaxCacheManager(dtype=self._dtype,
                                             cache_shape=self.cache_shape)
