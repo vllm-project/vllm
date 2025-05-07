@@ -22,6 +22,22 @@ logger = logging.getLogger()
 logging.basicConfig(level=logging.INFO)
 
 
+
+async def P_first_token_generator(generator_p, generator_d):
+    first_decode = True
+    async for chunk in generator_p:
+        yield chunk
+    async for chunk in generator_d:
+        if first_decode:
+            first_decode = False
+            continue
+        yield chunk
+
+async def D_first_token_generator(generator_p, generator_d):
+    async for _ in generator_p:
+        continue
+    async for chunk in generator_d:
+        yield chunk
 class SchedulingPolicy(ABC):
 
     def __init__(self):
@@ -44,6 +60,7 @@ class Proxy:
                                                     StreamingResponse]] = None,
         custom_create_chat_completion: Optional[Callable[
             [Request], StreamingResponse]] = None,
+        generator_on_p_node:bool = False
     ):
         self.prefill_instances = prefill_instances
         self.decode_instances = decode_instances
@@ -55,6 +72,7 @@ class Proxy:
         self.custom_create_chat_completion = custom_create_chat_completion
         self.router = APIRouter()
         self.setup_routes()
+        self.generator = P_first_token_generator if generator_on_p_node else D_first_token_generator
 
     def setup_routes(self):
         self.router.post(
@@ -250,25 +268,33 @@ class Proxy:
                 kv_prepare_request["max_tokens"] = 1
 
                 prefill_instance = self.schedule(self.prefill_cycler)
+                value = b''
                 try:
-                    async for _ in self.forward_request(
+                    async for chunk in self.forward_request(
                             f"http://{prefill_instance}/v1/completions",
                             kv_prepare_request):
-                        continue
+                        value += chunk
                 except HTTPException as http_exc:
                     self.remove_instance_endpoint("prefill", prefill_instance)
                     raise http_exc
 
             # Perform kv recv and decoding stage
             decode_instance = self.schedule(self.decode_cycler)
-
+            value = value.strip().decode("utf-8").removesuffix("data: [DONE]").encode("utf-8")
+            async def streaming_response(value):
+                if value:
+                    yield value
+                else:
+                    yield b""
+            generator_p = streaming_response(value)
             try:
-                generator = self.forward_request(
+                generator_d = self.forward_request(
                     f"http://{decode_instance}/v1/completions", request)
             except HTTPException as http_exc:
                 self.remove_instance_endpoint("decode", decode_instance)
                 raise http_exc
-            response = StreamingResponse(generator)
+            final_generator = self.generator(generator_p, generator_d)    
+            response = StreamingResponse(final_generator)
             return response
         except Exception:
             import sys
@@ -287,25 +313,33 @@ class Proxy:
 
             # prefill stage
             prefill_instance = self.schedule(self.prefill_cycler)
+            value = b''
             try:
-                async for _ in self.forward_request(
+                async for chunk in self.forward_request(
                         f"http://{prefill_instance}/v1/chat/completions",
                         kv_prepare_request):
-                    continue
+                    value += chunk
             except HTTPException as http_exc:
                 self.remove_instance_endpoint("prefill", prefill_instance)
                 raise http_exc
             # Perform kv recv and decoding stage
             decode_instance = self.schedule(self.decode_cycler)
-
+            value = value.strip().decode("utf-8").removesuffix("data: [DONE]").encode("utf-8")
+            async def streaming_response(value):
+                if value:
+                    yield value
+                else:
+                    yield b""
+            generator_p = streaming_response(value)
             try:
-                generator = self.forward_request(
+                generator_d = self.forward_request(
                     "http://" + decode_instance + "/v1/chat/completions",
                     request)
             except HTTPException as http_exc:
                 self.remove_instance_endpoint("decode", decode_instance)
                 raise http_exc
-            response = StreamingResponse(content=generator)
+            final_generator = self.generator(generator_p, generator_d)
+            response = StreamingResponse(final_generator)
             return response
         except Exception:
             exc_info = sys.exc_info()
@@ -361,6 +395,7 @@ class ProxyServer:
                                is not None else RoundRobinSchedulingPolicy()),
             custom_create_completion=create_completion,
             custom_create_chat_completion=create_chat_completion,
+            generator_on_p_node=args.generator_on_p_node,
         )
 
     def validate_parsed_serve_args(self, args: argparse.Namespace):
@@ -444,6 +479,12 @@ if __name__ == "__main__":
         type=int,
         default=8000,
         help="Server port number",
+    )
+    
+    parser.add_argument(
+        "--generator_on_p_node",
+        action="store_true",
+        help="generate first token on P node or D node",
     )
     args = parser.parse_args()
     proxy_server = ProxyServer(args=args)
