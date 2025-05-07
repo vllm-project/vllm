@@ -393,7 +393,7 @@ def engine_client(request: Request) -> EngineClient:
 async def health(raw_request: Request) -> Response:
     """Health check."""
     await engine_client(raw_request).check_health()
-    return Response(status_code=200)
+    return JSONResponse(content={}, status_code=200)
 
 
 @router.get("/load")
