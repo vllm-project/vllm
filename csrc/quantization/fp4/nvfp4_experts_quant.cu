@@ -331,7 +331,6 @@ void quant_impl(void* output, void* output_scale, void* input,
   CHECK_TH_CUDA(x, m);    \
   CHECK_CONTIGUOUS(x, m);
 
-constexpr auto FP8 = at::ScalarType::Float8_e4m3fn;
 constexpr auto HALF = at::ScalarType::Half;
 constexpr auto BF16 = at::ScalarType::BFloat16;
 constexpr auto FLOAT = at::ScalarType::Float;

@@ -736,7 +736,7 @@ class FusedMoE(torch.nn.Module):
             return
 
 
-# Case weight scales, zero_points and offset
+        # Case weight scales, zero_points and offset
         if ("scale" in weight_name or "zero" in weight_name
                 or "offset" in weight_name):
             # load the weight scales and zp based on the quantization scheme

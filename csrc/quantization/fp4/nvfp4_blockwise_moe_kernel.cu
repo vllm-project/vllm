@@ -277,8 +277,6 @@ void run_fp4_blockwise_scaled_group_mm(
   typename Gemm::GemmKernel::TileSchedulerArguments scheduler;
   scheduler.raster_order = RasterOrderOptions::AlongM;
   hw_info.device_id = a.get_device();
-  hw_info.cluster_shape = 2;
-  hw_info.cluster_shape_fallback = 2;
   static std::unordered_map<int, int> cached_sm_counts;
   if (cached_sm_counts.find(hw_info.device_id) == cached_sm_counts.end()) {
     cached_sm_counts[hw_info.device_id] =
@@ -350,14 +348,6 @@ constexpr auto SF_DTYPE = at::ScalarType::Float8_e4m3fn;
   CHECK_TH_CUDA(x, m);        \
   CHECK_CONTIGUOUS(x, m);     \
   CHECK_TYPE(x, st, m)
-
-static int getSMVersion() {
-  int device;
-  cudaGetDevice(&device);
-  cudaDeviceProp deviceProp;
-  cudaGetDeviceProperties(&deviceProp, device);
-  return deviceProp.major * 10 + deviceProp.minor;
-}
 
 void cutlass_fp4_group_mm(
     torch::Tensor& output, const torch::Tensor& a, const torch::Tensor& b,

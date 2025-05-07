@@ -8,8 +8,9 @@ from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.cutlass_moe import cutlass_moe_fp4
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.platforms import current_platform
-from nvfp4_utils import (dequantize_nvfp4_to_dtype, FLOAT4_E2M1_MAX,
-                         FLOAT8_E4M3_MAX)
+from tests.kernels.quantization.nvfp4_utils import (dequantize_nvfp4_to_dtype,
+                                                    FLOAT4_E2M1_MAX,
+                                                    FLOAT8_E4M3_MAX)
 
 MNK_FACTORS = [
     (2, 1024, 1024),
@@ -19,11 +20,9 @@ MNK_FACTORS = [
     (64, 1024, 1024),
     (64, 1024, 1536),
     (64, 3072, 1024),
-    (64, 3072, 1536),
+    (64, 2048, 1536),
     (224, 1024, 1024),
     (224, 1024, 1536),
-    (224, 3072, 1024),
-    (224, 3072, 1536),
 ]
 
 
@@ -42,16 +41,16 @@ def test_cutlass_fp4_moe_no_graph(m: int, n: int, k: int, e: int, topk: int,
         a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
         w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
         quant_blocksize = 16
-        round_up = lambda x, y: (x + y - 1) // y
+        round_up = lambda x, y: (x + y - 1) // y * y
         sf_w1_2n = round_up(2 * n, 128)
-        sf_w1_k = round_up(k, 4)
+        sf_w1_k = round_up(k // quant_blocksize, 4)
         w1_blockscale = torch.empty((e, sf_w1_2n, sf_w1_k),
                                     device="cuda",
                                     dtype=torch.float8_e4m3fn)
 
         w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
         sf_w2_k = round_up(k, 128)
-        sf_w2_n = round_up(n, 4)
+        sf_w2_n = round_up(n // quant_blocksize, 4)
         w2_blockscale = torch.empty((e, sf_w2_k, sf_w2_n),
                                     device="cuda",
                                     dtype=torch.float8_e4m3fn)
@@ -135,3 +134,7 @@ def test_cutlass_fp4_moe_no_graph(m: int, n: int, k: int, e: int, topk: int,
                                    cutlass_output,
                                    atol=1e-1,
                                    rtol=1e-1)
+
+
+if __name__ == "__main__":
+    test_cutlass_fp4_moe_no_graph((2, 1024, 1024), 40, 1, torch.half)

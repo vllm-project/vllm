@@ -550,8 +550,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         # GEMM 1
 
         assert torch.allclose(
-            layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
-        ), ("Expected w1_weight_scale_2[:,0] to equal w3_weight_scale_2[:,1]")
+            layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]), (
+                "Expected w1_weight_scale_2 to equal w3_weight_scale_2")
 
         w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0]
         layer.w13_weight_scale_2 = Parameter(w13_weight_scale_2,
@@ -637,8 +637,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         from vllm.model_executor.layers.fused_moe.cutlass_moe import (
             cutlass_moe_fp4)
 
-        # Cutlass moe takes in full precision activations
-        # and fp4 precision weights
+        # Cutlass moe takes in activations in BF16/Half precision
+        # and fp4 quantized weights loaded from the checkpoint
         return cutlass_moe_fp4(a=x,
                                w1_fp4=layer.w13_weight,
                                w1_blockscale=layer.w13_blockscale_swizzled,

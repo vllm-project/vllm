@@ -272,7 +272,8 @@ def cutlass_moe_fp4(a: torch.Tensor, a1_gscale: torch.Tensor,
         expert_offsets,
         blockscale_offsets,
         num_topk,
-        expert_map=a_map)
+        expert_map=a_map,
+        MAX_TOKENS_PER_EXPERT=MAX_TOKENS_PER_EXPERT)
 
     c1 = ops.cutlass_fp4_moe_mm(rep_a_fp4, w1_fp4, rep_a_blockscale,
                                 w1_blockscale, w1_alphas, problem_sizes1,
@@ -287,7 +288,13 @@ def cutlass_moe_fp4(a: torch.Tensor, a1_gscale: torch.Tensor,
     torch.ops._C.silu_and_mul(intermediate, c1)
 
     int_fp4, int_blockscale = ops.scaled_fp4_experts_quant(
-        intermediate, a2_gscale, expert_offsets, blockscale_offsets, num_topk)
+        intermediate,
+        a2_gscale,
+        expert_offsets,
+        blockscale_offsets,
+        num_topk,
+        MAX_TOKENS_PER_EXPERT=MAX_TOKENS_PER_EXPERT)
+
     c2 = ops.cutlass_fp4_moe_mm(int_fp4, w2_fp4, int_blockscale, w2_blockscale,
                                 w2_alphas, problem_sizes2, expert_offsets[:-1],
                                 blockscale_offsets[:-1], out_dtype, device)

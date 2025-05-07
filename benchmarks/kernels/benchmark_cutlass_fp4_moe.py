@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-
+"""
+Benchmark the performance of the cutlass_moe_fp4 kernel vs the triton_moe
+kernel. The cutlass_moe_fp4 kernel takes in fp4 quantized weights and 16-bit
+activations. The triton_moe kernel takes in fp8 weights(tensor scaled to fp8)
+and 16-bit activations.
+"""
 import nvtx
 import torch
 import torch.utils.benchmark as benchmark
@@ -40,7 +45,7 @@ def to_fp8(tensor: torch.Tensor):
 def bench_run(results: list[benchmark.Measurement], model: str,
               num_experts: int, topk: int, per_act_token: bool,
               per_out_ch: bool, mkn: tuple[int, int, int]):
-    label = "FP4 MOE vs FP8 Triton"
+    label = "NVFP4 Blockscaled CUTLASS MOE vs FP8 Tensor Scaled Triton"
 
     sub_label = (
         "{}, num_experts={}, topk={}, per_act_token={} per_out_ch={}, "
@@ -362,7 +367,7 @@ def main(args):
 
                 for per_act_token in PER_ACT_TOKEN_OPTS:
                     for per_out_ch in PER_OUT_CH_OPTS:
-                        for size_m in DEFAULT_BATCH_SIZES:
+                        for size_m in args.batch_sizes:
                             mkn = (size_m, size_k, size_n)
                             bench_run(results, model, num_experts, topk,
                                       per_act_token, per_out_ch, mkn)
@@ -373,7 +378,8 @@ def main(args):
 
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(
-        description="Benchmark Marlin across specified models/shapes/batches")
+        description="Benchmark NVFP4 CUTLASS MOE across specified "
+        "models/shapes/batches")
     parser.add_argument(
         "--models",
         nargs="+",
