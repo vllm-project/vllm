@@ -525,7 +525,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                     "Top-p sampling is currently disabled for the TPU backend "
                     "due to performance issues.")
             p.append(sampling_params.top_p)
-            if sampling_params.top_k != -1:
+            if 0 < sampling_params.top_k < self.model_config.get_vocab_size():
                 raise NotImplementedError(
                     "Top-k sampling is currently disabled for the TPU backend "
                     "due to performance issues.")

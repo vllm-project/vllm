@@ -478,7 +478,7 @@ def test_sampler_mixed(seed: int, device: str):
             sampling_params = SamplingParams(
                 temperature=random.random() + 0.1,
                 top_p=min(random.random() + 0.1, 1),
-                top_k=random.randint(0, 10) or -1,
+                top_k=random.randint(0, 10),
                 n=n,
                 presence_penalty=random.randint(0, 1),
             )
