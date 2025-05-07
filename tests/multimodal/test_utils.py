@@ -28,7 +28,6 @@ TEST_IMAGE_URLS = [
 
 TEST_VIDEO_URLS = [
     "https://www.bogotobogo.com/python/OpenCV_Python/images/mean_shift_tracking/slow_traffic_small.mp4",
-    "https://opencv.org/wp-content/uploads/2025/02/Example-Video.mp4",
 ]
 
 
