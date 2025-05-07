@@ -220,7 +220,7 @@ def get_model_architecture(
     # Special handling for quantized Mixtral.
     # FIXME(woosuk): This is a temporary hack.
     mixtral_supported = [
-        "fp8", "compressed-tensors", "gptq_marlin", "awq_marlin"
+        "fp8", "compressed-tensors", "gptq_marlin", "awq_marlin", "quark"
     ]
 
     if (model_config.quantization is not None
