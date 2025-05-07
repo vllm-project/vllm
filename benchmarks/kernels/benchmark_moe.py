@@ -535,7 +535,8 @@ def get_weight_block_size_safety(config, default_value=None):
 def main(args: argparse.Namespace):
     print(args)
 
-    config = get_config(model=args.model, trust_remote_code=True)
+    config = get_config(model=args.model,
+                        trust_remote_code=args.trust_remote_code)
     if args.model_prefix:
         config = getattr(config, args.model_prefix)
     config = SimpleNamespace(**config)
