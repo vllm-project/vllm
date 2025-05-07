@@ -11,6 +11,7 @@ from torch.func import functional_call
 from transformers import PretrainedConfig
 
 import vllm.envs as envs
+from vllm.attention.layer import NOT_USE_SLIDING_WINDOW
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -23,8 +24,6 @@ logger = init_logger(__name__)
 
 WeightsMapping = Mapping[str, Optional[str]]
 """If a key maps to a value of `None`, the corresponding weight is ignored."""
-
-NOT_USE_SLIDING_WINDOW = -1
 
 
 @dataclass
@@ -725,7 +724,7 @@ def resolve_sliding_window(
     if sliding_window is None:
         return NOT_USE_SLIDING_WINDOW
 
-    if max_window_layers is None:
+    if max_window_layers is None or layer_idx >= max_window_layers:
         return sliding_window
 
-    return sliding_window if layer_idx >= max_window_layers else NOT_USE_SLIDING_WINDOW
+    return NOT_USE_SLIDING_WINDOW
