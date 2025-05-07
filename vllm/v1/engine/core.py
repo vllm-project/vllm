@@ -195,14 +195,13 @@ class EngineCore:
 
     def execute_model(self, scheduler_output: SchedulerOutput):
         try:
-            output = self.model_executor.execute_model(scheduler_output)
+            return self.model_executor.execute_model(scheduler_output)
         except BaseException as err:
             # NOTE: This method is exception-free
             dump_engine_exception(self.vllm_config, scheduler_output,
                                   self.scheduler.make_stats())
             # Re-raise exception
             raise err
-        return output
 
     def step(self) -> EngineCoreOutputs:
         """Schedule, execute, and make output."""
@@ -215,9 +214,7 @@ class EngineCore:
                 scheduler_stats=self.scheduler.make_stats(),
             )
         scheduler_output = self.scheduler.schedule()
-
         model_output = self.execute_model(scheduler_output)
-
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output)  # type: ignore
 
