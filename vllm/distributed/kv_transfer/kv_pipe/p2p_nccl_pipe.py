@@ -198,17 +198,19 @@ class P2pNcclPipe:
             if tensor is not None:
                 if isinstance(tensor, tuple):
                     addr, dtype, shape = tensor
-                    tensor = self.pool.load_tensor(addr, dtype, shape)
+                    tensor = self.pool.load_tensor(addr, dtype, shape,
+                                                   self.device)
                 else:
+                    addr = 0
                     self.buffer_size -= (tensor.element_size() *
                                          tensor.numel())
                 duration = time.time() - start_time
                 logger.info(
                     "🔵[PUT]Recv From %s, tensor_id:%s, shape:%s, "
-                    "duration:%.3fms, size:%.3fGB, rank:%d", remote_address,
-                    tensor_id, tensor.shape, duration * 1000,
+                    "duration:%.3fms, size:%.3fGB, addr:%d, rank:%d",
+                    remote_address, tensor_id, tensor.shape, duration * 1000,
                     tensor.element_size() * tensor.numel() / 1024**3,
-                    self.rank)
+                    addr, self.rank)
             else:
                 duration = time.time() - start_time
                 logger.warning(
@@ -290,8 +292,8 @@ class P2pNcclPipe:
                             tensor = (addr, tensor.dtype, tensor.shape)
                             logger.warning(
                                 "🔴[PUT]Recv Tensor, Out Of Threshold, "
-                                "%s👈%s, data:%s", self.zmq_address,
-                                remote_address.decode(), data)
+                                "%s👈%s, data:%s, addr:%d", self.zmq_address,
+                                remote_address.decode(), data, addr)
                         else:
                             self.buffer_size += tensor_size
                             logger.info(

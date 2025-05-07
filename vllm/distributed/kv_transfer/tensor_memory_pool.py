@@ -101,12 +101,11 @@ class TensorMemoryPool:
                 del self.free_lists[buddy.size][buddy.addr]
                 merged_addr = min(block.addr, buddy.addr)
                 merged_size = block.size * 2
-                merged_block = MemoryBlock(size=merged_size, addr=merged_addr)
-                block = merged_block
+                block = MemoryBlock(size=merged_size, addr=merged_addr)
                 depth += 1
             else:
-                self.free_lists[block.size][block.addr] = block
                 break
+        self.free_lists[block.size][block.addr] = block
 
     def store_tensor(self, tensor: torch.Tensor) -> int:
         if not tensor.is_cuda:
@@ -127,13 +126,15 @@ class TensorMemoryPool:
             self.free(addr)
             raise MemoryError(f"Failed to create tensor view: {e}")
 
+        event = torch.cuda.Event()
         with torch.cuda.stream(self.store_stream):
             cuda_kernels.store_tensor(tensor, cpu_tensor)
-        self.store_stream.synchronize()
+            event.record()
+        event.wait()
 
         return addr
 
-    def load_tensor(self, addr: int, dtype: torch.dtype, shape: Tuple[int, ...]) -> torch.Tensor:
+    def load_tensor(self, addr: int, dtype: torch.dtype, shape: Tuple[int, ...], device) -> torch.Tensor:
         if addr not in self.allocated_blocks:
             raise ValueError("Invalid address to load")
 
@@ -148,11 +149,14 @@ class TensorMemoryPool:
         buffer = (ctypes.c_byte * block.size).from_address(block.addr)
         cpu_tensor = torch.frombuffer(buffer, dtype=dtype, count=num_elements)
 
-        cuda_tensor = torch.empty(shape, dtype=dtype, device='cuda')
+        cuda_tensor = torch.empty(shape, dtype=dtype, device=device)
 
+        event = torch.cuda.Event()
         with torch.cuda.stream(self.load_stream):
             cuda_kernels.load_tensor(cpu_tensor, cuda_tensor)
-        self.load_stream.synchronize()
+            event.record()
+        event.wait()
+
         self.free(addr)
 
         return cuda_tensor
