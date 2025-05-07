@@ -186,7 +186,7 @@ class NixlConnectorScheduler:
         return 0
 
     def update_state_after_alloc(self, request: "Request",
-                                 blocks: KVCacheBlocks,
+                                 blocks: "KVCacheBlocks",
                                  num_external_tokens: int):
         if request.do_remote_prefill and num_external_tokens > 0:
             self._reqs_need_recv[request.request_id] = (request,

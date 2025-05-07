@@ -260,7 +260,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
         return num_tokens_to_check - num_computed_tokens
 
     def update_state_after_alloc(self, request: "Request",
-                                 blocks: KVCacheBlocks,
+                                 blocks: "KVCacheBlocks",
                                  num_external_tokens: int):
         """
         Update KVConnector state after block allocation.
