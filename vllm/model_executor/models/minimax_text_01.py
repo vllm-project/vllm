@@ -3,8 +3,7 @@
 import copy
 import math
 import re
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
-from vllm.model_executor.layers.rotary_embedding import get_rope
+from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 import torch.distributed
@@ -334,80 +333,166 @@ class MiniMaxText01LinearAttention(nn.Module):
     def __init__(
         self,
         hidden_size: int,
+        hidden_inner_size: int,
         num_heads: int,
-        num_kv_heads: int,
-        rope_theta: float = 10000,
-        rope_scaling: Optional[Dict[str, Any]] = None,
-        max_position_embeddings: int = 8192,
-        cache_config: Optional[CacheConfig] = None,
+        head_dim: int,
+        max_position: int,
+        block_size: int,
+        num_hidden_layer: int,
         quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
+        layer_idx: int = 0,
+        linear_layer_idx: int = 0,
+        prefix: str = "linear_attn",
     ) -> None:
         super().__init__()
+
+        self.layer_idx = layer_idx
+        self.BLOCK = block_size
         self.hidden_size = hidden_size
-        tp_size = get_tensor_model_parallel_world_size()
+        self.num_heads = num_heads
+        self.head_dim = head_dim
         self.total_num_heads = num_heads
-        assert self.total_num_heads % tp_size == 0
-        self.num_heads = self.total_num_heads // tp_size
-        self.total_num_kv_heads = num_kv_heads
-        if self.total_num_kv_heads >= tp_size:
-            # Number of KV heads is greater than TP size, so we partition
-            # the KV heads across multiple tensor parallel GPUs.
-            assert self.total_num_kv_heads % tp_size == 0
-        else:
-            # Number of KV heads is less than TP size, so we replicate
-            # the KV heads across multiple tensor parallel GPUs.
-            assert tp_size % self.total_num_kv_heads == 0
-        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        self.head_dim = hidden_size // self.total_num_heads
-        self.q_size = self.num_heads * self.head_dim
-        self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
-        self.max_position_embeddings = max_position_embeddings
+        self.hidden_inner_size = hidden_inner_size
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tensor_model_parallel_rank()
 
-        self.qkv_proj = QKVParallelLinear(
+        assert self.total_num_heads % self.tp_size == 0
+        self.tp_heads = self.total_num_heads // self.tp_size
+        self.qkv_size = self.num_heads * self.head_dim
+        self.tp_hidden = self.head_dim * self.tp_heads
+        self.qkv_proj = ColumnParallelLinear(
             hidden_size,
-            self.head_dim,
-            self.total_num_heads,
-            self.total_num_kv_heads,
-            bias=True,
+            self.hidden_inner_size * 3,
+            bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
         )
-
-        self.o_proj = RowParallelLinear(
-            self.total_num_heads * self.head_dim,
+        self.output_gate = ColumnParallelLinear(
+            hidden_size,
+            self.hidden_inner_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.output_gate",
+        )
+        self.out_proj = RowParallelLinear(
+            self.hidden_inner_size,
             hidden_size,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.out_proj",
+        )
+        self.norm = MiniMaxText01RMSNormTP(
+            self.hidden_inner_size,
+            eps=1e-5,
         )
 
-        self.rotary_emb = get_rope(
-            self.head_dim,
-            rotary_dim=self.head_dim,
-            max_position=max_position_embeddings,
-            base=rope_theta,
-            rope_scaling=rope_scaling,
-        )
-        self.attn = Attention(self.num_heads,
-                              self.head_dim,
-                              self.scaling,
-                              num_kv_heads=self.num_kv_heads,
-                              cache_config=cache_config,
-                              quant_config=quant_config,
-                              prefix=f"{prefix}.attn")
+        slope_rate = MiniMaxText01LinearAttention._build_slope_tensor(
+            self.num_heads)
+        if num_hidden_layer <= 1:
+            self.slope_rate = slope_rate * (1 + 1e-5)
+        else:
+            self.slope_rate = slope_rate * (1 - layer_idx /
+                                            (num_hidden_layer - 1) + 1e-5)
+        self.tp_slope = self.slope_rate[self.tp_rank *
+                                        self.tp_heads:(self.tp_rank + 1) *
+                                        self.tp_heads].contiguous()
 
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
+    @staticmethod
+    def weight_direct_load(param: torch.Tensor,
+                           loaded_weight: torch.Tensor) -> None:
+        assert param.size() == loaded_weight.size()
+        param.data.copy_(loaded_weight)
+        return
+
+    @staticmethod
+    def _build_slope_tensor(n_attention_heads: int):
+
+        def get_slopes(n):
+
+            def get_slopes_power_of_2(n):
+                start = 2**(-(2**-(math.log2(n) - 3)))
+                ratio = start
+                return [start * ratio**i for i in range(n)]
+
+            if math.log2(n).is_integer():
+                return get_slopes_power_of_2(n)
+            else:
+                closest_power_of_2 = 2**math.floor(math.log2(n))
+                return (get_slopes_power_of_2(closest_power_of_2) + get_slopes(
+                    2 * closest_power_of_2)[0::2][:n - closest_power_of_2])
+
+        slopes = torch.tensor(get_slopes(n_attention_heads),
+                              dtype=torch.float32).reshape(
+                                  n_attention_heads, 1, 1)
+        return slopes
+
+    def _prefill_and_mix_infer(self, q, k, v, kv_cache, state_indices_tensor):
+        forward_context = get_forward_context()
+        attn_metadata = forward_context.attn_metadata
+        hidden = []
+        for _prefill_idx in range(getattr(attn_metadata, "num_prefills", 0)):
+            _start = attn_metadata.query_start_loc[_prefill_idx]
+            _end = attn_metadata.query_start_loc[_prefill_idx + 1]
+            slot_id = state_indices_tensor[_prefill_idx]
+            qs = q[_start:_end].transpose(0, 1).contiguous()
+            ks = k[_start:_end].transpose(0, 1).contiguous()
+            vs = v[_start:_end].transpose(0, 1).contiguous()
+            slot_id = state_indices_tensor[_prefill_idx]
+            slice_layer_cache = kv_cache[slot_id, ...]
+
+            out_slice = MiniMaxText01LinearKernel.jit_linear_forward_prefix(
+                qs,
+                ks,
+                vs,
+                slice_layer_cache,
+                self.tp_slope,
+                self.BLOCK,
+                layer_idx=self.layer_idx)
+            hidden.append(out_slice.contiguous())
+        if attn_metadata.num_decode_tokens > 0:
+            hidden.append(
+                self._decode_infer(q, k, v, kv_cache, state_indices_tensor,
+                                   attn_metadata))
+        hidden = torch.concat(hidden, dim=0).contiguous()
+        return hidden
+
+    def _decode_infer(self, q, k, v, kv_cache, state_indices_tensor,
+                      attn_metadata):
+        q = q[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
+        k = k[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
+        v = v[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
+        slot_id = state_indices_tensor[getattr(attn_metadata, "num_prefills", 0
+                                               ):]
+        hidden = linear_decode_forward_triton(q, k, v, kv_cache, self.tp_slope,
+                                              slot_id, 32)
+        return hidden
+
+    def forward(self, hidden_states: torch.Tensor, positions: torch.Tensor,
+                kv_caches: MinimaxCacheParams, **kwargs) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v)
-        output, _ = self.o_proj(attn_output)
-        return output
+        qkv32 = qkv.to(torch.float32)
+        qkvact = torch.nn.functional.silu(qkv32)
+        qkvact = qkvact.view((qkv.shape[0], self.tp_heads, -1))
+        q, k, v = torch.split(qkvact, [self.head_dim] * 3, dim=-1)
+        forward_context = get_forward_context()
+        attn_metadata = forward_context.attn_metadata
+        kv_cache = kv_caches.minimax_cache
+        state_indices_tensor = kv_caches.state_indices_tensor
+
+        decode_only = getattr(attn_metadata, "num_prefills", 0) == 0
+        if not decode_only:
+            hidden = self._prefill_and_mix_infer(q, k, v, kv_cache,
+                                                 state_indices_tensor)
+        else:
+            hidden = self._decode_infer(q, k, v, kv_cache,
+                                        state_indices_tensor, attn_metadata)
+
+        hidden = self.norm._forward(hidden)
+        gate, _ = self.output_gate(hidden_states)
+        hidden = F.sigmoid(gate) * hidden
+        hidden = hidden.to(hidden_states.dtype)
+        hidden, _ = self.out_proj(hidden)
+        return hidden
 
 
 class MiniMaxText01Attention(nn.Module):
@@ -515,6 +600,7 @@ class MiniMaxText01DecoderLayer(nn.Module):
                 config.max_model_len, int):
             max_position_embeddings = min(config.max_position_embeddings,
                                           config.max_model_len)
+        config.attention_type = 1
         if config.attention_type == 0:
             use_headxdim = True
             hidden_inner = (head_dim * config.num_attention_heads
