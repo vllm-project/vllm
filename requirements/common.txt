@@ -29,7 +29,7 @@ partial-json-parser # used for parsing partial JSON outputs
 pyzmq >= 25.0.0
 msgspec
 gguf >= 0.13.0
-importlib_metadata
+importlib_metadata; python_version < '3.10'
 mistral_common[opencv] >= 1.5.4
 opencv-python-headless >= 4.11.0    # required for video IO
 pyyaml
