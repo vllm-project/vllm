@@ -340,6 +340,13 @@ class Platform:
         return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
 
     @classmethod
+    def supports_mx(cls) -> bool:
+        """
+        Returns whether the current platform supports MX types.
+        """
+        return False
+
+    @classmethod
     def supports_fp8(cls) -> bool:
         """
         Returns whether the current platform supports FP8 types.
