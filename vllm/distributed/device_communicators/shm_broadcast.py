@@ -429,7 +429,7 @@ class MessageQueue:
                             > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
                         logger.debug(
                             ("No available shared memory broadcast block found"
-                             "in %s second."),
+                             " in %s second."),
                             VLLM_RINGBUFFER_WARNING_INTERVAL,
                         )
                         n_warning += 1
