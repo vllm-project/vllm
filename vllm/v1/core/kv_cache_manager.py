@@ -123,9 +123,16 @@ class KVCacheManager:
 
         Returns:
             A tuple containing:
-                - A list of blocks that are computed for the request.
+                - A list of new blocks that are computed for the request.
                 - The number of computed tokens.
         """
+        # Request has already has its blocks, do not look up in block table.
+        # This can happen in P/D if blocks are injected by the scheduler.
+        if (request_blocks := self.req_to_blocks.get(request.request_id,
+                                                     None)) is not None:
+            num_computed_tokens = len(request_blocks) * self.block_size
+            return KVCacheBlocks.create_empty(), num_computed_tokens
+
         if not self.enable_caching:
             # Prefix caching is disabled.
             return KVCacheBlocks.create_empty(), 0
@@ -296,23 +303,13 @@ class KVCacheManager:
         if not self.enable_caching:
             return KVCacheBlocks(new_blocks)
 
-        if skip_cache_blocks:
-            # NOTE(rob): this assert is valid because we only call
-            # skip_cache_blocks=True on the first time of WAITING
-            # during a P/D setup.
-            assert request.request_id not in self.num_cached_block
-            # NOTE(rob): this is necessary so we don't double
-            # cache a block after is has finished recving.
-            self.num_cached_block[request.request_id] = len(
-                new_computed_block_list)
-            return KVCacheBlocks(new_blocks)
-
-        self.cache_blocks(
-            request=request,
-            num_tokens=num_tokens,
-            num_computed_tokens=num_computed_tokens,
-            new_computed_block_list=new_computed_block_list,
-        )
+        if not skip_cache_blocks:
+            self.cache_blocks(
+                request=request,
+                num_tokens=num_tokens,
+                num_computed_tokens=num_computed_tokens,
+                new_computed_block_list=new_computed_block_list,
+            )
         return KVCacheBlocks(new_blocks)
 
     def cache_blocks(

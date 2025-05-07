@@ -17,6 +17,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -259,7 +260,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
         return num_tokens_to_check - num_computed_tokens
 
     def update_state_after_alloc(self, request: "Request",
-                                 block_ids: list[int],
+                                 blocks: KVCacheBlocks,
                                  num_external_tokens: int):
         """
         Update KVConnector state after block allocation.

@@ -28,6 +28,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
 
 GET_META_MSG = b"get_meta_msg"
@@ -110,11 +111,11 @@ class NixlConnector(KVConnectorBase_V1):
             request, num_computed_tokens)
 
     def update_state_after_alloc(self, request: "Request",
-                                 block_ids: list[int],
+                                 blocks: KVCacheBlocks,
                                  num_external_tokens: int):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.update_state_after_alloc(
-            request, block_ids, num_external_tokens)
+            request, blocks, num_external_tokens)
 
     def build_connector_meta(
         self,
@@ -185,10 +186,11 @@ class NixlConnectorScheduler:
         return 0
 
     def update_state_after_alloc(self, request: "Request",
-                                 block_ids: list[int],
+                                 blocks: KVCacheBlocks,
                                  num_external_tokens: int):
         if request.do_remote_prefill and num_external_tokens > 0:
-            self._reqs_need_recv[request.request_id] = (request, block_ids)
+            self._reqs_need_recv[request.request_id] = (request,
+                                                        blocks.get_block_ids())
 
     def build_connector_meta(
         self,

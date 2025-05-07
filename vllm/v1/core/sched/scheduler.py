@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import itertools
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -32,6 +31,9 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
+
+if TYPE_CHECKING:
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 
 logger = init_logger(__name__)
 
@@ -316,23 +318,9 @@ class Scheduler(SchedulerInterface):
                 # Skip request if the remote KV recv is still waiting
                 # for the requests to arrive.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
-                    if request.request_id in self.finished_recving_kv_req_ids:
-                        assert self.kv_cache_manager.enable_caching
-                        # Now that the KVs have been recved, we can cache
-                        # them and set num_computed_tokens.
-                        self.kv_cache_manager.cache_blocks(
-                            request,
-                            num_tokens=0,
-                            num_computed_tokens=(len(request.all_token_ids) -
-                                                 1),
-                            new_computed_block_list=[])
-                        self.finished_recving_kv_req_ids.remove(
-                            request.request_id)
-                        request.status = RequestStatus.WAITING
-                        self.kv_cache_manager.free(request)
-                    else:
-                        self.waiting.popleft()
-                        skipped_waiting_requests.appendleft(request)
+                    is_ready = self._update_waiting_for_remote_kv(
+                        request, skipped_waiting_requests)
+                    if not is_ready:
                         continue
 
                 # Skip request if the structured output request is still waiting
@@ -357,10 +345,9 @@ class Scheduler(SchedulerInterface):
                     skipped_waiting_requests.appendleft(request)
                     continue
 
-                # Get already-cached tokens.
-                computed_blocks, num_computed_tokens = \
-                    self.kv_cache_manager.get_computed_blocks(
-                        request)
+                # Get tokens in the KV cache.
+                new_computed_blocks, num_computed_tokens = (
+                    self.kv_cache_manager.get_computed_blocks(request))
 
                 # Get externally-cached tokens if using a KVConnector.
                 num_external_tokens = (
@@ -371,36 +358,18 @@ class Scheduler(SchedulerInterface):
                 # Total computed tokens (local + external).
                 num_computed_tokens += num_external_tokens
 
+                # P/D: if remote prefill, allocate memory and put request
+                # into the WAITING_FOR_REMOTE_KV state.
                 if request.do_remote_prefill and num_external_tokens > 0:
-                    # Allocate slots for the external tokens, but skip
-                    # caching until after the KV transfer is done.
-                    new_blocks = self.kv_cache_manager.allocate_slots(
+                    new_blocks = self._allocate_and_set_waiting_for_remote_kv(
                         request,
                         num_external_tokens,
-                        computed_blocks,
-                        skip_cache_blocks=True)
+                        new_computed_blocks,
+                        skipped_waiting_requests,
+                    )
                     if new_blocks is None:
-                        # Requests cannot be scheduled
+                        # Not enough KV cache space
                         break
-
-                    self.waiting.popleft()
-                    skipped_waiting_requests.appendleft(request)
-                    request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
-
-                    # KVConnector: update internal state after allocation.
-                    # This information is used to determine if a load is
-                    # needed for this request.
-                    if self.connector is not None:
-                        self.connector.update_state_after_alloc(
-                            request,
-                            [
-                                b.block_id for b in itertools.chain(
-                                    computed_blocks.blocks, new_blocks.blocks)
-                            ],
-                            num_external_tokens,
-                        )
-                        # We should only trigger a KV transfer once per request.
-                        request.do_remote_prefill = False
                     continue
 
                 # Number of tokens to be scheduled.
@@ -431,7 +400,7 @@ class Scheduler(SchedulerInterface):
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens + num_external_tokens,
-                    computed_blocks,
+                    new_computed_blocks,
                     num_lookahead_tokens=self.num_lookahead_tokens,
                 )
                 if new_blocks is None:
@@ -444,10 +413,7 @@ class Scheduler(SchedulerInterface):
                 if self.connector is not None:
                     self.connector.update_state_after_alloc(
                         request,
-                        [
-                            b.block_id for b in itertools.chain(
-                                computed_blocks.blocks, new_blocks.blocks)
-                        ],
+                        new_computed_blocks + new_blocks,
                         num_external_tokens,
                     )
 
@@ -471,7 +437,7 @@ class Scheduler(SchedulerInterface):
                 if self.lora_config and request.lora_request:
                     scheduled_loras.add(request.lora_request.lora_int_id)
                 req_to_new_block_ids[request.request_id] = (
-                    computed_blocks + new_blocks).get_block_ids()
+                    new_computed_blocks + new_blocks).get_block_ids()
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
@@ -616,6 +582,68 @@ class Scheduler(SchedulerInterface):
                                                       new_token_ids,
                                                       new_block_ids)
         return req_data
+
+    def _update_waiting_for_remote_kv(
+        self,
+        request: Request,
+        skipped_waiting_requests: deque[Request],
+    ) -> bool:
+        """Update """
+        if request.request_id in self.finished_recving_kv_req_ids:
+            # Now that the KVs have been recved, we can cache
+            # them and set num_computed_tokens.
+            blocks = self.kv_cache_manager.req_to_blocks[request.request_id]
+            num_computed_tokens = len(blocks) * self.block_size
+            self.kv_cache_manager.cache_blocks(
+                request,
+                num_tokens=0,
+                num_computed_tokens=num_computed_tokens,
+                new_computed_block_list=[])
+            request.num_computed_tokens = num_computed_tokens
+            request.status = RequestStatus.WAITING
+            self.finished_recving_kv_req_ids.remove(request.request_id)
+            is_ready = True
+        else:
+            self.waiting.popleft()
+            skipped_waiting_requests.appendleft(request)
+            is_ready = False
+
+        return is_ready
+
+    def _allocate_and_set_waiting_for_remote_kv(
+        self,
+        request: Request,
+        num_external_tokens: int,
+        new_computed_blocks: KVCacheBlocks,
+        skipped_waiting_requests: deque[Request],
+    ) -> Optional[KVCacheBlocks]:
+        # Allocate slots for the external tokens, but skip
+        # caching until after the KV transfer is done.
+        new_blocks = self.kv_cache_manager.allocate_slots(
+            request,
+            num_external_tokens,
+            new_computed_blocks,
+            skip_cache_blocks=True)
+        if new_blocks is None:
+            return None
+
+        self.waiting.popleft()
+        skipped_waiting_requests.appendleft(request)
+        request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+
+        # KVConnector: update internal state after allocation.
+        # This information is used to determine if a load is
+        # needed for this request.
+        assert self.connector is not None
+        self.connector.update_state_after_alloc(
+            request,
+            new_computed_blocks + new_blocks,
+            num_external_tokens,
+        )
+        # Only trigger a KV transfer once per request.
+        request.do_remote_prefill = False
+
+        return new_blocks
 
     def _try_schedule_encoder_inputs(
         self,
