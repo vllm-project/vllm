@@ -871,10 +871,7 @@ def run_phi4_multimodal(questions: list[str],
                                    revision="refs/pr/70")
     # Since the vision-lora and speech-lora co-exist with the base model,
     # we have to manually specify the path of the lora weights.
-    orig_model_path = snapshot_download(
-        "microsoft/Phi-4-multimodal-instruct",
-        allow_patterns=["vision-lora/adapter_*"])
-    vision_lora_path = os.path.join(orig_model_path, "vision-lora")
+    vision_lora_path = os.path.join(model_path, "vision-lora")
     prompts = [
         f"<|user|><|image|>{question}<|end|><|assistant|>"
         for question in questions

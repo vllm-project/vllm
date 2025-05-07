@@ -273,8 +273,8 @@ class Phi4MultimodalAudioAttention(nn.Module):
         self.config = config
         self.embed_dim = config.hidden_size
         self.total_num_heads = config.num_attention_heads
-        self.head_dim = self.embed_dim // self.num_heads
-        if self.head_dim * self.num_heads != self.embed_dim:
+        self.head_dim = self.embed_dim // self.total_num_heads
+        if self.head_dim * self.total_num_heads != self.embed_dim:
             raise ValueError(
                 "embed_dim must be divisible by num_heads "
                 f"(got `embed_dim`: {self.embed_dim} and `num_heads`:"
