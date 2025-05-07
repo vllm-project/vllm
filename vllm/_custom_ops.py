@@ -497,6 +497,24 @@ if hasattr(torch.ops._C, "ggml_dequantize"):
                            device=W.device)
 
 
+if hasattr(torch.ops._C, "ggml_moe_a8_vec"):
+
+    @register_fake("_C::ggml_moe_a8_vec")
+    def _ggml_moe_a8_vec_fake(
+        X: torch.Tensor,
+        W: torch.Tensor,
+        topk_ids: torch.Tensor,
+        top_k: int,
+        quant_type: int,
+        row: torch.SymInt,
+        tokens: torch.SymInt,
+    ) -> torch.Tensor:
+        tokens = X.size(0)
+        return torch.empty((tokens * top_k, row),
+                           dtype=X.dtype,
+                           device=W.device)
+
+
 # cutlass
 def cutlass_scaled_mm_supports_fp4(cuda_device_capability: int) -> bool:
     return torch.ops._C.cutlass_scaled_mm_supports_fp4(cuda_device_capability)
@@ -1144,6 +1162,19 @@ def ggml_moe_a8(
     return torch.ops._C.ggml_moe_a8(X, W, sorted_token_ids, expert_ids,
                                     num_tokens_post_padded, quant_type, row,
                                     top_k, tokens)
+
+
+def ggml_moe_a8_vec(
+    X: torch.Tensor,
+    W: torch.Tensor,
+    topk_ids: torch.Tensor,
+    top_k: int,
+    quant_type: int,
+    row: torch.SymInt,
+    tokens: torch.SymInt,
+) -> torch.Tensor:
+    return torch.ops._C.ggml_moe_a8_vec(X, W, topk_ids, top_k, quant_type, row,
+                                        tokens)
 
 
 def ggml_moe_get_block_size(quant_type: int) -> int:
