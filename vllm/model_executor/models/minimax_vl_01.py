@@ -189,6 +189,8 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             hf_config=config.text_config,
             prefix=maybe_prefix(prefix, "language_model"),
         )
+        _dummy = torch.zeros(1)
+        self._dtype = _dummy.dtype
         self.minimax_cache: Optional[MinimaxCacheManager] = None
         self.vision_feature_layer = config.vision_feature_layer
         self.vocab_size = config.text_config.vocab_size
