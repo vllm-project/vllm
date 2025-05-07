@@ -11,14 +11,9 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-import vllm.envs as envs
 from tests.models.registry import HF_EXAMPLE_MODELS
 from tests.multimodal.utils import random_audio, random_image, random_video
-from vllm import AsyncEngineArgs, EngineArgs, SamplingParams
 from vllm.config import ModelConfig, ParallelProcessorBackend
-from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.engine.llm_engine import LLMEngine
-from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (apply_hf_chat_template,
                                          load_chat_template,
                                          parse_chat_messages,
@@ -26,64 +21,16 @@ from vllm.entrypoints.chat_utils import (apply_hf_chat_template,
                                          resolve_hf_chat_template)
 from vllm.inputs import InputProcessingContext
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.utils import (encode_audio_base64, encode_image_base64,
                                    encode_video_base64)
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
-from vllm.usage.usage_lib import UsageContext
 
 ROOT_DIR = Path(__file__).parent
 EXAMPLES_DIR = ROOT_DIR / "examples"
 assert EXAMPLES_DIR.exists()
 
 ModalityStr = Literal["audio", "image", "video"]
-
-
-def get_supported_modalities(model_id: str) -> list[ModalityStr]:
-    model_config = ModelConfig(
-        model_id,
-        tokenizer=get_hf_tokenizer(model_id),
-        hf_overrides=get_hf_overrides(model_id),
-        task="auto",
-        trust_remote_code=True,
-        seed=0,
-        dtype="float16",
-        revision=None,
-    )
-
-    model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
-    factories = MULTIMODAL_REGISTRY._processor_factories[model_cls]
-    ctx = InputProcessingContext(
-        model_config,
-        tokenizer=cached_tokenizer_from_config(model_config),
-    )
-
-    processing_info = factories.info(ctx)
-    supported_mm_limits = processing_info.get_supported_mm_limits()
-
-    return list(supported_mm_limits.keys())
-
-
-def engine_from_args(engine_args: EngineArgs) -> LLMEngine:
-    return LLMEngine.from_engine_args(
-        engine_args,
-        usage_context=UsageContext.ENGINE_CONTEXT,
-    )
-
-
-def async_engine_from_args(engine_args: AsyncEngineArgs) -> EngineClient:
-    vllm_config = engine_args.create_engine_config(
-        usage_context=UsageContext.ENGINE_CONTEXT)
-
-    engine_cls = AsyncLLMEngine
-    if envs.VLLM_USE_V1:
-        from vllm.v1.engine.async_llm import AsyncLLM
-        engine_cls = AsyncLLM
-
-    return engine_cls.from_vllm_config(
-        vllm_config=vllm_config,
-        disable_log_requests=engine_args.disable_log_requests,
-        disable_log_stats=engine_args.disable_log_stats,
-    )
 
 
 def get_hf_tokenizer(model_id: str):
@@ -104,49 +51,50 @@ def get_hf_overrides(model_id: str):
         return model_info.hf_overrides
 
 
-def get_engine(
-    model_id: str,
-    modalities: list[ModalityStr],
-    parallel_backend: ParallelProcessorBackend,
-) -> LLMEngine:
-    args = EngineArgs(
-        model=model_id,
+def get_model_config(model_id: str) -> ModelConfig:
+    return ModelConfig(
+        model_id,
         tokenizer=get_hf_tokenizer(model_id),
         hf_overrides=get_hf_overrides(model_id),
+        task="auto",
         trust_remote_code=True,
-        parallel_processor_backend=parallel_backend,
-        limit_mm_per_prompt={
-            m: m in modalities
-            for m in get_args(ModalityStr)
-        },
-        disable_mm_preprocessor_cache=True,
-        enforce_eager=True,
+        seed=0,
+        dtype="float16",
+        revision=None,
     )
 
-    return engine_from_args(args)
+
+def get_supported_modalities(model_config: ModelConfig) -> list[ModalityStr]:
+    model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
+    factories = MULTIMODAL_REGISTRY._processor_factories[model_cls]
+    ctx = InputProcessingContext(
+        model_config,
+        tokenizer=cached_tokenizer_from_config(model_config),
+    )
+
+    processing_info = factories.info(ctx)
+    supported_mm_limits = processing_info.get_supported_mm_limits()
+
+    return list(supported_mm_limits.keys())
 
 
-async def get_async_engine(
-    model_id: str,
+def get_processor(
+    model_config: ModelConfig,
     modalities: list[ModalityStr],
     parallel_backend: ParallelProcessorBackend,
-) -> EngineClient:
-    args = AsyncEngineArgs(
-        model=model_id,
-        tokenizer=get_hf_tokenizer(model_id),
-        hf_overrides=get_hf_overrides(model_id),
-        trust_remote_code=True,
-        parallel_processor_backend=parallel_backend,
-        limit_mm_per_prompt={
-            m: m in modalities
-            for m in get_args(ModalityStr)
-        },
-        disable_mm_preprocessor_cache=True,
-        enforce_eager=True,
-        disable_log_requests=True,
-    )
+) -> BaseMultiModalProcessor:
+    parallel_processor_backend = parallel_backend
+    limit_mm_per_prompt = {m: m in modalities for m in get_args(ModalityStr)}
 
-    return async_engine_from_args(args)
+    model_config.parallel_processor_backend = parallel_processor_backend
+    model_config.limit_mm_per_prompt = limit_mm_per_prompt
+
+    mm_config = model_config.get_multimodal_config()
+    mm_config.parallel_processor_backend = parallel_backend
+    mm_config.limit_per_prompt = limit_mm_per_prompt
+
+    return MULTIMODAL_REGISTRY.create_processor(model_config,
+                                                disable_cache=True)
 
 
 def get_prompt(model_config: ModelConfig, modality: ModalityStr) -> str:
@@ -215,7 +163,7 @@ def get_prompt(model_config: ModelConfig, modality: ModalityStr) -> str:
             }
         }
 
-    conversation, mm_data = parse_chat_messages(
+    conversation, _ = parse_chat_messages(
         [
             {
                 "role":
@@ -267,14 +215,13 @@ def get_benchmark_mm_data(
 
 
 def benchmark_run(
-    engine: LLMEngine,
-    model_config: ModelConfig,
+    processor: BaseMultiModalProcessor,
     model_id: str,
     parallel_backend: ParallelProcessorBackend,
     modality: ModalityStr,
     data: list,
 ):
-    prompt = get_prompt(model_config, modality)
+    prompt = get_prompt(processor.info.ctx.model_config, modality)
 
     start_s = time.monotonic()
     progbar = tqdm(
@@ -283,37 +230,30 @@ def benchmark_run(
         f"{modality=}",
     )
 
-    def _chat(idx: int, item):
-        engine.add_request(
-            prompt={
-                "prompt": prompt,
-                "multi_modal_data": {
-                    modality: item
-                }
-            },
-            params=SamplingParams(max_tokens=1),
-            request_id=str(idx),
+    def _chat(item):
+        processor.apply(
+            prompt=prompt,
+            mm_data={modality: item},
+            hf_processor_mm_kwargs={},
         )
 
-        engine.step()
         progbar.update()
 
-    for args in enumerate(data):
-        _chat(*args)
+    for item in data:
+        _chat(item)
 
     total_s = (time.monotonic() - start_s)
     return total_s / len(data)
 
 
 async def benchmark_run_async(
-    engine: EngineClient,
-    model_config: ModelConfig,
+    processor: BaseMultiModalProcessor,
     model_id: str,
     parallel_backend: ParallelProcessorBackend,
     modality: ModalityStr,
     data: list,
 ):
-    prompt = get_prompt(model_config, modality)
+    prompt = get_prompt(processor.info.ctx.model_config, modality)
 
     start_s = time.monotonic()
     progbar = tqdm(
@@ -322,22 +262,16 @@ async def benchmark_run_async(
         f"{modality=}",
     )
 
-    async def _chat(idx: int, item):
-        generator = engine.generate(
-            prompt={
-                "prompt": prompt,
-                "multi_modal_data": {
-                    modality: item
-                }
-            },
-            sampling_params=SamplingParams(max_tokens=1),
-            request_id=str(idx),
+    async def _chat(item):
+        await processor.apply_async(
+            prompt=prompt,
+            mm_data={modality: item},
+            hf_processor_mm_kwargs={},
         )
 
-        async for output in generator:
-            progbar.update()
+        progbar.update()
 
-    await asyncio.gather(*(_chat(*args) for args in enumerate(data)))
+    await asyncio.gather(*(_chat(item) for item in data))
 
     total_s = (time.monotonic() - start_s)
     return total_s / len(data)
@@ -347,18 +281,19 @@ def benchmark(
     model_id: str,
     parallel_backend: ParallelProcessorBackend,
 ) -> dict[ParallelProcessorBackend, dict[ModalityStr, float]]:
-    supported_modalities = get_supported_modalities(model_id)
+    model_config = get_model_config(model_id)
+
+    supported_modalities = get_supported_modalities(model_config)
     mm_data = get_benchmark_mm_data(supported_modalities)
 
-    engine = get_engine(model_id, supported_modalities, parallel_backend)
-    model_config = engine.get_model_config()
+    processor = get_processor(model_config, supported_modalities,
+                              parallel_backend)
 
     results = dict[ModalityStr, float]()
     for modality, data in mm_data.items():
         try:
             results[modality] = benchmark_run(
-                engine,
-                model_config,
+                processor,
                 model_id,
                 parallel_backend,
                 modality,
@@ -375,19 +310,19 @@ async def benchmark_async(
     model_id: str,
     parallel_backend: ParallelProcessorBackend,
 ) -> dict[ParallelProcessorBackend, dict[ModalityStr, float]]:
-    supported_modalities = get_supported_modalities(model_id)
+    model_config = get_model_config(model_id)
+
+    supported_modalities = get_supported_modalities(model_config)
     mm_data = get_benchmark_mm_data(supported_modalities)
 
-    engine = await get_async_engine(model_id, supported_modalities,
-                                    parallel_backend)
-    model_config = await engine.get_model_config()
+    processor = get_processor(model_config, supported_modalities,
+                              parallel_backend)
 
     results = dict[ModalityStr, float]()
     for modality, data in mm_data.items():
         try:
             results[modality] = await benchmark_run_async(
-                engine,
-                model_config,
+                processor,
                 model_id,
                 parallel_backend,
                 modality,
