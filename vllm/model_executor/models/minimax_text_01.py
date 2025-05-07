@@ -431,6 +431,10 @@ class MiniMaxText01LinearAttention(nn.Module):
         attn_metadata = forward_context.attn_metadata
         hidden = []
         for _prefill_idx in range(getattr(attn_metadata, "num_prefills", 0)):
+            if _prefill_idx+1 >= len(attn_metadata.query_start_loc):
+                break
+            if _prefill_idx >= len(state_indices_tensor):
+                break
             _start = attn_metadata.query_start_loc[_prefill_idx]
             _end = attn_metadata.query_start_loc[_prefill_idx + 1]
             qs = q[_start:_end].transpose(0, 1).contiguous()
