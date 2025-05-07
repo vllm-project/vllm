@@ -4,21 +4,13 @@ import re
 from collections.abc import Sequence
 from typing import Union
 
-from partial_json_parser.core.options import Allow
-
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionRequest,
-    DeltaFunctionCall,
-    DeltaMessage,
-    DeltaToolCall,
-    ExtractedToolCallInformation,
-    FunctionCall,
-    ToolCall,
-)
+from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                              DeltaFunctionCall, DeltaMessage,
+                                              DeltaToolCall,
+                                              ExtractedToolCallInformation,
+                                              FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
-    ToolParser,
-    ToolParserManager,
-)
+    ToolParser, ToolParserManager)
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
@@ -36,8 +28,7 @@ class DeepSeekV3ToolParser(ToolParser):
         self.prev_tool_call_arr: list[dict] = []
         self.current_tool_id: int = -1
         self.streamed_args_for_tool: list[str] = (
-            []
-        )  # map what has been streamed for each tool so far to a list
+            [])  # map what has been streamed for each tool so far to a list
 
         self.tool_calls_start_token: str = "<｜tool▁calls▁begin｜>"
         self.tool_calls_end_token: str = "<｜tool▁calls▁end｜>"
@@ -54,28 +45,26 @@ class DeepSeekV3ToolParser(ToolParser):
         )
 
         self.stream_tool_call_name_regex = re.compile(
-            r"(?P<type>.*)<｜tool▁sep｜>(?P<function_name>.*)\n"
-        )
+            r"(?P<type>.*)<｜tool▁sep｜>(?P<function_name>.*)\n")
 
         if not self.model_tokenizer:
             raise ValueError(
                 "The model tokenizer must be passed to the ToolParser "
-                "constructor during construction."
-            )
-        self.tool_calls_start_token_id = self.vocab.get(self.tool_calls_start_token)
-        self.tool_calls_end_token_id = self.vocab.get(self.tool_calls_end_token)
+                "constructor during construction.")
+        self.tool_calls_start_token_id = self.vocab.get(
+            self.tool_calls_start_token)
+        self.tool_calls_end_token_id = self.vocab.get(
+            self.tool_calls_end_token)
 
-        self.tool_call_start_token_id = self.vocab.get(self.tool_call_start_token)
+        self.tool_call_start_token_id = self.vocab.get(
+            self.tool_call_start_token)
         self.tool_call_end_token_id = self.vocab.get(self.tool_call_end_token)
 
-        if (
-            self.tool_calls_start_token_id is None
-            or self.tool_calls_end_token_id is None
-        ):
+        if (self.tool_calls_start_token_id is None
+                or self.tool_calls_end_token_id is None):
             raise RuntimeError(
                 "DeepSeek-V3 Tool parser could not locate tool call start/end "
-                "tokens in the tokenizer!"
-            )
+                "tokens in the tokenizer!")
 
     def extract_tool_calls(
         self,
@@ -85,9 +74,9 @@ class DeepSeekV3ToolParser(ToolParser):
 
         # sanity check; avoid unnecessary processing
         if self.tool_calls_start_token not in model_output:
-            return ExtractedToolCallInformation(
-                tools_called=False, tool_calls=[], content=model_output
-            )
+            return ExtractedToolCallInformation(tools_called=False,
+                                                tool_calls=[],
+                                                content=model_output)
 
         else:
             try:
@@ -95,7 +84,8 @@ class DeepSeekV3ToolParser(ToolParser):
                 # tag and end-of-string so the result of
                 # findall is an array of tuples where one is a function call and
                 # the other is None
-                function_call_tuples = self.tool_call_regex.findall(model_output)
+                function_call_tuples = self.tool_call_regex.findall(
+                    model_output)
 
                 tool_calls = []
                 for match in function_call_tuples:
@@ -103,13 +93,12 @@ class DeepSeekV3ToolParser(ToolParser):
                     tool_calls.append(
                         ToolCall(
                             type=tool_type,
-                            function=FunctionCall(
-                                name=function_name, arguments=function_args
-                            ),
-                        )
-                    )
+                            function=FunctionCall(name=function_name,
+                                                  arguments=function_args),
+                        ))
 
-                content = model_output[: model_output.find(self.tool_calls_start_token)]
+                content = model_output[:model_output.
+                                       find(self.tool_calls_start_token)]
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=tool_calls,
@@ -117,10 +106,11 @@ class DeepSeekV3ToolParser(ToolParser):
                 )
 
             except Exception:
-                logger.exception("Error in extracting tool call from response.")
-                return ExtractedToolCallInformation(
-                    tools_called=False, tool_calls=[], content=model_output
-                )
+                logger.exception(
+                    "Error in extracting tool call from response.")
+                return ExtractedToolCallInformation(tools_called=False,
+                                                    tool_calls=[],
+                                                    content=model_output)
 
     def extract_tool_calls_streaming(
         self,
@@ -139,60 +129,48 @@ class DeepSeekV3ToolParser(ToolParser):
         if self.tool_calls_start_token_id not in current_token_ids:
             logger.debug("No tool call tokens found!")
             return DeltaMessage(content=delta_text)
-        delta_text = delta_text.replace(self.tool_calls_start_token, "").replace(
-            self.tool_calls_end_token, ""
-        )
+        delta_text = delta_text.replace(self.tool_calls_start_token,
+                                        "").replace(self.tool_calls_end_token,
+                                                    "")
         try:
 
             # figure out where we are in the parsing by counting tool call
             # start & end tags
             prev_tool_start_count = previous_token_ids.count(
-                self.tool_call_start_token_id
-            )
-            prev_tool_end_count = previous_token_ids.count(self.tool_call_end_token_id)
+                self.tool_call_start_token_id)
+            prev_tool_end_count = previous_token_ids.count(
+                self.tool_call_end_token_id)
             cur_tool_start_count = current_token_ids.count(
-                self.tool_call_start_token_id
-            )
-            cur_tool_end_count = current_token_ids.count(self.tool_call_end_token_id)
+                self.tool_call_start_token_id)
+            cur_tool_end_count = current_token_ids.count(
+                self.tool_call_end_token_id)
             tool_call_portion = None
             text_portion = None
 
             # case: if we're generating text, OR rounding out a tool call
-            if (
-                cur_tool_start_count == cur_tool_end_count
-                and prev_tool_end_count == cur_tool_end_count
-                and self.tool_call_end_token not in delta_text
-            ):
+            if (cur_tool_start_count == cur_tool_end_count
+                    and prev_tool_end_count == cur_tool_end_count
+                    and self.tool_call_end_token not in delta_text):
                 logger.debug("Generating text content! skipping tool parsing.")
                 return DeltaMessage(content=delta_text)
 
             if self.tool_call_end_token in delta_text:
                 logger.debug("tool_call_end_token in delta_text")
                 full_text = current_text + delta_text
-                tool_call_portion = (
-                    full_text.split(self.tool_call_start_token)[-1]
-                    .split(self.tool_call_end_token)[0]
-                    .rstrip()
-                )
-                delta_text = delta_text.split(self.tool_call_end_token)[0].rstrip()
-                text_portion = delta_text.split(self.tool_call_end_token)[-1].lstrip()
-
-            # case: if tool open & close tag counts don't match, we're doing
-            # imaginary "else" block here
-            # something with tools with this diff.
-            # flags for partial JSON parting. exported constants from
-            # "Allow" are handled via BIT MASK
-            flags = Allow.ALL if self.current_tool_name_sent else Allow.ALL & ~Allow.STR
+                tool_call_portion = full_text.split(
+                    self.tool_call_start_token)[-1].split(
+                        self.tool_call_end_token)[0].rstrip()
+                delta_text = delta_text.split(
+                    self.tool_call_end_token)[0].rstrip()
+                text_portion = delta_text.split(
+                    self.tool_call_end_token)[-1].lstrip()
 
             # case -- we're starting a new tool call
-            if (
-                cur_tool_start_count > cur_tool_end_count
-                and cur_tool_start_count > prev_tool_start_count
-            ):
+            if (cur_tool_start_count > cur_tool_end_count
+                    and cur_tool_start_count > prev_tool_start_count):
                 if len(delta_token_ids) > 1:
-                    tool_call_portion = current_text.split(self.tool_call_start_token)[
-                        -1
-                    ]
+                    tool_call_portion = current_text.split(
+                        self.tool_call_start_token)[-1]
                 else:
                     tool_call_portion = None
                     delta = None
@@ -206,30 +184,27 @@ class DeepSeekV3ToolParser(ToolParser):
                 logger.debug("Starting on a new tool %s", self.current_tool_id)
 
             # case -- we're updating an existing tool call
-            elif (
-                cur_tool_start_count > cur_tool_end_count
-                and cur_tool_start_count == prev_tool_start_count
-            ):
+            elif (cur_tool_start_count > cur_tool_end_count
+                  and cur_tool_start_count == prev_tool_start_count):
 
                 # get the portion of the text that's the tool call
-                tool_call_portion = current_text.split(self.tool_call_start_token)[-1]
+                tool_call_portion = current_text.split(
+                    self.tool_call_start_token)[-1]
                 text_portion = None
 
             # case -- the current tool call is being closed.
-            elif (
-                cur_tool_start_count == cur_tool_end_count
-                and cur_tool_end_count >= prev_tool_end_count
-            ):
-                if self.prev_tool_call_arr is None or len(self.prev_tool_call_arr) == 0:
-                    logger.debug("attempting to close tool call, but no tool call")
+            elif (cur_tool_start_count == cur_tool_end_count
+                  and cur_tool_end_count >= prev_tool_end_count):
+                if self.prev_tool_call_arr is None or len(
+                        self.prev_tool_call_arr) == 0:
+                    logger.debug(
+                        "attempting to close tool call, but no tool call")
                     return None
-                diff = self.prev_tool_call_arr[self.current_tool_id].get("arguments")
+                diff = self.prev_tool_call_arr[self.current_tool_id].get(
+                    "arguments")
                 if diff:
-                    diff = (
-                        diff.encode("utf-8").decode("unicode_escape")
-                        if diff is str
-                        else diff
-                    )
+                    diff = (diff.encode("utf-8").decode("unicode_escape")
+                            if diff is str else diff)
                     if '"}' not in delta_text:
                         return None
                     end_loc = delta_text.rindex('"}')
@@ -240,16 +215,13 @@ class DeepSeekV3ToolParser(ToolParser):
                         diff,
                     )
                     self.streamed_args_for_tool[self.current_tool_id] += diff
-                    return DeltaMessage(
-                        tool_calls=[
-                            DeltaToolCall(
-                                index=self.current_tool_id,
-                                function=DeltaFunctionCall(arguments=diff).model_dump(
-                                    exclude_none=True
-                                ),
-                            )
-                        ]
-                    )
+                    return DeltaMessage(tool_calls=[
+                        DeltaToolCall(
+                            index=self.current_tool_id,
+                            function=DeltaFunctionCall(
+                                arguments=diff).model_dump(exclude_none=True),
+                        )
+                    ])
 
             # case -- otherwise we're just generating text
             else:
@@ -259,15 +231,23 @@ class DeepSeekV3ToolParser(ToolParser):
                 return delta
 
             try:
-                current_tool_call_matches = self.stream_tool_call_portion_regex.findall(
-                    tool_call_portion
+                current_tool_call_matches = (
+                    self.stream_tool_call_portion_regex.findall(
+                        tool_call_portion)
                 )
                 if len(current_tool_call_matches) > 0:
-                    tool_type, tool_name, tool_args = current_tool_call_matches[0]
-                    current_tool_call = {"name": tool_name, "arguments": tool_args}
+                    tool_type, tool_name, tool_args = current_tool_call_matches[
+                        0
+                    ]
+                    current_tool_call = {
+                        "name": tool_name,
+                        "arguments": tool_args,
+                    }
                 else:
                     current_tool_call_name_matches = (
-                        self.stream_tool_call_name_regex.findall(tool_call_portion)
+                        self.stream_tool_call_name_regex.findall(
+                            tool_call_portion
+                        )
                     )
                     if len(current_tool_call_name_matches) > 0:
                         tool_type, tool_name = current_tool_call_name_matches[0]
@@ -275,7 +255,7 @@ class DeepSeekV3ToolParser(ToolParser):
                     else:
                         logger.debug("Not enough token")
                         return None
-            except:
+            except Exception:
                 logger.debug("regex err")
                 return None
 
@@ -287,18 +267,16 @@ class DeepSeekV3ToolParser(ToolParser):
                 function_name: Union[str, None] = current_tool_call.get("name")
                 if function_name:
                     self.current_tool_name_sent = True
-                    return DeltaMessage(
-                        tool_calls=[
-                            DeltaToolCall(
-                                index=self.current_tool_id,
-                                type="function",
-                                id=f"chatcmpl-tool-{random_uuid()}",
-                                function=DeltaFunctionCall(
-                                    name=function_name
-                                ).model_dump(exclude_none=True),
-                            )
-                        ]
-                    )
+                    return DeltaMessage(tool_calls=[
+                        DeltaToolCall(
+                            index=self.current_tool_id,
+                            type="function",
+                            id=f"chatcmpl-tool-{random_uuid()}",
+                            function=DeltaFunctionCall(
+                                name=function_name).model_dump(
+                                    exclude_none=True),
+                        )
+                    ])
                 else:
                     return None
             # case -- otherwise, send the tool call delta
@@ -307,19 +285,15 @@ class DeepSeekV3ToolParser(ToolParser):
             if tool_call_portion is None:
                 # if there's text but not tool calls, send that -
                 # otherwise None to skip chunk
-                delta = (
-                    DeltaMessage(content=delta_text)
-                    if text_portion is not None
-                    else None
-                )
+                delta = (DeltaMessage(
+                    content=delta_text) if text_portion is not None else None)
                 return delta
 
             # now, the nitty-gritty of tool calls
             # now we have the portion to parse as tool call.
 
-            logger.debug(
-                "Trying to parse current tool call with ID %s", self.current_tool_id
-            )
+            logger.debug("Trying to parse current tool call with ID %s",
+                         self.current_tool_id)
 
             # if we're starting a new tool call, push an empty object in as
             #   a placeholder for the arguments
@@ -329,8 +303,7 @@ class DeepSeekV3ToolParser(ToolParser):
             # main logic for tool parsing here - compare prev. partially-parsed
             #   JSON to the current partially-parsed JSON
             prev_arguments = self.prev_tool_call_arr[self.current_tool_id].get(
-                "arguments"
-            )
+                "arguments")
             cur_arguments = current_tool_call.get("arguments")
 
             logger.debug("diffing old arguments: %s", prev_arguments)
@@ -344,10 +317,8 @@ class DeepSeekV3ToolParser(ToolParser):
             # case -- prev arguments are defined, but non are now.
             #   probably impossible, but not a fatal error - just keep going
             elif not cur_arguments and prev_arguments:
-                logger.error(
-                    "should be impossible to have arguments reset "
-                    "mid-call. skipping streaming anything."
-                )
+                logger.error("should be impossible to have arguments reset "
+                             "mid-call. skipping streaming anything.")
                 delta = None
 
             # case -- we now have the first info about arguments available from
@@ -359,53 +330,49 @@ class DeepSeekV3ToolParser(ToolParser):
                 # get the location where previous args differ from current
                 if delta_text not in cur_arguments[:-2]:
                     return None
-                args_delta_start_loc = cur_arguments[:-2].rindex(delta_text) + len(
-                    delta_text
-                )
+                args_delta_start_loc = cur_arguments[:-2].rindex(
+                    delta_text) + len(delta_text)
 
                 # use that to find the actual delta
                 arguments_delta = cur_arguments[:args_delta_start_loc]
-                logger.debug("First tokens in arguments received: %s", arguments_delta)
+                logger.debug("First tokens in arguments received: %s",
+                             arguments_delta)
 
-                delta = DeltaMessage(
-                    tool_calls=[
-                        DeltaToolCall(
-                            index=self.current_tool_id,
-                            function=DeltaFunctionCall(
-                                arguments=arguments_delta
-                            ).model_dump(exclude_none=True),
-                        )
-                    ]
-                )
-                self.streamed_args_for_tool[self.current_tool_id] += arguments_delta
+                delta = DeltaMessage(tool_calls=[
+                    DeltaToolCall(
+                        index=self.current_tool_id,
+                        function=DeltaFunctionCall(
+                            arguments=arguments_delta).model_dump(
+                                exclude_none=True),
+                    )
+                ])
+                self.streamed_args_for_tool[
+                    self.current_tool_id] += arguments_delta
 
             # last case -- we have an update to existing arguments.
             elif cur_arguments and prev_arguments:
-                if (
-                    isinstance(delta_text, str)
-                    and len(delta_text.rstrip()) >= 1
-                    and delta_text.rstrip()[-1] == "}"
-                ):
+                if (isinstance(delta_text, str)
+                        and len(delta_text.rstrip()) >= 1
+                        and delta_text.rstrip()[-1] == "}"):
                     delta_text = delta_text.rstrip()[:-1]
 
                 logger.debug("got diff %s", delta_text)
 
-                delta = DeltaMessage(
-                    tool_calls=[
-                        DeltaToolCall(
-                            index=self.current_tool_id,
-                            function=DeltaFunctionCall(arguments=delta_text).model_dump(
-                                exclude_none=True
-                            ),
-                        )
-                    ]
-                )
+                delta = DeltaMessage(tool_calls=[
+                    DeltaToolCall(
+                        index=self.current_tool_id,
+                        function=DeltaFunctionCall(
+                            arguments=delta_text).model_dump(
+                                exclude_none=True),
+                    )
+                ])
                 self.streamed_args_for_tool[self.current_tool_id] += delta_text
 
             # handle saving the state for the current tool into
             # the "prev" list for use in diffing for the next iteration
             if self.current_tool_id == len(self.prev_tool_call_arr) - 1:
-                self.prev_tool_call_arr[self.current_tool_id] = current_tool_call
+                self.prev_tool_call_arr[
+                    self.current_tool_id] = current_tool_call
             else:
                 self.prev_tool_call_arr.append(current_tool_call)
 
