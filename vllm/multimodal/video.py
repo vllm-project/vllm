@@ -81,7 +81,8 @@ class OpenCVVideoBackend(VideoLoader):
         total_frames_num = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         full_read = num_frames == -1 or total_frames_num < num_frames
         if full_read:
-            frame_idx = list(range(0, total_frames_num))
+            num_frames = total_frames_num
+            frame_idx = list(range(0, num_frames))
         else:
             uniform_sampled_frames = np.linspace(0,
                                                  total_frames_num - 1,
