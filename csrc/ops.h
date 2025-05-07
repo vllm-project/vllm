@@ -97,6 +97,9 @@ void batched_rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
 
 void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
 
+void silu_and_mul_quant(torch::Tensor& out, torch::Tensor& input,
+                        torch::Tensor& scale);
+
 void mul_and_silu(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_and_mul(torch::Tensor& out, torch::Tensor& input);
@@ -174,6 +177,10 @@ torch::Tensor ggml_moe_a8(torch::Tensor X, torch::Tensor W,
                           torch::Tensor expert_ids,
                           torch::Tensor num_tokens_post_padded, int64_t type,
                           int64_t row, int64_t top_k, int64_t tokens);
+
+torch::Tensor ggml_moe_a8_vec(torch::Tensor X, torch::Tensor W,
+                              torch::Tensor topk_ids, int64_t top_k,
+                              int64_t type, int64_t row, int64_t tokens);
 
 int64_t ggml_moe_get_block_size(int64_t type);
 

@@ -8,6 +8,7 @@ from collections.abc import Iterable
 from typing import Optional, Union
 
 from vllm.config import VllmConfig
+from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
@@ -48,6 +49,7 @@ class Scheduler(SchedulerInterface):
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
         self.kv_cache_config = kv_cache_config
+        self.kv_events_config = vllm_config.kv_events_config
         self.log_stats = log_stats
         self.structured_output_manager = structured_output_manager
 
@@ -62,6 +64,9 @@ class Scheduler(SchedulerInterface):
         self.max_num_scheduled_tokens = \
             self.scheduler_config.max_num_batched_tokens
         self.max_model_len = self.scheduler_config.max_model_len
+        self.enable_kv_cache_events = (
+            self.kv_events_config is not None
+            and self.kv_events_config.enable_kv_cache_events)
 
         # Create KVConnector for the Scheduler. Note that each Worker
         # will have a corresponding KVConnector with Role=WORKER.
@@ -70,6 +75,9 @@ class Scheduler(SchedulerInterface):
         if self.vllm_config.kv_transfer_config is not None:
             self.connector = KVConnectorFactory.create_connector_v1(
                 config=self.vllm_config, role=KVConnectorRole.SCHEDULER)
+
+        self.kv_event_publisher = EventPublisherFactory.create(
+            self.kv_events_config)
 
         num_gpu_blocks = self.cache_config.num_gpu_blocks
         assert num_gpu_blocks is not None and num_gpu_blocks > 0
@@ -132,7 +140,9 @@ class Scheduler(SchedulerInterface):
             enable_caching=self.cache_config.enable_prefix_caching,
             caching_hash_algo=self.cache_config.prefix_caching_hash_algo,
             use_eagle=self.use_eagle,
-            log_stats=self.log_stats)
+            log_stats=self.log_stats,
+            enable_kv_cache_events=self.enable_kv_cache_events,
+        )
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -251,9 +261,8 @@ class Scheduler(SchedulerInterface):
                 # Therefore, we might introduce some additional
                 # cycle to fill in the bitmask, which could be a big no-op.
                 structured_output_request_ids[request.request_id] = req_index
-            req_to_new_block_ids[request.request_id] = [
-                b.block_id for b in new_blocks
-            ]
+            req_to_new_block_ids[request.request_id] = (
+                new_blocks.get_block_ids())
             num_scheduled_tokens[request.request_id] = num_new_tokens
             token_budget -= num_new_tokens
             req_index += 1
@@ -397,9 +406,8 @@ class Scheduler(SchedulerInterface):
 
                 if self.lora_config and request.lora_request:
                     scheduled_loras.add(request.lora_request.lora_int_id)
-                req_to_new_block_ids[request.request_id] = [
-                    b.block_id for b in computed_blocks + new_blocks
-                ]
+                req_to_new_block_ids[request.request_id] = (
+                    computed_blocks + new_blocks).get_block_ids()
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
@@ -492,6 +500,11 @@ class Scheduler(SchedulerInterface):
         if self.connector is not None:
             meta = self.connector.build_connector_meta(scheduler_output)
             scheduler_output.kv_connector_metadata = meta
+
+        events = self.kv_cache_manager.take_events()
+        if events:
+            batch = KVEventBatch(ts=time.time(), events=events)
+            self.kv_event_publisher.publish(batch)
 
         # Advance the number of computed tokens for the request AFTER
         # the request is scheduled.
@@ -746,7 +759,10 @@ class Scheduler(SchedulerInterface):
 
         # Return the cached request data to the queue so they can be reused.
         for req_data in scheduler_output.scheduled_cached_reqs:
-            self._cached_reqs_data[req_data.req_id].append(req_data)
+            # NOTE(rob): since we free stopped reqs above, adding stopped reqs
+            # to _cached_reqs_data will cause a memory leak.
+            if req_data.req_id not in self.finished_req_ids:
+                self._cached_reqs_data[req_data.req_id].append(req_data)
 
         self.running = new_running
         engine_core_outputs = EngineCoreOutputs(
@@ -843,3 +859,7 @@ class Scheduler(SchedulerInterface):
             num_draft_tokens=num_draft_tokens,
             num_accepted_tokens=num_accepted_tokens)
         return spec_decoding_stats
+
+    def shutdown(self) -> None:
+        if self.kv_event_publisher:
+            self.kv_event_publisher.shutdown()
