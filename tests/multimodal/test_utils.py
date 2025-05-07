@@ -146,7 +146,8 @@ async def test_fetch_video_http(video_url: str, num_frames: int):
     connector = MediaConnector()
 
     video_sync = connector.fetch_video(video_url, num_frames=num_frames)
-    video_async = await connector.fetch_video_async(video_url, num_frames=num_frames)
+    video_async = await connector.fetch_video_async(video_url,
+                                                    num_frames=num_frames)
     assert np.array_equal(video_sync, video_async)
 
 
