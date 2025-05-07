@@ -914,6 +914,7 @@ def test_resolve_content_format_hf_defined(model, expected_format):
      ("template_paligemma.jinja", "string"),
      ("template_teleflm.jinja", "string"),
      ("template_qwen_vl.jinja", "string"),
+     ("template_qwen_vl_chat.jinja", "string"),
      ("template_vlm2vec.jinja", "openai"),
      ("tool_chat_template_granite_20b_fc.jinja", "string"),
      ("tool_chat_template_hermes.jinja", "string"),
