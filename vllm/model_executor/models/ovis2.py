@@ -22,10 +22,15 @@ from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
 import torch
 import torch.nn as nn
 from torch import Tensor
+from torch.nn.functional import gumbel_softmax, pad, softmax
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
-from vllm.model_executor.models.aimv2 import Aimv2VisualTokenizer
+from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
+from vllm.model_executor.models.aimv2 import AIMv2Model
+from vllm.model_executor.models.siglip import SiglipVisionModel
 from vllm.model_executor.models.utils import (AutoWeightsLoader, flatten_bn,
                                               init_vllm_registered_model,
                                               maybe_prefix)
@@ -38,7 +43,8 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.ovis2 import OvisConfig
+from vllm.transformers_utils.configs.ovis2 import (BaseVisualTokenizerConfig,
+                                                   OvisConfig)
 from vllm.transformers_utils.processors.ovis2 import OvisProcessor
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal
@@ -46,8 +52,153 @@ from .utils import merge_multimodal_embeddings
 
 # Cannot find the following number from hf config.
 IMAGE_TOKEN = "<image>"
-IMAGE_PAD_TOKEN_ID = 151655
 NUMBER_OF_TOKEN_TO_RESERVE_FOR_SEGMENT = 256
+IMAGE_INDICATOR_IDS = [-301, -302, -303, -304, -305]
+
+IMAGE_PAD_TOKEN_MAP = {
+    "gemma2": "<unused0>",
+    "llama": "<|reserved_special_token_0|>",
+    "qwen2": "<|image_pad|>",
+}
+IMAGE_PAD_TOKEN_ID_MAP = {
+    "gemma2": 7,
+    "llama": 128002,
+    "qwen2": 151655,
+}
+
+
+def st_argmax(y_soft: torch.Tensor, dim: int):  # straight-through softmax
+    index = y_soft.max(dim, keepdim=True)[1]
+    y_hard = torch.zeros_like(
+        y_soft, memory_format=torch.legacy_contiguous_format).scatter_(
+            dim, index, 1.0)
+    ret = y_hard - y_soft.detach() + y_soft
+    return ret
+
+
+class VisualTokenizer(torch.nn.Module):
+
+    def __init__(
+        self,
+        config: BaseVisualTokenizerConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ):
+        super().__init__()
+        self.config = config
+        self.backbone = self._init_backbone(
+            config=config.backbone_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.backbone",
+        )
+        # reserved tokens for IMAGE_INDICATORS
+        head_dim = config.vocab_size - len(IMAGE_INDICATOR_IDS)
+        self.head = torch.nn.Sequential(
+            ReplicatedLinear(
+                config.backbone_config.hidden_size * config.hidden_stride *
+                config.hidden_stride,
+                head_dim,
+                bias=False,
+            ), torch.nn.LayerNorm(head_dim))
+
+    def _init_backbone(
+        self,
+        config: BaseVisualTokenizerConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ):
+        model_type = config.backbone_config.model_type
+        if model_type == "aimv2":
+            return AIMv2Model(
+                config=config.backbone_config,
+                quant_config=quant_config,
+                prefix=prefix,
+            )
+        elif model_type == "siglip_vision_model":
+            return SiglipVisionModel(
+                config=config.backbone_config,
+                quant_config=quant_config,
+                prefix=prefix,
+            )
+        raise ValueError(
+            f"Unsupported visual tokenizer model_type: {model_type}")
+
+    @property
+    def dtype(self):
+        return self.backbone.dtype
+
+    @property
+    def device(self):
+        return self.backbone.device
+
+    def tokenize(self, logits):
+        if self.config.tokenize_function == 'softmax':
+            tokens = softmax(logits, dim=-1)
+        elif self.config.tokenize_function == 'gumbel_argmax':
+            tokens = gumbel_softmax(logits, tau=self.config.tau, hard=True)
+        elif self.config.tokenize_function == 'st_argmax':
+            tokens = st_argmax(logits, dim=-1)
+        else:
+            raise ValueError(
+                'Invalid `max_type`, expected softmax or gumbel_argmax '
+                f'or st_argmax, but got {self.config.tokenize_function}')
+        return tokens
+
+    def encode(self, pixel_values):
+        features = self.backbone(pixel_values)
+        if self.config.drop_cls_token:
+            features = features[:, 1:, :]
+
+        # merge number of `hidden_stride * hidden_stride` hidden states together
+        # to reduce token sequence length
+        # e.g., for hidden_stride=2, this leads to a token length reduction:
+        # 1024 -> 256 for aimv2
+        if self.config.hidden_stride > 1:
+            # this `d` maybe different from the above `d``
+            n, L, d = features.shape
+            sqrt_l = int(L**0.5)
+            assert sqrt_l**2 == L, (
+                "The token sequence length should be a perfect square.")
+            features = features.reshape(n, sqrt_l, sqrt_l, d)
+            pl = (self.config.hidden_stride -
+                  (sqrt_l %
+                   self.config.hidden_stride)) % self.config.hidden_stride
+            features = pad(features, (0, 0, 0, pl, 0, pl), "constant", 0)
+            sqrt_l += pl
+            features = features.reshape(n, sqrt_l // self.config.hidden_stride,
+                                        self.config.hidden_stride,
+                                        sqrt_l // self.config.hidden_stride,
+                                        self.config.hidden_stride, d)
+            # [n, sqrt_l/hs, sqrt_l/hs, hs, hs, d]
+            features = features.permute(0, 1, 3, 2, 4, 5)
+            # [n, sqrt_l/hs, sqrt_l/hs, hs*hs*d]
+            features = features.flatten(3)
+            # [n, sqrt_l/hs*sqrt_l/hs, hs*hs*d]
+            features = features.reshape(
+                n, -1,
+                self.config.hidden_stride * self.config.hidden_stride * d)
+
+        return features
+
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        """[BatchSize, ImageShape] -> [BatchSize, Token, VocabSize]"""
+        features = self.encode(pixel_values)
+        logits, _ = self.head[0](
+            features)  # we spllit the sequncial here for not throwing an error
+        logits = self.head[1](logits)
+        tokens = self.tokenize(logits)
+        # tokens' shape is [BatchSize, #Token, VocabSize-5], so padding with
+        # [BatchSize, #Token, 5], after which, tokens' shape should become
+        # [BatchSize, #Token, VocabSize]
+        batch_size, token_len, _ = tokens.shape
+        padding_tensor = torch.zeros(size=(batch_size, token_len,
+                                           len(IMAGE_INDICATOR_IDS)),
+                                     dtype=tokens.dtype,
+                                     device=tokens.device,
+                                     layout=tokens.layout,
+                                     requires_grad=False)
+        tokens = torch.cat((tokens, padding_tensor), dim=2)
+        return tokens
 
 
 class Ovis2ImagePatchInputs(TypedDict):
@@ -99,6 +250,11 @@ class Ovis2ProcessingInfo(BaseProcessingInfo):
 
     def get_hf_processor(self, **kwargs):
         return self.ctx.get_hf_processor(OvisProcessor)
+
+    def get_image_pad_token(self) -> str:
+        hf_text_config = self.get_hf_config().get_text_config()
+        text_model_type = hf_text_config.model_type
+        return IMAGE_PAD_TOKEN_MAP.get(text_model_type)
 
     def get_image_processor(self) -> OvisProcessor:
         return self.get_hf_processor().image_processor  # type: ignore
@@ -242,17 +398,18 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal):
             prefix=maybe_prefix(prefix, "llm"),
         )
 
-        self.visual_tokenizer = Aimv2VisualTokenizer(
+        self.visual_tokenizer = VisualTokenizer(
             config=config.visual_tokenizer_config,
             quant_config=quant_config,
             prefix=f"{prefix}.visual_tokenizer",
-            image_processor_name_or_path=config.visual_tokenizer_config.
-            backbone_config.name_or_path,
         )
 
         self.vte = VisualEmbedding(
             self.config.visual_tokenizer_config.vocab_size,
             self.config.hidden_size)
+
+        text_model_type = self.config.get_text_config().model_type
+        self.image_pad_token_id = IMAGE_PAD_TOKEN_ID_MAP[text_model_type]
 
         # TODO(Isotr0py): PP support
         # self.make_empty_intermediate_tensors = (
@@ -338,7 +495,7 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal):
         if multimodal_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings,
-                [IMAGE_PAD_TOKEN_ID])
+                self.image_pad_token_id)
         return inputs_embeds
 
     def forward(
