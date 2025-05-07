@@ -86,7 +86,7 @@ The table below shows the compatibility of various quantization implementations 
   * ✅︎
   * ✅︎
   * ✅︎
-  * ✅︎
+  * ❌
   * ❌
   * ❌
   * ❌
@@ -148,6 +148,18 @@ The table below shows the compatibility of various quantization implementations 
   * ❌
   * ❌
   * ✅︎
+  * ❌
+  * ❌
+  * ❌
+  * ❌
+- * modelopt
+  * ✅︎
+  * ✅︎
+  * ✅︎
+  * ✅︎
+  * ✅︎︎
+  * ❌
+  * ❌
   * ❌
   * ❌
   * ❌

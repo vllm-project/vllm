@@ -30,7 +30,7 @@ from vllm.entrypoints.openai.logits_processors import (
     get_logits_processors as get_openai_logits_processors)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.inputs import ProcessorInputs, PromptType, SingletonInputs
-from vllm.inputs.parse import is_token_prompt, split_enc_dec_inputs
+from vllm.inputs.parse import split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.logits_process import get_bad_words_logits_processors
@@ -130,11 +130,11 @@ class LLMEngine:
     iteration-level scheduling and efficient memory management to maximize the
     serving throughput.
 
-    The :class:`~vllm.LLM` class wraps this class for offline batched inference
-    and the :class:`AsyncLLMEngine` class wraps this class for online serving.
+    The {class}`~vllm.LLM` class wraps this class for offline batched inference
+    and the {class}`AsyncLLMEngine` class wraps this class for online serving.
 
-    The config arguments are derived from :class:`~vllm.EngineArgs`. (See
-    :ref:`engine-args`)
+    The config arguments are derived from {class}`~vllm.EngineArgs`. (See
+    {ref}`engine-args`)
 
     Args:
         model_config: The configuration related to the LLM model.
@@ -688,11 +688,11 @@ class LLMEngine:
 
         Args:
             request_id: The unique ID of the request.
-            prompt: The prompt to the LLM. See :class:`~vllm.inputs.PromptType`
+            prompt: The prompt to the LLM. See {class}`~vllm.inputs.PromptType`
                 for more details about the format of each input.
             params: Parameters for sampling or pooling.
-                :class:`~vllm.SamplingParams` for text generation.
-                :class:`~vllm.PoolingParams` for pooling.
+                {class}`~vllm.SamplingParams` for text generation.
+                {class}`~vllm.PoolingParams` for pooling.
             arrival_time: The arrival time of the request. If None, we use
                 the current monotonic time.
             lora_request: The LoRA request to add.
@@ -704,10 +704,10 @@ class LLMEngine:
         Details:
             - Set arrival_time to the current time if it is None.
             - Set prompt_token_ids to the encoded prompt if it is None.
-            - Create `n` number of :class:`~vllm.Sequence` objects.
-            - Create a :class:`~vllm.SequenceGroup` object
-              from the list of :class:`~vllm.Sequence`.
-            - Add the :class:`~vllm.SequenceGroup` object to the scheduler.
+            - Create `n` number of {class}`~vllm.Sequence` objects.
+            - Create a {class}`~vllm.SequenceGroup` object
+              from the list of {class}`~vllm.Sequence`.
+            - Add the {class}`~vllm.SequenceGroup` object to the scheduler.
 
         Example:
             >>> # initialize engine
@@ -747,10 +747,11 @@ class LLMEngine:
         if arrival_time is None:
             arrival_time = time.time()
 
-        if self.tokenizer is not None:
-            self._validate_token_prompt(
-                prompt,
-                tokenizer=self.get_tokenizer(lora_request=lora_request))
+        if (isinstance(prompt, dict)
+                and prompt.get("prompt_embeds", None) is not None
+                and not prompt.get("prompt_token_ids", None)):
+            seq_len = prompt["prompt_embeds"].shape[0]
+            prompt["prompt_token_ids"] = [0] * seq_len
 
         processed_inputs = self.input_preprocessor.preprocess(
             prompt,
@@ -769,27 +770,6 @@ class LLMEngine:
             trace_headers=trace_headers,
             priority=priority,
         )
-
-    def _validate_token_prompt(self, prompt: PromptType,
-                               tokenizer: AnyTokenizer):
-        # Guard against out-of-vocab tokens.
-        # For some tokenizers, tokenizer.decode will happily return empty text
-        # for token ids that are out of vocab, and we don't detect token ids
-        # that are greater than the max token id before running the model.
-        # However, these token ids will later crash a cuda kernel at runtime
-        # with an index out of bounds error. This will crash the entire engine.
-        # This needs to happen before multimodal input pre-processing, which
-        # may add dummy <image> tokens that aren't part of the tokenizer's
-        # vocabulary.
-        if is_token_prompt(prompt):
-            prompt_ids = prompt["prompt_token_ids"]
-            if len(prompt_ids) == 0:
-                # Empty prompt check is handled later
-                return
-            max_input_id = max(prompt_ids)
-            if max_input_id > tokenizer.max_token_id:
-                raise ValueError(
-                    "Token id {} is out of vocabulary".format(max_input_id))
 
     def _create_sequence_group_with_sampling(
         self,
@@ -875,8 +855,8 @@ class LLMEngine:
 
         Details:
             - Refer to the
-              :meth:`~vllm.core.scheduler.Scheduler.abort_seq_group`
-              from class :class:`~vllm.core.scheduler.Scheduler`.
+              {meth}`~vllm.core.scheduler.Scheduler.abort_seq_group`
+              from class {class}`~vllm.core.scheduler.Scheduler`.
 
         Example:
             >>> # initialize engine and add a request with request_id
@@ -1261,62 +1241,67 @@ class LLMEngine:
                 if self.scheduler_config.is_multi_step:
                     is_prefill_append = seq.data.get_num_uncomputed_tokens(
                     ) == 0
-                    seq.append_token_id(sample.output_token, sample.logprobs)
+                    seq.append_token_id(sample.output_token, sample.logprobs,
+                                        sample.output_embed)
                     if not is_prefill_append:
                         seq_group.update_num_computed_tokens(1)
                 else:
-                    seq.append_token_id(sample.output_token, sample.logprobs)
+                    seq.append_token_id(sample.output_token, sample.logprobs,
+                                        sample.output_embed)
 
     def step(self) -> List[Union[RequestOutput, PoolingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
 
-        .. figure:: https://i.imgur.com/sv2HssD.png
-            :alt: Overview of the step function
-            :align: center
+        :::{figure} https://i.imgur.com/sv2HssD.png
+        :alt: Overview of the step function
+        :align: center
 
-            Overview of the step function.
+        Overview of the step function.
+        :::
 
         Details:
-            - Step 1: Schedules the sequences to be executed in the next
-              iteration and the token blocks to be swapped in/out/copy.
+        - Step 1: Schedules the sequences to be executed in the next
+            iteration and the token blocks to be swapped in/out/copy.
 
-                - Depending on the scheduling policy,
-                  sequences may be `preempted/reordered`.
-                - A Sequence Group (SG) refer to a group of sequences
-                  that are generated from the same prompt.
+            - Depending on the scheduling policy,
+                sequences may be `preempted/reordered`.
+            - A Sequence Group (SG) refer to a group of sequences
+                that are generated from the same prompt.
 
-            - Step 2: Calls the distributed executor to execute the model.
-            - Step 3: Processes the model output. This mainly includes:
+        - Step 2: Calls the distributed executor to execute the model.
+        - Step 3: Processes the model output. This mainly includes:
 
-                - Decodes the relevant outputs.
-                - Updates the scheduled sequence groups with model outputs
-                  based on its `sampling parameters` (`use_beam_search` or not).
-                - Frees the finished sequence groups.
+            - Decodes the relevant outputs.
+            - Updates the scheduled sequence groups with model outputs
+                based on its `sampling parameters` (`use_beam_search` or not).
+            - Frees the finished sequence groups.
 
-            - Finally, it creates and returns the newly generated results.
+        - Finally, it creates and returns the newly generated results.
 
         Example:
-            >>> # Please see the example/ folder for more detailed examples.
-            >>>
-            >>> # initialize engine and request arguments
-            >>> engine = LLMEngine.from_engine_args(engine_args)
-            >>> example_inputs = [(0, "What is LLM?",
-            >>>    SamplingParams(temperature=0.0))]
-            >>>
-            >>> # Start the engine with an event loop
-            >>> while True:
-            >>>     if example_inputs:
-            >>>         req_id, prompt, sampling_params = example_inputs.pop(0)
-            >>>         engine.add_request(str(req_id),prompt,sampling_params)
-            >>>
-            >>>     # continue the request processing
-            >>>     request_outputs = engine.step()
-            >>>     for request_output in request_outputs:
-            >>>         if request_output.finished:
-            >>>             # return or show the request output
-            >>>
-            >>>     if not (engine.has_unfinished_requests() or example_inputs):
-            >>>         break
+        ```
+        # Please see the example/ folder for more detailed examples.
+
+        # initialize engine and request arguments
+        engine = LLMEngine.from_engine_args(engine_args)
+        example_inputs = [(0, "What is LLM?",
+        SamplingParams(temperature=0.0))]
+    
+        # Start the engine with an event loop
+        while True:
+            if example_inputs:
+                req_id, prompt, sampling_params = example_inputs.pop(0)
+                engine.add_request(str(req_id),prompt,sampling_params)
+
+            # continue the request processing
+            request_outputs = engine.step()
+            for request_output in request_outputs:
+                if request_output.finished:
+                    # return or show the request output
+
+            if not (engine.has_unfinished_requests() or example_inputs):
+                break
+        ```
         """
         if self.parallel_config.pipeline_parallel_size > 1:
             raise NotImplementedError(
@@ -2026,12 +2011,20 @@ class LLMEngine:
         tokenizer = (None if self.tokenizer is None else
                      self.tokenizer.get_lora_tokenizer(lora_request))
 
-        prompt_ids = prompt_inputs["prompt_token_ids"]
+        prompt_ids = prompt_inputs.get("prompt_token_ids", [])
         if not prompt_ids:
             if prompt_type == "encoder" and model_config.is_multimodal_model:
                 pass  # Mllama may have empty encoder inputs for text-only data
+            if prompt_inputs["type"] == "embeds":
+                pass
             else:
                 raise ValueError(f"The {prompt_type} prompt cannot be empty")
+
+        if tokenizer is not None:
+            max_input_id = max(prompt_ids, default=0)
+            if max_input_id > tokenizer.max_token_id:
+                raise ValueError(
+                    f"Token id {max_input_id} is out of vocabulary")
 
         max_prompt_len = self.model_config.max_model_len
         if len(prompt_ids) > max_prompt_len:
@@ -2090,7 +2083,7 @@ class LLMEngine:
             guided_decoding.backend = guided_decoding.backend or \
                 self.decoding_config.backend
 
-            if self.decoding_config.reasoning_backend is not None:
+            if self.decoding_config.reasoning_backend:
                 logger.debug("Building with reasoning backend %s",
                              self.decoding_config.reasoning_backend)
 

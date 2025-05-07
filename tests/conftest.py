@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-
 import json
 import os
 import tempfile
-from collections import UserList
 from enum import Enum
 from typing import Any, Callable, Optional, TypedDict, TypeVar, Union
 
@@ -60,16 +58,12 @@ def _read_prompts(filename: str) -> list[str]:
         return prompts
 
 
-class _ImageAssetPrompts(TypedDict):
+class ImageAssetPrompts(TypedDict):
     stop_sign: str
     cherry_blossom: str
 
 
-class _ImageAssetsBase(UserList[ImageAsset]):
-    pass
-
-
-class _ImageAssets(_ImageAssetsBase):
+class ImageTestAssets(list[ImageAsset]):
 
     def __init__(self) -> None:
         super().__init__([
@@ -77,7 +71,7 @@ class _ImageAssets(_ImageAssetsBase):
             ImageAsset("cherry_blossom"),
         ])
 
-    def prompts(self, prompts: _ImageAssetPrompts) -> list[str]:
+    def prompts(self, prompts: ImageAssetPrompts) -> list[str]:
         """
         Convenience method to define the prompt for each test image.
 
@@ -87,30 +81,27 @@ class _ImageAssets(_ImageAssetsBase):
         return [prompts["stop_sign"], prompts["cherry_blossom"]]
 
 
-class _VideoAssetPrompts(TypedDict):
-    sample_demo_1: str
+class VideoAssetPrompts(TypedDict):
+    baby_reading: str
 
 
-class _VideoAssetsBase(UserList[VideoAsset]):
-    pass
-
-
-class _VideoAssets(_VideoAssetsBase):
+class VideoTestAssets(list[VideoAsset]):
 
     def __init__(self) -> None:
         super().__init__([
-            VideoAsset("sample_demo_1.mp4"),
+            VideoAsset("baby_reading"),
         ])
 
-    def prompts(self, prompts: _VideoAssetPrompts) -> list[str]:
-        return [prompts["sample_demo_1"]]
+    def prompts(self, prompts: VideoAssetPrompts) -> list[str]:
+        return [prompts["baby_reading"]]
 
 
-class _AudioAssetsBase(UserList[AudioAsset]):
-    pass
+class AudioAssetPrompts(TypedDict):
+    mary_had_lamb: str
+    winning_call: str
 
 
-class _AudioAssets(_AudioAssetsBase):
+class AudioTestAssets(list[AudioAsset]):
 
     def __init__(self) -> None:
         super().__init__([
@@ -118,13 +109,16 @@ class _AudioAssets(_AudioAssetsBase):
             AudioAsset("winning_call"),
         ])
 
+    def prompts(self, prompts: AudioAssetPrompts) -> list[str]:
+        return [prompts["mary_had_lamb"], prompts["winning_call"]]
 
-IMAGE_ASSETS = _ImageAssets()
-"""Singleton instance of :class:`_ImageAssets`."""
-VIDEO_ASSETS = _VideoAssets()
-"""Singleton instance of :class:`_VideoAssets`."""
-AUDIO_ASSETS = _AudioAssets()
-"""Singleton instance of :class:`_AudioAssets`."""
+
+IMAGE_ASSETS = ImageTestAssets()
+"""Singleton instance of {class}`ImageTestAssets`."""
+VIDEO_ASSETS = VideoTestAssets()
+"""Singleton instance of {class}`VideoTestAssets`."""
+AUDIO_ASSETS = AudioTestAssets()
+"""Singleton instance of {class}`AudioTestAssets`."""
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -272,17 +266,17 @@ def example_long_prompts() -> list[str]:
 
 
 @pytest.fixture(scope="session")
-def image_assets() -> _ImageAssets:
+def image_assets() -> ImageTestAssets:
     return IMAGE_ASSETS
 
 
 @pytest.fixture(scope="session")
-def video_assets() -> _VideoAssets:
+def video_assets() -> VideoTestAssets:
     return VIDEO_ASSETS
 
 
 @pytest.fixture(scope="session")
-def audio_assets() -> _AudioAssets:
+def audio_assets() -> AudioTestAssets:
     return AUDIO_ASSETS
 
 
@@ -808,7 +802,7 @@ def hf_hpu_runner():
 class VllmRunner:
     """
     The default value of some arguments have been modified from
-    :class:`~vllm.LLM` as follows:
+    {class}`~vllm.LLM` as follows:
 
     - `trust_remote_code`: Set to `True` instead of `False` for convenience.
     - `seed`: Set to `0` instead of `None` for test reproducibility.
@@ -857,7 +851,7 @@ class VllmRunner:
 
     def get_inputs(
         self,
-        prompts: list[str],
+        prompts: Union[list[str], list[torch.Tensor]],
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
@@ -879,16 +873,18 @@ class VllmRunner:
             if audios is not None and (audio := audios[i]) is not None:
                 multi_modal_data["audio"] = audio
 
-            inputs.append(
-                TextPrompt(prompt=prompt,
-                           multi_modal_data=multi_modal_data
-                           if multi_modal_data else None))
+            text_prompt_kwargs = {
+                ("prompt" if isinstance(prompt, str) else "prompt_embeds"):
+                prompt,
+                "multi_modal_data": multi_modal_data or None
+            }
+            inputs.append(TextPrompt(**text_prompt_kwargs))
 
         return inputs
 
     def generate(
         self,
-        prompts: list[str],
+        prompts: Union[list[str], list[torch.Tensor]],
         sampling_params: SamplingParams,
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
@@ -914,7 +910,7 @@ class VllmRunner:
                 output_str = sample.text
                 output_ids = list(sample.token_ids)
                 req_sample_output_ids.append(prompt_ids + output_ids)
-                req_sample_output_strs.append(prompt_str + output_str)
+                req_sample_output_strs.append((prompt_str or "") + output_str)
             outputs.append((req_sample_output_ids, req_sample_output_strs))
         return outputs
 
@@ -981,7 +977,7 @@ class VllmRunner:
 
     def generate_greedy(
         self,
-        prompts: list[str],
+        prompts: Union[list[str], list[torch.Tensor]],
         max_tokens: int,
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,

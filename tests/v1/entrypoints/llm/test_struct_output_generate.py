@@ -84,6 +84,9 @@ def test_structured_output(
 ):
     monkeypatch.setenv("VLLM_USE_V1", "1")
 
+    if current_platform.is_tpu() and speculative_config:
+        pytest.skip("TPU does not support speculative decoding")
+
     # Don't use eager execution on TPUs because we want to test for no
     # recompilation at runtime
     enforce_eager = bool(not current_platform.is_tpu())

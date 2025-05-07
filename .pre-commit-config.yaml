@@ -46,7 +46,7 @@ repos:
   rev: 0.6.17
   hooks:
     - id: pip-compile
-      args: [requirements/test.in, -o, requirements/test.txt, --index-strategy, unsafe-best-match]
+      args: [requirements/test.in, -o, requirements/test.txt, --index-strategy, unsafe-best-match, --torch-backend, cu128]
       files: ^requirements/test\.(in|txt)$
 - repo: local
   hooks:
@@ -94,8 +94,8 @@ repos:
     args:
       - -c
       - |
-        if ! grep -q "^Signed-off-by: $(git config user.name) <$(git config user.email)>" .git/COMMIT_EDITMSG; then
-          printf "\nSigned-off-by: $(git config user.name) <$(git config user.email)>\n" >> .git/COMMIT_EDITMSG
+        if ! grep -q "^Signed-off-by: $(git config user.name) <$(git config user.email)>" "$(git rev-parse --git-path COMMIT_EDITMSG)"; then
+          printf "\nSigned-off-by: $(git config user.name) <$(git config user.email)>\n" >> "$(git rev-parse --git-path COMMIT_EDITMSG)"
         fi
     language: system
     verbose: true
@@ -118,8 +118,6 @@ repos:
     name: Update Dockerfile dependency graph
     entry: tools/update-dockerfile-graph.sh
     language: script
-    files: ^docker/Dockerfile$
-    pass_filenames: false
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion
