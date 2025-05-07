@@ -37,7 +37,7 @@
 {%- endfor %}
 
 {%- for message in filtered_messages %}
-    {%- if (message["role"] == "user") != (i % 2 == 0) %}
+    {%- if (message["role"] == "user") != (loop.index0 % 2 == 0) %}
         {{- raise_exception("After the optional system message, conversation roles must alternate user/assistant/user/assistant/...") }}
     {%- endif %}
 {%- endfor %}
