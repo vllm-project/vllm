@@ -269,6 +269,7 @@ if __name__ == "__main__":
             max_model_len=args.max_model_len,
             dtype="bfloat16",
             gpu_memory_utilization=0.8,
+            enable_expert_parallel=True,
             **param
         )
 
@@ -297,5 +298,6 @@ if __name__ == "__main__":
         print(f"Ground truth: {gt_i!r}")
         print("====================================")
     if os.getenv("VLLM_REQUANT_FP8_INC", None) is not None:
+        print(f"VLLM_REQUANT_FP8_INC: {os.getenv('VLLM_REQUANT_FP8_INC')}")
         llm.llm_engine.model_executor.shutdown()
     del llm
