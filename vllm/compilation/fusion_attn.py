@@ -95,7 +95,7 @@ class AttentionStaticQuantPattern:
 
             return RESHAPE_OP(at1[1], [-1, self.num_heads * self.head_size])
 
-        # custom fake mode, not tracing yet?
+        # custom fake mode
         with unset_fake_temporarily(), FakeTensorMode():
             inputs = [
                 empty_bf16(5, self.num_heads, self.head_size),  # q
@@ -126,15 +126,15 @@ class AttentionStaticQuantPattern:
 
 class AttnFusionPass(VllmInductorPass):
     """
-    - check if output is quantized
-    - set the scale on the attention backend
-      - lookup via layer name and config (need config)
-    - remap the out from scaled_fp8_quant to attention directly
-    - remap the meta vals
+    This pass fuses post-attention quantization onto attention if supported.
 
-    TODO with pattern_matcher:
-     - hope the attention layers are available so we can extract dims
-     - otherwise wildcard the sizes?
+    It uses the pattern matcher and matches each layer manually, as strings
+    cannot be wildcarded. This also lets us check support on attention layers
+    upon registration instead of during pattern matching.
+
+    Currently, only static fp8 quant is supported, but patterns could easily be
+    added for other quant schemes and dtypes. The bigger hurdle for wider
+    support are attention kernels, which need to support fusing output quant.
     """
 
     def __init__(self, config: VllmConfig):
