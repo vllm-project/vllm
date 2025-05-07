@@ -301,16 +301,20 @@ class KVCacheManager:
         if not self.enable_caching:
             return KVCacheBlocks(new_blocks)
 
-        if not delay_cache_blocks:
+        if delay_cache_blocks:
+            # P/D: delay caching the blocks if we need to wait for the
+            # KVs to be recved from remote, but update num_cached_block
+            # with the prefix cache hits to avoid double caching later.
+            assert request.request_id not in self.num_cached_block
+            self.num_cached_block[request.request_id] = len(
+                new_computed_block_list)
+        else:
             self.cache_blocks(
                 request=request,
                 num_tokens=num_tokens,
                 num_computed_tokens=num_computed_tokens,
                 new_computed_block_list=new_computed_block_list,
             )
-        else:
-            self.num_cached_block[request.request_id] = len(
-                new_computed_block_list)
 
         return KVCacheBlocks(new_blocks)
 

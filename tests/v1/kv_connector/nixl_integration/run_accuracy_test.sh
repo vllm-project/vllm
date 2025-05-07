@@ -4,7 +4,7 @@ set -xe
 # Models to run
 MODELS=(
     "Qwen/Qwen3-0.6B"
-    # "deepseek-ai/deepseek-vl2-tiny"
+    "deepseek-ai/deepseek-vl2-tiny"
 )
 
 # Number of prefill and decode instances to create
