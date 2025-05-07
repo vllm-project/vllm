@@ -79,6 +79,7 @@ commands=$@
 echo "Commands:$commands"
 
 if [[ $commands == *" basic_correctness/test_basic_correctness.py"* ]]; then
+  commands=${commands//"pytest -v -s basic_correctness/test_basic_correctness.py"/"VLLM_USE_TRITON_FLASH_ATTN=0 pytest -v -s basic_correctness/test_basic_correctness.py"}
   commands="VLLM_USE_TRITON_FLASH_ATTN=0 ${commands}"
 fi
 
