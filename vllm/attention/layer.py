@@ -56,9 +56,18 @@ class Attention(nn.Module):
         `self.kv_cache`.
         """
         super().__init__()
+
+        # Determine the attention sliding window size:
+        # Priority: per-layer setting > model-level setting > None
         if per_layer_sliding_window is not None:
             # per-layer sliding window
-            sliding_window = per_layer_sliding_window
+
+            if per_layer_sliding_window == -1:
+                sliding_window = None
+            else:
+                assert per_layer_sliding_window > 0, \
+            "per_layer_sliding_window must be positive or -1 (to force disable)"
+                sliding_window = per_layer_sliding_window
         elif cache_config is not None:
             # model-level sliding window
             sliding_window = cache_config.sliding_window

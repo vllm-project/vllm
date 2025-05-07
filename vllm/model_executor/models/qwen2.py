@@ -53,9 +53,9 @@ from vllm.sequence import IntermediateTensors, PoolerOutput
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
-                    is_pp_missing_parameter,
+                    extract_layer_index, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
-                    maybe_prefix)
+                    maybe_prefix, resolve_sliding_window)
 
 logger = init_logger(__name__)
 
@@ -103,6 +103,7 @@ class Qwen2Attention(nn.Module):
                  hidden_size: int,
                  num_heads: int,
                  num_kv_heads: int,
+                 max_window_layers: int = None,
                  max_position: int = 4096 * 32,
                  rope_theta: float = 10000,
                  cache_config: Optional[CacheConfig] = None,
@@ -117,6 +118,7 @@ class Qwen2Attention(nn.Module):
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
         self.total_num_kv_heads = num_kv_heads
+
         if self.total_num_kv_heads >= tp_size:
             # Number of KV heads is greater than TP size, so we partition
             # the KV heads across multiple tensor parallel GPUs.
@@ -156,12 +158,21 @@ class Qwen2Attention(nn.Module):
             base=self.rope_theta,
             rope_scaling=rope_scaling,
         )
+
+        self.layer_idx = extract_layer_index(prefix)
+        slide_window = resolve_sliding_window(
+            cache_config.sliding_window,
+            self.layer_idx,
+            max_window_layers,
+        )
+
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
                               quant_config=quant_config,
+                              per_layer_sliding_window=slide_window,
                               prefix=f"{prefix}.attn",
                               attn_type=attn_type)
 
@@ -202,11 +213,14 @@ class Qwen2DecoderLayer(nn.Module):
         else:
             attn_type = AttentionType.ENCODER_ONLY
 
+        max_window_layers = getattr(config, "max_window_layers", None)
+
         self.self_attn = Qwen2Attention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
+            max_window_layers=max_window_layers,
             rope_theta=rope_theta,
             cache_config=cache_config,
             quant_config=quant_config,
@@ -272,18 +286,6 @@ class Qwen2Model(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-
-        # TODO (@robertgshaw2): see if this can be moved out
-        if (cache_config.sliding_window is not None
-                and hasattr(config, "max_window_layers")):
-            raise ValueError("Sliding window for some but all layers is not "
-                             "supported. This model uses sliding window "
-                             "but `max_window_layers` = {} is less than "
-                             "`num_hidden_layers` = {}. Please open an issue "
-                             "to discuss this feature.".format(
-                                 config.max_window_layers,
-                                 config.num_hidden_layers,
-                             ))
 
         self.config = config
         self.quant_config = quant_config

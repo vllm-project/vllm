@@ -712,3 +712,18 @@ def fast_topk(values, topk, dim):
     else:
         # Use topk for efficiency with larger k values
         return torch.topk(values, topk, dim=dim)
+
+
+def resolve_sliding_window(
+    sliding_window: Optional[int],
+    layer_idx: Optional[int],
+    max_window_layers: Optional[int],
+) -> Optional[int]:
+
+    if sliding_window is None:
+        return -1
+
+    if max_window_layers is None:
+        return sliding_window
+
+    return sliding_window if layer_idx >= max_window_layers else -1
