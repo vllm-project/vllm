@@ -858,7 +858,7 @@ class Scheduler(SchedulerInterface):
                 # inside AsyncLLM.
                 if request.do_remote_decode and not stopped:
                     request.status = RequestStatus.FINISHED_REMOTE_DECODE
-                    self._free_request(request, skip_free_blocks=True)
+                    self._free_request(request, delay_free_blocks=True)
                     stopped = True
 
                     remote_blocks = [
@@ -969,13 +969,13 @@ class Scheduler(SchedulerInterface):
 
     def _free_request(self,
                       request: Request,
-                      skip_free_blocks: bool = False) -> None:
+                      delay_free_blocks: bool = False) -> None:
         assert request.is_finished()
         self.encoder_cache_manager.free(request)
         self._cached_reqs_data.pop(request.request_id, None)
         self.finished_req_ids.add(request.request_id)
 
-        if not skip_free_blocks:
+        if not delay_free_blocks:
             self._free_blocks(request)
 
     def _free_blocks(self, request: Request):
