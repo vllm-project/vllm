@@ -9,7 +9,6 @@ from torch.nn.parameter import Parameter
 from vllm._custom_ops import (cutlass_scaled_fp4_mm,
                               cutlass_scaled_mm_supports_fp4, scaled_fp4_quant)
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.cutlass_moe import cutlass_moe_fp4
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
@@ -515,7 +514,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value})
 
         w13_input_scale = PerTensorScaleParameter(data=torch.empty(
-            num_experts, dtype=torch.float32),
+            num_experts, 2, dtype=torch.float32),
                                                   weight_loader=weight_loader)
         layer.register_parameter("w13_input_scale", w13_input_scale)
 
@@ -548,15 +547,21 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 if scale_ndim == 2 else swizzled_scale.reshape(B, M, K))
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-
         # GEMM 1
-        w13_weight_scale_2 = torch.amax(layer.w13_weight_scale_2, dim=-1)
+
+        assert torch.allclose(
+            layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
+        ), ("Expected w1_weight_scale_2[:,0] to equal w3_weight_scale_2[:,1]")
+
+        w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0]
         layer.w13_weight_scale_2 = Parameter(w13_weight_scale_2,
                                              requires_grad=False)
 
-        layer.g1_alphas = Parameter(layer.w13_input_scale *
-                                    layer.w13_weight_scale_2,
-                                    requires_grad=False)
+        w13_input_scale = layer.w13_input_scale.max(dim=1).values.to(
+            torch.float32)
+        layer.g1_alphas = Parameter(
+            (w13_input_scale * w13_weight_scale_2).to(torch.float32),
+            requires_grad=False)
 
         assert (layer.w13_weight_scale.shape[2] % 16 == 0), (
             "Expected weight_scale.dim(1) to be divisible by 16")
@@ -568,14 +573,18 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         layer.w13_blockscale_swizzled = Parameter(w13_blockscale_swizzled,
                                                   requires_grad=False)
 
-        # GEMM 2
-        w2_weight_scale_2 = torch.amax(layer.w2_weight_scale_2, dim=-1)
-        layer.w2_weight_scale_2 = Parameter(w2_weight_scale_2,
-                                            requires_grad=False)
+        # This is for quantization, so we need to invert it.
+        layer.w13_input_scale_quant = Parameter(
+            (1 / w13_input_scale).to(torch.float32), requires_grad=False)
 
-        layer.g2_alphas = Parameter(layer.w2_input_scale *
-                                    layer.w2_weight_scale_2,
-                                    requires_grad=False)
+        # GEMM 2
+        layer.g2_alphas = Parameter(
+            (layer.w2_input_scale * layer.w2_weight_scale_2).to(torch.float32),
+            requires_grad=False)
+
+        # This is for quantization, so we need to invert it.
+        layer.w2_input_scale_quant = Parameter(
+            (1 / layer.w2_input_scale).to(torch.float32), requires_grad=False)
 
         assert (layer.w2_weight_scale.shape[2] % 16 == 0), (
             "Expected weight_scale.dim(1) to be divisible by 16")
@@ -606,6 +615,12 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         activation: str = "silu",
     ):
         assert activation == "silu", "Only SiLU activation is supported."
+        assert not apply_router_weight_on_input, (
+            "Router weight on input is not "
+            "supported for ModelOptNvFp4FusedMoE.")
+        assert expert_map is None, ("Expert Parallelism /expert_map "
+                                    "is currently not supported for "
+                                    "ModelOptNvFp4FusedMoE.")
 
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
@@ -619,21 +634,24 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
 
-        # Cutlass moe takes in full precision a and fp4 precision weights
-        return cutlass_moe_fp4(
-            a=x,
-            w1_fp4=layer.w13_weight,
-            w1_blockscale=layer.w13_blockscale_swizzled,
-            w1_tensorscale=layer.w13_weight_scale_2,  #Note that this is s_enc
-            w2_fp4=layer.w2_weight,
-            w2_blockscale=layer.w2_blockscale_swizzled,
-            w2_tensorscale=layer.w2_weight_scale_2,  #Note that this is s_enc
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            m=x.shape[0],
-            n=layer.w2_weight.shape[2] * 2,
-            k=x.shape[1],
-            e=layer.w13_weight.shape[0],
-            a1_gscale=layer.g1_alphas,
-            a2_gscale=layer.g2_alphas,
-            device=x.device).to(x.dtype)
+        from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+            cutlass_moe_fp4)
+
+        # Cutlass moe takes in full precision activations
+        # and fp4 precision weights
+        return cutlass_moe_fp4(a=x,
+                               w1_fp4=layer.w13_weight,
+                               w1_blockscale=layer.w13_blockscale_swizzled,
+                               w1_alphas=layer.g1_alphas,
+                               w2_fp4=layer.w2_weight,
+                               w2_blockscale=layer.w2_blockscale_swizzled,
+                               w2_alphas=layer.g2_alphas,
+                               topk_weights=topk_weights,
+                               topk_ids=topk_ids,
+                               m=x.shape[0],
+                               n=layer.w2_weight.shape[2] * 2,
+                               k=x.shape[1],
+                               e=layer.w13_weight.shape[0],
+                               a1_gscale=layer.w13_input_scale_quant,
+                               a2_gscale=layer.w2_input_scale_quant,
+                               device=x.device).to(x.dtype)

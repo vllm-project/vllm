@@ -193,9 +193,9 @@ void run_fp4_blockwise_scaled_group_mm(
       cutlass::gemm::collective::StageCountAuto;  // Stage count maximized based
                                                   // on the tile size
 
-  using ClusterShape = Shape<int32_t, int32_t, _1>;
+  using ClusterShape = Shape<_1, _1, _1>;
   struct MMA1SMConfig {
-    using MmaTileShape = Shape<_128, _256, _256>;
+    using MmaTileShape = Shape<_128, _128, _128>;
     using KernelSchedule = cutlass::gemm::
         KernelPtrArrayTmaWarpSpecialized1SmNvf4Sm100;  // Kernel to launch
     using EpilogueSchedule =
@@ -320,17 +320,20 @@ void run_fp4_blockwise_scaled_group_mm(
       scheduler};
 
   size_t workspace_size = Gemm::get_workspace_size(args);
-  cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
+  auto const workspace_options =
+      torch::TensorOptions().dtype(torch::kUInt8).device(a.device());
+  auto workspace = torch::empty(workspace_size, workspace_options);
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(a.get_device());
 
   auto can_implement_status = gemm_op.can_implement(args);
   TORCH_CHECK(can_implement_status == cutlass::Status::kSuccess,
               "Failed to implement GEMM");
 
   // Run the GEMM
-  auto status = gemm_op.initialize(args, workspace.get());
+  auto status = gemm_op.initialize(args, workspace.data_ptr());
   TORCH_CHECK(status == cutlass::Status::kSuccess, "Failed to initialize GEMM");
 
-  status = gemm_op.run();
+  status = gemm_op.run(args, workspace.data_ptr(), stream);
   TORCH_CHECK(status == cutlass::Status::kSuccess, "Failed to run GEMM");
 }
 

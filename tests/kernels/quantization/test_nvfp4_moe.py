@@ -44,8 +44,8 @@ def break_fp4_bytes(a, dtype):
     assert a.dtype == torch.uint8
     m, n = a.shape
     a_flat = a.flatten()
-    high = (a_flat & 0xF0) >> 4 
-    low = a_flat & 0x0F  
+    high = (a_flat & 0xF0) >> 4
+    low = a_flat & 0x0F
     combined = torch.stack((low, high), dim=1).flatten()
     signs = (combined & 0x08).to(torch.bool)  # Sign bits
     abs_vals = (combined & 0x07).to(torch.long)
@@ -135,16 +135,17 @@ def test_cutlass_fp4_moe_no_graph(m: int, n: int, k: int, e: int, topk: int,
 
         a1_gs = torch.ones((e, ), device="cuda", dtype=torch.float32)
         a2_gs = torch.ones((e, ), device="cuda", dtype=torch.float32)
+
         cutlass_output = cutlass_moe_fp4(
             a=a,
             a1_gscale=a1_gs,
             w1_fp4=w1_q,
             w1_blockscale=w1_blockscale,
-            w1_tensorscale=1 / w1_gs,
+            w1_alphas=(1 / w1_gs),
             a2_gscale=a2_gs,
             w2_fp4=w2_q,
             w2_blockscale=w2_blockscale,
-            w2_tensorscale=1 / w2_gs,
+            w2_alphas=(1 / w2_gs),
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             m=m,
@@ -187,5 +188,5 @@ def test_cutlass_fp4_moe_no_graph(m: int, n: int, k: int, e: int, topk: int,
 
         torch.testing.assert_close(torch_output,
                                    cutlass_output,
-                                   atol=1e-1,
-                                   rtol=1e-1)
+                                   atol=1e-2,
+                                   rtol=1e-2)

@@ -500,6 +500,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                 Tensor! output_scale, Tensor input_scale) -> ()");
   ops.impl("scaled_fp4_quant", torch::kCUDA, &scaled_fp4_quant);
 
+  // Compute NVFP4 experts quantization.
+  ops.def(
+      "scaled_fp4_experts_quant(Tensor! output, Tensor! output_scale, Tensor "
+      "input,"
+      "                 Tensor input_global_scale, Tensor "
+      "input_offset_by_experts,"
+      "                 Tensor output_scale_offset_by_experts) -> ()");
+  ops.impl("scaled_fp4_experts_quant", torch::kCUDA, &scaled_fp4_experts_quant);
+
   // Check if cutlass_scaled_mm_fp4 is supported for CUDA devices
   // of the given capability
   ops.def("cutlass_scaled_mm_supports_fp4(int cuda_device_capability) -> bool");
