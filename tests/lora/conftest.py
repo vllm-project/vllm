@@ -47,7 +47,7 @@ def dist_init():
     temp_file = tempfile.mkstemp()[1]
 
     backend = "nccl"
-    if current_platform.is_cpu():
+    if current_platform.is_cpu() or current_platform.is_tpu():
         backend = "gloo"
 
     init_distributed_environment(world_size=1,

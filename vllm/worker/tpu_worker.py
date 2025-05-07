@@ -54,6 +54,10 @@ class TPUWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         if self.model_config.seed is None:
             self.model_config.seed = 0
 
+        if vllm_config.lora_config is not None:
+            raise NotImplementedError(
+                "The V0 TPU backend doesn't support LoRA serving")
+
     def init_device(self) -> None:
         os.environ["PJRT_DEVICE"] = "TPU"
         torch.set_grad_enabled(False)
