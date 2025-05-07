@@ -49,7 +49,7 @@ def test_rotary_embedding_opcheck(max_position, is_neox_style, rotary_dim,
         positions, query, key)
     out_query, out_key = rot.to(device=device).forward_neuron(
         positions.to(device=device), query.to(device=device),
-        key.to(device=device))
+        key.to(device=device) if key is not None else None)
     if use_key:
         assert out_query.is_xla and out_key.is_xla, \
             "output tensor is expected to be XLA tensor"
