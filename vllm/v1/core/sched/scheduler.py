@@ -944,6 +944,8 @@ class Scheduler(SchedulerInterface):
             # Now that the blocks are ready, actually cache them.
             blocks = self.kv_cache_manager.req_to_blocks[request.request_id]
             num_computed_tokens = len(blocks) * self.block_size
+            if num_computed_tokens == request.num_tokens:
+                num_computed_tokens -= 1
             self.kv_cache_manager.cache_blocks(
                 request,
                 num_tokens=0,

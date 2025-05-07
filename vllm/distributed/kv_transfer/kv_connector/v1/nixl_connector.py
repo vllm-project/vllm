@@ -173,12 +173,8 @@ class NixlConnectorScheduler:
     def get_num_new_matched_tokens(self, request: "Request",
                                    num_computed_tokens: int) -> int:
         """For remote prefill, allocate for all tokens."""
-
-        # NOTE: this function is called in the WAITING loop.
-        # So we should only have full blocks of computed tokens.
-        assert num_computed_tokens % self.block_size == 0
-
         if request.do_remote_prefill:
+            assert num_computed_tokens % self.block_size == 0
             rounded_num_prompt_tokens = round_down(
                 len(request.prompt_token_ids), self.block_size)
             return max(rounded_num_prompt_tokens - num_computed_tokens, 0)
