@@ -3,7 +3,7 @@ set -xe
 
 # Models to run
 MODELS=(
-#    "Qwen/Qwen3-0.6B"
+    "Qwen/Qwen3-0.6B"
     "deepseek-ai/deepseek-vl2-tiny"
 )
 

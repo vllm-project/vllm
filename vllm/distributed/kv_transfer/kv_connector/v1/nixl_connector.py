@@ -111,7 +111,7 @@ class NixlConnector(KVConnectorBase_V1):
             request, num_computed_tokens)
 
     def update_state_after_alloc(self, request: "Request",
-                                 blocks: KVCacheBlocks,
+                                 blocks: "KVCacheBlocks",
                                  num_external_tokens: int):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.update_state_after_alloc(
@@ -333,7 +333,7 @@ class NixlConnectorWorker:
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
 
-        first_layer_name, first_kv_cache = next(iter(kv_caches.items()))
+        _, first_kv_cache = next(iter(kv_caches.items()))
         kv_elem_size = first_kv_cache.element_size()
 
         # TODO(tms): Find a more robust way to detect and handle MLA
@@ -557,7 +557,6 @@ class NixlConnectorWorker:
         We check for these trnxs to complete in each step().
         """
         for req_id, meta in metadata.requests.items():
-            # NOTE: this is non-blocking
             logger.debug(
                 "start_load_kv for request %s from remote engine %s. "
                 "Num local_block_ids: %s. Num remote_block_ids: %s. ", req_id,

@@ -433,8 +433,12 @@ class Scheduler(SchedulerInterface):
 
                 if self.lora_config and request.lora_request:
                     scheduled_loras.add(request.lora_request.lora_int_id)
-                req_to_new_block_ids[request.request_id] = (
-                    new_computed_blocks + new_blocks).get_block_ids()
+                # req_to_new_block_ids[request.request_id] = (
+                #     new_computed_blocks + new_blocks).get_block_ids()
+                req_to_new_block_ids[request.request_id] = [
+                    block.block_id for block in
+                    self.kv_cache_manager.req_to_blocks[request.request_id]
+                ]
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
