@@ -21,10 +21,14 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                  block_m: Optional[int] = None,
                  allow_deep_gemm: bool = False):
         super().__init__()
-        self.triton_expert: TritonExperts = TritonExperts(
-            use_fp8_w8a8, use_int8_w8a8, use_int4_w4a16, use_int8_w8a16,
-            per_channel_quant, block_shape, block_m)
-        self.deep_gemm_expert: DeepGemmExperts = DeepGemmExperts()
+        self.triton_expert = TritonExperts(use_fp8_w8a8=use_fp8_w8a8,
+                                           use_int8_w8a8=use_int8_w8a8,
+                                           use_int4_w4a16=use_int4_w4a16,
+                                           use_int8_w8a16=use_int8_w8a16,
+                                           per_channel_quant=per_channel_quant,
+                                           block_shape=block_shape,
+                                           block_m=block_m)
+        self.deep_gemm_expert = DeepGemmExperts()
         self.allow_deep_gemm = allow_deep_gemm
         self.use_fp8_w8a8 = use_fp8_w8a8
 
@@ -69,7 +73,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         N = w1.shape[1]
         if (self.allow_deep_gemm and self.use_fp8_w8a8 and N > 512
                 and _valid_deep_gemm(hidden_states, w1, w2, expert_map)):
-            return self.deep_gemm_expert(
+            return self.deep_gemm_expert.apply(
                 hidden_states,
                 w1,
                 w2,
@@ -88,7 +92,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 expert_num_tokens,
             )
         else:
-            return self.triton_expert(
+            return self.triton_expert.apply(
                 hidden_states,
                 w1,
                 w2,
