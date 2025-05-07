@@ -414,7 +414,8 @@ class InductorAdaptor(CompilerInterface):
             assert hash_str is not None, (
                 f"failed to get the hash of the compiled graph: {file_path}")
             assert file_path is not None, (
-                "failed to get the file path of the compiled graph: {file_path}")
+                "failed to get the file path of the compiled graph: {file_path}"
+            )
         return compiled_graph, (hash_str, file_path)
 
     def load(self,

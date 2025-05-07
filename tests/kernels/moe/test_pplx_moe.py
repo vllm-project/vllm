@@ -522,13 +522,10 @@ def pplx_moe(pgi, dp_size, a, w1, w2, topk_weight, topk_ids):
 def _batched_moe(pgi, dp_size, a, w1, w2, topk_weight, topk_ids):
     assert torch.cuda.current_device() == pgi.local_rank
 
-    hidden_dim = a.shape[1]
     num_experts = w1.shape[0]
-    block_size = 128
     device = pgi.device
     rank = pgi.rank
     world_size = pgi.world_size
-    topk = topk_ids.shape[1]
     max_num_tokens = rank_chunk(a.shape[0], 0, world_size)
 
     dispatch_combine = BatchedDispatchCombine(

@@ -514,30 +514,17 @@ class BatchedDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
                                             dtype=torch.int,
                                             device=a1.device)
 
-        rem_experts = num_experts % self.world_size
-        num_local_experts = ((num_experts // self.world_size) +
-                             (1 if self.rank < rem_experts else 0))
+        assert num_experts % self.world_size == 0
+
+        num_local_experts = num_experts // self.world_size
 
         b_a1 = torch.zeros(
             (num_local_experts, self.max_num_tokens, hidden_dim),
             dtype=a1.dtype,
             device=a1.device)
 
-        first_expert = (((num_experts // self.world_size) * self.rank) +
-                        rem_experts - self.rank)
+        first_expert = num_local_experts * self.rank
         last_expert = first_expert + num_local_experts
-
-        # rhs = torch.empty((self.max_num_tokens, hidden_dim),
-        #                   dtype=a1.dtype, device=a1.device)
-
-        # for expert_id in range(first_expert, last_expert):
-        #     topks = torch.any(topk_ids == expert_id, dim=1).flatten()
-        #     rows = torch.count_nonzero(topks.flatten())
-        #     #rhs[:rows] = a1[:topks.numel()][topks]
-        #     topks_idx = topks.nonzero()
-        #     torch.index_select(a1, dim=0, index=topks_idx.flatten(), out=rhs[:rows])
-        #     b_a1[expert_id - first_expert, :rows, :] = rhs[:rows]
-        #     tokens_per_expert[expert_id - first_expert] = rows
 
         for expert_id in range(first_expert, last_expert):
             topks = torch.any(topk_ids == expert_id, dim=1).flatten()
@@ -558,23 +545,13 @@ class BatchedDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
     ) -> None:
         num_tokens = topk_ids.shape[0]
         num_local_experts = fused_expert_output.shape[0]
-        topk = topk_weights.shape[1]
         K = fused_expert_output.shape[-1]
         assert output.shape[0] == num_tokens and output.shape[1] == K
 
         output.fill_(0)
 
-        first_expert = num_local_experts * self.rank  # NOT QUITE RIGHT
+        first_expert = num_local_experts * self.rank
         last_expert = first_expert + num_local_experts
-
-        # for expert_id in range(first_expert, last_expert):
-        #     topkws = topk_ids == expert_id
-        #     topks = torch.any(topkws, dim=1).flatten()
-        #     outrhs = output[topks]
-        #     rhs = fused_expert_output[expert_id - first_expert, :outrhs.shape[0], :]
-        #     if not apply_router_weight_on_input:
-        #         rhs.mul_(topk_weights[topkws].view(rhs.shape[0], 1))
-        #     output[topks] = outrhs + rhs
 
         for expert_id in range(first_expert, last_expert):
             topkws = topk_ids == expert_id
@@ -661,20 +638,20 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         num_experts = global_num_experts
         out = _resize_cache(workspace13,
                             (num_experts, max_num_tokens * num_dp, hidden_dim))
-        num_local_experts = w1.shape[0]  #expert_num_tokens.numel()
+        num_local_experts = w1.shape[0]
         assert num_local_experts == w1.shape[
             0], f"{num_local_experts} == {w1.shape[0]}"
 
         N = w1.shape[1] // 2
 
         # Not cudagraph friendly
-        # assert (torch.cuda.is_current_stream_capturing() or
-        #         torch.all(expert_num_tokens <= max_num_tokens)), (
-        #             f"{expert_num_tokens} <= {max_num_tokens}")
+        assert (torch.cuda.is_current_stream_capturing()
+                or torch.all(expert_num_tokens <= max_num_tokens)), (
+                    f"{expert_num_tokens} <= {max_num_tokens}")
 
         for expert in range(num_local_experts):
             # Indexing expert_num_tokens doesn't work w/cudagraphs
-            if True or torch.cuda.is_current_stream_capturing():
+            if torch.cuda.is_current_stream_capturing():
                 num = max_num_tokens * num_dp
             else:
                 num = int(expert_num_tokens[expert].item())
@@ -821,12 +798,14 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                          block_shape=self.block_shape)
 
         # Fix activations
-        # assert activation == "silu"
-        # invoke_batched_silu_and_mul(output=intermediate_cache2,
-        #                             input=intermediate_cache1,
-        #                             expert_num_tokens=expert_num_tokens)
-        self.activation(activation, intermediate_cache2.view(-1, N // 2),
-                        intermediate_cache1.view(-1, N))
+        if True:
+            assert activation == "silu"
+            invoke_batched_silu_and_mul(output=intermediate_cache2,
+                                        input=intermediate_cache1,
+                                        expert_num_tokens=expert_num_tokens)
+        else:
+            self.activation(activation, intermediate_cache2.view(-1, N // 2),
+                            intermediate_cache1.view(-1, N))
 
         #qintermediate_cache2 = intermediate_cache2
         a2q_scale = a2_scale

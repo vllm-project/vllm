@@ -76,55 +76,68 @@ class FusedMoEParallelConfig:
     def make(tp_size_: int, dp_size_: int,
              vllm_parallel_config: ParallelConfig) -> "FusedMoEParallelConfig":
         """
-        Determine MoE parallel configuration. Based on the input tp_size_, dp_size_,
-        ep_size_ and vllm's parallel config, determine what level's of parallelism
-        to use in the fused moe layer.
+        Determine MoE parallel configuration. Based on the input tp_size_,
+        dp_size_, ep_size_ and vllm's parallel config, determine what
+        level's of parallelism to use in the fused moe layer.
 
         Args:
             tp_size_ (int): tp_size passed into the FusedMoE constructor.
             dp_size_ (int): dp_size passed into the FusedMoE constructor.
             ep_size_ (int): ep_size passed into the FusedMoE constructor.
-            vllm_parallel_config (ParallelConfig): vllm's parallel config  object.
+            vllm_parallel_config (ParallelConfig): vllm's parallel config
+            object.
 
         Examples:
         When there is no parallelism requested, i.e. tp_size_ = dp_size_ = 1,
         we simply return the sizes unaltered and the ranks set to 0.
 
-        Expert Parallelism is considered only when either dp_size_ or tp_size_ is non trivial.
+        Expert Parallelism is considered only when either dp_size_ or tp_size_
+        is non trivial.
 
-        When TP = 2, DP = 1 and EP = False, the configuration on different devices,
-            - device 0 : TP = {2, 0} DP = {1, 0} EP = {1, 0} // legend : {size, rank}
+        When TP = 2, DP = 1 and EP = False, the configuration on different
+        devices,
+            - device 0 : TP = {2, 0} DP = {1, 0} EP = {1, 0} //
+                         legend : {size, rank}
             - device 1 : TP = {2, 1} DP = {1, 0} EP = {1, 0}
             - Comment : Tensors are sharded across 2 devices.
 
-        When TP = 1, DP = 2 and EP = False, the configuration on different devices,
+        When TP = 1, DP = 2 and EP = False, the configuration on different
+        devices,
             - device 0 : TP = {2, 0} DP = {2, 0} EP = {1, 0}
             - device 1 : TP = {2, 1} DP = {2, 1} EP = {1, 0}
-            - Comment: There are 2 engine instances and the tensors are sharded across 2 decvices.
+            - Comment: There are 2 engine instances and the tensors are sharded
+              across 2 decvices.
 
-        When TP = 2, DP = 2 and EP = False, the configuration on different devices,
+        When TP = 2, DP = 2 and EP = False, the configuration on different
+        devices,
             - device 0: TP = {4, 0} DP = {2, 0} EP = {1, 0}
             - device 1: TP = {4, 1} DP = {2, 0} EP = {1, 0}
             - device 2: TP = {4, 2} DP = {2, 1} EP = {1, 0}
             - device 3: TP = {4, 3} DP = {2, 1} EP = {1, 0}
-            - Comment: There are 2 engine instances and the tensors are sharded across 4 devices.
+            - Comment: There are 2 engine instances and the tensors are sharded
+              across 4 devices.
 
-        When, TP = 2, DP = 1 and EP = True, the configuration on different devices,
+        When, TP = 2, DP = 1 and EP = True, the configuration on different
+        devices,
             - device 0: TP = {1, 0} DP = {1, 0} EP = {2, 0}
             - device 1: TP = {1, 0} DP = {1, 0} EP = {2, 1}
             - Comment: The experts are split between the 2 devices.
 
-        When, TP = 1, DP = 2 and EP = True, the configuration on different devices,
+        When, TP = 1, DP = 2 and EP = True, the configuration on different
+        devices,
             - device 0: TP = {1, 0} DP = {2, 0} EP = {2, 0}
             - device 1: TP = {1, 0} DP = {2, 1} EP = {2, 1}
-            - Comment: There are 2 engine instances and the experts are split between the 2 devices.
+            - Comment: There are 2 engine instances and the experts are split
+              between the 2 devices.
 
-        When TP = 2, DP = 2 and EP = True, the configuration on different devices,
+        When TP = 2, DP = 2 and EP = True, the configuration on different
+        devices,
             - device 0: TP = {1, 0} DP = {2, 0} EP = {4, 0}
             - device 1: TP = {1, 0} DP = {2, 0} EP = {4, 1}
             - device 2: TP = {1, 0} DP = {2, 1} EP = {4, 2}
             - device 3: TP = {1, 0} DP = {2, 1} EP = {4, 3}
-            - Comment: There are 2 engine instances and the experts are split between the 4 devices.
+            - Comment: There are 2 engine instances and the experts are split
+              between the 4 devices.
         """
 
         def flatten_tp_across_dp(dp_rank: int):
@@ -135,7 +148,8 @@ class FusedMoEParallelConfig:
             tp_rank = dp_rank * tp_size_ + tp_rank
             return tp_size, tp_rank
 
-        use_ep = dp_size_ * tp_size_ > 1 and vllm_parallel_config.enable_expert_parallel
+        use_ep = (dp_size_ * tp_size_ > 1
+                  and vllm_parallel_config.enable_expert_parallel)
 
         dp_size = dp_size_
         dp_rank = get_dp_group().rank_in_group
@@ -151,8 +165,8 @@ class FusedMoEParallelConfig:
                                           use_ep=False)
         # DP + EP / TP + EP / DP + TP + EP
         assert use_ep
-        # In EP, each device owns a set of experts fully. There is no tensor parallel.
-        # Update tp_size, tp_rank, ep_size and ep_rank to reflect that.
+        # In EP, each device owns a set of experts fully. There is no tensor
+        # parallel update tp_size, tp_rank, ep_size and ep_rank to reflect that.
         ep_size = tp_size
         ep_rank = tp_rank
         return FusedMoEParallelConfig(tp_size=1,
@@ -744,12 +758,13 @@ class FusedMoE(torch.nn.Module):
         self.params_dtype = params_dtype
 
         vllm_config = get_current_vllm_config()
-        self.moe_parallel_config: FusedMoEParallelConfig = FusedMoEParallelConfig.make(
-            tp_size_=(tp_size if tp_size is not None else
-                      get_tensor_model_parallel_world_size()),
-            dp_size_=(dp_size
-                      if dp_size is not None else get_dp_group().world_size),
-            vllm_parallel_config=vllm_config.parallel_config)
+        self.moe_parallel_config: FusedMoEParallelConfig = (
+            FusedMoEParallelConfig.make(
+                tp_size_=(tp_size if tp_size is not None else
+                          get_tensor_model_parallel_world_size()),
+                dp_size_=(dp_size if dp_size is not None else
+                          get_dp_group().world_size),
+                vllm_parallel_config=vllm_config.parallel_config))
 
         self.global_num_experts = num_experts
 
@@ -1226,8 +1241,9 @@ class FusedMoE(torch.nn.Module):
     def maybe_all_reduce_tensor_model_parallel(
             self, final_hidden_states: torch.Tensor):
         """
-        The pplx combine kernel reduce across GPU ranks by default. The pplx kernels are
-        used when EP is enabled. In that case, this function is a no-op.
+        The pplx combine kernel reduce across GPU ranks by default. The pplx
+        kernels are used when EP is enabled. In that case, this function is a
+        no-op.
         """
         if self.dp_size > 1 and self.use_ep and has_pplx:
             return final_hidden_states
