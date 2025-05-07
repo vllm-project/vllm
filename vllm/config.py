@@ -23,7 +23,7 @@ from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
 import torch
 from pydantic import BaseModel, Field, PrivateAttr
 from torch.distributed import ProcessGroup, ReduceOp
-from transformers import PretrainedConfig
+from transformers import GenerationConfig, PretrainedConfig
 from typing_extensions import deprecated
 
 import vllm.envs as envs
@@ -1230,7 +1230,14 @@ class ModelConfig:
         if config is None:
             return {}
 
-        return config.to_diff_dict()
+        diff_dict = config.to_diff_dict()
+
+        # If config.top_k is the Transformers default, to_diff_dict() will
+        # remove it. vLLM default is different, so we need to add it back.
+        if config.top_k == GenerationConfig().top_k:
+            diff_dict["top_k"] = config.top_l
+
+        return diff_dict
 
     def get_diff_sampling_param(self) -> dict[str, Any]:
         """
