@@ -53,6 +53,7 @@ class Logprob:
 PromptLogprobs = list[Optional[dict[int, Logprob]]]
 # {token_id -> logprob} for each sequence group.
 SampleLogprobs = list[dict[int, Logprob]]
+AdditionalHeads = list[list[float]]
 
 
 class SequenceStatus(enum.IntEnum):

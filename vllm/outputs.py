@@ -12,8 +12,9 @@ from typing_extensions import TypeVar, deprecated
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalPlaceholderDict
 from vllm.sampling_params import RequestOutputKind
-from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
-                           SequenceGroup, SequenceGroupBase, SequenceStatus)
+from vllm.sequence import (AdditionalHeads, PromptLogprobs, RequestMetrics,
+                           SampleLogprobs, SequenceGroup, SequenceGroupBase,
+                           SequenceStatus)
 
 
 @dataclass
@@ -28,6 +29,8 @@ class CompletionOutput:
             output text.
         logprobs: The log probabilities of the top probability words at each
             position if the logprobs are requested.
+        additional_heads: The additional head outputs of the generated output 
+            text.
         finish_reason: The reason why the sequence is finished.
         stop_reason: The stop string or token id that caused the completion
             to stop, None if the completion finished for some other reason
@@ -43,6 +46,7 @@ class CompletionOutput:
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
     lora_request: Optional[LoRARequest] = None
+    additional_heads: Optional[AdditionalHeads] = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -53,6 +57,7 @@ class CompletionOutput:
                 f"token_ids={self.token_ids}, "
                 f"cumulative_logprob={self.cumulative_logprob}, "
                 f"logprobs={self.logprobs}, "
+                f"additional_heads={self.additional_heads}, "
                 f"finish_reason={self.finish_reason}, "
                 f"stop_reason={self.stop_reason})")
 
