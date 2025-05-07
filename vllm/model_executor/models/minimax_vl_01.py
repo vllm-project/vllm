@@ -7,7 +7,7 @@ import torch.nn as nn
 from transformers import BatchFeature
 from transformers.models.llava_next.modeling_llava_next import (
     get_anyres_image_grid_shape, unpad_image)
-
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.distributed.parallel_state import (
     get_pp_group, get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size)
@@ -447,6 +447,26 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return self._process_image_input(image_input)
 
+    def calculate_request_ids_to_seq_ids(self, scheduler_output: SchedulerOutput):
+        request_ids_to_seq_ids = {}
+        
+        for new_req_data in scheduler_output.scheduled_new_reqs:
+            req_id = new_req_data.req_id
+            request_ids_to_seq_ids[req_id] = [0]  
+        
+        for req_data in scheduler_output.scheduled_cached_reqs:
+            req_id = req_data.req_id
+            sampling_params = req_data.sampling_params
+            if hasattr(sampling_params, 'n') and sampling_params.n > 1:
+                request_ids_to_seq_ids[req_id] = list(range(sampling_params.n))
+            else:
+                request_ids_to_seq_ids[req_id] = [0]
+        
+        return request_ids_to_seq_ids
+
+    def calculate_finished_requests_ids(self,scheduler_output: SchedulerOutput):
+        return scheduler_output.finished_req_ids
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -462,12 +482,12 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             inputs_embeds = self.get_input_embeddings(input_ids,
                                                       vision_embeddings)
             input_ids = None
-
-        if "request_ids_to_seq_ids" not in kwargs:
-            kwargs["request_ids_to_seq_ids"] = {}
-        if "finished_requests_ids" not in kwargs:
-            kwargs["finished_requests_ids"] = []
         
+        if "scheduler_output" in kwargs:
+            scheduler_output = kwargs["scheduler_output"]
+            kwargs["request_ids_to_seq_ids"] = self.calculate_request_ids_to_seq_ids(scheduler_output)
+            kwargs["finished_requests_ids"] = self.calculate_finished_requests_ids(scheduler_output)
+
         if  self.minimax_cache is None:
             self.minimax_cache = MinimaxCacheManager(dtype=self._dtype,
                                             cache_shape=self.cache_shape)
