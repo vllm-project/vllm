@@ -1876,7 +1876,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
     def _dummy_run(self, max_num_batched_tokens: int) -> None:
         assert max_num_batched_tokens == 1
         self.warmup_scenario(max_num_batched_tokens, 1, False, None, False,
-                             True, False, 0, 1, True, False)
+                             True, False, 0, 1, True, True)
         return
 
     def warmup_scenario(self,
@@ -1890,8 +1890,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                         temperature=0,
                         num_iters=3,
                         align_worker=False,
-                        do_gc=True) -> None:
-        use_graphs = (not do_gc) or self._use_graphs(batch_size,
+                        is_dummy_run=False) -> None:
+        use_graphs = (is_dummy_run) or self._use_graphs(batch_size,
                                       seq_len,
                                       is_prompt,
                                       is_profile_run=is_profile_run)
@@ -1948,7 +1948,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     if dummy_lora_requests_per_seq else None,
                     temperature=temperature) for i, b in enumerate(blocks)
             ]
-        torch.hpu.synchronize()
+        if not is_dummy_run:
+            torch.hpu.synchronize()
         profiler = None
         if is_pt_profiler_run and self.is_driver_worker:
             profiler = setup_profiler()
@@ -1982,6 +1983,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                    kv_caches,
                                    warmup_mode=True,
                                    profile_run_mode=is_profile_run,
+                                   is_dummy_run=is_dummy_run,
                                    **additional_inputs)
             else:  # decode with multi-step
                 inputs = dataclasses.replace(inputs,
@@ -2004,14 +2006,15 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                    num_steps=2,
                                    seqs=seqs,
                                    **additional_inputs)
-            torch.hpu.synchronize()
+            if not is_dummy_run:
+                torch.hpu.synchronize()
             if profiler:
                 profiler.step()
         if profiler:
             profiler.stop()
         self.profiler.end()
         # don't do gc for dummy run
-        if do_gc:
+        if not is_dummy_run:
             gc.collect()
 
     def remove_all_loras(self):
@@ -2624,6 +2627,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
         num_steps: int = 1,
         profile_run_mode=False,
         seqs=None,
+        is_dummy_run=False,
         **kwargs,
     ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         warmup_mode = kwargs.get('warmup_mode', False)
@@ -2828,7 +2832,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                             **execute_model_kwargs,
                             selected_token_indices=sampling_metadata.selected_token_indices
                         )
-                        if warmup_mode == True:
+                        if warmup_mode == True and is_dummy_run == False:
                             torch.hpu.synchronize()
                             import torch.distributed as dist
                             if dist.is_initialized():
@@ -2857,7 +2861,9 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                     LoraMask.setLoraMask(
                         lora_logits_mask.index_select(
                             0, sampling_metadata.selected_token_indices))
-
+                if is_dummy_run:
+                    fake_output = self._delayed_sampler_outputs(model_input)
+                    return [fake_output]
                 # Compute the logits.
                 with self.profiler.record_event(
                         'internal',
