@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 from typing import Iterable, Optional, Set, Tuple
 
 import torch
@@ -521,7 +522,7 @@ class NomicBertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant):
         # than max_trained_positions 2048, the results are consistent
         # with SentenceTransformer.
         # The context extension uses vllm style rope_theta and rope_scaling.
-        # See #17175
+        # See #17785
 
         return NomicBertModel(vllm_config=vllm_config,
                               prefix=prefix,
