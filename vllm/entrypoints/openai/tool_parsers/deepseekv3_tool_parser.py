@@ -60,8 +60,12 @@ class DeepSeekV3ToolParser(ToolParser):
             r"<｜tool▁call▁begin｜>(?P<type>.*)<｜tool▁sep｜>(?P<function_name>.*)\n```json\n(?P<function_arguments>.*)\n```<｜tool▁call▁end｜>"
         )
 
-        self.stream_tool_call_portion_regex = re.compile(
+        self.stream_tool_call_complete_regex = re.compile(
             r"(?P<type>.*)<｜tool▁sep｜>(?P<function_name>.*)\n```json\n(?P<function_arguments>.*)\n```"
+        )
+
+        self.stream_tool_call_portion_regex = re.compile(
+            r"(?P<type>.*)<｜tool▁sep｜>(?P<function_name>.*)\n```json\n(?P<function_arguments>.*[^\n`])"
         )
 
         self.stream_tool_call_name_regex = re.compile(
@@ -144,14 +148,15 @@ class DeepSeekV3ToolParser(ToolParser):
         request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
 
-        logger.debug("current_text: %s", current_text)
         logger.debug("delta_text: %s", delta_text)
         logger.debug("delta_token_ids: %s", delta_token_ids)
         # check to see if we should be streaming a tool call - is there a
-        if self.tool_call_start_token_id not in current_token_ids:
+        if self.tool_calls_start_token_id not in current_token_ids:
             logger.debug("No tool call tokens found!")
             return DeltaMessage(content=delta_text)
-
+        delta_text = delta_text.replace(self.tool_calls_start_token, "").replace(
+            self.tool_calls_end_token, ""
+        )
         try:
 
             # figure out where we are in the parsing by counting tool call
