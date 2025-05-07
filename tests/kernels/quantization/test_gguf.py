@@ -151,20 +151,7 @@ def test_mmq(num_tokens: int, hidden_size: int, dtype: torch.dtype,
 @pytest.mark.parametrize("hidden_size", [512])
 @pytest.mark.parametrize("top_k", [4, 8])
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize(
-    "quant_type",
-    [
-        # k-quants
-        GGMLQuantizationType.Q2_K,
-        GGMLQuantizationType.Q3_K,
-        GGMLQuantizationType.Q4_K,
-        GGMLQuantizationType.Q5_K,
-        GGMLQuantizationType.Q6_K,
-        # standard quants
-        GGMLQuantizationType.Q4_0,
-        GGMLQuantizationType.Q5_0,
-        GGMLQuantizationType.Q8_0,
-    ])
+@pytest.mark.parametrize("quant_type", QUANT_TYPES)
 @torch.inference_mode()
 def test_moe(num_tokens: int, hidden_size: int, dtype: torch.dtype,
              quant_type: GGMLQuantizationType, top_k: int):
@@ -174,7 +161,10 @@ def test_moe(num_tokens: int, hidden_size: int, dtype: torch.dtype,
     x = torch.rand((num_tokens, H), dtype=dtype, device="cuda")
 
     topk_weights = torch.rand(num_tokens, top_k, device="cuda", dtype=dtype)
-    topk_ids = torch.randint(0, E, (num_tokens, top_k), device="cuda")
+    topk_ids = torch.randint(0,
+                             E, (num_tokens, top_k),
+                             device="cuda",
+                             dtype=torch.int32)
 
     tensors = get_gguf_MoE_tensors(hidden_size, quant_type)
 

@@ -86,13 +86,13 @@ void rms_norm_dynamic_per_token_quant(torch::Tensor& out,
                                       std::optional<torch::Tensor> residual);
 
 void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
-                      torch::Tensor& key, int64_t head_size,
+                      std::optional<torch::Tensor> key, int64_t head_size,
                       torch::Tensor& cos_sin_cache, bool is_neox);
 
 void batched_rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
-                              torch::Tensor& key, int64_t head_size,
-                              torch::Tensor& cos_sin_cache, bool is_neox,
-                              int64_t rot_dim,
+                              std::optional<torch::Tensor> key,
+                              int64_t head_size, torch::Tensor& cos_sin_cache,
+                              bool is_neox, int64_t rot_dim,
                               torch::Tensor& cos_sin_cache_offsets);
 
 void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
@@ -177,6 +177,10 @@ torch::Tensor ggml_moe_a8(torch::Tensor X, torch::Tensor W,
                           torch::Tensor expert_ids,
                           torch::Tensor num_tokens_post_padded, int64_t type,
                           int64_t row, int64_t top_k, int64_t tokens);
+
+torch::Tensor ggml_moe_a8_vec(torch::Tensor X, torch::Tensor W,
+                              torch::Tensor topk_ids, int64_t top_k,
+                              int64_t type, int64_t row, int64_t tokens);
 
 int64_t ggml_moe_get_block_size(int64_t type);
 
