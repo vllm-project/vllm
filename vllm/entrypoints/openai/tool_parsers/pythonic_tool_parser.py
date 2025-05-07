@@ -200,9 +200,12 @@ def _handle_single_tool(call: ast.Call) -> ToolCall:
     arguments = {}
     for keyword in call.keywords:
         arguments[keyword.arg] = _get_parameter_value(keyword.value)
-    return ToolCall(type="function",
-                    function=FunctionCall(name=function_name,
-                                          arguments=json.dumps(arguments)))
+    return ToolCall(
+        type="function",
+        function=FunctionCall(name=function_name,
+                              arguments=json.dumps(arguments,
+                                                   ensure_ascii=False)),
+    )
 
 
 def _make_valid_python(text: str) -> Union[tuple[str, str], None]:
