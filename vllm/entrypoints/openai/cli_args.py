@@ -17,8 +17,10 @@ from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
 from vllm.entrypoints.openai.serving_models import (LoRAModulePath,
                                                     PromptAdapterPath)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
-from vllm.logger import _VllmLogger
+from vllm.logger import init_logger
 from vllm.utils import FlexibleArgumentParser
+
+logger = init_logger(__name__)
 
 
 class LoRAParserAction(argparse.Action):
@@ -286,7 +288,7 @@ def validate_parsed_serve_args(args: argparse.Namespace):
                         "--tool-call-parser")
 
 
-def log_non_default_args(args: argparse.Namespace, logger: _VllmLogger):
+def log_non_default_args(args: argparse.Namespace):
     non_default_args = {}
     parser = make_arg_parser(FlexibleArgumentParser())
     for arg, default in vars(parser.parse_args([])).items():

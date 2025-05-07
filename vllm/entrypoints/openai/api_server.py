@@ -1041,7 +1041,7 @@ def create_server_socket(addr: tuple[str, int]) -> socket.socket:
 
 async def run_server(args, **uvicorn_kwargs) -> None:
     logger.info("vLLM API server version %s", VLLM_VERSION)
-    log_non_default_args(args, logger)
+    log_non_default_args(args)
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
