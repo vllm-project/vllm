@@ -346,8 +346,9 @@ class Scheduler(SchedulerInterface):
                     continue
 
                 # Get tokens in the KV cache.
-                new_computed_blocks, num_computed_tokens = (
-                    self.kv_cache_manager.get_computed_blocks(request))
+                new_computed_blocks, num_computed_tokens = \
+                    self.kv_cache_manager.get_computed_blocks(
+                        request)
 
                 # Get externally-cached tokens if using a KVConnector.
                 num_external_tokens = (
