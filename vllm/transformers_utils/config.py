@@ -688,7 +688,7 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
     default_for_max_seq_len = ultimate_fallback_max_val
     if hf_standard_config_data:
         msl_from_hf = None
-        text_config_data = hf_standard_config_data.get("text_config") 
+        text_config_data = hf_standard_config_data.get("text_config")
         if isinstance(text_config_data, dict):
             msl_from_hf = text_config_data.get("max_seq_len")
 
@@ -720,7 +720,7 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
 
     def recurse_elems(elem: Any):
         if isinstance(elem, dict):
-            mapped_dict = {} 
+            mapped_dict = {}
             for key, value in elem.items():
                 mapped_key = config_mapping.get(key, key)
                 mapped_dict[mapped_key] = recurse_elems(value)
