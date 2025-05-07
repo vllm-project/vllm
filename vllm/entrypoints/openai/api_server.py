@@ -394,7 +394,7 @@ async def health(raw_request: Request) -> Response:
     try:
         await engine_client(raw_request).check_health()
     except Exception as e:
-        logger.error(f"Health check failed: {e}")
+        logger.error("Health check failed: %s", str(e))
         return Response(status_code=500, content="Health check failed")
     return Response(status_code=200)
 
