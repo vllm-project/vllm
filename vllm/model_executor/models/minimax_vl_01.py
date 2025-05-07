@@ -479,7 +479,8 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
                                                   self.minimax_cache,
                                                   minimax_cache_params,
                                                   intermediate_tensors,
-                                                  inputs_embeds=inputs_embeds)
+                                                  inputs_embeds=inputs_embeds,
+                                                  **kwargs)
 
         return hidden_states
 
