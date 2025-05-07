@@ -126,8 +126,8 @@ __global__ void LLGemm1_kernel(const scalar_t* in_a, const scalar_t* in_b,
   const int warp = threadIdx.x / WARP_SIZE;
   const int lane = threadIdx.x % WARP_SIZE;
   const int num_warps = blockDim.x / WARP_SIZE;
-  const int qwarpid = threadid / num_warps;
-  const int qthreadid = threadid % num_warps;
+  const int qwarpid = threadid / 16;
+  const int qthreadid = threadid % 16;
   float4 rowA_elem4[NUM_A_ROWS_PER_BLOCK];
   scalar2_t colB_elem4x, colB_elem4y, colB_elem4z, colB_elem4w;
   float acc[NUM_A_ROWS_PER_BLOCK];
@@ -142,15 +142,13 @@ __global__ void LLGemm1_kernel(const scalar_t* in_a, const scalar_t* in_b,
       // rowA_elem4[i] holds 8 * half numbers seen as a single float4.
       rowA_elem4[i] = load_ntmprl(&af4[row_addr + threadid + K / 8 * i]);
     }
+    colB_elem4x = bf4[threadid * 4 + 0];
+    colB_elem4y = bf4[threadid * 4 + 1];
+    colB_elem4z = bf4[threadid * 4 + 2];
+    colB_elem4w = bf4[threadid * 4 + 3];
   }
 
-  colB_elem4x = bf4[threadid * 4 + 0];
-  colB_elem4y = bf4[threadid * 4 + 1];
-  colB_elem4z = bf4[threadid * 4 + 2];
-  colB_elem4w = bf4[threadid * 4 + 3];
-
   scalar2_t Af2;
-  [[maybe_unused]] scalar2_t Bf2;
   float2 S;
 
   auto Ah2ptr = reinterpret_cast<scalar2_t*>(&rowA_elem4);
@@ -193,12 +191,13 @@ __global__ void LLGemm1_kernel(const scalar_t* in_a, const scalar_t* in_b,
 
   if (qwarpid < NUM_A_ROWS_PER_BLOCK) {
     acc[qwarpid] = qthreadid < num_warps ? red_smem[qwarpid][qthreadid] : 0.f;
-    for (int mask = num_warps / 2; mask >= 1; mask /= 2) {
+#pragma unroll
+    for (int mask = 16 / 2; mask >= 1; mask /= 2) {
       acc[qwarpid] += __shfl_xor(acc[qwarpid], mask);
     }
-    float oval2 = __shfl_xor(acc[qwarpid], num_warps);
+    float oval2 = __shfl_xor(acc[qwarpid], 16);
 
-    if (lane % (num_warps * 2) == 0) {
+    if (lane % 32 == 0) {
       oval = __float22s2_rn<scalar2_t>(make_float2(acc[qwarpid], oval2));
       c[blockIdx.x * NUM_A_ROWS_PER_BLOCK / 2 + qwarpid / 2] = oval;
     }
@@ -222,9 +221,10 @@ torch::Tensor LLMM1(at::Tensor& in_a, at::Tensor& in_b,
   // NUM_TREADS need to be a multiple of WARP_SIZE, as we are using warp shuffle
   // operations.
   const int NUM_THREADS =
-      K * 2 / 16 % WARP_SIZE == 0
-          ? K * 2 / 16
-          : K * 2 / 16 + (WARP_SIZE - K * 2 / 16 % WARP_SIZE);
+      max(rows_per_block * 16,
+          K * 2 / 16 % WARP_SIZE == 0
+              ? K * 2 / 16
+              : K * 2 / 16 + (WARP_SIZE - K * 2 / 16 % WARP_SIZE));
 
   int NUM_BLOCKS = M / rows_per_block;
 
