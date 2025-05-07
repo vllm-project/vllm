@@ -4,19 +4,13 @@ from __future__ import annotations
 import ast
 import json
 import re
-if sys.version_info >= (3, 11):
-    import re._parser as sre_parse
-    import re._constants as sre_constants
-else:
-    import sre_parse
-    import sre_constants
+import sys
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import torch
 
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding.outlines_logits_processors import (
     OutlinesVocabulary, get_cache, get_vocabulary)
 from vllm.sampling_params import SamplingParams
@@ -31,7 +25,14 @@ if TYPE_CHECKING:
 else:
     oc = LazyLoader("oc", globals(), "outlines_core")
 
-logger = init_logger(__name__)
+# Python 3.11+ sre_parse and sre_constants
+# are deprecated, so we must import them from re
+if sys.version_info >= (3, 11):
+    from re import _constants as sre_constants
+    from re import _parser as sre_parse
+else:
+    import sre_constants
+    import sre_parse
 
 
 class OutlinesBackend(StructuredOutputBackend):
@@ -43,9 +44,8 @@ class OutlinesBackend(StructuredOutputBackend):
         tokenizer_group = init_tokenizer_from_configs(
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
-            parallel_config=vllm_config.parallel_config,
             lora_config=vllm_config.lora_config)  # type: ignore[arg-type]
-        tokenizer_group.ping()
+
         tokenizer = tokenizer_group.get_lora_tokenizer(None)
         self.vocabulary = get_vocabulary(tokenizer)
         self.cache = get_cache()
@@ -76,8 +76,11 @@ class OutlinesBackend(StructuredOutputBackend):
                 f"Invalid request type for Outlines backend ({request_type!s})"
             )
         index = self._compile_index(regex, self.vocabulary)
-        return OutlinesGrammar(vocab_size=self.vocab_size,
-                               guide=oc.Guide(index))
+        return OutlinesGrammar(
+            vocab_size=self.vocab_size,
+            guide=oc.Guide(index,
+                           max_rollback=self.vllm_config.speculative_config.
+                           num_speculative_tokens))
 
     def allocate_token_bitmask(self, max_num_seqs: int):
         return torch.full(
@@ -86,6 +89,9 @@ class OutlinesBackend(StructuredOutputBackend):
             dtype=torch.int32,
             pin_memory=torch.cuda.is_available(),
         )
+
+    def destroy(self):
+        pass
 
 
 @dataclass
@@ -118,6 +124,19 @@ class OutlinesGrammar(StructuredOutputGrammar):
             except ValueError:
                 return False
         return True
+
+    def rollback(self, num_tokens: int) -> None:
+        self.guide.rollback_state(num_tokens)
+        self.num_processed_tokens -= num_tokens
+
+    def validate_tokens(self, tokens: list[int]) -> list[int]:
+        accepted: list[int] = []
+        for tok in tokens:
+            if self.guide.accept_tokens(accepted + [tok]):
+                accepted.append(tok)
+            else:
+                return accepted
+        return accepted
 
     def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> None:
         mask = bitmask[idx]
@@ -231,7 +250,7 @@ def _prefix_needs_context(parsed) -> bool:
     return False
 
 
-def _check_unsupported(parsed):
+def _check_unsupported(parsed) -> None:
     """Check for regex features unsupported by regex-automata"""
     tokens = parsed.data if hasattr(parsed, 'data') else parsed
     for ttype, tval in tokens:
@@ -253,13 +272,11 @@ def _check_unsupported(parsed):
         elif ttype == sre_parse.BRANCH:
             # tval is (None, branches)
             for branch in tval[1]:
-                if _check_unsupported(branch):
-                    return True
+                _check_unsupported(branch)
 
         # tval is (min, max, subpattern)
-        elif ttype == sre_parse.MAX_REPEAT and _check_unsupported(tval[2]):
-            return True
-    return False
+        elif ttype == sre_parse.MAX_REPEAT:
+            _check_unsupported(tval[2])
 
 
 def validate_regex_is_buildable(pattern: str) -> None:
