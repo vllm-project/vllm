@@ -66,10 +66,10 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                     raise ValueError(
                         "WNA16MoE is not supported with actorder=group/dynamic."
                     )
-                logger.warning_once("Layer is not supported by GPTQMoeMarlin. "
-                                    "Falling back to Moe WNA16 kernels.")
+                logger.info_once("Using CompressedTensorsWNA16MoEMethod")
                 return CompressedTensorsWNA16MoEMethod(quant_config)
             else:
+                logger.info_once("Using CompressedTensorsWNA16MarlinMoEMethod")
                 return CompressedTensorsWNA16MarlinMoEMethod(quant_config)
         elif (quant_config._is_fp8_w8a8_sm90(weight_quant, input_quant)
               and layer.activation == "silu"):
