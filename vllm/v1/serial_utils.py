@@ -288,7 +288,8 @@ class MsgpackDecoder:
         return [self._decode_nested_tensors(x) for x in obj]
 
     def _decode_nested_slices(self, obj: Any) -> Any:
-        if obj and isinstance(obj[0], int):
+        assert isinstance(obj, (list, tuple))
+        if obj and not isinstance(obj[0], (list, tuple)):
             return slice(*obj)
         return [self._decode_nested_slices(x) for x in obj]
 
