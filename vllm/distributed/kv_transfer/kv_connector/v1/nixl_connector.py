@@ -104,8 +104,9 @@ class NixlConnector(KVConnectorBase_V1):
     ############################################################
     # Scheduler Side Methods
     ############################################################
-    def get_num_new_matched_tokens(self, request: "Request",
-                                   num_computed_tokens: int) -> int:
+    def get_num_new_matched_tokens(
+            self, request: "Request",
+            num_computed_tokens: int) -> tuple[int, bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(
             request, num_computed_tokens)
@@ -170,16 +171,18 @@ class NixlConnectorScheduler:
         # the scheduler. Used to make metadata passed to Worker.
         self._reqs_need_recv: dict[str, tuple[Request, list[int]]] = {}
 
-    def get_num_new_matched_tokens(self, request: "Request",
-                                   num_computed_tokens: int) -> int:
+    def get_num_new_matched_tokens(
+            self, request: "Request",
+            num_computed_tokens: int) -> tuple[int, bool]:
         """For remote prefill, allocate for all tokens."""
         if request.do_remote_prefill:
             assert num_computed_tokens % self.block_size == 0
             rounded_num_prompt_tokens = round_down(
                 len(request.prompt_token_ids), self.block_size)
-            return max(rounded_num_prompt_tokens - num_computed_tokens, 0)
+            count = max(rounded_num_prompt_tokens - num_computed_tokens, 0)
+            return count, count > 0
 
-        return 0
+        return 0, False
 
     def update_state_after_alloc(self, request: "Request",
                                  blocks: "KVCacheBlocks",
@@ -187,6 +190,8 @@ class NixlConnectorScheduler:
         if request.do_remote_prefill and num_external_tokens > 0:
             self._reqs_need_recv[request.request_id] = (request,
                                                         blocks.get_block_ids())
+            # Only trigger a KV transfer once per request.
+            request.do_remote_prefill = False
 
     def build_connector_meta(
         self,

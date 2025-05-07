@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Optional, Union
+from typing import Optional, Union
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -31,9 +31,6 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
-
-if TYPE_CHECKING:
-    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 
 logger = init_logger(__name__)
 
@@ -317,9 +314,12 @@ class Scheduler(SchedulerInterface):
 
                 # P/D: skip request if still waiting for remote kvs.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
-                    is_ready = self._update_waiting_for_remote_kv(
-                        request, skipped_waiting_requests)
-                    if not is_ready:
+                    is_ready = self._update_waiting_for_remote_kv(request)
+                    if is_ready:
+                        request.status = RequestStatus.WAITING
+                    else:
+                        self.waiting.popleft()
+                        skipped_waiting_requests.appendleft(request)
                         continue
 
                 # Skip request if the structured output request is still waiting
@@ -350,55 +350,48 @@ class Scheduler(SchedulerInterface):
                         request)
 
                 # Get externally-cached tokens if using a KVConnector.
-                num_external_tokens = (
-                    0 if self.connector is None else
+                num_external_tokens, load_kv_async = (
+                    (0, False) if self.connector is None else
                     self.connector.get_num_new_matched_tokens(
                         request, num_computed_tokens))
 
                 # Total computed tokens (local + external).
                 num_computed_tokens += num_external_tokens
 
-                # P/D: if remote prefill, allocate memory and put request
-                # into the WAITING_FOR_REMOTE_KV state.
-                if request.do_remote_prefill and num_external_tokens > 0:
-                    new_blocks = self._allocate_and_set_waiting_for_remote_kv(
-                        request, num_external_tokens, new_computed_blocks,
-                        skipped_waiting_requests)
-                    if new_blocks is None:
-                        # Not enough KV cache space
-                        break
-                    continue
+                encoder_inputs_to_schedule = None
+                new_encoder_budget = encoder_budget
+                if not load_kv_async:
+                    # Number of tokens to be scheduled.
+                    # We use `request.num_tokens` instead of
+                    # `request.num_prompt_tokens` to consider the resumed
+                    # requests, which have output tokens.
+                    num_new_tokens = request.num_tokens - num_computed_tokens
+                    if (0 < self.scheduler_config.long_prefill_token_threshold
+                            < num_new_tokens):
+                        num_new_tokens = (
+                            self.scheduler_config.long_prefill_token_threshold)
+                    num_new_tokens = min(num_new_tokens, token_budget)
+                    assert num_new_tokens > 0
 
-                # Number of tokens to be scheduled.
-                # We use `request.num_tokens` instead of
-                # `request.num_prompt_tokens` to consider the resumed requests,
-                # which have output tokens.
-                num_new_tokens = request.num_tokens - num_computed_tokens
-                if (0 < self.scheduler_config.long_prefill_token_threshold <
-                        num_new_tokens):
-                    num_new_tokens = (
-                        self.scheduler_config.long_prefill_token_threshold)
-                num_new_tokens = min(num_new_tokens, token_budget)
-                assert num_new_tokens > 0
-
-                # Schedule encoder inputs.
-                if request.has_encoder_inputs:
-                    (encoder_inputs_to_schedule, num_new_tokens,
-                     new_encoder_budget) = self._try_schedule_encoder_inputs(
-                         request, num_computed_tokens, num_new_tokens,
-                         encoder_budget)
-                    if num_new_tokens == 0:
-                        # The request cannot be scheduled.
-                        break
+                    # Schedule encoder inputs.
+                    if request.has_encoder_inputs:
+                        (encoder_inputs_to_schedule, num_new_tokens,
+                         new_encoder_budget
+                         ) = self._try_schedule_encoder_inputs(
+                             request, num_computed_tokens, num_new_tokens,
+                             encoder_budget)
+                        if num_new_tokens == 0:
+                            # The request cannot be scheduled.
+                            break
                 else:
-                    encoder_inputs_to_schedule = None
-                    new_encoder_budget = encoder_budget
+                    num_new_tokens = 0
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens + num_external_tokens,
                     new_computed_blocks,
                     num_lookahead_tokens=self.num_lookahead_tokens,
+                    delay_cache_blocks=load_kv_async,
                 )
                 if new_blocks is None:
                     # The request cannot be scheduled.
@@ -415,6 +408,13 @@ class Scheduler(SchedulerInterface):
                     )
 
                 self.waiting.popleft()
+                if load_kv_async:
+                    # If loading async, allocate memory and put request
+                    # into the WAITING_FOR_REMOTE_KV state.
+                    skipped_waiting_requests.appendleft(request)
+                    request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+                    continue
+
                 if request.use_structured_output:
                     structured_output_request_ids[
                         request.request_id] = req_index
@@ -445,7 +445,7 @@ class Scheduler(SchedulerInterface):
                 request.num_computed_tokens = num_computed_tokens
 
                 # Encoder-related.
-                if not request.do_remote_prefill and encoder_inputs_to_schedule:
+                if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request.request_id] = (
                         encoder_inputs_to_schedule)
                     # Allocate the encoder cache.
@@ -924,11 +924,7 @@ class Scheduler(SchedulerInterface):
     # P/D Related Methods
     ########################################################################
 
-    def _update_waiting_for_remote_kv(
-        self,
-        request: Request,
-        skipped_waiting_requests: deque[Request],
-    ) -> bool:
+    def _update_waiting_for_remote_kv(self, request: Request) -> bool:
         """
         P/D: check if the request_id is finished_recving.
 
@@ -937,87 +933,29 @@ class Scheduler(SchedulerInterface):
         on the worker side connector.
 
         When the kv transfer is ready, we cache the blocks
-        and update the request state to be in WAITING from
+        and the request state will be moved back to WAITING from
         WAITING_FOR_REMOTE_KV.
         """
-        if request.request_id in self.finished_recving_kv_req_ids:
-            # Now that the blocks are ready, actually cache them.
-            blocks = self.kv_cache_manager.req_to_blocks[request.request_id]
-            num_computed_tokens = len(blocks) * self.block_size
-            if num_computed_tokens == request.num_tokens:
-                num_computed_tokens -= 1
-            self.kv_cache_manager.cache_blocks(
-                request,
-                num_tokens=0,
-                num_computed_tokens=num_computed_tokens,
-                new_computed_block_list=[])
+        if request.request_id not in self.finished_recving_kv_req_ids:
+            return False
 
-            # Update the request state for scheduling.
-            request.num_computed_tokens = num_computed_tokens
-            request.status = RequestStatus.WAITING
-            # NOTE(rob): only read the blocks from remote once.
-            request.do_remote_prefill = False
-
-            # Set that we are ready.
-            self.finished_recving_kv_req_ids.remove(request.request_id)
-            is_ready = True
-        else:
-            self.waiting.popleft()
-            skipped_waiting_requests.appendleft(request)
-            is_ready = False
-
-        return is_ready
-
-    def _allocate_and_set_waiting_for_remote_kv(
-        self,
-        request: Request,
-        num_external_tokens: int,
-        new_computed_blocks: KVCacheBlocks,
-        skipped_waiting_requests: deque[Request],
-    ) -> Optional[KVCacheBlocks]:
-        """
-        P/D: allocate KV cache blocks for a request and put
-        the request into the WAITING_FOR_REMOTE_KV state and
-        update the KVConnector state.
-
-        The KV caches are allocated but NOT cached. This is
-        to avoid another request getting a cache hit on a
-        block that has not been written to. We will cache
-        the blocks only after the recv is complete.
-
-        The update_state_after_alloc() function passes this
-        request to the KVConnector, which triggers KVConnector
-        to start a read_blocks transaction.
-        """
-
-        # Allocate slots for the external tokens, but skip
-        # caching until after the KV transfer is done to avoid
-        # cache hits on blocks that are still be written to.
-        new_blocks = self.kv_cache_manager.allocate_slots(
+        # Now that the blocks are ready, actually cache them.
+        blocks = self.kv_cache_manager.req_to_blocks[request.request_id]
+        num_computed_tokens = len(blocks) * self.block_size
+        if num_computed_tokens == request.num_tokens:
+            num_computed_tokens -= 1
+        self.kv_cache_manager.cache_blocks(
             request,
-            num_external_tokens,
-            new_computed_blocks,
-            delay_cache_blocks=True)
-        if new_blocks is None:
-            return None
+            num_tokens=0,
+            num_computed_tokens=num_computed_tokens,
+            new_computed_block_list=[])
 
-        self.waiting.popleft()
-        skipped_waiting_requests.appendleft(request)
-        request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+        # Update the request state for scheduling.
+        request.num_computed_tokens = num_computed_tokens
 
-        # KVConnector: update internal state after allocation.
-        # This information is used to determine if a load is
-        # needed for this request.
-        assert self.connector is not None
-        self.connector.update_state_after_alloc(
-            request,
-            new_computed_blocks + new_blocks,
-            num_external_tokens,
-        )
-        # Only trigger a KV transfer once per request.
-        request.do_remote_prefill = False
-
-        return new_blocks
+        # Return that we are ready.
+        self.finished_recving_kv_req_ids.remove(request.request_id)
+        return True
 
     def _set_finished_remote_decode(
         self,
