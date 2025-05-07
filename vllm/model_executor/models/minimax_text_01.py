@@ -433,7 +433,6 @@ class MiniMaxText01LinearAttention(nn.Module):
         for _prefill_idx in range(getattr(attn_metadata, "num_prefills", 0)):
             _start = attn_metadata.query_start_loc[_prefill_idx]
             _end = attn_metadata.query_start_loc[_prefill_idx + 1]
-            slot_id = state_indices_tensor[_prefill_idx]
             qs = q[_start:_end].transpose(0, 1).contiguous()
             ks = k[_start:_end].transpose(0, 1).contiguous()
             vs = v[_start:_end].transpose(0, 1).contiguous()
@@ -600,7 +599,6 @@ class MiniMaxText01DecoderLayer(nn.Module):
                 config.max_model_len, int):
             max_position_embeddings = min(config.max_position_embeddings,
                                           config.max_model_len)
-        config.attention_type = 1
         if config.attention_type == 0:
             use_headxdim = True
             hidden_inner = (head_dim * config.num_attention_heads
@@ -836,7 +834,7 @@ class MiniMaxText01Model(nn.Module):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers, layer_fn, prefix=f"{prefix}.layers")
-
+        
         linear_layer_nums = sum(1 for i in range(config.num_hidden_layers)
                                 if self.decoder_attention_types[i] == 0)
         max_slots_number = scheduler_config.max_num_seqs
@@ -848,8 +846,7 @@ class MiniMaxText01Model(nn.Module):
         self._dtype = _dummy.dtype
         del _dummy
 
-        self.minimax_cache = MinimaxCacheManager(dtype=self._dtype,
-                                                 cache_shape=self.cache_shape)
+        self.minimax_cache: Optional[MinimaxCacheManager] = None
 
         rope_theta = getattr(config, "rope_theta", 10000)
         head_dim = getattr(config, "head_dim",
@@ -910,6 +907,8 @@ class MiniMaxText01Model(nn.Module):
     def forward(self,
                 input_ids: Optional[torch.Tensor],
                 positions: torch.Tensor,
+                minimax_cache: MinimaxCacheManager,
+                minimax_cache_params: MinimaxCacheParams,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs) -> Union[torch.Tensor, IntermediateTensors]:
@@ -917,21 +916,14 @@ class MiniMaxText01Model(nn.Module):
         attn_metadata = forward_context.attn_metadata
         if attn_metadata is None:
             return None
-        if "request_ids_to_seq_ids" not in kwargs:
-            kwargs["request_ids_to_seq_ids"] = {}
-        if "finished_requests_ids" not in kwargs:
-            kwargs["finished_requests_ids"] = []
 
-        (
-            minimax_cache_tensors,
-            state_indices_tensor,
-        ) = self.minimax_cache.current_run_tensors(**kwargs)
+        self.minimax_cache = minimax_cache
+        minimax_cache_tensors = minimax_cache_params.minimax_cache_tensors
+
         if getattr(attn_metadata, "num_prefills", 0) > 0:
             self._clear_prefill_cache(attn_metadata, minimax_cache_tensors,
                                       **kwargs)
 
-        minimax_cache_params = MinimaxCacheParams(minimax_cache_tensors,
-                                                  state_indices_tensor)
         if get_pp_group().is_first_rank:
             if inputs_embeds is None:
                 hidden_states = self.embed_scale * self.embed_tokens(input_ids)
@@ -989,6 +981,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
             config.sliding_window = None
 
         self.CONCAT_FFN = True
+        self.minimax_cache: Optional[MinimaxCacheManager] = None
 
         self.unpadded_vocab_size = self.config.vocab_size
         if hasattr(vllm_config.model_config, "max_model_len"):
@@ -1038,7 +1031,11 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, intermediate_tensors,
+        if  self.minimax_cache is None:
+            self.minimax_cache = MinimaxCacheManager(dtype=self._dtype,
+                                            cache_shape=self.cache_shape)
+        minimax_cache_params = self.minimax_cache.current_run_tensors(**kwargs)
+        hidden_states = self.model(input_ids, positions, self.minimax_cache, minimax_cache_params, intermediate_tensors,
                                    inputs_embeds, **kwargs)
 
         return hidden_states
