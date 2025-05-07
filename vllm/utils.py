@@ -1349,7 +1349,8 @@ class FlexibleArgumentParser(ArgumentParser):
         def parse_known_args(self, args=None, namespace=None):
             namespace, args = super().parse_known_args(args, namespace)
             for action in FlexibleArgumentParser._deprecated:
-                if getattr(namespace, dest := action.dest) != action.default:
+                if (hasattr(namespace, dest := action.dest)
+                        and getattr(namespace, dest) != action.default):
                     logger.warning_once("argument '%s' is deprecated", dest)
             return namespace, args
 
