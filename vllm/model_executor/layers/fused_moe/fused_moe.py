@@ -765,7 +765,7 @@ def get_default_config(
         # num_stages=3 can cause triton.runtime.errors.OutOfResources
         # on ROCm, set it to 2 instead.
         config = {
-            "BLOCK_SIZE_M": 64 if not use_deep_gemm else dg.get_m_alignment_for_contiguous_layout(),
+            "BLOCK_SIZE_M": 64,
             "BLOCK_SIZE_N": block_shape[0],
             "BLOCK_SIZE_K": block_shape[1],
             "GROUP_SIZE_M": 32,
