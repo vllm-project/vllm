@@ -291,6 +291,7 @@ class FlashAttentionMetadataBuilder:
 
     def __init__(self, runner: "GPUModelRunner"):
         model_config = runner.model_config
+        compilation_config = runner.vllm_config.compilation_config
 
         self.runner = runner
         self.num_heads_q = model_config.get_num_attention_heads(
@@ -300,7 +301,13 @@ class FlashAttentionMetadataBuilder:
         self.headdim = model_config.get_head_size()
         self.page_size = self.runner.block_size
 
-        self.aot_schedule = (get_flash_attn_version() == 3)
+        if get_flash_attn_version() == 3:
+            # TODO(cnguyen): Support AOT scheduler with full CUDA graph
+            self.aot_schedule = not compilation_config.full_cuda_graph
+            if not self.aot_schedule:
+                logger.warning(
+                    "AOT Scheduler is disabled when using full_cuda_graph")
+
         # Sliding window size to be used with the AOT scheduler will be
         # populated on first build() call.
         self.aot_sliding_window: Optional[tuple[int, int]] = None
