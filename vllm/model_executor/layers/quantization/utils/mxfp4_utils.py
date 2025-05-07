@@ -934,7 +934,7 @@ def per_token_group_quant_mxfp4_triton(x: torch.Tensor, block_k: int):
         DEQUANT_SCALE_ROUNDING_MODE=DequantScaleRoundingMode.EVEN,  # 0: ceil, 1: floor, 2: even
     )
     x_qdq = upcast_from_mxfp(x_mxfp4, scale_e8m0, x.dtype, axis=-1, swizzle_axis=None)
-    return x_qdq, scale_e8m0
+    return x_qdq
 
 PER_TOKEN_GROUP_QUANT_IMPLEM = {
     "torch": per_token_group_quant_mxfp4_torch,
