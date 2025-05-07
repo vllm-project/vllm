@@ -10,8 +10,8 @@ DEFAULT_SAMPLING_PARAMS = dict(
     temperature=-1.0,
     min_p=0.0,
     # strictly disabled for now
-    # top_k=-1,
-    # top_p=0.0,
+    top_k=0,
+    top_p=1.0,
     # frequency_penalties=0.0,
     # presence_penalties=0.0,
     # repetition_penalties=0.0,
@@ -26,19 +26,15 @@ class TPUSupportedSamplingMetadata:
     temperature: torch.Tensor = None
 
     min_p: torch.Tensor = None
-    # Still too slow on forward_native!
     top_k: torch.Tensor = None
     top_p: torch.Tensor = None
 
-    # Greedy sampling flag for compiling single xla graph.
     all_greedy: bool = True
 
-    # Generator not supported by xla
-    generators: dict[int,
-                     torch.Generator] = field(default_factory=lambda: dict())
-
-    # unsupported, you need to return an extra tensor of static size BxV
-    max_num_logprobs = None
+    # Whether logprobs are to be gathered in this batch of request. To balance
+    # out compile time and runtime, a fixed `max_number_logprobs` value is used
+    # when gathering logprobs, regardless of the values specified in the batch.
+    logprobs: bool = False
 
     # TODO No penalties for now
     no_penalties: bool = True
@@ -56,6 +52,15 @@ class TPUSupportedSamplingMetadata:
 
     allowed_token_ids_mask = None
     bad_words_token_ids = None
+
+    # Generator not supported by xla
+    _generators: dict[int,
+                      torch.Generator] = field(default_factory=lambda: dict())
+
+    @property
+    def generators(self) -> dict[int, torch.Generator]:
+        # Generator not supported by torch/xla. This field must be immutable.
+        return self._generators
 
     @classmethod
     def from_input_batch(
@@ -81,10 +86,12 @@ class TPUSupportedSamplingMetadata:
                 we want to pre-compile a graph with sampling parameters, even if
                 they are not strictly needed for greedy decoding.
         """
+        needs_logprobs = input_batch.max_num_logprobs>0 if \
+            input_batch.max_num_logprobs else False
         # Early return to avoid unnecessary cpu to tpu copy
         if (input_batch.all_greedy is True
                 and generate_params_if_all_greedy is False):
-            return cls(all_greedy=True)
+            return cls(all_greedy=True, logprobs=needs_logprobs)
 
         num_reqs = input_batch.num_reqs
 
@@ -94,11 +101,12 @@ class TPUSupportedSamplingMetadata:
 
         fill_slice(input_batch.temperature_cpu_tensor,
                    DEFAULT_SAMPLING_PARAMS["temperature"])
-        # TODO Temporarily disabled until sampling options are enabled
-        # fill_slice(input_batch.top_p_cpu_tensor)
-        # fill_slice(input_batch.top_k_cpu_tensor)
         fill_slice(input_batch.min_p_cpu_tensor,
                    DEFAULT_SAMPLING_PARAMS["min_p"])
+        fill_slice(input_batch.top_k_cpu_tensor,
+                   DEFAULT_SAMPLING_PARAMS["top_k"])
+        fill_slice(input_batch.top_p_cpu_tensor,
+                   DEFAULT_SAMPLING_PARAMS["top_p"])
 
         # Slice persistent device tensors to a fixed pre-compiled padded shape.
         return cls(
@@ -106,8 +114,10 @@ class TPUSupportedSamplingMetadata:
             to(xla_device),
             all_greedy=input_batch.all_greedy,
             # TODO enable more and avoid returning None values
-            top_p=None,  # input_batch.top_p[:padded_num_reqs],
-            top_k=None,  # input_batch.top_k[:padded_num_reqs],
+            top_p=input_batch.top_p_cpu_tensor[:padded_num_reqs].to(
+                xla_device),
+            top_k=input_batch.top_k_cpu_tensor[:padded_num_reqs].to(
+                xla_device),
             min_p=input_batch.min_p_cpu_tensor[:padded_num_reqs].to(
                 xla_device),
-            generators=input_batch.generators)
+            logprobs=needs_logprobs)

@@ -7,11 +7,10 @@
 #  - Thomas Parnell <tpa@zurich.ibm.com>
 
 import torch
-import triton
-import triton.language as tl
 
 from vllm import _custom_ops as ops
 from vllm.platforms.rocm import use_rocm_custom_paged_attention
+from vllm.triton_utils import tl, triton
 from vllm.triton_utils.jit_cache import jitcache
 
 from .prefix_prefill import context_attention_fwd
@@ -89,8 +88,8 @@ def kernel_paged_attention_2d(
         cur_batch_in_all_start_index = tl.load(query_start_len_ptr + seq_idx)
         cur_batch_in_all_stop_index = tl.load(query_start_len_ptr + seq_idx +
                                               1)
-        cur_batch_query_len = (cur_batch_in_all_stop_index -
-                               cur_batch_in_all_start_index)
+        cur_batch_query_len = cur_batch_in_all_stop_index \
+            - cur_batch_in_all_start_index
         if cur_batch_query_len > 1:
             return
     else:
@@ -303,27 +302,19 @@ def chunked_prefill_paged_decode(
     num_queries_per_kv_padded = max(triton.next_power_of_2(num_queries_per_kv),
                                     16)
 
-    use_custom = use_rocm_custom_paged_attention(
-        query.dtype,
-        head_size,
-        block_size,
-        num_queries_per_kv,
-        max_seq_len,
-        sliding_window,
-    )
+    use_custom = use_rocm_custom_paged_attention(query.dtype, head_size,
+                                                 block_size,
+                                                 num_queries_per_kv,
+                                                 max_seq_len, sliding_window)
     if use_custom:
         _PARTITION_SIZE_ROCM = 256
-        max_num_partitions = (max_seq_len + _PARTITION_SIZE_ROCM -
-                              1) // _PARTITION_SIZE_ROCM
+        max_num_partitions = ((max_seq_len + _PARTITION_SIZE_ROCM - 1) //
+                              _PARTITION_SIZE_ROCM)
         assert _PARTITION_SIZE_ROCM % block_size == 0
-        total_num_seq = query.shape[0]
+        total_num_seq = block_table.shape[0]
         tmp_output = torch.empty(
-            size=(
-                total_num_seq,
-                num_query_heads,
-                max_num_partitions,
-                head_size,
-            ),
+            size=(total_num_seq, num_query_heads, max_num_partitions,
+                  head_size),
             dtype=output.dtype,
             device=output.device,
         )
@@ -359,7 +350,7 @@ def chunked_prefill_paged_decode(
         #  Therefore, we assuem a maximum batch_size of 4096.
         assert num_seqs <= 4096
         kernel_paged_attention_2d[(
-            4096,
+            num_seqs,
             num_kv_heads,
         )](
             output_ptr=output,

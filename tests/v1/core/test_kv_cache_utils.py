@@ -7,6 +7,7 @@ from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.utils import GiB_bytes, sha256
+from vllm.v1.core.kv_cache_manager import KVCacheManager
 # disable yapf here as it formats differently than isort such that both fail
 # yapf: disable
 from vllm.v1.core.kv_cache_utils import (NONE_HASH, BlockHashType,
@@ -28,7 +29,8 @@ from vllm.v1.request import Request
 def make_request(request_id,
                  prompt_token_ids,
                  mm_positions=None,
-                 mm_hashes=None):
+                 mm_hashes=None,
+                 cache_salt=None):
     if mm_positions is None:
         multi_modal_inputs = None
     else:
@@ -36,7 +38,6 @@ def make_request(request_id,
 
     return Request(
         request_id=request_id,
-        prompt=None,
         prompt_token_ids=prompt_token_ids,
         multi_modal_inputs=multi_modal_inputs,
         multi_modal_hashes=mm_hashes,
@@ -45,7 +46,20 @@ def make_request(request_id,
         eos_token_id=100,
         arrival_time=0,
         lora_request=None,
+        cache_salt=cache_salt,
     )
+
+
+def new_kv_cache_spec(block_size=16,
+                      num_kv_heads=2,
+                      head_size=64,
+                      dtype=torch.float32,
+                      use_mla=False):
+    return FullAttentionSpec(block_size=block_size,
+                             num_kv_heads=num_kv_heads,
+                             head_size=head_size,
+                             dtype=dtype,
+                             use_mla=use_mla)
 
 
 def test_none_hash():
@@ -201,6 +215,45 @@ def test_generate_block_hash_extra_keys_no_mm_inputs():
     assert next_mm_idx == 0
 
 
+def test_generate_block_hash_extra_keys_cache_salt():
+    request = make_request(
+        request_id=0,
+        prompt_token_ids=[_ for _ in range(6)],
+        mm_positions=None,
+        mm_hashes=None,
+        cache_salt="salt",
+    )
+
+    # salt is added for the first token
+    extra_keys, _ = generate_block_hash_extra_keys(request, 0, 1, 0)
+    assert extra_keys == ('salt', )
+    extra_keys, _ = generate_block_hash_extra_keys(request, 0, 10, 0)
+    assert extra_keys == ('salt', )
+
+    # no salt added for other tokens
+    extra_keys, _ = generate_block_hash_extra_keys(request, 1, 2, 0)
+    assert extra_keys is None
+    extra_keys, _ = generate_block_hash_extra_keys(request, 6, 10, 0)
+    assert extra_keys is None
+
+    # works together with other extra keys
+    request_mm = make_request(
+        request_id=0,
+        prompt_token_ids=[_ for _ in range(20)],
+        mm_positions=[
+            PlaceholderRange(offset=0, length=5),
+        ],
+        mm_hashes=["hash1"],
+        cache_salt="salt",
+    )
+
+    # Test with no extra keys
+    extra_keys, next_mm_idx = generate_block_hash_extra_keys(
+        request_mm, 0, 5, 0)
+    assert extra_keys == ("hash1", "salt")
+    assert next_mm_idx == 1
+
+
 @pytest.mark.parametrize("hash_fn", [sha256, hash])
 def test_hash_block_tokens(hash_fn):
     parent_block_hash = 123
@@ -298,7 +351,7 @@ def test_metrics():
     def stats(requests, queries, hits):
         return PrefixCacheStats(requests=requests, queries=queries, hits=hits)
 
-    metrics = PrefixCachingMetrics(interval=5)
+    metrics = PrefixCachingMetrics(max_recent_requests=5)
     assert metrics.hit_rate == 0.0
 
     metrics.observe(stats(1, 20, 9))
@@ -327,18 +380,6 @@ def test_metrics():
 
 
 def test_unify_kv_cache_configs():
-
-    def new_kv_cache_spec(block_size=16,
-                          num_kv_heads=2,
-                          head_size=64,
-                          dtype=torch.float32,
-                          use_mla=False):
-        return FullAttentionSpec(block_size=block_size,
-                                 num_kv_heads=num_kv_heads,
-                                 head_size=head_size,
-                                 dtype=dtype,
-                                 use_mla=use_mla)
-
     same_kv_cache_config = [
         KVCacheConfig(
             num_blocks=10,
@@ -470,3 +511,57 @@ def test_estimate_max_model_len(model_id, max_model_len,
     estimated_max_len = estimate_max_model_len(vllm_config, kv_cache_spec,
                                                8 * GiB_bytes)
     assert estimated_max_len == want_estimated_max_len
+
+
+def test_allocate_with_lookahead():
+    """Verify that lookahead tokens correctly affect block allocation"""
+    block_size = 4
+    config = KVCacheConfig(
+        num_blocks=10,
+        tensors={
+            "layer1": KVCacheTensor(100),
+        },
+        kv_cache_groups=[
+            KVCacheGroupSpec(["layer1"],
+                             new_kv_cache_spec(block_size=block_size)),
+        ],
+    )
+
+    request = make_request(
+        request_id=0,
+        prompt_token_ids=[],
+        mm_positions=None,
+        mm_hashes=None,
+    )
+
+    # Test case 1: Requires additional lookahead tokens
+    kv_cache_manager = KVCacheManager(kv_cache_config=config,
+                                      max_model_len=100)
+    blocks = kv_cache_manager.allocate_slots(
+        request,
+        num_tokens=3,
+        num_lookahead_tokens=2,  # Total required: 3+2=5 tokens
+    )
+    assert len(blocks.blocks) == 2  # ceil(5/4)=2 blocks
+
+    # Test case 2: With precomputed blocks
+    kv_cache_manager = KVCacheManager(kv_cache_config=config,
+                                      max_model_len=100)
+    # required_blocks = ceil((3 + 2) /4) = 2
+    blocks = kv_cache_manager.allocate_slots(
+        request,
+        num_tokens=3,
+        num_lookahead_tokens=2,
+    )
+    assert len(blocks.blocks) == 2
+
+    # Test case 3: With precomputed blocks
+    # required_blocks = ceil((3 + 4) / 4) = 2
+    kv_cache_manager = KVCacheManager(kv_cache_config=config,
+                                      max_model_len=100)
+    blocks = kv_cache_manager.allocate_slots(
+        request,
+        num_tokens=3,
+        num_lookahead_tokens=4,
+    )
+    assert len(blocks.blocks) == 2

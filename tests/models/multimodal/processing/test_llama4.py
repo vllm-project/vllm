@@ -6,7 +6,7 @@ import pytest
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.transformers_utils.tokenizer import encode_tokens
 
-from ....conftest import _ImageAssets
+from ....conftest import ImageTestAssets
 from ...utils import build_model_context
 
 
@@ -17,7 +17,7 @@ from ...utils import build_model_context
 @pytest.mark.parametrize("disable_mm_preprocessor_cache", [True, False])
 @pytest.mark.parametrize("tokenized_prompt", [True, False])
 def test_processor_override(
-    image_assets: _ImageAssets,
+    image_assets: ImageTestAssets,
     model_id: str,
     mm_processor_kwargs: dict,
     num_imgs: int,
@@ -76,11 +76,6 @@ def test_processor_override(
         if v == config.boi_token_index]
 
     # patch sizes and masks
-    patch_token_id = vocab[hf_processor.img_patch_token]
-    num_patches = processed_inputs["prompt_token_ids"].count(patch_token_id)
-    mm_counts = {"image": num_imgs}
-    assert num_patches / num_imgs <= \
-        processor.info.get_mm_max_tokens_per_item(32768, mm_counts)["image"]
     num_patches_per_chunk = processor.info.get_patch_per_chunk(
         config.vision_config)
     assert prompt_token_ids.count(config.image_token_index) \

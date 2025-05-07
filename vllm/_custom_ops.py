@@ -117,13 +117,14 @@ def paged_attention_rocm(
     kv_cache_dtype: str,
     k_scale: torch.Tensor,
     v_scale: torch.Tensor,
+    fp8_out_scale: Optional[torch.Tensor] = None,
 ) -> None:
     torch.ops._rocm_C.paged_attention(out, exp_sum, max_logits, tmp_out, query,
                                       key_cache, value_cache, num_kv_heads,
                                       scale, block_tables, seq_lens,
                                       query_start_loc, block_size, max_seq_len,
                                       alibi_slopes, kv_cache_dtype, k_scale,
-                                      v_scale)
+                                      v_scale, fp8_out_scale)
 
 
 def mla_decode_kvcache_cpu(
@@ -138,33 +139,59 @@ def mla_decode_kvcache_cpu(
                                         block_tables, seq_lens)
 
 
+# merge attn states ops
+def merge_attn_states(output: torch.Tensor,
+                      prefix_output: torch.Tensor,
+                      prefix_lse: torch.Tensor,
+                      suffix_output: torch.Tensor,
+                      suffix_lse: torch.Tensor,
+                      output_lse: Optional[torch.Tensor] = None) -> None:
+    torch.ops._C.merge_attn_states(output, output_lse, prefix_output,
+                                   prefix_lse, suffix_output, suffix_lse)
+
+
 # pos encoding ops
 def rotary_embedding(
     positions: torch.Tensor,
     query: torch.Tensor,
-    key: torch.Tensor,
+    key: Optional[torch.Tensor],
     head_size: int,
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
 ) -> None:
-    torch.ops._C.rotary_embedding(positions, query, key, head_size,
-                                  cos_sin_cache, is_neox)
+    # TODO: Remove this contiguous call when the kernel is updated to support tensor slices
+    query_contiguous = query.contiguous()
+    key_contiguous = key.contiguous() if key is not None else None
+    torch.ops._C.rotary_embedding(positions, query_contiguous, key_contiguous,
+                                  head_size, cos_sin_cache, is_neox)
+    query.copy_(query_contiguous)
+    if key is not None:
+        key.copy_(key_contiguous)
 
 
 def batched_rotary_embedding(positions: torch.Tensor, query: torch.Tensor,
-                             key: torch.Tensor, head_size: int,
+                             key: Optional[torch.Tensor], head_size: int,
                              cos_sin_cache: torch.Tensor, is_neox: bool,
                              rot_dim: int,
                              cos_sin_cache_offsets: torch.Tensor) -> None:
-    torch.ops._C.batched_rotary_embedding(positions, query, key, head_size,
+    # TODO: Remove this contiguous call when the kernel is updated to support tensor slices
+    query_contiguous = query.contiguous()
+    key_contiguous = key.contiguous() if key is not None else None
+    torch.ops._C.batched_rotary_embedding(positions, query_contiguous,
+                                          key_contiguous, head_size,
                                           cos_sin_cache, is_neox, rot_dim,
                                           cos_sin_cache_offsets)
+    query.copy_(query_contiguous)
+    if key is not None:
+        key.copy_(key_contiguous)
 
 
 # layer norm ops
 def rms_norm(out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
              epsilon: float) -> None:
-    torch.ops._C.rms_norm(out, input, weight, epsilon)
+    # TODO: Remove this contiguous call when the kernel is updated to support non-contiguous input
+    input_contiguous = input.contiguous()
+    torch.ops._C.rms_norm(out, input_contiguous, weight, epsilon)
 
 
 def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
@@ -303,18 +330,18 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
 
     @register_fake("_C::gptq_marlin_gemm")
     def _gptq_marlin_gemm_fake(a: torch.Tensor,
+                               c: Optional[torch.Tensor],
                                b_q_weight: torch.Tensor,
                                b_scales: torch.Tensor,
-                               b_zeros: torch.Tensor,
-                               g_idx: torch.Tensor,
-                               perm: torch.Tensor,
+                               b_zeros: Optional[torch.Tensor],
+                               g_idx: Optional[torch.Tensor],
+                               perm: Optional[torch.Tensor],
                                workspace: torch.Tensor,
-                               b_q_type: ScalarType,
+                               b_q_type_id: int,
                                size_m: torch.SymInt,
                                size_n: torch.SymInt,
                                size_k: torch.SymInt,
-                               is_k_full: bool,
-                               has_zp: bool = False,
+                               is_k_full: bool = True,
                                use_atomic_add: bool = False,
                                use_fp32_reduce: bool = False,
                                is_zp_float: bool = False) -> torch.Tensor:
@@ -384,14 +411,6 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
         return torch.empty((out_features, in_features),
                            dtype=codebooks.dtype,
                            device=codebooks.device)
-
-    @register_fake("_C::fp8_marlin_gemm")
-    def _fp8_marlin_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
-                              b_scales: torch.Tensor, workspace: torch.Tensor,
-                              num_bits: int, size_m: torch.SymInt,
-                              size_n: torch.SymInt,
-                              size_k: torch.SymInt) -> torch.Tensor:
-        return torch.empty((size_m, size_n), dtype=a.dtype, device=a.device)
 
     @register_fake("_C::machete_mm")
     def machete_mm_fake(
@@ -483,6 +502,24 @@ if hasattr(torch.ops._C, "ggml_dequantize"):
                            device=W.device)
 
 
+if hasattr(torch.ops._C, "ggml_moe_a8_vec"):
+
+    @register_fake("_C::ggml_moe_a8_vec")
+    def _ggml_moe_a8_vec_fake(
+        X: torch.Tensor,
+        W: torch.Tensor,
+        topk_ids: torch.Tensor,
+        top_k: int,
+        quant_type: int,
+        row: torch.SymInt,
+        tokens: torch.SymInt,
+    ) -> torch.Tensor:
+        tokens = X.size(0)
+        return torch.empty((tokens * top_k, row),
+                           dtype=X.dtype,
+                           device=W.device)
+
+
 # cutlass
 def cutlass_scaled_mm_supports_fp4(cuda_device_capability: int) -> bool:
     return torch.ops._C.cutlass_scaled_mm_supports_fp4(cuda_device_capability)
@@ -537,7 +574,6 @@ def cutlass_scaled_mm(a: torch.Tensor,
         scale_a.shape * [1, 128] == a.shape
         scale_b.shape * [128, 128] == b.shape
     """
-    assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
     assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
     assert bias is None or bias.shape[0] == b.shape[
         1] and bias.dtype == out_dtype
@@ -545,7 +581,8 @@ def cutlass_scaled_mm(a: torch.Tensor,
     m = a.shape[0]
     n = b.shape[1]
 
-    if current_platform.is_rocm():
+    cutlass_compatible_b = (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
+    if current_platform.is_rocm() or not cutlass_compatible_b:
         triton_scaled_mm_module = importlib.import_module(
             "vllm.model_executor.layers.quantization.compressed_tensors."
             "triton_scaled_mm")
@@ -793,35 +830,26 @@ def awq_marlin_moe_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
 
 
 def gptq_marlin_gemm(a: torch.Tensor,
+                     c: Optional[torch.Tensor],
                      b_q_weight: torch.Tensor,
                      b_scales: torch.Tensor,
-                     b_zeros: torch.Tensor,
-                     g_idx: torch.Tensor,
-                     perm: torch.Tensor,
+                     b_zeros: Optional[torch.Tensor],
+                     g_idx: Optional[torch.Tensor],
+                     perm: Optional[torch.Tensor],
                      workspace: torch.Tensor,
                      b_q_type: ScalarType,
                      size_m: int,
                      size_n: int,
                      size_k: int,
-                     is_k_full: bool,
-                     has_zp: bool = False,
+                     is_k_full: bool = True,
                      use_atomic_add: bool = False,
                      use_fp32_reduce: bool = False,
                      is_zp_float: bool = False) -> torch.Tensor:
-    return torch.ops._C.gptq_marlin_gemm(a, b_q_weight, b_scales, b_zeros,
+    return torch.ops._C.gptq_marlin_gemm(a, c, b_q_weight, b_scales, b_zeros,
                                          g_idx, perm, workspace, b_q_type.id,
                                          size_m, size_n, size_k, is_k_full,
-                                         has_zp, use_atomic_add,
-                                         use_fp32_reduce, is_zp_float)
-
-
-# fp8 marlin
-def fp8_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
-                    b_scales: torch.Tensor, workspace: torch.Tensor,
-                    num_bits: int, size_m: int, size_n: int,
-                    size_k: int) -> torch.Tensor:
-    return torch.ops._C.fp8_marlin_gemm(a, b_q_weight, b_scales, workspace,
-                                        num_bits, size_m, size_n, size_k)
+                                         use_atomic_add, use_fp32_reduce,
+                                         is_zp_float)
 
 
 # machete
@@ -1141,6 +1169,19 @@ def ggml_moe_a8(
                                     top_k, tokens)
 
 
+def ggml_moe_a8_vec(
+    X: torch.Tensor,
+    W: torch.Tensor,
+    topk_ids: torch.Tensor,
+    top_k: int,
+    quant_type: int,
+    row: torch.SymInt,
+    tokens: torch.SymInt,
+) -> torch.Tensor:
+    return torch.ops._C.ggml_moe_a8_vec(X, W, topk_ids, top_k, quant_type, row,
+                                        tokens)
+
+
 def ggml_moe_get_block_size(quant_type: int) -> int:
     return torch.ops._C.ggml_moe_get_block_size(quant_type)
 
@@ -1183,6 +1224,26 @@ def selective_scan_fwd(u: torch.Tensor, delta: torch.Tensor, A: torch.Tensor,
                                     delta_softplus, query_start_loc,
                                     cache_indices, has_initial_state,
                                     ssm_states, pad_slot_id)
+
+
+# ROCm skinny gemms
+def LLMM1(a: torch.Tensor, b: torch.Tensor,
+          rows_per_block: int) -> torch.Tensor:
+    return torch.ops._rocm_C.LLMM1(a, b, rows_per_block)
+
+
+def wvSplitK(a: torch.Tensor, b: torch.Tensor, cu_count: int) -> torch.Tensor:
+    return torch.ops._rocm_C.wvSplitK(a, b, cu_count)
+
+
+def wvSplitKQ(a: torch.Tensor, b: torch.Tensor, out_dtype: torch.dtype,
+              scale_a: torch.Tensor, scale_b: torch.Tensor,
+              cu_count: int) -> torch.Tensor:
+    out = torch.empty((b.shape[0], a.shape[0]),
+                      dtype=out_dtype,
+                      device=b.device)
+    torch.ops._rocm_C.wvSplitKQ(a, b, out, scale_a, scale_b, cu_count)
+    return out
 
 
 # moe
@@ -1234,6 +1295,29 @@ def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                                   token_expert_indicies, gating_output)
 
 
+def moe_wna16_marlin_gemm(input: torch.Tensor, output: Optional[torch.Tensor],
+                          b_qweight: torch.Tensor, b_scales: torch.Tensor,
+                          b_qzeros: Optional[torch.Tensor],
+                          g_idx: Optional[torch.Tensor],
+                          perm: Optional[torch.Tensor],
+                          workspace: torch.Tensor,
+                          sorted_token_ids: torch.Tensor,
+                          expert_ids: torch.Tensor,
+                          num_tokens_past_padded: torch.Tensor,
+                          topk_weights: torch.Tensor, moe_block_size: int,
+                          top_k: int, mul_topk_weights: bool, is_ep: bool,
+                          b_q_type: ScalarType, size_m: int, size_n: int,
+                          size_k: int, is_k_full: bool, use_atomic_add: bool,
+                          use_fp32_reduce: bool,
+                          is_zp_float: bool) -> torch.Tensor:
+    return torch.ops._moe_C.moe_wna16_marlin_gemm(
+        input, output, b_qweight, b_scales, b_qzeros, g_idx, perm, workspace,
+        sorted_token_ids, expert_ids, num_tokens_past_padded, topk_weights,
+        moe_block_size, top_k, mul_topk_weights, is_ep, b_q_type.id, size_m,
+        size_n, size_k, is_k_full, use_atomic_add, use_fp32_reduce,
+        is_zp_float)
+
+
 if supports_moe_ops and hasattr(torch.ops._moe_C, "marlin_gemm_moe"):
 
     @register_fake("_moe_C::marlin_gemm_moe")
@@ -1251,6 +1335,29 @@ if supports_moe_ops and hasattr(torch.ops._moe_C, "marlin_gemm_moe"):
         return torch.empty((size_m, topk, size_n),
                            dtype=a.dtype,
                            device=a.device)
+
+    @register_fake("_moe_C::moe_wna16_marlin_gemm")
+    def moe_wna16_marlin_gemm_fake(input: torch.Tensor,
+                                   output: Optional[torch.Tensor],
+                                   b_qweight: torch.Tensor,
+                                   b_scales: torch.Tensor,
+                                   b_qzeros: Optional[torch.Tensor],
+                                   g_idx: Optional[torch.Tensor],
+                                   perm: Optional[torch.Tensor],
+                                   workspace: torch.Tensor,
+                                   sorted_token_ids: torch.Tensor,
+                                   expert_ids: torch.Tensor,
+                                   num_tokens_past_padded: torch.Tensor,
+                                   topk_weights: torch.Tensor,
+                                   moe_block_size: int, top_k: int,
+                                   mul_topk_weights: bool, is_ep: bool,
+                                   b_q_type: ScalarType, size_m: int,
+                                   size_n: int, size_k: int, is_k_full: bool,
+                                   use_atomic_add: bool, use_fp32_reduce: bool,
+                                   is_zp_float: bool) -> torch.Tensor:
+        return torch.empty((size_m * top_k, size_n),
+                           dtype=input.dtype,
+                           device=input.device)
 
 
 def reshape_and_cache(
@@ -1448,3 +1555,12 @@ def flash_mla_with_kvcache(
         num_splits,
     )
     return out, softmax_lse
+
+
+def cutlass_mla_decode(out: torch.Tensor, q_nope: torch.Tensor,
+                       q_pe: torch.Tensor, kv_c_and_k_pe_cache: torch.Tensor,
+                       seq_lens: torch.Tensor, page_table: torch.Tensor,
+                       scale: float) -> torch.Tensor:
+    torch.ops._C.cutlass_mla_decode(out, q_nope, q_pe, kv_c_and_k_pe_cache,
+                                    seq_lens, page_table, scale)
+    return out

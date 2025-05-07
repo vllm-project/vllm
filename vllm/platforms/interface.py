@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, NamedTuple, Optional, Tuple, Union
 import numpy as np
 import torch
 
-from vllm.inputs import PromptType
+from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -39,6 +39,7 @@ class _Backend(enum.Enum):
     TRITON_ATTN_VLLM_V1 = enum.auto()
     XFORMERS = enum.auto()
     ROCM_FLASH = enum.auto()
+    ROCM_AITER_MLA = enum.auto()
     TORCH_SDPA = enum.auto()
     FLASHINFER = enum.auto()
     TRITON_MLA = enum.auto()  # Supported by V1
@@ -145,8 +146,11 @@ class Platform:
         return self._enum == PlatformEnum.OOT
 
     def is_cuda_alike(self) -> bool:
-        """Stateless version of :func:`torch.cuda.is_available`."""
+        """Stateless version of {func}`torch.cuda.is_available`."""
         return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
+
+    def is_sleep_mode_available(self) -> bool:
+        return self._enum == PlatformEnum.CUDA
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
@@ -161,7 +165,7 @@ class Platform:
         cls,
         device_id: int = 0,
     ) -> Optional[DeviceCapability]:
-        """Stateless version of :func:`torch.cuda.get_device_capability`."""
+        """Stateless version of {func}`torch.cuda.get_device_capability`."""
         return None
 
     @classmethod
@@ -176,7 +180,7 @@ class Platform:
         The ``capability`` argument can either be:
 
         - A tuple ``(major, minor)``.
-        - An integer ``<major><minor>``. (See :meth:`DeviceCapability.to_int`)
+        - An integer ``<major><minor>``. (See {meth}`DeviceCapability.to_int`)
         """
         current_capability = cls.get_device_capability(device_id=device_id)
         if current_capability is None:
@@ -397,8 +401,25 @@ class Platform:
         cls,
         prompt: PromptType,
         params: Union[SamplingParams, PoolingParams],
+        processed_inputs: ProcessorInputs,
     ) -> None:
         """Raises if this request is unsupported on this platform"""
+
+    def __getattr__(self, key: str):
+        device = getattr(torch, self.device_type, None)
+        if device is not None and hasattr(device, key):
+            return getattr(device, key)
+        else:
+            logger.warning("Current platform %s does not have '%s'" \
+            " attribute.", self.device_type, key)
+            return None
+
+    @classmethod
+    def get_cu_count(cls, device_id: int = 0) -> int:
+        """
+        Returns the total number of compute units (CU) on single GPU.
+        """
+        raise NotImplementedError
 
 
 class UnspecifiedPlatform(Platform):
