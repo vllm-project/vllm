@@ -664,12 +664,11 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
 
     # Load standard Hugging Face config.json to get better defaults
     # if params.json (loaded into config_dict) is missing these specific keys.
-    hf_standard_config_data = get_hf_file_to_dict(
-        "config.json", model, revision
-    )
+    hf_standard_config_data = get_hf_file_to_dict("config.json", model,
+                                                  revision)
 
-    ultimate_fallback_max_val = 128_000 # Original hardcoded fallback
-    
+    ultimate_fallback_max_val = 128_000  # Original hardcoded fallback
+
     # Determine the default for max_position_embeddings
     default_for_max_pos_embed = ultimate_fallback_max_val
     if hf_standard_config_data:
@@ -678,8 +677,9 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
         if isinstance(text_config_data, dict):
             mpe_from_hf = text_config_data.get("max_position_embeddings")
         
-        if mpe_from_hf is None: # If not in text_config or text_config absent
-            mpe_from_hf = hf_standard_config_data.get("max_position_embeddings")
+        if mpe_from_hf is None:  # If not in text_config or text_config absent
+            mpe_from_hf = hf_standard_config_data.get(
+                "max_position_embeddings")
         
         if mpe_from_hf is not None:
             default_for_max_pos_embed = mpe_from_hf
@@ -688,28 +688,26 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
     default_for_max_seq_len = ultimate_fallback_max_val
     if hf_standard_config_data:
         msl_from_hf = None
-        text_config_data = hf_standard_config_data.get("text_config")
+        text_config_data = hf_standard_config_data.get("text_config") 
         if isinstance(text_config_data, dict):
             msl_from_hf = text_config_data.get("max_seq_len")
 
-        if msl_from_hf is None: # If not in text_config or text_config absent
+        if msl_from_hf is None:  # If not in text_config or text_config absent
             msl_from_hf = hf_standard_config_data.get("max_seq_len")
         
         if msl_from_hf is not None:
             default_for_max_seq_len = msl_from_hf
         elif default_for_max_pos_embed != ultimate_fallback_max_val:
-            # If max_seq_len is not in standard config, 
+            # If max_seq_len is not in standard config,
             # but max_pos_embed was found there, use it for max_seq_len.
             default_for_max_seq_len = default_for_max_pos_embed
             
     # If config_dict (from params.json) has the key, its value is used.
     # Otherwise, the determined from config.json or 128_000 is used.
-    config_dict["max_seq_len"] = config_dict.get(
-        "max_seq_len", default_for_max_seq_len
-    )
+    config_dict["max_seq_len"] = config_dict.get("max_seq_len",
+                                                 default_for_max_seq_len)
     config_dict["max_position_embeddings"] = config_dict.get(
-        "max_position_embeddings", default_for_max_pos_embed
-    )
+        "max_position_embeddings", default_for_max_pos_embed)
 
     config_mapping = {
         "dim": "hidden_size",
@@ -722,8 +720,6 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
 
     def recurse_elems(elem: Any):
         if isinstance(elem, dict):
-            # This inner config_dict shadows the outer one, which is fine
-            # for this recursive transformation pattern.
             mapped_dict = {} 
             for key, value in elem.items():
                 mapped_key = config_mapping.get(key, key)
@@ -764,37 +760,28 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
 
     if config_type == "multimodal":
         multimodal_config = config_dict.pop("vision_encoder")
-        # Save quantization_config if it was set from params.json,
         quantization_config_val = config_dict.get("quantization_config")
 
-        # config_dict is now repurposed to build the multimodal structure
         config_dict = {
-            "text_config": config_dict, # Original config_dict (now text part)
+            "text_config": config_dict,
             "vision_config": multimodal_config
         }
         config_dict["architectures"] = ["PixtralForConditionalGeneration"]
         config_dict["model_type"] = "pixtral"
-        if quantization_config_val: # Check if it was not None
+        if quantization_config_val:
             config_dict["quantization_config"] = quantization_config_val
 
     config_dict.update(kwargs)
 
-    # The variable 'config_dict' is rebound by recurse_elems call
     config_dict = recurse_elems(config_dict)
 
-    # transform to HF config format
     if config_type == "multimodal":
-        # Ensure text_config and vision_config are dicts before ** unpacking
         text_c = config_dict.get("text_config", {})
         vision_c = config_dict.get("vision_config", {})
-        # If recurse_elems already processed them, they should be dicts.
-        # This step is defensive.
         config_dict["text_config"] = PretrainedConfig(
-            **(text_c if isinstance(text_c, dict) else {})
-        )
+            **(text_c if isinstance(text_c, dict) else {}))
         config_dict["vision_config"] = PretrainedConfig(
-            **(vision_c if isinstance(vision_c, dict) else {})
-        )
+            **(vision_c if isinstance(vision_c, dict) else {}))
 
     return PretrainedConfig(**config_dict)
 
