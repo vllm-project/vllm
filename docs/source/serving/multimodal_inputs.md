@@ -216,7 +216,7 @@ A chat template is **required** to use Chat Completions API.
 
 Although most models come with a chat template, for others you have to define one yourself.
 The chat template can be inferred based on the documentation on the model's HuggingFace repo.
-For example, `Qwen/Qwen-VL-Chat` requires a chat template that can be found here: <gh-file:examples/template_qwen_vl.jinja>
+For example, DeepSeek-VL2 requires a chat template that can be found here: <gh-file:examples/template_deepseek_vl2.jinja>
 :::
 
 ### Image Inputs
