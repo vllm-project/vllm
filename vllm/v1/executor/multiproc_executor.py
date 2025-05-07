@@ -258,9 +258,10 @@ class MultiprocExecutor(Executor):
                 self.io_thread_pool.shutdown(wait=False, cancel_futures=True)
                 self.io_thread_pool = None
 
-            for w in self.workers:
-                w.worker_response_mq = None
-            self._ensure_worker_termination([w.proc for w in self.workers])
+            if workers := getattr(self, 'workers', None):
+                for w in workers:
+                    w.worker_response_mq = None
+                self._ensure_worker_termination([w.proc for w in workers])
 
         self.rpc_broadcast_mq = None
 
