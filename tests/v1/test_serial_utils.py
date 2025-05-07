@@ -286,7 +286,8 @@ def test_custom_class_serialization_allowed_with_pickle(
         decoded = decoder.decode(encoded)
 
         # Verify the decoded object matches the original
-        assert obj == decoded, "Decoded object does not match the original object."
+        assert obj == decoded, (
+            "Decoded object does not match the original object.")
 
 
 def test_custom_class_serialization_disallowed_without_pickle():
