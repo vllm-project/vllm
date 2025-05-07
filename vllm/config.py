@@ -171,6 +171,12 @@ def config(cls: ConfigT) -> ConfigT:
     """
     A decorator that ensures all fields in a dataclass have default values
     and that each field has a docstring.
+
+    If a `ConfigT` is used as a CLI argument itself, the default value provided
+    by `get_kwargs` will be the result parsing a JSON string as the kwargs
+    (i.e. `ConfigT(**json.loads(cli_arg))`). However, if a particular `ConfigT`
+    requires custom construction from CLI (i.e. `CompilationConfig`), it can
+    have a `from_cli` method, which will be called instead.
     """
     if not is_dataclass(cls):
         raise TypeError("The decorated class must be a dataclass.")
