@@ -194,6 +194,11 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
         )
         _dummy = torch.zeros(1)
         self._dtype = _dummy.dtype
+        self.decoder_attention_types = getattr(
+            config.text_config, "attn_type_list", False) or getattr(
+                config.text_config, "decoder_attention_types", False)
+        if not self.decoder_attention_types:
+            self.decoder_attention_types = [1] * config.text_config.num_hidden_layers
         self.minimax_cache: Optional[MinimaxCacheManager] = None
         linear_layer_nums = sum(1 for i in range(config.text_config.num_hidden_layers)
                                 if self.decoder_attention_types[i] == 0)
