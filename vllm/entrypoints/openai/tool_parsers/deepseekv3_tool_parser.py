@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import json
 import re
 from collections.abc import Sequence
 from typing import Union
@@ -26,19 +25,9 @@ from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
-"""
-
-"""
-
 
 @ToolParserManager.register_module("deepseekv3")
 class DeepSeekV3ToolParser(ToolParser):
-    """
-    Tool call parser for DeepSeekV3 model,
-
-    Parse DeepSeekV3 tool call returns like:
-    '<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather\n```json\n{"location": "Beijing"}\n```<｜tool▁call▁end｜>\n<｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather\n```json\n{"location": "Beijing"}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>'
-    """
 
     def __init__(self, tokenizer: AnyTokenizer):
         super().__init__(tokenizer)
@@ -58,10 +47,6 @@ class DeepSeekV3ToolParser(ToolParser):
 
         self.tool_call_regex = re.compile(
             r"<｜tool▁call▁begin｜>(?P<type>.*)<｜tool▁sep｜>(?P<function_name>.*)\n```json\n(?P<function_arguments>.*)\n```<｜tool▁call▁end｜>"
-        )
-
-        self.stream_tool_call_complete_regex = re.compile(
-            r"(?P<type>.*)<｜tool▁sep｜>(?P<function_name>.*)\n```json\n(?P<function_arguments>.*)\n```"
         )
 
         self.stream_tool_call_portion_regex = re.compile(
