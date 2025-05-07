@@ -145,7 +145,8 @@ class DeepseekV2MoE(nn.Module):
                 # to reduce the shared_output result. Instead we reduce
                 # at the end of the forward pass.
                 # With EP and the pplx kernels - this is no longer viable
-                # as all GPU ranks in DP, produce the complete set of hidden_states.
+                # as all GPU ranks in DP, produce the complete set of
+                # hidden_states.
                 # Therefore reduce the shared experts early.
                 reduce_results=self.experts.must_reduce_shared_outputs(),
                 prefix=f"{prefix}.shared_experts",
@@ -178,7 +179,7 @@ class DeepseekV2MoE(nn.Module):
                     * (1. / self.routed_scaling_factor)
 
         if self.tp_size > 1:
-            final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(
+            final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(  # noqa E501
                 final_hidden_states)
 
         return final_hidden_states.view(num_tokens, hidden_dim)

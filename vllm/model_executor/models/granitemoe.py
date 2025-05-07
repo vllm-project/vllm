@@ -100,7 +100,7 @@ class GraniteMoeMoE(nn.Module):
         final_hidden_states = self.experts(hidden_states, router_logits)
 
         if self.tp_size > 1:
-            final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(
+            final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(  # noqa E501
                 final_hidden_states)
 
         return final_hidden_states.view(orig_shape)
