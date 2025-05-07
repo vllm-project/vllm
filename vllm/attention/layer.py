@@ -18,6 +18,7 @@ from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.models.utils import NOT_USE_SLIDING_WINDOW
 from vllm.platforms import _Backend, current_platform
 from vllm.utils import direct_register_custom_op
 
@@ -62,11 +63,11 @@ class Attention(nn.Module):
         if per_layer_sliding_window is not None:
             # per-layer sliding window
 
-            if per_layer_sliding_window == -1:
+            if per_layer_sliding_window == NOT_USE_SLIDING_WINDOW:
                 sliding_window = None
             else:
                 assert per_layer_sliding_window > 0, \
-            "per_layer_sliding_window must be positive or -1 (to force disable)"
+            f"per_layer_sliding_window must be positive or {NOT_USE_SLIDING_WINDOW} (to force disable)"
                 sliding_window = per_layer_sliding_window
         elif cache_config is not None:
             # model-level sliding window

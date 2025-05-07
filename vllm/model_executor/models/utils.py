@@ -24,6 +24,8 @@ logger = init_logger(__name__)
 WeightsMapping = Mapping[str, Optional[str]]
 """If a key maps to a value of `None`, the corresponding weight is ignored."""
 
+NOT_USE_SLIDING_WINDOW = -1
+
 
 @dataclass
 class WeightsMapper:
@@ -721,9 +723,9 @@ def resolve_sliding_window(
 ) -> Optional[int]:
 
     if sliding_window is None:
-        return -1
+        return NOT_USE_SLIDING_WINDOW
 
     if max_window_layers is None:
         return sliding_window
 
-    return sliding_window if layer_idx >= max_window_layers else -1
+    return sliding_window if layer_idx >= max_window_layers else NOT_USE_SLIDING_WINDOW
