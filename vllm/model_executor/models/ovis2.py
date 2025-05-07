@@ -87,7 +87,7 @@ class VisualTokenizer(torch.nn.Module):
         super().__init__()
         self.config = config
         self.backbone = self._init_backbone(
-            config=config.backbone_config,
+            config=config,
             quant_config=quant_config,
             prefix=f"{prefix}.backbone",
         )
@@ -249,7 +249,11 @@ class Ovis2ProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_config(OvisConfig)
 
     def get_hf_processor(self, **kwargs):
-        return self.ctx.get_hf_processor(OvisProcessor)
+        image_pad_token = self.get_image_pad_token()
+        return self.ctx.get_hf_processor(
+            OvisProcessor,
+            image_pad_token=image_pad_token,
+        )
 
     def get_image_pad_token(self) -> str:
         hf_text_config = self.get_hf_config().get_text_config()

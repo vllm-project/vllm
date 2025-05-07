@@ -67,7 +67,7 @@ class OvisProcessor(ProcessorMixin):
     valid_kwargs = ["chat_template"]
 
     image_processor_class = "AutoImageProcessor"
-    tokenizer_class = "Qwen2Tokenizer"
+    tokenizer_class = "AutoTokenizer"
 
     def __init__(self, image_processor=None, tokenizer=None, chat_template=None, image_pad_token=None, **kwargs):
         self.image_token = "<image>"
