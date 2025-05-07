@@ -64,6 +64,7 @@ class SampleRequest:
 
 class BenchmarkDataset(ABC):
     DEFAULT_SEED = 0
+    IS_MULTIMODAL = False
 
     def __init__(
         self,
@@ -314,13 +315,15 @@ class RandomDataset(BenchmarkDataset):
         )
 
         vocab_size = tokenizer.vocab_size
+        num_special_tokens = tokenizer.num_special_tokens_to_add()
+        real_input_len = input_len - num_special_tokens
 
         prefix_token_ids = (np.random.randint(
             0, vocab_size, size=prefix_len).tolist() if prefix_len > 0 else [])
 
         # New sampling logic: [X * (1 - b), X * (1 + b)]
-        input_low = int(input_len * (1 - range_ratio))
-        input_high = int(input_len * (1 + range_ratio))
+        input_low = int(real_input_len * (1 - range_ratio))
+        input_high = int(real_input_len * (1 + range_ratio))
         output_low = int(output_len * (1 - range_ratio))
         output_high = int(output_len * (1 + range_ratio))
 
@@ -343,6 +346,17 @@ class RandomDataset(BenchmarkDataset):
                          vocab_size).tolist()
             token_sequence = prefix_token_ids + inner_seq
             prompt = tokenizer.decode(token_sequence)
+            # After decoding the prompt we have to encode and decode it again.
+            # This is done because in some cases N consecutive tokens
+            # give a string tokenized into != N number of tokens.
+            # For example for GPT2Tokenizer:
+            # [6880, 6881] -> ['Ġcalls', 'here'] ->
+            # [1650, 939, 486] -> ['Ġcall', 'sh', 'ere']
+            # To avoid uncontrolled change of the prompt length,
+            # the encoded sequence is truncated before being decode again.
+            re_encoded_sequence = tokenizer.encode(
+                prompt, add_special_tokens=False)[:input_lens[i]]
+            prompt = tokenizer.decode(re_encoded_sequence)
             total_input_len = prefix_len + int(input_lens[i])
             requests.append(
                 SampleRequest(
@@ -621,6 +635,7 @@ class ConversationDataset(HuggingFaceDataset):
     SUPPORTED_DATASET_PATHS = {
         'lmms-lab/LLaVA-OneVision-Data', 'Aeala/ShareGPT_Vicuna_unfiltered'
     }
+    IS_MULTIMODAL = True
 
     def sample(self,
                tokenizer: PreTrainedTokenizerBase,
@@ -685,6 +700,7 @@ class VisionArenaDataset(HuggingFaceDataset):
         "lmarena-ai/vision-arena-bench-v0.1":
         lambda x: x["turns"][0][0]["content"]
     }
+    IS_MULTIMODAL = True
 
     def sample(
         self,
@@ -769,6 +785,60 @@ class InstructCoderDataset(HuggingFaceDataset):
 
 
 # -----------------------------------------------------------------------------
+# MT-Bench Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class MTBenchDataset(HuggingFaceDataset):
+    """
+    MT-Bench Dataset.
+    https://huggingface.co/datasets/philschmid/mt-bench
+
+    We create a single turn dataset for MT-Bench. 
+    This is similar to Spec decoding benchmark setup in vLLM
+    https://github.com/vllm-project/vllm/blob/9d98ab5ec/examples/offline_inference/eagle.py#L14-L18
+    """ # noqa: E501
+
+    DEFAULT_OUTPUT_LEN = 256  # avg len used in SD bench in vLLM
+    SUPPORTED_DATASET_PATHS = {
+        "philschmid/mt-bench",
+    }
+
+    def sample(self,
+               tokenizer: PreTrainedTokenizerBase,
+               num_requests: int,
+               output_len: Optional[int] = None,
+               enable_multimodal_chat: bool = False,
+               **kwargs) -> list:
+        output_len = (output_len
+                      if output_len is not None else self.DEFAULT_OUTPUT_LEN)
+        sampled_requests = []
+
+        for item in self.data:
+            if len(sampled_requests) >= num_requests:
+                break
+            prompt = item['turns'][0]
+
+            # apply template
+            prompt = tokenizer.apply_chat_template([{
+                "role": "user",
+                "content": prompt
+            }],
+                                                   add_generation_prompt=True,
+                                                   tokenize=False)
+
+            prompt_len = len(tokenizer(prompt).input_ids)
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                ))
+        self.maybe_oversample_requests(sampled_requests, num_requests)
+        return sampled_requests
+
+
+# -----------------------------------------------------------------------------
 # AIMO Dataset Implementation
 # -----------------------------------------------------------------------------
 
@@ -813,5 +883,170 @@ class AIMODataset(HuggingFaceDataset):
                     expected_output_len=output_len,
                     multi_modal_data=None,
                 ))
+        self.maybe_oversample_requests(sampled_requests, num_requests)
+        return sampled_requests
+
+
+# -----------------------------------------------------------------------------
+# Next Edit Prediction Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+zeta_prompt = """### Instruction:
+You are a code completion assistant and your task is to analyze user edits and then rewrite an excerpt that the user provides, suggesting the appropriate edits within the excerpt, taking into account the cursor location.
+
+### User Edits:
+
+{}
+
+### User Excerpt:
+
+{}
+
+### Response:
+
+""" # noqa: E501
+
+
+def _format_zeta_prompt(
+        sample: dict,
+        original_start_marker: str = "<|editable_region_start|>") -> dict:
+    """Format the zeta prompt for the Next Edit Prediction (NEP) dataset.
+    
+    This function formats examples from the NEP dataset 
+    into prompts and expected outputs. It could be 
+    further extended to support more NEP datasets.
+    
+    Args:
+        sample: The dataset sample containing events, 
+            inputs, and outputs.
+        original_start_marker: The marker indicating the 
+            start of the editable region. Defaults to 
+            "<|editable_region_start|>".
+            
+    Returns:
+        A dictionary with the formatted prompts and expected outputs.
+    """
+    events = sample["events"]
+    input = sample["input"]
+    output = sample["output"]
+    prompt = zeta_prompt.format(events, input)
+
+    # following the original implementation, extract the focused region
+    # from the raw output
+    output_start_index = output.find(original_start_marker)
+    output_focused_region = output[output_start_index:]
+    expected_output = output_focused_region
+
+    return {"prompt": prompt, "expected_output": expected_output}
+
+
+class NextEditPredictionDataset(HuggingFaceDataset):
+    """
+    Dataset class for processing a Next Edit Prediction dataset.
+    """
+
+    SUPPORTED_DATASET_PATHS = {
+        "zed-industries/zeta",
+    }
+    MAPPING_PROMPT_FUNCS = {
+        "zed-industries/zeta": _format_zeta_prompt,
+    }
+
+    def sample(self, tokenizer: PreTrainedTokenizerBase, num_requests: int,
+               **kwargs):
+        formatting_prompt_func = self.MAPPING_PROMPT_FUNCS.get(
+            self.dataset_path)
+        if formatting_prompt_func is None:
+            raise ValueError(f"Unsupported dataset path: {self.dataset_path}")
+        samples = []
+        for sample in self.data:
+            sample = formatting_prompt_func(sample)
+            samples.append(
+                SampleRequest(
+                    prompt=sample["prompt"],
+                    prompt_len=len(tokenizer(sample["prompt"]).input_ids),
+                    expected_output_len=len(
+                        tokenizer(sample["expected_output"]).input_ids),
+                ))
+            if len(samples) >= num_requests:
+                break
+        self.maybe_oversample_requests(samples, num_requests)
+        return samples
+
+
+# -----------------------------------------------------------------------------
+# ASR Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class ASRDataset(HuggingFaceDataset):
+    """
+    Dataset class for processing a ASR dataset for transcription.
+    Tested on the following set:
+
+    +----------------+----------------------------------------+--------------------------+-----------------------------+
+    | Dataset        | Domain                                 | Speaking Style           | hf-subset                   |
+    +----------------+----------------------------------------+--------------------------+-----------------------------+
+    | TED-LIUM       | TED talks                              | Oratory                  | release1, release2, release3|
+    |                |                                        |                          | release3-speaker-adaptation |
+    | VoxPopuli      | European Parliament                    | Oratory                  | en, de, it, fr,  ...        |
+    | LibriSpeech    | Audiobook                              | Narrated                 | "LIUM/tedlium"              |
+    | GigaSpeech     | Audiobook, podcast, YouTube            | Narrated, spontaneous    | xs, s, m, l, xl, dev, test  |
+    | SPGISpeech     | Financial meetings                     | Oratory, spontaneous     | S, M, L, dev, test          |
+    | AMI            | Meetings                               | Spontaneous              | ihm, sdm                    |
+    +----------------+----------------------------------------+--------------------------+-----------------------------+
+
+    """ # noqa: E501
+    SUPPORTED_DATASET_PATHS = {
+        "openslr/librispeech_asr", "facebook/voxpopuli", "LIUM/tedlium",
+        "edinburghcstr/ami", "speechcolab/gigaspeech", "kensho/spgispeech"
+    }
+
+    DEFAULT_OUTPUT_LEN = 128
+    IS_MULTIMODAL = True
+
+    # TODO Whisper-specific. Abstract interface when more models are supported.
+    TRANSCRIPTION_PREAMBLE = "<|startoftranscript|><|en|><|transcribe|>"\
+                              "<|notimestamps|>"
+    skip_long_audios: bool = True
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        output_len: Optional[int] = None,
+        **kwargs,
+    ) -> list:
+        import librosa
+        output_len = (output_len
+                      if output_len is not None else self.DEFAULT_OUTPUT_LEN)
+        prompt = ASRDataset.TRANSCRIPTION_PREAMBLE
+        prompt_len = len(tokenizer(prompt).input_ids)
+        sampled_requests = []
+        skipped = 0
+        for item in self.data:
+            if len(sampled_requests) >= num_requests:
+                break
+            audio = item["audio"]
+            y, sr = audio["array"], audio["sampling_rate"]
+            duration_s = librosa.get_duration(y=y, sr=sr)
+            # Whisper max supported duration
+            if self.skip_long_audios and duration_s > 30:
+                skipped += 1
+                continue
+
+            mm_content = {"audio": (y, sr)}
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                    multi_modal_data=mm_content,
+                ))
+        if skipped:
+            logger.warning("%d samples discarded from dataset due to" \
+                           " their length being greater than" \
+                           " what Whisper supports.", skipped)
         self.maybe_oversample_requests(sampled_requests, num_requests)
         return sampled_requests

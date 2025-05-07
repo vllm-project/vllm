@@ -50,9 +50,10 @@ try:
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
-from benchmark_dataset import (AIMODataset, BurstGPTDataset,
+from benchmark_dataset import (AIMODataset, ASRDataset, BurstGPTDataset,
                                ConversationDataset, HuggingFaceDataset,
-                               InstructCoderDataset, RandomDataset,
+                               InstructCoderDataset, MTBenchDataset,
+                               NextEditPredictionDataset, RandomDataset,
                                SampleRequest, ShareGPTDataset, SonnetDataset,
                                VisionArenaDataset)
 from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
@@ -274,10 +275,6 @@ async def benchmark(
         input_requests[0].expected_output_len, \
             input_requests[0].multi_modal_data
 
-    if backend != "openai-chat" and test_mm_content is not None:
-        # multi-modal benchmark is only available on OpenAI Chat backend.
-        raise ValueError(
-            "Multi-modal content is only supported on 'openai-chat' backend.")
     assert test_mm_content is None or isinstance(test_mm_content, dict)
     test_input = RequestFuncInput(
         model=model_id,
@@ -599,10 +596,19 @@ def main(args: argparse.Namespace):
         elif args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS:
             dataset_class = InstructCoderDataset
             args.hf_split = "train"
+        elif args.dataset_path in MTBenchDataset.SUPPORTED_DATASET_PATHS:
+            dataset_class = MTBenchDataset
+            args.hf_split = "train"
         elif args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS:
             dataset_class = ConversationDataset
         elif args.dataset_path in AIMODataset.SUPPORTED_DATASET_PATHS:
             dataset_class = AIMODataset
+            args.hf_split = "train"
+        elif args.dataset_path in NextEditPredictionDataset.SUPPORTED_DATASET_PATHS:  # noqa: E501
+            dataset_class = NextEditPredictionDataset
+            args.hf_split = "train"
+        elif args.dataset_path in ASRDataset.SUPPORTED_DATASET_PATHS:
+            dataset_class = ASRDataset
             args.hf_split = "train"
         else:
             supported_datasets = set([
@@ -615,6 +621,13 @@ def main(args: argparse.Namespace):
                 f" from one of following: {supported_datasets}. "
                 "Please consider contributing if you would "
                 "like to add support for additional dataset formats.")
+
+        if (dataset_class.IS_MULTIMODAL and backend not in \
+            ["openai-chat", "openai-audio"]):
+            # multi-modal benchmark is only available on OpenAI Chat backend.
+            raise ValueError(
+                "Multi-modal content is only supported on 'openai-chat' and " \
+                "'openai-audio' backend.")
         input_requests = dataset_class(
             dataset_path=args.dataset_path,
             dataset_subset=args.hf_subset,
@@ -707,7 +720,7 @@ def main(args: argparse.Namespace):
         ))
 
     # Save config and results to json
-    if args.save_result:
+    if args.save_result or args.append_result:
         result_json: dict[str, Any] = {}
 
         # Setup
@@ -728,6 +741,14 @@ def main(args: argparse.Namespace):
                     raise ValueError(
                         "Invalid metadata format. Please use KEY=VALUE format."
                     )
+        # Traffic
+        result_json["request_rate"] = (args.request_rate if args.request_rate
+                                       < float("inf") else "inf")
+        result_json["burstiness"] = args.burstiness
+        result_json["max_concurrency"] = args.max_concurrency
+
+        # Merge with benchmark result
+        result_json = {**result_json, **benchmark_result}
 
         if not args.save_detailed:
             # Remove fields with too many data points
@@ -738,15 +759,6 @@ def main(args: argparse.Namespace):
                 if field in result_json:
                     del result_json[field]
 
-        # Traffic
-        result_json["request_rate"] = (args.request_rate if args.request_rate
-                                       < float("inf") else "inf")
-        result_json["burstiness"] = args.burstiness
-        result_json["max_concurrency"] = args.max_concurrency
-
-        # Merge with benchmark result
-        result_json = {**result_json, **benchmark_result}
-
         # Save to file
         base_model_id = model_id.split("/")[-1]
         max_concurrency_str = (f"-concurrency{args.max_concurrency}"
@@ -756,7 +768,12 @@ def main(args: argparse.Namespace):
             file_name = args.result_filename
         if args.result_dir:
             file_name = os.path.join(args.result_dir, file_name)
-        with open(file_name, "w", encoding='utf-8') as outfile:
+        with open(file_name,
+                  mode="a+" if args.append_result else "w",
+                  encoding='utf-8') as outfile:
+            # Append a newline.
+            if args.append_result and outfile.tell() != 0:
+                outfile.write("\n")
             json.dump(result_json, outfile)
         save_to_pytorch_benchmark_format(args, result_json, file_name)
 
@@ -887,6 +904,11 @@ if __name__ == "__main__":
         action="store_true",
         help="When saving the results, whether to include per request "
         "information such as response, error, ttfs, tpots, etc.",
+    )
+    parser.add_argument(
+        "--append-result",
+        action="store_true",
+        help="Append the benchmark result to the existing json file.",
     )
     parser.add_argument(
         "--metadata",
