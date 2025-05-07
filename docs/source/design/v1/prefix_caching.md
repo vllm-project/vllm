@@ -16,7 +16,7 @@ In the example above, the KV cache in the first block can be uniquely identified
 
 * Parent hash value: The hash value of the parent hash block.
 * Block tokens: A tuple of tokens in this block. The reason to include the exact tokens is to reduce potential hash value collision.
-* Extra hashes: Other values required to make this block unique, such as LoRA IDs and multi-modality input hashes (see the example below).
+* Extra hashes: Other values required to make this block unique, such as LoRA IDs, multi-modality input hashes (see the example below), and cache salts to isolate caches in multi-tenant environments.
 
 > **Note 1:** We only cache full blocks.
 
@@ -75,6 +75,24 @@ Block 3
 ```
 
 In the rest of this document, we first introduce the data structure used for prefix caching in vLLM v1, followed by the prefix caching workflow of major KV cache operators (e.g., allocate, append, free, eviction). Finally, we use an example to illustrate the end to end prefix caching workflow.
+
+**Cache Isolation for Security**
+To improve privacy in shared environments, vLLM supports isolating prefix cache reuse through optional per-request salting. By including a `cache_salt` in the request, this value is injected into the hash of the first block, ensuring that only requests with the same salt can reuse cached KV blocks. This prevents timing-based attacks where an adversary could infer cached content by observing latency differences. This offers protection without compromising performance.
+
+```json
+{
+  "messages": [
+    {"role": "system", "content": "You are a helpful assistant."},
+    {"role": "user", "content": "Here is a document with details about the world series: ..."},
+    {"role": "user", "content": "Who won the world series in 2020?"}
+  ],
+  "cache_salt": "Z3V2bmV3aGxza3ZubGFoZ3Zud3V3ZWZ2bmd0b3V2bnZmc2xpZ3RoZ2x2aQ=="
+}
+```
+
+With this setup, cache sharing is limited to users or requests that explicitly agree on a common salt, enabling cache reuse within a trust group while isolating others.
+
+> **Note:** Cache isolation is not supported in engine V0.
 
 ## Data Structure
 
