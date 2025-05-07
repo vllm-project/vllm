@@ -1235,7 +1235,7 @@ class ModelConfig:
         # If config.top_k is the Transformers default, to_diff_dict() will
         # remove it. vLLM default is different, so we need to add it back.
         if config.top_k == GenerationConfig().top_k:
-            diff_dict["top_k"] = config.top_l
+            diff_dict["top_k"] = config.top_k
 
         return diff_dict
 
