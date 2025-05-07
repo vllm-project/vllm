@@ -375,7 +375,7 @@ class Scheduler(SchedulerInterface):
 
                 # Number of tokens to be scheduled.
                 # We use `request.num_tokens` instead of
-                # `request.num_prompt_tokens` to consider the resumed reqs,
+                # `request.num_prompt_tokens` to consider the resumed requests,
                 # which have output tokens.
                 num_new_tokens = request.num_tokens - num_computed_tokens
                 if (0 < self.scheduler_config.long_prefill_token_threshold <
@@ -524,7 +524,7 @@ class Scheduler(SchedulerInterface):
             grammar_bitmask=grammar_bitmask,
         )
 
-        # This function is designed for multiple purposes:
+        # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
         # 2. Wrap up all the KV cache load / save ops into an opaque object
         # 3. Clear the internal states of the connector
@@ -547,8 +547,7 @@ class Scheduler(SchedulerInterface):
         # 3. If some tokens (e.g. spec tokens) are rejected later, the number of
         #    computed tokens will be adjusted in update_from_output.
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
-            if req := self.requests.get(req_id):
-                req.num_computed_tokens += num_scheduled_token
+            self.requests[req_id].num_computed_tokens += num_scheduled_token
 
         self.finished_req_ids = set()
         return scheduler_output
