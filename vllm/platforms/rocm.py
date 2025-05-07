@@ -328,6 +328,11 @@ class RocmPlatform(Platform):
         return "vllm.distributed.device_communicators.cuda_communicator.CudaCommunicator"  # noqa
 
     @classmethod
+    def supports_mx(cls) -> bool:
+        gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
+        return any(gfx in gcn_arch for gfx in ["gfx95"])
+
+    @classmethod
     def supports_fp8(cls) -> bool:
         gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
         return any(gfx in gcn_arch for gfx in ['gfx94', 'gfx95', 'gfx12'])
