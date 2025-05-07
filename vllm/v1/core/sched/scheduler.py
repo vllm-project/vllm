@@ -344,7 +344,7 @@ class Scheduler(SchedulerInterface):
                     skipped_waiting_requests.appendleft(request)
                     continue
 
-                # Get tokens in the KV cache.
+                # Get already-cached tokens.
                 new_computed_blocks, num_computed_tokens = \
                     self.kv_cache_manager.get_computed_blocks(
                         request)
