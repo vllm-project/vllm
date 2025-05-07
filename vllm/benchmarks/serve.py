@@ -494,7 +494,7 @@ async def benchmark(
 
     process_one_metric("ttft", "TTFT", "Time to First Token")
     process_one_metric("tpot", "TPOT",
-                       "Time per Output Token (excl. 1st token)")
+                       "Time per Output Token (incl. 1st token)")
     process_one_metric("itl", "ITL", "Inter-token Latency")
     process_one_metric("e2el", "E2EL", "End-to-end Latency")
 
