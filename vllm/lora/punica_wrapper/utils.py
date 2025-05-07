@@ -125,8 +125,8 @@ def convert_mapping(
         indices[2] * extra_vocab_size,
         indices[2] * (vocab_size + extra_vocab_size),
     ])
-    embeddings_indices = torch.where(embeddings_indices == -1,
-                                     max_loras - 1, embeddings_indices)
+    embeddings_indices = torch.where(embeddings_indices == -1, max_loras - 1,
+                                     embeddings_indices)
     base_indices = indices[1]
     sampler_indices = prompt_mapping_tensor
     sampler_indices_padded = sampler_indices.clone()
