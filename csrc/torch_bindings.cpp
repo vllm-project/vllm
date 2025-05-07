@@ -176,7 +176,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.
   ops.def(
       "rotary_embedding(Tensor positions, Tensor! query,"
-      "                 Tensor! key, int head_size,"
+      "                 Tensor!? key, int head_size,"
       "                 Tensor cos_sin_cache, bool is_neox) -> ()");
   ops.impl("rotary_embedding", torch::kCUDA, &rotary_embedding);
 
@@ -184,7 +184,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // (supports multiple loras).
   ops.def(
       "batched_rotary_embedding(Tensor positions, Tensor! query,"
-      "                         Tensor! key, int head_size,"
+      "                         Tensor!? key, int head_size,"
       "                         Tensor cos_sin_cache, bool is_neox,"
       "                         int rot_dim,"
       "                         Tensor cos_sin_cache_offsets) -> ()");
@@ -336,6 +336,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "num_tokens_post_padded, "
       "int type, SymInt row, SymInt top_k, SymInt tokens) -> Tensor");
   ops.impl("ggml_moe_a8", torch::kCUDA, &ggml_moe_a8);
+
+  ops.def(
+      "ggml_moe_a8_vec(Tensor X, Tensor W, "
+      "Tensor topk_ids, int top_k, "
+      "int type, SymInt row, SymInt tokens) -> Tensor");
+  ops.impl("ggml_moe_a8_vec", torch::kCUDA, &ggml_moe_a8_vec);
 
   ops.def("ggml_moe_get_block_size", &ggml_moe_get_block_size);
 
