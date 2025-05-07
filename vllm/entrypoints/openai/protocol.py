@@ -246,7 +246,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     ]] = "none"
 
     # Custom sampling params
-    extra_sampling_params: Optional[dict[str, Any]] = Field(
+    vllm_xargs: Optional[dict[str, Union[str, int, float]]] = Field(
         default=None,
         description=("Additional kwargs to pass to sampling."),
     )
@@ -545,7 +545,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 else RequestOutputKind.FINAL_ONLY,
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias,
-            extra_args=self.extra_sampling_params)
+            extra_args=self.vllm_xargs)
 
     def _get_guided_json_from_tool(
             self) -> Optional[Union[str, dict, BaseModel]]:
@@ -764,7 +764,7 @@ class CompletionRequest(OpenAIBaseModel):
     user: Optional[str] = None
 
     # Custom args param
-    extra_sampling_params: Optional[dict[str, Any]] = Field(
+    vllm_xargs: Optional[dict[str, Any]] = Field(
         default=None,
         description=("Additional kwargs to pass to sampling."),
     )
@@ -985,7 +985,7 @@ class CompletionRequest(OpenAIBaseModel):
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
-            extra_args=self.extra_sampling_params)
+            extra_args=self.vllm_xargs)
 
     @model_validator(mode="before")
     @classmethod
@@ -1697,6 +1697,12 @@ class TranscriptionRequest(OpenAIBaseModel):
         "min_p": 0.0,
     }
 
+    # Custom sampling params
+    vllm_xargs: Optional[dict[str, Union[str, int, float]]] = Field(
+        default=None,
+        description=("Additional kwargs to pass to sampling."),
+    )
+
     def to_sampling_params(
             self,
             default_max_tokens: int,
@@ -1737,7 +1743,8 @@ class TranscriptionRequest(OpenAIBaseModel):
                                             presence_penalty=self.presence_penalty,
                                             output_kind=RequestOutputKind.DELTA
                                             if self.stream \
-                                            else RequestOutputKind.FINAL_ONLY)
+                                            else RequestOutputKind.FINAL_ONLY,
+                                            extra_args=self.vllm_xargs)
 
     @model_validator(mode="before")
     @classmethod
