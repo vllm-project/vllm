@@ -337,6 +337,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "int type, SymInt row, SymInt top_k, SymInt tokens) -> Tensor");
   ops.impl("ggml_moe_a8", torch::kCUDA, &ggml_moe_a8);
 
+  ops.def(
+      "ggml_moe_a8_vec(Tensor X, Tensor W, "
+      "Tensor topk_ids, int top_k, "
+      "int type, SymInt row, SymInt tokens) -> Tensor");
+  ops.impl("ggml_moe_a8_vec", torch::kCUDA, &ggml_moe_a8_vec);
+
   ops.def("ggml_moe_get_block_size", &ggml_moe_get_block_size);
 
 #ifndef USE_ROCM
