@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.metadata
 import json
 import copy
@@ -95,7 +96,7 @@ class BaseLogitsProcessor:
             # mask must be on same device
             mask=self._mask.to(scores.device))
         self._mask.to("cpu")
-        
+
         return scores
 
     def clone(self) -> "BaseLogitsProcessor":
@@ -169,7 +170,9 @@ class OutlinesVocabulary:
         self.inner = vocabulary
         # Have to do abs(hash()) because python hashes can
         # be negative, and we are using hash as a cache key.
-        self._hash = abs(hash(repr(vocabulary)))
+        hex_str = hashlib.sha256(vocabulary.__repr__()).hexdigest()
+        hash_int = int(hex_str, 16)
+        self._hash = hash_int
 
 
 re_llama_byte_token = re.compile(r"^<0x[0-9A-F]{2}>$")
@@ -262,7 +265,6 @@ def get_vocabulary(tokenizer: AnyTokenizer) -> Vocabulary:
         )
         vocabulary = OutlinesVocabulary(Vocabulary(eos_token_id,
                                                    reduced_vocab))
-        vocabulary._hash = hash(vocabulary.__repr__())
         tokenizer._outlines_vocabulary = vocabulary  # type: ignore
 
         return vocabulary

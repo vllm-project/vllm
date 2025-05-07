@@ -82,7 +82,7 @@ class StructuredOutputManager:
                     tokenizer=self.tokenizer,
                     vocab_size=vocab_size,
                 )
-            elif backend_name == "outlines":
+            elif backend == "outlines":
                 from vllm.v1.structured_output.backend_outlines import (
                     OutlinesBackend)
 
