@@ -408,7 +408,7 @@ steps:
   - vllm/model_executor/layers/quantization
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - bash ./run-tests.sh -c configs/models-small.txt -t 1
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-small.txt --tp-size=1
 
 - label: OpenAI API correctness
   source_file_dependencies:
@@ -713,4 +713,4 @@ steps:
   - vllm/model_executor/layers/quantization
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - bash ./run-tests.sh -c configs/models-large.txt -t 4
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4

@@ -6,6 +6,7 @@ import dataclasses
 import json
 import re
 import threading
+import warnings
 from dataclasses import MISSING, dataclass, fields
 from itertools import permutations
 from typing import (Any, Callable, Dict, List, Literal, Optional, Type,
@@ -394,7 +395,13 @@ class EngineArgs:
         if isinstance(self.compilation_config, (int, dict)):
             self.compilation_config = CompilationConfig.from_cli(
                 str(self.compilation_config))
-
+        if self.qlora_adapter_name_or_path is not None:
+            warnings.warn(
+                "The `qlora_adapter_name_or_path` is deprecated "
+                "and will be removed in v0.10.0. ",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         # Setup plugins
         from vllm.plugins import load_general_plugins
         load_general_plugins()
@@ -504,10 +511,14 @@ class EngineArgs:
                                 **load_kwargs["ignore_patterns"])
         load_group.add_argument("--use-tqdm-on-load",
                                 **load_kwargs["use_tqdm_on_load"])
-        load_group.add_argument('--qlora-adapter-name-or-path',
-                                type=str,
-                                default=None,
-                                help='Name or path of the QLoRA adapter.')
+        load_group.add_argument(
+            "--qlora-adapter-name-or-path",
+            type=str,
+            default=None,
+            help="The `--qlora-adapter-name-or-path` has no effect, do not set"
+            " it, and it  will be removed in v0.10.0.",
+            deprecated=True,
+        )
         load_group.add_argument('--pt-load-map-location',
                                 **load_kwargs["pt_load_map_location"])
 
@@ -534,7 +545,7 @@ class EngineArgs:
             deprecated=True,
             help="[DEPRECATED] The `--enable-reasoning` flag is deprecated as "
             "of v0.8.6. Use `--reasoning-parser` to specify the reasoning "
-            "parser backend insteadThis flag (`--enable-reasoning`) will be "
+            "parser backend instead. This flag (`--enable-reasoning`) will be "
             "removed in v0.10.0. When `--reasoning-parser` is specified, "
             "reasoning mode is automatically enabled.")
         guided_decoding_group.add_argument(
@@ -896,12 +907,6 @@ class EngineArgs:
 
     def create_load_config(self) -> LoadConfig:
 
-        if(self.qlora_adapter_name_or_path is not None) and \
-            self.quantization != "bitsandbytes":
-            raise ValueError(
-                "QLoRA adapter only support "
-                f"'bitsandbytes' quantization, but got {self.quantization}")
-
         if self.quantization == "bitsandbytes":
             self.load_format = "bitsandbytes"
 
@@ -1097,11 +1102,6 @@ class EngineArgs:
             lora_dtype=self.lora_dtype,
             max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
             and self.max_cpu_loras > 0 else None) if self.enable_lora else None
-
-        if self.qlora_adapter_name_or_path is not None and \
-            self.qlora_adapter_name_or_path != "":
-            self.model_loader_extra_config[
-                "qlora_adapter_name_or_path"] = self.qlora_adapter_name_or_path
 
         # bitsandbytes pre-quantized model need a specific model loader
         if model_config.quantization == "bitsandbytes":

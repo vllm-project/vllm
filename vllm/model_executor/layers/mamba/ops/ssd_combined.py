@@ -40,7 +40,6 @@ def _mamba_chunk_scan_combined_fwd(x,
     _, _, ngroups, dstate = B.shape
     assert nheads % ngroups == 0
     assert B.shape == (batch, seqlen, ngroups, dstate)
-    assert x.shape == (batch, seqlen, nheads, headdim)
     assert dt.shape == (batch, seqlen, nheads)
     assert A.shape == (nheads, )
     assert C.shape == B.shape

@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-
+import enum
+import os
+from functools import lru_cache
 from typing import TYPE_CHECKING, Optional
 
 from vllm import envs
@@ -13,6 +15,11 @@ else:
     VllmConfig = None
 
 logger = init_logger(__name__)
+
+
+class NeuronFramework(enum.Enum):
+    TRANSFORMERS_NEURONX = "transformers-neuronx"
+    NEURONX_DISTRIBUTED_INFERENCE = "neuronx-distributed-inference"
 
 
 class NeuronPlatform(Platform):
@@ -43,8 +50,6 @@ class NeuronPlatform(Platform):
 
         assert (vllm_config.lora_config
                 is None), "LoRA is not supported for Neuron backend."
-        assert (not vllm_config.speculative_config
-                ), "Speculative decoding not yet supported for Neuron backend."
 
         cache_config = vllm_config.cache_config
         if cache_config:
@@ -67,3 +72,71 @@ class NeuronPlatform(Platform):
     @classmethod
     def use_all_gather(cls) -> bool:
         return True
+
+    @classmethod
+    @lru_cache
+    def is_neuronx_distributed_inference(cls) -> bool:
+        try:
+            import neuronx_distributed_inference
+        except ImportError:
+            neuronx_distributed_inference = None
+        return neuronx_distributed_inference is not None
+
+    @classmethod
+    @lru_cache
+    def is_transformers_neuronx(cls) -> bool:
+        try:
+            import transformers_neuronx
+        except ImportError:
+            transformers_neuronx = None
+        return transformers_neuronx is not None
+
+    def get_neuron_framework_to_use(self):
+        """Return the specified framework if corresponding installations are
+        available.
+
+        If no framework is specified, use neuronx-distributed-inference by
+        default.
+        If that's unavailable, check and switch to transformers-neuronx.
+        """
+        if not self.is_neuron():
+            raise AssertionError(
+                f"Neuron Framework unavailable for platform: {self}")
+
+        tnx_installed = self.is_transformers_neuronx()
+        nxd_installed = self.is_neuronx_distributed_inference()
+
+        specified_framework = os.environ.get("VLLM_NEURON_FRAMEWORK")
+        tnx_framework = NeuronFramework.TRANSFORMERS_NEURONX.value
+        nxd_framework = NeuronFramework.NEURONX_DISTRIBUTED_INFERENCE.value
+        if specified_framework == tnx_framework and tnx_installed:
+            return self.TRANSFORMERS_NEURONX
+
+        if ((specified_framework == nxd_framework and nxd_installed)
+                or (specified_framework is None and nxd_installed)):
+            return NeuronFramework.NEURONX_DISTRIBUTED_INFERENCE
+
+        if specified_framework is None and tnx_installed:
+            return NeuronFramework.TRANSFORMERS_NEURONX
+
+        return None
+
+    def use_neuronx_distributed(self):
+        """
+        Return True if the framework determined in get_neuron_framework_to_use()
+        is NeuronFramework.NEURONX_DISTRIBUTED_INFERENCE, False otherwise. This
+        is used to select the Neuron model framework and framework-specific
+        configuration to apply during model compilation.
+        """
+        nxd_framework = NeuronFramework.NEURONX_DISTRIBUTED_INFERENCE
+        return self.get_neuron_framework_to_use() == nxd_framework
+
+    def use_transformers_neuronx(self):
+        """
+        Return True if the framework determined in get_neuron_framework_to_use()
+        is NeuronFramework.TRANSFORMERS_NEURONX, False otherwise. This is used
+        to select the Neuron model framework and framework-specific
+        configuration to apply during model compilation.
+        """
+        return self.get_neuron_framework_to_use(
+        ) == NeuronFramework.TRANSFORMERS_NEURONX
