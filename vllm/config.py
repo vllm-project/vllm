@@ -54,7 +54,7 @@ if TYPE_CHECKING:
     from vllm.executor.executor_base import ExecutorBase
     from vllm.model_executor.layers.quantization.base_config import (
         QuantizationConfig)
-    from vllm.model_executor.model_loader.loader import BaseModelLoader
+    from vllm.model_executor.model_loader import BaseModelLoader
 
     ConfigType = type[DataclassInstance]
 else:
@@ -321,6 +321,10 @@ class ModelConfig:
     """Skip initialization of tokenizer and detokenizer. Expects valid
     `prompt_token_ids` and `None` for prompt from the input. The generated
     output will contain token ids."""
+    enable_prompt_embeds: bool = False
+    """If `True`, enables passing text embeddings as inputs via the
+    `prompt_embeds` key. Note that enabling this will double the time required
+    for graph compilation."""
     served_model_name: Optional[Union[str, list[str]]] = None
     """The model name(s) used in the API. If multiple names are provided, the
     server will respond to any of the provided names. The model name in the
@@ -1907,10 +1911,10 @@ class SchedulerConfig:
 
     cuda_graph_sizes: list[int] = field(default_factory=lambda: [512])
     """Cuda graph capture sizes, default is 512.
-    1. if one value is provided, then the capture list would follow the pattern:
-        [1, 2, 4] + [i for i in range(8, cuda_graph_sizes + 1, 8)]
-    2. more than one value (e.g. 1 2 128) is provided,
-        then the capture list will follow the provided list."""
+    1. if one value is provided, then the capture list would follow the
+    pattern: [1, 2, 4] + [i for i in range(8, cuda_graph_sizes + 1, 8)]
+    2. more than one value (e.g. 1 2 128) is provided, then the capture list
+    will follow the provided list."""
 
     delay_factor: float = 0.0
     """Apply a delay (of delay factor multiplied by previous
@@ -2269,6 +2273,9 @@ class SpeculativeConfig:
     """Scaling factor for entropy-based threshold, applied when using
     `TypicalAcceptanceSampler`."""
 
+    speculative_token_tree: Optional[str] = None
+    """Specifies the tree structure for speculative token generation. 
+    """
     # required configuration params passed from engine
     target_model_config: ModelConfig = field(default=None,
                                              init=True)  # type: ignore
@@ -2443,10 +2450,11 @@ class SpeculativeConfig:
                             "Chunked prefill and EAGLE are not compatible "
                             "when using V0.")
 
+                    from vllm.platforms import current_platform
                     from vllm.transformers_utils.configs.eagle import (
                         EAGLEConfig)
                     if isinstance(self.draft_model_config.hf_config,
-                                  EAGLEConfig):
+                                  EAGLEConfig) or current_platform.is_neuron():
                         pass
                     else:
                         eagle_config = EAGLEConfig(
@@ -2884,7 +2892,7 @@ class PoolerConfig:
     pooling_type: Optional[str] = None
     """
     The pooling method of the pooling model. This should be a key in
-    :class:`vllm.model_executor.layers.pooler.PoolingType`.
+    {class}`vllm.model_executor.layers.pooler.PoolingType`.
     """
 
     normalize: Optional[bool] = None
@@ -2950,10 +2958,12 @@ def _get_and_verify_dtype(
 ) -> torch.dtype:
     # NOTE: getattr(config, "torch_dtype", torch.float32) is not correct
     # because config.torch_dtype can be None.
-    config_dtype = getattr(config.get_text_config(), "torch_dtype", None)
+    config_dtype = getattr(config, "torch_dtype", None)
 
-    # Fallback for multi-modal models if the root config
+    # Fallbacks for multi-modal models if the root config
     # does not define torch_dtype
+    if config_dtype is None:
+        config_dtype = getattr(config.get_text_config(), "torch_dtype", None)
     if config_dtype is None and hasattr(config, "vision_config"):
         config_dtype = getattr(config.vision_config, "torch_dtype", None)
 
@@ -3140,6 +3150,14 @@ def _get_and_verify_max_len(
     # derived length from the HF model config.
     if max_model_len is None:
         max_model_len = int(derived_max_model_len)
+        if current_platform.is_tpu():
+            logger.warning(
+                "--max-model-len is not specified, "
+                "it's currently using model's default length %s, "
+                "which might be too large."
+                "Please input with --max-model-len based on your "
+                "request input length and output length, to avoid "
+                "unnecessary degradation.", max_model_len)
     elif max_model_len > derived_max_model_len:
         # Some models might have a separate key for specifying model_max_length
         # that will be bigger than derived_max_model_len. We compare user input

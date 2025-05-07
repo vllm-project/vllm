@@ -44,7 +44,7 @@ def create_scheduler(
                              (None)
 
     Returns:
-      :class:`Scheduler` instance
+      {class}`Scheduler` instance
     '''
     if max_model_len is None:
         max_model_len = max_num_batched_tokens
