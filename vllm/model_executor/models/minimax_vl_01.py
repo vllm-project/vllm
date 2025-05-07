@@ -195,13 +195,13 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
         _dummy = torch.zeros(1)
         self._dtype = _dummy.dtype
         self.minimax_cache: Optional[MinimaxCacheManager] = None
-        linear_layer_nums = sum(1 for i in range(config.num_hidden_layers)
+        linear_layer_nums = sum(1 for i in range(config.text_config.num_hidden_layers)
                                 if self.decoder_attention_types[i] == 0)
         max_slots_number = vllm_config.scheduler_config.max_num_seqs
         self.cache_shape = (linear_layer_nums, max_slots_number,
-                            config.num_attention_heads //
+                            config.text_config.num_attention_heads //
                             get_tensor_model_parallel_world_size(),
-                            config.head_dim, config.head_dim)
+                            config.text_config.head_dim, config.text_config.head_dim)
         self.vision_feature_layer = config.vision_feature_layer
         self.vocab_size = config.text_config.vocab_size
         self.pad_token_id = -1
