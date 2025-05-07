@@ -8,6 +8,9 @@ from transformers import BatchFeature
 from transformers.models.llava_next.modeling_llava_next import (
     get_anyres_image_grid_shape, unpad_image)
 
+from vllm.distributed.parallel_state import (
+    get_pp_group, get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size)
 from .minimax_cache import MinimaxCacheManager, MinimaxCacheParams
 from vllm.config import VllmConfig
 from vllm.jsontree import json_map_leaves
@@ -192,6 +195,13 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
         _dummy = torch.zeros(1)
         self._dtype = _dummy.dtype
         self.minimax_cache: Optional[MinimaxCacheManager] = None
+        linear_layer_nums = sum(1 for i in range(config.num_hidden_layers)
+                                if self.decoder_attention_types[i] == 0)
+        max_slots_number = vllm_config.scheduler_config.max_num_seqs
+        self.cache_shape = (linear_layer_nums, max_slots_number,
+                            config.num_attention_heads //
+                            get_tensor_model_parallel_world_size(),
+                            config.head_dim, config.head_dim)
         self.vision_feature_layer = config.vision_feature_layer
         self.vocab_size = config.text_config.vocab_size
         self.pad_token_id = -1
