@@ -6,6 +6,8 @@ accelerate==1.0.1
     # via
     #   lm-eval
     #   peft
+aiofiles==24.1.0
+    # via quart
 aiohappyeyeballs==2.4.3
     # via aiohttp
 aiohttp==3.10.11
@@ -45,6 +47,10 @@ bitsandbytes==0.45.3
     # via -r requirements/test.in
 black==24.10.0
     # via datamodel-code-generator
+blinker==1.9.0
+    # via
+    #   flask
+    #   quart
 blobfile==3.0.0
     # via -r requirements/test.in
 boto3==1.35.57
@@ -71,8 +77,10 @@ charset-normalizer==3.4.0
 click==8.1.7
     # via
     #   black
+    #   flask
     #   jiwer
     #   nltk
+    #   quart
     #   ray
     #   schemathesis
     #   typer
@@ -140,6 +148,8 @@ filelock==3.16.1
     #   ray
     #   torch
     #   transformers
+flask==3.1.0
+    # via quart
 fonttools==4.54.1
     # via matplotlib
 fqdn==1.5.1
@@ -165,13 +175,20 @@ genson==1.3.0
 graphql-core==3.2.6
     # via hypothesis-graphql
 h11==0.14.0
-    # via httpcore
+    # via
+    #   httpcore
+    #   hypercorn
+    #   wsproto
+h2==4.2.0
+    # via hypercorn
 harfile==0.3.0
     # via schemathesis
 hf-xet==0.1.4
     # via huggingface-hub
 hiredis==3.0.0
     # via tensorizer
+hpack==4.1.0
+    # via h2
 httpcore==1.0.6
     # via httpx
 httpx==0.27.2
@@ -192,6 +209,10 @@ huggingface-hub==0.30.1
     #   vocos
 humanize==4.11.0
     # via runai-model-streamer
+hypercorn==0.17.3
+    # via quart
+hyperframe==6.1.0
+    # via h2
 hypothesis==6.131.0
     # via
     #   hypothesis-graphql
@@ -217,9 +238,15 @@ isoduration==20.11.0
     # via jsonschema
 isort==5.13.2
     # via datamodel-code-generator
+itsdangerous==2.2.0
+    # via
+    #   flask
+    #   quart
 jinja2==3.1.6
     # via
     #   datamodel-code-generator
+    #   flask
+    #   quart
     #   torch
 jiwer==3.0.5
     # via -r requirements/test.in
@@ -271,6 +298,7 @@ markdown-it-py==3.0.0
 markupsafe==3.0.1
     # via
     #   jinja2
+    #   quart
     #   werkzeug
 matplotlib==3.9.2
     # via -r requirements/test.in
@@ -449,6 +477,8 @@ portalocker==2.10.1
     # via sacrebleu
 pqdm==0.2.0
     # via -r requirements/test.in
+priority==2.0.0
+    # via hypercorn
 propcache==0.2.0
     # via yarl
 protobuf==5.28.3
@@ -540,6 +570,8 @@ pyyaml==6.0.2
     #   timm
     #   transformers
     #   vocos
+quart==0.20.0
+    # via -r requirements/test.in
 rapidfuzz==3.12.1
     # via jiwer
 ray==2.43.0
@@ -782,9 +814,14 @@ vocos==0.1.0
 webcolors==24.11.1
     # via jsonschema
 werkzeug==3.1.3
-    # via schemathesis
+    # via
+    #   flask
+    #   quart
+    #   schemathesis
 word2number==1.1
     # via lm-eval
+wsproto==1.2.0
+    # via hypercorn
 xxhash==3.5.0
     # via
     #   datasets
