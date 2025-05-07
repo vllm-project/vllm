@@ -866,7 +866,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
         if attn_metadata is None:
             # Profiling run.
-            return output
+            return output.fill_(0)
 
         num_actual_toks = attn_metadata.num_actual_tokens
 
