@@ -28,6 +28,7 @@ TEST_IMAGE_URLS = [
 
 TEST_VIDEO_URLS = [
     "https://www.bogotobogo.com/python/OpenCV_Python/images/mean_shift_tracking/slow_traffic_small.mp4",
+    "https://filesamples.com/samples/video/avi/sample_640x360.avi",
 ]
 
 
@@ -144,8 +145,8 @@ async def test_fetch_image_local_files(image_url: str):
 async def test_fetch_video_http(video_url: str, num_frames: int):
     connector = MediaConnector()
 
-    video_sync = connector.fetch_video(video_url, num_frames)
-    video_async = await connector.fetch_video_async(video_url, num_frames)
+    video_sync = connector.fetch_video(video_url, num_frames=num_frames)
+    video_async = await connector.fetch_video_async(video_url, num_frames=num_frames)
     assert np.array_equal(video_sync, video_async)
 
 
