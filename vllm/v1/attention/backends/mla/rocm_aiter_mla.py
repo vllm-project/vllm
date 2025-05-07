@@ -65,7 +65,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         assert max_model_len == 32768,\
             "AITER MLA requires max_model_len=32768"
         assert self.runner.block_size == 1, "AITER MLA" \
-            "requires only block size 1."
+            "only supports block size 1."
 
     def _get_paged_kv_tensors(
             self, block_table: torch.Tensor,
