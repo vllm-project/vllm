@@ -7,7 +7,7 @@ from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config, set_current_vllm_config)
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.loader import get_model_loader
+from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM

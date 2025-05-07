@@ -54,7 +54,7 @@ if TYPE_CHECKING:
     from vllm.executor.executor_base import ExecutorBase
     from vllm.model_executor.layers.quantization.base_config import (
         QuantizationConfig)
-    from vllm.model_executor.model_loader.loader import BaseModelLoader
+    from vllm.model_executor.model_loader import BaseModelLoader
 
     ConfigType = type[DataclassInstance]
 else:
