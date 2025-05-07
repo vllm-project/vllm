@@ -676,11 +676,11 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
         text_config_data = hf_standard_config_data.get("text_config")
         if isinstance(text_config_data, dict):
             mpe_from_hf = text_config_data.get("max_position_embeddings")
-        
+
         if mpe_from_hf is None:  # If not in text_config or text_config absent
             mpe_from_hf = hf_standard_config_data.get(
                 "max_position_embeddings")
-        
+
         if mpe_from_hf is not None:
             default_for_max_pos_embed = mpe_from_hf
 
@@ -694,14 +694,14 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
 
         if msl_from_hf is None:  # If not in text_config or text_config absent
             msl_from_hf = hf_standard_config_data.get("max_seq_len")
-        
+
         if msl_from_hf is not None:
             default_for_max_seq_len = msl_from_hf
         elif default_for_max_pos_embed != ultimate_fallback_max_val:
             # If max_seq_len is not in standard config,
             # but max_pos_embed was found there, use it for max_seq_len.
             default_for_max_seq_len = default_for_max_pos_embed
-            
+
     # If config_dict (from params.json) has the key, its value is used.
     # Otherwise, the determined from config.json or 128_000 is used.
     config_dict["max_seq_len"] = config_dict.get("max_seq_len",
