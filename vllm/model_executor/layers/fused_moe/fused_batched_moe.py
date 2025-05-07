@@ -10,7 +10,6 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     get_config_dtype_str, try_get_optimal_moe_config)
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
-from vllm.utils import direct_register_custom_op
 
 
 @triton.jit
@@ -473,7 +472,8 @@ def rank_chunk(num, r, w):
 
 class BatchedDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
 
-    def __init__(self, max_num_tokens: Optional[int], world_size: int, dp_size: int, rank: int):
+    def __init__(self, max_num_tokens: Optional[int], world_size: int,
+                 dp_size: int, rank: int):
         super().__init__()
         self.world_size = world_size
         self.dp_size = dp_size
@@ -510,16 +510,18 @@ class BatchedDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
                                                minlength=num_experts)
             self.max_num_tokens = int(tokens_per_expert.max().item())
         else:
-            tokens_per_expert = torch.zeros(num_experts, dtype=torch.int,
+            tokens_per_expert = torch.zeros(num_experts,
+                                            dtype=torch.int,
                                             device=a1.device)
 
         rem_experts = num_experts % self.world_size
         num_local_experts = ((num_experts // self.world_size) +
                              (1 if self.rank < rem_experts else 0))
 
-        b_a1 = torch.zeros((num_local_experts, self.max_num_tokens, hidden_dim),
-                           dtype=a1.dtype,
-                           device=a1.device)
+        b_a1 = torch.zeros(
+            (num_local_experts, self.max_num_tokens, hidden_dim),
+            dtype=a1.dtype,
+            device=a1.device)
 
         first_expert = (((num_experts // self.world_size) * self.rank) +
                         rem_experts - self.rank)
@@ -540,7 +542,8 @@ class BatchedDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         for expert_id in range(first_expert, last_expert):
             topks = torch.any(topk_ids == expert_id, dim=1).flatten()
             rows = torch.count_nonzero(topks.flatten())
-            b_a1[expert_id - first_expert, :rows, :] = a1[:topks.numel()][topks]
+            b_a1[expert_id -
+                 first_expert, :rows, :] = a1[:topks.numel()][topks]
             tokens_per_expert[expert_id - first_expert] = rows
 
         return b_a1, a1_scale, tokens_per_expert
@@ -561,7 +564,7 @@ class BatchedDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
 
         output.fill_(0)
 
-        first_expert = num_local_experts * self.rank # NOT QUITE RIGHT
+        first_expert = num_local_experts * self.rank  # NOT QUITE RIGHT
         last_expert = first_expert + num_local_experts
 
         # for expert_id in range(first_expert, last_expert):
@@ -658,8 +661,9 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         num_experts = global_num_experts
         out = _resize_cache(workspace13,
                             (num_experts, max_num_tokens * num_dp, hidden_dim))
-        num_local_experts = w1.shape[0] #expert_num_tokens.numel()
-        assert num_local_experts == w1.shape[0], f"{num_local_experts} == {w1.shape[0]}"
+        num_local_experts = w1.shape[0]  #expert_num_tokens.numel()
+        assert num_local_experts == w1.shape[
+            0], f"{num_local_experts} == {w1.shape[0]}"
 
         N = w1.shape[1] // 2
 
@@ -821,8 +825,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # invoke_batched_silu_and_mul(output=intermediate_cache2,
         #                             input=intermediate_cache1,
         #                             expert_num_tokens=expert_num_tokens)
-        self.activation(activation,
-                        intermediate_cache2.view(-1, N//2),
+        self.activation(activation, intermediate_cache2.view(-1, N // 2),
                         intermediate_cache1.view(-1, N))
 
         #qintermediate_cache2 = intermediate_cache2
