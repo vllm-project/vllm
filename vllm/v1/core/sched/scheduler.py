@@ -768,35 +768,14 @@ class Scheduler(SchedulerInterface):
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             if new_token_ids:
-                # Stop request after the first token if doing a remote_decode.
-                # NOTE(rob): req is not freed (or preempted) in the EngineCore
-                # until the xfer is done to ensure we do not free the KV blocks.
+
+                # P/D: stop request after the 1st token if remote_decode.
+                # Note that the blocks are not freed until the xfer is done.
                 kv_transfer_params = None
-                # TODO(rob): edge case where we get a stop for stop_strings
-                # inside AsyncLLM.
                 if request.do_remote_decode and not stopped:
-                    request.status = RequestStatus.FINISHED_REMOTE_DECODE
-                    self._free_request(request, delay_free_blocks=True)
+                    kv_transfer_params = self._set_finished_remote_decode(
+                        request, send_kv_no_op)
                     stopped = True
-
-                    remote_blocks = [
-                        block.block_id for block in
-                        self.kv_cache_manager.req_to_blocks[request.request_id]
-                        if block._block_hash is not None
-                    ]
-                    # If prompt < block_size, then there will be no KV xfer.
-                    # Free these requests so we don't have a mem leak.
-                    if len(remote_blocks) == 0:
-                        send_kv_no_op.append(request.request_id)
-
-                    engine_id = self.vllm_config.kv_transfer_config.engine_id
-                    kv_transfer_params = KVTransferParams(
-                        do_remote_prefill=True,
-                        remote_block_ids=remote_blocks,
-                        remote_engine_id=engine_id,
-                        remote_host=envs.VLLM_NIXL_SIDE_CHANNEL_HOST,
-                        remote_port=envs.VLLM_NIXL_SIDE_CHANNEL_PORT,
-                    )
 
                 # Add EngineCoreOutput for this Request.
                 outputs.append(
@@ -818,16 +797,8 @@ class Scheduler(SchedulerInterface):
             if not stopped:
                 new_running.append(request)
 
-        # P/D: update recv and send status from last step.
-        for req_id in (model_runner_output.finished_recving or ()):
-            logger.debug("Finished recving KV transfer for request %s", req_id)
-            self.finished_recving_kv_req_ids.add(req_id)
-        for req_id in (model_runner_output.finished_sending or ()):
-            logger.debug("Finished sending KV transfer for request %s", req_id)
-            self._free_blocks(self.requests[req_id])
-        for req_id in send_kv_no_op:
-            logger.debug("No op sending KV transfer for request %s", req_id)
-            self._free_blocks(self.requests[req_id])
+        # P/D: update state for finished KV Transfers.
+        self._update_from_kv_xfer_finished(model_runner_output, send_kv_no_op)
 
         # Return the cached request data to the queue so they can
         # be reused. Note: we cannot add stopped requests to this
@@ -956,10 +927,19 @@ class Scheduler(SchedulerInterface):
         request: Request,
         skipped_waiting_requests: deque[Request],
     ) -> bool:
-        """Update """
+        """
+        P/D: check if the request_id is finished_recving.
+
+        The finished_recving_kv_req_ids list is populated
+        on the previous steps()'s update_from_output based
+        on the worker side connector.
+
+        When the kv transfer is ready, we cache the blocks
+        and update the request state to be in WAITING from
+        WAITING_FOR_REMOTE_KV.
+        """
         if request.request_id in self.finished_recving_kv_req_ids:
-            # Now that the KVs have been recved, we can cache
-            # them and set num_computed_tokens.
+            # Now that the blocks are ready, actually cache them.
             blocks = self.kv_cache_manager.req_to_blocks[request.request_id]
             num_computed_tokens = len(blocks) * self.block_size
             self.kv_cache_manager.cache_blocks(
@@ -967,8 +947,14 @@ class Scheduler(SchedulerInterface):
                 num_tokens=0,
                 num_computed_tokens=num_computed_tokens,
                 new_computed_block_list=[])
+
+            # Update the request state for scheduling.
             request.num_computed_tokens = num_computed_tokens
             request.status = RequestStatus.WAITING
+            # NOTE(rob): only read the blocks from remote once.
+            request.do_remote_prefill = False
+
+            # Set that we are ready.
             self.finished_recving_kv_req_ids.remove(request.request_id)
             is_ready = True
         else:
@@ -1028,3 +1014,65 @@ class Scheduler(SchedulerInterface):
         request.do_remote_prefill = False
 
         return new_blocks
+
+    def _set_finished_remote_decode(
+        self,
+        request: Request,
+        send_kv_no_op: list[str],
+    ) -> KVTransferParams:
+        """
+        P/D: put request into a FINISHED_REMOTE_DECODE state.
+
+        This state is considered "finished" from the POV
+        of the AsyncLLM. This means that the AsyncLLM will
+        free the request. In the scheduler, we also free the
+        request, but delay the freeing of the blocks until
+        the send transaction is completed.
+        """
+
+        assert request.do_remote_decode
+        request.status = RequestStatus.FINISHED_REMOTE_DECODE
+        self._free_request(request, delay_free_blocks=True)
+        remote_blocks = [
+            block.block_id for block in self.kv_cache_manager.req_to_blocks[
+                request.request_id] if block._block_hash is not None
+        ]
+        # If prompt < block_size, then there will be no KV xfer.
+        # Add to the no-op list so we can free w/o memory leak.
+        if len(remote_blocks) == 0:
+            send_kv_no_op.append(request.request_id)
+
+        # TODO(rob): we could make the creation of the KVTransferParams
+        # per Connector to allow for true pluggabilty.
+        return KVTransferParams(
+            do_remote_prefill=True,
+            remote_block_ids=remote_blocks,
+            remote_engine_id=self.vllm_config.kv_transfer_config.engine_id,
+            remote_host=envs.VLLM_NIXL_SIDE_CHANNEL_HOST,
+            remote_port=envs.VLLM_NIXL_SIDE_CHANNEL_PORT,
+        )
+
+    def _update_from_kv_xfer_finished(
+        self,
+        model_runner_output: ModelRunnerOutput,
+        send_kv_no_op: list[str],
+    ):
+        """
+        P/D: update the scheduler state based on the output.
+
+        The Worker side connectors add finished_recving and
+        finished_sending reqs to the output.
+        * if finished_sending: free the blocks
+        # if finished_recving: add to state so we can
+            scheduler the request during the next step.
+        """
+        # P/D: update recv and send status from last step.
+        for req_id in (model_runner_output.finished_recving or ()):
+            logger.debug("Finished recving KV transfer for request %s", req_id)
+            self.finished_recving_kv_req_ids.add(req_id)
+        for req_id in (model_runner_output.finished_sending or ()):
+            logger.debug("Finished sending KV transfer for request %s", req_id)
+            self._free_blocks(self.requests[req_id])
+        for req_id in send_kv_no_op:
+            logger.debug("No op sending KV transfer for request %s", req_id)
+            self._free_blocks(self.requests[req_id])
