@@ -230,15 +230,13 @@ class DeepSeekV3ToolParser(ToolParser):
                 delta = DeltaMessage(tool_calls=[], content=text)
                 return delta
 
-            try:
+            if tool_call_portion:
                 current_tool_call_matches = (
                     self.stream_tool_call_portion_regex.findall(
-                        tool_call_portion)
-                )
+                        tool_call_portion))
                 if len(current_tool_call_matches) > 0:
                     tool_type, tool_name, tool_args = current_tool_call_matches[
-                        0
-                    ]
+                        0]
                     current_tool_call = {
                         "name": tool_name,
                         "arguments": tool_args,
@@ -246,18 +244,19 @@ class DeepSeekV3ToolParser(ToolParser):
                 else:
                     current_tool_call_name_matches = (
                         self.stream_tool_call_name_regex.findall(
-                            tool_call_portion
-                        )
-                    )
+                            tool_call_portion))
                     if len(current_tool_call_name_matches) > 0:
-                        tool_type, tool_name = current_tool_call_name_matches[0]
-                        current_tool_call = {"name": tool_name, "arguments": ""}
+                        tool_type, tool_name = current_tool_call_name_matches[
+                            0]
+                        current_tool_call = {
+                            "name": tool_name,
+                            "arguments": ""
+                        }
                     else:
                         logger.debug("Not enough token")
                         return None
-            except Exception:
-                logger.debug("regex err")
-                return None
+            else:
+                current_tool_call = None
 
             # case - we haven't sent the tool name yet. If it's available, send
             #   it. otherwise, wait until it's available.
