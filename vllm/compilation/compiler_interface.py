@@ -412,10 +412,9 @@ class InductorAdaptor(CompilerInterface):
         # compilation cache.
         if not envs.VLLM_DISABLE_COMPILE_CACHE:
             assert hash_str is not None, (
-                f"failed to get the hash of the compiled graph: {file_path}")
+                "failed to get the hash of the compiled graph")
             assert file_path is not None, (
-                "failed to get the file path of the compiled graph: {file_path}"
-            )
+                "failed to get the file path of the compiled graph")
         return compiled_graph, (hash_str, file_path)
 
     def load(self,
