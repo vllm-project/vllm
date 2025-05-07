@@ -36,7 +36,8 @@ from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser, GiB_bytes, is_in_ray_actor
+from vllm.utils import (FlexibleArgumentParser, GiB_bytes, is_in_doc_build,
+                        is_in_ray_actor)
 
 # yapf: enable
 
@@ -166,7 +167,10 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
         if field.default is not MISSING:
             default = field.default
         elif field.default_factory is not MISSING:
-            default = field.default_factory()
+            if is_dataclass(field.default_factory) and is_in_doc_build():
+                default = {}
+            else:
+                default = field.default_factory()
 
         # Get the help text for the field
         name = field.name

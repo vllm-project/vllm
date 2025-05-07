@@ -3917,9 +3917,7 @@ class VllmConfig:
     simplifies passing around the distinct configurations in the codebase.
     """
 
-    # TODO: change to default_factory once multimodal_config has been removed
-    # from ModelConfig and added to VllmConfig
-    model_config: ModelConfig = field(default=None)  # type: ignore
+    model_config: ModelConfig = field(default_factory=ModelConfig)
     """Model configuration."""
     cache_config: CacheConfig = field(default_factory=CacheConfig)
     """Cache configuration."""
