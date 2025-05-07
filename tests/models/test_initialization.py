@@ -15,12 +15,12 @@ from .registry import HF_EXAMPLE_MODELS
 
 
 @pytest.mark.parametrize("model_arch", HF_EXAMPLE_MODELS.get_supported_archs())
-def test_can_initialize(model_arch):
+def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
     model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
 
-    # Avoid OOM
+    # Avoid OOM and reduce initialization time by only using 1 layer
     def hf_overrides(hf_config: PretrainedConfig) -> PretrainedConfig:
         hf_config.update(model_info.hf_overrides)
 
@@ -61,7 +61,9 @@ def test_can_initialize(model_arch):
     with (patch.object(V0LLMEngine, "_initialize_kv_caches",
                        _initialize_kv_caches_v0),
           patch.object(V1EngineCore, "_initialize_kv_caches",
-                       _initialize_kv_caches_v1)):
+                       _initialize_kv_caches_v1), monkeypatch.context() as m):
+        if model_info.v0_only:
+            m.setenv("VLLM_USE_V1", "0")
         LLM(
             model_info.default,
             tokenizer=model_info.tokenizer,
