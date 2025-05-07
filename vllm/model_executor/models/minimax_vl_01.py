@@ -8,6 +8,7 @@ from transformers import BatchFeature
 from transformers.models.llava_next.modeling_llava_next import (
     get_anyres_image_grid_shape, unpad_image)
 
+from .minimax_cache import MinimaxCacheManager, MinimaxCacheParams
 from vllm.config import VllmConfig
 from vllm.jsontree import json_map_leaves
 from vllm.model_executor.layers.activation import get_act_fn
@@ -188,6 +189,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             hf_config=config.text_config,
             prefix=maybe_prefix(prefix, "language_model"),
         )
+        self.minimax_cache: Optional[MinimaxCacheManager] = None
         self.vision_feature_layer = config.vision_feature_layer
         self.vocab_size = config.text_config.vocab_size
         self.pad_token_id = -1
@@ -444,9 +446,15 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             inputs_embeds = self.get_input_embeddings(input_ids,
                                                       vision_embeddings)
             input_ids = None
+        if  self.minimax_cache is None:
+            self.minimax_cache = MinimaxCacheManager(dtype=self._dtype,
+                                            cache_shape=self.cache_shape)
+        minimax_cache_params = self.minimax_cache.current_run_tensors(**kwargs)
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
+                                                  self.minimax_cache,
+                                                  minimax_cache_params,
                                                   intermediate_tensors,
                                                   inputs_embeds=inputs_embeds)
 
