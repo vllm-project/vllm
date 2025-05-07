@@ -617,8 +617,24 @@ class Scheduler(SchedulerInterface):
         new_computed_blocks: KVCacheBlocks,
         skipped_waiting_requests: deque[Request],
     ) -> Optional[KVCacheBlocks]:
+        """
+        P/D: allocate KV cache blocks for a request and put
+        the request into the WAITING_FOR_REMOTE_KV state and
+        update the KVConnector state.
+
+        The KV caches are allocated but NOT cached. This is
+        to avoid another request getting a cache hit on a
+        block that has not been written to. We will cache
+        the blocks only after the recv is complete.
+
+        The update_state_after_alloc() function passes this
+        request to the KVConnector, which triggers KVConnector
+        to start a read_blocks transaction.
+        """
+
         # Allocate slots for the external tokens, but skip
-        # caching until after the KV transfer is done.
+        # caching until after the KV transfer is done to avoid
+        # cache hits on blocks that are still be written to.
         new_blocks = self.kv_cache_manager.allocate_slots(
             request,
             num_external_tokens,
