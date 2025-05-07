@@ -302,11 +302,12 @@ class FlashAttentionMetadataBuilder:
         self.page_size = self.runner.block_size
 
         if get_flash_attn_version() == 3:
-            # TODO(cnguyen): Support AOT scheduler with full CUDA graph
             self.aot_schedule = not compilation_config.full_cuda_graph
             if not self.aot_schedule:
                 logger.warning(
-                    "AOT Scheduler is disabled when using full_cuda_graph")
+                    "AOT Schedule is disabled when using full_cuda_graph")
+        else:
+            self.aot_schedule = False
 
         # Sliding window size to be used with the AOT scheduler will be
         # populated on first build() call.
