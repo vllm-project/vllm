@@ -6,9 +6,10 @@
 # ruff: noqa: E501
 
 import torch
-import triton
 from einops import rearrange
 from packaging import version
+
+from vllm.triton_utils import triton
 
 from .ssd_bmm import _bmm_chunk_fwd
 from .ssd_chunk_scan import _chunk_scan_fwd
@@ -39,7 +40,6 @@ def _mamba_chunk_scan_combined_fwd(x,
     _, _, ngroups, dstate = B.shape
     assert nheads % ngroups == 0
     assert B.shape == (batch, seqlen, ngroups, dstate)
-    assert x.shape == (batch, seqlen, nheads, headdim)
     assert dt.shape == (batch, seqlen, nheads)
     assert A.shape == (nheads, )
     assert C.shape == B.shape
