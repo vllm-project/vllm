@@ -41,7 +41,8 @@ class QuarkW8A8Fp8(QuarkScheme):
                     weight_scale=layer.weight_scale,
                     input_scale=input_scale)
                 if input_scale is not None:
-                    layer.input_scale = Parameter(input_scale, requires_grad=False)
+                    layer.input_scale = Parameter(input_scale,
+                                                  requires_grad=False)
             else:
                 max_w_scale = layer.weight_scale
                 weight = layer.weight
