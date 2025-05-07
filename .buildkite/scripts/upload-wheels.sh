@@ -40,7 +40,7 @@ if [[ $version == *dev* ]]; then
     version="$new_version"
 fi
 
-# Upload the wheel to S3
+# Generate index for wheel on commit
 python3 .buildkite/generate_index.py --wheel "$normal_wheel"
 
 # generate index for this commit
@@ -59,7 +59,7 @@ else
     aws s3 cp "s3://vllm-wheels/nightly/index.html" "s3://vllm-wheels/$BUILDKITE_COMMIT/index.html"
 fi
 
-# generate index for nightly
+# Upload wheel to nightly
 aws s3 cp "$wheel" "s3://vllm-wheels/nightly/"
 aws s3 cp "$normal_wheel" "s3://vllm-wheels/nightly/"
 
@@ -71,7 +71,8 @@ elif [[ $normal_wheel == *"cu126"* ]]; then
     echo "Skipping index files for cu126 wheels"
 else
     # only upload index.html for cu128 wheels (default wheels)
-    aws s3 cp index.html "s3://vllm-wheels/nightly/vllm/index.html"
+    python3 .buildkite/generate-index-nightly.py --do-not-upload nightly
+    aws s3 cp ./nightly/vllm/vllm/index.html "s3://vllm-wheels/nightly/vllm/index.html"
 fi
 
 aws s3 cp "$wheel" "s3://vllm-wheels/$version/"
