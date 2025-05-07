@@ -105,7 +105,8 @@ class OpenCVVideoBackend(VideoLoader):
                     frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     i += 1
         # we expect all frames loaded
-        assert i == num_frames
+        assert i == num_frames, (f"Expected reading {num_frames} frames, "
+                                 f"but only loaded {i} frames from video.")
         return frames
 
 
