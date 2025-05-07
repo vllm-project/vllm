@@ -90,6 +90,7 @@ class DNNLPrimitiveHelper {
     }
 
     dnnl::matmul::primitive_desc matmul_pd;
+
     if (bias) {
       dnnl::memory::desc bias_md({1, N}, BiasType, {N, 1});
       matmul_pd = dnnl::matmul::primitive_desc(default_engine(), a_md, b_md,
@@ -98,6 +99,7 @@ class DNNLPrimitiveHelper {
       matmul_pd = dnnl::matmul::primitive_desc(default_engine(), a_md, b_md,
                                                c_md, attr);
     }
+
     dnnl::matmul matmul(matmul_pd);
 
     auto& engine = default_engine();
@@ -111,6 +113,15 @@ class DNNLPrimitiveHelper {
                             (void*)b_scales);
 
     auto& stream = default_stream();
+
+    auto mat_weights_mem = b_m;
+
+#ifdef __aarch64__
+    if (matmul_pd.weights_desc() != b_m.get_desc()) {
+      mat_weights_mem = dnnl::memory(matmul_pd.weights_desc(), engine);
+      dnnl::reorder(b_m, mat_weights_mem).execute(stream, b_m, mat_weights_mem);
+    }
+#endif
     if constexpr (InputNoScale) {
       if (bias) {
         dnnl::memory::desc bias_md({N}, BiasType, {1});
@@ -118,7 +129,7 @@ class DNNLPrimitiveHelper {
         matmul.execute(
             stream, {
                         {DNNL_ARG_SRC, a_m},
-                        {DNNL_ARG_WEIGHTS, b_m},
+                        {DNNL_ARG_WEIGHTS, mat_weights_mem},
                         {DNNL_ARG_BIAS, bias_m},
                         {DNNL_ARG_DST, c_m},
                         {DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS, b_scales_m},
@@ -127,7 +138,7 @@ class DNNLPrimitiveHelper {
         matmul.execute(
             stream, {
                         {DNNL_ARG_SRC, a_m},
-                        {DNNL_ARG_WEIGHTS, b_m},
+                        {DNNL_ARG_WEIGHTS, mat_weights_mem},
                         {DNNL_ARG_DST, c_m},
                         {DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS, b_scales_m},
                     });
@@ -139,7 +150,7 @@ class DNNLPrimitiveHelper {
         matmul.execute(
             stream, {
                         {DNNL_ARG_SRC, a_m},
-                        {DNNL_ARG_WEIGHTS, b_m},
+                        {DNNL_ARG_WEIGHTS, mat_weights_mem},
                         {DNNL_ARG_BIAS, bias_m},
                         {DNNL_ARG_DST, c_m},
                         {DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC, a_scales_m},
@@ -149,7 +160,7 @@ class DNNLPrimitiveHelper {
         matmul.execute(
             stream, {
                         {DNNL_ARG_SRC, a_m},
-                        {DNNL_ARG_WEIGHTS, b_m},
+                        {DNNL_ARG_WEIGHTS, mat_weights_mem},
                         {DNNL_ARG_DST, c_m},
                         {DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC, a_scales_m},
                         {DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS, b_scales_m},
@@ -170,5 +181,4 @@ class DNNLPrimitiveHelper {
     return stream;
   }
 };
-
 #endif
