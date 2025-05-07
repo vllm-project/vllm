@@ -436,10 +436,7 @@ class MiniMaxText01LinearAttention(nn.Module):
             qs = q[_start:_end].transpose(0, 1).contiguous()
             ks = k[_start:_end].transpose(0, 1).contiguous()
             vs = v[_start:_end].transpose(0, 1).contiguous()
-            if _prefill_idx >= len(state_indices_tensor):
-                slot_id = 0
-            else:
-                slot_id = state_indices_tensor[_prefill_idx]
+            slot_id = state_indices_tensor[_prefill_idx]
             slice_layer_cache = kv_cache[slot_id, ...]
 
             out_slice = MiniMaxText01LinearKernel.jit_linear_forward_prefix(

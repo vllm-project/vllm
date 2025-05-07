@@ -455,7 +455,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-
+        print("minimax_vl_01 forward", **kwargs)
         if intermediate_tensors is not None:
             inputs_embeds = None
         elif inputs_embeds is None:
