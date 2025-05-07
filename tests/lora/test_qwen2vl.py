@@ -12,7 +12,7 @@ from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture(autouse=not current_platform.is_cpu())
 def v1(run_with_both_engines_lora):
     # Simple autouse wrapper to run both engines for each test
     # This can be promoted up to conftest.py to run for every

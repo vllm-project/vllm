@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 
-class Block(nn.Module):
+class BlockBase(nn.Module):
     """Block abstract module"""
 
     def __init__(self, input_size, output_size):
@@ -1602,7 +1602,7 @@ class AttModule(nn.Module):
         return x, memory, pos_emb, att_mask
 
 
-class AttBlock(Block, AttModule):
+class AttBlock(BlockBase, AttModule):
     """Attention Block module to support both Attention and Block module."""
 
     def memory_dims(self, max_len=False):
@@ -1766,9 +1766,12 @@ class MultiHeadedAttention(nn.Module):
                 if mask.dtype != q.dtype:
                     attn_mask = attn_mask.to(q.dtype)
 
-            with torch.backends.cuda.sdp_kernel(enable_flash=True,
-                                                enable_math=True,
-                                                enable_mem_efficient=True):
+            with torch.nn.attention.sdpa_kernel([
+                    torch.nn.attention.SDPBackend.FLASH_ATTENTION,
+                    torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
+                    torch.nn.attention.SDPBackend.MATH,
+                    torch.nn.attention.SDPBackend.CUDNN_ATTENTION,
+            ]):
                 x = torch.nn.functional.scaled_dot_product_attention(
                     q,
                     k,

@@ -3,8 +3,8 @@ import pytest
 
 from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.sampling_params import SamplingParams
-from vllm.v1.core.scheduler_output import (CachedRequestData, NewRequestData,
-                                           SchedulerOutput)
+from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
+                                       SchedulerOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -50,7 +50,6 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
             NewRequestData(
                 req_id=req_id,
                 prompt_token_ids=[1, 2, 3],
-                prompt="test",
                 mm_inputs=[],
                 mm_hashes=[],
                 mm_positions=[],

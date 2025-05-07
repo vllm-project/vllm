@@ -7,11 +7,12 @@ For most models, the prompt format should follow corresponding examples
 on HuggingFace model repository.
 """
 from argparse import Namespace
+from dataclasses import asdict
 from typing import Literal, NamedTuple, Optional, TypedDict, Union, get_args
 
 from PIL.Image import Image
 
-from vllm import LLM
+from vllm import LLM, EngineArgs
 from vllm.multimodal.utils import fetch_image
 from vllm.utils import FlexibleArgumentParser
 
@@ -37,12 +38,12 @@ Query = Union[TextQuery, ImageQuery, TextImageQuery]
 
 
 class ModelRequestData(NamedTuple):
-    llm: LLM
+    engine_args: EngineArgs
     prompt: str
     image: Optional[Image]
 
 
-def run_e5_v(query: Query):
+def run_e5_v(query: Query) -> ModelRequestData:
     llama3_template = '<|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n \n'  # noqa: E501
 
     if query["modality"] == "text":
@@ -58,20 +59,21 @@ def run_e5_v(query: Query):
         modality = query['modality']
         raise ValueError(f"Unsupported query modality: '{modality}'")
 
-    llm = LLM(
+    engine_args = EngineArgs(
         model="royokong/e5-v",
         task="embed",
         max_model_len=4096,
+        limit_mm_per_prompt={"image": 1},
     )
 
     return ModelRequestData(
-        llm=llm,
+        engine_args=engine_args,
         prompt=prompt,
         image=image,
     )
 
 
-def run_vlm2vec(query: Query):
+def run_vlm2vec(query: Query) -> ModelRequestData:
     if query["modality"] == "text":
         text = query["text"]
         prompt = f"Find me an everyday image that matches the given caption: {text}"  # noqa: E501
@@ -87,15 +89,16 @@ def run_vlm2vec(query: Query):
         modality = query['modality']
         raise ValueError(f"Unsupported query modality: '{modality}'")
 
-    llm = LLM(
+    engine_args = EngineArgs(
         model="TIGER-Lab/VLM2Vec-Full",
         task="embed",
         trust_remote_code=True,
         mm_processor_kwargs={"num_crops": 4},
+        limit_mm_per_prompt={"image": 1},
     )
 
     return ModelRequestData(
-        llm=llm,
+        engine_args=engine_args,
         prompt=prompt,
         image=image,
     )
@@ -126,25 +129,31 @@ def get_query(modality: QueryModality):
     raise ValueError(msg)
 
 
-def run_encode(model: str, modality: QueryModality):
+def run_encode(model: str, modality: QueryModality, seed: Optional[int]):
     query = get_query(modality)
     req_data = model_example_map[model](query)
+
+    # Disable other modalities to save memory
+    default_limits = {"image": 0, "video": 0, "audio": 0}
+    req_data.engine_args.limit_mm_per_prompt = default_limits | dict(
+        req_data.engine_args.limit_mm_per_prompt or {})
+
+    engine_args = asdict(req_data.engine_args) | {"seed": seed}
+    llm = LLM(**engine_args)
 
     mm_data = {}
     if req_data.image is not None:
         mm_data["image"] = req_data.image
 
-    outputs = req_data.llm.embed({
+    outputs = llm.embed({
         "prompt": req_data.prompt,
         "multi_modal_data": mm_data,
     })
 
+    print("-" * 50)
     for output in outputs:
         print(output.outputs.embedding)
-
-
-def main(args: Namespace):
-    run_encode(args.model_name, args.modality)
+        print("-" * 50)
 
 
 model_example_map = {
@@ -152,7 +161,8 @@ model_example_map = {
     "vlm2vec": run_vlm2vec,
 }
 
-if __name__ == "__main__":
+
+def parse_args():
     parser = FlexibleArgumentParser(
         description='Demo on using vLLM for offline inference with '
         'vision language models for multimodal embedding')
@@ -167,5 +177,17 @@ if __name__ == "__main__":
                         default="image",
                         choices=get_args(QueryModality),
                         help='Modality of the input.')
-    args = parser.parse_args()
+    parser.add_argument("--seed",
+                        type=int,
+                        default=None,
+                        help="Set the seed when initializing `vllm.LLM`.")
+    return parser.parse_args()
+
+
+def main(args: Namespace):
+    run_encode(args.model_name, args.modality, args.seed)
+
+
+if __name__ == "__main__":
+    args = parse_args()
     main(args)

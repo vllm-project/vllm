@@ -8,6 +8,7 @@ from typing import Annotated, Any, Optional, Union
 
 import msgspec
 from pydantic import BaseModel
+from typing_extensions import deprecated
 
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
@@ -37,7 +38,12 @@ class GuidedDecodingParams:
     json_object: Optional[bool] = None
     """These are other options that can be set"""
     backend: Optional[str] = None
+    backend_was_auto: bool = False
+    disable_fallback: bool = False
+    disable_any_whitespace: bool = False
+    disable_additional_properties: bool = False
     whitespace_pattern: Optional[str] = None
+    structural_tag: Optional[str] = None
 
     @staticmethod
     def from_optional(
@@ -48,9 +54,10 @@ class GuidedDecodingParams:
         json_object: Optional[bool] = None,
         backend: Optional[str] = None,
         whitespace_pattern: Optional[str] = None,
+        structural_tag: Optional[str] = None,
     ) -> Optional["GuidedDecodingParams"]:
-        if all(arg is None
-               for arg in (json, regex, choice, grammar, json_object)):
+        if all(arg is None for arg in (json, regex, choice, grammar,
+                                       json_object, structural_tag)):
             return None
         # Extract json schemas from pydantic models
         if isinstance(json, (BaseModel, type(BaseModel))):
@@ -63,26 +70,8 @@ class GuidedDecodingParams:
             json_object=json_object,
             backend=backend,
             whitespace_pattern=whitespace_pattern,
+            structural_tag=structural_tag,
         )
-
-    @property
-    def backend_name(self) -> str:
-        """Return the backend name without any options.
-        
-        For example if the backend is "xgrammar:no-fallback", returns "xgrammar"
-        """
-        return (self.backend or "").split(":")[0]
-
-    def backend_options(self) -> list[str]:
-        """Return the backend options as a list of strings."""
-        if not self.backend or ":" not in self.backend:
-            return []
-        return self.backend.split(":")[1].split(",")
-
-    def no_fallback(self) -> bool:
-        """Returns True if the "no-fallback" option is supplied for the guided
-        decoding backend"""
-        return "no-fallback" in self.backend_options()
 
     def __post_init__(self):
         """Validate that some fields are mutually exclusive."""
@@ -95,13 +84,34 @@ class GuidedDecodingParams:
                 "You can only use one kind of guided decoding but multiple are "
                 f"specified: {self.__dict__}")
 
+        if self.backend is not None and ":" in self.backend:
+            self._extract_backend_options()
+
+    @deprecated(
+        "Passing guided decoding backend options inside backend in the format "
+        "'backend:...' is deprecated. This will be removed in v0.10.0. Please "
+        "use the dedicated arguments '--disable-fallback', "
+        "'--disable-any-whitespace' and '--disable-additional-properties' "
+        "instead.")
+    def _extract_backend_options(self):
+        """Extract backend options from the backend string."""
+        assert isinstance(self.backend, str)
+        self.backend, options = self.backend.split(":")
+        options_set = set(options.strip().split(","))
+        if "no-fallback" in options_set:
+            self.disable_fallback = True
+        if "disable-any-whitespace" in options_set:
+            self.disable_any_whitespace = True
+        if "no-additional-properties" in options_set:
+            self.disable_additional_properties = True
+
 
 class RequestOutputKind(Enum):
     # Return entire output so far in every RequestOutput
     CUMULATIVE = 0
     # Return only deltas in each RequestOutput
     DELTA = 1
-    # Do not return intermediate RequestOuputs
+    # Do not return intermediate RequestOutput
     FINAL_ONLY = 2
 
 
@@ -176,9 +186,10 @@ class SamplingParams(
         logits_processors: list of functions that modify logits based on
             previously generated tokens, and optionally prompt tokens as
             a first argument.
-        truncate_prompt_tokens: If set to an integer k, will use only the last k
-            tokens from the prompt (i.e., left truncation). Defaults to None
-            (i.e., no truncation).
+        truncate_prompt_tokens: If set to -1, will use the truncation size
+            supported by the model. If set to an integer k, will use only
+            the last k tokens from the prompt (i.e., left truncation).
+            Defaults to None (i.e., no truncation).
         guided_decoding: If provided, the engine will construct a guided
             decoding logits processor from these parameters. Defaults to None.
         logit_bias: If provided, the engine will construct a logits processor
@@ -235,7 +246,7 @@ class SamplingParams(
 
     # Fields used for bad words
     bad_words: Optional[list[str]] = None
-    _bad_words_token_ids: list[list[int]] = msgspec.field(default_factory=list)
+    _bad_words_token_ids: Optional[list[list[int]]] = None
 
     @staticmethod
     def from_optional(
@@ -338,29 +349,23 @@ class SamplingParams(
 
         if self.seed == -1:
             self.seed = None
-        else:
-            self.seed = self.seed
 
         if self.stop is None:
             self.stop = []
         elif isinstance(self.stop, str):
             self.stop = [self.stop]
-        else:
-            self.stop = list(self.stop)
 
         if self.stop_token_ids is None:
             self.stop_token_ids = []
-        else:
-            self.stop_token_ids = list(self.stop_token_ids)
 
         if self.bad_words is None:
             self.bad_words = []
-        else:
-            self.bad_words = list(self.bad_words)
 
-        self.logprobs = 1 if self.logprobs is True else self.logprobs
-        self.prompt_logprobs = (1 if self.prompt_logprobs is True else
-                                self.prompt_logprobs)
+        if self.logprobs is True:
+            self.logprobs = 1
+
+        if self.prompt_logprobs is True:
+            self.prompt_logprobs = 1
 
         # Number of characters to hold back for stop string evaluation
         # until sequence is finished.
@@ -375,8 +380,9 @@ class SamplingParams(
             self.top_k = -1
             self.min_p = 0.0
             self._verify_greedy_sampling()
+
         # eos_token_id is added to this by the engine
-        self._all_stop_token_ids = set(self.stop_token_ids)
+        self._all_stop_token_ids.update(self.stop_token_ids)
 
     def _verify_args(self) -> None:
         if not isinstance(self.n, int):
@@ -390,9 +396,10 @@ class SamplingParams(
         if not -2.0 <= self.frequency_penalty <= 2.0:
             raise ValueError("frequency_penalty must be in [-2, 2], got "
                              f"{self.frequency_penalty}.")
-        if not 0.0 < self.repetition_penalty <= 2.0:
-            raise ValueError("repetition_penalty must be in (0, 2], got "
-                             f"{self.repetition_penalty}.")
+        if self.repetition_penalty <= 0.0:
+            raise ValueError(
+                "repetition_penalty must be greater than zero, got "
+                f"{self.repetition_penalty}.")
         if self.temperature < 0.0:
             raise ValueError(
                 f"temperature must be non-negative, got {self.temperature}.")
@@ -427,6 +434,10 @@ class SamplingParams(
                 and self.truncate_prompt_tokens < 1):
             raise ValueError(f"truncate_prompt_tokens must be >= 1, "
                              f"got {self.truncate_prompt_tokens}")
+        assert isinstance(self.stop_token_ids, list)
+        if not all(isinstance(st_id, int) for st_id in self.stop_token_ids):
+            raise ValueError(f"stop_token_ids must contain only integers, "
+                             f"got {self.stop_token_ids}.")
         assert isinstance(self.stop, list)
         if any(not stop_str for stop_str in self.stop):
             raise ValueError("stop cannot contain an empty string.")
@@ -470,8 +481,9 @@ class SamplingParams(
                     self.stop_token_ids = list(eos_ids)
 
     def update_from_tokenizer(self, tokenizer: AnyTokenizer) -> None:
-        if self.bad_words is None:
+        if not self.bad_words:
             return
+        self._bad_words_token_ids = []
         for bad_word in self.bad_words:
             # To prohibit words both at the beginning
             # and in the middle of text
@@ -522,7 +534,7 @@ class SamplingParams(
         return self._all_stop_token_ids
 
     @property
-    def bad_words_token_ids(self) -> list[list[int]]:
+    def bad_words_token_ids(self) -> Optional[list[list[int]]]:
         # For internal use only. Backward compatibility not guaranteed
         return self._bad_words_token_ids
 

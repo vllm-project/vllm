@@ -62,7 +62,7 @@ The table below shows the compatibility of various quantization implementations 
   * ❌
   * ✅︎
   * ❌
-  * ❌
+  * ✅︎
 - * FP8 (W8A8)
   * ❌
   * ❌
@@ -70,6 +70,17 @@ The table below shows the compatibility of various quantization implementations 
   * ✅︎
   * ✅︎
   * ✅︎
+  * ❌
+  * ❌
+  * ❌
+  * ❌
+- * BitBLAS (GPTQ)
+  * ✅︎
+  * ✅︎
+  * ✅︎
+  * ✅︎
+  * ✅︎
+  * ❌
   * ❌
   * ❌
   * ❌
@@ -118,7 +129,17 @@ The table below shows the compatibility of various quantization implementations 
   * ❌
   * ❌
   * ❌
-
+- * modelopt
+  * ✅︎
+  * ✅︎
+  * ✅︎
+  * ✅︎
+  * ✅︎︎
+  * ❌
+  * ❌
+  * ❌
+  * ❌
+  * ❌
 :::
 
 - Volta refers to SM 7.0, Turing to SM 7.5, Ampere to SM 8.0/8.6, Ada to SM 8.9, and Hopper to SM 9.0.

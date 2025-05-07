@@ -141,8 +141,8 @@ __device__ inline FragB dequant_per_group(int q, FragS_GROUP& frag_s, int i) {
   static constexpr uint32_t HI = 0x00f000f0;
   static constexpr uint32_t EX = 0x64006400;
   // Guarantee that the `(a & b) | c` operations are LOP3s.
-  uint32_t t0 = lop3 < (0xf0 & 0xcc) | 0xaa > (q, LO, EX);
-  uint32_t t1 = lop3 < (0xf0 & 0xcc) | 0xaa > (q, HI, EX);
+  uint32_t t0 = lop3<(0xf0 & 0xcc) | 0xaa>(q, LO, EX);
+  uint32_t t1 = lop3<(0xf0 & 0xcc) | 0xaa>(q, HI, EX);
   // We want signed int4 outputs, hence we fuse the `-8` symmetric zero point
   // directly into `SUB` and `ADD`.
   static constexpr uint32_t SUB = 0x64086408;
@@ -353,10 +353,10 @@ __global__ void Marlin(
       b_gl_stride * (threadIdx.x / b_sh_stride) + (threadIdx.x % b_sh_stride);
   b_gl_rd += b_sh_stride * slice_col;
   b_gl_rd += b_gl_rd_delta_o * slice_row;
-  int b_sh_wr = threadIdx.x;
-  int b_sh_rd = threadIdx.x;
+  auto b_sh_wr = threadIdx.x;
+  auto b_sh_rd = threadIdx.x;
 
-  int s_tok_gl_rd = threadIdx.x;
+  auto s_tok_gl_rd = threadIdx.x;
   // NOTE(HandH1998): activation scale s_tok need shuffle to [0, 8, 1, 9, 2, 10,
   // 3, 11, 4, 12, 5, 13, 6, 14, 7, 15] for example, 0, 8 row scales serve for
   // thread 0, 1, 2, 3. For more details, refer to mma operand A layout as
@@ -368,8 +368,8 @@ __global__ void Marlin(
   int s_tok_sh_rd = (threadIdx.x % 32) / 4;
   bool s_tok_sh_wr_pred = threadIdx.x < prob_m;
 
-  int s_ch_gl_rd = s_ch_sh_stride * slice_col + threadIdx.x;
-  int s_ch_sh_wr = threadIdx.x;
+  auto s_ch_gl_rd = s_ch_sh_stride * slice_col + threadIdx.x;
+  auto s_ch_sh_wr = threadIdx.x;
   int s_ch_sh_rd = 16 * ((threadIdx.x / 32) % (thread_n_blocks / 4)) +
                    2 * ((threadIdx.x % 32) % 4);
   bool s_ch_sh_wr_pred = threadIdx.x < s_ch_sh_stride;
@@ -558,7 +558,7 @@ __global__ void Marlin(
   auto thread_block_reduce = [&]() {
     constexpr int red_off = threads / b_sh_stride / 2;
     if (red_off >= 1) {
-      int red_idx = threadIdx.x / b_sh_stride;
+      auto red_idx = threadIdx.x / b_sh_stride;
       constexpr int red_sh_stride = b_sh_stride * 4 * 2;
       constexpr int red_sh_delta = b_sh_stride;
       int red_sh_rd = red_sh_stride * (threadIdx.x / b_sh_stride) +
@@ -628,7 +628,7 @@ __global__ void Marlin(
                     8 * (threadIdx.x / 32) + (threadIdx.x % 4) * 2;
       c_gl_wr += (4 * thread_n_blocks) * slice_col;
       constexpr int c_sh_wr_delta = active_threads * 2;
-      int c_sh_wr = 2 * threadIdx.x;
+      auto c_sh_wr = 2 * threadIdx.x;
 
       int row = (threadIdx.x % 32) / 4;
 

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from concurrent.futures import Future
-from typing import Union
+from typing import Callable, Union
 
 import torch
 import torch.distributed as dist
@@ -14,6 +14,8 @@ from vllm.executor.uniproc_executor import (  # noqa
     UniProcExecutor as UniProcExecutorV0)
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
+
+FailureCallback = Callable[[], None]
 
 
 class Executor(ExecutorBase):
@@ -62,14 +64,18 @@ class Executor(ExecutorBase):
                             args=(kv_cache_configs, ))
         self.collective_rpc("compile_or_warm_up_model")
 
-    def determine_available_memory(self) -> int:  # in bytes
-        output = self.collective_rpc("determine_available_memory")
-        # Since we use a shared centralized controller, we take the minimum
-        # memory size across all workers to make sure all the memory
-        # operators can be applied to all workers.
-        return min(output)
+    def register_failure_callback(self, callback: FailureCallback):
+        """
+        Register a function to be called if the executor enters a permanent
+        failed state.
+        """
+        pass
 
-    def get_kv_cache_specs(self) -> list[KVCacheSpec]:
+    def determine_available_memory(self) -> list[int]:  # in bytes
+        output = self.collective_rpc("determine_available_memory")
+        return output
+
+    def get_kv_cache_specs(self) -> list[dict[str, KVCacheSpec]]:
         output = self.collective_rpc("get_kv_cache_spec")
         return output
 
@@ -95,7 +101,7 @@ class UniProcExecutor(UniProcExecutorV0, Executor):
 
 class ExecutorWithExternalLauncher(ExecutorWithExternalLauncherV0, Executor):
 
-    def determine_available_memory(self) -> int:  # in bytes
+    def determine_available_memory(self) -> list[int]:  # in bytes
         # same as determine_num_available_blocks in v0,
         # we need to get the min across all ranks.
         memory = super().determine_available_memory()
@@ -103,4 +109,4 @@ class ExecutorWithExternalLauncher(ExecutorWithExternalLauncherV0, Executor):
         cpu_group = get_world_group().cpu_group
         memory_tensor = torch.tensor([memory], device="cpu", dtype=torch.int64)
         dist.all_reduce(memory_tensor, group=cpu_group, op=dist.ReduceOp.MIN)
-        return memory_tensor.item()
+        return [memory_tensor.item()]

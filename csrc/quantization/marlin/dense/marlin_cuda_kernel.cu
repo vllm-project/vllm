@@ -96,8 +96,8 @@ __device__ inline FragB dequant(int q) {
   const int HI = 0x00f000f0;
   const int EX = 0x64006400;
   // Guarantee that the `(a & b) | c` operations are LOP3s.
-  int lo = lop3 < (0xf0 & 0xcc) | 0xaa > (q, LO, EX);
-  int hi = lop3 < (0xf0 & 0xcc) | 0xaa > (q, HI, EX);
+  int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, LO, EX);
+  int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, HI, EX);
   // We want signed int4 outputs, hence we fuse the `-8` symmetric zero point
   // directly into `SUB` and `ADD`.
   const int SUB = 0x64086408;
@@ -277,12 +277,12 @@ __global__ void Marlin(
       b_gl_stride * (threadIdx.x / b_sh_stride) + (threadIdx.x % b_sh_stride);
   b_gl_rd += b_sh_stride * slice_col;
   b_gl_rd += b_gl_rd_delta_o * slice_row;
-  int b_sh_wr = threadIdx.x;
-  int b_sh_rd = threadIdx.x;
+  auto b_sh_wr = threadIdx.x;
+  auto b_sh_rd = threadIdx.x;
 
   int s_gl_rd = s_gl_stride * ((thread_k_blocks * slice_row) / group_blocks) +
                 s_sh_stride * slice_col + threadIdx.x;
-  int s_sh_wr = threadIdx.x;
+  auto s_sh_wr = threadIdx.x;
   int s_sh_rd;
   // We use a different scale layout for grouped and column-wise quantization as
   // we scale a `half2` tile in column-major layout in the former and in
@@ -455,7 +455,7 @@ __global__ void Marlin(
   auto thread_block_reduce = [&]() {
     constexpr int red_off = threads / b_sh_stride / 2;
     if (red_off >= 1) {
-      int red_idx = threadIdx.x / b_sh_stride;
+      auto red_idx = threadIdx.x / b_sh_stride;
       constexpr int red_sh_stride = b_sh_stride * 4 * 2;
       constexpr int red_sh_delta = b_sh_stride;
       int red_sh_rd = red_sh_stride * (threadIdx.x / b_sh_stride) +
@@ -522,7 +522,7 @@ __global__ void Marlin(
                     4 * (threadIdx.x / 32) + threadIdx.x % 4;
       c_gl_wr += (2 * thread_n_blocks) * slice_col;
       constexpr int c_sh_wr_delta = active_threads;
-      int c_sh_wr = threadIdx.x;
+      auto c_sh_wr = threadIdx.x;
 
       int row = (threadIdx.x % 32) / 4;
 

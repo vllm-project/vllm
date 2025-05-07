@@ -9,6 +9,7 @@ from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
@@ -64,7 +65,7 @@ class MoeWNA16Config(QuantizationConfig):
             self.modules_to_not_convert = modules_to_not_convert
 
     @classmethod
-    def get_name(cls) -> str:
+    def get_name(cls) -> QuantizationMethods:
         return "moe_wna16"
 
     @classmethod
@@ -100,8 +101,8 @@ class MoeWNA16Config(QuantizationConfig):
                    lm_head_quantized, modules_to_not_convert, config)
 
     @classmethod
-    def override_quantization_method(cls, hf_quant_cfg,
-                                     user_quant) -> Optional[str]:
+    def override_quantization_method(
+            cls, hf_quant_cfg, user_quant) -> Optional[QuantizationMethods]:
         can_convert = cls.is_moe_wna16_compatible(hf_quant_cfg)
         if can_convert and user_quant == "moe_wna16":
             return cls.get_name()
@@ -293,6 +294,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
         activation: str = "silu",
     ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe import fused_experts
@@ -312,21 +314,23 @@ class MoeWNA16Method(FusedMoEMethodBase):
         weight_bits = self.quant_config.weight_bits
         has_zp = self.quant_config.has_zp
 
-        return fused_experts(x,
-                             layer.w13_qweight,
-                             layer.w2_qweight,
-                             topk_weights=topk_weights,
-                             topk_ids=topk_ids,
-                             inplace=True,
-                             use_int4_w4a16=weight_bits == 4,
-                             use_int8_w8a16=weight_bits == 8,
-                             global_num_experts=global_num_experts,
-                             expert_map=expert_map,
-                             w1_scale=layer.w13_scales,
-                             w2_scale=layer.w2_scales,
-                             w1_zp=layer.w13_qzeros if has_zp else None,
-                             w2_zp=layer.w2_qzeros if has_zp else None,
-                             block_shape=[0, layer.group_size])
+        return fused_experts(
+            x,
+            layer.w13_qweight,
+            layer.w2_qweight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            inplace=True,
+            use_int4_w4a16=weight_bits == 4,
+            use_int8_w8a16=weight_bits == 8,
+            global_num_experts=global_num_experts,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            expert_map=expert_map,
+            w1_scale=layer.w13_scales,
+            w2_scale=layer.w2_scales,
+            w1_zp=layer.w13_qzeros if has_zp else None,
+            w2_zp=layer.w2_qzeros if has_zp else None,
+            block_shape=[0, layer.group_size])
 
     @staticmethod
     def get_weight_loader(layer, weight_loader):

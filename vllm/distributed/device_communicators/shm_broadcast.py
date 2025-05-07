@@ -7,11 +7,13 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from multiprocessing import shared_memory
-from typing import List, Optional, Tuple, Union
+from threading import Event
+from typing import Any, List, Optional, Tuple, Union
 from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
+import zmq
 from torch.distributed import ProcessGroup
 from zmq import IPV6  # type: ignore
 from zmq import SUB, SUBSCRIBE, XPUB, XPUB_VERBOSE, Context  # type: ignore
@@ -125,8 +127,13 @@ class ShmRingBuffer:
                        lambda *args, **kwargs: None):
                 try:
                     self.shared_memory = shared_memory.SharedMemory(name=name)
-                    assert (
-                        self.shared_memory.size == self.total_bytes_of_buffer)
+                    # See https://docs.python.org/3/library/multiprocessing.shared_memory.html # noqa
+                    # Some platforms allocate memory based on page size,
+                    # so the shared memory block size may be larger or equal
+                    # to the requested size. The size parameter is ignored
+                    # when attaching to an existing block.
+                    assert (self.shared_memory.size
+                            >= self.total_bytes_of_buffer)
                 except FileNotFoundError:
                     # we might deserialize the object in a different node
                     # in this case, this object is not used,
@@ -233,7 +240,8 @@ class MessageQueue:
             if is_valid_ipv6_address(connect_ip):
                 self.remote_socket.setsockopt(IPV6, 1)
                 remote_addr_ipv6 = True
-            socket_addr = f"tcp://*:{remote_subscribe_port}"
+                connect_ip = f"[{connect_ip}]"
+            socket_addr = f"tcp://{connect_ip}:{remote_subscribe_port}"
             self.remote_socket.bind(socket_addr)
             remote_subscribe_addr = f"tcp://{connect_ip}:{remote_subscribe_port}"
         else:
@@ -356,8 +364,11 @@ class MessageQueue:
                     # if we wait for a long time, log a message
                     if (time.monotonic() - start_time
                             > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
-                        logger.debug("No available block found in %s second. ",
-                                     VLLM_RINGBUFFER_WARNING_INTERVAL)
+                        logger.debug(
+                            ("No available shared memory broadcast block found"
+                             " in %s second."),
+                            VLLM_RINGBUFFER_WARNING_INTERVAL,
+                        )
                         n_warning += 1
 
                     # if we time out, raise an exception
@@ -391,7 +402,9 @@ class MessageQueue:
                 break
 
     @contextmanager
-    def acquire_read(self, timeout: Optional[float] = None):
+    def acquire_read(self,
+                     timeout: Optional[float] = None,
+                     cancel: Optional[Event] = None):
         assert self._is_local_reader, "Only readers can acquire read"
         start_time = time.monotonic()
         n_warning = 1
@@ -414,9 +427,15 @@ class MessageQueue:
                     # if we wait for a long time, log a message
                     if (time.monotonic() - start_time
                             > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
-                        logger.debug("No available block found in %s second. ",
-                                     VLLM_RINGBUFFER_WARNING_INTERVAL)
+                        logger.debug(
+                            ("No available shared memory broadcast block found"
+                             " in %s second."),
+                            VLLM_RINGBUFFER_WARNING_INTERVAL,
+                        )
                         n_warning += 1
+
+                    if cancel is not None and cancel.is_set():
+                        raise RuntimeError("cancelled")
 
                     # if we time out, raise an exception
                     if (timeout is not None
@@ -452,10 +471,12 @@ class MessageQueue:
         if self.n_remote_reader > 0:
             self.remote_socket.send(serialized_obj)
 
-    def dequeue(self, timeout: Optional[float] = None):
+    def dequeue(self,
+                timeout: Optional[float] = None,
+                cancel: Optional[Event] = None):
         """ Read from message queue with optional timeout (in seconds) """
         if self._is_local_reader:
-            with self.acquire_read(timeout) as buf:
+            with self.acquire_read(timeout, cancel) as buf:
                 overflow = buf[0] == 1
                 if not overflow:
                     # no need to know the size of serialized object
@@ -463,14 +484,20 @@ class MessageQueue:
                     # see https://docs.python.org/3/library/pickle.html
                     obj = pickle.loads(buf[1:])
             if overflow:
-                recv = self.local_socket.recv()
-                obj = pickle.loads(recv)
+                obj = MessageQueue.recv(self.local_socket, timeout)
         elif self._is_remote_reader:
-            recv = self.remote_socket.recv()
-            obj = pickle.loads(recv)
+            obj = MessageQueue.recv(self.remote_socket, timeout)
         else:
             raise RuntimeError("Only readers can dequeue")
         return obj
+
+    @staticmethod
+    def recv(socket: zmq.Socket, timeout: Optional[float]) -> Any:
+        timeout_ms = None if timeout is None else int(timeout * 1000)
+        if not socket.poll(timeout=timeout_ms):
+            raise TimeoutError
+        recv = socket.recv(copy=False)
+        return pickle.loads(recv.buffer)
 
     def broadcast_object(self, obj=None):
         if self._is_writer:

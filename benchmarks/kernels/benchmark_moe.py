@@ -10,16 +10,15 @@ from typing import Any, TypedDict
 
 import ray
 import torch
-import triton
 from ray.experimental.tqdm_ray import tqdm
 from transformers import AutoConfig
 
 from vllm.model_executor.layers.fused_moe.fused_moe import *
 from vllm.platforms import current_platform
+from vllm.triton_utils import triton
 from vllm.utils import FlexibleArgumentParser
 
-FP8_DTYPE = torch.float8_e4m3fnuz if current_platform.is_rocm(
-) else torch.float8_e4m3fn
+FP8_DTYPE = current_platform.fp8_dtype()
 
 
 class BenchmarkConfig(TypedDict):
@@ -31,19 +30,18 @@ class BenchmarkConfig(TypedDict):
     num_stages: int
 
 
-def benchmark_config(
-    config: BenchmarkConfig,
-    num_tokens: int,
-    num_experts: int,
-    shard_intermediate_size: int,
-    hidden_size: int,
-    topk: int,
-    dtype: torch.dtype,
-    use_fp8_w8a8: bool,
-    use_int8_w8a16: bool,
-    num_iters: int = 100,
-    block_quant_shape: List[int] = None,
-) -> float:
+def benchmark_config(config: BenchmarkConfig,
+                     num_tokens: int,
+                     num_experts: int,
+                     shard_intermediate_size: int,
+                     hidden_size: int,
+                     topk: int,
+                     dtype: torch.dtype,
+                     use_fp8_w8a8: bool,
+                     use_int8_w8a16: bool,
+                     num_iters: int = 100,
+                     block_quant_shape: List[int] = None,
+                     use_deep_gemm: bool = False) -> float:
     init_dtype = torch.float16 if use_fp8_w8a8 else dtype
     x = torch.randn(num_tokens, hidden_size, dtype=dtype)
     if use_int8_w8a16:
@@ -116,22 +114,41 @@ def benchmark_config(
     def run():
         from vllm.model_executor.layers.fused_moe import override_config
         with override_config(config):
-            fused_moe(
-                x,
-                w1,
-                w2,
-                input_gating,
-                topk,
-                renormalize=True,
-                inplace=True,
-                use_fp8_w8a8=use_fp8_w8a8,
-                use_int8_w8a16=use_int8_w8a16,
-                w1_scale=w1_scale,
-                w2_scale=w2_scale,
-                a1_scale=a1_scale,
-                a2_scale=a2_scale,
-                block_shape=block_quant_shape,
-            )
+            if use_deep_gemm:
+                topk_weights, topk_ids, token_expert_indices = fused_topk(
+                    x, input_gating, topk, False)
+                return fused_experts(
+                    x,
+                    w1,
+                    w2,
+                    topk_weights,
+                    topk_ids,
+                    inplace=True,
+                    use_fp8_w8a8=use_fp8_w8a8,
+                    w1_scale=w1_scale,
+                    w2_scale=w2_scale,
+                    a1_scale=a1_scale,
+                    a2_scale=a2_scale,
+                    block_shape=block_quant_shape,
+                    allow_deep_gemm=True,
+                )
+            else:
+                fused_moe(
+                    x,
+                    w1,
+                    w2,
+                    input_gating,
+                    topk,
+                    renormalize=True,
+                    inplace=True,
+                    use_fp8_w8a8=use_fp8_w8a8,
+                    use_int8_w8a16=use_int8_w8a16,
+                    w1_scale=w1_scale,
+                    w2_scale=w2_scale,
+                    a1_scale=a1_scale,
+                    a2_scale=a2_scale,
+                    block_shape=block_quant_shape,
+                )
 
     # JIT compilation & warmup
     run()
@@ -366,6 +383,8 @@ class BenchmarkWorker:
         dtype: torch.dtype,
         use_fp8_w8a8: bool,
         use_int8_w8a16: bool,
+        block_quant_shape: List[int] = None,
+        use_deep_gemm: bool = False,
     ) -> tuple[dict[str, int], float]:
         current_platform.seed_everything(self.seed)
         dtype_str = get_config_dtype_str(dtype,
@@ -386,10 +405,18 @@ class BenchmarkWorker:
         else:
             config = op_config[min(op_config.keys(),
                                    key=lambda x: abs(x - num_tokens))]
-        kernel_time = benchmark_config(config, num_tokens, num_experts,
-                                       shard_intermediate_size, hidden_size,
-                                       topk, dtype, use_fp8_w8a8,
-                                       use_int8_w8a16)
+        kernel_time = benchmark_config(config,
+                                       num_tokens,
+                                       num_experts,
+                                       shard_intermediate_size,
+                                       hidden_size,
+                                       topk,
+                                       dtype,
+                                       use_fp8_w8a8,
+                                       use_int8_w8a16,
+                                       num_iters=100,
+                                       block_quant_shape=block_quant_shape,
+                                       use_deep_gemm=use_deep_gemm)
         return config, kernel_time
 
     def tune(
@@ -404,6 +431,7 @@ class BenchmarkWorker:
         use_int8_w8a16: bool,
         search_space: list[dict[str, int]],
         block_quant_shape: list[int],
+        use_deep_gemm: bool,
     ) -> dict[str, int]:
         best_config = None
         best_time = float("inf")
@@ -414,8 +442,14 @@ class BenchmarkWorker:
                                                    hidden_size, search_space,
                                                    is_fp16, topk)
 
-        with torch.cuda.device(self.device_id) if current_platform.is_rocm(
-        ) else nullcontext():
+        need_device_guard = False
+        if current_platform.is_rocm():
+            visible_device = os.environ.get("ROCR_VISIBLE_DEVICES", None)
+            if visible_device != f"{self.device_id}":
+                need_device_guard = True
+
+        with torch.cuda.device(
+                self.device_id) if need_device_guard else nullcontext():
             for config in tqdm(search_space):
                 try:
                     kernel_time = benchmark_config(
@@ -429,7 +463,8 @@ class BenchmarkWorker:
                         use_fp8_w8a8,
                         use_int8_w8a16,
                         num_iters=20,
-                        block_quant_shape=block_quant_shape)
+                        block_quant_shape=block_quant_shape,
+                        use_deep_gemm=use_deep_gemm)
                 except triton.runtime.autotuner.OutOfResources:
                     # Some configurations may be invalid and fail to compile.
                     continue
@@ -488,9 +523,17 @@ def save_configs(configs: dict[int, BenchmarkConfig], num_experts: int,
         f.write("\n")
 
 
+def get_weight_block_size_safety(config, default_value=None):
+
+    quantization_config = getattr(config, 'quantization_config', {})
+    if isinstance(quantization_config, dict):
+        return quantization_config.get('weight_block_size', default_value)
+    return default_value
+
+
 def main(args: argparse.Namespace):
     print(args)
-    block_quant_shape = None
+
     config = AutoConfig.from_pretrained(
         args.model, trust_remote_code=args.trust_remote_code)
     if config.architectures[0] == "DbrxForCausalLM":
@@ -509,13 +552,16 @@ def main(args: argparse.Namespace):
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
         shard_intermediate_size = 2 * intermediate_size // args.tp_size
-        block_quant_shape = config.quantization_config['weight_block_size']
-    elif config.architectures[0] == "Qwen2MoeForCausalLM":
+    elif config.architectures[0] in [
+            "Qwen2MoeForCausalLM", "Qwen3MoeForCausalLM"
+    ]:
         E = config.num_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
         shard_intermediate_size = 2 * intermediate_size // args.tp_size
     else:
+        # Support for llama4
+        config = config.get_text_config()
         # Default: Mixtral.
         E = config.num_local_experts
         topk = config.num_experts_per_tok
@@ -526,6 +572,7 @@ def main(args: argparse.Namespace):
     dtype = torch.float16 if current_platform.is_rocm() else config.torch_dtype
     use_fp8_w8a8 = args.dtype == "fp8_w8a8"
     use_int8_w8a16 = args.dtype == "int8_w8a16"
+    block_quant_shape = get_weight_block_size_safety(config)
 
     if args.batch_size is None:
         batch_sizes = [
@@ -534,6 +581,17 @@ def main(args: argparse.Namespace):
         ]
     else:
         batch_sizes = [args.batch_size]
+
+    use_deep_gemm = bool(args.use_deep_gemm)
+
+    if current_platform.is_rocm() and "HIP_VISIBLE_DEVICES" in os.environ:
+        # Ray will set ROCR_VISIBLE_DEVICES for device visibility
+        logger.warning(
+            "Ray uses ROCR_VISIBLE_DEVICES to control device accessibility."
+            "Replacing HIP_VISIBLE_DEVICES with ROCR_VISIBLE_DEVICES.")
+        val = os.environ["HIP_VISIBLE_DEVICES"]
+        os.environ["ROCR_VISIBLE_DEVICES"] = val
+        del os.environ["HIP_VISIBLE_DEVICES"]
 
     ray.init()
     num_gpus = int(ray.available_resources()["GPU"])
@@ -557,10 +615,10 @@ def main(args: argparse.Namespace):
 
         start = time.time()
         configs = _distribute(
-            "tune",
-            [(batch_size, E, shard_intermediate_size, hidden_size, topk, dtype,
-              use_fp8_w8a8, use_int8_w8a16, search_space, block_quant_shape)
-             for batch_size in batch_sizes])
+            "tune", [(batch_size, E, shard_intermediate_size, hidden_size,
+                      topk, dtype, use_fp8_w8a8, use_int8_w8a16, search_space,
+                      block_quant_shape, use_deep_gemm)
+                     for batch_size in batch_sizes])
         best_configs = {
             M: sort_config(config)
             for M, config in zip(batch_sizes, configs)
@@ -574,7 +632,7 @@ def main(args: argparse.Namespace):
         outputs = _distribute(
             "benchmark",
             [(batch_size, E, shard_intermediate_size, hidden_size, topk, dtype,
-              use_fp8_w8a8, use_int8_w8a16, block_quant_shape)
+              use_fp8_w8a8, use_int8_w8a16, block_quant_shape, use_deep_gemm)
              for batch_size in batch_sizes])
 
         for batch_size, (config, kernel_time) in zip(batch_sizes, outputs):
@@ -596,6 +654,7 @@ if __name__ == "__main__":
                         type=str,
                         choices=["auto", "fp8_w8a8", "int8_w8a16"],
                         default="auto")
+    parser.add_argument("--use-deep-gemm", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--batch-size", type=int, required=False)
     parser.add_argument("--tune", action="store_true")

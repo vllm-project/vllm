@@ -23,6 +23,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
     def __init__(self, strategy: str, is_static_input_scheme: bool):
         self.strategy = strategy
+        self.out_dtype = torch.get_default_dtype()
         self.is_static_input_scheme = is_static_input_scheme
         self.fp8_linear = Fp8LinearOp(use_per_token_if_dynamic=True)
 
@@ -42,7 +43,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                 logical_widths=layer.logical_widths,
             )
 
-            if current_platform.is_rocm():
+            if current_platform.is_fp8_fnuz():
                 input_scale = getattr(layer, 'input_scale', None)
 
                 weight, max_w_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
@@ -60,7 +61,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         elif self.strategy == QuantizationStrategy.CHANNEL:
             weight = layer.weight
 
-            if current_platform.is_rocm():
+            if current_platform.is_fp8_fnuz():
                 input_scale = getattr(layer, 'input_scale', None)
 
                 weight, weight_scale, input_scale = \
@@ -143,5 +144,6 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         return self.fp8_linear.apply(input=x,
                                      weight=layer.weight,
                                      weight_scale=layer.weight_scale,
+                                     out_dtype=self.out_dtype,
                                      input_scale=layer.input_scale,
                                      bias=bias)
