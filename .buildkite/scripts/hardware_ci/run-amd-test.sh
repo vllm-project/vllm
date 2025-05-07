@@ -3,6 +3,9 @@
 # This script runs test inside the corresponding ROCm docker container.
 set -o pipefail
 
+# Export Python path
+export PYTHONPATH=".."
+
 # Print ROCm version
 echo "--- Confirming Clean Initial State"
 while true; do
@@ -74,6 +77,11 @@ HF_MOUNT="/root/.cache/huggingface"
 
 commands=$@
 echo "Commands:$commands"
+
+if [[ $commands == *" basic_correctness/test_basic_correctness.py"* ]]; then
+  commands="VLLM_USE_TRITON_FLASH_ATTN=0 ${commands}"
+fi
+
 #ignore certain kernels tests
 if [[ $commands == *" kernels/core"* ]]; then
   commands="${commands} \

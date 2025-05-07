@@ -72,7 +72,7 @@ steps:
   - bash standalone_tests/python_only_compile.sh
 
 - label: Basic Correctness Test # 30min
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   fast_check: true
   torch_nightly: true
   source_file_dependencies:
@@ -98,7 +98,7 @@ steps:
   - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_chunked_prefill.py
 
 - label: Core Test # 10min
-  mirror_hardwares: [amdexperimental,amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction]
   fast_check: true
   source_file_dependencies:
   - vllm/core
