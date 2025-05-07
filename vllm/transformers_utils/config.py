@@ -698,14 +698,12 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
         if msl_from_hf is not None:
             default_for_max_seq_len = msl_from_hf
         elif default_for_max_pos_embed != ultimate_fallback_max_val:
-            # If max_seq_len is not in standard config, but max_pos_embed was found there
-            # (and is not the 128k fallback itself), use it for max_seq_len.
+            # If max_seq_len is not in standard config, 
+            # but max_pos_embed was found there, use it for max_seq_len.
             default_for_max_seq_len = default_for_max_pos_embed
             
-    # The following two lines are MODIFIED from the original:
-    # They now use the determined defaults instead of a hardcoded 128_000.
     # If config_dict (from params.json) has the key, its value is used.
-    # Otherwise, the determined default (from config.json or 128_000) is used.
+    # Otherwise, the determined from config.json or 128_000 is used.
     config_dict["max_seq_len"] = config_dict.get(
         "max_seq_len", default_for_max_seq_len
     )
@@ -766,9 +764,7 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
 
     if config_type == "multimodal":
         multimodal_config = config_dict.pop("vision_encoder")
-        # Save quantization_config if it was set from params.json processing,
-        # as the original config_dict (which becomes text_config) might lose it
-        # if it's intended to be a top-level key in the final multimodal config.
+        # Save quantization_config if it was set from params.json,
         quantization_config_val = config_dict.get("quantization_config")
 
         # config_dict is now repurposed to build the multimodal structure
