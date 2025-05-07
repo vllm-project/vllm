@@ -3,10 +3,10 @@
 requires = [
     "cmake>=3.26",
     "ninja",
-    "packaging",
-    "setuptools>=61",
+    "packaging>=24.2",
+    "setuptools>=77.0.3,<80.0.0",
     "setuptools-scm>=8.0",
-    "torch == 2.6.0",
+    "torch == 2.7.0",
     "wheel",
     "jinja2",
 ]
@@ -158,7 +158,6 @@ markers = [
     "skip_global_cleanup",
     "core_model: enable this model test in each PR instead of only nightly",
     "cpu_model: enable this model test in CPU tests",
-    "quant_model: run this model test under Quantized category",
     "split: run this test as part of a split",
     "distributed: run this test only in distributed GPU tests",
     "skip_v1: do not run this test with v1",
