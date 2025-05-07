@@ -71,7 +71,8 @@ class LlavaNextVideoProcessingInfo(BaseProcessingInfo):
         max_video_tokens = self.get_num_video_tokens(
             image_width=target_width,
             image_height=target_height,
-            num_frames=self.get_num_frames_with_most_features(seq_len),
+            num_frames=self.get_num_frames_with_most_features(
+                seq_len, mm_counts),
         )
 
         return {"video": max_video_tokens}
@@ -130,9 +131,12 @@ class LlavaNextVideoProcessingInfo(BaseProcessingInfo):
 
         return num_frames
 
-    def get_num_frames_with_most_features(self, seq_len: int) -> int:
-        mm_config = self.ctx.get_mm_config()
-        max_videos = mm_config.get_limit_per_prompt("video")
+    def get_num_frames_with_most_features(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> int:
+        max_videos = mm_counts.get("video", 0)
 
         max_total_frames = self._get_max_video_frames(seq_len)
 
@@ -155,7 +159,7 @@ class LlavaNextVideoDummyInputsBuilder(
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
         target_num_frames = \
-            self.info.get_num_frames_with_most_features(seq_len)
+            self.info.get_num_frames_with_most_features(seq_len, mm_counts)
 
         mm_data = {
             "video":
@@ -402,19 +406,20 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
                                                h, w)
             stacked_embeddings = self._video_pixels_to_features(
                 self.vision_tower, stacked_pixels)
-            return stacked_embeddings.view(b, num_frames,
-                                           *stacked_embeddings.shape[1:])
+            embeds = stacked_embeddings.view(b, num_frames,
+                                             *stacked_embeddings.shape[1:])
 
         elif is_list_of(video_pixels, torch.Tensor):
             frames_per_videos = [v.shape[0] for v in video_pixels]
             stacked_pixels = torch.cat(video_pixels, dim=0)
             stacked_embeddings = self._video_pixels_to_features(
                 self.vision_tower, stacked_pixels)
-            return torch.split(stacked_embeddings, frames_per_videos, dim=0)
-
+            embeds = torch.split(stacked_embeddings, frames_per_videos, dim=0)
         else:
             raise ValueError(
                 f"Unsupported type of video input {type(video_pixels)}")
+
+        return [e.flatten(0, 1) for e in embeds]
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:

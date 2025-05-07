@@ -38,6 +38,7 @@ models = client.models.list()
 model = models.data[0].id
 
 messages = [{"role": "user", "content": "9.11 and 9.8, which is greater?"}]
+# For granite, add: `extra_body={"chat_template_kwargs": {"thinking": True}}`
 stream = client.chat.completions.create(model=model,
                                         messages=messages,
                                         stream=True)

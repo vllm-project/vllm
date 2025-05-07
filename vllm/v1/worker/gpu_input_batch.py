@@ -2,23 +2,21 @@
 # Datastructures defining an input batch
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional, cast
+from typing import Optional, cast
 
 import numpy as np
 import torch
 
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import MultiModalKwargs
+from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
+from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import BlockTable
 
 _SAMPLING_EPS = 1e-5
-
-if TYPE_CHECKING:
-    from vllm.multimodal.inputs import PlaceholderRange
 
 
 @dataclass
@@ -28,7 +26,7 @@ class CachedRequestState:
     prompt_token_ids: list[int]
     prompt: Optional[str]
     mm_inputs: list[MultiModalKwargs]
-    mm_positions: list["PlaceholderRange"]
+    mm_positions: list[PlaceholderRange]
     sampling_params: SamplingParams
     generator: Optional[torch.Generator]
 
@@ -41,9 +39,18 @@ class CachedRequestState:
 
     lora_request: Optional[LoRARequest] = None
 
+    def __post_init__(self):
+        self.num_prompt_tokens = len(self.prompt_token_ids)
+
     @property
     def num_tokens(self) -> int:
-        return len(self.prompt_token_ids) + len(self.output_token_ids)
+        return self.num_prompt_tokens + len(self.output_token_ids)
+
+    def get_token_id(self, idx: int) -> int:
+        if idx < self.num_prompt_tokens:
+            return self.prompt_token_ids[idx]
+        else:
+            return self.output_token_ids[idx - self.num_prompt_tokens]
 
 
 class InputBatch:
@@ -196,6 +203,9 @@ class InputBatch:
         # NOTE(rob): num_prompt_logprobs only includes reqs
         # that are currently in the prefill phase.
         self.num_prompt_logprobs: dict[str, int] = {}
+
+        # To accumulate prompt logprobs tensor chunks across prefill steps.
+        self.in_progress_prompt_logprobs_cpu: dict[str, LogprobsTensors] = {}
 
         self.logit_bias: list[Optional[dict[int,
                                             float]]] = [None] * max_num_reqs
@@ -362,6 +372,7 @@ class InputBatch:
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
         self.num_prompt_logprobs.pop(req_id, None)
+        self.in_progress_prompt_logprobs_cpu.pop(req_id, None)
 
         # LoRA
         lora_id = self.request_lora_mapping[req_index]

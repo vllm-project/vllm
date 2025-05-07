@@ -282,7 +282,7 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def wake_up(self) -> None:
+    async def wake_up(self, tags: Optional[list[str]] = None) -> None:
         """Wake up the engine"""
         ...
 

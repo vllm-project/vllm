@@ -17,16 +17,13 @@ from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import use_rocm_custom_paged_attention
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
 logger = init_logger(__name__)
-
 _PARTITION_SIZE_ROCM = 256
-_GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
-_ON_NAVI = "gfx1" in _GPU_ARCH
-_ON_MI250_MI300 = any(arch in _GPU_ARCH for arch in ["gfx90a", "gfx942"])
 
 
 class ROCmFlashAttentionBackend(AttentionBackend):
@@ -790,9 +787,9 @@ class ROCmFlashAttentionImpl(AttentionImpl):
             num_seqs, num_heads, head_size = decode_query.shape
             block_size = value_cache.shape[3]
             gqa_ratio = num_heads // self.num_kv_heads
-            use_custom = _use_rocm_custom_paged_attention(
+            use_custom = use_rocm_custom_paged_attention(
                 decode_query.dtype, head_size, block_size, gqa_ratio,
-                decode_meta.max_decode_seq_len)
+                decode_meta.max_decode_seq_len, self.sliding_window)
             if use_custom:
                 max_seq_len = (decode_meta.max_decode_seq_len if self.attn_type
                                != AttentionType.ENCODER_DECODER else
@@ -817,6 +814,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     out = output[num_prefill_tokens:]
                 else:
                     out = output
+
+                query_start_loc = None
                 ops.paged_attention_rocm(
                     out,
                     exp_sums,
@@ -833,6 +832,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     decode_meta.seq_lens_tensor
                     if self.attn_type != AttentionType.ENCODER_DECODER else
                     decode_meta.encoder_seq_lens_tensor,
+                    query_start_loc,
                     block_size,
                     max_seq_len,
                     self.alibi_slopes,
@@ -884,9 +884,8 @@ def _sdpa_attention(
 
     for i, seq_len in enumerate(seq_lens):
         end = start + seq_len
-        with torch.backends.cuda.sdp_kernel(enable_math=True,
-                                            enable_flash=False,
-                                            enable_mem_efficient=False):
+        with torch.nn.attention.sdpa_kernel(
+                torch.nn.attention.SDPBackend.MATH):
             sub_out = torch.nn.functional.scaled_dot_product_attention(
                 query[:, start:end, :],
                 key[:, start:end, :],
@@ -899,14 +898,3 @@ def _sdpa_attention(
             start = end
 
     return output
-
-
-def _use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
-                                     block_size: int, gqa_ratio: int,
-                                     max_seq_len: int) -> bool:
-    # rocm custom page attention not support on navi (gfx1*)
-    return (_ON_MI250_MI300 and not _ON_NAVI
-            and (qtype == torch.half or qtype == torch.bfloat16)
-            and (head_size == 64 or head_size == 128)
-            and (block_size == 16 or block_size == 32)
-            and (gqa_ratio >= 1 and gqa_ratio <= 16) and max_seq_len <= 32768)

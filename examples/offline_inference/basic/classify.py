@@ -23,12 +23,14 @@ def main(args: Namespace):
     outputs = model.classify(prompts)
 
     # Print the outputs.
+    print("\nGenerated Outputs:\n" + "-" * 60)
     for prompt, output in zip(prompts, outputs):
         probs = output.outputs.probs
         probs_trimmed = ((str(probs[:16])[:-1] +
                           ", ...]") if len(probs) > 16 else probs)
-        print(f"Prompt: {prompt!r} | "
+        print(f"Prompt: {prompt!r} \n"
               f"Class Probabilities: {probs_trimmed} (size={len(probs)})")
+        print("-" * 60)
 
 
 if __name__ == "__main__":

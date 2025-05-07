@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -8,7 +8,6 @@ import torch
 from vllm.attention.selector import _cached_get_attn_backend, get_attn_backend
 from vllm.platforms.cpu import CpuPlatform
 from vllm.platforms.cuda import CudaPlatform
-from vllm.platforms.openvino import OpenVinoPlatform
 from vllm.platforms.rocm import RocmPlatform
 from vllm.utils import STR_BACKEND_ENV_VAR, STR_FLASH_ATTN_VAL, STR_INVALID_VAL
 
@@ -21,9 +20,9 @@ def clear_cache():
 
 
 @pytest.mark.parametrize(
-    "name", ["TORCH_SDPA", "ROCM_FLASH", "XFORMERS", "FLASHINFER", "OPENVINO"])
+    "name", ["TORCH_SDPA", "ROCM_FLASH", "XFORMERS", "FLASHINFER"])
 @pytest.mark.parametrize("use_v1", [True, False])
-@pytest.mark.parametrize("device", ["cpu", "openvino", "hip", "cuda"])
+@pytest.mark.parametrize("device", ["cpu", "hip", "cuda"])
 def test_env(
     name: str,
     use_v1: bool,
@@ -51,13 +50,6 @@ def test_env(
                                            16, False)
             EXPECTED = "TRITON_ATTN_VLLM_V1" if use_v1 else "ROCM_FLASH"
             assert backend.get_name() == EXPECTED
-        elif device == "openvino":
-            with patch("vllm.attention.selector.current_platform",
-                       OpenVinoPlatform()), patch.dict('sys.modules',
-                                                       {'openvino': Mock()}):
-                backend = get_attn_backend(16, torch.float16, torch.float16,
-                                           16, False)
-            assert backend.get_name() == "OPENVINO"
         else:
             if name in ["XFORMERS", "FLASHINFER"]:
                 with patch("vllm.attention.selector.current_platform",

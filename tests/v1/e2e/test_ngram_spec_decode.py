@@ -70,12 +70,16 @@ def test_ngram_correctness(
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         del ref_llm
 
-        spec_llm = LLM(model=model_name,
-                       speculative_model='[ngram]',
-                       ngram_prompt_lookup_max=5,
-                       ngram_prompt_lookup_min=3,
-                       num_speculative_tokens=3,
-                       max_model_len=1024)
+        spec_llm = LLM(
+            model=model_name,
+            speculative_config={
+                "method": "ngram",
+                "prompt_lookup_max": 5,
+                "prompt_lookup_min": 3,
+                "num_speculative_tokens": 3,
+            },
+            max_model_len=1024,
+        )
         spec_outputs = spec_llm.chat(test_prompts, sampling_config)
         matches = 0
         misses = 0

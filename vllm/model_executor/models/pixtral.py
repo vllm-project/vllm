@@ -42,7 +42,6 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import (MistralTokenizer,
                                                cached_tokenizer_from_config)
-from vllm.utils import flatten_2d_lists
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (flatten_bn, init_vllm_registered_model, maybe_prefix,
@@ -74,11 +73,8 @@ class PixtralImagePixelInputs(TypedDict):
     A boolean mask indicating which image embeddings correspond
     to patch tokens.
 
-    Shape: `(batch_size, num_images, num_embeds)`
+    Shape: `(batch_size * num_images, num_embeds)`
     """
-
-    num_embeds: Union[torch.Tensor, list[torch.Tensor]]
-    """Shape: `(batch_size, num_images)`"""
 
 
 class PixtralProcessorAdapter:
@@ -153,7 +149,6 @@ class PixtralProcessorAdapter:
         images_processed = list[torch.Tensor]()
         images_tokens = list[torch.Tensor]()
         images_embed_is_patch = list[torch.Tensor]()
-        images_num_embeds = list[int]()
 
         for image in images:
             image_inputs = self.image_processor(ImageChunk(image=image))
@@ -163,13 +158,11 @@ class PixtralProcessorAdapter:
             images_processed.append(image_processed)
             images_tokens.append(image_tokens)
             images_embed_is_patch.append(image_tokens == image_token_id)
-            images_num_embeds.append(len(image_tokens))
 
         return {
             "input_ids": torch.cat(images_tokens)[None].expand(len(text), -1),
             "images": images_processed,
             "embed_is_patch": images_embed_is_patch,
-            "num_embeds": torch.tensor(images_num_embeds),
         }
 
 
@@ -273,7 +266,6 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
         return dict(
             images=MultiModalFieldConfig.batched("image"),
             embed_is_patch=MultiModalFieldConfig.batched("image"),
-            num_embeds=MultiModalFieldConfig.batched("image"),
         )
 
     def _get_prompt_updates(
@@ -394,16 +386,12 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
             raise ValueError("Incorrect type of embed_is_patch. "
                              f"Got type: {type(embed_is_patch)}")
 
-        num_embeds = kwargs.pop("num_embeds")
-        if not isinstance(num_embeds, (torch.Tensor, list)):
-            raise ValueError("Incorrect type of num_embeds. "
-                             f"Got type: {type(num_embeds)}")
+        embed_is_patch = flatten_bn(embed_is_patch)
 
         return PixtralImagePixelInputs(
             type="pixel_values",
             images=flatten_bn(images),
             embed_is_patch=embed_is_patch,
-            num_embeds=num_embeds,
         )
 
     def _process_image_input(
@@ -441,15 +429,10 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         image_features = self._process_image_input(image_input)
 
-        if kwargs.get("v0_path", False):
-            return image_features
-
-        return flatten_2d_lists(
-            scatter_patch_features(*args) for args in zip(
-                image_features,
-                image_input["num_embeds"],
-                image_input["embed_is_patch"],
-            ))
+        return scatter_patch_features(
+            image_features,
+            image_input["embed_is_patch"],
+        )
 
     def get_input_embeddings(
         self,
@@ -481,7 +464,6 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         # NOTE: In v1, inputs_embeds is always generated at model runner, this
         # condition is for v0 compatibility.
         elif inputs_embeds is None:
-            kwargs.update({"v0_path": True})
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
             inputs_embeds = self.get_input_embeddings(input_ids,
                                                       vision_embeddings)
@@ -997,7 +979,8 @@ class PixtralHFEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
         return self.vision_config.image_size
 
     def get_patch_size(self) -> int:
-        return self.vision_config.patch_size
+        return (self.vision_config.patch_size *
+                self.vision_config.spatial_merge_size)
 
     def get_patch_grid_length(self) -> int:
         image_size, patch_size = self.get_image_size(), self.get_patch_size()
@@ -1019,8 +1002,8 @@ class PixtralHFEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
         ratio = max(image_width / max_width, image_height / max_height)
 
         if ratio > 1:
-            image_width = int(math.ceil(image_width / ratio))
-            image_height = int(math.ceil(image_height / ratio))
+            image_width = int(math.floor(image_width / ratio))
+            image_height = int(math.floor(image_height / ratio))
 
         nrows, ncols = _get_pixtral_hf_num_image_tokens(
             (image_height, image_width),

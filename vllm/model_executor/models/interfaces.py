@@ -412,6 +412,35 @@ def is_hybrid(
 
 
 @runtime_checkable
+class HasNoOps(Protocol):
+    has_noops: ClassVar[Literal[True]] = True
+
+
+@runtime_checkable
+class _HasNoOpsType(Protocol):
+    has_noops: ClassVar[Literal[True]]
+
+
+@overload
+def has_noops(model: object) -> TypeIs[HasNoOps]:
+    ...
+
+
+@overload
+def has_noops(model: Type[object]) -> TypeIs[Type[HasNoOps]]:
+    ...
+
+
+def has_noops(
+    model: Union[Type[object], object]
+) -> Union[TypeIs[Type[HasNoOps]], TypeIs[HasNoOps]]:
+    if isinstance(model, type):
+        return isinstance(model, _HasNoOpsType)
+
+    return isinstance(model, HasNoOps)
+
+
+@runtime_checkable
 class SupportsCrossEncoding(Protocol):
     """The interface required for all models that support cross encoding."""
 

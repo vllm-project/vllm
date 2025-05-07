@@ -119,6 +119,8 @@ void advance_step_flashinfer(
     torch::Tensor& paged_kv_indices, torch::Tensor& paged_kv_indptr,
     torch::Tensor& paged_kv_last_page_len, torch::Tensor& block_table_bounds);
 
+torch::Tensor get_cuda_view_from_cpu_tensor(torch::Tensor& cpu_tensor);
+
 #ifndef USE_ROCM
 torch::Tensor aqlm_gemm(const torch::Tensor& input, const torch::Tensor& codes,
                         const torch::Tensor& codebooks,
@@ -143,7 +145,8 @@ torch::Tensor permute_cols(torch::Tensor const& A, torch::Tensor const& perm);
 #endif
 
 torch::Tensor ggml_dequantize(torch::Tensor W, int64_t type, int64_t m,
-                              int64_t n);
+                              int64_t n,
+                              std::optional<at::ScalarType> const& dtype);
 
 torch::Tensor ggml_mul_mat_vec_a8(torch::Tensor W, torch::Tensor X,
                                   int64_t type, int64_t row);
@@ -164,6 +167,7 @@ int64_t ggml_moe_get_block_size(int64_t type);
 bool cutlass_scaled_mm_supports_fp4(int64_t cuda_device_capability);
 bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability);
 bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability);
+bool cutlass_group_gemm_supported(int64_t cuda_device_capability);
 
 void cutlass_scaled_fp4_mm(torch::Tensor& D, torch::Tensor const& A,
                            torch::Tensor const& B, torch::Tensor const& A_sf,
@@ -174,6 +178,19 @@ void cutlass_scaled_mm(torch::Tensor& out, torch::Tensor const& a,
                        torch::Tensor const& b, torch::Tensor const& a_scales,
                        torch::Tensor const& b_scales,
                        std::optional<torch::Tensor> const& bias);
+
+void cutlass_moe_mm(
+    torch::Tensor& out_tensors, torch::Tensor const& a_tensors,
+    torch::Tensor const& b_tensors, torch::Tensor const& a_scales,
+    torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
+    torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
+    torch::Tensor const& b_strides, torch::Tensor const& c_strides);
+
+void get_cutlass_moe_mm_data(
+    const torch::Tensor& topk_ids, torch::Tensor& expert_offsets,
+    torch::Tensor& problem_sizes1, torch::Tensor& problem_sizes2,
+    torch::Tensor& input_permutation, torch::Tensor& output_permutation,
+    const int64_t num_experts, const int64_t n, const int64_t k);
 
 void cutlass_scaled_mm_azp(torch::Tensor& out, torch::Tensor const& a,
                            torch::Tensor const& b,
@@ -251,10 +268,10 @@ void causal_conv1d_fwd(const at::Tensor& x, const at::Tensor& weight,
                        const std::optional<at::Tensor>& has_initial_state,
                        bool silu_activation, int64_t pad_slot_id);
 
-#ifndef USE_ROCM
 using fptr_t = int64_t;
 fptr_t init_custom_ar(const std::vector<int64_t>& fake_ipc_ptrs,
-                      torch::Tensor& rank_data, int64_t rank, bool full_nvlink);
+                      torch::Tensor& rank_data, int64_t rank,
+                      bool fully_connected);
 void all_reduce(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
                 fptr_t reg_buffer, int64_t reg_buffer_sz_bytes);
 void dispose(fptr_t _fa);
@@ -265,4 +282,7 @@ get_graph_buffer_ipc_meta(fptr_t _fa);
 void register_graph_buffers(fptr_t _fa,
                             const std::vector<std::vector<int64_t>>& handles,
                             const std::vector<std::vector<int64_t>>& offsets);
-#endif
+std::tuple<int64_t, torch::Tensor> allocate_shared_buffer_and_handle(
+    int64_t size);
+int64_t open_mem_handle(torch::Tensor& mem_handle);
+void free_shared_buffer(int64_t buffer);

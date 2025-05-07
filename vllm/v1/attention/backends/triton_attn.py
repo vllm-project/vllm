@@ -168,6 +168,7 @@ class TritonAttentionImpl(AttentionImpl):
             block_table=attn_metadata.block_table,
             query_start_loc=attn_metadata.query_start_loc,
             seq_lens=attn_metadata.seq_lens,
+            max_seq_len=attn_metadata.max_seq_len,
             max_query_len=attn_metadata.max_query_len,
             k_scale=layer._k_scale,
             v_scale=layer._v_scale,

@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import importlib
 import random
 from copy import deepcopy
 from dataclasses import dataclass
@@ -20,7 +19,6 @@ from vllm.lora.fully_sharded_layers import (
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
-                              LinearScalingRotaryEmbeddingWithLoRA,
                               LogitsProcessorWithLoRA, LoRAMapping,
                               MergedColumnParallelLinearWithLoRA,
                               MergedQKVParallelLinearWithLoRA,
@@ -29,8 +27,7 @@ from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
                               RowParallelLinearWithLoRA,
                               VocabParallelEmbeddingWithLoRA)
 # yapf: enable
-from vllm.lora.models import (LongContextLoRAContext, LoRALayerWeights,
-                              PackedLoRALayerWeights)
+from vllm.lora.models import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.punica_wrapper import get_punica_wrapper
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
@@ -38,7 +35,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding, get_masked_input_and_mask)
 from vllm.model_executor.utils import set_random_seed
@@ -60,38 +56,40 @@ DEVICES = ([
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
 ] if current_platform.is_cuda_alike() else ["cpu"])
 
-#For GPU, we will launch different triton kernels between the prefill and decode
-# stages, so we need to verify this. prefill stage(True) or decode stage(False)
+# prefill stage(True) or decode stage(False)
 STAGES = [True, False]
 
-# With the inclusion of V1 tests (look at the run_with_both_engines_lora),
-# the tests in this file run twice, once with the V0 engine and then with
-# the V1 engine.
-# The NUM_RANDOM_SEEDS value was set to 10 before. It is cut to half
-# with the inclusion of V1 tests to maintain the CI test times.
-NUM_RANDOM_SEEDS = 5
-# The VOCAB_PARALLEL_EMBEDDING_TEST_NUM_RANDOM_SEEDS value was set to
-# 256 before. It is cut to half with the inclusion of V1 tests to maintain
-# the CI test times.
+NUM_RANDOM_SEEDS = 6
+
 VOCAB_PARALLEL_EMBEDDING_TEST_NUM_RANDOM_SEEDS = 128
 
 
 @pytest.fixture(autouse=True)
-def v1(run_with_both_engines_lora):
-    # Simple autouse wrapper to run both engines for each test
-    # This can be promoted up to conftest.py to run for every
-    # test in a package
-
-    # Reload punica_gpu as the kernels used are tied to engine type.
-    from vllm.lora.punica_wrapper import punica_gpu
-    importlib.reload(punica_gpu)
-
+def clean_cache():
     # Release any memory we might be holding on to. CI runs OOMs otherwise.
     from vllm.lora.ops.triton_ops.utils import (_LORA_A_PTR_DICT,
                                                 _LORA_B_PTR_DICT)
     _LORA_B_PTR_DICT.clear()
     _LORA_A_PTR_DICT.clear()
 
+    yield
+
+
+@pytest.fixture(autouse=True)
+def skip_cuda_with_stage_false(request):
+    """
+    On cuda-like platforms, we use the same kernels for prefill and decode 
+    stage, and 'stage' is generally ignored, so we only need to test once.
+    """
+    if current_platform.is_cuda_alike():
+        try:
+            if hasattr(request.node, "callspec") and hasattr(
+                    request.node.callspec, "params"):
+                params = request.node.callspec.params
+                if "stage" in params and params["stage"] is False:
+                    pytest.skip("Skip test when stage=False")
+        except Exception:
+            pass
     yield
 
 
@@ -1014,103 +1012,6 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
                                    expected_result,
                                    rtol=rtol,
                                    atol=atol)
-
-
-@torch.inference_mode()
-@pytest.mark.parametrize("num_loras", [1, 8])
-@pytest.mark.parametrize("device", ["cuda"])
-@pytest.mark.parametrize("scaling_factors", [(1.0, ), (4.0, ), (4.0, 8.0),
-                                             (6.0, 1.0)])
-@pytest.mark.parametrize("max_position", [11, 4096, 32768])
-@pytest.mark.parametrize("is_neox_style", [True, False])
-@pytest.mark.parametrize("rotary_dim", [None, 32])
-@pytest.mark.parametrize("head_size", [32, 108])
-@pytest.mark.parametrize("seq_len", [11, 1024])
-@pytest.mark.skipif(not current_platform.is_cuda_alike(),
-                    reason="Only CUDA backends are supported")
-def test_rotary_embedding_long_context(dist_init, num_loras, device,
-                                       scaling_factors, max_position,
-                                       is_neox_style, rotary_dim, head_size,
-                                       seq_len) -> None:
-    dtype = torch.float16
-    max_loras = 8
-    seed = 0
-    current_platform.seed_everything(seed)
-    torch.set_default_device(device)
-    punica_wrapper = get_punica_wrapper(8192, 256, device, max_loras=max_loras)
-    assert check_punica_wrapper(punica_wrapper)
-    lora_config = LoRAConfig(max_loras=max_loras,
-                             max_lora_rank=8,
-                             long_lora_scaling_factors=scaling_factors,
-                             lora_dtype=dtype)
-
-    if rotary_dim is None:
-        rotary_dim = head_size
-    base = 10000
-    batch_size = 5 * num_loras
-    num_heads = 7
-
-    # Verify lora is equivalent to linear scaling rotary embedding.
-    rope = get_rope(
-        head_size,
-        rotary_dim,
-        max_position,
-        base,
-        is_neox_style,
-    )
-    lora_rope = LinearScalingRotaryEmbeddingWithLoRA(rope)
-    lora_rope.set_mapping(punica_wrapper)
-    lora_rope.create_lora_weights(max_loras, lora_config)
-    linear_rope = get_rope(head_size, rotary_dim, max_position, base,
-                           is_neox_style, {
-                               "rope_type": "linear",
-                               "factor": scaling_factors
-                           })
-    linear_rope = linear_rope.to(dtype=dtype)
-    id_to_index = get_random_id_to_index(num_loras, max_loras)
-    _, index_mapping, prompt_mapping = create_random_inputs(
-        active_lora_ids=[0],
-        num_inputs=batch_size,
-        input_size=(1, max_position),
-        input_range=(0, lora_config.lora_extra_vocab_size),
-        input_type=torch.float16,
-        device=device)
-
-    lora_mapping = LoRAMapping(index_mapping, prompt_mapping)
-    long_lora_context = LongContextLoRAContext(list(scaling_factors),
-                                               rotary_dim)
-
-    next_expected_offset = 0
-    # Make sure the offset is correct.
-    scaling_factor_to_offset = lora_rope.scaling_factor_to_offset
-    for scaling_factor, offset in scaling_factor_to_offset.items():
-        assert offset == next_expected_offset
-        next_expected_offset += scaling_factor * max_position
-
-    for i in range(len(scaling_factors)):
-        long_lora_context.offsets_by_lora_id[i] = scaling_factor_to_offset.get(
-            scaling_factors[i], 0)
-    punica_wrapper.update_metadata(
-        lora_mapping,
-        id_to_index,
-        max_loras,
-        512,
-        lora_config.lora_extra_vocab_size,
-        long_lora_context=long_lora_context,
-    )
-    # lora_rope.set_mapping(*mapping_info)
-
-    positions = torch.randint(0, max_position, (batch_size, seq_len))
-    query = torch.randn(batch_size,
-                        seq_len,
-                        num_heads * head_size,
-                        dtype=dtype)
-    key = torch.randn_like(query)
-    ref_q, ref_k = linear_rope(positions, query, key)
-    actual_q, actual_k = lora_rope(positions, query, key)
-
-    torch.allclose(ref_q, actual_q)
-    torch.allclose(ref_k, actual_k)
 
 
 @pytest.mark.parametrize("tp_size", [1, 2, 4, 8])

@@ -160,7 +160,7 @@ class Qwen2AudioMultiModalProcessor(
         mm_kwargs: Mapping[str, Any],
     ) -> BatchFeature:
         # Text-only input not supported in composite processor
-        if not mm_data or not mm_data.get("audios", []):
+        if not mm_data.get("audios", []):
             prompt_ids = self.info.get_tokenizer().encode(prompt)
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")

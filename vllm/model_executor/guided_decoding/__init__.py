@@ -5,10 +5,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
-from vllm.model_executor.guided_decoding.reasoner import get_reasoner
 from vllm.model_executor.guided_decoding.utils import (
     convert_lark_to_gbnf, grammar_is_likely_lark,
     has_lmf_unsupported_json_features, has_xgrammar_unsupported_json_features)
+from vllm.reasoning import ReasoningParserManager
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
@@ -79,12 +79,6 @@ def maybe_backend_fallback(
                     "xgrammar does not support Lark grammars and the "
                     "grammar failed to convert to GBNF.", "outlines")
 
-        elif guided_params.json_object:
-            # https://github.com/mlc-ai/xgrammar/issues/256
-            fallback_or_error(guided_params,
-                              "xgrammar does not support json_object.",
-                              "guidance")
-
         # If the xgrammar module cannot be imported successfully,
         # we should still allow users to use guided decoding with a fallback.
         elif not xgr_installed:
@@ -107,7 +101,11 @@ async def get_guided_decoding_logits_processor(
         model_config: ModelConfig,
         reasoning_backend: str | None = None) -> LogitsProcessor | None:
 
-    reasoner = get_reasoner(tokenizer, reasoning_backend)
+    reasoner = None
+    if reasoning_backend is not None:
+        reasoner_class = ReasoningParserManager.get_reasoning_parser(
+            reasoning_backend)
+        reasoner = reasoner_class(tokenizer)
 
     guided_params = maybe_backend_fallback(guided_params)
 
@@ -146,8 +144,11 @@ def get_local_guided_decoding_logits_processor(
         reasoning_backend: str | None = None) -> LogitsProcessor | None:
     guided_params = maybe_backend_fallback(guided_params)
 
-    # Get the reasoner if needed, it will be None if reasoning_
-    reasoner = get_reasoner(tokenizer, reasoning_backend)
+    reasoner = None
+    if reasoning_backend is not None:
+        reasoner_class = ReasoningParserManager.get_reasoning_parser(
+            reasoning_backend)
+        reasoner = reasoner_class(tokenizer)
 
     # CFG grammar not supported by LMFE, so we use outlines instead
     if guided_params.backend_name == 'outlines':

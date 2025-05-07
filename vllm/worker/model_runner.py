@@ -1143,8 +1143,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             time_after_load = time.perf_counter()
 
         self.model_memory_usage = m.consumed_memory
-        logger.info("Model loading took %.4f GB and %.6f seconds",
-                    self.model_memory_usage / float(2**30),
+        logger.info("Model loading took %.4f GiB and %.6f seconds",
+                    self.model_memory_usage / GiB_bytes,
                     time_after_load - time_before_load)
         if self.prompt_adapter_config:
             self.prompt_adapter_manager = LRUCacheWorkerPromptAdapterManager(
@@ -1242,6 +1242,29 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         max_num_seqs = self.scheduler_config.max_num_seqs
         self._dummy_run(max_num_batched_tokens, max_num_seqs)
 
+    def _add_dummy_loras(self, num_loras: int) -> list[LoRARequest]:
+        assert num_loras > 0
+        assert self.lora_manager is not None
+
+        dummy_lora_requests: list[LoRARequest] = []
+        with self.lora_manager.dummy_lora_cache():
+            for idx in range(num_loras):
+                lora_id = idx + 1
+                dummy_lora_request = LoRARequest(
+                    lora_name=f"warmup_{lora_id}",
+                    lora_int_id=lora_id,
+                    lora_path="/not/a/real/path",
+                )
+                self.lora_manager.add_dummy_lora(dummy_lora_request,
+                                                 rank=LORA_WARMUP_RANK)
+                dummy_lora_requests.append(dummy_lora_request)
+        return dummy_lora_requests
+
+    def _remove_dummy_loras(self):
+        # Remove dummy loras.
+        assert self.lora_manager is not None
+        self.remove_all_loras()
+
     def _dummy_run(self,
                    max_num_batched_tokens: int,
                    max_num_seqs: int = 1) -> None:
@@ -1251,28 +1274,20 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 SamplingParams(top_p=0.99, top_k=self.vocab_size - 1)
 
             # This represents the maximum number of different requests
-            # that will have unique loras, an therefore the max amount of memory
-            # consumption create dummy lora request copies from the lora request
-            # passed in, which contains a lora from the lora warmup path.
+            # that will have unique loras, and therefore the max amount of
+            # memory consumption. Create dummy lora request copies from the
+            # lora request passed in, which contains a lora from the lora
+            # warmup path.
             dummy_lora_requests: List[LoRARequest] = []
             dummy_lora_requests_per_seq: List[LoRARequest] = []
             if self.lora_config:
-                assert self.lora_manager is not None
-                with self.lora_manager.dummy_lora_cache():
-                    for idx in range(self.lora_config.max_loras):
-                        lora_id = idx + 1
-                        dummy_lora_request = LoRARequest(
-                            lora_name=f"warmup_{lora_id}",
-                            lora_int_id=lora_id,
-                            lora_path="/not/a/real/path",
-                        )
-                        self.lora_manager.add_dummy_lora(dummy_lora_request,
-                                                         rank=LORA_WARMUP_RANK)
-                        dummy_lora_requests.append(dummy_lora_request)
-                    dummy_lora_requests_per_seq = [
-                        dummy_lora_requests[idx % len(dummy_lora_requests)]
-                        for idx in range(max_num_seqs)
-                    ]
+                dummy_lora_requests = self._add_dummy_loras(
+                    self.lora_config.max_loras)
+                assert len(dummy_lora_requests) == self.lora_config.max_loras
+                dummy_lora_requests_per_seq = [
+                    dummy_lora_requests[idx % len(dummy_lora_requests)]
+                    for idx in range(max_num_seqs)
+                ]
 
             # Profile memory usage with max_num_sequences sequences and the
             # total number of tokens equal to max_num_batched_tokens.
@@ -1354,9 +1369,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             self.execute_model(model_input, kv_caches, intermediate_tensors)
             torch.cuda.synchronize()
             if self.lora_config:
-                # Remove dummy loras.
-                assert self.lora_manager is not None
-                self.remove_all_loras()
+                self._remove_dummy_loras()
+
             return
 
     def remove_all_loras(self):
@@ -1479,6 +1493,16 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 dtype=self.model_config.dtype,
                 device=self.device)
 
+        dummy_lora_id: Optional[int] = None
+        dummy_lora_request: LoRARequest = []
+        if self.lora_config:
+            # The goal is to capture the LoRA kernels in cuda graphs.
+            # for this purpose, as single dummy lora is sufficient.
+            dummy_lora_requests = self._add_dummy_loras(num_loras=1)
+            assert len(dummy_lora_requests) == 1
+            dummy_lora_request = dummy_lora_requests[0]
+            dummy_lora_id = dummy_lora_request.lora_int_id
+
         with self.attn_state.graph_capture(max_batch_size), graph_capture(
                 self.device) as graph_capture_context:
             # NOTE: Capturing the largest batch size first may help reduce the
@@ -1503,10 +1527,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     attn_metadata.enable_kv_scales_calculation = False
                     if self.lora_config:
                         lora_mapping = LoRAMapping(
-                            **dict(index_mapping=[0] * batch_size,
-                                   prompt_mapping=[0] * batch_size,
+                            **dict(index_mapping=[dummy_lora_id] * batch_size,
+                                   prompt_mapping=[dummy_lora_id] * batch_size,
                                    is_prefill=False))
-                        self.set_active_loras(set(), lora_mapping)
+                        self.set_active_loras(set([dummy_lora_request]),
+                                              lora_mapping)
 
                     if self.prompt_adapter_config:
                         prompt_adapter_mapping = PromptAdapterMapping(
@@ -1561,6 +1586,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     self.graph_memory_pool = graph_runner.graph.pool()
                     self.graph_runners[virtual_engine][batch_size] = (
                         graph_runner)
+
+        if self.lora_config:
+            self._remove_dummy_loras()
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]

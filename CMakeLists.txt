@@ -34,7 +34,7 @@ set(PYTHON_SUPPORTED_VERSIONS "3.9" "3.10" "3.11" "3.12")
 set(CUDA_SUPPORTED_ARCHS "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0;10.0;10.1;12.0")
 
 # Supported AMD GPU architectures.
-set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx1030;gfx1100;gfx1101")
+set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1200;gfx1201")
 
 #
 # Supported/expected torch versions for CUDA/ROCm.
@@ -44,7 +44,7 @@ set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx1030;gfx1100;gfx1101")
 #
 # Note: the CUDA torch version is derived from pyproject.toml and various
 # requirements.txt files and should be kept consistent.  The ROCm torch
-# versions are derived from Dockerfile.rocm
+# versions are derived from docker/Dockerfile.rocm
 #
 set(TORCH_SUPPORTED_VERSION_CUDA "2.6.0")
 set(TORCH_SUPPORTED_VERSION_ROCM "2.6.0")
@@ -234,6 +234,7 @@ set(VLLM_EXT_SRC
   "csrc/activation_kernels.cu"
   "csrc/layernorm_kernels.cu"
   "csrc/layernorm_quant_kernels.cu"
+  "csrc/cuda_view.cu"
   "csrc/quantization/gptq/q_gemm.cu"
   "csrc/quantization/compressed_tensors/int8_quant_kernels.cu"
   "csrc/quantization/fp8/common.cu"
@@ -241,6 +242,7 @@ set(VLLM_EXT_SRC
   "csrc/quantization/gguf/gguf_kernel.cu"
   "csrc/cuda_utils_kernels.cu"
   "csrc/prepare_inputs/advance_step.cu"
+  "csrc/custom_all_reduce.cu"
   "csrc/torch_bindings.cpp")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
@@ -282,7 +284,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/mamba/causal_conv1d/causal_conv1d.cu"
     "csrc/quantization/aqlm/gemm_kernels.cu"
     "csrc/quantization/awq/gemm_kernels.cu"
-    "csrc/custom_all_reduce.cu"
     "csrc/permute_cols.cu"
     "csrc/quantization/cutlass_w8a8/scaled_mm_entry.cu"
     "csrc/quantization/fp4/nvfp4_quant_entry.cu"
@@ -459,6 +460,33 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     message(STATUS "Not building NVFP4 as no compatible archs were found.")
     # clear FP4_ARCHS
     set(FP4_ARCHS)
+  endif()
+
+  #
+  # CUTLASS MoE kernels
+
+  # The MoE kernel cutlass_moe_mm requires CUDA 12.3 or later (and only works
+  # on Hopper). get_cutlass_moe_mm_data should only be compiled if it's possible
+  # to compile MoE kernels that use its output.
+  cuda_archs_loose_intersection(SCALED_MM_ARCHS "9.0a;" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND SCALED_MM_ARCHS)
+    set(SRCS "csrc/quantization/cutlass_w8a8/moe/grouped_mm_c3x.cu"
+             "csrc/quantization/cutlass_w8a8/moe/moe_data.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${SCALED_MM_ARCHS}")
+    list(APPEND VLLM_EXT_SRC "${SRCS}")
+    list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM90=1")
+    message(STATUS "Building grouped_mm_c3x for archs: ${SCALED_MM_ARCHS}")
+  else()
+    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND SCALED_MM_ARCHS)
+      message(STATUS "Not building grouped_mm_c3x kernels as CUDA Compiler version is "
+                     "not >= 12.3, we recommend upgrading to CUDA 12.3 or later "
+                     "if you intend on running FP8 quantized MoE models on Hopper.")
+    else()
+      message(STATUS "Not building grouped_mm_c3x as no compatible archs found "
+                     "in CUDA target architectures")
+    endif()
   endif()
 
   #

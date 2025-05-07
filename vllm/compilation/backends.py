@@ -357,6 +357,11 @@ class VllmBackend:
             # graph.
 
             factors = []
+            # 0. factors come from the env, for example, The values of
+            # VLLM_PP_LAYER_PARTITION will affects the computation graph.
+            env_hash = envs.compute_hash()
+            factors.append(env_hash)
+
             # 1. factors come from the vllm_config (it mainly summarizes how the
             #    model is created)
             config_hash = vllm_config.compute_hash()
@@ -376,8 +381,8 @@ class VllmBackend:
                 with open(filepath) as f:
                     hash_content.append(f.read())
             import hashlib
-            code_hash = hashlib.md5(
-                "\n".join(hash_content).encode()).hexdigest()
+            code_hash = hashlib.md5("\n".join(hash_content).encode(),
+                                    usedforsecurity=False).hexdigest()
             factors.append(code_hash)
 
             # 3. compiler hash
@@ -385,7 +390,8 @@ class VllmBackend:
             factors.append(compiler_hash)
 
             # combine all factors to generate the cache dir
-            hash_key = hashlib.md5(str(factors).encode()).hexdigest()[:10]
+            hash_key = hashlib.md5(str(factors).encode(),
+                                   usedforsecurity=False).hexdigest()[:10]
 
             cache_dir = os.path.join(
                 envs.VLLM_CACHE_ROOT,
