@@ -10,13 +10,11 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-    OCP_MX_BLOCK_SIZE)
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import OCP_MX_BLOCK_SIZE, dequant_mxfp4
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d, normalize_e4m3fn_to_e4m3fnuz, per_tensor_dequantize)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import SUPPORTED_IMPLEMS
 
 logger = init_logger(__name__)
 
@@ -263,9 +261,6 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
         self.static_input_scales = not self.input_quant.get("is_dynamic")
         self.emulate = not current_platform.supports_mx()
 
-        if envs.VLLM_QUARK_MXFP4_Q_DQ_QDQ_IMPLEM not in SUPPORTED_IMPLEMS:
-            raise ValueError(f"VLLM_QUARK_MXFP4_Q_DQ_QDQ_IMPLEM='{envs.VLLM_QUARK_MXFP4_Q_DQ_QDQ_IMPLEM}' is not supported, only {SUPPORTED_IMPLEMS} are.")
-
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
@@ -327,54 +322,21 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
         float_dtype = torch.get_default_dtype()
 
         if self.emulate and not envs.VLLM_QUARK_EMU_MEM_OPT:
-            try:
-                from quark.torch.export.nn.modules import realquantizer
-                from quark.torch.quantization.config.config import (
-                    QuantizationSpec)
-            except ImportError as err:
-                raise ImportError(
-                    "The package `amd-quark` is required to use AMD Quark "
-                    "MX-FP4 models. Please install it with `pip install "
-                    "amd-quark`.") from err
-
-            weight_quant_spec = QuantizationSpec.from_dict(self.weight_quant)
-
             # Unpack and dequantize the weights (the operators are in high-precision, with simulated quantization).
-            w13_quantizer = realquantizer.get_real_quantizer(
-                qspec=weight_quant_spec,
-                quantizer=None,
-                real_quantized=True,
-                reorder=False,  # TODO: load from config
-                float_dtype=float_dtype,
-                scale_shape=layer.w13_weight_scale.shape,
-                zero_point_shape=None,
-            )
-            w13_quantizer.scale.data = layer.w13_weight_scale.data
-
             layer.w13_weight = torch.nn.Parameter(
-                w13_quantizer(layer.w13_weight.data).to(float_dtype),
+                dequant_mxfp4(layer.w13_weight.data, layer.w13_weight_scale.data, float_dtype),
                 requires_grad=False,
             )
             layer.w13_weight_scale = None
 
-            w2_quantizer = realquantizer.get_real_quantizer(
-                qspec=weight_quant_spec,
-                quantizer=None,
-                real_quantized=True,
-                reorder=False,  # TODO: load from config
-                float_dtype=float_dtype,
-                scale_shape=layer.w2_weight_scale.shape,
-                zero_point_shape=None,
-            )
-            w2_quantizer.scale.data = layer.w2_weight_scale.data
-
             layer.w2_weight = torch.nn.Parameter(
-                w2_quantizer(layer.w2_weight.data).to(float_dtype),
+                dequant_mxfp4(layer.w2_weight.data, layer.w2_weight_scale.data, float_dtype),
                 requires_grad=False,
             )
             layer.w2_weight_scale = None
 
             # This call is necessary to release the scales memory.
+            # TODO: is it still?
             torch.cuda.empty_cache()
 
     def apply(

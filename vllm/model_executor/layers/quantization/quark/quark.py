@@ -177,7 +177,7 @@ class QuarkConfig(QuantizationConfig):
         is_static_weight = not weight_quant.get("is_dynamic")
         is_per_tensor_or_channel_weight = (weight_quant.get("qscheme")
                                            in ["per_tensor", "per_channel"])
-        
+
         if not (is_fp8_dtype and is_static_weight
                 and is_per_tensor_or_channel_weight):
             return False
@@ -325,7 +325,6 @@ class QuarkConfig(QuantizationConfig):
                                  is_static_input_scheme=True,
                                  input_symmetric=input_config.get("symmetric"))
         elif self._is_mx_fp4(weight_config, input_config):
-            logger.info(f"Using VLLM_QUARK_MXFP4_Q_DQ_QDQ_IMPLEM='{envs.VLLM_QUARK_MXFP4_Q_DQ_QDQ_IMPLEM}'.")
             return QuarkW4A4MXFP4(weight_config, input_config)
 
         raise NotImplementedError("No quark compatible scheme was found. "

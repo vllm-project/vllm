@@ -593,11 +593,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_QUARK_EMU_MEM_OPT":
     lambda: bool(int(os.getenv("VLLM_QUARK_EMU_MEM_OPT", "0"))),
 
-    # Selects the Q/DQ/QDQ implementation to use with mxfp4.
-    # Available: "hip", "torch", "triton".
-    "VLLM_QUARK_MXFP4_Q_DQ_QDQ_IMPLEM":
-    lambda: os.getenv("VLLM_QUARK_MXFP4_Q_DQ_QDQ_IMPLEM", "hip"),
-
     # Divisor for dynamic query scale factor calculation for FP8 KV Cache
     "Q_SCALE_CONSTANT":
     lambda: int(os.getenv("Q_SCALE_CONSTANT", "200")),
