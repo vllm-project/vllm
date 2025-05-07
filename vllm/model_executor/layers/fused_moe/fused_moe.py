@@ -21,7 +21,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache, moe_kernel_quantize_input)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils import direct_register_custom_op, round_up
+from vllm.utils import direct_register_custom_op
 
 from .rocm_aiter_fused_moe import is_rocm_aiter_moe_enabled
 
@@ -885,8 +885,7 @@ def fused_topk(
         M,
         topk,
         dtype=torch.int32 if indices_type is None else indices_type,
-        device=hidden_states.device
-    )
+        device=hidden_states.device)
     token_expert_indices = torch.empty(M,
                                        topk,
                                        dtype=torch.int32,
@@ -980,7 +979,7 @@ def get_config_dtype_str(
     return None
 
 
-# TODO: use scalar_type?
+# TODO: use scalar_type instead of bools?
 def get_config_qtype(
     use_fp8_w8a8: bool,
     use_int8_w8a8: bool,
@@ -1236,8 +1235,8 @@ def fused_experts_impl(
         assert hidden_states.shape[1] // 2 == w1.shape[
             2], "Hidden size mismatch"
     else:
-        assert hidden_states.shape[1] == w1.shape[2], \
-            f"Hidden size mismatch {hidden_states.shape[1]} != {w1.shape[2]}"
+        assert hidden_states.shape[1] == w1.shape[2], (
+            f"Hidden size mismatch {hidden_states.shape[1]} != {w1.shape[2]}")
 
     assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
@@ -1652,16 +1651,11 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             expert_ids = torch.repeat_interleave(expert_ids,
                                                  max_num_tokens,
                                                  dim=0)
-            print(f"EXPERT_IDS {expert_ids}")
-            #num_tokens_post_padded = torch.tensor([num_tokens],
-            #                                      device=hidden_states.device,
-            #                                      dtype=torch.int32)
             num_tokens_post_padded = torch.zeros(1,
                                                  device=hidden_states.device,
                                                  dtype=torch.int32)
             num_tokens_post_padded.fill_(max_num_tokens)
             hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-            #print(f"P = {sorted_token_ids}, {hidden_states.shape}")
 
         invoke_fused_moe_kernel(hidden_states,
                                 w1,

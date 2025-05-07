@@ -25,8 +25,7 @@ from transformers import Llama4TextConfig
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_reduce)
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
@@ -102,7 +101,8 @@ class Llama4MoE(nn.Module):
         experts_out = routed_out + shared_out
 
         if self.tp_size > 1:
-            experts_out = self.experts.maybe_all_reduce_tensor_model_parallel(experts_out)
+            experts_out = self.experts.maybe_all_reduce_tensor_model_parallel(
+                experts_out)
 
         return experts_out
 

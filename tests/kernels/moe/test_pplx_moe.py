@@ -28,8 +28,7 @@ import vllm.model_executor.layers.fused_moe  # noqa
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-    BatchedDispatchCombine,
-    BatchedExperts)
+    BatchedDispatchCombine, BatchedExperts)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
@@ -246,15 +245,9 @@ def batched_moe(a, w1, w2, topk_weight, topk_ids):
 
     fused_experts = FusedMoEModularKernel(
         BatchedDispatchCombine(a.shape[0], world_size=1, dp_size=1, rank=0),
-        BatchedExperts(a.shape[0])
-    )
+        BatchedExperts(a.shape[0]))
 
-    return fused_experts(a,
-                         w1,
-                         w2,
-                         topk_weight,
-                         topk_ids,
-                         num_experts)
+    return fused_experts(a, w1, w2, topk_weight, topk_ids, num_experts)
 
 
 # TODO: same as torch_moe but with fused_topk factored out.
@@ -301,9 +294,15 @@ def test_fused_moe_batched_experts(
         torch_output = torch_batched_moe(a, w1, w2, topk_weight, topk_ids)
         batched_output = batched_moe(a, w1, w2, topk_weight, topk_ids)
 
-    torch.testing.assert_close(baseline_output, torch_output, atol=2e-2, rtol=0)
+    torch.testing.assert_close(baseline_output,
+                               torch_output,
+                               atol=2e-2,
+                               rtol=0)
     torch.set_printoptions(profile="full")
-    torch.testing.assert_close(baseline_output, batched_output, atol=2e-2, rtol=0)
+    torch.testing.assert_close(baseline_output,
+                               batched_output,
+                               atol=2e-2,
+                               rtol=0)
 
 
 def rank_chunk(num, r, w):
@@ -585,7 +584,8 @@ def _pplx_moe(
         topk_weight, topk_ids, _ = fused_topk(a, score, topk, False)
         torch_output = torch_moe2(a, w1, w2, topk_weight, topk_ids)
         pplx_output = pplx_moe(pgi, dp_size, a, w1, w2, topk_weight, topk_ids)
-        batched_output = _batched_moe(pgi, dp_size, a, w1, w2, topk_weight, topk_ids)
+        batched_output = _batched_moe(pgi, dp_size, a, w1, w2, topk_weight,
+                                      topk_ids)
 
     torch_output = chunk_by_rank(torch_output, pgi.rank,
                                  pgi.world_size).to(pplx_output.device)

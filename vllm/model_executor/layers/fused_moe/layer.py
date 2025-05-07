@@ -33,11 +33,7 @@ from vllm.utils import direct_register_custom_op
 has_pplx = importlib.util.find_spec("pplx_kernels") is not None
 
 if current_platform.is_cuda_alike():
-    from .dispatch_combine import StandardDispatchCombine
-    from .fused_batched_moe import (
-        BatchedDispatchCombine,
-        BatchedTritonExperts,
-        BatchedExperts)
+    from .fused_batched_moe import BatchedDispatchCombine, BatchedTritonExperts
     from .fused_moe import TritonExperts, fused_experts
     from .modular_kernel import (FusedMoEModularKernel,
                                  FusedMoEPermuteExpertsUnpermute,
@@ -146,26 +142,27 @@ class FusedMoEParallelConfig:
         tp_size, tp_rank = flatten_tp_across_dp(dp_rank)
 
         if not use_ep:
-            return FusedMoEParallelConfig(tp_size = tp_size,
-                                          tp_rank = tp_rank,
-                                          dp_size = dp_size,
-                                          dp_rank = dp_rank,
-                                          ep_size = 1,
-                                          ep_rank = 0,
-                                          use_ep = False)
+            return FusedMoEParallelConfig(tp_size=tp_size,
+                                          tp_rank=tp_rank,
+                                          dp_size=dp_size,
+                                          dp_rank=dp_rank,
+                                          ep_size=1,
+                                          ep_rank=0,
+                                          use_ep=False)
         # DP + EP / TP + EP / DP + TP + EP
         assert use_ep
         # In EP, each device owns a set of experts fully. There is no tensor parallel.
         # Update tp_size, tp_rank, ep_size and ep_rank to reflect that.
         ep_size = tp_size
         ep_rank = tp_rank
-        return FusedMoEParallelConfig(tp_size = 1,
-                                      tp_rank = 0,
-                                      dp_size = dp_size,
-                                      dp_rank = dp_rank,
-                                      ep_size = ep_size,
-                                      ep_rank = ep_rank,
-                                      use_ep = True)
+        return FusedMoEParallelConfig(tp_size=1,
+                                      tp_rank=0,
+                                      dp_size=dp_size,
+                                      dp_rank=dp_rank,
+                                      ep_size=ep_size,
+                                      ep_rank=ep_rank,
+                                      use_ep=True)
+
 
 # Adapted from pplx-kernels tests/all_to_all_utils.py
 @dataclass
@@ -266,15 +263,9 @@ class AllToAllCache:
         self._cache = weakref.WeakValueDictionary()
         self._lock = threading.RLock()  # Reentrant lock for thread safety
 
-    def __del__(self):
-        logger.info("Deleting AllToAllCache")
-
     def get_or_create(self, **kwargs):
         assert has_pplx
         import pplx_kernels as pplx
-
-        if False:
-            return pplx.AllToAll.internode(**kwargs)
 
         # Create a hashable key from the kwargs
         key = tuple(sorted((k, v) for k, v in kwargs.items()))
@@ -664,12 +655,11 @@ def determine_expert_map(
 
 
 def _construct_dispatch_combine(
-    moe: MoEConfig,
-    quant_config: Optional[QuantizationConfig]
+    moe: MoEConfig, quant_config: Optional[QuantizationConfig]
 ) -> Optional[FusedMoEQuantizeDispatchCombine]:
     max_num_tokens = MOE_DP_CHUNK_SIZE
     world_size = moe.ep_size
-    dp_size = moe.ep_size // moe.dp_size # dp_size actually means TP.
+    dp_size = moe.ep_size // moe.dp_size  # dp_size actually means TP.
     rank = moe.ep_rank
 
     if moe.use_ep and has_pplx:
@@ -681,15 +671,15 @@ def _construct_dispatch_combine(
             experts_per_token=moe.experts_per_token,  # topk
             rank=rank,
             world_size=world_size,
-            dp_size= dp_size,
+            dp_size=dp_size,
             hidden_dim=moe.hidden_dim,
             hidden_dim_bytes=moe.hidden_dim * moe.in_dtype.itemsize,
             # For blocked per token: set to
             #   ceil_div(hidden_dim, block_size) * sizeof(float32)
             # For per-token: set to sizeof(float32)
-            hidden_dim_scale_bytes=(0 if moe.in_dtype.itemsize != 1 else (
-                (moe.hidden_dim + moe.block_size - 1) // moe.block_size *
-                torch.float32.itemsize)))
+            hidden_dim_scale_bytes=(0 if moe.in_dtype.itemsize != 1 else
+                                    ((moe.hidden_dim + moe.block_size - 1) //
+                                     moe.block_size * torch.float32.itemsize)))
 
         return PplxDispatchCombine(
             all_to_all,
@@ -699,23 +689,8 @@ def _construct_dispatch_combine(
             dp_size=dp_size,
             quant_dtype=moe.in_dtype,
         )
-    elif moe.use_ep:
-        logger.debug("using batched dispatch")
-        return BatchedDispatchCombine(
-            max_num_tokens=max_num_tokens,
-            world_size=world_size,
-            dp_size=dp_size,
-            rank=rank,
-        )
-    elif True:
-        return None
-    else:
-        logger.debug("using standard dispatch")
-        return StandardDispatchCombine(
-            moe.in_dtype,
-            quant_config.weight_block_size
-            if quant_config is not None else None,
-        )
+
+    return None
 
 
 class FusedMoE(torch.nn.Module):
@@ -770,8 +745,10 @@ class FusedMoE(torch.nn.Module):
 
         vllm_config = get_current_vllm_config()
         self.moe_parallel_config: FusedMoEParallelConfig = FusedMoEParallelConfig.make(
-            tp_size_ = (tp_size if tp_size is not None else get_tensor_model_parallel_world_size()),
-            dp_size_ = (dp_size if dp_size is not None else get_dp_group().world_size),
+            tp_size_=(tp_size if tp_size is not None else
+                      get_tensor_model_parallel_world_size()),
+            dp_size_=(dp_size
+                      if dp_size is not None else get_dp_group().world_size),
             vllm_parallel_config=vllm_config.parallel_config)
 
         self.global_num_experts = num_experts
@@ -792,7 +769,8 @@ class FusedMoE(torch.nn.Module):
                 ep_rank=self.ep_rank,
                 global_num_experts=self.global_num_experts)
         else:
-            self.local_num_experts, self.expert_map = (self.global_num_experts, None)
+            self.local_num_experts, self.expert_map = (self.global_num_experts,
+                                                       None)
 
         self.top_k = top_k
 
@@ -825,7 +803,7 @@ class FusedMoE(torch.nn.Module):
             hidden_dim=hidden_size,
             num_local_experts=self.local_num_experts,
             moe_parallel_config=self.moe_parallel_config,
-            in_dtype=params_dtype, # TODO: is this right?
+            in_dtype=params_dtype,  # TODO: is this right?
         )
 
         # Note: get_quant_method will look at the layer's local_num_experts
@@ -1245,7 +1223,8 @@ class FusedMoE(torch.nn.Module):
     def must_reduce_shared_outputs(self) -> bool:
         return self.dp_size > 1 and self.use_ep and has_pplx
 
-    def maybe_all_reduce_tensor_model_parallel(self, final_hidden_states: torch.Tensor):
+    def maybe_all_reduce_tensor_model_parallel(
+            self, final_hidden_states: torch.Tensor):
         """
         The pplx combine kernel reduce across GPU ranks by default. The pplx kernels are
         used when EP is enabled. In that case, this function is a no-op.
@@ -1345,8 +1324,7 @@ class FusedMoE(torch.nn.Module):
         if self.dp_size > 1:
             final_hidden_states = get_ep_group().combine(final_hidden_states)
 
-        if self.reduce_results and (self.tp_size > 1
-                                    or self.ep_size > 1):
+        if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
             # Default set to False. (May have to add shared expert outputs.)
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)

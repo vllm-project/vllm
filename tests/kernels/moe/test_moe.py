@@ -11,8 +11,7 @@ from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
 import vllm.model_executor.layers.fused_moe  # noqa
-from tests.kernels.utils import (opcheck, stack_and_dev, torch_moe,
-                                 torch_moe_single)
+from tests.kernels.utils import opcheck, stack_and_dev, torch_moe
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
@@ -29,7 +28,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.models.mixtral import MixtralMoE
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
-from vllm.model_executor.layers.activation import SiluAndMul
 
 NUM_EXPERTS = [8, 64]
 EP_SIZE = [1, 4]

@@ -9,11 +9,6 @@ from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
 
 
-def rank_chunk(num, r, w):
-    rem = num % w
-    return (num // w) + (1 if r < rem else 0)
-
-
 # Note use: layer.get_all_to_all() to get an AllToAll instance
 # The max_num_tokens, world_size and dp_size must be the same
 # as the ones used to create the AllToAll.
@@ -72,8 +67,9 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
                                                    per_act_token,
                                                    self.block_shape)
 
-        # TODO: does rem_experts need to be 0 for pplx to work properly?
+        # rem_experts need to be 0 for pplx to work properly.
         rem_experts = num_experts % self.world_size
+        assert rem_experts == 0
         num_local_experts = ((num_experts // self.world_size) +
                              (1 if self.rank < rem_experts else 0))
 
@@ -107,7 +103,6 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
 
         # This argument is optional, defaults to indices.shape[0]
         # There's not much point setting this unless it is != indices.shape[0]
-        #bound_m = torch.tensor([num_tokens], dtype=torch.uint32, device=device)
         bound_m = None
 
         self.a2a.dispatch(
@@ -133,9 +128,6 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         num_tokens = output.shape[0]  # M
         # This argument is optional
         # There's not much point setting this unless it is != topk_ids.shape[0]
-        #bound_m = torch.tensor([num_tokens],
-        #                       dtype=torch.uint32,
-        #                       device=fused_expert_output.device)
         bound_m = None
 
         assert topk_ids.shape[0] == num_tokens
@@ -147,8 +139,9 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         if apply_router_weight_on_input:
             topk_weights = torch.ones_like(topk_weights)
 
-        self.a2a.combine(out_tokens=output,
-                         indices=topk_ids, #.to(torch.uint32),
-                         weights=topk_weights,
-                         expert_y=fused_expert_output,
-                         bound_m=bound_m)
+        self.a2a.combine(
+            out_tokens=output,
+            indices=topk_ids,  #.to(torch.uint32),
+            weights=topk_weights,
+            expert_y=fused_expert_output,
+            bound_m=bound_m)
