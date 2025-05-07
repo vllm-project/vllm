@@ -432,18 +432,23 @@ class MiniMaxText01LinearAttention(nn.Module):
         hidden = []
         for _prefill_idx in range(getattr(attn_metadata, "num_prefills", 0)):
             if _prefill_idx >= len(attn_metadata.query_start_loc):
-                break
+                _start = 0
+            else:
+                _start = attn_metadata.query_start_loc[_prefill_idx]
+
+            if _prefill_idx+1 >= len(attn_metadata.query_end_loc):
+                _end = 0
+            else:
+                _end = attn_metadata.query_end_loc[_prefill_idx+1]
+
             if _prefill_idx >= len(state_indices_tensor):
-                break
-            _start = attn_metadata.query_start_loc[_prefill_idx]
-            _end = attn_metadata.query_start_loc[_prefill_idx + 1]
-            slot_id = state_indices_tensor[_prefill_idx]
+                slot_id = 0
+            else:
+                slot_id = state_indices_tensor[_prefill_idx]
             qs = q[_start:_end].transpose(0, 1).contiguous()
             ks = k[_start:_end].transpose(0, 1).contiguous()
             vs = v[_start:_end].transpose(0, 1).contiguous()
-            slot_id = state_indices_tensor[_prefill_idx]
             slice_layer_cache = kv_cache[slot_id, ...]
-
             out_slice = MiniMaxText01LinearKernel.jit_linear_forward_prefix(
                 qs,
                 ks,
@@ -458,7 +463,7 @@ class MiniMaxText01LinearAttention(nn.Module):
                 self._decode_infer(q, k, v, kv_cache, state_indices_tensor,
                                    attn_metadata))
 
-        if not hidden:
+        if len(hidden) == 0:
             return torch.empty((0, q.size(-1)), device=q.device, dtype=q.dtype)
 
         hidden = torch.concat(hidden, dim=0).contiguous()
