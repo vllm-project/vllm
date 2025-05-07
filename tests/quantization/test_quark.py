@@ -5,12 +5,11 @@ Run `pytest tests/quantization/test_quark.py`.
 """
 
 import pytest
+import torch
 
 from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
     QuarkLinearMethod, QuarkW8A8Fp8, QuarkW8A8Int8)
 from vllm.platforms import current_platform
-
-import torch
 
 
 @pytest.fixture(scope="function", autouse=True)
