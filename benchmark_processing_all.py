@@ -69,9 +69,10 @@ def main(output_dir: str, sync: bool):
                 args.extend(["--async"])
             args.extend(["--append"])
 
-            res = subprocess.run(args, timeout=5 * 60)
-            if res.returncode != 0:
-                print(f"Failed to benchmark {model}")
+            try:
+                subprocess.run(args, timeout=5 * 60, check=True)
+            except Exception as e:
+                print(f"Failed to benchmark {model}:\n{e}")
 
 
 if __name__ == "__main__":
