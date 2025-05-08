@@ -85,6 +85,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 
     from .aqlm import AQLMConfig
+    from .auto_round import AutoRoundConfig
     from .awq import AWQConfig
     from .awq_marlin import AWQMarlinConfig
     from .bitblas import BitBLASConfig
@@ -110,7 +111,6 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
     from .qqq import QQQConfig
     from .torchao import TorchAOConfig
     from .tpu_int8 import Int8TpuConfig
-    from .auto_round import AutoRoundConfig
 
     method_to_config: dict[str, Type[QuantizationConfig]] = {
         "aqlm": AQLMConfig,
