@@ -200,7 +200,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             self.decoder_attention_types = [
                 1
             ] * config.text_config.num_hidden_layers
-        self.minimax_cache: Optional[MinimaxCacheManager] = None
+        self.minimax_cache = None
         linear_layer_nums = sum(
             1 for i in range(config.text_config.num_hidden_layers)
             if self.decoder_attention_types[i] == 0)

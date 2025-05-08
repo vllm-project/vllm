@@ -488,12 +488,12 @@ class MiniMaxText01LinearAttention(nn.Module):
         state_indices_tensor = kv_caches.state_indices_tensor
 
         decode_only = getattr(attn_metadata, "num_prefills", 0) == 0
-        # if not decode_only:
-            # hidden = self._prefill_and_mix_infer(q, k, v, kv_cache,
-                                                #  state_indices_tensor)
-        # else:
-        hidden = self._decode_infer(q, k, v, kv_cache,
-                                    state_indices_tensor, attn_metadata)
+        if not decode_only:
+            hidden = self._prefill_and_mix_infer(q, k, v, kv_cache,
+                                                 state_indices_tensor)
+        else:
+            hidden = self._decode_infer(q, k, v, kv_cache,
+                                        state_indices_tensor, attn_metadata)
 
         hidden = self.norm._forward(hidden)
         gate, _ = self.output_gate(hidden_states)
