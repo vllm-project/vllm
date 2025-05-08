@@ -274,6 +274,8 @@ def _test_processing_correctness_mistral(
     "allenai/Molmo-7B-D-0924",
     "allenai/Molmo-7B-O-0924",
     "nvidia/NVLM-D-72B",
+    "AIDC-AI/Ovis1.5-Gemma2-9B",
+    "AIDC-AI/Ovis1.6-Llama3.2-3B",
     "AIDC-AI/Ovis2-1B",
     "google/paligemma-3b-mix-224",
     "google/paligemma2-3b-ft-docci-448",
