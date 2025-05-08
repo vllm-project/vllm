@@ -3982,7 +3982,7 @@ class VllmConfig:
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.
-    additional_config: dict = field(default_factory=dict)
+    additional_config: Union[dict, SupportsHash] = field(default_factory=dict)
     """Additional config for specified platform. Different platforms may
     support different configs. Make sure the configs are valid for the platform
     you are using. Contents must be hashable."""
@@ -4068,8 +4068,12 @@ class VllmConfig:
         else:
             vllm_factors.append("None")
         if self.additional_config:
-            vllm_factors.append(hash(frozenset(
-                self.additional_config.items())))
+            if isinstance(additional_config := self.additional_config, dict):
+                additional_config_frozen = frozenset(additional_config.items())
+                additional_config_hash = hash(additional_config_frozen)
+            else:
+                additional_config_hash = additional_config.compute_hash()
+            vllm_factors.append(additional_config_hash)
         else:
             vllm_factors.append("None")
         factors.append(vllm_factors)
