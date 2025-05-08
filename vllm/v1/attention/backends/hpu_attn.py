@@ -30,6 +30,8 @@ class HPUAttentionBackendV1(HPUAttentionBackend):
 
 @dataclass
 class HPUAttentionMetadataV1(HPUAttentionMetadata):
+    # TODO(kwisniewski98): for now, in V1 input positions are not provided
+    # which needs to be fixed in the future, as we need to support MLA
     """Metadata for HPUAttentionbackend."""
     is_prompt: bool
     attn_bias: Optional[torch.Tensor]
@@ -39,7 +41,8 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
 
     @classmethod
     def make_prefill_metadata(cls, seq_lens_tensor, num_prefills,
-                              num_prefill_tokens, slot_mapping):
+                              input_positions, num_prefill_tokens,
+                              slot_mapping):
         return cls(is_prompt=True,
                    block_list=None,
                    block_mapping=None,
@@ -53,6 +56,7 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                    multi_modal_placeholder_index_maps=None,
                    seq_lens_tensor=seq_lens_tensor,
                    num_prefills=num_prefills,
+                   input_positions=input_positions,
                    num_prefill_tokens=num_prefill_tokens,
                    slot_mapping=slot_mapping,
                    enable_kv_scales_calculation=False)
@@ -60,7 +64,8 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
     @classmethod
     def make_cached_prefill_metadata(cls, seq_lens_tensor, context_lens_tensor,
                                      num_prefills, num_prefill_tokens,
-                                     slot_mapping, block_list):
+                                     input_positions, slot_mapping,
+                                     block_list):
         return cls(is_prompt=True,
                    block_list=block_list,
                    block_mapping=None,
@@ -75,12 +80,13 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                    seq_lens_tensor=seq_lens_tensor,
                    num_prefills=num_prefills,
                    num_prefill_tokens=num_prefill_tokens,
+                   input_positions=input_positions,
                    slot_mapping=slot_mapping,
                    enable_kv_scales_calculation=False)
 
     @classmethod
     def make_decode_metadata(cls, block_list, block_usage, block_groups,
-                             num_decode_tokens, slot_mapping):
+                             input_positions, num_decode_tokens, slot_mapping):
         return cls(is_prompt=False,
                    block_mapping=None,
                    block_indices=None,
@@ -94,6 +100,7 @@ class HPUAttentionMetadataV1(HPUAttentionMetadata):
                    block_list=block_list,
                    block_usage=block_usage,
                    block_groups=block_groups,
+                   input_positions=input_positions,
                    num_decode_tokens=num_decode_tokens,
                    slot_mapping=slot_mapping,
                    enable_kv_scales_calculation=False)

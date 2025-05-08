@@ -676,6 +676,9 @@ def initialize_dummy_weights(
                                        requires_grad=param.requires_grad,
                                        device="cpu") + low)
                 torch._sync(param)
+            if current_platform.is_hpu():
+                # XLA device does not support torch.Generator()
+                param.uniform_(low, high)
                 continue
 
             if current_platform.is_hpu():

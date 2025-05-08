@@ -902,6 +902,10 @@ def grouped_topk(
     assert hidden_states.shape[0] == gating_output.shape[0], (
         "Number of tokens mismatch")
 
+    gating_output = gating_output.float()
+    if e_score_correction_bias is not None:
+        e_score_correction_bias = e_score_correction_bias.float()
+
     if scoring_func == "softmax":
         scores = torch.softmax(gating_output, dim=-1)
     elif scoring_func == "sigmoid":

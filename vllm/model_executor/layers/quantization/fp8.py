@@ -38,6 +38,7 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 if current_platform.is_hpu():
+    import vllm_hpu_extension.ops as hpu_ops
     from vllm_hpu_extension.ops import scaled_fp8_quant
     ops.scaled_fp8_quant = scaled_fp8_quant
 
@@ -209,6 +210,7 @@ class Fp8LinearMethod(LinearMethodBase):
     ):
         maybe_create_device_identity()
 
+        layer.quant_config = self.quant_config
         output_size_per_partition = sum(output_partition_sizes)
         weight_loader = extra_weight_attrs.get("weight_loader")
         layer.logical_widths = output_partition_sizes
@@ -310,12 +312,28 @@ class Fp8LinearMethod(LinearMethodBase):
             torch.cuda.empty_cache()
         return weight
 
+    def dequant_block_fp8_weight(self, layer) -> torch.Tensor:
+        if hasattr(layer, "updated_fp8_weight") and layer.updated_fp8_weight:
+            return layer.weight
+        dequant_weight = hpu_ops.dequant_block_fp8_weight_naive(
+            layer.weight,
+            layer.weight_scale_inv.data,
+            self.quant_config.weight_block_size,
+            original_M=layer.orig_M,
+            original_N=layer.orig_N,
+            do_unpad=True,
+        )
+        return dequant_weight
+
     def process_weights_after_loading(self, layer: Module) -> None:
         size_k_first = True
         # TODO(rob): refactor block quant into separate class.
         if self.block_quant:
             assert self.quant_config.activation_scheme == "dynamic"
             size_k_first = False
+            if current_platform.is_hpu():
+                layer = hpu_ops.fp8_block_linear_postprocess_weights(layer)
+                return
             if current_platform.is_fp8_fnuz():
                 weight, weight_scale_inv, _ = \
                     normalize_e4m3fn_to_e4m3fnuz(
@@ -404,6 +422,18 @@ class Fp8LinearMethod(LinearMethodBase):
 
         if self.block_quant:
             assert self.quant_config.weight_block_size is not None
+            if current_platform.is_hpu():
+                return hpu_ops.apply_block_fp8_linear_hpu_dequant(
+                    input=x,
+                    weight=layer.weight,
+                    block_size=self.quant_config.weight_block_size,
+                    weight_scale=layer.weight_scale_inv,
+                    input_scale=layer.input_scale,
+                    bias=bias,
+                    original_M=layer.orig_M,
+                    original_N=layer.orig_N,
+                    do_unpad=True,
+                )
             return torch.ops.vllm.apply_w8a8_block_fp8_linear(
                 input=x,
                 weight=layer.weight,
@@ -470,6 +500,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
 
+        layer.quant_config = self.quant_config
         if self.quant_config.is_checkpoint_fp8_serialized:
             params_dtype = torch.float8_e4m3fn
         if self.block_quant:
@@ -596,6 +627,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # TODO (rob): refactor block quant into separate class.
         if self.block_quant:
             assert self.quant_config.activation_scheme == "dynamic"
+            if current_platform.is_hpu():
+                layer = hpu_ops.fp8_block_moe_prepare_weights(layer)
+                return
             if current_platform.is_fp8_fnuz():
                 w13_weight, w13_weight_scale_inv, w13_input_scale = \
                     normalize_e4m3fn_to_e4m3fnuz(
@@ -812,6 +846,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             e_score_correction_bias=e_score_correction_bias,
         )
 
+        if current_platform.is_hpu():
+            topk_ids = topk_ids.view(*x.shape[:-1], -1)
+            topk_weights = topk_weights.view(*x.shape[:-1], -1)
+            return layer.moe_op(x, topk_ids.to(torch.int64),
+                                topk_weights.to(x.dtype))
         if self.use_marlin:
             return torch.ops.vllm.fused_marlin_moe(
                 x,
@@ -825,7 +864,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 quant_type_id=scalar_types.float8_e4m3fn.id,
                 global_num_experts=global_num_experts,
                 expert_map=expert_map)
-
         return fused_experts(
             x,
             layer.w13_weight,

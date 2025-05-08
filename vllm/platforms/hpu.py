@@ -38,6 +38,9 @@ class HpuPlatform(Platform):
         if use_v1:
             logger.info("Using HPUAttentionV1 backend.")
             return "vllm.v1.attention.backends.hpu_attn.HPUAttentionBackendV1"
+        if use_mla:
+            logger.info("Using HPUAttentionMLA backend.")
+            return "vllm.attention.backends.hpu_attn.HPUMLAAttentionBackend"
         logger.info("Using HPUAttention backend.")
         return "vllm.attention.backends.hpu_attn.HPUAttentionBackend"
 

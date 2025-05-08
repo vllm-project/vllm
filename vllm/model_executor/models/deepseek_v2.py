@@ -111,30 +111,6 @@ class DeepseekV2MoE(nn.Module):
         if config.hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {config.hidden_act}. "
                              "Only silu is supported for now.")
-        if is_hpu:
-            self.experts = FusedMoE(
-                num_experts=config.n_routed_experts,
-                top_k=config.num_experts_per_tok,
-                hidden_size=config.hidden_size,
-                intermediate_size=config.moe_intermediate_size,
-                reduce_results=False,
-                renormalize=config.norm_topk_prob,
-                quant_config=quant_config,
-                use_grouped_topk=False,
-                prefix=f"{prefix}.experts")
-        else:
-            self.experts = FusedMoE(
-                num_experts=config.n_routed_experts,
-                top_k=config.num_experts_per_tok,
-                hidden_size=config.hidden_size,
-                intermediate_size=config.moe_intermediate_size,
-                reduce_results=False,
-                renormalize=config.norm_topk_prob,
-                quant_config=quant_config,
-                use_grouped_topk=True,
-                num_expert_group=config.n_group,
-                topk_group=config.topk_group,
-                prefix=f"{prefix}.experts")
 
         self.gate = ReplicatedLinear(config.hidden_size,
                                      config.n_routed_experts,
@@ -159,6 +135,7 @@ class DeepseekV2MoE(nn.Module):
             num_expert_group=config.n_group,
             topk_group=config.topk_group,
             prefix=f"{prefix}.experts",
+            tp_size=self.tp_size,
             scoring_func=config.scoring_func,
             e_score_correction_bias=self.gate.e_score_correction_bias)
 
@@ -175,7 +152,8 @@ class DeepseekV2MoE(nn.Module):
             )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        num_tokens, hidden_dim = hidden_states.shape
+        input_shape = hidden_states.shape
+        hidden_dim = input_shape[-1]
         hidden_states = hidden_states.view(-1, hidden_dim)
         if self.n_shared_experts is not None:
             shared_output = self.shared_experts(hidden_states)
@@ -202,7 +180,7 @@ class DeepseekV2MoE(nn.Module):
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)
 
-        return final_hidden_states.view(num_tokens, hidden_dim)
+        return final_hidden_states.view(*input_shape)
 
 
 def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
@@ -612,8 +590,6 @@ class DeepseekV2DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        if is_hpu:
-            _batch_size = positions.shape[0]
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -639,11 +615,6 @@ class DeepseekV2DecoderLayer(nn.Module):
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
-        if is_hpu:
-            # need reshape from tensor(x0, y0) to tensor(x1) for hpu
-            hidden_states = hidden_states.reshape(
-                hidden_states.shape[0] * hidden_states.shape[1],
-                hidden_states.shape[2])
         hidden_states = self.mlp(hidden_states)
 
         if isinstance(self.mlp,
@@ -655,10 +626,6 @@ class DeepseekV2DecoderLayer(nn.Module):
             # of DeepseekV2MOE
             hidden_states *= 1. / self.routed_scaling_factor
             residual *= 1. / self.routed_scaling_factor
-        if is_hpu:
-            hidden_states = hidden_states.reshape(
-                _batch_size, hidden_states.shape[0] // _batch_size,
-                hidden_states.shape[1])
 
         return hidden_states, residual
 
@@ -745,6 +712,15 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        if is_hpu:
+            import habana_frameworks.torch as htorch
+
+            assert htorch.utils.internal.is_lazy(), \
+                (
+                "Deepseek currently supports only lazy mode on HPU, "
+                "please set PT_HPU_LAZY_MODE=1"
+                )
+
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
