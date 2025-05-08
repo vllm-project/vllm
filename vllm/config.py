@@ -2050,6 +2050,10 @@ class SchedulerConfig:
                     _MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
                 )
 
+            self.max_num_batched_tokens = min(
+                self.max_num_seqs * self.max_model_len,
+                self.max_num_batched_tokens)
+
         self.max_num_encoder_input_tokens = self.max_num_batched_tokens
         self.encoder_cache_size = self.max_num_batched_tokens
 
@@ -2089,6 +2093,12 @@ class SchedulerConfig:
                 f"max_num_batched_tokens ({self.max_num_batched_tokens}) must "
                 "be greater than or equal to max_num_seqs "
                 f"({self.max_num_seqs}).")
+
+        if self.max_num_batched_tokens > self.max_num_seqs * self.max_model_len:
+            raise ValueError(
+                f"max_num_batched_tokens ({self.max_num_batched_tokens}) must "
+                "be less than or equal to max_num_seqs * max_model_len "
+                f"({self.max_num_seqs * self.max_model_len}).")
 
         if self.num_lookahead_slots < 0:
             raise ValueError(
