@@ -467,6 +467,9 @@ In general:
    hatch](https://kubernetes.io/docs/concepts/cluster-administration/system-metrics/#show-hidden-metrics)
    for some time before deleting them.
 
+See the [deprecation policy](project:../../contributing/deprecation_policy.md) for
+the project-wide deprecation policy.
+
 ### Unimplemented - `vllm:tokens_total`
 
 Added by <gh-pr:4464>, but apparently never implemented. This can just be

@@ -38,7 +38,7 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            is_block_tables_empty)
 from vllm.attention.layer import Attention
 from vllm.attention.ops.paged_attn import PagedAttention
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.utils import (async_tensor_h2d, get_kv_cache_torch_dtype,
                         make_tensor_with_pad)
@@ -140,12 +140,10 @@ def get_per_layer_parameters(
     to use during `plan`.
     """
 
-    layers = vllm_config.compilation_config.static_forward_context
+    layers = get_layers_from_vllm_config(vllm_config, Attention)
     per_layer_params: Dict[str, PerLayerParameters] = {}
 
     for key, layer in layers.items():
-        assert isinstance(layer, Attention)
-
         impl = layer.impl
         assert isinstance(impl, FlashInferImpl)
 
@@ -369,9 +367,17 @@ class FlashInferState(AttentionState):
         # scheduled while CUDA graph mode is enabled. We don't run graph in that
         # case.
         if use_cuda_graph and is_decode:
-            batch_size = model_input.input_tokens.shape[0]
-            state = (self.runner.graph_runners[model_input.virtual_engine]
-                     [batch_size].attn_state)
+            if model_input.inputs_embeds is None:
+                batch_size = model_input.input_tokens.shape[0]
+                state = (
+                    self.runner.graph_runners[model_input.virtual_engine][(
+                        batch_size, False)].attn_state)
+            else:
+                batch_size = model_input.inputs_embeds.shape[0]
+                state = (
+                    self.runner.graph_runners[model_input.virtual_engine][(
+                        batch_size, True)].attn_state)
+
         model_input.attn_metadata.prefill_wrapper = state._get_prefill_wrapper(
         )
         model_input.attn_metadata.decode_wrapper = state._get_decode_wrapper()

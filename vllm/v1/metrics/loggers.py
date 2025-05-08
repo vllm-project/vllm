@@ -39,6 +39,10 @@ class StatLoggerBase(ABC):
                iteration_stats: Optional[IterationStats]):
         ...
 
+    @abstractmethod
+    def log_engine_initialized(self):
+        ...
+
     def log(self):  # noqa
         pass
 
@@ -47,6 +51,7 @@ class LoggingStatLogger(StatLoggerBase):
 
     def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
         self.engine_index = engine_index
+        self.vllm_config = vllm_config
         self._reset(time.monotonic())
         self.last_scheduler_stats = SchedulerStats()
         # Prefix cache metrics. This cannot be reset.
@@ -127,12 +132,19 @@ class LoggingStatLogger(StatLoggerBase):
         if scheduler_stats.spec_decoding_stats is not None:
             self.spec_decoding_logging.log(log_fn=log_fn)
 
+    def log_engine_initialized(self):
+        logger.info(
+            "vllm cache_config_info with initialization " \
+            "after num_gpu_blocks is: %d",
+            self.vllm_config.cache_config.num_gpu_blocks)
+
 
 class PrometheusStatLogger(StatLoggerBase):
 
     def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
         self._unregister_vllm_metrics()
-
+        self.vllm_config = vllm_config
+        self.engine_index = engine_index
         # Use this flag to hide metrics that were deprecated in
         # a previous release and which will be removed future
         self.show_hidden_metrics = \
@@ -232,7 +244,10 @@ class PrometheusStatLogger(StatLoggerBase):
             prometheus_client.Histogram(
                 name="vllm:iteration_tokens_total",
                 documentation="Histogram of number of tokens per engine_step.",
-                buckets=build_cudagraph_buckets(vllm_config),
+                buckets=[
+                    1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192,
+                    16384
+                ],
                 labelnames=labelnames).labels(*labelvalues)
 
         self.histogram_max_num_generation_tokens_request = \
@@ -339,13 +354,9 @@ class PrometheusStatLogger(StatLoggerBase):
                         self.labelname_running_lora_adapters,
                     ])
 
-        #
-        # Cache config info metric
-        #
-        self.log_metrics_info("cache_config", vllm_config.cache_config)
-
     def log_metrics_info(self, type: str, config_obj: SupportsMetricsInfo):
         metrics_info = config_obj.metrics_info()
+        metrics_info["engine"] = self.engine_index
 
         name, documentation = None, None
         if type == "cache_config":
@@ -439,6 +450,9 @@ class PrometheusStatLogger(StatLoggerBase):
             if hasattr(collector, "_name") and "vllm" in collector._name:
                 prometheus_client.REGISTRY.unregister(collector)
 
+    def log_engine_initialized(self):
+        self.log_metrics_info("cache_config", self.vllm_config.cache_config)
+
 
 def build_buckets(mantissa_lst: list[int], max_value: int) -> list[int]:
     """
@@ -465,16 +479,6 @@ def build_1_2_5_buckets(max_value: int) -> list[int]:
     [1, 2, 5, 10, 20, 50, 100]
     """
     return build_buckets([1, 2, 5], max_value)
-
-
-def build_cudagraph_buckets(vllm_config: VllmConfig) -> list[int]:
-    if not vllm_config.model_config.enforce_eager:
-        buckets = vllm_config.compilation_config.\
-            cudagraph_capture_sizes.copy()
-        buckets.sort()
-        return buckets
-    else:
-        return [1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8096]
 
 
 def setup_default_loggers(
