@@ -489,6 +489,11 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             kwargs["finished_requests_ids"] = self.calculate_finished_requests_ids(scheduler_output)
             print("minimax_vl_01 add request_ids_to_seq_ids and finished_requests_ids")
 
+        if "request_ids_to_seq_ids" not in kwargs:
+            kwargs["request_ids_to_seq_ids"] = {}
+        if "finished_requests_ids" not in kwargs:
+            kwargs["finished_requests_ids"] = []
+
         if  self.minimax_cache is None:
             self.minimax_cache = MinimaxCacheManager(dtype=self._dtype,
                                             cache_shape=self.cache_shape)
