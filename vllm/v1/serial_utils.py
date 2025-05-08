@@ -40,6 +40,11 @@ MMF_CLASS_TO_FACTORY: dict[type[BaseMultiModalField], str] = {
 bytestr = Union[bytes, bytearray, memoryview, zmq.Frame]
 
 
+def _log_insecure_serialization_warning():
+    logger.warning_once("Allowing insecure serialization using pickle due to "
+                        "VLLM_ALLOW_INSECURE_SERIALIZATION=1")
+
+
 class MsgpackEncoder:
     """Encoder with custom torch tensor and numpy array serialization.
 
@@ -60,9 +65,7 @@ class MsgpackEncoder:
         self.aux_buffers: Optional[list[bytestr]] = None
         self.size_threshold = size_threshold
         if envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
-            logger.warning(
-                "Allowing insecure serialization using pickle due to "
-                "VLLM_ALLOW_INSECURE_SERIALIZATION=1")
+            _log_insecure_serialization_warning()
 
     def encode(self, obj: Any) -> Sequence[bytestr]:
         try:
@@ -119,7 +122,9 @@ class MsgpackEncoder:
                     for item in itemlist]
 
         if not envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
-            raise TypeError(f"Object of type {type(obj)} is not serializable")
+            raise TypeError(f"Object of type {type(obj)} is not serializable"
+                            "Set VLLM_ALLOW_INSECURE_SERIALIZATION=1 to allow "
+                            "fallback to pickle-based serialization.")
 
         if isinstance(obj, FunctionType):
             # `pickle` is generally faster than cloudpickle, but can have
@@ -202,9 +207,7 @@ class MsgpackDecoder:
                                        dec_hook=self.dec_hook)
         self.aux_buffers: Sequence[bytestr] = ()
         if envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
-            logger.warning(
-                "Allowing insecure deserialization using pickle due to "
-                "VLLM_ALLOW_INSECURE_SERIALIZATION=1")
+            _log_insecure_serialization_warning()
 
     def decode(self, bufs: Union[bytestr, Sequence[bytestr]]) -> Any:
         if isinstance(bufs, (bytes, bytearray, memoryview, zmq.Frame)):
