@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Optional, Tuple, Union
 
 import torch
 from tpu_info import device
@@ -66,6 +66,22 @@ class TpuPlatform(Platform):
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
         return not envs.VLLM_USE_V1
+
+    @classmethod
+    def get_punica_wrapper(cls) -> str:
+        return "vllm.lora.punica_wrapper.punica_tpu.PunicaWrapperTPU"
+
+    @classmethod
+    def get_infinity_values(cls, dtype: torch.dtype) -> Tuple[float, float]:
+        return torch.finfo(dtype).min, torch.finfo(dtype).max
+
+    @classmethod
+    def can_update_inplace(cls):
+        return False
+
+    @classmethod
+    def get_lora_vocab_padding_size(cls) -> int:
+        return 1
 
     @classmethod
     def inference_mode(cls):

@@ -39,6 +39,7 @@ from vllm.v1.sample.tpu.metadata import TPUSupportedSamplingMetadata
 from vllm.v1.sample.tpu.sampler import Sampler as TPUSampler
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from .utils import sanity_check_mm_encoder_outputs
 
@@ -90,7 +91,7 @@ MIN_NUM_SEQS = 8
 # The dummy_run should be comprehensive, ensuring all potential input shapes and
 # branch predictions are included as subgraph inputs to facilitate
 # pre-compilation.
-class TPUModelRunner:
+class TPUModelRunner(LoRAModelRunnerMixin):
 
     def __init__(
         self,
@@ -568,6 +569,17 @@ class TPUModelRunner:
             self.device)
         seq_lens = self.seq_lens_cpu[:self.max_num_reqs].to(self.device)
 
+        if self.lora_config is not None:
+            # We need to respect padding when activating LoRA adapters
+            padded_num_scheduled_tokens_per_req = np.copy(
+                num_scheduled_tokens_per_req
+            )  # Copying to avoid accidental state corruption bugs
+            padded_num_scheduled_tokens_per_req[-1] += \
+                padded_total_num_scheduled_tokens - total_num_scheduled_tokens
+
+            self.set_active_loras(self.input_batch,
+                                  padded_num_scheduled_tokens_per_req)
+
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
             block_tables=block_tables,
@@ -907,6 +919,11 @@ class TPUModelRunner:
                 "get_tensor_model_parallel_rank",
                 return_value=xm_tp_rank):
             model = get_model(vllm_config=self.vllm_config)
+        if self.lora_config is not None:
+            model = self.load_lora_model(model, self.model_config,
+                                         self.scheduler_config,
+                                         self.lora_config, self.device)
+
         # Sync all pending XLA execution during model initialization and weight
         # loading.
         xm.mark_step()
@@ -970,7 +987,10 @@ class TPUModelRunner:
             for layer_name in layer_names
         }
 
-        with set_forward_context(per_layer_attn_metadata, self.vllm_config, 0):
+        with self.maybe_dummy_run_with_lora(
+                self.lora_config,
+                np.array([num_tokens], dtype=np.int32)), set_forward_context(
+                    per_layer_attn_metadata, self.vllm_config, 0):
             out = self.model(input_ids=input_ids,
                              positions=position_ids,
                              inputs_embeds=inputs_embeds)
