@@ -497,6 +497,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         if modality in ("image", "image_embeds"):
             if model_type == "chatglm":
                 return "<|begin_of_image|><|endoftext|><|end_of_image|>"
+            if model_type == "glm4v":
+                return "<|begin_of_image|><|image|><|end_of_image|>"
             if model_type in ("phi3_v", "phi4mm"):
                 return f"<|image_{current_count}|>"
             if model_type in ("minicpmo", "minicpmv"):
