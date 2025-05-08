@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 import tempfile
 
+import numpy as np
 import pytest
 import torch
+import torch_xla.distributed.spmd as xs
+import torch_xla.runtime as xr
 
 from vllm.config import set_current_vllm_config
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
@@ -39,7 +42,22 @@ def setup_environment():
         yield
 
 
-def test_xla_qkv_linear():
+MESH = None
+
+
+def _get_spmd_mesh():
+    global MESH
+    if MESH is None:
+        xr.use_spmd()
+        num_devices = xr.global_runtime_device_count()
+        mesh_shape = (num_devices, 1)
+        device_ids = np.array(range(num_devices))
+        MESH = xs.Mesh(device_ids, mesh_shape, ('x', 'y'))
+    return MESH
+
+
+@pytest.mark.parametrize("mesh", [None, _get_spmd_mesh()])
+def test_xla_qkv_linear(mesh):
 
     qkv_linear = QKVParallelLinear(
         hidden_size=4096,
@@ -53,7 +71,7 @@ def test_xla_qkv_linear():
 
     qkv_linear.weight.data = torch.rand_like(qkv_linear.weight.data)
 
-    xla_qkv_linear = XlaQKVParallelLinear(qkv_linear)
+    xla_qkv_linear = XlaQKVParallelLinear(qkv_linear, mesh=mesh)
 
     qkv_linear = qkv_linear.to('xla')
     xla_qkv_linear = xla_qkv_linear.to('xla')

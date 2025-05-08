@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from collections import OrderedDict
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -17,7 +18,9 @@ logger = init_logger(__name__)
 
 class XlaQKVParallelLinear(nn.Module):
 
-    def __init__(self, qkv_linear: nn.Module):
+    def __init__(self,
+                 qkv_linear: nn.Module,
+                 mesh: Optional["xs.Mesh"] = None):
         super().__init__()
         assert isinstance(qkv_linear, QKVParallelLinear)
         assert qkv_linear.bias is None, "Bias is not supported for QKVLinear"
@@ -25,6 +28,16 @@ class XlaQKVParallelLinear(nn.Module):
             "Return bias is not supported for QKVLinear"
         assert qkv_linear.tp_size == 1, "TP > 1 is only supported under SPMD."
         self._load_and_shard_weight_from_qkv_linear(qkv_linear)
+        if mesh is not None:
+            self._shard_weight(mesh)
+
+    def _shard_weight(self, mesh: "xs.Mesh"):
+        self.q_weight = Parameter(self.q_weight.to('xla'), requires_grad=False)
+        self.k_weight = Parameter(self.k_weight.to('xla'), requires_grad=False)
+        self.v_weight = Parameter(self.v_weight.to('xla'), requires_grad=False)
+        xs.mark_sharding(self.q_weight, mesh, ('x', None))
+        xs.mark_sharding(self.k_weight, mesh, ('x', None))
+        xs.mark_sharding(self.v_weight, mesh, ('x', None))
 
     def _load_and_shard_weight_from_qkv_linear(self, qkv_linear: nn.Module):
         q_proj_size, k_proj_size, _ = qkv_linear.output_sizes
