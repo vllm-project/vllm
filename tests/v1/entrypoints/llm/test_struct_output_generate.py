@@ -63,7 +63,6 @@ class CarDescription(BaseModel):
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.flaky(reruns=2)
 @pytest.mark.parametrize(
     "model_name, guided_decoding_backend, tokenizer_mode, speculative_config",
     PARAMS_MODELS_BACKENDS_TOKENIZER_MODE)
