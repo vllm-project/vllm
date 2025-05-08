@@ -657,6 +657,11 @@ Specified using `--task generate`.
   * `XiaomiMiMo/MiMo-7B-RL`, etc.
   *
   *
+- * `Dots1ForCausalLM`
+  * Dots1
+  * `rednote-hilab/dots.llm1.inst`, etc.
+  *
+  * ✅︎
 :::
 
 :::{note}
