@@ -245,7 +245,7 @@ def batched_moe(a, w1, w2, topk_weight, topk_ids):
 
     fused_experts = FusedMoEModularKernel(
         BatchedDispatchCombine(a.shape[0], world_size=1, dp_size=1, rank=0),
-        BatchedExperts(a.shape[0]))
+        BatchedExperts(max_num_tokens=a.shape[0], dp_size=1, world_size=1))
 
     return fused_experts(a, w1, w2, topk_weight, topk_ids, num_experts)
 
@@ -490,7 +490,9 @@ def pplx_moe(pgi, dp_size, a, w1, w2, topk_weight, topk_ids):
         dp_size,
     )
 
-    experts = BatchedExperts(a.shape[0])
+    experts = BatchedExperts(max_num_tokens=a.shape[0],
+                             world_size=world_size,
+                             dp_size=dp_size)
 
     fused_experts = FusedMoEModularKernel(
         dispatch_combine,
@@ -535,7 +537,9 @@ def _batched_moe(pgi, dp_size, a, w1, w2, topk_weight, topk_ids):
         rank=rank,
     )
 
-    experts = BatchedExperts(a.shape[0])
+    experts = BatchedExperts(max_num_tokens=a.shape[0],
+                             world_size=1,
+                             dp_size=1)
 
     fused_experts = FusedMoEModularKernel(
         dispatch_combine,
