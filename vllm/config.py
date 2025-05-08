@@ -21,8 +21,6 @@ from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
                     Protocol, TypeVar, Union, cast, get_args, get_origin)
 
 import torch
-from pydantic import BaseModel
-from pydantic import Field as PydanticField
 from torch.distributed import ProcessGroup, ReduceOp
 from transformers import PretrainedConfig
 from typing_extensions import deprecated
@@ -217,6 +215,10 @@ def get_field(cls: ConfigType, name: str) -> Field:
         return field(default=default)
     raise ValueError(
         f"{cls.__name__}.{name} must have a default value or default factory.")
+
+
+def is_init_field(cls: ConfigType, name: str) -> bool:
+    return next(f for f in fields(cls) if f.name == name).init
 
 
 TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
@@ -3555,6 +3557,48 @@ class CompilationLevel:
 
 @config
 @dataclass
+class PassConfig:
+    """Configuration for custom Inductor passes.
+
+    This is separate from general `CompilationConfig` so that inductor passes
+    don't all have access to full configuration - that would create a cycle as
+    the `PassManager` is set as a property of config."""
+
+    dump_graph_stages: list[str] = field(default_factory=list)
+    """List of stages for which we want to dump the graph. Each pass defines
+    its own stages (before, after, maybe in-between)."""
+    dump_graph_dir: Path = Path(".")
+    """Directory to dump the graphs."""
+    # TODO(luka) better pass enabling system.
+    enable_fusion: bool = True
+    """Whether to enable the custom fusion pass."""
+    enable_noop: bool = True
+    """Whether to enable the custom no-op elimination pass."""
+    enable_sequence_parallelism: bool = False
+    """Whether to enable sequence parallelism."""
+
+    def uuid(self):
+        """
+        Produces a hash unique to the pass configuration.
+        Any new fields that affect compilation should be added to the hash.
+        Do not include dump_graph_* in the hash - they don't affect
+        compilation.
+        """
+        include = {
+            "enable_fusion", "enable_noop", "enable_sequence_parallelism"
+        }
+        dict_ = {k: v for k, v in asdict(self).items() if k in include}
+        return InductorPass.hash_dict(dict_)
+
+    def __post_init__(self) -> None:
+        if not self.enable_noop and self.enable_fusion:
+            logger.warning_once(
+                "Fusion enabled but reshape elimination disabled. "
+                "RMSNorm + quant (fp8) fusion might not work")
+
+
+@config
+@dataclass
 class CompilationConfig:
     """Configuration for compilation. It has three parts:
 
@@ -3684,43 +3728,6 @@ class CompilationConfig:
     flag cannot be used together with splitting_ops. This may provide
     performance benefits for smaller models."""
 
-    class PassConfig(BaseModel):
-        """
-        Configuration for custom Inductor passes.
-        This is separate from general CompilationConfig so that inductor passes
-        don't all have access to full configuration - that would create a cycle
-        as the PassManager is set as a property of config.
-        - dump_graph_stages: list of stages for which we want to dump the graph.
-            Each pass defines its own stages (before, after, maybe in-between).
-        - dump_graph_dir: directory to dump the graphs. Default is .
-        - enable_fusion: whether to enable the custom fusion pass.
-        - enable_noop: whether to enable the custom no-op elimination pass.
-            TODO(luka) better pass enabling system.
-        - enable_sequence_parallelism: whether to enable sequence parallelism.
-        """
-        dump_graph_stages: list[str] = PydanticField(default_factory=list)
-        dump_graph_dir: Path = Path(".")
-        enable_fusion: bool = True
-        enable_noop: bool = True
-        enable_sequence_parallelism: bool = False
-
-        def uuid(self):
-            """
-            Produces a hash unique to the pass configuration.
-            Any new fields that affect compilation should be added to the hash.
-            Do not include dump_graph_* in the hash - they don't affect
-            compilation.
-            """
-            dict_ = self.model_dump(include={"enable_fusion", "enable_noop", \
-                "enable_sequence_parallelism"})
-            return InductorPass.hash_dict(dict_)
-
-        def model_post_init(self, __context: Any) -> None:
-            if not self.enable_noop and self.enable_fusion:
-                logger.warning_once(
-                    "Fusion enabled but reshape elimination disabled. "
-                    "RMSNorm + quant (fp8) fusion might not work")
-
     pass_config: PassConfig = field(default_factory=PassConfig)
     """Custom inductor passes, see PassConfig for more details"""
 
@@ -3841,6 +3848,9 @@ class CompilationConfig:
             func = __import__(module).__dict__[func_name]
             self.inductor_compile_config[k] = func if isinstance(
                 func, InductorPass) else CallableInductorPass(func)
+
+        if isinstance(self.pass_config, dict):
+            self.pass_config = PassConfig(**self.pass_config)
 
     def init_backend(self, vllm_config: "VllmConfig") -> Union[str, Callable]:
         if self.level == CompilationLevel.NO_COMPILATION:
@@ -4069,8 +4079,10 @@ class VllmConfig:
             vllm_factors.append("None")
         if self.additional_config:
             if isinstance(additional_config := self.additional_config, dict):
-                additional_config_frozen = frozenset(additional_config.items())
-                additional_config_hash = hash(additional_config_frozen)
+                additional_config_hash = hashlib.md5(
+                    json.dumps(additional_config, sort_keys=True).encode(),
+                    usedforsecurity=False,
+                ).hexdigest()
             else:
                 additional_config_hash = additional_config.compute_hash()
             vllm_factors.append(additional_config_hash)
