@@ -43,16 +43,20 @@ class AutoRoundConfig(QuantizationConfig):
         super().__init__()
         if weight_bits not in self.SUPPORTED_BITS:
             raise ValueError(
-                f"Unsupported weight_bits: {weight_bits}, currently only support  {self.SUPPORTED_BITS}")
+                f"Unsupported weight_bits: {weight_bits}, "
+                f"currently only support  {self.SUPPORTED_BITS}")
         if data_type not in self.SUPPORTED_DTYPES:
             raise ValueError(
-                f"Unsupported data_type: {data_type}, currently only support  {self.SUPPORTED_DTYPES}")
+                f"Unsupported data_type: {data_type},"
+                f" currently only support  {self.SUPPORTED_DTYPES}")
         if packing_format not in self.SUPPORTED_FORMATS:
             raise ValueError(
-                f"Unsupported packing_format: {packing_format}, currently only support  {self.SUPPORTED_FORMATS}")
+                f"Unsupported packing_format: {packing_format}, "
+                f"currently only support  {self.SUPPORTED_FORMATS}")
         if backend not in self.SUPPORTED_BACKENDS:
             raise ValueError(
-                f"Unsupported backend: {backend},  currently only support  {self.SUPPORTED_BACKENDS}")
+                f"Unsupported backend: {backend},  "
+                f"currently only support  {self.SUPPORTED_BACKENDS}")
 
         self.weight_bits = weight_bits
         self.group_size = group_size
@@ -94,14 +98,22 @@ class AutoRoundConfig(QuantizationConfig):
             weight_bits=cls.get_from_keys(config, ["bits"]),
             group_size=cls.get_from_keys(config, ["group_size"]),
             sym=cls.get_from_keys(config, ["sym"]),
-            packing_format=cls.get_from_keys_or(config, ["packing_format"],
+            packing_format=cls.get_from_keys_or(config,
+                                                ["packing_format"],
                                                 "auto_round:auto_gptq"),
             block_name_to_quantize=cls.get_from_keys_or(config,
-                                                        ["block_name_to_quantize"],
+                                                   ["block_name_to_quantize",
+                                                        "to_quant_block_names"],
                                                         None),
-            extra_config=cls.get_from_keys_or(config, ["extra_config"], None),
-            data_type=cls.get_from_keys_or(config, ["data_type"], "int"),
-            backend=cls.get_from_keys_or(config, ["vllm_backend"], "auto"),
+            extra_config=cls.get_from_keys_or(config,
+                                              ["extra_config"],
+                                              None),
+            data_type=cls.get_from_keys_or(config,
+                                           ["data_type"],
+                                           "int"),
+            backend=cls.get_from_keys_or(config,
+                                         ["vllm_backend"],
+                                         "auto"),
         )
 
     def get_layer_config(self, layer, layer_name: str):
@@ -255,8 +267,8 @@ class AutoRoundConfig(QuantizationConfig):
 
         if isinstance(layer, FusedMoE):
             if use_marlin:
-                from vllm.model_executor.layers.quantization.moe_wna16 import \
-                    MoeWNA16Config
+                from vllm.model_executor.layers.quantization.moe_wna16 \
+                    import MoeWNA16Config
                 config = {
                     "linear_quant_method": "gptq",
                     "weight_bits": weight_bits,
@@ -274,7 +286,8 @@ class AutoRoundConfig(QuantizationConfig):
         if isinstance(layer, (LinearBase, ParallelLMHead)):
             if self.check_quantized(weight_bits):
                 return (
-                    GPTQMarlinLinearMethod if use_marlin else GPTQLinearMethod)(
+                    GPTQMarlinLinearMethod
+                    if use_marlin else GPTQLinearMethod)(
                     quant_args)
             return UnquantizedLinearMethod()
 
@@ -301,13 +314,15 @@ class AutoRoundConfig(QuantizationConfig):
                 return IPEXGPTQLinearMethod(conifg)
             else:
                 raise ValueError(
-                    f"ipex backend only supports awq and gtpq format,but got {self.packing_format}")
+                    f"ipex backend only supports awq "
+                    f"and gtpq format,but got {self.packing_format}")
         else:
             return None
 
     def get_quant_method(self, layer: torch.nn.Module, prefix: str):
 
-        if current_platform.is_cpu() or current_platform.is_xpu() or self.backend == "ipex":
+        if (current_platform.is_cpu() or
+                current_platform.is_xpu() or self.backend == "ipex"):
             return self.apply_ipex_quant_layer(layer, prefix)
         if "gptq" in self.packing_format or "gptq" in self.backend:
             return self.apply_gptq_quant_layer(layer, prefix)
