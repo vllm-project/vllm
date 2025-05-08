@@ -18,6 +18,7 @@ from __future__ import annotations
 import inspect
 import time
 from typing import List
+import copy
 
 from triton import KernelInterface
 from triton import __version__ as triton_version
@@ -62,6 +63,7 @@ class PreparedKernel:
         launch_enter_hook,
         launch_exit_hook,
         non_const_arg_names,
+        const_arg_list,
         assume_const_vals_dict,
         update_only_arg_names,
         cache_key,
@@ -98,6 +100,10 @@ class PreparedKernel:
                 self.non_const_vals_lst.append("dummy_value")
             else:
                 self.non_const_vals_lst.append(assume_const_vals_dict[arg_n])
+
+        # self.non_const_vals_lst.extend(const_arg_list)
+        # FIXME: why do I need to add dummy values for the constexpr?
+        self.non_const_vals_lst.extend([0 for e in const_arg_list])
 
         self.device = device
         self._init_handles()
@@ -136,7 +142,7 @@ class PreparedKernel:
             if self.grid_is_callable:
                 grid = kwargs["grid"](kwargs)
             else:
-                grid = kwargs["grid"]
+                grid = copy.deepcopy(kwargs["grid"])
             grid_size = len(grid)
             grid_0 = grid[0]
             grid_1 = grid[1] if grid_size > 1 else 1
@@ -247,8 +253,12 @@ class JitCache(KernelInterface):
             update_only_arg_names = non_const_arg_names
             assume_const_vals_dict = {}
 
+        const_arg_list = []
+        for arg_n in const_arg_names:
+            const_arg_list.append(kwargs[arg_n])
+
         device = driver.active.get_current_device()
-        kernel_cache, target, backend, binder = self.device_caches[device]
+        kernel_cache, target, backend, binder = self.fn.device_caches[device]
         bound_args, specialization, options = binder(*args, **kwargs)
         bind_end = time.time()
 
@@ -257,7 +267,6 @@ class JitCache(KernelInterface):
         else:
             grid = kwargs["grid"]
 
-        device = driver.active.get_current_device()
         stream = driver.active.get_current_stream(device)
         launch_metadata = kernel.launch_metadata(grid, stream,
                                                  *bound_args.values())
@@ -271,6 +280,7 @@ class JitCache(KernelInterface):
             self.fn.CompiledKernel.launch_enter_hook,
             self.fn.CompiledKernel.launch_exit_hook,
             non_const_arg_names,
+            const_arg_list,
             assume_const_vals_dict,
             update_only_arg_names,
             self.cache_index_func(kwargs),
