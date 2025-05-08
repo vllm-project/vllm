@@ -65,12 +65,20 @@ class OvisProcessor(ProcessorMixin):
     """
 
     attributes = ["image_processor", "tokenizer"]
-    valid_kwargs = ["chat_template", "image_pad_token"]
+    valid_kwargs = ["chat_template", "image_pad_token", "image_segement_len"]
 
     image_processor_class = "AutoImageProcessor"
     tokenizer_class = "AutoTokenizer"
 
-    def __init__(self, image_processor=None, tokenizer=None, chat_template=None, image_pad_token=None, image_segment_len=255, **kwargs: Unpack[OvisProcessorKwargs]):
+    def __init__(
+        self,
+        image_processor=None,
+        tokenizer=None,
+        chat_template=None,
+        image_pad_token=None,
+        image_segment_len=255,
+        **kwargs,
+    ):
         self.image_token = "<image>"
         self.image_pad_token = image_pad_token
         self.image_segment_len = image_segment_len

@@ -52,7 +52,6 @@ from .utils import merge_multimodal_embeddings
 
 # Cannot find the following number from hf config.
 IMAGE_TOKEN = "<image>"
-NUMBER_OF_TOKEN_TO_RESERVE_FOR_SEGMENT = 256
 IMAGE_INDICATOR_IDS = [-301, -302, -303, -304, -305]
 
 IMAGE_PAD_TOKEN_MAP = {
@@ -126,11 +125,11 @@ class VisualTokenizer(torch.nn.Module):
 
     @property
     def dtype(self):
-        return self.backbone.dtype
+        return next(self.head.parameters()).dtype
 
     @property
     def device(self):
-        return self.backbone.device
+        return next(self.head.parameters()).device
 
     def tokenize(self, logits):
         if self.config.tokenize_function == 'softmax':
@@ -251,7 +250,7 @@ class Ovis2ProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_processor(
             OvisProcessor,
             image_pad_token=self.get_image_pad_token(),
-            image_segement_len=self.get_image_segment_len(),
+            image_segment_len=self.get_image_segment_len(),
         )
 
     def get_image_segment_len(self) -> int:
@@ -277,7 +276,7 @@ class Ovis2ProcessingInfo(BaseProcessingInfo):
         return {  # 32k is model token limit at the moment
             "image":
             self.get_hf_config().multimodal_max_length //
-            ((9 + 1) * NUMBER_OF_TOKEN_TO_RESERVE_FOR_SEGMENT)
+            ((9 + 1) * self.get_image_segment_len())
         }
 
     def get_image_size_with_most_features(self) -> ImageSize:
@@ -545,8 +544,7 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.llm.logits_processor(self.llm.lm_head, hidden_states,
-                                           sampling_metadata)
+        logits = self.llm.compute_logits(hidden_states, sampling_metadata)
         return logits
 
     def load_weights(self, weights: Iterable[Tuple[str,

@@ -187,14 +187,6 @@ class AIMv2Model(torch.nn.Module):
                                       quant_config=quant_config,
                                       prefix=f"{prefix}.trunk")
 
-    @property
-    def dtype(self):
-        return self.trunk.blocks[0].attn.qkv.weight.dtype
-
-    @property
-    def device(self):
-        return self.trunk.blocks[0].attn.qkv.device
-
     def forward(
         self,
         pixel_values: torch.Tensor,
