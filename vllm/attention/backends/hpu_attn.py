@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
+import habana_frameworks.torch.core as htcore
 import vllm_hpu_extension.kernels as kernels
 import vllm_hpu_extension.ops as ops
 from vllm_hpu_extension.flags import enabled_flags
@@ -251,6 +252,11 @@ def flat_pa_mla(query, key_cache, value_cache, block_list, block_mapping,
         key = key.transpose(2, 3)
 
     attn = matmul_qk_op(query, key)
+
+    if "fp32_softmax" in enabled_flags():
+        attn = attn.float()
+        htcore.mark_step()
+
     attn = attn + block_bias
     if kv_in_fp8:
         # Chendi: This is a workaround for manually
