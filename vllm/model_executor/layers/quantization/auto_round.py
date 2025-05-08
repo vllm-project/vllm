@@ -112,24 +112,6 @@ class AutoRoundConfig(QuantizationConfig):
     def check_quantized(self, weight_bits: int) -> bool:
         return weight_bits < 16
 
-    # def apply_awq_quant_layer(self,  layer, prefix: str, backend: str = "auto"):
-    #     from vllm.model_executor.layers.fused_moe import FusedMoE
-    #
-    #     weight_bits, group_size, sym = self.get_layer_config(layer, prefix)
-    #     print(prefix, layer.__class__.__name__, weight_bits, group_size, sym)  ##TODO change to debug
-    #     if backend == "auto" or "marlin" in backend:
-    #         from vllm.model_executor.layers.quantization.utils.marlin_utils import check_moe_marlin_supports_layer, \
-    #             check_marlin_supported
-    #         AWQ_TYPE_MAP = {
-    #             4: scalar_types.uint4,
-    #             8: scalar_types.uint8,
-    #         }
-    #         use_marlin = (
-    #                 (weight_bits, sym) in AWQ_TYPE_MAP and
-    #                 check_marlin_supported(AWQ_TYPE_MAP[(weight_bits, sym)], group_size)
-    #         )
-    #     else:
-    #         use_marlin = True
 
     def apply_awq_quant_layer(self, layer, prefix: str, backend: str = "auto"):
 

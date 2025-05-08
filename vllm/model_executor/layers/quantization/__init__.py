@@ -2,7 +2,6 @@
 
 from typing import Literal, Type, get_args
 
-from vllm.model_executor.layers.quantization.auto_round import AutoRoundConfig
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 
