@@ -394,11 +394,11 @@ class OpenAIServing:
         model_config = self.model_config
 
         resolved_content_format = resolve_chat_template_content_format(
+            model_config,
             chat_template,
             tool_dicts,
             chat_template_content_format,
             tokenizer,
-            trust_remote_code=model_config.trust_remote_code,
         )
         conversation, mm_data_future = parse_chat_messages_futures(
             messages,
@@ -425,8 +425,8 @@ class OpenAIServing:
             )
         else:
             request_prompt = apply_hf_chat_template(
+                model_config,
                 tokenizer,
-                trust_remote_code=model_config.trust_remote_code,
                 conversation=conversation,
                 **_chat_template_kwargs,
             )
