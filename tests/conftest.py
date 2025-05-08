@@ -358,7 +358,7 @@ class HfRunner:
             if (getattr(model, "quantization_method", None) != "bitsandbytes"
                     and len({p.device
                              for p in model.parameters()}) < 2):
-                model = model.to(self.device)
+                model = model.to(device=self.device, dtype=self.dtype)
 
             self.model = model
 

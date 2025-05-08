@@ -273,11 +273,7 @@ class OvisProcessingInfo(BaseProcessingInfo):
         return self.get_hf_processor().image_processor  # type: ignore
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        return {  # 32k is model token limit at the moment
-            "image":
-            self.get_hf_config().multimodal_max_length //
-            ((9 + 1) * self.get_image_segment_len())
-        }
+        return {"image": None}
 
     def get_image_size_with_most_features(self) -> ImageSize:
         height, width = self.get_hf_processor().get_image_size()

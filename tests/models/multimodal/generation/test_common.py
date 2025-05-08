@@ -476,8 +476,11 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         patch_hf_runner=model_utils.molmo_patch_hf_runner,
     ),
-    "ovis2": VLMTestInfo(
-        models=["AIDC-AI/Ovis2-1B"],
+    "ovis": VLMTestInfo(
+        models=[
+            "AIDC-AI/Ovis2-1B",
+            "AIDC-AI/Ovis1.6-Llama3.2-3B",
+        ],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n", # noqa: E501
         img_idx_to_prompt=lambda idx: "<image>\n", # noqa: E501
@@ -486,7 +489,7 @@ VLM_TEST_SETTINGS = {
         dtype="half",
         # use sdpa mode for hf runner since ovis2 didn't work with flash_attn
         hf_model_kwargs={"llm_attn_implementation": "sdpa"},
-        patch_hf_runner=model_utils.ovis2_patch_hf_runner,
+        patch_hf_runner=model_utils.ovis_patch_hf_runner,
     ),
     "phi3v": VLMTestInfo(
         models=["microsoft/Phi-3.5-vision-instruct"],

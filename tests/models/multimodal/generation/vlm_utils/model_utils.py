@@ -678,7 +678,7 @@ def molmo_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     return hf_model
 
 
-def ovis2_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+def ovis_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for Ovis2."""
     hf_model.model.visual_tokenizer.to(hf_model.dtype)
     hf_model.model.vte.to(hf_model.dtype)
