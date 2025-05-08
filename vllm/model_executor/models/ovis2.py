@@ -23,7 +23,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 from torch.nn.functional import gumbel_softmax, pad, softmax
-from transformers import BatchFeature
+from transformers import BaseImageProcessor, BatchFeature
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -260,7 +260,7 @@ class Ovis2ProcessingInfo(BaseProcessingInfo):
         text_model_type = hf_text_config.model_type
         return IMAGE_PAD_TOKEN_MAP.get(text_model_type)
 
-    def get_image_processor(self) -> OvisProcessor:
+    def get_image_processor(self) -> BaseImageProcessor:
         return self.get_hf_processor().image_processor  # type: ignore
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
@@ -271,9 +271,16 @@ class Ovis2ProcessingInfo(BaseProcessingInfo):
         }
 
     def get_image_size_with_most_features(self) -> ImageSize:
-        image_processor = self.get_image_processor()
-        return ImageSize(width=image_processor.size['shortest_edge'] * 9 * 2,
-                         height=image_processor.size['shortest_edge'] * 9 * 2)
+        size = self.get_image_processor().size
+        if 'shortest_edge' in size:
+            width = height = size['shortest_edge']
+        elif "height" in size and "width" in size:
+            width = size['width']
+            height = size['height']
+        else:
+            raise ValueError(
+                "Can't parse image size from image_processor config.")
+        return ImageSize(width=width * 9 * 2, height=height * 9 * 2)
 
 
 class Ovis2DummyInputsBuilder(BaseDummyInputsBuilder[Ovis2ProcessingInfo]):

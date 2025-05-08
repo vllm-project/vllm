@@ -22,6 +22,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from functools import cached_property
 from typing import List, Union
 
 import PIL
@@ -64,17 +65,19 @@ class OvisProcessor(ProcessorMixin):
     """
 
     attributes = ["image_processor", "tokenizer"]
-    valid_kwargs = ["chat_template"]
+    valid_kwargs = ["chat_template", "image_pad_token"]
 
     image_processor_class = "AutoImageProcessor"
     tokenizer_class = "AutoTokenizer"
 
-    def __init__(self, image_processor=None, tokenizer=None, chat_template=None, image_pad_token=None, **kwargs):
+    def __init__(self, image_processor=None, tokenizer=None, chat_template=None, image_pad_token=None, **kwargs: Unpack[OvisProcessorKwargs]):
         self.image_token = "<image>"
-        self.image_pad_token = "<|image_pad|>" if image_pad_token is None else image_pad_token
+        self.image_pad_token = image_pad_token
         super().__init__(image_processor, tokenizer, chat_template=chat_template)
 
-        self.image_pad_token_id = self.tokenizer.get_vocab()[self.image_pad_token]
+    @cached_property
+    def extra_special_tokens(self):
+        image_pad_token_id = self.tokenizer.get_vocab()[self.image_pad_token]
         self.extra_special_tokens = {
             "image_token": -200,
             "image_atom": -300,
@@ -83,7 +86,7 @@ class OvisProcessor(ProcessorMixin):
             "image_col_sep": -303,
             "image_row_sep": -304,
             "image_end": -305,
-            'image_pad': self.image_pad_token_id,
+            'image_pad': image_pad_token_id,
         }
 
     def __call__(
