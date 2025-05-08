@@ -38,7 +38,8 @@ inline __device__ void apply_rotary_embedding(
     scalar_t* __restrict__ query,  // [batch_size, seq_len, num_heads,
                                    // head_size] or [num_tokens, num_heads,
                                    // head_size]
-    scalar_t* __restrict__ key,    // [batch_size, seq_len, num_kv_heads,
+    scalar_t* __restrict__ key,    // nullptr or
+                                   // [batch_size, seq_len, num_kv_heads,
                                    // head_size] or [num_tokens, num_kv_heads,
                                    // head_size]
     const scalar_t* cache_ptr, const int head_size, const int num_heads,
@@ -57,13 +58,15 @@ inline __device__ void apply_rotary_embedding(
         query + token_head, cos_ptr, sin_ptr, rot_offset, embed_dim);
   }
 
-  const int nk = num_kv_heads * embed_dim;
-  for (int i = threadIdx.x; i < nk; i += blockDim.x) {
-    const int head_idx = i / embed_dim;
-    const int64_t token_head = token_idx * key_stride + head_idx * head_size;
-    const int rot_offset = i % embed_dim;
-    apply_token_rotary_embedding<scalar_t, IS_NEOX>(
-        key + token_head, cos_ptr, sin_ptr, rot_offset, embed_dim);
+  if (key != nullptr) {
+    const int nk = num_kv_heads * embed_dim;
+    for (int i = threadIdx.x; i < nk; i += blockDim.x) {
+      const int head_idx = i / embed_dim;
+      const int64_t token_head = token_idx * key_stride + head_idx * head_size;
+      const int rot_offset = i % embed_dim;
+      apply_token_rotary_embedding<scalar_t, IS_NEOX>(
+          key + token_head, cos_ptr, sin_ptr, rot_offset, embed_dim);
+    }
   }
 }
 
@@ -74,7 +77,8 @@ __global__ void rotary_embedding_kernel(
     scalar_t* __restrict__ query,           // [batch_size, seq_len, num_heads,
                                    // head_size] or [num_tokens, num_heads,
                                    // head_size]
-    scalar_t* __restrict__ key,  // [batch_size, seq_len, num_kv_heads,
+    scalar_t* __restrict__ key,  // nullptr or
+                                 // [batch_size, seq_len, num_kv_heads,
                                  // head_size] or [num_tokens, num_kv_heads,
                                  // head_size]
     const scalar_t* __restrict__ cos_sin_cache,  // [max_position, 2, rot_dim //
@@ -98,7 +102,8 @@ __global__ void batched_rotary_embedding_kernel(
     scalar_t* __restrict__ query,           // [batch_size, seq_len, num_heads,
                                    // head_size] or [num_tokens, num_heads,
                                    // head_size]
-    scalar_t* __restrict__ key,  // [batch_size, seq_len, num_kv_heads,
+    scalar_t* __restrict__ key,  // nullptr or
+                                 // [batch_size, seq_len, num_kv_heads,
                                  // head_size] or [num_tokens, num_kv_heads,
                                  // head_size]
     const scalar_t* __restrict__ cos_sin_cache,  // [max_position, 2, rot_dim //
@@ -127,10 +132,12 @@ void rotary_embedding(
                            // [num_tokens, num_heads * head_size] or
                            // [batch_size, seq_len, num_heads, head_size] or
                            // [num_tokens, num_heads, head_size]
-    torch::Tensor& key,    // [batch_size, seq_len, num_kv_heads * head_size] or
-                           // [num_tokens, num_kv_heads * head_size] or
-                           // [batch_size, seq_len, num_heads, head_size] or
-                           // [num_tokens, num_heads, head_size]
+    std::optional<torch::Tensor> key,
+    // null or
+    // [batch_size, seq_len, num_kv_heads * head_size] or
+    // [num_tokens, num_kv_heads * head_size] or
+    // [batch_size, seq_len, num_heads, head_size] or
+    // [num_tokens, num_heads, head_size]
     int64_t head_size,
     torch::Tensor& cos_sin_cache,  // [max_position, rot_dim]
     bool is_neox) {
@@ -138,40 +145,40 @@ void rotary_embedding(
   int64_t num_tokens = positions.numel();
   int positions_ndim = positions.dim();
 
-  // Make sure num_tokens dim is consistent across positions, query, and key.
+  // Make sure num_tokens dim is consistent across positions, query, and key
   TORCH_CHECK(
       positions_ndim == 1 || positions_ndim == 2,
       "positions must have shape [num_tokens] or [batch_size, seq_len]");
   if (positions_ndim == 1) {
-    TORCH_CHECK(
-        query.size(0) == positions.size(0) && key.size(0) == positions.size(0),
-        "query, key and positions must have the same number of tokens");
+    TORCH_CHECK(query.size(0) == positions.size(0) &&
+                    (!key.has_value() || key->size(0) == positions.size(0)),
+                "query, key and positions must have the same number of tokens");
   }
   if (positions_ndim == 2) {
     TORCH_CHECK(
         query.size(0) == positions.size(0) &&
-            key.size(0) == positions.size(0) &&
+            (!key.has_value() || key->size(0) == positions.size(0)) &&
             query.size(1) == positions.size(1) &&
-            key.size(1) == positions.size(1),
+            (!key.has_value() || key->size(1) == positions.size(1)),
         "query, key and positions must have the same batch_size and seq_len");
   }
 
   // Make sure head_size is valid for query and key
   // hidden_size = num_heads * head_size
   int query_hidden_size = query.numel() / num_tokens;
-  int key_hidden_size = key.numel() / num_tokens;
+  int key_hidden_size = key.has_value() ? key->numel() / num_tokens : 0;
   TORCH_CHECK(query_hidden_size % head_size == 0);
   TORCH_CHECK(key_hidden_size % head_size == 0);
 
   // Make sure query and key have consistent number of heads
   int num_heads = query_hidden_size / head_size;
-  int num_kv_heads = key_hidden_size / head_size;
+  int num_kv_heads = key.has_value() ? key_hidden_size / head_size : num_heads;
   TORCH_CHECK(num_heads % num_kv_heads == 0);
 
   int rot_dim = cos_sin_cache.size(1);
   int seq_dim_idx = positions_ndim - 1;
   int64_t query_stride = query.stride(seq_dim_idx);
-  int64_t key_stride = key.stride(seq_dim_idx);
+  int64_t key_stride = key.has_value() ? key->stride(seq_dim_idx) : 0;
 
   dim3 grid(num_tokens);
   dim3 block(std::min<int64_t>(num_heads * rot_dim / 2, 512));
@@ -181,15 +188,16 @@ void rotary_embedding(
     if (is_neox) {
       vllm::rotary_embedding_kernel<scalar_t, true><<<grid, block, 0, stream>>>(
           positions.data_ptr<int64_t>(), query.data_ptr<scalar_t>(),
-          key.data_ptr<scalar_t>(), cos_sin_cache.data_ptr<scalar_t>(), rot_dim,
-          query_stride, key_stride, num_heads, num_kv_heads, head_size);
+          key.has_value() ? key->data_ptr<scalar_t>() : nullptr,
+          cos_sin_cache.data_ptr<scalar_t>(), rot_dim, query_stride, key_stride,
+          num_heads, num_kv_heads, head_size);
     } else {
       vllm::rotary_embedding_kernel<scalar_t, false>
           <<<grid, block, 0, stream>>>(
               positions.data_ptr<int64_t>(), query.data_ptr<scalar_t>(),
-              key.data_ptr<scalar_t>(), cos_sin_cache.data_ptr<scalar_t>(),
-              rot_dim, query_stride, key_stride, num_heads, num_kv_heads,
-              head_size);
+              key.has_value() ? key->data_ptr<scalar_t>() : nullptr,
+              cos_sin_cache.data_ptr<scalar_t>(), rot_dim, query_stride,
+              key_stride, num_heads, num_kv_heads, head_size);
     }
   });
 }
@@ -204,10 +212,12 @@ void batched_rotary_embedding(
                            // [num_tokens, num_heads * head_size] or
                            // [batch_size, seq_len, num_heads, head_size] or
                            // [num_tokens, num_heads, head_size]
-    torch::Tensor& key,    // [batch_size, seq_len, num_kv_heads * head_size] or
-                           // [num_tokens, num_kv_heads * head_size] or
-                           // [batch_size, seq_len, num_heads, head_size] or
-                           // [num_tokens, num_heads, head_size]
+    std::optional<torch::Tensor>
+        key,  // null or
+              // [batch_size, seq_len, num_kv_heads * head_size] or
+              // [num_tokens, num_kv_heads * head_size] or
+              // [batch_size, seq_len, num_heads, head_size] or
+              // [num_tokens, num_heads, head_size]
     int64_t head_size,
     torch::Tensor& cos_sin_cache,  // [max_position, rot_dim]
     bool is_neox, int64_t rot_dim,
@@ -221,38 +231,38 @@ void batched_rotary_embedding(
       "cos_sin_cache_offsets");
 
   int positions_ndim = positions.dim();
-  // Make sure num_tokens dim is consistent across positions, query, and key.
+  // Make sure num_tokens dim is consistent across positions, query, and key
   TORCH_CHECK(
       positions_ndim == 1 || positions_ndim == 2,
       "positions must have shape [num_tokens] or [batch_size, seq_len]");
   if (positions_ndim == 1) {
-    TORCH_CHECK(
-        query.size(0) == positions.size(0) && key.size(0) == positions.size(0),
-        "query, key and positions must have the same number of tokens");
+    TORCH_CHECK(query.size(0) == positions.size(0) &&
+                    (!key.has_value() || key->size(0) == positions.size(0)),
+                "query, key and positions must have the same number of tokens");
   }
   if (positions_ndim == 2) {
     TORCH_CHECK(
         query.size(0) == positions.size(0) &&
-            key.size(0) == positions.size(0) &&
+            (!key.has_value() || key->size(0) == positions.size(0)) &&
             query.size(1) == positions.size(1) &&
-            key.size(1) == positions.size(1),
+            (!key.has_value() || key->size(1) == positions.size(1)),
         "query, key and positions must have the same batch_size and seq_len");
   }
 
   // Make sure head_size is valid for query and key
   int query_hidden_size = query.numel() / num_tokens;
-  int key_hidden_size = key.numel() / num_tokens;
+  int key_hidden_size = key.has_value() ? key->numel() / num_tokens : 0;
   TORCH_CHECK(query_hidden_size % head_size == 0);
   TORCH_CHECK(key_hidden_size % head_size == 0);
 
   // Make sure query and key have concistent number of heads
   int num_heads = query_hidden_size / head_size;
-  int num_kv_heads = key_hidden_size / head_size;
+  int num_kv_heads = key.has_value() ? key_hidden_size / head_size : num_heads;
   TORCH_CHECK(num_heads % num_kv_heads == 0);
 
   int seq_dim_idx = positions_ndim - 1;
   int64_t query_stride = query.stride(seq_dim_idx);
-  int64_t key_stride = key.stride(seq_dim_idx);
+  int64_t key_stride = key.has_value() ? key->stride(seq_dim_idx) : 0;
 
   dim3 grid(num_tokens);
   dim3 block(std::min<int64_t>(num_heads * rot_dim / 2, 512));
@@ -263,14 +273,16 @@ void batched_rotary_embedding(
       vllm::batched_rotary_embedding_kernel<scalar_t, true>
           <<<grid, block, 0, stream>>>(
               positions.data_ptr<int64_t>(), query.data_ptr<scalar_t>(),
-              key.data_ptr<scalar_t>(), cos_sin_cache.data_ptr<scalar_t>(),
+              key.has_value() ? key->data_ptr<scalar_t>() : nullptr,
+              cos_sin_cache.data_ptr<scalar_t>(),
               cos_sin_cache_offsets.data_ptr<int64_t>(), rot_dim, query_stride,
               key_stride, num_heads, num_kv_heads, head_size);
     } else {
       vllm::batched_rotary_embedding_kernel<scalar_t, false>
           <<<grid, block, 0, stream>>>(
               positions.data_ptr<int64_t>(), query.data_ptr<scalar_t>(),
-              key.data_ptr<scalar_t>(), cos_sin_cache.data_ptr<scalar_t>(),
+              key.has_value() ? key->data_ptr<scalar_t>() : nullptr,
+              cos_sin_cache.data_ptr<scalar_t>(),
               cos_sin_cache_offsets.data_ptr<int64_t>(), rot_dim, query_stride,
               key_stride, num_heads, num_kv_heads, head_size);
     }

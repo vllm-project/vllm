@@ -313,7 +313,6 @@ class BambaModel(nn.Module):
 
         mamba2_metadata = prepare_mamba2_metadata(
             chunk_size=self.config.mamba_chunk_size,
-            input_ids=input_ids,
             attn_metadata=attn_metadata,
         )
 
