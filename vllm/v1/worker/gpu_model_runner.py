@@ -1377,7 +1377,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return output
 
     @staticmethod
-    def maybe_setup_kv_connector(scheduler_output: SchedulerOutput):
+    def maybe_setup_kv_connector(scheduler_output: "SchedulerOutput"):
         # Update KVConnector with the KVConnector metadata forward().
         if has_kv_transfer_group():
             kv_connector = get_kv_transfer_group()

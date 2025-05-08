@@ -160,6 +160,7 @@ class Scheduler(SchedulerInterface):
         # num_tokens_with_spec. This is general enough to cover
         # chunked prefills, prefix caching, speculative decoding,
         # and the "jump decoding" optimization in the future.
+        print(f"{self.requests=}")
 
         scheduled_new_reqs: list[Request] = []
         scheduled_resumed_reqs: list[Request] = []
@@ -360,8 +361,12 @@ class Scheduler(SchedulerInterface):
 
                 encoder_inputs_to_schedule = None
                 new_encoder_budget = encoder_budget
-                if not load_kv_async:
-                    # Number of tokens to be scheduled.
+
+                # P/D: loading remote KV, do not allocate for new work.
+                if load_kv_async:
+                    num_new_tokens = 0
+                # Number of tokens to be scheduled.
+                else:
                     # We use `request.num_tokens` instead of
                     # `request.num_prompt_tokens` to consider the resumed
                     # requests, which have output tokens.
@@ -383,8 +388,6 @@ class Scheduler(SchedulerInterface):
                         if num_new_tokens == 0:
                             # The request cannot be scheduled.
                             break
-                else:
-                    num_new_tokens = 0
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
@@ -973,20 +976,26 @@ class Scheduler(SchedulerInterface):
         assert request.do_remote_decode
         request.status = RequestStatus.FINISHED_REMOTE_DECODE
         self._free_request(request, delay_free_blocks=True)
-        remote_blocks = [
+
+        # Get computed blocks.
+        all_block_ids = [
             block.block_id for block in self.kv_cache_manager.req_to_blocks[
-                request.request_id] if block._block_hash is not None
+                request.request_id]
         ]
+        last_block_full = request.num_computed_tokens % self.block_size == 0
+        computed_block_ids = (all_block_ids
+                              if last_block_full else all_block_ids[:-1])
+
         # If prompt < block_size, then there will be no KV xfer.
         # Add to the no-op list so we can free w/o memory leak.
-        if len(remote_blocks) == 0:
+        if len(computed_block_ids) == 0:
             send_kv_no_op.append(request.request_id)
 
         # TODO(rob): we could make the creation of the KVTransferParams
         # per Connector to allow for true pluggabilty.
         return KVTransferParams(
             do_remote_prefill=True,
-            remote_block_ids=remote_blocks,
+            remote_block_ids=computed_block_ids,
             remote_engine_id=self.vllm_config.kv_transfer_config.engine_id,
             remote_host=envs.VLLM_NIXL_SIDE_CHANNEL_HOST,
             remote_port=envs.VLLM_NIXL_SIDE_CHANNEL_PORT,

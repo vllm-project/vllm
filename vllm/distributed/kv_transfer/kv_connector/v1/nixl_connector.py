@@ -596,6 +596,8 @@ class NixlConnectorWorker:
         # blocks until we are ready.
 
         assert len(local_block_ids) > 0
+        print(f"{local_block_ids=}")
+        print(f"{remote_block_ids=}")
         assert len(local_block_ids) == len(remote_block_ids)
 
         # Get side handles.
