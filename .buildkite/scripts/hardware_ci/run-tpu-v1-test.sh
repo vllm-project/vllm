@@ -84,6 +84,11 @@ docker run --privileged --net host --shm-size=16G -it \
         pytest -s -v /workspace/vllm/tests/v1/entrypoints/llm/test_struct_output_generate.py; \
         echo TEST_11_EXIT_CODE: \$?; \
     } & \
+    && { \
+        echo TEST_12: Running test_moe_pallas.py; \
+        pytest -s -v /workspace/vllm/tests/tpu/test_moe_pallas.py; \
+        echo TEST_12_EXIT_CODE: \$?; \
+    } & \
     wait \
     && echo 'All tests have attempted to run. Check logs for individual test statuses and exit codes.' \
 "
