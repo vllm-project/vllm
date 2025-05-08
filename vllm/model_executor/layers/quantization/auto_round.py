@@ -34,7 +34,7 @@ class AutoRoundConfig(QuantizationConfig):
             sym: bool = True,
             packing_format: str = "auto_round:auto_gptq",
             block_name_to_quantize: Optional[Union[str, List[str]]] = None,
-            extra_config: Optional[Dict[str, Any, None]] = None,
+            extra_config: Optional[Dict[str, Any]] = None,
             data_type: str = "int",
             backend: str = "auto",
     ) -> None:
@@ -75,7 +75,7 @@ class AutoRoundConfig(QuantizationConfig):
                 f"group_size={self.group_size}, sym={self.sym})")
 
     @classmethod
-    def get_name(cls) -> str:
+    def get_name(cls): ## use str will trigger preci issue
         return "auto-round"
 
     @classmethod
@@ -318,7 +318,6 @@ class AutoRoundConfig(QuantizationConfig):
             return None
 
     def get_quant_method(self, layer: torch.nn.Module, prefix: str):
-
         if (current_platform.is_cpu() or
                 current_platform.is_xpu() or self.backend == "ipex"):
             return self.apply_ipex_quant_layer(layer, prefix)
