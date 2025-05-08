@@ -6,6 +6,7 @@
 anything-llm
 bentoml
 cerebrium
+chatbox
 dstack
 helm
 lws
