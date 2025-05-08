@@ -33,7 +33,7 @@ from transformers.processing_utils import (ProcessingKwargs, ProcessorMixin,
                                            Unpack)
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 
-__all__ = [ 'OvisProcessor']
+__all__ = ['OvisProcessor']
 IGNORE_ID = -100
 
 class OvisProcessorKwargs(ProcessingKwargs, total=False):   # type: ignore[call-arg]
@@ -70,15 +70,16 @@ class OvisProcessor(ProcessorMixin):
     image_processor_class = "AutoImageProcessor"
     tokenizer_class = "AutoTokenizer"
 
-    def __init__(self, image_processor=None, tokenizer=None, chat_template=None, image_pad_token=None, **kwargs: Unpack[OvisProcessorKwargs]):
+    def __init__(self, image_processor=None, tokenizer=None, chat_template=None, image_pad_token=None, image_segment_len=255, **kwargs: Unpack[OvisProcessorKwargs]):
         self.image_token = "<image>"
         self.image_pad_token = image_pad_token
+        self.image_segment_len = image_segment_len
         super().__init__(image_processor, tokenizer, chat_template=chat_template)
 
     @cached_property
     def extra_special_tokens(self):
         image_pad_token_id = self.tokenizer.get_vocab()[self.image_pad_token]
-        self.extra_special_tokens = {
+        extra_special_tokens = {
             "image_token": -200,
             "image_atom": -300,
             "image_start": -301,
@@ -88,6 +89,7 @@ class OvisProcessor(ProcessorMixin):
             "image_end": -305,
             'image_pad': image_pad_token_id,
         }
+        return extra_special_tokens
 
     def __call__(
         self,
@@ -227,8 +229,14 @@ class OvisProcessor(ProcessorMixin):
         return torch.tensor(batch_token_ids, dtype=torch.long)
 
     def get_image_size(self):
-        height = self.image_processor.crop_size["height"]
-        width = self.image_processor.crop_size["width"]
+        size = self.image_processor.size
+        if 'shortest_edge' in size:
+            width = height = size['shortest_edge']
+        elif "height" in size and "width" in size:
+            width = size['width']
+            height = size['height']
+        else:
+            raise ValueError( "Can't parse image size from image_processor config.")
         return height, width
 
     def get_token_value(self, tok):
@@ -263,7 +271,7 @@ class OvisProcessor(ProcessorMixin):
             padded_placeholder_tokens.append(image_padding_token_id)
             if token == image_atom_token_id:
                 # Add 255 padding tokens after each image atom token
-                padded_placeholder_tokens.extend([image_padding_token_id] * 255)
+                padded_placeholder_tokens.extend([image_padding_token_id] * self.image_segment_len)
         return padded_placeholder_tokens
 
     def preprocess_image(self, image: PIL.Image.Image, max_partition, covering_threshold, convert_to_rgb, return_tensors):

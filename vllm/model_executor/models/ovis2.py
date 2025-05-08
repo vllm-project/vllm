@@ -99,6 +99,7 @@ class VisualTokenizer(torch.nn.Module):
                 config.hidden_stride,
                 head_dim,
                 bias=False,
+                return_bias=False,
             ), torch.nn.LayerNorm(head_dim))
 
     def _init_backbone(
@@ -183,9 +184,7 @@ class VisualTokenizer(torch.nn.Module):
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         """[BatchSize, ImageShape] -> [BatchSize, Token, VocabSize]"""
         features = self.encode(pixel_values)
-        logits, _ = self.head[0](
-            features)  # we spllit the sequncial here for not throwing an error
-        logits = self.head[1](logits)
+        logits = self.head(features)
         tokens = self.tokenize(logits)
         # tokens' shape is [BatchSize, #Token, VocabSize-5], so padding with
         # [BatchSize, #Token, 5], after which, tokens' shape should become
@@ -249,11 +248,22 @@ class Ovis2ProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_config(OvisConfig)
 
     def get_hf_processor(self, **kwargs):
-        image_pad_token = self.get_image_pad_token()
         return self.ctx.get_hf_processor(
             OvisProcessor,
-            image_pad_token=image_pad_token,
+            image_pad_token=self.get_image_pad_token(),
+            image_segement_len=self.get_image_segment_len(),
         )
+
+    def get_image_segment_len(self) -> int:
+        visual_tokenizer_config = self.get_hf_config().visual_tokenizer_config
+        vit_type = visual_tokenizer_config.backbone_config.model_type
+        if vit_type == "aimv2":
+            # 16 ** 2 -1
+            return 255
+        elif vit_type == "siglip_vision_model":
+            # 14 ** 2 -1
+            return 195
+        raise ValueError(f"Unsupported ViT backbone: {vit_type}. ")
 
     def get_image_pad_token(self) -> str:
         hf_text_config = self.get_hf_config().get_text_config()
@@ -271,15 +281,7 @@ class Ovis2ProcessingInfo(BaseProcessingInfo):
         }
 
     def get_image_size_with_most_features(self) -> ImageSize:
-        size = self.get_image_processor().size
-        if 'shortest_edge' in size:
-            width = height = size['shortest_edge']
-        elif "height" in size and "width" in size:
-            width = size['width']
-            height = size['height']
-        else:
-            raise ValueError(
-                "Can't parse image size from image_processor config.")
+        height, width = self.get_hf_processor().get_image_size()
         return ImageSize(width=width * 9 * 2, height=height * 9 * 2)
 
 
