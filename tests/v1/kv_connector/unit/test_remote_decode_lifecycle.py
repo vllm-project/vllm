@@ -127,7 +127,7 @@ def test_short_prompt_lifecycle():
 
 
 def test_prefix_cache_lifecycle():
-    """Test lifecycle of a Remote Decode request with short prompt."""
+    """Test that remote decode params still works with a prefix cache hit."""
 
     vllm_config = create_vllm_config()
     scheduler = create_scheduler(vllm_config)
