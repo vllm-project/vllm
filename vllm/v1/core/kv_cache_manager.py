@@ -36,6 +36,12 @@ class KVCacheBlocks:
         """Converts the KVCacheBlocks instance to a list of block IDs."""
         return [block.block_id for block in self.blocks]
 
+    def get_unhashed_block_ids(self) -> list[int]:
+        """Get block_ids of unhashed blocks from KVCacheBlocks instance."""
+        return [
+            block.block_id for block in self.blocks if block.block_hash is None
+        ]
+
 
 class KVCacheManager:
 

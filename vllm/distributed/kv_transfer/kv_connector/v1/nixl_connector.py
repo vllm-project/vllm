@@ -188,9 +188,11 @@ class NixlConnectorScheduler:
                                  blocks: "KVCacheBlocks",
                                  num_external_tokens: int):
         if request.do_remote_prefill and num_external_tokens > 0:
-            self._reqs_need_recv[request.request_id] = (request,
-                                                        blocks.get_block_ids())
-            # Only trigger a KV transfer once per request.
+            # Get unhashed blocks to pull from remote.
+            self._reqs_need_recv[request.request_id] = (
+                request, blocks.get_unhashed_block_ids())
+
+            # Only trigger 1 KV transfer per request.
             request.do_remote_prefill = False
 
     def build_connector_meta(
@@ -597,6 +599,8 @@ class NixlConnectorWorker:
 
         num_local_blocks = len(local_block_ids)
         num_remote_blocks = len(remote_block_ids)
+        print(f"{num_local_blocks=}")
+        print(f"{num_remote_blocks=}")
         assert num_local_blocks > 0
         assert num_local_blocks <= num_remote_blocks
 
