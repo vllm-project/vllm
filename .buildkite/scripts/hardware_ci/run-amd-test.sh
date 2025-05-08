@@ -78,8 +78,12 @@ HF_MOUNT="/root/.cache/huggingface"
 commands=$@
 echo "Commands:$commands"
 
-if [[ $commands == *" basic_correctness/test_basic_correctness.py"* ]]; then
+if [[ $commands == *"pytest -v -s basic_correctness/test_basic_correctness.py"* ]]; then
   commands=${commands//"pytest -v -s basic_correctness/test_basic_correctness.py"/"VLLM_USE_TRITON_FLASH_ATTN=0 pytest -v -s basic_correctness/test_basic_correctness.py"}
+fi
+
+if [[ $commands == *"pytest -v -s compile/test_basic_correctness.py"* ]]; then
+  commands=${commands//"pytest -v -s compile/test_basic_correctness.py"/"VLLM_USE_TRITON_FLASH_ATTN=0 pytest -v -s compile/test_basic_correctness.py"}
 fi
 
 #ignore certain kernels tests
