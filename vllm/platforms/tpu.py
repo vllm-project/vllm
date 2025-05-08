@@ -6,7 +6,6 @@ import torch
 from tpu_info import device
 
 import vllm.envs as envs
-from vllm.config import BlockSize
 from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams, SamplingType
@@ -14,9 +13,10 @@ from vllm.sampling_params import SamplingParams, SamplingType
 from .interface import Platform, PlatformEnum, _Backend
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config import BlockSize, ModelConfig, VllmConfig
     from vllm.pooling_params import PoolingParams
 else:
+    BlockSize = None
     ModelConfig = None
     VllmConfig = None
     PoolingParams = None
