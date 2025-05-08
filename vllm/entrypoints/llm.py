@@ -726,11 +726,11 @@ class LLM:
         tokenizer = self.get_tokenizer(lora_request)
         model_config = self.llm_engine.get_model_config()
         resolved_content_format = resolve_chat_template_content_format(
+            model_config,
             chat_template,
             tools,
             chat_template_content_format,
             tokenizer,
-            trust_remote_code=model_config.trust_remote_code,
         )
 
         _chat_template_kwargs: dict[str, Any] = dict(
@@ -762,8 +762,8 @@ class LLM:
                 )
             else:
                 prompt_str = apply_hf_chat_template(
+                    model_config,
                     tokenizer,
-                    trust_remote_code=model_config.trust_remote_code,
                     conversation=conversation,
                     **_chat_template_kwargs,
                 )
