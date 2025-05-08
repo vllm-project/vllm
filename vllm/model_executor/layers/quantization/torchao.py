@@ -65,11 +65,8 @@ class TorchAOConfig(QuantizationConfig):
         module_fqn = prefix
         if isinstance(self.torchao_config, AOPerModuleConfig):
             module_fqn_to_config = self.torchao_config.module_fqn_to_config
-            c = None
-            if module_fqn in module_fqn_to_config:
-                c = module_fqn_to_config[module_fqn]
-            else:
-                c = module_fqn_to_config.get("_default", None)
+            c = module_fqn_to_config.get(
+                module_fqn) or module_fqn_to_config.get("_default", None)
             if c is not None:
                 current_torchao_config = TorchAOConfig(c)
                 return TorchAOLinearMethod(current_torchao_config)
@@ -93,7 +90,7 @@ def torchao_quantize_param_data(param: torch.Tensor,
     """
     from torchao.core.config import AOBaseConfig
     from torchao.quantization import quantize_
-    assert isinstance(torchao_config, AOBaseConfig)
+    assert isinstance(torchao_config, AOBaseConfig), f"{torchao_config}"
     dummy_linear = torch.nn.Linear(param.shape[1], param.shape[0], bias=False)
     dummy_linear.weight = param
     quantize_(dummy_linear, torchao_config)
