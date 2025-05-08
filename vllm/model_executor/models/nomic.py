@@ -362,29 +362,17 @@ class NomicBertEncoder(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        if getattr(config, "moe_every_n_layers", 0) > 0:
-            every_n = config.moe_every_n_layers
-            self.layers = nn.ModuleList([
-                NomicBertBlock(config=config,
-                               cache_config=cache_config,
-                               quant_config=quant_config,
-                               bias=bias,
-                               moe=(layer_idx % every_n == 1),
-                               rotary_kwargs=rotary_kwargs,
-                               prefix=f"{prefix}.layer.{layer_idx}")
-                for layer_idx in range(config.num_hidden_layers)
-            ])
-        else:
-            self.layers = nn.ModuleList([
-                NomicBertBlock(config=config,
-                               cache_config=cache_config,
-                               quant_config=quant_config,
-                               bias=bias,
-                               moe=False,
-                               rotary_kwargs=rotary_kwargs,
-                               prefix=f"{prefix}.layer.{layer_idx}")
-                for layer_idx in range(config.num_hidden_layers)
-            ])
+        every_n = getattr(config, "moe_every_n_layers", 0)
+        self.layers = nn.ModuleList([
+            NomicBertBlock(config=config,
+                           cache_config=cache_config,
+                           quant_config=quant_config,
+                           bias=bias,
+                           moe=every_n > 0 and (layer_idx % every_n == 1),
+                           rotary_kwargs=rotary_kwargs,
+                           prefix=f"{prefix}.layer.{layer_idx}")
+            for layer_idx in range(config.num_hidden_layers)
+        ])
 
     def forward(
         self,
