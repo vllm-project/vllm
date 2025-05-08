@@ -204,7 +204,6 @@ def _lora_expand(
     NUM_WARPS = 4
     NUM_CTAS = 1
     NUM_STAGES = 2
-    MAX_NREG = None
 
     EVEN_K = K % BLOCK_K == 0  # type: ignore
 
@@ -258,7 +257,6 @@ def _lora_expand(
         num_warps=NUM_WARPS,
         num_ctas=NUM_CTAS,
         num_stages=NUM_STAGES,
-        maxnreg=MAX_NREG,
     )
 
     return
