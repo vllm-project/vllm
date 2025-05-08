@@ -210,9 +210,9 @@ class AutoRoundConfig(QuantizationConfig):
         return None
 
     def apply_gptq_quant_layer(self, layer, prefix: str, backend: str = "auto"):
-
         from vllm.model_executor.layers.fused_moe import FusedMoE
-
+        from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+            check_marlin_supported, check_moe_marlin_supports_layer)
         weight_bits, group_size, sym = self.get_layer_config(layer, prefix)
         if not self.check_quantized(weight_bits):
             if isinstance(layer, (LinearBase, ParallelLMHead)):
@@ -224,12 +224,8 @@ class AutoRoundConfig(QuantizationConfig):
                      sym)
         if backend == "auto" or "marlin" in backend:
             if isinstance(layer, FusedMoE):
-                from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-                    check_moe_marlin_supports_layer)
                 use_marlin = check_moe_marlin_supports_layer(layer, group_size)
             else:
-                from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-                    check_marlin_supported)
                 GPTQ_TYPE_MAP = {
                     (4, True): scalar_types.uint4b8,
                     (8, True): scalar_types.uint8b128,
