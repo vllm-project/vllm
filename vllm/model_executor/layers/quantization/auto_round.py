@@ -16,6 +16,7 @@ from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
 
+
 class AutoRoundConfig(QuantizationConfig):
     """Config class for AutoRound.
     Reference: https://arxiv.org/pdf/2309.05516
@@ -75,7 +76,7 @@ class AutoRoundConfig(QuantizationConfig):
                 f"group_size={self.group_size}, sym={self.sym})")
 
     @classmethod
-    def get_name(cls): ## use str will trigger preci issue
+    def get_name(cls):  ## use str will trigger preci issue
         return "auto-round"
 
     @classmethod
@@ -100,8 +101,8 @@ class AutoRoundConfig(QuantizationConfig):
                                                 ["packing_format"],
                                                 "auto_round:auto_gptq"),
             block_name_to_quantize=cls.get_from_keys_or(config,
-                                                   ["block_name_to_quantize",
-                                                        "to_quant_block_names"],
+                                                        ["block_name_to_quantize",
+                                                         "to_quant_block_names"],
                                                         None),
             extra_config=cls.get_from_keys_or(config,
                                               ["extra_config"],
@@ -136,8 +137,9 @@ class AutoRoundConfig(QuantizationConfig):
         return weight_bits < 16
 
     def apply_awq_quant_layer(self, layer, prefix: str, backend: str = "auto"):
-
         from vllm.model_executor.layers.fused_moe import FusedMoE
+        from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+            check_marlin_supported, check_moe_marlin_supports_layer)
 
         weight_bits, group_size, sym = self.get_layer_config(layer, prefix)
         if not self.check_quantized(weight_bits):
@@ -147,16 +149,13 @@ class AutoRoundConfig(QuantizationConfig):
                 return None
 
         logger.debug(prefix, layer.__class__.__name__, weight_bits, group_size,
-              sym)
+                     sym)
         if backend == "auto" or "marlin" in backend:
             if isinstance(layer, FusedMoE):
-                from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-                    check_moe_marlin_supports_layer)
+
                 use_marlin = check_moe_marlin_supports_layer(layer, group_size)
             else:
-                from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-                    check_marlin_supported, check_moe_marlin_supports_layer,
-                    marlin_utils)
+
                 AWQ_TYPE_MAP = {
                     4: scalar_types.uint4,
                     8: scalar_types.uint8,
@@ -222,7 +221,7 @@ class AutoRoundConfig(QuantizationConfig):
                 return None
 
         logger.debug(prefix, layer.__class__.__name__, weight_bits, group_size,
-              sym)
+                     sym)
         if backend == "auto" or "marlin" in backend:
             if isinstance(layer, FusedMoE):
                 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
