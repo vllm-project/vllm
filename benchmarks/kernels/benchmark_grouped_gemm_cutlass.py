@@ -90,7 +90,8 @@ def bench_run(results: list[benchmark.Measurement], model: str,
 
     score = torch.randn((m, num_experts), device="cuda", dtype=dtype)
 
-    topk_weights, topk_ids = fused_topk(a, score, topk, renormalize=False)
+    topk_weights, topk_ids, token_expert_indices = fused_topk(
+        a, score, topk, renormalize=False)
 
     def run_triton_moe(a: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor,
                        topk_weights: torch.Tensor, topk_ids: torch.Tensor,

@@ -106,6 +106,8 @@ class DummyConfigClass:
     """List with literal choices"""
     literal_literal: Literal[Literal[1], Literal[2]] = 1
     """Literal of literals with default 1"""
+    json_tip: dict = field(default_factory=dict)
+    """Dict which will be JSON in CLI"""
 
 
 @pytest.mark.parametrize(("type_hint", "expected"), [
@@ -137,6 +139,9 @@ def test_get_kwargs():
     assert kwargs["list_literal"]["choices"] == [1, 2]
     # literals of literals should have merged choices
     assert kwargs["literal_literal"]["choices"] == [1, 2]
+    # dict should have json tip in help
+    json_tip = "\n\nShould be a valid JSON string."
+    assert kwargs["json_tip"]["help"].endswith(json_tip)
 
 
 @pytest.mark.parametrize(("arg", "expected"), [

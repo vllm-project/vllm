@@ -81,8 +81,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Activation ops
   // Activation function used in SwiGLU.
-  ops.def("silu_and_mul(Tensor! out, Tensor input) -> ()");
+  ops.def("silu_and_mul(Tensor! result, Tensor input) -> ()");
   ops.impl("silu_and_mul", torch::kCUDA, &silu_and_mul);
+
+  ops.def(
+      "silu_and_mul_quant(Tensor! result, Tensor input, Tensor scale) -> ()");
+  ops.impl("silu_and_mul_quant", torch::kCUDA, &silu_and_mul_quant);
 
   ops.def("mul_and_silu(Tensor! out, Tensor input) -> ()");
   ops.impl("mul_and_silu", torch::kCUDA, &mul_and_silu);
@@ -172,7 +176,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.
   ops.def(
       "rotary_embedding(Tensor positions, Tensor! query,"
-      "                 Tensor! key, int head_size,"
+      "                 Tensor!? key, int head_size,"
       "                 Tensor cos_sin_cache, bool is_neox) -> ()");
   ops.impl("rotary_embedding", torch::kCUDA, &rotary_embedding);
 
@@ -180,7 +184,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // (supports multiple loras).
   ops.def(
       "batched_rotary_embedding(Tensor positions, Tensor! query,"
-      "                         Tensor! key, int head_size,"
+      "                         Tensor!? key, int head_size,"
       "                         Tensor cos_sin_cache, bool is_neox,"
       "                         int rot_dim,"
       "                         Tensor cos_sin_cache_offsets) -> ()");
@@ -287,12 +291,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // gptq_marlin Optimized Quantized GEMM for GPTQ.
   ops.def(
-      "gptq_marlin_gemm(Tensor a, Tensor b_q_weight, Tensor b_scales, "
-      "Tensor b_zeros, Tensor g_idx, Tensor perm, Tensor workspace, "
-      "int b_q_type, "
+      "gptq_marlin_gemm(Tensor a, Tensor? c_or_none, Tensor b_q_weight, "
+      "Tensor b_scales, Tensor? b_zeros_or_none, Tensor? g_idx_or_none, "
+      "Tensor? perm_or_none, Tensor workspace, int b_q_type, "
       "SymInt size_m, SymInt size_n, SymInt size_k, bool is_k_full, "
-      "bool has_zp, bool use_atomic_add, bool use_fp32_reduce, "
-      "bool is_zp_float) -> Tensor",
+      "bool use_atomic_add, bool use_fp32_reduce, bool is_zp_float) -> Tensor",
       {stride_tag});
   // conditionally compiled so impl registration is in source file
 
@@ -334,17 +337,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "int type, SymInt row, SymInt top_k, SymInt tokens) -> Tensor");
   ops.impl("ggml_moe_a8", torch::kCUDA, &ggml_moe_a8);
 
+  ops.def(
+      "ggml_moe_a8_vec(Tensor X, Tensor W, "
+      "Tensor topk_ids, int top_k, "
+      "int type, SymInt row, SymInt tokens) -> Tensor");
+  ops.impl("ggml_moe_a8_vec", torch::kCUDA, &ggml_moe_a8_vec);
+
   ops.def("ggml_moe_get_block_size", &ggml_moe_get_block_size);
 
 #ifndef USE_ROCM
-  // fp8_marlin Optimized Quantized GEMM for FP8 weight-only.
-  ops.def(
-      "fp8_marlin_gemm(Tensor a, Tensor b_q_weight, Tensor b_scales, "
-      "Tensor! workspace, int num_bits, SymInt size_m, SymInt size_n, "
-      "SymInt size_k) -> Tensor",
-      {stride_tag});
-  // conditionally compiled so impl registration is in source file
-
   // marlin_qqq_gemm for QQQ.
   ops.def(
       "marlin_qqq_gemm(Tensor a, Tensor b_q_weight, "

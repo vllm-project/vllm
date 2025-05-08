@@ -22,27 +22,18 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: TPUSupportedSamplingMetadata,
     ) -> SamplerOutput:
-        # NOTE(woosuk): Use the original logits (before any penalties or
-        # temperature scaling) for the top-k logprobs.
-        # This is different from the V0 sampler, which uses the logits that
-        # is used for sampling (after penalties and temperature scaling).
-
         # Use float32 for the logits.
         logits = logits.to(torch.float32)
         # Sample the next token.
         sampled = self.sample(logits, sampling_metadata)
 
-        # Use int32 to reduce the tensor size.
-        sampled = sampled.to(torch.int32)
-
-        # These are GPU tensors.
+        # These are TPU tensors.
         sampler_output = SamplerOutput(
             # The sampled tokens are expanded to 2D tensor with shape
             # [num_requests, 1], where each row represents one generated
             # token per request.
             sampled_token_ids=sampled.unsqueeze(-1),
-            logprobs_tensors=None,
-        )
+            logprobs_tensors=None)
         return sampler_output
 
     def apply_temperature(
@@ -50,7 +41,6 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         temp: torch.Tensor,
     ) -> torch.Tensor:
-        # Use in-place division to avoid creating a new tensor.
         return logits.div_(temp.unsqueeze(dim=1))
 
     def greedy_sample(self, logits: torch.Tensor) -> torch.Tensor:

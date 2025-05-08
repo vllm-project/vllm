@@ -72,12 +72,15 @@ class _HfExamplesInfo:
             return
 
         current_version = TRANSFORMERS_VERSION
+        cur_base_version = Version(current_version).base_version
         min_version = self.min_transformers_version
         max_version = self.max_transformers_version
         msg = f"`transformers=={current_version}` installed, but `transformers"
-        if min_version and Version(current_version) < Version(min_version):
+        # Only check the base version for the min/max version, otherwise preview
+        # models cannot be run because `x.yy.0.dev0`<`x.yy.0`
+        if min_version and Version(cur_base_version) < Version(min_version):
             msg += f">={min_version}` is required to run this model."
-        elif max_version and Version(current_version) > Version(max_version):
+        elif max_version and Version(cur_base_version) > Version(max_version):
             msg += f"<={max_version}` is required to run this model."
         else:
             return
@@ -163,6 +166,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                           {"1b": "EleutherAI/pythia-1.4b"}),
     "GraniteForCausalLM": _HfExamplesInfo("ibm/PowerLM-3b"),
     "GraniteMoeForCausalLM": _HfExamplesInfo("ibm/PowerMoE-3b"),
+    "GraniteMoeHybridForCausalLM": _HfExamplesInfo("ibm-granite/granite-4.0-tiny-preview",  # noqa: E501
+                                                   min_transformers_version="4.52.0"),  # noqa: E501
     "GraniteMoeSharedForCausalLM": _HfExamplesInfo("ibm-research/moe-7b-1b-active-shared-experts"),  # noqa: E501
     "Grok1ModelForCausalLM": _HfExamplesInfo("hpcai-tech/grok-1",
                                              trust_remote_code=True),
@@ -177,7 +182,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "JAISLMHeadModel": _HfExamplesInfo("inceptionai/jais-13b-chat"),
     "JambaForCausalLM": _HfExamplesInfo("ai21labs/AI21-Jamba-1.5-Mini",
                                         extras={"tiny": "ai21labs/Jamba-tiny-dev"}),  # noqa: E501
-    "LlamaForCausalLM": _HfExamplesInfo("meta-llama/Llama-3.2-1B-Instruct"),
+    "LlamaForCausalLM": _HfExamplesInfo("meta-llama/Llama-3.2-1B-Instruct",
+                                        extras={"guard": "meta-llama/Llama-Guard-3-1B",  # noqa: E501
+                                                "hermes": "NousResearch/Hermes-3-Llama-3.1-8B"}),  # noqa: E501
     "LLaMAForCausalLM": _HfExamplesInfo("decapoda-research/llama-7b-hf",
                                         is_available_online=False),
     "MambaForCausalLM": _HfExamplesInfo("state-spaces/mamba-130m-hf"),
@@ -349,7 +356,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                         transformers_version_reason="Use of deprecated imports which have been removed.",  # noqa: E501
                                         extras={"phi3.5": "microsoft/Phi-3.5-vision-instruct"}),  # noqa: E501
     "Ovis2ForConditionalGeneration": _HfExamplesInfo("AIDC-AI/Ovis2-1B",
-                                                    tokenizer="Isotr0py/Ovis2-tokenizer",
                                                     trust_remote_code=True,
                                                     hf_overrides={"architectures": ["Ovis2ForConditionalGeneration"]}), # noqa: E501
     "Phi4MMForCausalLM": _HfExamplesInfo("microsoft/Phi-4-multimodal-instruct",
@@ -363,8 +369,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Qwen2AudioForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2-Audio-7B-Instruct"),  # noqa: E501
     "Qwen2VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2-VL-2B-Instruct"),  # noqa: E501
     "Qwen2_5_VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2.5-VL-3B-Instruct"),  # noqa: E501
-    "Qwen2_5OmniModel": _HfExamplesInfo("Qwen/Qwen2.5-Omni-7B",  # noqa: E501
-                                                                  min_transformers_version="4.52"),  # noqa: E501
+    "Qwen2_5OmniModel": _HfExamplesInfo("Qwen/Qwen2.5-Omni-3B",
+                                        min_transformers_version="4.52"),
     "SkyworkR1VChatModel": _HfExamplesInfo("Skywork/Skywork-R1V-38B"),
     "SmolVLMForConditionalGeneration": _HfExamplesInfo("HuggingFaceTB/SmolVLM2-2.2B-Instruct"),  # noqa: E501
     "UltravoxModel": _HfExamplesInfo("fixie-ai/ultravox-v0_5-llama-3_2-1b",  # noqa: E501
@@ -374,7 +380,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     # Therefore, we borrow the BartTokenizer from the original Bart model
     "Florence2ForConditionalGeneration": _HfExamplesInfo("microsoft/Florence-2-base",  # noqa: E501
                                                          tokenizer="Isotr0py/Florence-2-tokenizer",
-                                                         trust_remote_code=True),  # noqa: E501
+                                                         trust_remote_code=True,),  # noqa: E501
     "MllamaForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-3.2-11B-Vision-Instruct"),  # noqa: E501
     "WhisperForConditionalGeneration": _HfExamplesInfo("openai/whisper-large-v3"),  # noqa: E501
 }

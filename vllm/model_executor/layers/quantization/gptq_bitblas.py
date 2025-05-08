@@ -134,7 +134,7 @@ class GPTQBitBLASConfig(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 70
+        return 80
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
