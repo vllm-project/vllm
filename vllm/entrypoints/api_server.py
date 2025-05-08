@@ -23,7 +23,8 @@ from vllm.entrypoints.utils import with_cancellation
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser, random_uuid, set_ulimit
+from vllm.utils import (FlexibleArgumentParser, JsonFlexibleArgumentParser,
+                        merge_args, random_uuid, set_ulimit)
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger("vllm.entrypoints.api_server")
@@ -172,6 +173,15 @@ if __name__ == "__main__":
         help="FastAPI root_path when app is behind a path based routing proxy")
     parser.add_argument("--log-level", type=str, default="debug")
     parser = AsyncEngineArgs.add_cli_args(parser)
-    args = parser.parse_args()
+    args, remaining_argv = parser.parse_use_args()
+
+    json_parser = JsonFlexibleArgumentParser()
+    model_group = json_parser.add_argument_group(title="ModelConfig", )
+    model_group.add_argument("--hf_overrides",
+                             type=dict,
+                             default={},
+                             dest="hf_overrides")
+    json_args = json_parser.parse_args(remaining_argv)
+    args = merge_args(args, json_args)
 
     asyncio.run(run_server(args))

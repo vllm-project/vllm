@@ -41,7 +41,7 @@ from collections.abc import (AsyncGenerator, Awaitable, Generator, Hashable,
 from concurrent.futures.process import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
                     Optional, Sequence, Tuple, Type, TypeVar, Union, cast,
                     overload)
@@ -58,6 +58,7 @@ import torch.types
 import yaml
 import zmq
 import zmq.asyncio
+from jsonargparse import ArgumentParser as JSONArgumentParser
 from packaging import version
 from packaging.version import Version
 from torch.library import Library
@@ -1381,6 +1382,14 @@ class FlexibleArgumentParser(ArgumentParser):
         args: list[str] | None = None,
         namespace: Namespace | None = None,
     ):
+        args, _ = self.parse_use_args(args, namespace)
+        return args
+
+    def parse_use_args(  # type: ignore[override]
+        self,
+        args: list[str] | None = None,
+        namespace: Namespace | None = None,
+    ):
         if args is None:
             args = sys.argv[1:]
 
@@ -1415,7 +1424,7 @@ class FlexibleArgumentParser(ArgumentParser):
             else:
                 processed_args.append(arg)
 
-        return super().parse_args(processed_args, namespace)
+        return super().parse_known_args(processed_args, namespace)
 
     def check_port(self, value):
         try:
@@ -1550,6 +1559,50 @@ class FlexibleArgumentParser(ArgumentParser):
                 processed_args.append(str(value))
 
         return processed_args
+
+
+class JsonFlexibleArgumentParser(JSONArgumentParser):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def parse_args(self, args=None, namespace=None):
+        # Convert underscores to dashes and vice versa in argument names
+        processed_args = []
+        for arg in args:
+            if arg.startswith('--'):
+                if '=' in arg:
+                    key, value = arg.split('=', 1)
+                    key = '--' + key[len('--'):].replace('_', '-')
+                    processed_args.append(f'{key}={value}')
+                else:
+                    processed_args.append('--' +
+                                          arg[len('--'):].replace('-', '_'))
+            elif arg.startswith('-O') and arg != '-O' and len(arg) == 2:
+                # allow -O flag to be used without space, e.g. -O3
+                processed_args.append('-O')
+                processed_args.append(arg[2:])
+            else:
+                processed_args.append(arg)
+
+        return super().parse_args(processed_args, namespace)
+
+
+def merge_args(args, json_args):
+
+    def flatten_namespace(namespace, prefix=""):
+        flattened = {}
+        for key, value in vars(namespace).items():
+            if isinstance(value, SimpleNamespace):
+                nested = flatten_namespace(value, prefix=f"{prefix}{key}.")
+                flattened.update(nested)
+            else:
+                flattened[f"{prefix}{key}"] = value
+        return flattened
+
+    merged_dict = {**vars(args), **flatten_namespace(json_args)}
+    args = SimpleNamespace(**merged_dict)
+    return args
 
 
 async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,

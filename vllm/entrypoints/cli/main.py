@@ -10,7 +10,8 @@ import vllm.entrypoints.cli.openai
 import vllm.entrypoints.cli.serve
 import vllm.version
 from vllm.entrypoints.utils import cli_env_setup
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils import (FlexibleArgumentParser, JsonFlexibleArgumentParser,
+                        merge_args)
 
 CMD_MODULES = [
     vllm.entrypoints.cli.openai,
@@ -45,7 +46,17 @@ def main():
             cmd.subparser_init(subparsers).set_defaults(
                 dispatch_function=cmd.cmd)
             cmds[cmd.name] = cmd
-    args = parser.parse_args()
+    args, remaining_argv = parser.parse_use_args()
+
+    json_parser = JsonFlexibleArgumentParser()
+    model_group = json_parser.add_argument_group(title="ModelConfig", )
+    model_group.add_argument("--hf_overrides",
+                             type=dict,
+                             default={},
+                             dest="hf_overrides")
+    json_args = json_parser.parse_args(remaining_argv)
+    args = merge_args(args, json_args)
+
     if args.subparser in cmds:
         cmds[args.subparser].validate(args)
 

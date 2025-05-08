@@ -13,7 +13,7 @@ from vllm.engine.arg_utils import (EngineArgs, contains_type, get_kwargs,
                                    get_type, is_not_builtin, is_type,
                                    literal_to_kwargs, nullable_kvs,
                                    optional_type, parse_type)
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils import FlexibleArgumentParser, JsonFlexibleArgumentParser
 
 
 @pytest.mark.parametrize(("type", "value", "expected"), [
@@ -360,3 +360,22 @@ def test_human_readable_model_len():
     for invalid in ["1a", "pwd", "10.24", "1.23M"]:
         with pytest.raises(ArgumentError):
             args = parser.parse_args(["--max-model-len", invalid])
+
+
+def test_hf_overrides():
+    args = [
+        "--hf_overrides", '{"matryoshka_dimensions":[256]}',
+        "--hf_overrides.matryoshka_dimensions", "[256]"
+    ]
+    parser = EngineArgs.add_cli_args(
+        FlexibleArgumentParser(exit_on_error=False))
+    args, remaining_argv = parser.parse_use_args(args)
+
+    json_parser = JsonFlexibleArgumentParser()
+    model_group = json_parser.add_argument_group(title="ModelConfig", )
+    model_group.add_argument("--hf_overrides",
+                             type=dict,
+                             default={},
+                             dest="hf_overrides")
+    json_args = json_parser.parse_args(remaining_argv)
+    assert args.hf_overrides == json_args.hf_overrides  # type: ignore[attr-defined]
