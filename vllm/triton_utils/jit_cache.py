@@ -172,10 +172,10 @@ class JitCache(KernelInterface):
         cache_launch_grid=False,
         assume_const=None,
     ):
-        # we depend on the triton version, right now, 3.0 -- 3.2 are supported
+        # we depend on the triton version, right now, only 3.3 is supported
         if not (int(triton_version.split(".")[0]) == 3
-                and int(triton_version.split(".")[1]) <= 2):
-            logger.warning("JITCache is incompatible to installed Triton " \
+                and int(triton_version.split(".")[1]) == 3):
+            logger.warning_once("JITCache is incompatible to installed Triton " \
                            "version: %s! The cache acts in pass-through mode" \
                            " (no caching happening).", triton_version)
             self.run = fn.run
@@ -205,6 +205,7 @@ class JitCache(KernelInterface):
         self.cache_index_func = calc_cache_index
         if len(check_keys) == 0:
             self.cache_index_func = lambda ignore: "_default_"
+
 
     def _get_prepared_kernel(self, *args, **kwargs) -> PreparedKernel:
         """
@@ -246,13 +247,9 @@ class JitCache(KernelInterface):
             update_only_arg_names = non_const_arg_names
             assume_const_vals_dict = {}
 
-        (
-            bound_args,
-            sig_and_spec,
-            constexpr_vals,
-            non_constexpr_vals,
-            excess_kwargs,
-        ) = self.fn.binder(*args, **kwargs)
+        device = driver.active.get_current_device()
+        kernel_cache, target, backend, binder = self.device_caches[device]
+        bound_args, specialization, options = binder(*args, **kwargs)
         bind_end = time.time()
 
         if callable(kwargs["grid"]):
@@ -263,7 +260,7 @@ class JitCache(KernelInterface):
         device = driver.active.get_current_device()
         stream = driver.active.get_current_stream(device)
         launch_metadata = kernel.launch_metadata(grid, stream,
-                                                 *non_constexpr_vals)
+                                                 *bound_args.values())
 
         prepared_kernel = PreparedKernel(
             kwargs["grid"],
