@@ -168,6 +168,33 @@ if (AVX512_FOUND AND NOT AVX512_DISABLED)
     FetchContent_MakeAvailable(oneDNN)
     
     list(APPEND LIBS dnnl)
+elseif(POWER10_FOUND)
+    FetchContent_Declare(
+        oneDNN
+        GIT_REPOSITORY https://github.com/oneapi-src/oneDNN.git
+        GIT_TAG v3.7.2
+        GIT_PROGRESS TRUE
+        GIT_SHALLOW TRUE
+    )
+
+    set(ONEDNN_LIBRARY_TYPE "STATIC")
+    set(ONEDNN_BUILD_DOC "OFF")
+    set(ONEDNN_BUILD_EXAMPLES "OFF")
+    set(ONEDNN_BUILD_TESTS "OFF")
+    set(ONEDNN_ENABLE_WORKLOAD "INFERENCE")
+    set(ONEDNN_ENABLE_PRIMITIVE "MATMUL;REORDER")
+    set(ONEDNN_BUILD_GRAPH "OFF")
+    set(ONEDNN_ENABLE_JIT_PROFILING "OFF")
+    set(ONEDNN_ENABLE_ITT_TASKS "OFF")
+    set(ONEDNN_ENABLE_MAX_CPU_ISA "OFF")
+    set(ONEDNN_ENABLE_CPU_ISA_HINTS "OFF")
+    set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
+
+    set(DNNL_CPU_RUNTIME "OMP")
+
+    FetchContent_MakeAvailable(oneDNN)
+
+    list(APPEND LIBS dnnl)
 endif()
 
 message(STATUS "CPU extension compile flags: ${CXX_COMPILE_FLAGS}")
@@ -196,6 +223,10 @@ if (AVX512_FOUND AND NOT AVX512_DISABLED)
     set(VLLM_EXT_SRC
         "csrc/cpu/quant.cpp"
         "csrc/cpu/shm.cpp"
+        ${VLLM_EXT_SRC})
+elseif(POWER10_FOUND)
+    set(VLLM_EXT_SRC
+        "csrc/cpu/quant.cpp"
         ${VLLM_EXT_SRC})
 endif()
 
