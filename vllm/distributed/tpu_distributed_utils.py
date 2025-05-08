@@ -2,13 +2,57 @@
 from collections import OrderedDict
 
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import torch_xla.distributed.spmd as xs
+from torch.nn.parameter import Parameter
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               QKVParallelLinear,
                                                RowParallelLinear)
 
 logger = init_logger(__name__)
+
+
+class XlaQKVParallelLinear(nn.Module):
+
+    def __init__(self, qkv_linear: nn.Module):
+        super().__init__()
+        assert isinstance(qkv_linear, QKVParallelLinear)
+        assert qkv_linear.bias is None, "Bias is not supported for QKVLinear"
+        assert qkv_linear.return_bias is False, \
+            "Return bias is not supported for QKVLinear"
+        assert qkv_linear.tp_size == 1, "TP > 1 is only supported under SPMD."
+        self._load_and_shard_weight_from_qkv_linear(qkv_linear)
+
+    def _load_and_shard_weight_from_qkv_linear(self, qkv_linear: nn.Module):
+        q_proj_size, k_proj_size, _ = qkv_linear.output_sizes
+        # The weight of qkv linear is a concatenation of q, k, and v weights
+        # along the output dimension.
+        qkv_weight = qkv_linear.weight.data
+        q_weight = Parameter(qkv_weight[:q_proj_size], requires_grad=False)
+        k_weight = Parameter(qkv_weight[q_proj_size:q_proj_size + k_proj_size],
+                             requires_grad=False)
+        v_weight = Parameter(qkv_weight[q_proj_size + k_proj_size:],
+                             requires_grad=False)
+        self.register_parameter("q_weight", q_weight)
+        self.register_parameter("k_weight", k_weight)
+        self.register_parameter("v_weight", v_weight)
+
+    def forward(self, input):
+        q_proj = F.linear(input, self.q_weight)
+        k_proj = F.linear(input, self.k_weight)
+        v_proj = F.linear(input, self.v_weight)
+        # The q/k/v projections will be split outside of the QKVParallelLinear.
+        # Because we are replacing XlaQKVParallelLinear with the
+        # QKVParallelLinear, we need to concatenate q, k, and v projections to
+        # match the output shape of the QKVParallelLinear implementation even if
+        # it seems to be redundant.
+        # The concat and the following split will be noop, and should be
+        # optimized away by the compiler.
+        qkv_proj = torch.cat([q_proj, k_proj, v_proj], dim=-1)
+        return qkv_proj
 
 
 def wrap_column_parallel_linear(layer: torch.nn.Module,

@@ -1,0 +1,69 @@
+# SPDX-License-Identifier: Apache-2.0
+import tempfile
+
+import pytest
+import torch
+
+from vllm.config import set_current_vllm_config
+from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
+                                             init_distributed_environment)
+from vllm.distributed.tpu_distributed_utils import XlaQKVParallelLinear
+from vllm.engine.arg_utils import EngineArgs
+from vllm.model_executor.layers.linear import QKVParallelLinear
+
+torch.manual_seed(123)
+
+
+@pytest.fixture(autouse=True)
+def setup_environment():
+    # This is a fake config used for init dist env.
+    # QKVParallelLinear needs dist env to be initialized.
+    engine_args = EngineArgs(
+        model="Qwen/Qwen2-1.5B-Instruct",
+        max_model_len=64,
+        max_num_batched_tokens=64,
+        max_num_seqs=4,
+    )
+
+    vllm_config = engine_args.create_engine_config()
+
+    with set_current_vllm_config(vllm_config):
+        temp_file = tempfile.mkstemp()[1]
+        init_distributed_environment(
+            1,
+            0,
+            local_rank=0,
+            distributed_init_method=f"file://{temp_file}",
+            backend="gloo")
+        ensure_model_parallel_initialized(1, 1)
+        yield
+
+
+def test_xla_qkv_linear():
+
+    qkv_linear = QKVParallelLinear(
+        hidden_size=4096,
+        head_size=128,
+        total_num_heads=32,
+        total_num_kv_heads=8,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        return_bias=False,
+    )
+
+    qkv_linear.weight.data = torch.rand_like(qkv_linear.weight.data)
+
+    xla_qkv_linear = XlaQKVParallelLinear(qkv_linear)
+
+    qkv_linear = qkv_linear.to('xla')
+    xla_qkv_linear = xla_qkv_linear.to('xla')
+
+    # Create an input tensor
+    input_tensor = torch.randn(10, 4096, dtype=torch.bfloat16).to('xla')
+
+    # Forward pass
+    output = qkv_linear(input_tensor)
+
+    xla_output = xla_qkv_linear(input_tensor)
+
+    assert torch.allclose(output.cpu(), xla_output.cpu())
