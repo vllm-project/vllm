@@ -376,12 +376,13 @@ def test_structured_output(
                 "minLength": min_length
             }
         },
-        "required": ["description"]
+        "required": ["description"],
+        "additionalProperties": False
     }
 
     sampling_params = SamplingParams(
         temperature=1.0,
-        max_tokens=1000,
+        max_tokens=4096,
         guided_decoding=GuidedDecodingParams(json=json_schema))
 
     outputs = llm.generate(
@@ -417,7 +418,8 @@ def test_structured_output(
                     "city": {
                         "type": "string"
                     }
-                }
+                },
+                "additionalProperties": False
             },
             "end": "</function>"
         }],
