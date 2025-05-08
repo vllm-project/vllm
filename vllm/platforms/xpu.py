@@ -119,6 +119,11 @@ class XPUPlatform(Platform):
         return False
 
     @classmethod
+    def empty_cache(cls) -> None:
+        # There seems to be no torch.xpu.empty_cache()
+        pass
+
+    @classmethod
     def get_current_memory_usage(cls,
                                  device: Optional[torch.types.Device] = None
                                  ) -> float:
