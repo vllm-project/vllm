@@ -117,13 +117,14 @@ def paged_attention_rocm(
     kv_cache_dtype: str,
     k_scale: torch.Tensor,
     v_scale: torch.Tensor,
+    fp8_out_scale: Optional[torch.Tensor] = None,
 ) -> None:
     torch.ops._rocm_C.paged_attention(out, exp_sum, max_logits, tmp_out, query,
                                       key_cache, value_cache, num_kv_heads,
                                       scale, block_tables, seq_lens,
                                       query_start_loc, block_size, max_seq_len,
                                       alibi_slopes, kv_cache_dtype, k_scale,
-                                      v_scale)
+                                      v_scale, fp8_out_scale)
 
 
 def mla_decode_kvcache_cpu(
@@ -153,34 +154,36 @@ def merge_attn_states(output: torch.Tensor,
 def rotary_embedding(
     positions: torch.Tensor,
     query: torch.Tensor,
-    key: torch.Tensor,
+    key: Optional[torch.Tensor],
     head_size: int,
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
 ) -> None:
     # TODO: Remove this contiguous call when the kernel is updated to support tensor slices
     query_contiguous = query.contiguous()
-    key_contiguous = key.contiguous()
+    key_contiguous = key.contiguous() if key is not None else None
     torch.ops._C.rotary_embedding(positions, query_contiguous, key_contiguous,
                                   head_size, cos_sin_cache, is_neox)
     query.copy_(query_contiguous)
-    key.copy_(key_contiguous)
+    if key is not None:
+        key.copy_(key_contiguous)
 
 
 def batched_rotary_embedding(positions: torch.Tensor, query: torch.Tensor,
-                             key: torch.Tensor, head_size: int,
+                             key: Optional[torch.Tensor], head_size: int,
                              cos_sin_cache: torch.Tensor, is_neox: bool,
                              rot_dim: int,
                              cos_sin_cache_offsets: torch.Tensor) -> None:
     # TODO: Remove this contiguous call when the kernel is updated to support tensor slices
     query_contiguous = query.contiguous()
-    key_contiguous = key.contiguous()
+    key_contiguous = key.contiguous() if key is not None else None
     torch.ops._C.batched_rotary_embedding(positions, query_contiguous,
                                           key_contiguous, head_size,
                                           cos_sin_cache, is_neox, rot_dim,
                                           cos_sin_cache_offsets)
     query.copy_(query_contiguous)
-    key.copy_(key_contiguous)
+    if key is not None:
+        key.copy_(key_contiguous)
 
 
 # layer norm ops
