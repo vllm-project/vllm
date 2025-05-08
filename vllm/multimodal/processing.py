@@ -11,11 +11,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from functools import lru_cache
 from typing import (TYPE_CHECKING, Generic, NamedTuple, Optional, Protocol,
-                    TypeVar, Union, cast)
+                    Union, cast)
 
 import torch
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
-from typing_extensions import assert_never
+from typing_extensions import TypeVar, assert_never
 
 from vllm.inputs import InputProcessingContext
 from vllm.jsontree import json_map_leaves, json_reduce_leaves
@@ -1080,7 +1080,7 @@ class BaseProcessingInfo:
         return allowed_limits
 
 
-_I = TypeVar("_I", bound=BaseProcessingInfo)
+_I = TypeVar("_I", bound=BaseProcessingInfo, default=BaseProcessingInfo)
 
 MultiModalHashes = dict[str, list[str]]
 """

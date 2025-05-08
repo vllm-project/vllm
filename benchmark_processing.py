@@ -15,7 +15,6 @@ from tests.models.registry import HF_EXAMPLE_MODELS
 from tests.multimodal.utils import random_audio, random_image, random_video
 from vllm.config import ModelConfig, ParallelProcessorBackend
 from vllm.entrypoints.chat_utils import (apply_hf_chat_template,
-                                         load_chat_template,
                                          parse_chat_messages,
                                          resolve_chat_template_content_format,
                                          resolve_hf_chat_template)
@@ -56,11 +55,8 @@ def get_model_config(model_id: str) -> ModelConfig:
         model_id,
         tokenizer=get_hf_tokenizer(model_id),
         hf_overrides=get_hf_overrides(model_id),
-        task="auto",
         trust_remote_code=True,
         seed=0,
-        dtype="float16",
-        revision=None,
     )
 
 
@@ -104,36 +100,18 @@ def get_prompt(model_config: ModelConfig, modality: ModalityStr) -> str:
     tools = None
 
     chat_template = resolve_hf_chat_template(
+        model_config,
         tokenizer,
         chat_template,
         tools,
-        trust_remote_code=True,
     )
 
-    if chat_template is None:
-        model_type = model_config.hf_config.model_type
-        fallback_paths = [
-            EXAMPLES_DIR / f"template_{model_type}.jinja",
-            EXAMPLES_DIR / f"template_{model_type.replace('-', '_')}.jinja",
-            EXAMPLES_DIR /
-            f"template_{model_type.replace('_', '').replace('-', '')}.jinja",
-            EXAMPLES_DIR / f"template_{model_type.replace('_v2', '2')}.jinja",
-        ]
-
-        for fallback_path in fallback_paths:
-            if fallback_path.exists():
-                chat_template = load_chat_template(fallback_path)
-                break
-        else:
-            print(f"Failed to find chat template for {model_type=} in: "
-                  f"{fallback_paths}")
-
     content_format = resolve_chat_template_content_format(
+        model_config,
         chat_template,
         tools,
         "auto",
         tokenizer,
-        trust_remote_code=True,
     )
 
     rng = np.random.RandomState(0)
@@ -190,11 +168,11 @@ def get_prompt(model_config: ModelConfig, modality: ModalityStr) -> str:
                     content[content["type"]] = None
 
     return apply_hf_chat_template(
+        model_config,
         tokenizer,
         conversation,
         chat_template,
         tools,
-        trust_remote_code=True,
     )
 
 
