@@ -8,6 +8,11 @@ import pytest
 
 from tests.models.utils import EmbedModelInfo
 
+# Most models on the STS12 task (See #17175):
+# - Model implementation and minor changes in tensor dtype
+#   results in differences less than 1e-4
+# - Different model results in differences more than 1e-3
+# 1e-4 is a good tolerance threshold
 MTEB_EMBED_TASKS = ["STS12"]
 MTEB_EMBED_TOL = 1e-4
 
@@ -99,9 +104,8 @@ def mteb_test_embed_models(hf_runner, vllm_runner, model_info: EmbedModelInfo):
                    dtype=model_dtype) as hf_model:
         st_main_score = run_mteb_embed_task(hf_model, MTEB_EMBED_TASKS)
 
-    print("model dtype:", model_dtype, "vllm dtype:", vllm_dtype)
-    print("VLLM main score: ", vllm_main_score)
-    print("SentenceTransformer main score: ", st_main_score)
-    print("Difference: ", st_main_score - vllm_main_score)
+    print("VLLM:", vllm_dtype, vllm_main_score)
+    print("SentenceTransformer:", model_dtype, st_main_score)
+    print("Difference:", st_main_score - vllm_main_score)
 
     assert math.isclose(st_main_score, vllm_main_score, rel_tol=MTEB_EMBED_TOL)

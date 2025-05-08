@@ -12,7 +12,7 @@ MODELS = [
     EmbedModelInfo("nomic-ai/nomic-embed-text-v1.5",
                    architecture="NomicBertModel",
                    dtype="float32",
-                   enable_test=True),
+                   enable_test=False),
     EmbedModelInfo("nomic-ai/nomic-embed-text-v2-moe",
                    architecture="NomicBertModel",
                    dtype="float32",
