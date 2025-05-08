@@ -117,13 +117,12 @@ class OutlinesGrammar(StructuredOutputGrammar):
         Returns True if the FSM was advanced successfully.
         Returns False if the FSM failed to advance.
         """
-        for token in tokens:
-            try:
-                self.guide.advance(token, return_tokens=False)
-                self.num_processed_tokens += 1
-            except ValueError:
-                return False
-        return True
+        if self.guide.accepts_tokens(tokens):
+            # Advance cannot fail because we checked Guide.accepts_tokens()
+            for t in tokens:
+                self.guide.advance(t)
+            return True
+        return False
 
     def rollback(self, num_tokens: int) -> None:
         self.guide.rollback_state(num_tokens)
@@ -194,7 +193,7 @@ def _prefix_needs_context(parsed) -> bool:
                 return True
             # quantified subpattern: check inner pattern
             elif ttype == sre_parse.MAX_REPEAT:
-                mn, mx, sub = tval
+                _, mx, sub = tval
                 if mx != 0 and subpattern_consumes(sub):
                     return True
             # alternation: if any branch consumes, the whole does
