@@ -2050,6 +2050,8 @@ class SchedulerConfig:
                     _MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
                 )
 
+            # Ensure max_num_batched_tokens does not exceed model limit.
+            # Some models (e.g., Whisper) have embeddings tied to max length.
             self.max_num_batched_tokens = min(
                 self.max_num_seqs * self.max_model_len,
                 self.max_num_batched_tokens)
