@@ -333,11 +333,39 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
+    def get_infinity_values(cls, dtype: torch.dtype) -> Tuple[float, float]:
+        """
+        Return the platform specific values for (-inf, inf)
+        """
+        return float("-inf"), float("inf")
+
+    @classmethod
+    def can_update_inplace(cls) -> bool:
+        """
+        Checks if the platform allows inplace memory updates
+        """
+        return True
+
+    @classmethod
+    def get_lora_vocab_padding_size(cls) -> int:
+        """
+        Returns how much padding the LoRA logits need for kernels
+        """
+        return 256
+
+    @classmethod
     def get_device_communicator_cls(cls) -> str:
         """
         Get device specific communicator class for distributed communication.
         """
         return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
+
+    @classmethod
+    def supports_mx(cls) -> bool:
+        """
+        Returns whether the current platform supports MX types.
+        """
+        return False
 
     @classmethod
     def supports_fp8(cls) -> bool:
