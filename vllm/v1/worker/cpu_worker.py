@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import os
 from typing import Optional
 
 import torch
@@ -45,8 +46,11 @@ class CPUWorker(Worker):
             if ret:
                 logger.info(ret)
 
+        # Note: unique identifier for creating allreduce shared memory
+        os.environ["VLLM_DIST_IDENT"] = self.distributed_init_method.split(
+            ":")[-1]
         # Initialize the distributed environment.
-        init_worker_distributed_environment(self.parallel_config, self.rank,
+        init_worker_distributed_environment(self.vllm_config, self.rank,
                                             self.distributed_init_method,
                                             self.local_rank, "gloo")
         # Set random seed.
