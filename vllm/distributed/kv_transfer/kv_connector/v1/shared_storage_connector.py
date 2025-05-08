@@ -225,7 +225,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
         self,
         request: "Request",
         num_computed_tokens: int,
-    ) -> int:
+    ) -> tuple[int, bool]:
         """
         Get number of new tokens that can be loaded from the
         external KV cache beyond the num_computed_tokens.
@@ -248,7 +248,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
         # with the block granularity. And it expects the returned blocks and
         # num_computed_tokens to also be aligned with the block granularity.
         if not self._found_match_for_request(request):
-            return 0
+            return 0, False
 
         logger.info("External Cache Hit!")
 
@@ -257,7 +257,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
         num_tokens_to_check = align_to_block_size(
             len(request.prompt_token_ids) - 1, self._block_size)
 
-        return num_tokens_to_check - num_computed_tokens
+        return num_tokens_to_check - num_computed_tokens, False
 
     def update_state_after_alloc(self, request: "Request",
                                  blocks: "KVCacheBlocks",
