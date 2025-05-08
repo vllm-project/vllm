@@ -26,6 +26,11 @@ TEST_IMAGE_URLS = [
     "https://upload.wikimedia.org/wikipedia/commons/0/0b/RGBA_comp.png",
 ]
 
+TEST_VIDEO_URLS = [
+    "https://www.bogotobogo.com/python/OpenCV_Python/images/mean_shift_tracking/slow_traffic_small.mp4",
+    "https://filesamples.com/samples/video/avi/sample_640x360.avi",
+]
+
 
 @pytest.fixture(scope="module")
 def url_images() -> dict[str, Image.Image]:
@@ -132,6 +137,18 @@ async def test_fetch_image_local_files(image_url: str):
         with pytest.raises(RuntimeError, match="Cannot load local files"):
             connector.fetch_image(
                 f"file://{temp_dir}/../{os.path.basename(image_url)}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("video_url", TEST_VIDEO_URLS)
+@pytest.mark.parametrize("num_frames", [-1, 32, 1800])
+async def test_fetch_video_http(video_url: str, num_frames: int):
+    connector = MediaConnector()
+
+    video_sync = connector.fetch_video(video_url, num_frames=num_frames)
+    video_async = await connector.fetch_video_async(video_url,
+                                                    num_frames=num_frames)
+    assert np.array_equal(video_sync, video_async)
 
 
 # Used for the next two tests related to `merge_and_sort_multimodal_metadata`.
