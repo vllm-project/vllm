@@ -283,7 +283,7 @@ class xLAMToolParser(ToolParser):
                                 prev_arguments = prev_tool_call.get(
                                     "arguments")
 
-                        argument_diff = None
+                        argument_diff = ""
                         if is_complete[self.current_tool_id]:
                             argument_diff = cur_args_json[sent:]
                         elif prev_arguments:
@@ -293,7 +293,7 @@ class xLAMToolParser(ToolParser):
                                     prev_args_json, cur_args_json)
                                 argument_diff = prefix[sent:]
 
-                        if argument_diff is not None:
+                        if argument_diff:
                             delta = DeltaMessage(tool_calls=[
                                 DeltaToolCall(
                                     index=self.current_tool_id,
