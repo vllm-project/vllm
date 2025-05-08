@@ -95,7 +95,7 @@ class PallasMetadata:
     block_tables: torch.Tensor
     context_lens: torch.Tensor
     query_start_loc: torch.Tensor
-    num_seqs: int
+    num_seqs: torch.Tensor
 
 
 class PallasAttentionBackendImpl(AttentionImpl):
