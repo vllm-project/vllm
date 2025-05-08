@@ -4,19 +4,17 @@ import torch
 from fractions import Fraction
 from typing import Any, Dict, List, Optional, Union
 
-from vllm import _custom_ops as ops
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (
-    LinearBase, UnquantizedLinearMethod, LinearMethodBase)
+    LinearBase, UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead, UnquantizedEmbeddingMethod)
-from vllm.model_executor.parameter import (
-    ChannelQuantScaleParameter, GroupQuantScaleParameter,
-    PackedColumnParameter, PackedvLLMParameter, RowvLLMParameter)
+    ParallelLMHead)
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
+logger = init_logger(__name__)
 
 class AutoRoundConfig(QuantizationConfig):
     """Config class for AutoRound.
@@ -148,17 +146,17 @@ class AutoRoundConfig(QuantizationConfig):
             else:
                 return None
 
-        print(prefix, layer.__class__.__name__, weight_bits, group_size,
-              sym)  ##TODO change to debug
+        logger.debug(prefix, layer.__class__.__name__, weight_bits, group_size,
+              sym)
         if backend == "auto" or "marlin" in backend:
             if isinstance(layer, FusedMoE):
-                from vllm.model_executor.layers.quantization.utils.marlin_utils import \
-                    check_moe_marlin_supports_layer
+                from vllm.model_executor.layers.quantization.utils.\
+                marlin_utils import (check_moe_marlin_supports_layer)
                 use_marlin = check_moe_marlin_supports_layer(layer, group_size)
             else:
-                from vllm.model_executor.layers.quantization.utils.marlin_utils import \
-                    check_moe_marlin_supports_layer, \
-                    check_marlin_supported
+                from vllm.model_executor.layers.quantization.utils.\
+                marlin_utils import (check_moe_marlin_supports_layer, \
+                    check_marlin_supported)
                 AWQ_TYPE_MAP = {
                     4: scalar_types.uint4,
                     8: scalar_types.uint8,
@@ -178,7 +176,8 @@ class AutoRoundConfig(QuantizationConfig):
                 group_size=group_size,
                 zero_point=not sym,
                 lm_head_quantized=False,
-                full_config={}
+                full_config={},
+                modules_to_not_convert=[]
             )
         else:
             from vllm.model_executor.layers.quantization.awq import (
@@ -221,16 +220,16 @@ class AutoRoundConfig(QuantizationConfig):
             else:
                 return None
 
-        print(prefix, layer.__class__.__name__, weight_bits, group_size,
-              sym)  ##TODO change to debug
+        logger.debug(prefix, layer.__class__.__name__, weight_bits, group_size,
+              sym)
         if backend == "auto" or "marlin" in backend:
             if isinstance(layer, FusedMoE):
-                from vllm.model_executor.layers.quantization.utils.marlin_utils import \
-                    check_moe_marlin_supports_layer
+                from vllm.model_executor.layers.quantization.utils.\
+                marlin_utils import (check_moe_marlin_supports_layer)
                 use_marlin = check_moe_marlin_supports_layer(layer, group_size)
             else:
-                from vllm.model_executor.layers.quantization.utils.marlin_utils import \
-                    check_marlin_supported
+                from vllm.model_executor.layers.quantization.utils.\
+                marlin_utils import (check_marlin_supported)
                 GPTQ_TYPE_MAP = {
                     (4, True): scalar_types.uint4b8,
                     (8, True): scalar_types.uint8b128,
@@ -276,9 +275,6 @@ class AutoRoundConfig(QuantizationConfig):
                     "sym": sym,
                     "lm_head_quantized": False,
                 }
-                logger.warning_one(
-                    f"Layer '{prefix}' is not supported by GPTQMoeMarlin. "
-                    "Falling back to Moe WNA16 kernels.")
                 return MoeWNA16Config.from_config(config).get_quant_method(
                     layer, prefix)
             return GPTQMarlinMoEMethod(quant_args)
