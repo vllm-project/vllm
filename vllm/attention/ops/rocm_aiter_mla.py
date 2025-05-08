@@ -17,9 +17,7 @@ def get_aiter_mla_metadata(max_batch_size: int, block_size: int,
     paged_kv_last_page_lens = torch.full((max_batch_size, ),
                                          block_size,
                                          dtype=torch.int32)
-    qo_indptr = torch.zeros(max_batch_size + 1,
-                            dtype=torch.int,
-                            device=device)
+    qo_indptr = torch.zeros(max_batch_size + 1, dtype=torch.int, device=device)
     return paged_kv_indices, paged_kv_indptr, paged_kv_last_page_lens, qo_indptr
 
 

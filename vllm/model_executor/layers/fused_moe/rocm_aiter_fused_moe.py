@@ -126,9 +126,8 @@ def rocm_aiter_fmoe_fp8_blockscale_g1u1_impl(
                              num_valid_ids, topk,
                              a1_scale.t().contiguous(),
                              w1_scale.view(local_E, -1),
-                             w2_scale.view(local_E, -1),
-                             *block_shape,
-                             smooth_scale)
+                             w2_scale.view(local_E,
+                                           -1), *block_shape, smooth_scale)
 
     return out_asm
 
