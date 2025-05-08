@@ -64,8 +64,6 @@ async def test_basic_vision(model_name: str, base64_encoded_image: dict[str,
         "576",
         # NOTE: max-num-batched-tokens>=mm_item_size
         "--disable_chunked_mm_input",
-        "--chat-template",
-        "examples/template_llava.jinja"
     ]
 
     # Server will pre-compile on first startup (takes a long time).
