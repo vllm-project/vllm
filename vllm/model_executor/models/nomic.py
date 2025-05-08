@@ -14,6 +14,7 @@ from vllm.model_executor.layers.activation import (get_act_and_mul_fn,
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
+                                               ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -188,17 +189,14 @@ class NomicRouter(nn.Module):
     def __init__(self, hidden_size: int, moe_num_experts: int, moe_top_k: int):
         super().__init__()
         self.moe_top_k = moe_top_k
-
-        self.layer = nn.Linear(hidden_size, moe_num_experts, bias=False)
+        self.layer = ReplicatedLinear(hidden_size, moe_num_experts, bias=False)
 
     def forward(
         self, x: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.LongTensor]:
-        weights = self.layer(x.view(-1,
-                                    x.shape[-1])).softmax(dim=-1,
-                                                          dtype=torch.float32)
+        weights = self.layer(x.view(-1, x.shape[-1]))[0].softmax(
+            dim=-1, dtype=torch.float32)
         top_weights, top_experts = torch.topk(weights, self.moe_top_k, dim=-1)
-
         weights = weights.to(x.dtype)
         top_weights = top_weights.to(x.dtype)
         return weights, top_weights, top_experts  # type: ignore
@@ -293,7 +291,6 @@ class NomicMoELayer(nn.Module):
     def forward(self, x: torch.Tensor):
         weights, top_weights, top_experts = self.router(x)
         out = self.experts(x, weights, top_weights, top_experts)
-
         return out
 
 
@@ -517,5 +514,6 @@ class NomicBertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant):
                               bias=config.qkv_proj_bias,
                               rotary_kwargs=rotary_kwargs)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        self.model.load_weights(weights)
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
+        return self.model.load_weights(weights)
