@@ -657,7 +657,7 @@ Specified using `--task embed`.
   * ✅︎
 - * `RobertaModel`, `RobertaForMaskedLM`
   * RoBERTa-based
-  * `sentence-transformers/all-roberta-large-v1`, `sentence-transformers/all-roberta-large-v1`, etc.
+  * `sentence-transformers/all-roberta-large-v1`, etc.
   *
   *
 - * `XLMRobertaModel`
