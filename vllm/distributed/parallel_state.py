@@ -29,15 +29,13 @@ from collections import namedtuple
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from multiprocessing import shared_memory
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
-                    Union)
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from unittest.mock import patch
 
 import torch
 import torch.distributed
 from torch.distributed import Backend, ProcessGroup
 
-import vllm.distributed.kv_transfer.kv_transfer_agent as kv_transfer
 import vllm.envs as envs
 from vllm.distributed.device_communicators.base_device_communicator import (
     DeviceCommunicatorBase)
@@ -45,9 +43,6 @@ from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.utils import (direct_register_custom_op, resolve_obj_by_qualname,
                         supports_custom_op)
-
-if TYPE_CHECKING:
-    from vllm.config import VllmConfig
 
 
 @dataclass
@@ -118,12 +113,60 @@ def all_reduce_fake(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
     return torch.empty_like(tensor)
 
 
+def reduce_scatter(tensor: torch.Tensor, dim: int, world_size: int,
+                   group_name: str) -> torch.Tensor:
+    assert group_name in _groups, f"Group {group_name} is not found."
+    group = _groups[group_name]()
+    if group is None:
+        raise ValueError(f"Group {group_name} is destroyed.")
+    return group.reduce_scatter(tensor, dim)
+
+
+def reduce_scatter_fake(tensor: torch.Tensor, dim: int, world_size: int,
+                        group_name: str) -> torch.Tensor:
+    new_shape = list(tensor.shape)
+    new_shape[dim] = tensor.shape[dim] // world_size
+    return torch.empty(new_shape, dtype=tensor.dtype, device=tensor.device)
+
+
+def all_gather(tensor: torch.Tensor, dim: int, world_size: int,
+               group_name: str) -> torch.Tensor:
+    assert group_name in _groups, f"Group {group_name} is not found."
+    group = _groups[group_name]()
+    if group is None:
+        raise ValueError(f"Group {group_name} is destroyed.")
+    return group.all_gather(tensor, dim)
+
+
+def all_gather_fake(tensor: torch.Tensor, dim: int, world_size: int,
+                    group_name: str) -> torch.Tensor:
+    new_shape = list(tensor.shape)
+    new_shape[dim] = tensor.shape[dim] * world_size
+    return torch.empty(new_shape, dtype=tensor.dtype, device=tensor.device)
+
+
 if supports_custom_op():
+    from vllm.platforms import current_platform
     direct_register_custom_op(
         op_name="all_reduce",
         op_func=all_reduce,
         mutates_args=[],
         fake_impl=all_reduce_fake,
+        dispatch_key=current_platform.dispatch_key,
+    )
+
+    direct_register_custom_op(
+        op_name="reduce_scatter",
+        op_func=reduce_scatter,
+        mutates_args=[],
+        fake_impl=reduce_scatter_fake,
+    )
+
+    direct_register_custom_op(
+        op_name="all_gather",
+        op_func=all_gather,
+        mutates_args=[],
+        fake_impl=all_gather_fake,
     )
 
 
@@ -192,9 +235,11 @@ class GroupCoordinator:
 
         from vllm.platforms import current_platform
 
-        # TODO: fix it for other platforms
         if current_platform.is_cuda_alike():
             self.device = torch.device(f"cuda:{local_rank}")
+        elif current_platform.is_out_of_tree():
+            self.device = torch.device(
+                f"{current_platform.device_name}:{local_rank}")
         else:
             self.device = torch.device("cpu")
 
@@ -219,7 +264,8 @@ class GroupCoordinator:
                 self.cpu_group, 1 << 22, 6)
 
         from vllm.platforms import current_platform
-        self.use_custom_op_call = current_platform.is_cuda_alike()
+        self.use_custom_op_call = (current_platform.is_cuda_alike()
+                                   or current_platform.is_tpu())
 
     @property
     def first_rank(self):
@@ -321,6 +367,18 @@ class GroupCoordinator:
             f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
 
         return self.device_communicator.all_gather(input_, dim)
+
+    def reduce_scatter(self,
+                       input_: torch.Tensor,
+                       dim: int = -1) -> torch.Tensor:
+        world_size = self.world_size
+        # Bypass the function if we are using only 1 GPU.
+        if world_size == 1:
+            return input_
+        assert -input_.dim() <= dim < input_.dim(), (
+            f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
+
+        return self.device_communicator.reduce_scatter(input_, dim)
 
     def gather(self,
                input_: torch.Tensor,
@@ -750,6 +808,13 @@ get_tensor_model_parallel_group = get_tp_group
 
 _PP: Optional[GroupCoordinator] = None
 
+_DP: Optional[GroupCoordinator] = None
+
+
+def get_dp_group() -> GroupCoordinator:
+    assert _DP is not None, ("data parallel group is not initialized")
+    return _DP
+
 
 def get_pp_group() -> GroupCoordinator:
     assert _PP is not None, (
@@ -759,14 +824,6 @@ def get_pp_group() -> GroupCoordinator:
 
 # kept for backward compatibility
 get_pipeline_model_parallel_group = get_pp_group
-
-_KV_TRANSFER: Optional[kv_transfer.KVTransferAgent] = None
-
-
-def get_kv_transfer_group() -> kv_transfer.KVTransferAgent:
-    assert _KV_TRANSFER is not None, (
-        "disaggregated KV cache transfer parallel group is not initialized")
-    return _KV_TRANSFER
 
 
 @contextmanager
@@ -811,6 +868,21 @@ def init_distributed_environment(
         "world_size=%d rank=%d local_rank=%d "
         "distributed_init_method=%s backend=%s", world_size, rank, local_rank,
         distributed_init_method, backend)
+    from vllm.config import get_current_vllm_config
+    config = get_current_vllm_config()
+    if config is not None and config.parallel_config.data_parallel_size > 1:
+        parallel_config = config.parallel_config
+        # adjust to take into account data parallelism
+        # offset the rank by the data parallel rank
+        rank = parallel_config.data_parallel_rank * world_size + rank
+        # adjust the world size to take into account data parallelism
+        world_size = parallel_config.world_size_across_dp
+        ip = parallel_config.data_parallel_master_ip
+        port = parallel_config.get_next_dp_init_port()
+        distributed_init_method = f"tcp://{ip}:{port}"  # noqa
+        logger.info(
+            "Adjusting world_size=%d rank=%d distributed_init_method=%s for DP",
+            world_size, rank, distributed_init_method)
     if not torch.distributed.is_initialized():
         assert distributed_init_method is not None, (
             "distributed_init_method must be provided when initializing "
@@ -870,20 +942,34 @@ def initialize_model_parallel(
     # Get world size and rank. Ensure some consistencies.
     assert torch.distributed.is_initialized()
     world_size: int = torch.distributed.get_world_size()
+    rank = torch.distributed.get_rank()
     backend = backend or torch.distributed.get_backend(
         get_world_group().device_group)
 
+    data_parallel_size = 1
+    from vllm.config import get_current_vllm_config
+    config = get_current_vllm_config()
+    if config is not None:
+        data_parallel_size = config.parallel_config.data_parallel_size
+
+    # the layout order is: ExternalDP x DP x PP x TP
+    # ExternalDP is the data parallel group that is not part of the model,
+    # every dp rank can generate independently (in verl integration).
+    # DP is the data parallel group that is part of the model,
+    # all the ranks in the same DP group should generate simultaneously,
+    # i.e. the `generate` call in the same DP group should be called together,
+    # otherwise it will cause deadlock.
+    # to get group_ranks for each dimension, transpose that dimension to the
+    # last dimension, then reshape to 2D, then unbind the last dimension
+    all_ranks = torch.arange(world_size).reshape(
+        -1, data_parallel_size, pipeline_model_parallel_size,
+        tensor_model_parallel_size)  # noqa
+
     # Build the tensor model-parallel groups.
-    num_tensor_model_parallel_groups: int = (world_size //
-                                             tensor_model_parallel_size)
     global _TP
     assert _TP is None, ("tensor model parallel group is already initialized")
-    group_ranks = []
-    for i in range(num_tensor_model_parallel_groups):
-        ranks = list(
-            range(i * tensor_model_parallel_size,
-                  (i + 1) * tensor_model_parallel_size))
-        group_ranks.append(ranks)
+    group_ranks = all_ranks.view(-1, tensor_model_parallel_size).unbind(0)
+    group_ranks = [x.tolist() for x in group_ranks]
 
     # message queue broadcaster is only used in tensor model parallel group
     _TP = init_model_parallel_group(group_ranks,
@@ -893,39 +979,32 @@ def initialize_model_parallel(
                                     group_name="tp")
 
     # Build the pipeline model-parallel groups.
-    num_pipeline_model_parallel_groups: int = (world_size //
-                                               pipeline_model_parallel_size)
     global _PP
     assert _PP is None, (
         "pipeline model parallel group is already initialized")
-    group_ranks = []
-    for i in range(num_pipeline_model_parallel_groups):
-        ranks = list(range(i, world_size, num_pipeline_model_parallel_groups))
-        group_ranks.append(ranks)
+    group_ranks = all_ranks.transpose(2, 3).reshape(
+        -1, pipeline_model_parallel_size).unbind(0)
+    group_ranks = [x.tolist() for x in group_ranks]
     _PP = init_model_parallel_group(group_ranks,
                                     get_world_group().local_rank,
                                     backend,
                                     group_name="pp")
 
+    global _DP
+    assert _DP is None, ("data parallel group is already initialized")
+    group_ranks = all_ranks.transpose(1,
+                                      3).reshape(-1,
+                                                 data_parallel_size).unbind(0)
+    group_ranks = [x.tolist() for x in group_ranks]
+    _DP = init_model_parallel_group(group_ranks,
+                                    get_world_group().local_rank,
+                                    backend,
+                                    group_name="dp")
 
-def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
-    """
-    Initialize KV cache transfer parallel group.
-    """
-
-    global _KV_TRANSFER
-
-    if vllm_config.kv_transfer_config is None:
-        return
-
-    if all([
-            vllm_config.kv_transfer_config.need_kv_parallel_group, _KV_TRANSFER
-            is None
-    ]):
-        _KV_TRANSFER = kv_transfer.KVTransferAgent(
-            rank=get_world_group().rank,
-            local_rank=get_world_group().local_rank,
-            config=vllm_config)
+    logger.info(
+        "rank %s in world size %s is assigned as "
+        "DP rank %s, PP rank %s, TP rank %s", rank, world_size,
+        _DP.rank_in_group, _PP.rank_in_group, _TP.rank_in_group)
 
 
 def ensure_model_parallel_initialized(
@@ -1010,6 +1089,11 @@ def destroy_model_parallel():
     if _PP:
         _PP.destroy()
     _PP = None
+
+    global _DP
+    if _DP:
+        _DP.destroy()
+    _DP = None
 
 
 def destroy_distributed_environment():

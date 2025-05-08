@@ -10,7 +10,6 @@ import asyncio
 import io
 import time
 from statistics import mean, median
-from typing import List
 
 import librosa
 import pytest
@@ -67,7 +66,7 @@ async def process_dataset(model, client, data, concurrent_request):
     audio, sr = data[0]["audio"]["array"], data[0]["audio"]["sampling_rate"]
     _ = await bound_transcribe(model, sem, client, (audio, sr), "")
 
-    tasks: List[asyncio.Task] = []
+    tasks: list[asyncio.Task] = []
     for sample in data:
         audio, sr = sample["audio"]["array"], sample["audio"]["sampling_rate"]
         task = asyncio.create_task(
@@ -151,6 +150,7 @@ def test_wer_correctness(model_name,
                          expected_wer,
                          n_examples=-1,
                          max_concurrent_request=None):
+    # TODO refactor to use `ASRDataset`
     with RemoteOpenAIServer(model_name, ['--enforce-eager']) as remote_server:
         dataset = load_hf_dataset(dataset_repo)
 

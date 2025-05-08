@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import contextlib
 import copy
 import hashlib
 import os
@@ -10,7 +11,11 @@ import torch
 import torch._inductor.compile_fx
 import torch.fx as fx
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.utils import is_torch_equal_or_newer
+
+from .inductor_pass import pass_context
 
 
 class CompilerInterface:
@@ -31,10 +36,10 @@ class CompilerInterface:
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         """
-        Gather all the relevant information from the VLLM config,
+        Gather all the relevant information from the vLLM config,
         to compute a hash so that we can cache the compiled model.
 
-        See :meth:`VllmConfig.compute_hash` to check what information
+        See {meth}`VllmConfig.compute_hash` to check what information
         is already considered by default. This function should only
         consider the information that is specific to the compiler.
         """
@@ -139,10 +144,12 @@ class InductorAdaptor(CompilerInterface):
         from torch._inductor.codecache import torch_key
         torch_factors = torch_key()
         factors.append(torch_factors)
-        hash_str = hashlib.md5(str(factors).encode()).hexdigest()[:10]
+        hash_str = hashlib.md5(str(factors).encode(),
+                               usedforsecurity=False).hexdigest()[:10]
         return hash_str
 
     def initialize_cache(self, cache_dir: str, disable_cache: bool = False):
+        self.cache_dir = cache_dir
         if disable_cache:
             return
         # redirect the cache directory to a sub-directory
@@ -163,8 +170,7 @@ class InductorAdaptor(CompilerInterface):
         compiler_config: Dict[str, Any],
         runtime_shape: Optional[int] = None
     ) -> Tuple[Optional[Callable], Optional[Any]]:
-        from torch._inductor import config
-        current_config = config.get_config_copy()
+        current_config = {}
         from torch._inductor.compile_fx import compile_fx
 
         # disable remote cache
@@ -192,7 +198,6 @@ class InductorAdaptor(CompilerInterface):
         hash_str, file_path = None, None
         from torch._inductor.codecache import (FxGraphCache,
                                                compiled_fx_graph_hash)
-
         if torch.__version__.startswith("2.5"):
             original_load = FxGraphCache.load
             original_load_name = "torch._inductor.codecache.FxGraphCache.load"
@@ -200,7 +205,19 @@ class InductorAdaptor(CompilerInterface):
             def hijack_load(*args, **kwargs):
                 inductor_compiled_graph = original_load(*args, **kwargs)
                 nonlocal file_path
-                file_path = inductor_compiled_graph.current_callable.__code__.co_filename  # noqa
+                compiled_fn = inductor_compiled_graph.current_callable
+                file_path = compiled_fn.__code__.co_filename  # noqa
+                if not file_path.startswith(self.cache_dir):
+                    # hooked in the align_inputs_from_check_idxs function
+                    # in torch/_inductor/utils.py
+                    for cell in compiled_fn.__closure__:
+                        if not callable(cell.cell_contents):
+                            continue
+                        if cell.cell_contents.__code__.co_filename.startswith(
+                                self.cache_dir):
+                            # this is the real file path compiled from Inductor
+                            file_path = cell.cell_contents.__code__.co_filename
+                            break
                 return inductor_compiled_graph
 
             hijacked_compile_fx_inner = torch._inductor.compile_fx.compile_fx_inner  # noqa
@@ -215,7 +232,20 @@ class InductorAdaptor(CompilerInterface):
                 inductor_compiled_graph = output
                 if inductor_compiled_graph is not None:
                     nonlocal file_path
-                    file_path = inductor_compiled_graph.current_callable.__code__.co_filename  # noqa
+                    compiled_fn = inductor_compiled_graph.current_callable
+                    file_path = compiled_fn.__code__.co_filename  # noqa
+                    if not file_path.startswith(self.cache_dir):
+                        # hooked in the align_inputs_from_check_idxs function
+                        # in torch/_inductor/utils.py
+                        for cell in compiled_fn.__closure__:
+                            if not callable(cell.cell_contents):
+                                continue
+                            code = cell.cell_contents.__code__
+                            if code.co_filename.startswith(self.cache_dir):
+                                # this is the real file path
+                                # compiled from Inductor
+                                file_path = code.co_filename
+                                break
                     hash_str = inductor_compiled_graph._fx_graph_cache_key
                 return output
 
@@ -252,22 +282,53 @@ class InductorAdaptor(CompilerInterface):
                 patch("torch._inductor.codecache.FxGraphCache._get_shape_env",
                       _get_shape_env))
 
+            from torch._functorch._aot_autograd.autograd_cache import (
+                AOTAutogradCache)
+
+            # torch 2.8+ on main uses _get_shape_env in AOTAutogradCache
+            if hasattr(AOTAutogradCache, "_get_shape_env"):
+                stack.enter_context(
+                    patch(
+                        "torch._functorch._aot_autograd.autograd_cache.AOTAutogradCache._get_shape_env",
+                        _get_shape_env))
+
             # for forcing the graph to be cached
             stack.enter_context(
                 patch(
                     "torch._inductor.codecache.FxGraphCache._check_can_cache",
                     _check_can_cache))
 
-            compiled_graph = compile_fx(
-                graph,
-                example_inputs,
-                inner_compile=hijacked_compile_fx_inner,
-                config_patches=current_config)
+            # Dynamo metrics context, see method for more details.
+            stack.enter_context(self.metrics_context())
 
-        assert hash_str is not None, (
-            "failed to get the hash of the compiled graph")
-        assert file_path is not None, (
-            "failed to get the file path of the compiled graph")
+            # Disable remote caching. When these are on, on remote cache-hit,
+            # the monkey-patched functions never actually get called.
+            # vLLM today assumes and requires the monkey-patched functions to
+            # get hit.
+            # TODO(zou3519): we're going to replace this all with
+            # standalone_compile sometime.
+            if is_torch_equal_or_newer("2.6"):
+                stack.enter_context(
+                    torch._inductor.config.patch(fx_graph_remote_cache=False))
+                stack.enter_context(
+                    torch._functorch.config.patch(
+                        enable_remote_autograd_cache=False))
+
+            with pass_context(runtime_shape):
+                compiled_graph = compile_fx(
+                    graph,
+                    example_inputs,
+                    inner_compile=hijacked_compile_fx_inner,
+                    config_patches=current_config)
+
+        # We treat VLLM_DISABLE_COMPILE_CACHE as the overall switch for torch
+        # compilation cache. So turn off the checks if we disable the
+        # compilation cache.
+        if not envs.VLLM_DISABLE_COMPILE_CACHE:
+            assert hash_str is not None, (
+                "failed to get the hash of the compiled graph")
+            assert file_path is not None, (
+                "failed to get the file path of the compiled graph")
         return compiled_graph, (hash_str, file_path)
 
     def load(self,
@@ -281,9 +342,23 @@ class InductorAdaptor(CompilerInterface):
         assert isinstance(handle[1], str)
         hash_str = handle[0]
 
+        from torch._functorch._aot_autograd.autograd_cache import (
+            AOTAutogradCache)
         from torch._inductor.codecache import FxGraphCache
-        with patch("torch._inductor.codecache.FxGraphCache._get_shape_env",
-                   lambda *args, **kwargs: AlwaysHitShapeEnv()):
+        with ExitStack() as exit_stack:
+            exit_stack.enter_context(
+                patch("torch._inductor.codecache.FxGraphCache._get_shape_env",
+                      lambda *args, **kwargs: AlwaysHitShapeEnv()))
+            # torch 2.8+ on main uses _get_shape_env in AOTAutogradCache
+            if hasattr(AOTAutogradCache, "_get_shape_env"):
+                exit_stack.enter_context(
+                    patch(
+                        "torch._functorch._aot_autograd.autograd_cache.AOTAutogradCache._get_shape_env",
+                        lambda *args, **kwargs: AlwaysHitShapeEnv()))
+
+            # Dynamo metrics context, see method for more details.
+            exit_stack.enter_context(self.metrics_context())
+
             if torch.__version__.startswith("2.5"):
                 inductor_compiled_graph = FxGraphCache._lookup_graph(
                     hash_str, example_inputs, True, False)
@@ -323,6 +398,28 @@ class InductorAdaptor(CompilerInterface):
                 return graph_output[0]
 
         return compiled_graph
+
+    def metrics_context(self) -> contextlib.AbstractContextManager:
+        """
+        This method returns the Dynamo metrics context (if it exists,
+        otherwise a null context). It is used by various compile components.
+        Present in torch>=2.6, it's used inside FxGraphCache in
+        torch==2.6 (but not after). It might also be used in various other
+        torch.compile internal functions.
+
+        Because it is re-entrant, we always set it (even if entering via Dynamo
+        and the context was already entered). We might want to revisit if it
+        should be set at a different level of compilation.
+
+        This is likely a bug in PyTorch: public APIs should not rely on
+        manually setting up internal contexts. But we also rely on non-public
+        APIs which might not provide these guarantees.
+        """
+        if is_torch_equal_or_newer("2.6"):
+            import torch._dynamo.utils
+            return torch._dynamo.utils.get_metrics_context()
+        else:
+            return contextlib.nullcontext()
 
 
 class EagerAdaptor(CompilerInterface):

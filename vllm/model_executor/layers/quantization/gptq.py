@@ -10,6 +10,7 @@ from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.linear import LinearMethodBase
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.utils.gptq_utils import (
@@ -74,12 +75,12 @@ class GPTQConfig(QuantizationConfig):
     def __repr__(self) -> str:
         return (f"GPTQConfig(weight_bits={self.weight_bits}, "
                 f"group_size={self.group_size}, "
-                f"desc_act={self.desc_act}),"
+                f"desc_act={self.desc_act}), "
                 f"lm_head_quantized={self.lm_head_quantized}), "
                 f"dynamic={self.dynamic}")
 
     @classmethod
-    def get_name(cls) -> str:
+    def get_name(cls) -> QuantizationMethods:
         return "gptq"
 
     @classmethod

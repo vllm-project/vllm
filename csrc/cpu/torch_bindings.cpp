@@ -18,6 +18,38 @@ void int8_scaled_mm_azp(torch::Tensor& c, const torch::Tensor& a,
                         const std::optional<torch::Tensor>& azp,
                         const std::optional<torch::Tensor>& bias);
 
+#if defined(__powerpc64__)
+void int8_scaled_mm_ppc64le(torch::Tensor& c, const torch::Tensor& a,
+                            const torch::Tensor& b,
+                            const torch::Tensor& a_scales,
+                            const torch::Tensor& b_scales,
+                            const std::optional<torch::Tensor>& bias);
+#endif
+
+void mla_decode_kvcache(torch::Tensor& out, torch::Tensor& query,
+                        torch::Tensor& kv_cache, double scale,
+                        torch::Tensor& block_tables, torch::Tensor& seq_lens);
+
+int64_t init_shm_manager(const std::string& name, const int64_t group_size,
+                         const int64_t rank);
+
+std::string join_shm_manager(int64_t handle, const std::string& name);
+
+void shm_allreduce(int64_t handle, torch::Tensor& data);
+
+void shm_gather(int64_t handle, torch::Tensor& data,
+                const std::optional<std::vector<torch::Tensor>>& outputs,
+                int64_t dst);
+
+void shm_all_gather(int64_t handle, const torch::Tensor& data,
+                    torch::Tensor& output);
+
+void shm_send_tensor_list(int64_t handle,
+                          const std::vector<torch::Tensor>& tensor_list,
+                          int64_t dst);
+
+std::vector<torch::Tensor> shm_recv_tensor_list(int64_t handle, int64_t src);
+
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops
 
@@ -93,7 +125,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.
   ops.def(
       "rotary_embedding(Tensor positions, Tensor! query,"
-      "                 Tensor! key, int head_size,"
+      "                 Tensor!? key, int head_size,"
       "                 Tensor cos_sin_cache, bool is_neox) -> ()");
   ops.impl("rotary_embedding", torch::kCPU, &rotary_embedding);
 
@@ -126,6 +158,56 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                  Tensor b_scales, Tensor azp_adj,"
       "                  Tensor? azp, Tensor? bias) -> ()");
   ops.impl("cutlass_scaled_mm_azp", torch::kCPU, &int8_scaled_mm_azp);
+#elif defined(__powerpc64__)
+  // Compute int8 quantized tensor for given scaling factor.
+  ops.def(
+      "static_scaled_int8_quant(Tensor! out, Tensor input, Tensor scale,"
+      "Tensor? azp) -> ()");
+  ops.impl("static_scaled_int8_quant", torch::kCPU, &static_scaled_int8_quant);
+
+  // Compute int8 quantized tensor and scaling factor
+  ops.def(
+      "dynamic_scaled_int8_quant(Tensor! out, Tensor input, Tensor! scale, "
+      "Tensor!? azp) -> ()");
+  ops.impl("dynamic_scaled_int8_quant", torch::kCPU,
+           &dynamic_scaled_int8_quant);
+  // W8A8 GEMM, supporting symmetric quantization.
+  ops.def(
+      "cutlass_scaled_mm(Tensor! out, Tensor a,"
+      "                  Tensor b, Tensor a_scales,"
+      "                  Tensor b_scales, Tensor? bias) -> ()");
+  ops.impl("cutlass_scaled_mm", torch::kCPU, &int8_scaled_mm_ppc64le);
+  // w8a8 GEMM, supporting asymmetric per-tensor or per-row/column
+  // quantization.
+  ops.def(
+      "cutlass_scaled_mm_azp(Tensor! out, Tensor a,"
+      "                  Tensor b, Tensor a_scales,"
+      "                  Tensor b_scales, Tensor azp_adj,"
+      "                  Tensor? azp, Tensor? bias) -> ()");
+  ops.impl("cutlass_scaled_mm_azp", torch::kCPU, &int8_scaled_mm_azp);
+#endif
+
+// SHM CCL
+#ifdef __AVX512F__
+  ops.def("init_shm_manager(str name, int group_size, int rank) -> int",
+          &init_shm_manager);
+  ops.def("join_shm_manager(int handle, str name) -> str", &join_shm_manager);
+  ops.def("shm_allreduce(int handle, Tensor! data) -> ()");
+  ops.impl("shm_allreduce", torch::kCPU, &shm_allreduce);
+  ops.def(
+      "shm_gather(int handle, Tensor data, Tensor[](a!)? outputs, int dst) -> "
+      "()");
+  ops.impl("shm_gather", torch::kCPU, &shm_gather);
+  ops.def(
+      "shm_all_gather(int handle, Tensor data, Tensor! output) -> "
+      "()");
+  ops.impl("shm_all_gather", torch::kCPU, &shm_all_gather);
+  ops.def(
+      "shm_send_tensor_list(int handle, Tensor[](a) tensor_list, int dst) -> "
+      "()");
+  ops.impl("shm_send_tensor_list", torch::kCPU, &shm_send_tensor_list);
+  ops.def("shm_recv_tensor_list(int handle, int src) -> Tensor[](a)",
+          &shm_recv_tensor_list);
 #endif
 }
 
@@ -150,11 +232,27 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "                  str kv_cache_dtype,"
       "                  Tensor k_scale, Tensor v_scale) -> ()");
   cache_ops.impl("reshape_and_cache", torch::kCPU, &reshape_and_cache);
+
+  cache_ops.def(
+      "concat_and_cache_mla(Tensor kv_c, Tensor k_pe,"
+      "                     Tensor! kv_cache,"
+      "                     Tensor slot_mapping,"
+      "                     str kv_cache_dtype,"
+      "                     Tensor scale) -> ()");
+  cache_ops.impl("concat_and_cache_mla", torch::kCPU, &concat_and_cache_mla);
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _utils), utils) {
   // CPU utils
   utils.def("init_cpu_threads_env(str cpu_ids) -> str", &init_cpu_threads_env);
+}
+
+TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cpu), cpu_ops) {
+  cpu_ops.def(
+      "mla_decode_kvcache("
+      "   Tensor! out, Tensor query, Tensor kv_cache,"
+      "   float scale, Tensor block_tables, Tensor seq_lens) -> ()");
+  cpu_ops.impl("mla_decode_kvcache", torch::kCPU, &mla_decode_kvcache);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

@@ -19,10 +19,11 @@ _C = TypeVar("_C", bound=PretrainedConfig)
 
 class VisionEncoderInfo(ABC, Generic[_C]):
 
-    def __init__(self, vision_config: _C) -> None:
+    def __init__(self, hf_config: _C) -> None:
         super().__init__()
 
-        self.vision_config = vision_config
+        self.hf_config = hf_config
+        self.vision_config = hf_config.vision_config
 
     @abstractmethod
     def get_num_image_tokens(
@@ -31,10 +32,6 @@ class VisionEncoderInfo(ABC, Generic[_C]):
         image_width: int,
         image_height: int,
     ) -> int:
-        raise NotImplementedError
-
-    @abstractmethod
-    def get_max_image_tokens(self) -> int:
         raise NotImplementedError
 
     @abstractmethod
@@ -61,15 +58,14 @@ def get_vision_encoder_info(
     from .pixtral import PixtralHFEncoderInfo, PixtralVisionConfig
     from .siglip import SiglipEncoderInfo, SiglipVisionConfig
 
-    vision_config = hf_config.vision_config
-    if isinstance(vision_config, CLIPVisionConfig):
-        return CLIPEncoderInfo(vision_config)
-    if isinstance(vision_config, PixtralVisionConfig):
-        return PixtralHFEncoderInfo(vision_config)
-    if isinstance(vision_config, SiglipVisionConfig):
-        return SiglipEncoderInfo(vision_config)
+    if isinstance(hf_config.vision_config, CLIPVisionConfig):
+        return CLIPEncoderInfo(hf_config)
+    if isinstance(hf_config.vision_config, PixtralVisionConfig):
+        return PixtralHFEncoderInfo(hf_config)
+    if isinstance(hf_config.vision_config, SiglipVisionConfig):
+        return SiglipEncoderInfo(hf_config)
 
-    msg = f"Unsupported vision config: {type(vision_config)}"
+    msg = f"Unsupported vision config: {type(hf_config.vision_config)}"
     raise NotImplementedError(msg)
 
 
@@ -132,10 +128,11 @@ def resolve_visual_encoder_outputs(
     # Get the hidden states corresponding to the layer indices.
     # Negative values are relative to the full visual encoder,
     # so offset them depending on how many layers were loaded.
-    # NOTE: this assumes that encoder_outputs contains a list
-    # of hidden states in the same order as the encoder layers
-    # that produced them.
-    offset = max_possible_layers - len(encoder_outputs)
+    # NOTE: this assumes that encoder_outputs is a list containing
+    # the inputs to the visual encoder, followed by the hidden states
+    # of each layer.
+    num_loaded_layers = len(encoder_outputs) - 1
+    offset = max_possible_layers - num_loaded_layers
     hs_pool = [
         encoder_outputs[layer_idx]
         if layer_idx >= 0 else encoder_outputs[layer_idx + offset]

@@ -5,15 +5,16 @@ import json
 import os
 import sys
 from argparse import RawTextHelpFormatter
+from collections.abc import Generator
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, Generator, List, Optional, TypeAlias
+from typing import Any, Optional, TypeAlias
 
 import torch
 import tqdm
 
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import EngineArgs
-from vllm.profiler import layerwise_profile
+from vllm.profiler.layerwise_profile import layerwise_profile
 from vllm.utils import FlexibleArgumentParser
 
 BATCH_SIZE_DEFAULT = 1
@@ -42,8 +43,8 @@ def get_dtype(dtype: str):
         return dtype
 
 
-OutputLen_NumReqs_Map: TypeAlias = Dict[int, int]
-def compute_request_output_lengths(batch_size: int, step_requests: List[int]) \
+OutputLen_NumReqs_Map: TypeAlias = dict[int, int]
+def compute_request_output_lengths(batch_size: int, step_requests: list[int]) \
       -> OutputLen_NumReqs_Map:
     """
     Given the number of requests, batch_size, and the number of requests
@@ -63,7 +64,7 @@ def compute_request_output_lengths(batch_size: int, step_requests: List[int]) \
     Args:
         batch_size (int): Number of requests submitted for profile. This is
             args.batch_size.
-        step_requests (List[int]): step_requests[i] is the number of requests
+        step_requests (list[int]): step_requests[i] is the number of requests
             that the ith engine step should process.
 
     Returns:
@@ -114,7 +115,7 @@ def compute_request_output_lengths(batch_size: int, step_requests: List[int]) \
     return ol_nr
 
 
-def determine_requests_per_step(context: ProfileContext) -> List[int]:
+def determine_requests_per_step(context: ProfileContext) -> list[int]:
     """
     Determine number of requests each engine step should process.
     If context.num_steps is set, then all engine steps process the
@@ -130,7 +131,7 @@ def determine_requests_per_step(context: ProfileContext) -> List[int]:
         context: ProfileContext object.
 
     Returns:
-        List[int]: Number of requests to process for all engine-steps. 
+        list[int]: Number of requests to process for all engine-steps. 
          output[i], contains the number of requests that the ith step
          should process.
     """
@@ -170,7 +171,7 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
     for key, value in asdict(context).items():
         print(f"  {key} = {value}")
 
-    requests_per_step: List[int] = determine_requests_per_step(context)
+    requests_per_step: list[int] = determine_requests_per_step(context)
 
     ol_nr: OutputLen_NumReqs_Map = compute_request_output_lengths(
         context.batch_size, requests_per_step)
@@ -233,9 +234,8 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
             sampling_params.max_tokens = next(output_len_generator)
             assert isinstance(sampling_params.max_tokens, int)
 
-            prompt_token_ids = torch.randint(
-                llm.llm_engine.model_config.get_vocab_size(),
-                size=(prompt_len, )).tolist()
+            prompt_token_ids = torch.randint(llm.get_tokenizer().vocab_size,
+                                             size=(prompt_len, )).tolist()
 
             llm.llm_engine.add_request(
                 request_id=f"seq{i}",
@@ -359,7 +359,7 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
               f" in folder {context.save_chrome_traces_folder}")
 
 
-if __name__ == "__main__":
+def parse_args():
     parser = FlexibleArgumentParser(description="""
 Profile a model
 
@@ -449,7 +449,10 @@ Profile a model
 
     EngineArgs.add_cli_args(parser)
 
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+def main(args):
     context = ProfileContext(
         engine_args=EngineArgs.from_cli_args(args),
         **{
@@ -458,3 +461,8 @@ Profile a model
             if k in inspect.signature(ProfileContext).parameters
         })
     run_profile(context, csv_output=args.csv, json_output=args.json)
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    main(args)

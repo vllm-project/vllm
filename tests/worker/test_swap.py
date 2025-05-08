@@ -10,7 +10,7 @@ from vllm.worker.worker import Worker
 
 def test_swap() -> None:
     # Configure the engine.
-    engine_args = EngineArgs(model="facebook/opt-125m",
+    engine_args = EngineArgs(model="distilbert/distilgpt2",
                              dtype="half",
                              load_format="dummy")
     engine_config = engine_args.create_engine_config()

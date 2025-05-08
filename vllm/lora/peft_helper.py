@@ -42,7 +42,7 @@ class PEFTHelper:
 
     def _validate_features(self) -> List[str]:
         """
-        Check if there are any unsupported Lora features.
+        Check if there are any unsupported LoRA features.
         """
         error_msg = []
         if self.modules_to_save:

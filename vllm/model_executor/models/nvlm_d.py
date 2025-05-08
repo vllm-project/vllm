@@ -6,7 +6,8 @@
 # Copyright (c) 2024 NVIDIA
 # Licensed under Apache 2.0 License [see LICENSE for details]
 # --------------------------------------------------------
-from typing import Mapping, Optional
+from collections.abc import Mapping, Sequence
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -14,12 +15,11 @@ from transformers import PretrainedConfig
 
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalKwargs
+from vllm.multimodal.inputs import MultiModalDataDict, MultiModalKwargs
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    MultiModalDataItems)
-from vllm.multimodal.processing import (PromptReplacement,
-                                        PromptReplacementDetails)
-from vllm.multimodal.profiling import ProcessorInputs
+from vllm.multimodal.processing import (PromptReplacement, PromptUpdate,
+                                        PromptUpdateDetails)
 
 from .intern_vit import InternVisionModel
 from .internvl import (BaseInternVLProcessingInfo, BaseInternVLProcessor,
@@ -35,16 +35,16 @@ class NVLMProcessor(BaseInternVLProcessor):
     def image_token_id(self) -> int:
         return self.tokenizer.get_vocab()[IMG_PAD]
 
-    def get_image_repl_features(
+    def get_image_repl(
         self,
         feature_size: int,
         num_patches: Optional[int],
-    ) -> str:
+    ) -> PromptUpdateDetails[str]:
         if num_patches is None:
             raise NotImplementedError("Embedding inputs are not supported")
 
         tile_pos_identifiers = [f"<tile_{i}>" for i in range(1, num_patches)]
-        if self.use_thumbnail and num_patches != 1:
+        if self.use_thumbnail:
             tile_pos_identifiers += ["<tile_global_thumbnail>"]
 
         context_size = feature_size // num_patches
@@ -54,14 +54,9 @@ class NVLMProcessor(BaseInternVLProcessor):
         # We include the start and end as well because "<Image><tile" is
         # tokenized as ["<Image", "><", "tile"], resulting in assertion error
         # when trying to find "<tile" as a subsequence of "<Image><tile"
-        return "<Image>" + features + "</Image>"
+        repl = "<Image>" + features + "</Image>"
 
-    def get_image_repl_full(
-        self,
-        feature_size: int,
-        num_patches: Optional[int],
-    ) -> str:
-        return self.get_image_repl_features(feature_size, num_patches)
+        return PromptUpdateDetails.select_text(repl, IMG_PAD)
 
 
 class NVLMProcessingInfo(BaseInternVLProcessingInfo):
@@ -69,76 +64,60 @@ class NVLMProcessingInfo(BaseInternVLProcessingInfo):
     def get_hf_processor(
         self,
         *,
+        min_dynamic_patch: Optional[int] = None,
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
+        **kwargs: object,
     ) -> NVLMProcessor:
-        return NVLMProcessor(
-            self.get_hf_config(),
-            self.get_tokenizer(),
-            max_dynamic_patch=max_dynamic_patch,
-            dynamic_image_size=dynamic_image_size,
+        if min_dynamic_patch is not None:
+            kwargs["min_dynamic_patch"] = min_dynamic_patch
+        if max_dynamic_patch is not None:
+            kwargs["max_dynamic_patch"] = max_dynamic_patch
+        if dynamic_image_size is not None:
+            kwargs["dynamic_image_size"] = dynamic_image_size
+
+        return self.ctx.init_processor(
+            NVLMProcessor,
+            config=self.get_hf_config(),
+            tokenizer=self.get_tokenizer(),
+            **kwargs,
         )
-
-    def get_max_image_tokens(self) -> int:
-        hf_processor = self.get_hf_processor()
-        tokenizer = hf_processor.tokenizer
-
-        max_num_patches = hf_processor.max_dynamic_patch
-        # we need +1 here because max_dynamic_patch in config doesn't
-        # include the thumbnail patch
-        tile_pos_identifiers = [
-            f"<tile_{i+1}>" for i in range(max_num_patches)
-        ]
-        if hf_processor.use_thumbnail and max_num_patches != 1:
-            tile_pos_identifiers += ["<tile_global_thumbnail>"]
-
-        # "<Image><tile" is tokenized as ["<Image", "><", "tile"]
-        # so we include <tile_1> in the start_str
-        start_str = "<Image>" + tile_pos_identifiers.pop(0)
-        end_str = "</Image>"
-        start_token_len = len(tokenizer.encode(start_str))
-        end_token_len = len(tokenizer.encode(end_str))
-        tile_token_len = sum(
-            len(tokenizer.encode(identifier))
-            for identifier in tile_pos_identifiers)
-        non_image_tokens_num = start_token_len + end_token_len + tile_token_len
-        return super().get_max_image_tokens() + non_image_tokens_num
 
 
 class NVLMDummyInputsBuilder(InternVLDummyInputsBuilder[NVLMProcessingInfo]):
 
-    def get_dummy_processor_inputs(
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        num_images = mm_counts.get("image", 0)
+
+        # The newline is necessary to separate ">" of the current item
+        # and "<" of the next item
+        return "<image>\n" * num_images
+
+    def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    ) -> MultiModalDataDict:
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
         num_images = mm_counts.get("image", 0)
 
-        mm_data = {
+        return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
                                    num_images=num_images)
         }
 
-        return ProcessorInputs(
-            # The newline is necessary to separate ">" of the current item
-            # and "<" of the next item
-            prompt_text="<image>\n" * num_images,
-            mm_data=mm_data,
-        )
-
 
 class NVLMMultiModalProcessor(InternVLMultiModalProcessor[NVLMProcessingInfo]):
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
         if "image_num_patches" in out_mm_kwargs:
@@ -170,12 +149,9 @@ class NVLMMultiModalProcessor(InternVLMultiModalProcessor[NVLMProcessingInfo]):
             if num_patches is not None:
                 assert isinstance(num_patches, int)
 
-            return PromptReplacementDetails(
-                full=hf_processor.get_image_repl_full(feature_size,
-                                                      num_patches) + "\n",
-                features=hf_processor.get_image_repl_features(
-                    feature_size, num_patches) + "\n",
-            )
+            repl = hf_processor.get_image_repl(feature_size, num_patches)
+
+            return PromptUpdateDetails.select_text(repl.full + "\n", IMG_PAD)
 
         # See note in dummy data regarding why we have the extra newline
         return [

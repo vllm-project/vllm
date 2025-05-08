@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """A CPU worker class."""
+import os
 from typing import Dict, List, Optional, Set, Tuple, Type
 
 import torch
@@ -53,8 +54,11 @@ class CPUCacheEngine:
 
         if cache_config.cache_dtype == "auto":
             self.dtype = model_config.dtype
+        elif cache_config.cache_dtype in ["fp8", "fp8_e5m2"]:
+            self.dtype = torch.float8_e5m2
         else:
-            self.dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
+            raise NotImplementedError(f"Unsupported KV cache type "
+                                      f"{cache_config.cache_dtype}.")
 
         # Get attention backend.
         self.attn_backend = get_attn_backend(
@@ -63,6 +67,7 @@ class CPUCacheEngine:
             cache_config.cache_dtype,
             self.block_size,
             self.model_config.is_attention_free,
+            use_mla=self.model_config.use_mla,
         )
 
         # Initialize the cache.
@@ -102,7 +107,7 @@ class CPUCacheEngine:
         num_layers = model_config.get_num_layers(parallel_config)
 
         key_cache_block = block_size * num_heads * head_size
-        value_cache_block = key_cache_block
+        value_cache_block = key_cache_block if not model_config.use_mla else 0
         total = num_layers * (key_cache_block + value_cache_block)
         if cache_dtype == "auto":
             dtype = model_config.dtype
@@ -135,6 +140,8 @@ class CPUWorker(LocalOrDistributedWorkerBase):
 
         self.local_rank = local_rank
         self.rank = rank
+        vllm_config.parallel_config.rank = rank
+
         self.distributed_init_method = distributed_init_method
 
         self.is_driver_worker = is_driver_worker
@@ -213,6 +220,10 @@ class CPUWorker(LocalOrDistributedWorkerBase):
             ret = torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
             if ret:
                 logger.info(ret)
+
+        # Note: unique identifier for creating allreduce shared memory
+        os.environ["VLLM_DIST_IDENT"] = self.distributed_init_method.split(
+            ":")[-1]
         self.device = torch.device("cpu")
         self.init_distributed_environment()
         # Set random seed.

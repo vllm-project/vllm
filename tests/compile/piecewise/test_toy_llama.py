@@ -8,7 +8,7 @@ if the config `tractable_init` is set to True. Otherwise, the weights are
 initialized randomly with a fixed seed.
 """
 from dataclasses import dataclass
-from typing import Any, List, Optional, Tuple
+from typing import Any, Optional
 
 import torch
 from torch import nn
@@ -56,14 +56,15 @@ class LlamaConfig:
     random_seed: int = 0
 
     def compute_hash(self) -> str:
-        factors: List[Any] = []
+        factors: list[Any] = []
         for k, v in self.__dict__.items():
             if k == "random_seed":
                 continue
             factors.append((k, v))
         factors.sort()
         import hashlib
-        return hashlib.md5(str(factors).encode()).hexdigest()
+        return hashlib.md5(str(factors).encode(),
+                           usedforsecurity=False).hexdigest()
 
     def __post_init__(self):
         assert self.mlp_size >= self.hidden_size
@@ -174,7 +175,7 @@ class LlamaDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         For tractable computation:
         - if residual is None, the outputs are:

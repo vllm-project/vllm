@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from torch.nn import Module
 
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 
@@ -25,12 +26,12 @@ class NeuronQuantConfig(QuantizationConfig):
         if self.quant_dtype not in SUPPORTED_QUANT_DTYPE_LIST:
             raise ValueError(
                 f"Neuron quantization datatype {self.quant_dtype} is not valid,"
-                f"the quantization datatype should match one of the below types"
-                f"{SUPPORTED_QUANT_DTYPE_LIST}")
+                f" the quantization datatype should match one of the below "
+                f"types {SUPPORTED_QUANT_DTYPE_LIST}")
         self.dequant_dtype = dequant_dtype
         self.quantize_method = quantize_method
 
-    def get_name(self) -> str:
+    def get_name(self) -> QuantizationMethods:
         return "neuron_quant"
 
     def get_supported_act_dtypes(self) -> List[str]:

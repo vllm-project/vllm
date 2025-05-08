@@ -7,22 +7,18 @@ import os
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
-import triton
-import triton.language as tl
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    _normalize_quant_group_shape, scaled_dequantize)
+    scaled_dequantize)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    CUTLASS_BLOCK_FP8_SUPPORTED, CUTLASS_FP8_SUPPORTED, apply_fp8_linear)
+    CUTLASS_BLOCK_FP8_SUPPORTED)
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
+from vllm.utils import direct_register_custom_op
 
 logger = init_logger(__name__)
-
-current_platform_fp8_dtype = (torch.float8_e4m3fnuz
-                              if current_platform.is_rocm() else
-                              torch.float8_e4m3fn)
 
 
 def is_fp8(x: Union[torch.dtype, torch.Tensor]) -> bool:
@@ -31,6 +27,8 @@ def is_fp8(x: Union[torch.dtype, torch.Tensor]) -> bool:
     return x == torch.float8_e4m3fn or x == torch.float8_e4m3fnuz
 
 
+# TODO fix ROCm->Triton custom path:
+#  https://github.com/vllm-project/vllm/issues/14397
 def apply_w8a8_block_fp8_linear(
     input: torch.Tensor,
     weight: torch.Tensor,
@@ -48,6 +46,7 @@ def apply_w8a8_block_fp8_linear(
     shape_supported_by_cutlass = (weight.shape[0] % 128 == 0
                                   and weight.shape[1] % 128 == 0)
     if current_platform.is_rocm():
+        # TODO this is never used, as cutlass_block_fp8_supported is False
         scale_a_shape = ((input_2d.shape[-1] // block_size[1], ) +
                          input_2d.shape[:-1])[::-1]
         scale_b_shape = (weight_scale.view(-1, 1)
@@ -81,46 +80,23 @@ def apply_w8a8_block_fp8_linear(
     return output.to(dtype=input.dtype).view(*output_shape)
 
 
-# Unify the interface between `apply_w8a8_block_fp8_linear` and
-# `apply_fp8_linear`
-# NOTE(lucas): this is quite messy, we should think through this more formally
-def apply_fp8_linear_generic(
+def apply_w8a8_block_fp8_linear_fake(
     input: torch.Tensor,
     weight: torch.Tensor,
+    block_size: List[int],
     weight_scale: torch.Tensor,
-    input_group_shape: Tuple[int, int],
-    weight_group_shape: Tuple[int, int],
-    input_scale: Optional[torch.Tensor] = None,  # static scale if one
-    cutlass_fp8_supported: bool = CUTLASS_FP8_SUPPORTED,
-    cutlass_block_fp8_supported: bool = CUTLASS_BLOCK_FP8_SUPPORTED,
+    input_scale: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    # View input as 2D matrix for fp8 methods
-    input = input.view(-1, input.shape[-1])
+    output_shape = [*input.shape[:-1], weight.shape[0]]
+    return torch.empty(output_shape, dtype=input.dtype, device=input.device)
 
-    weight_group_shape = _normalize_quant_group_shape(\
-        weight, weight_group_shape)
-    input_group_shape = _normalize_quant_group_shape(input, input_group_shape)
 
-    def is_dim_blocked(dim, shape, group_shape):
-        return group_shape < shape[dim] and group_shape > 1
-
-    if is_dim_blocked(0, weight.shape, weight_group_shape[0])\
-     and is_dim_blocked(1, weight.shape, weight_group_shape[1]) and\
-     input_group_shape == (1, weight_group_shape[1]):
-        return apply_w8a8_block_fp8_linear(
-            input,
-            weight,
-            list(weight_group_shape),
-            weight_scale,
-            cutlass_block_fp8_supported=cutlass_block_fp8_supported)
-    else:
-        # Despite having linear in the it doesn't conform to
-        # `torch.nn.functional.linear` which is defined as `input @ weight.T`
-        # so we explicitly transpose the weight matrix here
-        return apply_fp8_linear(input, weight.T, weight_scale.T,
-                    cutlass_fp8_supported=cutlass_fp8_supported,
-                         use_per_token_if_dynamic=\
-                             (input_group_shape == (1, input.shape[1])))
+direct_register_custom_op(
+    op_name="apply_w8a8_block_fp8_linear",
+    op_func=apply_w8a8_block_fp8_linear,
+    mutates_args=[],
+    fake_impl=apply_w8a8_block_fp8_linear_fake,
+)
 
 
 def input_to_float8(
@@ -129,9 +105,7 @@ def input_to_float8(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """This function quantizes input values to float8 values "
     "with tensor-wise quantization."""
-    if dtype is None:
-        dtype = (torch.float8_e4m3fnuz
-                 if current_platform.is_rocm() else torch.float8_e4m3fn)
+    dtype = current_platform.fp8_dtype() if dtype is None else dtype
     finfo = torch.finfo(dtype)
     min_val, max_val = x.aminmax()
     amax = torch.maximum(min_val.abs(), max_val.abs()).clamp(min=1e-12)
@@ -162,6 +136,9 @@ def _per_token_group_quant_fp8(
     y_q_ptr,
     y_s_ptr,
     group_size,
+    # Num columns of y
+    y_num_columns,
+    y_row_stride,
     # Avoid to divide zero
     eps,
     # Information for float8
@@ -174,9 +151,14 @@ def _per_token_group_quant_fp8(
     quantization on a tensor.
     This function converts the tensor values into float8 values.
     """
+    groups_per_row = y_num_columns // group_size
+
     # Map the program id to the row of X and Y it should compute.
     g_id = tl.program_id(0)
-    y_ptr += g_id * group_size
+    row = g_id // groups_per_row
+    row_g_id = g_id % groups_per_row
+
+    y_ptr += (row * y_row_stride) + (row_g_id * group_size)
     y_q_ptr += g_id * group_size
     y_s_ptr += g_id
 
@@ -202,6 +184,7 @@ def _per_token_group_quant_fp8_colmajor(
     group_size,
     # Num columns of y
     y_num_columns,
+    y_row_stride,
     # Stride from one column to the next of y_s
     y_s_col_stride,
     # Avoid to divide zero
@@ -216,9 +199,14 @@ def _per_token_group_quant_fp8_colmajor(
     quantization on a tensor.
     This function converts the tensor values into float8 values.
     """
+    groups_per_row = y_num_columns // group_size
+
     # Map the program id to the row of X and Y it should compute.
     g_id = tl.program_id(0)
-    y_ptr += g_id * group_size
+    row = g_id // groups_per_row
+    row_g_id = g_id % groups_per_row
+
+    y_ptr += (row * y_row_stride) + (row_g_id * group_size)
     y_q_ptr += g_id * group_size
 
     # Convert g_id the flattened block coordinate to 2D so we can index
@@ -261,13 +249,11 @@ def per_token_group_quant_fp8(
         Tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the
         scaling factor for quantization.
     """
-    if dtype is None:
-        dtype = (torch.float8_e4m3fnuz
-                 if current_platform.is_rocm() else torch.float8_e4m3fn)
+    dtype = current_platform.fp8_dtype() if dtype is None else dtype
     assert (x.shape[-1] % group_size == 0), (
         f"the last dimension of `x` {x.shape[-1]} must be divisible "
         f"by `group_size` {group_size}")
-    assert x.is_contiguous(), "`x` must be contiguous"
+    assert x.stride(-1) == 1, "`x` groups must be contiguous"
 
     finfo = torch.finfo(dtype)
     fp8_min = finfo.min
@@ -295,6 +281,7 @@ def per_token_group_quant_fp8(
             x_s,
             group_size,
             x.shape[1],
+            x.stride(0),
             x_s.stride(1),
             eps,
             fp8_min=fp8_min,
@@ -309,6 +296,8 @@ def per_token_group_quant_fp8(
             x_q,
             x_s,
             group_size,
+            x.shape[1],
+            x.stride(0),
             eps,
             fp8_min=fp8_min,
             fp8_max=fp8_max,
@@ -477,7 +466,7 @@ def w8a8_block_fp8_matmul(
     assert triton.cdiv(A.shape[-1], block_k) == As.shape[-1]
     M = A.numel() // A.shape[-1]
 
-    assert B.ndim == 2 and B.is_contiguous() and Bs.ndim == 2
+    assert B.ndim == 2 and Bs.ndim == 2
     N, K = B.shape
     assert triton.cdiv(N, block_n) == Bs.shape[0]
     assert triton.cdiv(K, block_k) == Bs.shape[1]

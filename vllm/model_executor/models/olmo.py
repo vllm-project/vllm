@@ -22,13 +22,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only OLMo model compatible with HuggingFace weights."""
-from typing import Iterable, List, Optional, Set, Tuple, Union
+from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
 from transformers import OlmoConfig
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -39,7 +39,6 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -119,15 +118,13 @@ class OlmoAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         if self.clip_qkv is not None:
             qkv.clamp_(min=-self.clip_qkv, max=self.clip_qkv)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -212,14 +209,11 @@ class OlmoDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         # Attention block.
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(positions, hidden_states, kv_cache,
-                                       attn_metadata)
+        hidden_states = self.self_attn(positions, hidden_states)
         hidden_states = hidden_states + residual
 
         # MLP block.
@@ -263,8 +257,6 @@ class OlmoModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
@@ -281,14 +273,9 @@ class OlmoModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
 
         # Apply blocks one-by-one.
-        for i in range(self.start_layer, self.end_layer):
+        for layer in self.layers[self.start_layer:self.end_layer]:
             # shape: (batch_size, seq_len, d_model)
-            hidden_states = self.layers[i](
-                positions,
-                hidden_states,
-                kv_caches[i - self.start_layer],
-                attn_metadata,
-            )
+            hidden_states = layer(positions, hidden_states)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
@@ -321,7 +308,6 @@ class OlmoForCausalLM(nn.Module, SupportsPP):
                 quant_config=quant_config,
             )
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
@@ -332,16 +318,12 @@ class OlmoForCausalLM(nn.Module, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.model(
             input_ids=input_ids,
             positions=positions,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
         )
@@ -355,14 +337,6 @@ class OlmoForCausalLM(nn.Module, SupportsPP):
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:

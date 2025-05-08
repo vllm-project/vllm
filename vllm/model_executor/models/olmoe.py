@@ -12,13 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only OLMoE model compatible with HuggingFace weights."""
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, Iterable, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -31,7 +31,6 @@ from vllm.model_executor.layers.linear import (QKVParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -39,7 +38,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP
-from .utils import (is_pp_missing_parameter,
+from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
@@ -80,7 +79,8 @@ class OlmoeMoE(nn.Module):
                                 reduce_results=True,
                                 renormalize=False,
                                 quant_config=quant_config,
-                                tp_size=tp_size)
+                                tp_size=tp_size,
+                                prefix=f"{prefix}.experts")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.
@@ -168,14 +168,12 @@ class OlmoeAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.q_norm(q.contiguous()), self.k_norm(k.contiguous())
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -214,6 +212,7 @@ class OlmoeDecoderLayer(nn.Module):
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             quant_config=quant_config,
+            prefix=f"{prefix}.mlp",
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=1e-5)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=1e-5)
@@ -222,8 +221,6 @@ class OlmoeDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
         # Self Attention
@@ -237,8 +234,6 @@ class OlmoeDecoderLayer(nn.Module):
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
         )
 
         # Fully Connected
@@ -258,9 +253,8 @@ class OlmoeModel(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
-        self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
-
+        self.config = config
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
@@ -283,8 +277,6 @@ class OlmoeModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
@@ -299,13 +291,10 @@ class OlmoeModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for i in range(self.start_layer, self.end_layer):
-            layer = self.layers[i]
+        for layer in self.layers[self.start_layer:self.end_layer]:
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
-                kv_caches[i - self.start_layer],
-                attn_metadata,
                 residual,
             )
 
@@ -317,59 +306,6 @@ class OlmoeModel(nn.Module):
 
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
-
-
-class OlmoeForCausalLM(nn.Module, SupportsPP):
-
-    fall_back_to_pt_during_load = False
-
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
-        config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
-        self.config = config
-        self.quant_config = quant_config
-        self.model = OlmoeModel(vllm_config=vllm_config,
-                                prefix=maybe_prefix(prefix, "model"))
-        self.lm_head = ParallelLMHead(config.vocab_size,
-                                      config.hidden_size,
-                                      quant_config=quant_config)
-        self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = get_sampler()
-
-        self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors)
-
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, intermediate_tensors,
-                                   inputs_embeds)
-        return hidden_states
-
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
-        return logits
-
-    def sample(
-        self,
-        logits: Optional[torch.Tensor],
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
@@ -393,8 +329,6 @@ class OlmoeForCausalLM(nn.Module, SupportsPP):
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
@@ -451,11 +385,10 @@ class OlmoeForCausalLM(nn.Module, SupportsPP):
                             ".kv_scale", ".attn.kv_scale")
                         if remapped_kv_scale_name not in params_dict:
                             logger.warning_once(
-                                "Found kv scale in the checkpoint "
-                                f"(e.g. {name}), but not found the expected "
-                                f"name in the model "
-                                f"(e.g. {remapped_kv_scale_name}). "
-                                "kv-scale is not loaded.")
+                                "Found kv scale in the checkpoint (e.g. %s), but not found the expected name in the model (e.g. %s). kv-scale is not loaded.",  # noqa: E501
+                                name,
+                                remapped_kv_scale_name,
+                            )
                             continue
                         else:
                             name = remapped_kv_scale_name
@@ -466,3 +399,50 @@ class OlmoeForCausalLM(nn.Module, SupportsPP):
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
+
+
+class OlmoeForCausalLM(nn.Module, SupportsPP):
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        self.config = config
+        self.quant_config = quant_config
+        self.model = OlmoeModel(vllm_config=vllm_config,
+                                prefix=maybe_prefix(prefix, "model"))
+        self.lm_head = ParallelLMHead(config.vocab_size,
+                                      config.hidden_size,
+                                      quant_config=quant_config)
+        self.logits_processor = LogitsProcessor(config.vocab_size)
+
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors)
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        hidden_states = self.model(input_ids, positions, intermediate_tensors,
+                                   inputs_embeds)
+        return hidden_states
+
+    def compute_logits(self, hidden_states: torch.Tensor,
+                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        logits = self.logits_processor(self.lm_head, hidden_states,
+                                       sampling_metadata)
+        return logits
+
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=["rotary_emb.inv_freq"],
+        )
+        return loader.load_weights(weights)

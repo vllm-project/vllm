@@ -50,11 +50,15 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
 
     def set_include_gpu_probs_tensor(self) -> None:
         # Need include_gpu_probs_tensor for MultiStepWorker
-        self.model_runner.model.sampler.include_gpu_probs_tensor = True
+        self.model_runner.sampler.include_gpu_probs_tensor = True
+        if hasattr(self.model_runner.model, "sampler"):
+            (self.model_runner.model.sampler.include_gpu_probs_tensor) = True
 
     def set_should_modify_greedy_probs_inplace(self) -> None:
-        self.model_runner.model.sampler.should_modify_greedy_probs_inplace = (
-            True)
+        self.model_runner.sampler.should_modify_greedy_probs_inplace = True
+        if hasattr(self.model_runner.model, "sampler"):
+            (self.model_runner.model.sampler.should_modify_greedy_probs_inplace
+             ) = True
 
     @torch.inference_mode()
     def sampler_output(
@@ -96,12 +100,16 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
             # TODO: Remove this branch once DraftModelRunner supports TP>1
             # and other restrictions that are part of DraftModelRunner's
             # supports_gpu_multi_step(..)
+            if expanded_request.previous_hidden_states is not None:
+                self.worker.model_runner.return_hidden_states = True
             for _ in range(sample_len):
                 model_output: List[SamplerOutput] = self.worker.execute_model(
                     execute_model_req=expanded_request)
                 assert (len(model_output) == 1
                         ), "composing multistep workers not supported"
                 model_output = model_output[0]
+                self._maybe_update_previous_hidden_states(
+                    model_output, expanded_request)
 
                 self._append_new_tokens(
                     model_output, expanded_request.seq_group_metadata_list,
@@ -114,6 +122,19 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
         filtered_model_outputs = self._filter_model_output(
             model_outputs, indices_of_seq_with_bonus_tokens)
         return filtered_model_outputs, True
+
+    @staticmethod
+    def _maybe_update_previous_hidden_states(
+            model_output: SamplerOutput,
+            expanded_request: ExecuteModelRequest) -> None:
+        """
+        Updates the previous hidden states in an expanded request
+        in-place with the hidden states from the model output. 
+        """
+        if expanded_request.previous_hidden_states is not None:
+            expanded_request.previous_hidden_states = HiddenStates(
+                model_output.hidden_states,
+                expanded_request.seq_group_metadata_list)
 
     @staticmethod
     def _expand_execute_model_request(
@@ -261,7 +282,8 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
                 else:
                     count += 1
 
-                seq.append_token_id(token_id, token_logprob.logprob)
+                seq.append_token_id(token_id, token_logprob.logprob,
+                                    seq_output.output_embed)
                 seq.update_num_computed_tokens(1)
 
     @staticmethod

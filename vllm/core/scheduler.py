@@ -16,8 +16,9 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
-                           SequenceGroupMetadata, SequenceGroupMetadataDelta,
-                           SequenceStage, SequenceStatus)
+                           SequenceGroupBase, SequenceGroupMetadata,
+                           SequenceGroupMetadataDelta, SequenceStage,
+                           SequenceStatus)
 from vllm.utils import Device, PyObjectCache
 
 logger = init_logger(__name__)
@@ -561,7 +562,11 @@ class Scheduler:
         # Only for testing purposes.
         self.swapped.append(seq_group)
 
-    def abort_seq_group(self, request_id: Union[str, Iterable[str]]) -> None:
+    def abort_seq_group(
+        self,
+        request_id: Union[str, Iterable[str]],
+        seq_id_to_seq_group: Optional[Dict[str, SequenceGroupBase]] = None,
+    ) -> None:
         """Aborts a sequence group with the given ID.
 
         Check if the sequence group with the given ID
@@ -573,21 +578,29 @@ class Scheduler:
 
         Args:
             request_id: The ID(s) of the sequence group to abort.
+            seq_id_to_seq_group: helper for groups with n>1
         """
         if isinstance(request_id, str):
             request_id = (request_id, )
         request_ids = set(request_id)
+        seq_id_to_seq_group = seq_id_to_seq_group or {}
         for state_queue in [self.waiting, self.running, self.swapped]:
             aborted_groups: List[SequenceGroup] = []
             for seq_group in state_queue:
-                if not request_ids:
-                    # Using 'break' here may add two extra iterations,
-                    # but is acceptable to reduce complexity.
-                    break
-                if seq_group.request_id in request_ids:
+                # When n>1, seq_group.request_id looks like
+                # foo_parallel_sample_0, while request_ids is just foo, and we
+                # should resolve it as real_request_id to match.
+                if seq_group.request_id in seq_id_to_seq_group:
+                    real_request_id = seq_id_to_seq_group[
+                        seq_group.request_id].group_id
+                else:
+                    real_request_id = seq_group.request_id
+                if real_request_id in request_ids:
                     # Appending aborted group into pending list.
                     aborted_groups.append(seq_group)
-                    request_ids.remove(seq_group.request_id)
+                    # We can't remove real_request_id in request_ids here,
+                    # because there may be other seq groups sharing the same
+                    # real_request_id
             for aborted_group in aborted_groups:
                 # Remove the sequence group from the state queue.
                 state_queue.remove(aborted_group)
@@ -598,6 +611,8 @@ class Scheduler:
                         continue
                     seq.status = SequenceStatus.FINISHED_ABORTED
                     self.free_seq(seq)
+                if aborted_group.request_id in seq_id_to_seq_group:
+                    del seq_id_to_seq_group[aborted_group.request_id]
 
                 self._free_seq_group_cross_attn_blocks(aborted_group)
 
@@ -619,8 +634,8 @@ class Scheduler:
     def get_prefix_cache_hit_rate(self, device: Device) -> float:
         return self.block_manager.get_prefix_cache_hit_rate(device)
 
-    def reset_prefix_cache(self) -> bool:
-        return self.block_manager.reset_prefix_cache()
+    def reset_prefix_cache(self, device: Optional[Device] = None) -> bool:
+        return self.block_manager.reset_prefix_cache(device)
 
     def get_num_unfinished_seq_groups(self) -> int:
         return len(self.waiting) + len(self.running) + len(self.swapped)
@@ -1056,6 +1071,7 @@ class Scheduler:
             )
         ignored_seq_groups: List[SequenceGroup] = []
         seq_groups: List[ScheduledSequenceGroup] = []
+        using_prompt_embeds: bool = False
 
         waiting_queue = self.waiting
 
@@ -1120,6 +1136,15 @@ class Scheduler:
                 for seq in waiting_seqs:
                     seq.status = SequenceStatus.FINISHED_IGNORED
                 ignored_seq_groups.append(seq_group)
+                waiting_queue.popleft()
+                continue
+
+            # We cannot mix sequence groups that use prompt embeds and
+            # those that do not.
+            if len(seq_groups) == 0:
+                using_prompt_embeds = seq_group.uses_prompt_embeds()
+            if using_prompt_embeds != seq_group.uses_prompt_embeds():
+                leftover_waiting_sequences.appendleft(seq_group)
                 waiting_queue.popleft()
                 continue
 
@@ -1280,17 +1305,39 @@ class Scheduler:
 
         # Merge lists
         num_prefill_groups = len(prefills.seq_groups)
+        ignored_seq_groups_for_embeds = list[SequenceGroup]()
         if num_prefill_groups > 0:
             scheduled_seq_groups = prefills.seq_groups
             scheduled_seq_groups.extend(running_scheduled.decode_seq_groups)
+            ignored_seq_groups_for_embeds.clear()
         else:
             scheduled_seq_groups = running_scheduled.decode_seq_groups
+            if len(scheduled_seq_groups) > 0:
+                using_prompt_embeds = scheduled_seq_groups[
+                    0].seq_group.uses_prompt_embeds()
+                ignored_seq_groups_for_embeds.clear()
+                indices_ignored = list[int]()
+                for i, schedule_seq_group in enumerate(scheduled_seq_groups):
+                    if using_prompt_embeds !=\
+                        schedule_seq_group.seq_group.uses_prompt_embeds():
+                        ignored_seq_groups_for_embeds.append(
+                            schedule_seq_group.seq_group)
+                        indices_ignored.append(i)
+                if len(ignored_seq_groups_for_embeds) > 0:
+                    scheduled_seq_groups = [
+                        group for i, group in enumerate(scheduled_seq_groups)
+                        if i not in indices_ignored
+                    ]
+            else:
+                ignored_seq_groups_for_embeds.clear()
+
         scheduled_seq_groups.extend(swapped_in.decode_seq_groups)
 
         blocks_to_copy = running_scheduled.blocks_to_copy
         blocks_to_copy.extend(swapped_in.blocks_to_copy)
 
         ignored_seq_groups = prefills.ignored_seq_groups
+        ignored_seq_groups.extend(ignored_seq_groups_for_embeds)
         ignored_seq_groups.extend(swapped_in.infeasible_seq_groups)
 
         return SchedulerOutputs(
@@ -1581,7 +1628,6 @@ class Scheduler:
                     multi_modal_placeholders=(
                         seq_group.multi_modal_placeholders
                         if scheduler_outputs.num_prefill_groups > 0 else None),
-                    mm_processor_kwargs=seq_group.mm_processor_kwargs,
                     prompt_adapter_request=seq_group.prompt_adapter_request,
                 )
             else:

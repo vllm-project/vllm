@@ -1,14 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import weakref
-from typing import List
 
 import pytest
 
 from vllm import LLM, RequestOutput, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
 
-MODEL_NAME = "facebook/opt-125m"
+MODEL_NAME = "distilbert/distilgpt2"
 
 PROMPTS = [
     "Hello, my name is",
@@ -43,7 +42,7 @@ def llm():
     cleanup_dist_env_and_memory()
 
 
-def assert_outputs_equal(o1: List[RequestOutput], o2: List[RequestOutput]):
+def assert_outputs_equal(o1: list[RequestOutput], o2: list[RequestOutput]):
     assert [o.outputs for o in o1] == [o.outputs for o in o2]
 
 

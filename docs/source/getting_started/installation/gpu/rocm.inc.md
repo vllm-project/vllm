@@ -8,7 +8,7 @@ There are no pre-built wheels for this device, so you must either use the pre-bu
 
 ## Requirements
 
-- GPU: MI200s (gfx90a), MI300 (gfx942), Radeon RX 7900 series (gfx1100)
+- GPU: MI200s (gfx90a), MI300 (gfx942), Radeon RX 7900 series (gfx1100/1101), Radeon RX 9000 series (gfx1200/1201)
 - ROCm 6.3
 
 ## Set up using Python
@@ -31,7 +31,7 @@ Currently, there are no pre-built ROCm wheels.
     ```console
     # Install PyTorch
     $ pip uninstall torch -y
-    $ pip install --no-cache-dir --pre torch --index-url https://download.pytorch.org/whl/rocm6.3
+    $ pip install --no-cache-dir --pre torch --index-url https://download.pytorch.org/whl/nightly/rocm6.3
     ```
 
 1. Install [Triton flash attention for ROCm](https://github.com/ROCm/triton)
@@ -53,9 +53,9 @@ Currently, there are no pre-built ROCm wheels.
     If you see HTTP issue related to downloading packages during building triton, please try again as the HTTP error is intermittent.
     :::
 
-2. Optionally, if you choose to use CK flash attention, you can install [flash attention for ROCm](https://github.com/ROCm/flash-attention/tree/ck_tile)
+2. Optionally, if you choose to use CK flash attention, you can install [flash attention for ROCm](https://github.com/ROCm/flash-attention)
 
-    Install ROCm's flash attention (v2.7.2) following the instructions from [ROCm/flash-attention](https://github.com/ROCm/flash-attention/tree/ck_tile#amd-gpurocm-support)
+    Install ROCm's flash attention (v2.7.2) following the instructions from [ROCm/flash-attention](https://github.com/ROCm/flash-attention#amd-rocm-support)
     Alternatively, wheels intended for vLLM use can be accessed under the releases.
 
     For example, for ROCm 6.3, suppose your gfx arch is `gfx90a`. To get your gfx architecture, run `rocminfo |grep gfx`.
@@ -73,7 +73,22 @@ Currently, there are no pre-built ROCm wheels.
     You might need to downgrade the "ninja" version to 1.10 it is not used when compiling flash-attention-2 (e.g. `pip install ninja==1.10.2.4`)
     :::
 
-3. Build vLLM. For example, vLLM on ROCM 6.3 can be built with the following steps:
+3. If you choose to build AITER yourself to use a certain branch or commit, you can build AITER using the following steps:
+
+    ```console
+    python3 -m pip uninstall -y aiter
+    git clone --recursive https://github.com/ROCm/aiter.git
+    cd aiter
+    git checkout $AITER_BRANCH_OR_COMMIT
+    git submodule sync; git submodule update --init --recursive
+    python3 setup.py develop
+    ```
+
+    :::{note}
+    You will need to config the `$AITER_BRANCH_OR_COMMIT` for your purpose.
+    :::
+
+4. Build vLLM. For example, vLLM on ROCM 6.3 can be built with the following steps:
 
     ```bash
     $ pip install --upgrade pip
@@ -84,7 +99,7 @@ Currently, there are no pre-built ROCm wheels.
     # Install dependencies
     $ pip install --upgrade numba scipy huggingface-hub[cli,hf_transfer] setuptools_scm
     $ pip install "numpy<2"
-    $ pip install -r requirements-rocm.txt
+    $ pip install -r requirements/rocm.txt
 
     # Build vLLM for MI210/MI250/MI300.
     $ export PYTORCH_ROCM_ARCH="gfx90a;gfx942"
@@ -123,7 +138,7 @@ Building the Docker image from source is the recommended way to use vLLM with RO
 
 #### (Optional) Build an image with ROCm software stack
 
-Build a docker image from <gh-file:Dockerfile.rocm_base> which setup ROCm software stack needed by the vLLM.
+Build a docker image from <gh-file:docker/Dockerfile.rocm_base> which setup ROCm software stack needed by the vLLM.
 **This step is optional as this rocm_base image is usually prebuilt and store at [Docker Hub](https://hub.docker.com/r/rocm/vllm-dev) under tag `rocm/vllm-dev:base` to speed up user experience.**
 If you choose to build this rocm_base image yourself, the steps are as follows.
 
@@ -140,12 +155,12 @@ It is important that the user kicks off the docker build using buildkit. Either 
 To build vllm on ROCm 6.3 for MI200 and MI300 series, you can use the default:
 
 ```console
-DOCKER_BUILDKIT=1 docker build -f Dockerfile.rocm_base -t rocm/vllm-dev:base .
+DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.rocm_base -t rocm/vllm-dev:base .
 ```
 
 #### Build an image with vLLM
 
-First, build a docker image from <gh-file:Dockerfile.rocm> and launch a docker container from the image.
+First, build a docker image from <gh-file:docker/Dockerfile.rocm> and launch a docker container from the image.
 It is important that the user kicks off the docker build using buildkit. Either the user put `DOCKER_BUILDKIT=1` as environment variable when calling docker build command, or the user needs to setup buildkit in the docker daemon configuration /etc/docker/daemon.json as follows and restart the daemon:
 
 ```console
@@ -156,10 +171,10 @@ It is important that the user kicks off the docker build using buildkit. Either 
 }
 ```
 
-<gh-file:Dockerfile.rocm> uses ROCm 6.3 by default, but also supports ROCm 5.7, 6.0, 6.1, and 6.2, in older vLLM branches.
+<gh-file:docker/Dockerfile.rocm> uses ROCm 6.3 by default, but also supports ROCm 5.7, 6.0, 6.1, and 6.2, in older vLLM branches.
 It provides flexibility to customize the build of docker image using the following arguments:
 
-- `BASE_IMAGE`: specifies the base image used when running `docker build`. The default value `rocm/vllm-dev:base` is an image published and maintained by AMD. It is being built using <gh-file:Dockerfile.rocm_base>
+- `BASE_IMAGE`: specifies the base image used when running `docker build`. The default value `rocm/vllm-dev:base` is an image published and maintained by AMD. It is being built using <gh-file:docker/Dockerfile.rocm_base>
 - `USE_CYTHON`: An option to run cython compilation on a subset of python files upon docker build
 - `BUILD_RPD`: Include RocmProfileData profiling tool in the image
 - `ARG_PYTORCH_ROCM_ARCH`: Allows to override the gfx architecture values from the base docker image
@@ -169,13 +184,13 @@ Their values can be passed in when running `docker build` with `--build-arg` opt
 To build vllm on ROCm 6.3 for MI200 and MI300 series, you can use the default:
 
 ```console
-DOCKER_BUILDKIT=1 docker build -f Dockerfile.rocm -t vllm-rocm .
+DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.rocm -t vllm-rocm .
 ```
 
 To build vllm on ROCm 6.3 for Radeon RX7900 series (gfx1100), you should pick the alternative base image:
 
 ```console
-DOCKER_BUILDKIT=1 docker build --build-arg BASE_IMAGE="rocm/vllm-dev:navi_base" -f Dockerfile.rocm -t vllm-rocm .
+DOCKER_BUILDKIT=1 docker build --build-arg BASE_IMAGE="rocm/vllm-dev:navi_base" -f docker/Dockerfile.rocm -t vllm-rocm .
 ```
 
 To run the above docker image `vllm-rocm`, use the below command:

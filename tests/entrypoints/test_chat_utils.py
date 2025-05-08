@@ -10,21 +10,27 @@ from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (_try_extract_ast, load_chat_template,
                                          parse_chat_messages,
                                          parse_chat_messages_futures,
-                                         resolve_chat_template_content_format)
+                                         resolve_chat_template_content_format,
+                                         resolve_hf_chat_template)
 from vllm.entrypoints.llm import apply_hf_chat_template
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.utils import encode_image_base64
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 
+from ..models.registry import HF_EXAMPLE_MODELS
 from ..utils import VLLM_PATH
 
 EXAMPLES_DIR = VLLM_PATH / "examples"
 
 PHI3V_MODEL_ID = "microsoft/Phi-3.5-vision-instruct"
 ULTRAVOX_MODEL_ID = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
+QWEN2AUDIO_MODEL_ID = "Qwen/Qwen2-Audio-7B-Instruct"
 QWEN2VL_MODEL_ID = "Qwen/Qwen2-VL-2B-Instruct"
+QWEN25VL_MODEL_ID = "Qwen/Qwen2.5-VL-3B-Instruct"
 MLLAMA_MODEL_ID = "meta-llama/Llama-3.2-11B-Vision-Instruct"
 LLAMA_GUARD_MODEL_ID = "meta-llama/Llama-Guard-3-1B"
+HERMES_MODEL_ID = "NousResearch/Hermes-3-Llama-3.1-8B"
+MISTRAL_MODEL_ID = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
 
 
 @pytest.fixture(scope="function")
@@ -34,7 +40,7 @@ def phi3v_model_config():
                        tokenizer=PHI3V_MODEL_ID,
                        tokenizer_mode="auto",
                        trust_remote_code=True,
-                       dtype="bfloat16",
+                       dtype="auto",
                        seed=0,
                        limit_mm_per_prompt={
                            "image": 2,
@@ -58,7 +64,7 @@ def mllama_model_config():
                        tokenizer=MLLAMA_MODEL_ID,
                        tokenizer_mode="auto",
                        trust_remote_code=True,
-                       dtype="bfloat16",
+                       dtype="auto",
                        seed=0,
                        limit_mm_per_prompt={
                            "image": 2,
@@ -69,6 +75,30 @@ def mllama_model_config():
 def mllama_tokenizer():
     return TokenizerGroup(
         MLLAMA_MODEL_ID,
+        enable_lora=False,
+        max_num_seqs=5,
+        max_input_length=None,
+    )
+
+
+@pytest.fixture(scope="function")
+def mistral_model_config():
+    return ModelConfig(MISTRAL_MODEL_ID,
+                       task="generate",
+                       tokenizer=MISTRAL_MODEL_ID,
+                       tokenizer_mode="auto",
+                       trust_remote_code=True,
+                       dtype="auto",
+                       seed=0,
+                       limit_mm_per_prompt={
+                           "image": 2,
+                       })
+
+
+@pytest.fixture(scope="module")
+def mistral_tokenizer():
+    return TokenizerGroup(
+        tokenizer_id=MISTRAL_MODEL_ID,
         enable_lora=False,
         max_num_seqs=5,
         max_input_length=None,
@@ -124,6 +154,66 @@ def test_parse_chat_messages_single_image(
         "content": "<|image_1|>\nWhat's in the image?"
     }]
     _assert_mm_data_is_image_input(mm_data, 1)
+
+
+def test_parse_chat_messages_empty_system(
+    mistral_model_config,
+    mistral_tokenizer,
+):
+    # Test string format
+    conversation, _ = parse_chat_messages(
+        [{
+            "role": "system",
+            "content": ""
+        }, {
+            "role": "user",
+            "content": [{
+                "type": "text",
+                "text": "Who are you?"
+            }]
+        }],
+        mistral_model_config,
+        mistral_tokenizer,
+        content_format="string",
+    )
+    assert conversation == [{
+        "role": "system",
+        "content": ""
+    }, {
+        "role": "user",
+        "content": "Who are you?"
+    }]
+
+    # Test openai format
+    conversation, _ = parse_chat_messages(
+        [{
+            "role": "system",
+            "content": ""
+        }, {
+            "role": "user",
+            "content": [{
+                "type": "text",
+                "text": "Who are you?"
+            }]
+        }],
+        mistral_model_config,
+        mistral_tokenizer,
+        content_format="openai",
+    )
+    assert conversation == [{
+        "role": "system",
+        "content": [{
+            "type": "text",
+            "text": ""
+        }]
+    }, {
+        "role":
+        "user",
+        "content": [{
+            "type": "text",
+            "text": "Who are you?"
+        }]
+    }]
 
 
 @pytest.mark.asyncio
@@ -666,10 +756,10 @@ def test_multimodal_image_parsing_matches_hf(model, image_url):
     # Build a config for the model
     model_config = ModelConfig(model,
                                task="generate",
-                               tokenizer=MLLAMA_MODEL_ID,
+                               tokenizer=model,
                                tokenizer_mode="auto",
                                trust_remote_code=True,
-                               dtype="bfloat16",
+                               dtype="auto",
                                seed=0,
                                limit_mm_per_prompt={
                                    "image": 2,
@@ -677,10 +767,11 @@ def test_multimodal_image_parsing_matches_hf(model, image_url):
 
     # Build the tokenizer group and grab the underlying tokenizer
     tokenizer_group = TokenizerGroup(
-        MLLAMA_MODEL_ID,
+        model,
         enable_lora=False,
         max_num_seqs=5,
         max_input_length=None,
+        trust_remote_code=model_config.trust_remote_code,
     )
     tokenizer = tokenizer_group.tokenizer
 
@@ -702,35 +793,108 @@ def test_multimodal_image_parsing_matches_hf(model, image_url):
     )
 
     vllm_result = apply_hf_chat_template(
+        model_config,
         tokenizer,
         conversation=conversation,
         chat_template=None,
+        tools=None,
         add_generation_prompt=True,
     )
 
     assert hf_result == vllm_result
 
 
-# yapf: disable
 @pytest.mark.parametrize(
-    ("model", "expected_format"),
-    [(PHI3V_MODEL_ID, "string"),
-     (QWEN2VL_MODEL_ID, "openai"),
-     (ULTRAVOX_MODEL_ID, "string"),
-     (MLLAMA_MODEL_ID, "openai"),
-     (LLAMA_GUARD_MODEL_ID, "openai")],
-)
-# yapf: enable
-def test_resolve_content_format_hf_defined(model, expected_format):
+    "model",
+    [
+        QWEN2VL_MODEL_ID,  # tokenizer.chat_template is of type str
+        HERMES_MODEL_ID,  # tokenizer.chat_template is of type dict
+    ])
+@pytest.mark.parametrize("use_tools", [True, False])
+def test_resolve_hf_chat_template(sample_json_schema, model, use_tools):
+    """checks that chat_template is a dict type for HF models."""
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
+    model_info.check_available_online(on_fail="skip")
+
+    model_config = ModelConfig(
+        model,
+        tokenizer=model_info.tokenizer or model,
+        tokenizer_mode=model_info.tokenizer_mode,
+        trust_remote_code=model_info.trust_remote_code,
+        hf_overrides=model_info.hf_overrides,
+    )
+
+    # Build the tokenizer group and grab the underlying tokenizer
     tokenizer_group = TokenizerGroup(
         model,
         enable_lora=False,
         max_num_seqs=5,
         max_input_length=None,
+        trust_remote_code=model_config.trust_remote_code,
     )
     tokenizer = tokenizer_group.tokenizer
 
-    chat_template = tokenizer.chat_template
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "dummy_function_name",
+            "description": "This is a dummy function",
+            "parameters": sample_json_schema
+        }
+    }] if use_tools else None
+
+    # Test detecting the tokenizer's chat_template
+    chat_template = resolve_hf_chat_template(
+        model_config,
+        tokenizer,
+        chat_template=None,
+        tools=tools,
+    )
+    assert isinstance(chat_template, str)
+
+
+# NOTE: Qwen2-Audio default chat template is specially defined inside
+# processor class instead of using `tokenizer_config.json`
+# yapf: disable
+@pytest.mark.parametrize(
+    ("model", "expected_format"),
+    [(PHI3V_MODEL_ID, "string"),
+     (QWEN2VL_MODEL_ID, "openai"),
+     (QWEN25VL_MODEL_ID, "openai"),
+     (ULTRAVOX_MODEL_ID, "string"),
+     (QWEN2AUDIO_MODEL_ID, "openai"),
+     (MLLAMA_MODEL_ID, "openai"),
+     (LLAMA_GUARD_MODEL_ID, "openai")],
+)
+# yapf: enable
+def test_resolve_content_format_hf_defined(model, expected_format):
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
+    model_info.check_available_online(on_fail="skip")
+
+    model_config = ModelConfig(
+        model,
+        tokenizer=model_info.tokenizer or model,
+        tokenizer_mode=model_info.tokenizer_mode,
+        trust_remote_code=model_info.trust_remote_code,
+        hf_overrides=model_info.hf_overrides,
+    )
+
+    tokenizer_group = TokenizerGroup(
+        model,
+        enable_lora=False,
+        max_num_seqs=5,
+        max_input_length=None,
+        trust_remote_code=model_config.trust_remote_code,
+    )
+    tokenizer = tokenizer_group.tokenizer
+
+    # Test detecting the tokenizer's chat_template
+    chat_template = resolve_hf_chat_template(
+        model_config,
+        tokenizer,
+        chat_template=None,
+        tools=None,
+    )
     assert isinstance(chat_template, str)
 
     print("[TEXT]")
@@ -739,7 +903,68 @@ def test_resolve_content_format_hf_defined(model, expected_format):
     print(_try_extract_ast(chat_template))
 
     resolved_format = resolve_chat_template_content_format(
+        model_config,
         None,  # Test detecting the tokenizer's chat_template
+        None,
+        "auto",
+        tokenizer,
+    )
+
+    assert resolved_format == expected_format
+
+
+# yapf: disable
+@pytest.mark.parametrize(
+    ("model", "expected_format"),
+    [("Salesforce/blip2-opt-2.7b", "string"),
+     ("facebook/chameleon-7b", "string"),
+     ("deepseek-ai/deepseek-vl2-tiny", "string"),
+     ("microsoft/Florence-2-base", "string"),
+     ("adept/fuyu-8b", "string"),
+     ("google/paligemma-3b-mix-224", "string"),
+     ("Qwen/Qwen-VL", "string"),
+     ("Qwen/Qwen-VL-Chat", "string")],
+)
+# yapf: enable
+def test_resolve_content_format_fallbacks(model, expected_format):
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
+    model_info.check_available_online(on_fail="skip")
+
+    model_config = ModelConfig(
+        model,
+        tokenizer=model_info.tokenizer or model,
+        tokenizer_mode=model_info.tokenizer_mode,
+        trust_remote_code=model_info.trust_remote_code,
+        hf_overrides=model_info.hf_overrides,
+    )
+
+    tokenizer_group = TokenizerGroup(
+        model_config.tokenizer,
+        enable_lora=False,
+        max_num_seqs=5,
+        max_input_length=None,
+        trust_remote_code=model_config.trust_remote_code,
+    )
+    tokenizer = tokenizer_group.tokenizer
+
+    # Test detecting the tokenizer's chat_template
+    chat_template = resolve_hf_chat_template(
+        model_config,
+        tokenizer,
+        chat_template=None,
+        tools=None,
+    )
+    assert isinstance(chat_template, str)
+
+    print("[TEXT]")
+    print(chat_template)
+    print("[AST]")
+    print(_try_extract_ast(chat_template))
+
+    resolved_format = resolve_chat_template_content_format(
+        model_config,
+        None,  # Test detecting the tokenizer's chat_template
+        None,
         "auto",
         tokenizer,
     )
@@ -752,15 +977,14 @@ def test_resolve_content_format_hf_defined(model, expected_format):
     ("template_path", "expected_format"),
     [("template_alpaca.jinja", "string"),
      ("template_baichuan.jinja", "string"),
-     ("template_blip2.jinja", "string"),
      ("template_chatglm.jinja", "string"),
      ("template_chatglm2.jinja", "string"),
      ("template_chatml.jinja", "string"),
-     ("template_deepseek_vl2.jinja", "string"),
+     ("template_dse_qwen2_vl.jinja", "openai"),
      ("template_falcon_180b.jinja", "string"),
      ("template_falcon.jinja", "string"),
      ("template_inkbot.jinja", "string"),
-     ("template_llava.jinja", "string"),
+     ("template_teleflm.jinja", "string"),
      ("template_vlm2vec.jinja", "openai"),
      ("tool_chat_template_granite_20b_fc.jinja", "string"),
      ("tool_chat_template_hermes.jinja", "string"),
@@ -772,11 +996,18 @@ def test_resolve_content_format_hf_defined(model, expected_format):
 )
 # yapf: enable
 def test_resolve_content_format_examples(template_path, expected_format):
+    model_config = ModelConfig(
+        PHI3V_MODEL_ID,  # Dummy
+        tokenizer=PHI3V_MODEL_ID,  # Dummy
+        trust_remote_code=True,
+    )
+
     tokenizer_group = TokenizerGroup(
-        PHI3V_MODEL_ID,
+        PHI3V_MODEL_ID,  # Dummy
         enable_lora=False,
         max_num_seqs=5,
         max_input_length=None,
+        trust_remote_code=model_config.trust_remote_code,
     )
     dummy_tokenizer = tokenizer_group.tokenizer
     dummy_tokenizer.chat_template = None
@@ -790,7 +1021,9 @@ def test_resolve_content_format_examples(template_path, expected_format):
     print(_try_extract_ast(chat_template))
 
     resolved_format = resolve_chat_template_content_format(
+        model_config,
         chat_template,
+        None,
         "auto",
         dummy_tokenizer,
     )

@@ -18,14 +18,14 @@ from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadataCache
-from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalKwargs, MultiModalPlaceholderMap,
                              MultiModalRegistry)
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
-from vllm.utils import DeviceMemoryProfiler, make_tensor_with_pad
+from vllm.utils import DeviceMemoryProfiler, GiB_bytes, make_tensor_with_pad
 from vllm.worker.model_runner import AttentionMetadata, SamplingMetadata
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
@@ -188,19 +188,10 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
             input_positions.extend(list(positions_range))
 
             if seq_group_metadata.multi_modal_data:
-                # NOTE: mm_data only includes the subset of multi-modal items
+                # NOTE: mm_kwargs only includes the subset of multi-modal items
                 # that intersect with the current prefill positions.
-                mm_data, placeholder_maps = MultiModalPlaceholderMap \
+                mm_kwargs, placeholder_maps = MultiModalPlaceholderMap \
                     .from_seq_group(seq_group_metadata, positions_range)
-
-                if self.runner.mm_registry.has_processor(
-                        self.runner.model_config):
-                    mm_kwargs = mm_data
-                else:
-                    mm_kwargs = self.runner.multi_modal_input_mapper(
-                        mm_data,
-                        seq_group_metadata.mm_processor_kwargs,
-                    )
 
                 multi_modal_kwargs_list.append(mm_kwargs)
 
@@ -404,12 +395,10 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
         # Multi-modal data support
         self.input_registry = input_registry
         self.mm_registry = mm_registry
-        self.multi_modal_input_mapper = mm_registry \
-            .create_input_mapper(model_config)
-        self.mm_registry.init_mm_limits_per_prompt(self.model_config)
 
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
+        self.sampler = get_sampler()
 
         self.sampling_metadata_cache: SamplingMetadataCache = \
               SamplingMetadataCache() \
@@ -422,8 +411,8 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
             self.model = get_model(vllm_config=self.vllm_config)
 
         self.model_memory_usage = m.consumed_memory
-        logger.info("Loading model weights took %.4f GB",
-                    self.model_memory_usage / float(2**30))
+        logger.info("Loading model weights took %.4f GiB",
+                    self.model_memory_usage / GiB_bytes)
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -484,15 +473,6 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
                 multi_modal_placeholders=dummy_data.multi_modal_placeholders)
             seqs.append(seq)
 
-        # Run the model with the dummy inputs.
-        num_layers = self.model_config.get_num_layers(self.parallel_config)
-        # use an empty tensor instead of `None`` to force Dynamo to pass
-        # it by reference, rather by specializing on the value ``None``.
-        # the `dtype` argument does not matter, and we use `float32` as
-        # a placeholder (it has wide hardware support).
-        kv_caches = [
-            torch.tensor([], dtype=torch.float32, device=self.device)
-        ] * num_layers
         finished_requests_ids = [seq.request_id for seq in seqs]
         model_input = self.prepare_model_input(
             seqs, finished_requests_ids=finished_requests_ids)
@@ -502,7 +482,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
                 batch_size=batch_size,
                 dtype=self.model_config.dtype,
                 device=self.device)
-        self.execute_model(model_input, kv_caches, intermediate_tensors)
+        self.execute_model(model_input, None, intermediate_tensors)
         torch.xpu.synchronize()
         return
 
@@ -581,8 +561,6 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
             hidden_or_intermediate_states = model_executable(
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
-                kv_caches=kv_caches,
-                attn_metadata=model_input.attn_metadata,
                 intermediate_tensors=intermediate_tensors,
                 **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs
                                              or {},
@@ -607,7 +585,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
             model_input.async_callback()
 
         # Sample the next token.
-        output: SamplerOutput = self.model.sample(
+        output: SamplerOutput = self.sampler(
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
         )

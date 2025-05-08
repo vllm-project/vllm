@@ -2,22 +2,23 @@
 """Attention backend utils"""
 from collections import defaultdict
 from contextlib import contextmanager
+from dataclasses import dataclass
 from itertools import accumulate
-from typing import TYPE_CHECKING, Any, Dict, List, Tuple, Type, TypeVar, Union
+from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type,
+                    TypeVar, Union)
 
 import numpy as np
 import torch
 
-from vllm import envs
 from vllm.attention import (AttentionMetadata, AttentionMetadataBuilder,
                             AttentionState)
 from vllm.attention.backends.abstract import AttentionType
-from vllm.logger import logging
+from vllm.config import ModelConfig
+from vllm.logger import init_logger
 from vllm.multimodal import MultiModalPlaceholderMap
-from vllm.platforms import current_platform
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
-logger = logging.getLogger(__name__)
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner_base import ModelRunnerBase
@@ -549,7 +550,7 @@ def get_num_prefill_decode_query_kv_tokens(
     based on the attention metadata and the specified attention type.
 
     Args:
-        attn_metadata (FlashAttentionMetadata): Attention Metadata object.
+        attn_metadata (AttentionMetadata): Attention Metadata object.
         attn_type (AttentionType): The type of attention being used.
     Returns:
         Tuple[int, int, int]: A tuple containing three integers:
@@ -587,28 +588,22 @@ def get_num_prefill_decode_query_kv_tokens(
             num_decode_query_tokens)
 
 
-def get_flash_attn_version():
-    try:
-        from vllm.vllm_flash_attn.flash_attn_interface import (
-            fa_version_unsupported_reason, is_fa_version_supported)
+@dataclass
+class MLADims:
+    q_lora_rank: Optional[int]
+    kv_lora_rank: int
+    qk_nope_head_dim: int
+    qk_rope_head_dim: int
+    v_head_dim: int
 
-        # if hopper default to FA3, otherwise stick to FA2 for now
-        # TODO(lucas): profile FA3 on ampere to see if it makes sense to
-        #  use FA3 as default for both
-        if current_platform.get_device_capability()[0] >= 9:
-            fa_version = 3 if is_fa_version_supported(3) else 2
-        else:
-            fa_version = 2
 
-        if envs.VLLM_FLASH_ATTN_VERSION is not None:
-            assert envs.VLLM_FLASH_ATTN_VERSION in [2, 3]
-            fa_version = envs.VLLM_FLASH_ATTN_VERSION
+def get_mla_dims(model_config: ModelConfig) -> MLADims:
+    hf_text_config = model_config.hf_text_config
 
-        if not is_fa_version_supported(fa_version):
-            logger.error("Cannot use FA version %d is not supported due to %s",
-                         fa_version, fa_version_unsupported_reason(fa_version))
-
-        assert is_fa_version_supported(fa_version)
-        return fa_version
-    except (ImportError, AssertionError):
-        return None
+    return MLADims(
+        q_lora_rank=getattr(hf_text_config, "q_lora_rank", None),
+        kv_lora_rank=hf_text_config.kv_lora_rank,
+        qk_nope_head_dim=hf_text_config.qk_nope_head_dim,
+        qk_rope_head_dim=hf_text_config.qk_rope_head_dim,
+        v_head_dim=hf_text_config.v_head_dim,
+    )

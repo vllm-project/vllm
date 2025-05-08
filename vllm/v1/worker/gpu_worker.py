@@ -2,32 +2,36 @@
 """A GPU worker class."""
 import gc
 import os
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Optional
 
 import torch
 import torch.distributed
 import torch.nn as nn
 
 import vllm.envs as envs
-from vllm.config import ParallelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.device_allocator.cumem import CuMemAllocator
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
+from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
+from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
+from vllm.sequence import IntermediateTensors
 from vllm.utils import GiB_bytes
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
-    from vllm.v1.core.scheduler_output import SchedulerOutput
+    from vllm.v1.core.sched.output import SchedulerOutput
 
 
 class Worker(WorkerBase):
@@ -52,6 +56,9 @@ class Worker(WorkerBase):
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
 
+        # Buffers saved before sleep
+        self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
+
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
         if envs.VLLM_TORCH_PROFILER_DIR:
@@ -71,6 +78,15 @@ class Worker(WorkerBase):
 
     def sleep(self, level: int = 1) -> None:
         free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
+
+        # Save the buffers before level 2 sleep
+        if level == 2:
+            model = self.model_runner.model
+            self._sleep_saved_buffers = {
+                name: buffer.cpu().clone()
+                for name, buffer in model.named_buffers()
+            }
+
         allocator = CuMemAllocator.get_instance()
         allocator.sleep(offload_tags=("weights", ) if level == 1 else tuple())
         free_bytes_after_sleep, total = torch.cuda.mem_get_info()
@@ -82,9 +98,17 @@ class Worker(WorkerBase):
             "%.2f GiB memory is still in use.", freed_bytes / GiB_bytes,
             used_bytes / GiB_bytes)
 
-    def wake_up(self) -> None:
+    def wake_up(self, tags: Optional[list[str]] = None) -> None:
         allocator = CuMemAllocator.get_instance()
-        allocator.wake_up()
+        allocator.wake_up(tags)
+
+        # Restore the buffers after level 2 sleep
+        if len(self._sleep_saved_buffers):
+            model = self.model_runner.model
+            for name, buffer in model.named_buffers():
+                if name in self._sleep_saved_buffers:
+                    buffer.data.copy_(self._sleep_saved_buffers[name].data)
+            self._sleep_saved_buffers = {}
 
     def init_device(self):
         if self.device_config.device.type == "cuda":
@@ -109,7 +133,7 @@ class Worker(WorkerBase):
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
-        init_worker_distributed_environment(self.parallel_config, self.rank,
+        init_worker_distributed_environment(self.vllm_config, self.rank,
                                             self.distributed_init_method,
                                             self.local_rank)
         # Set random seed.
@@ -119,6 +143,12 @@ class Worker(WorkerBase):
         self.model_runner: GPUModelRunner = GPUModelRunner(
             self.vllm_config, self.device)
 
+        if self.rank == 0:
+            # If usage stat is enabled, collect relevant info.
+            report_usage_stats(self.vllm_config)
+
+    # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
+    # to hijack tensor allocation.
     def load_model(self) -> None:
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CuMemAllocator.get_instance()
@@ -141,9 +171,10 @@ class Worker(WorkerBase):
         Then, it calculate the free memory that can be used for KV cache in
         bytes.
 
-        .. tip::
-            You may limit the usage of GPU memory
-            by adjusting the `gpu_memory_utilization` parameter.
+        :::{tip}
+        You may limit the usage of GPU memory
+        by adjusting the `gpu_memory_utilization` parameter.
+        :::
         """
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
@@ -182,12 +213,11 @@ class Worker(WorkerBase):
 
         return int(available_kv_cache_memory)
 
-    def get_kv_cache_spec(self) -> KVCacheSpec:
+    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
 
-    def initialize_cache(self, kv_cache_configs: List[KVCacheConfig]) -> None:
+    def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
-        kv_cache_config = kv_cache_configs[self.rank]
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CuMemAllocator.get_instance()
             context = allocator.use_memory_pool(tag="kv_cache")
@@ -212,6 +242,19 @@ class Worker(WorkerBase):
             self.model_runner._dummy_run(size)
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model()
+
+        # Warm up sampler and preallocate memory buffer for logits and other
+        # sampling related tensors of max possible shape to avoid memory
+        # fragmentation issue.
+        # NOTE: This is called after `capture_model` on purpose to prevent
+        # memory buffers from being cleared by `torch.cuda.empty_cache`.
+        if get_pp_group().is_last_rank:
+            max_num_reqs = min(self.scheduler_config.max_num_seqs,
+                               self.scheduler_config.max_num_batched_tokens)
+            self.model_runner._dummy_sampler_run(
+                hidden_states=self.model_runner._dummy_run(
+                    num_tokens=max_num_reqs))
+
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
@@ -224,8 +267,23 @@ class Worker(WorkerBase):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> Optional[ModelRunnerOutput]:
-        output = self.model_runner.execute_model(scheduler_output)
-        return output if self.rank == 0 else None
+        intermediate_tensors = None
+        if not get_pp_group().is_first_rank:
+            intermediate_tensors = IntermediateTensors(
+                get_pp_group().recv_tensor_dict(
+                    all_gather_group=get_tp_group()))
+
+        output = self.model_runner.execute_model(scheduler_output,
+                                                 intermediate_tensors)
+
+        if not get_pp_group().is_last_rank:
+            assert isinstance(output, IntermediateTensors)
+            get_pp_group().send_tensor_dict(output.tensors,
+                                            all_gather_group=get_tp_group())
+            return None
+
+        assert isinstance(output, ModelRunnerOutput)
+        return output if self.is_driver_worker else None
 
     def profile(self, is_start: bool = True):
         if self.profiler is None:
@@ -235,21 +293,48 @@ class Worker(WorkerBase):
         else:
             self.profiler.stop()
 
+    def execute_dummy_batch(self) -> None:
+        self.model_runner._dummy_run(1)
+
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
+
+    def remove_lora(self, lora_id: int) -> bool:
+        return self.model_runner.remove_lora(lora_id)
+
+    def list_loras(self) -> set[int]:
+        return self.model_runner.list_loras()
+
+    def pin_lora(self, lora_id: int) -> bool:
+        return self.model_runner.pin_lora(lora_id)
 
     def check_health(self) -> None:
         # worker will always be healthy as long as it's running.
         return
 
+    def save_sharded_state(
+        self,
+        path: str,
+        pattern: Optional[str] = None,
+        max_size: Optional[int] = None,
+    ) -> None:
+        from vllm.model_executor.model_loader import ShardedStateLoader
+        ShardedStateLoader.save_model(
+            self.model_runner.model,
+            path,
+            pattern=pattern,
+            max_size=max_size,
+        )
+
 
 def init_worker_distributed_environment(
-    parallel_config: ParallelConfig,
+    vllm_config: VllmConfig,
     rank: int,
     distributed_init_method: Optional[str] = None,
     local_rank: int = -1,
 ) -> None:
     """Initialize the distributed environment."""
+    parallel_config = vllm_config.parallel_config
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 
     init_distributed_environment(parallel_config.world_size, rank,
@@ -257,6 +342,8 @@ def init_worker_distributed_environment(
 
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
+
+    ensure_kv_transfer_initialized(vllm_config)
 
 
 def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
@@ -275,5 +362,5 @@ def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
             raise ValueError(
                 "Bfloat16 is only supported on GPUs with compute capability "
                 f"of at least 8.0. Your {gpu_name} GPU {compute_str}. "
-                "You can use float16 instead by explicitly setting the"
+                "You can use float16 instead by explicitly setting the "
                 "`dtype` flag in CLI, for example: --dtype=half.")

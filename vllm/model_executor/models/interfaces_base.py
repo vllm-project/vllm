@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import (TYPE_CHECKING, List, Optional, Protocol, Type, Union,
-                    overload, runtime_checkable)
+from typing import (TYPE_CHECKING, Optional, Protocol, Type, Union, overload,
+                    runtime_checkable)
 
 import torch
 import torch.nn as nn
@@ -11,10 +11,8 @@ from vllm.logger import init_logger
 from vllm.utils import supports_kw
 
 if TYPE_CHECKING:
-    from vllm.attention import AttentionMetadata
     from vllm.config import VllmConfig
     from vllm.model_executor.layers.pooler import PoolerOutput
-    from vllm.model_executor.layers.sampler import SamplerOutput
     from vllm.model_executor.pooling_metadata import PoolingMetadata
     from vllm.model_executor.sampling_metadata import SamplingMetadata
 
@@ -46,8 +44,6 @@ class VllmModel(Protocol[T_co]):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: "AttentionMetadata",
     ) -> T_co:
         ...
 
@@ -62,7 +58,7 @@ def _check_vllm_model_forward(model: Union[Type[object], object]) -> bool:
     if not callable(model_forward):
         return False
 
-    vllm_kws = ("input_ids", "positions", "kv_caches", "attn_metadata")
+    vllm_kws = ("input_ids", "positions")
     missing_kws = tuple(kw for kw in vllm_kws
                         if not supports_kw(model_forward, kw))
 
@@ -104,14 +100,6 @@ class VllmModelForTextGeneration(VllmModel[T], Protocol[T]):
         sampling_metadata: "SamplingMetadata",
     ) -> Optional[T]:
         """Return `None` if TP rank > 0."""
-        ...
-
-    def sample(
-        self,
-        logits: T,
-        sampling_metadata: "SamplingMetadata",
-    ) -> "SamplerOutput":
-        """Only called on TP rank 0."""
         ...
 
 

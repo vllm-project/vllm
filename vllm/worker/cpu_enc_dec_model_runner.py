@@ -297,10 +297,6 @@ class CPUEncoderDecoderModelRunner(
             model_input.encoder_input_tokens,
             "encoder_positions":
             model_input.encoder_input_positions,
-            "kv_caches":
-            kv_caches,
-            "attn_metadata":
-            model_input.attn_metadata,
             **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs or {},
                                          device=self.device),
             "intermediate_tensors":
@@ -320,7 +316,7 @@ class CPUEncoderDecoderModelRunner(
             return []
 
         # Sample the next token.
-        output = self.model.sample(
+        output = self.sampler(
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
         )

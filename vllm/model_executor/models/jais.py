@@ -21,12 +21,12 @@
 """Inference-only Jais model compatible with HuggingFace weights."""
 
 import math
-from typing import Iterable, List, Optional, Set, Tuple, Union
+from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
@@ -36,7 +36,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -123,12 +122,10 @@ class JAISAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.c_attn(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q, k, v)
         attn_output, _ = self.c_proj(attn_output)
         return attn_output
 
@@ -200,16 +197,10 @@ class JAISBlock(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.ln_1(hidden_states)
-        attn_output = self.attn(
-            hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
-        )
+        attn_output = self.attn(hidden_states=hidden_states, )
         # residual connection
         hidden_states = attn_output + residual
 
@@ -266,8 +257,6 @@ class JAISModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[IntermediateTensors, torch.Tensor]:
@@ -285,11 +274,8 @@ class JAISModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
 
-        for i in range(self.start_layer, self.end_layer):
-            layer = self.h[i]
-            hidden_states = layer(hidden_states,
-                                  kv_caches[i - self.start_layer],
-                                  attn_metadata)
+        for layer in self.h[self.start_layer:self.end_layer]:
+            hidden_states = layer(hidden_states)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
@@ -321,7 +307,6 @@ class JAISLMHeadModel(nn.Module, SupportsPP):
                                         config.mup_width_scale)
         self.logits_processor = LogitsProcessor(vocab_size=config.vocab_size,
                                                 scale=self.output_logits_scale)
-        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.transformer.make_empty_intermediate_tensors)
 
@@ -332,14 +317,11 @@ class JAISLMHeadModel(nn.Module, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[IntermediateTensors, torch.Tensor]:
-        hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         attn_metadata, intermediate_tensors,
-                                         inputs_embeds)
+        hidden_states = self.transformer(input_ids, positions,
+                                         intermediate_tensors, inputs_embeds)
         return hidden_states
 
     def compute_logits(
@@ -350,14 +332,6 @@ class JAISLMHeadModel(nn.Module, SupportsPP):
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:

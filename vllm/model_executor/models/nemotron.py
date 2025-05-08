@@ -27,7 +27,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 import torch
 from torch import nn
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -38,7 +38,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -63,8 +62,8 @@ def _cast_if_autocast_enabled(*args):
     if not torch.is_autocast_enabled():
         return args
     else:
-        return torch.cuda.amp.autocast_mode._cast(
-            args, torch.get_autocast_gpu_dtype())
+        return torch.amp.autocast_mode._cast(
+            args, device_type="cuda", dtype=torch.get_autocast_gpu_dtype())
 
 
 class NemotronLayerNorm1P(nn.LayerNorm):
@@ -89,7 +88,7 @@ class NemotronLayerNorm1P(nn.LayerNorm):
             residual = x
         args = _cast_if_autocast_enabled(x, self.normalized_shape,
                                          self.weight + 1, self.bias, self.eps)
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast("cuda", enabled=False):
             x = torch.nn.functional.layer_norm(*args)
             return x if residual is None else (x, residual)
 
@@ -204,13 +203,11 @@ class NemotronAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -269,8 +266,6 @@ class NemotronDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
@@ -283,8 +278,6 @@ class NemotronDecoderLayer(nn.Module):
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
         )
 
         # Fully Connected
@@ -306,7 +299,6 @@ class NemotronModel(nn.Module):
         lora_config = vllm_config.lora_config
 
         self.config = config
-        self.padding_idx = config.pad_token_id
         lora_vocab = (lora_config.lora_extra_vocab_size *
                       (lora_config.max_loras or 1)) if lora_config else 0
         self.vocab_size = config.vocab_size + lora_vocab
@@ -343,8 +335,6 @@ class NemotronModel(nn.Module):
         self,
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
@@ -359,15 +349,8 @@ class NemotronModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for i in range(self.start_layer, self.end_layer):
-            layer = self.layers[i]
-            hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                kv_caches[i - self.start_layer],
-                attn_metadata,
-                residual,
-            )
+        for layer in self.layers[self.start_layer:self.end_layer]:
+            hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -389,9 +372,6 @@ class NemotronForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     }
 
     # LoRA specific attributes
-    supported_lora_modules = [
-        "qkv_proj", "o_proj", "up_proj", "down_proj", "embed_tokens", "lm_head"
-    ]
     embedding_modules = {
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
@@ -435,8 +415,6 @@ class NemotronForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         else:
             self.lm_head = PPMissingLayer()
 
-        self.sampler = get_sampler()
-
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
@@ -447,13 +425,10 @@ class NemotronForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        model_output = self.model(input_ids, positions, kv_caches,
-                                  attn_metadata, intermediate_tensors,
+        model_output = self.model(input_ids, positions, intermediate_tensors,
                                   inputs_embeds)
         return model_output
 
@@ -465,14 +440,6 @@ class NemotronForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:

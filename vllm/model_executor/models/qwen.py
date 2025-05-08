@@ -5,14 +5,14 @@
 # Copyright (c) Alibaba Cloud.
 # LICENSE: https://huggingface.co/Qwen/Qwen-7B/blob/main/LICENSE
 """Inference-only QWen model compatible with HuggingFace weights."""
-
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
+import json
+from typing import Any, Dict, Iterable, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -24,7 +24,6 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -124,13 +123,11 @@ class QWenAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.c_attn(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q, k, v)
         output, _ = self.c_proj(attn_output)
         return output
 
@@ -168,8 +165,6 @@ class QWenBlock(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
@@ -181,8 +176,6 @@ class QWenBlock(nn.Module):
         hidden_states = self.attn(
             positions=positions,
             hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
         )
 
         # Fully Connected
@@ -225,8 +218,6 @@ class QWenModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
@@ -241,13 +232,10 @@ class QWenModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for i in range(self.start_layer, self.end_layer):
-            layer = self.h[i]
+        for layer in self.h[self.start_layer:self.end_layer]:
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
-                kv_caches[i - self.start_layer],
-                attn_metadata,
                 residual,
             )
         if not get_pp_group().is_last_rank:
@@ -284,7 +272,6 @@ class QWenBaseModel(nn.Module):
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.transformer.wte.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.transformer.make_empty_intermediate_tensors)
 
@@ -296,14 +283,6 @@ class QWenBaseModel(nn.Module):
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
@@ -354,15 +333,6 @@ class QWenLMHeadModel(QWenBaseModel, SupportsPP, SupportsLoRA):
             "w1",
         ],
     }
-    # LoRA specific attributes
-    supported_lora_modules = [
-        "c_attn",
-        "gate_up_proj",
-        "c_proj",
-    ]
-
-    embedding_modules = {}
-    embedding_padding_modules = []
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
@@ -374,7 +344,7 @@ class QWenLMHeadModel(QWenBaseModel, SupportsPP, SupportsLoRA):
                 "The configuration of this model indicates that it supports "
                 "vision inputs, but you instantiated the text-only version "
                 "of this model. Please use the vision model by setting "
-                f"`--hf-overrides {hf_overrides!r}`")
+                f"`--hf-overrides '{json.dumps(hf_overrides)}'`")
 
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
@@ -382,12 +352,9 @@ class QWenLMHeadModel(QWenBaseModel, SupportsPP, SupportsLoRA):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         attn_metadata, intermediate_tensors,
-                                         inputs_embeds)
+        hidden_states = self.transformer(input_ids, positions,
+                                         intermediate_tensors, inputs_embeds)
         return hidden_states

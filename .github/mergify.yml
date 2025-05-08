@@ -5,6 +5,7 @@ pull_request_rules:
     - or:
       - files~=^[^/]+\.md$
       - files~=^docs/
+      - files~=^examples/
   actions:
     label:
       add:
@@ -18,7 +19,7 @@ pull_request_rules:
       - files~=\.buildkite/
       - files~=^cmake/
       - files=CMakeLists.txt
-      - files~=^Dockerfile
+      - files~=^docker/Dockerfile
       - files~=^requirements.*\.txt
       - files=setup.py
   actions:
@@ -35,15 +36,38 @@ pull_request_rules:
       add:
         - frontend
 
+- name: label-multi-modality
+  description: Automatically apply multi-modality label
+  conditions:
+    - or:
+      - files~=^vllm/multimodal/
+      - files~=^tests/multimodal/
+      - files~=^tests/models/multimodal/
+      - files~=^tests/models/*/audio_language/
+      - files~=^tests/models/*/vision_language/
+      - files=tests/models/test_vision.py
+  actions:
+    label:
+      add:
+        - multi-modality
+
 - name: label-structured-output
   description: Automatically apply structured-output label
   conditions:
     - or:
+      - files~=^benchmarks/structured_schemas/
+      - files=benchmarks/benchmark_serving_structured_output.py
+      - files=benchmarks/run_structured_output_benchmark.sh
+      - files=docs/source/features/structured_outputs.md
+      - files=examples/offline_inference/structured_outputs.py
+      - files=examples/online_serving/openai_chat_completion_structured_outputs.py
+      - files=examples/online_serving/openai_chat_completion_structured_outputs_with_reasoning.py
       - files~=^vllm/model_executor/guided_decoding/
       - files=tests/model_executor/test_guided_processors.py
       - files=tests/entrypoints/llm/test_guided_generate.py
-      - files=benchmarks/benchmark_serving_guided.py
-      - files=benchmarks/benchmark_guided.py
+      - files~=^tests/v1/structured_output/
+      - files=tests/v1/entrypoints/llm/test_guided_generate.py
+      - files~=^vllm/v1/structured_output/
   actions:
     label:
       add:
@@ -71,6 +95,58 @@ pull_request_rules:
     label:
       add:
         - v1
+
+- name: label-tpu
+  description: Automatically apply tpu label
+  # Keep this list in sync with `label-tpu-remove` conditions
+  conditions:
+    - or:
+      - files~=tpu.py
+      - files~=_tpu
+      - files~=tpu_
+      - files~=/tpu/
+      - files~=pallas
+  actions:
+    label:
+      add:
+        - tpu
+
+- name: label-tpu-remove
+  description: Automatically remove tpu label
+  # Keep this list in sync with `label-tpu` conditions
+  conditions:
+    - and:
+      - -files~=tpu.py
+      - -files~=_tpu
+      - -files~=tpu_
+      - -files~=/tpu/
+      - -files~=pallas
+  actions:
+    label:
+      remove:
+        - tpu
+
+- name: label-tool-calling
+  description: Automatically add tool-calling label
+  conditions:
+    - or:
+      - files~=^tests/tool_use/
+      - files~=^tests/mistral_tool_use/
+      - files~=^tests/entrypoints/openai/tool_parsers/
+      - files=tests/entrypoints/openai/test_chat_with_tool_reasoning.py
+      - files~=^vllm/entrypoints/openai/tool_parsers/
+      - files=docs/source/features/tool_calling.md
+      - files=docs/source/getting_started/examples/openai_chat_completion_client_with_tools.md
+      - files=docs/source/getting_started/examples/chat_with_tools.md
+      - files~=^examples/tool_chat_*
+      - files=examples/offline_inference/chat_with_tools.py
+      - files=examples/online_serving/openai_chat_completion_client_with_tools_required.py
+      - files=examples/online_serving/openai_chat_completion_tool_calls_with_reasoning.py
+      - files=examples/online_serving/openai_chat_completion_client_with_tools.py
+  actions:
+    label:
+      add:
+        - tool-calling
 
 - name: ping author on conflicts and add 'needs-rebase' label
   conditions:

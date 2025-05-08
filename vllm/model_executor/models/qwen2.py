@@ -23,13 +23,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Qwen2 model compatible with HuggingFace weights."""
-from typing import Iterable, List, Optional, Set, Tuple, Union
+from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
 from transformers import Qwen2Config
 
-from vllm.attention import Attention, AttentionMetadata, AttentionType
+from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -43,7 +43,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -170,13 +169,11 @@ class Qwen2Attention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -233,8 +230,6 @@ class Qwen2DecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
@@ -247,8 +242,6 @@ class Qwen2DecoderLayer(nn.Module):
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
         )
 
         # Fully Connected
@@ -269,7 +262,11 @@ class Qwen2DecoderLayer(nn.Module):
     })
 class Qwen2Model(nn.Module):
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self,
+                 *,
+                 vllm_config: VllmConfig,
+                 prefix: str = "",
+                 decoder_layer_type: type[nn.Module] = Qwen2DecoderLayer):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
@@ -290,7 +287,6 @@ class Qwen2Model(nn.Module):
 
         self.config = config
         self.quant_config = quant_config
-        self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         if get_pp_group().is_first_rank or (config.tie_word_embeddings
@@ -304,12 +300,14 @@ class Qwen2Model(nn.Module):
         else:
             self.embed_tokens = PPMissingLayer()
 
+        # Use the provided decoder layer type or default to Qwen2DecoderLayer
+        decoder_layer_type = decoder_layer_type or Qwen2DecoderLayer
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: Qwen2DecoderLayer(config=config,
-                                             cache_config=cache_config,
-                                             quant_config=quant_config,
-                                             prefix=prefix),
+            lambda prefix: decoder_layer_type(config=config,
+                                              cache_config=cache_config,
+                                              quant_config=quant_config,
+                                              prefix=prefix),
             prefix=f"{prefix}.layers",
         )
 
@@ -328,8 +326,6 @@ class Qwen2Model(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
@@ -343,13 +339,10 @@ class Qwen2Model(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        for i in range(self.start_layer, self.end_layer):
-            layer = self.layers[i]
+        for layer in self.layers[self.start_layer:self.end_layer]:
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
-                kv_caches[i - self.start_layer],
-                attn_metadata,
                 residual,
             )
         if not get_pp_group().is_last_rank:
@@ -430,16 +423,6 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         ],
     }
 
-    # LoRA specific attributes
-    supported_lora_modules = [
-        "qkv_proj",
-        "o_proj",
-        "gate_up_proj",
-        "down_proj",
-    ]
-    embedding_modules = {}
-    embedding_padding_modules = []
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -466,7 +449,6 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.lm_head = PPMissingLayer()
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = get_sampler()
 
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
@@ -478,13 +460,10 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, intermediate_tensors,
+        hidden_states = self.model(input_ids, positions, intermediate_tensors,
                                    inputs_embeds)
         return hidden_states
 
@@ -496,14 +475,6 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
@@ -527,16 +498,6 @@ class Qwen2EmbeddingModel(nn.Module, SupportsLoRA, SupportsPP):
             "up_proj",
         ],
     }
-
-    # LoRA specific attributes
-    supported_lora_modules = [
-        "qkv_proj",
-        "o_proj",
-        "gate_up_proj",
-        "down_proj",
-    ]
-    embedding_modules = {}
-    embedding_padding_modules = []
 
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
 
@@ -573,12 +534,9 @@ class Qwen2EmbeddingModel(nn.Module, SupportsLoRA, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
-        return self.model(input_ids, positions, kv_caches, attn_metadata,
-                          intermediate_tensors)
+        return self.model(input_ids, positions, intermediate_tensors)
 
     def pooler(
         self,

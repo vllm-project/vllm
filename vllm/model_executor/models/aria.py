@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-
-from typing import (Iterable, List, Mapping, Optional, Set, Tuple, TypedDict,
-                    Union)
+from collections.abc import Iterable, Mapping, Sequence
+from typing import List, Optional, Set, Tuple, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -9,7 +8,6 @@ from transformers import AriaConfig, AriaTextConfig, BatchFeature
 from transformers.models.aria.modeling_aria import AriaCrossAttention
 from transformers.models.aria.processing_aria import AriaProcessor
 
-from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, QuantizationConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.model_executor.layers.activation import get_act_fn
@@ -17,18 +15,18 @@ from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.sampler import (SamplerOutput,
-                                                SamplingMetadata, get_sampler)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
-                                    NestedTensors)
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalKwargs)
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+                                        BaseProcessingInfo, PromptReplacement,
+                                        PromptUpdate)
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
 # yapf: disable
@@ -36,7 +34,7 @@ from .idefics2_vision_model import Idefics2VisionConfig
 from .idefics2_vision_model import (
     Idefics2VisionTransformer as Idefics3VisionTransformer)
 # yapf: enable
-from .interfaces import SupportsMultiModal, SupportsQuant
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsQuant
 from .llama import LlamaDecoderLayer, LlamaMLP, LlamaModel
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     is_pp_missing_parameter, maybe_prefix,
@@ -47,7 +45,7 @@ class AriaImagePixelInputs(TypedDict):
     pixel_values: torch.Tensor
     pixel_mask: Optional[torch.Tensor]
     """
-    Shape: 
+    Shape:
         pixel_values: `(batch_size * num_images, num_channels, height, width)`
         pixel_mask: `(batch_size * num_images, height, width)`
     """
@@ -62,7 +60,7 @@ class AriaVisionTransformer(Idefics3VisionTransformer, SupportsQuant):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
-        super().__init__(config, quant_config, prefix)
+        super().__init__(config, quant_config=quant_config, prefix=prefix)
         # Unlike Idefics3VisionTransformer which uses LayerNorm after the
         # final layer, Aria omits this normalization, so we replace it with an
         # Identity layer
@@ -136,11 +134,11 @@ class AriaProjector(nn.Module):
         query numbers,
             e.g., {1225: 128, 4900: 256}. This allows for different query sizes
             based on image resolution.
-        embed_dim (int): Embedding dimension. 
-        num_heads (int): Number of attention heads. 
-        kv_dim (int): Dimension of key and value. 
-        ff_dim (int): Hidden dimension of the feed-forward network. 
-        output_dim (int): Output dimension. 
+        embed_dim (int): Embedding dimension.
+        num_heads (int): Number of attention heads.
+        kv_dim (int): Dimension of key and value.
+        ff_dim (int): Hidden dimension of the feed-forward network.
+        output_dim (int): Output dimension.
         norm_layer (nn.Module): Normalization layer. Default is nn.LayerNorm.
 
     Outputs:
@@ -240,6 +238,7 @@ class AriaTextMoELayer(nn.Module):
         self,
         config: AriaTextConfig,
         quant_config: Optional[QuantizationConfig],
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.config = config
@@ -255,6 +254,7 @@ class AriaTextMoELayer(nn.Module):
             intermediate_size=config.intermediate_size,
             quant_config=quant_config,
             reduce_results=True,
+            prefix=f"{prefix}.experts",
         )
         self.shared_experts = LlamaMLP(
             config.hidden_size,
@@ -302,7 +302,9 @@ class AriaTextDecoderLayer(LlamaDecoderLayer):
         prefix: str = "",
     ) -> None:
         super().__init__(config, cache_config, quant_config, prefix)
-        self.mlp = AriaTextMoELayer(config, quant_config=quant_config)
+        self.mlp = AriaTextMoELayer(config,
+                                    quant_config=quant_config,
+                                    prefix=f"{prefix}.mlp")
 
 
 class AriaTextModel(LlamaModel, SupportsQuant):
@@ -400,18 +402,11 @@ class AriaProcessingInfo(BaseProcessingInfo):
     def get_vision_config(self):
         return self.get_hf_config().vision_config
 
-    def get_hf_processor(self):
-        return self.ctx.get_hf_processor(AriaProcessor)
+    def get_hf_processor(self, **kwargs: object):
+        return self.ctx.get_hf_processor(AriaProcessor, **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
-
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {"image": self.get_num_image_tokens()}
 
     def get_num_image_tokens(self) -> int:
         hf_config = self.get_hf_config()
@@ -420,30 +415,30 @@ class AriaProcessingInfo(BaseProcessingInfo):
 
 class AriaDummyInputsBuilder(BaseDummyInputsBuilder[AriaProcessingInfo]):
 
-    def get_dummy_processor_inputs(
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        num_images = mm_counts.get("image", 0)
+
+        processor = self.info.get_hf_processor()
+        image_token: str = processor.tokenizer.image_token  # type: ignore
+
+        return image_token * num_images
+
+    def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    ) -> MultiModalDataDict:
         vision_config = self.info.get_vision_config()
 
         max_image_size = vision_config.image_size
         num_images = mm_counts.get("image", 0)
 
-        mm_data = {
+        return {
             "image":
             self._get_dummy_images(width=max_image_size,
                                    height=max_image_size,
                                    num_images=num_images)
         }
-
-        hf_processor = self.info.get_hf_processor()
-        image_token: str = hf_processor.tokenizer.image_token  # type: ignore
-
-        return ProcessorInputs(
-            prompt_text=image_token * num_images,
-            mm_data=mm_data,
-        )
 
 
 class AriaMultiModalProcessor(BaseMultiModalProcessor[AriaProcessingInfo]):
@@ -458,12 +453,12 @@ class AriaMultiModalProcessor(BaseMultiModalProcessor[AriaProcessingInfo]):
             pixel_mask=MultiModalFieldConfig.batched("image"),
         )
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         hf_config = self.info.get_hf_config()
         image_token_id = hf_config.image_token_index
 
@@ -510,7 +505,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         self.config = config
         self.vision_tower = AriaVisionTransformer(
             config.vision_config,
-            quant_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.vision_tower",
         )
         self.multi_modal_projector = AriaProjector(config)
@@ -531,7 +526,6 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 self.vocab_size, logit_scale)
-        self.sampler = get_sampler()
 
     def _validate_image_sizes(
             self, images: List[torch.Tensor]) -> List[torch.Tensor]:
@@ -603,7 +597,11 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         return self.multi_modal_projector(image_outputs, image_attn_mask)
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
+
+    def get_multimodal_embeddings(
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
@@ -613,7 +611,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[NestedTensors] = None,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
@@ -626,8 +624,6 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
@@ -643,8 +639,6 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         hidden_states = self.language_model(
             input_ids,
             positions,
-            kv_caches,
-            attn_metadata,
             intermediate_tensors,
             inputs_embeds=inputs_embeds,
         )
@@ -656,14 +650,6 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)

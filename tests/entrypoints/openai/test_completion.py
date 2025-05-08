@@ -5,7 +5,7 @@ import json
 import re
 import shutil
 from tempfile import TemporaryDirectory
-from typing import Dict, List, Optional
+from typing import Optional
 
 import jsonschema
 import openai  # use the official client for correctness check
@@ -287,7 +287,7 @@ async def test_too_many_completion_logprobs(client: openai.AsyncOpenAI,
 async def test_prompt_logprobs_completion(client: openai.AsyncOpenAI,
                                           model_name: str,
                                           prompt_logprobs: Optional[int]):
-    params: Dict = {
+    params: dict = {
         "prompt": ["A robot may not injure another robot", "My name is"],
         "model": model_name,
     }
@@ -331,7 +331,7 @@ async def test_completion_streaming(client: openai.AsyncOpenAI,
                                              max_tokens=5,
                                              temperature=0.0,
                                              stream=True)
-    chunks: List[str] = []
+    chunks: list[str] = []
     finish_reason_count = 0
     async for chunk in stream:
         chunks.append(chunk.choices[0].text)
@@ -364,7 +364,7 @@ async def test_parallel_streaming(client: openai.AsyncOpenAI, model_name: str):
                                              max_tokens=max_tokens,
                                              n=n,
                                              stream=True)
-    chunks: List[List[str]] = [[] for i in range(n)]
+    chunks: list[list[str]] = [[] for i in range(n)]
     finish_reason_count = 0
     async for chunk in stream:
         index = chunk.choices[0].index

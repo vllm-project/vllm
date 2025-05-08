@@ -3,6 +3,10 @@
 from typing import List, Optional, Type
 
 import vllm.envs as envs
+from vllm.model_executor.layers.quantization.kernels.mixed_precision.allspark import (  # noqa: E501
+    AllSparkLinearKernel)
+from vllm.model_executor.layers.quantization.kernels.mixed_precision.bitblas import (  # noqa: E501
+    BitBLASLinearKernel)
 from vllm.model_executor.layers.quantization.kernels.mixed_precision.exllama import (  # noqa: E501
     ExllamaLinearKernel)
 from vllm.model_executor.layers.quantization.kernels.mixed_precision.machete import (  # noqa: E501
@@ -16,7 +20,9 @@ from vllm.platforms import current_platform
 # in priority/performance order (when available)
 _POSSIBLE_KERNELS: List[Type[MPLinearKernel]] = [
     MacheteLinearKernel,
+    AllSparkLinearKernel,
     MarlinLinearKernel,
+    BitBLASLinearKernel,
     ExllamaLinearKernel,
 ]
 

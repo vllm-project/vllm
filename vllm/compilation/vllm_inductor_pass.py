@@ -4,7 +4,7 @@ import time
 
 import torch
 
-from vllm.config import CompilationConfig
+from vllm.config import CompilationConfig, VllmConfig
 # yapf: disable
 from vllm.distributed import get_tensor_model_parallel_rank as get_tp_rank
 from vllm.distributed import (
@@ -24,16 +24,19 @@ class VllmInductorPass(InductorPass):
     It provides timing, logging, and dumping utilities.
     """
 
-    def __init__(self, config: CompilationConfig.PassConfig):
-        self.config = config
+    def __init__(self, config: VllmConfig):
+        self.pass_config = config.compilation_config.pass_config
+        self.dtype = config.model_config.dtype if config.model_config else None
+        self.device = config.device_config.device if config.device_config \
+            else None
         self.pass_name = self.__class__.__name__
 
-    def dump_graph(self, graph: torch.fx.Graph, stage: str):
-        if stage in self.config.dump_graph_stages:
+    def dump_graph(self, graph: torch.fx.Graph, stage: str, always=False):
+        if stage in self.pass_config.dump_graph_stages or always:
             # Make sure filename includes rank in the distributed setting
             parallel = p_is_init() and get_tp_world_size() > 1
             rank = f"-{get_tp_rank()}" if parallel else ""
-            filepath = self.config.dump_graph_dir / f"{stage}{rank}.py"
+            filepath = self.pass_config.dump_graph_dir / f"{stage}{rank}.py"
 
             logger.info("%s printing graph to %s", self.pass_name, filepath)
             with open(filepath, "w") as f:
@@ -49,3 +52,17 @@ class VllmInductorPass(InductorPass):
         self._end_time = time.perf_counter_ns()
         duration_ms = float(self._end_time - self._start_time) / 1.0e6
         logger.debug("%s completed in %.1f ms", self.pass_name, duration_ms)
+
+
+class PrinterInductorPass(VllmInductorPass):
+
+    def __init__(self,
+                 name: str,
+                 config: CompilationConfig.PassConfig,
+                 always=False):
+        super().__init__(config)
+        self.name = name
+        self.always = always
+
+    def __call__(self, graph: torch.fx.Graph):
+        self.dump_graph(graph, self.name, always=self.always)

@@ -6,7 +6,7 @@ import json
 import math
 import os
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any, Optional
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -24,7 +24,7 @@ def largest_dist_from_leaf(node: dict, depth: int = 0):
 
 
 def get_entries_at_depth(depth: int,
-                         entries_and_traces: List[Tuple[Any, Any]],
+                         entries_and_traces: list[tuple[Any, Any]],
                          node: dict,
                          curr_depth: int = 0,
                          trace=()):
@@ -48,9 +48,9 @@ def get_entries_at_depth(depth: int,
                              trace=trace)
 
 
-def fold_nodes(root: dict, nodes_to_fold: List[str]):
+def fold_nodes(root: dict, nodes_to_fold: list[str]):
 
-    stack: List[dict] = [root]
+    stack: list[dict] = [root]
     while len(stack) != 0:
         node = stack.pop()
         if node['entry']['name'] in nodes_to_fold:
@@ -427,12 +427,12 @@ def main(
         plot_metric: str,
         make_names_unique: bool,
         top_k: int,
-        json_nodes_to_fold: List[str]):
+        json_nodes_to_fold: list[str]):
 
-    def prepare_data(profile_json: dict, step_keys: List[str]) -> pd.DataFrame:
+    def prepare_data(profile_json: dict, step_keys: list[str]) -> pd.DataFrame:
 
         def get_entries_and_traces(key: str):
-            entries_and_traces: List[Tuple[Any, Any]] = []
+            entries_and_traces: list[tuple[Any, Any]] = []
             for root in profile_json[key]["summary_stats"]:
                 # Fold nodes in the traces as per user request. i.e. simply
                 # make the requested nodes leaf-nodes.

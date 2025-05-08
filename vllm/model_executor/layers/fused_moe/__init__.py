@@ -35,6 +35,8 @@ if HAS_TRITON:
     # import to register the custom ops
     import vllm.model_executor.layers.fused_moe.fused_marlin_moe  # noqa
     import vllm.model_executor.layers.fused_moe.fused_moe  # noqa
+    from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+        cutlass_moe_fp8)
     from vllm.model_executor.layers.fused_moe.fused_moe import (
         fused_experts, fused_moe, fused_topk, get_config_file_name,
         grouped_topk)
@@ -45,4 +47,5 @@ if HAS_TRITON:
         "fused_experts",
         "get_config_file_name",
         "grouped_topk",
+        "cutlass_moe_fp8",
     ]

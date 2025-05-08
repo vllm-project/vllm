@@ -34,13 +34,13 @@ class UniProcExecutor(ExecutorBase):
         if len(device_info) > 1:
             local_rank = int(device_info[1])
         rank = 0
+        is_driver_worker = True
         kwargs = dict(
             vllm_config=self.vllm_config,
             local_rank=local_rank,
             rank=rank,
             distributed_init_method=distributed_init_method,
-            is_driver_worker=(not self.parallel_config)
-            or (rank % self.parallel_config.tensor_parallel_size == 0),
+            is_driver_worker=is_driver_worker,
         )
         self.collective_rpc("init_worker", args=([kwargs], ))
         self.collective_rpc("init_device")
@@ -93,15 +93,17 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
             ("ExecutorWithExternalLauncher needs deterministic "
             "execution, so it"
             "does not support delay_factor in scheduling")
-        assert not envs.VLLM_USE_V1, \
-            ("V1 architecture cannot guarantee deterministic execution, "
-            "so it is not supported in ExecutorWithExternalLauncher.")
+        if envs.VLLM_USE_V1:
+            assert not envs.VLLM_ENABLE_V1_MULTIPROCESSING, \
+            ("To get deterministic execution in V1, "
+            "please set VLLM_ENABLE_V1_MULTIPROCESSING=0")
         self.driver_worker = WorkerWrapperBase(vllm_config=self.vllm_config,
                                                rpc_rank=0)
         # engines are launched in torchrun-compatible launchers
         # so we can use the env:// method.
         # required env vars:
         # - RANK
+        # - LOCAL_RANK
         # - MASTER_ADDR
         # - MASTER_PORT
         distributed_init_method = "env://"

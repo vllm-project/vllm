@@ -1,25 +1,33 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import itertools
-from typing import List, Tuple
+from collections.abc import Generator
 
 import pytest
 import torch
 
-from tests.kernels.utils import override_backend_env_variable
 from tests.v1.sample.utils import (
+    BatchLogprobsComposition, BatchLogprobsSpecType,
     assert_incr_detok_str_matches_non_incr_detok_str,
     compute_correct_cumulative_logprob, get_test_batch)
 from vllm import SamplingParams
 
-from ...conftest import VllmRunner
+from ...conftest import HfRunner, VllmRunner
 
 MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 DTYPE = "half"
 
+NONE = BatchLogprobsComposition.NONE
+SAMPLE = BatchLogprobsComposition.SAMPLE
+PROMPT = BatchLogprobsComposition.PROMPT
+SAMPLE_PROMPT = BatchLogprobsComposition.SAMPLE_PROMPT
 
-@pytest.fixture(scope="module")
-def vllm_model(vllm_runner):
+
+@pytest.fixture(
+    scope="module",
+    # Parameterize APC
+    params=[False, True])
+def vllm_model(vllm_runner, request) -> Generator[VllmRunner, None, None]:
     with vllm_runner(
             MODEL,
             dtype=DTYPE,
@@ -32,24 +40,24 @@ def vllm_model(vllm_runner):
             enforce_eager=True,
             #TODO: enable this once we support it for
             # prompt logprobs.
-            enable_prefix_caching=False,
+            enable_prefix_caching=request.param,
             gpu_memory_utilization=0.5,
     ) as vllm_model:
         yield vllm_model
 
 
 @pytest.fixture(scope="module")
-def hf_model(hf_runner):
+def hf_model(hf_runner) -> Generator[HfRunner, None, None]:
     with hf_runner(MODEL, dtype=DTYPE) as hf_model:
         yield hf_model
 
 
 def _repeat_logprob_config(
     test_prompts,
-    logprob_prompt_logprob_list: List[Tuple],
-) -> List[Tuple]:
+    logprob_prompt_logprob_list: BatchLogprobsSpecType,
+) -> BatchLogprobsSpecType:
     """Ensure each test prompt has a logprob config.
-    
+
     A logprob config specifies the optional (i.e.
     may-be-`None`) number of sample logprobs and
     the optional number of prompt logprobs.
@@ -72,9 +80,9 @@ def _repeat_logprob_config(
                             (optional num sample logprob,
                              optional num prompt logprob)
                              tuples
-    
+
     Returns:
-      List of
+      list of
       (optional num sample logprob,optional num prompt logprob)
       tuples which is either identical to
       `logprob_prompt_logprob_list`, or else repeats
@@ -92,42 +100,17 @@ def _repeat_logprob_config(
     return logprob_prompt_logprob_list
 
 
-def _test_case_get_logprobs_and_prompt_logprobs(
-    hf_model,
-    vllm_model,
-    batch_logprobs_composition: str,
+def _run_and_validate(
+    vllm_model: VllmRunner,
+    test_prompts: list[str],
+    vllm_sampling_params: SamplingParams,
+    hf_logprobs: list[list[torch.Tensor]],
+    hf_outputs: list[tuple[list[int], str]],
+    logprob_prompt_logprob_list: BatchLogprobsSpecType,
     temperature: float,
-    example_prompts,
+    max_tokens: int,
+    do_apc: bool,
 ) -> None:
-    test_prompts = example_prompts
-
-    max_tokens = 5
-    hf_outputs = hf_model.generate_greedy(
-        test_prompts,
-        max_tokens=max_tokens,
-    )
-    hf_logprobs = hf_model.generate_greedy_logprobs(
-        test_prompts,
-        max_tokens=max_tokens,
-    )
-
-    # Batch has mixed sample params
-    # (different logprobs/prompt logprobs combos)
-    logprob_prompt_logprob_list = get_test_batch(batch_logprobs_composition)
-
-    # Ensure that each test prompt has a logprob config for testing
-    logprob_prompt_logprob_list = _repeat_logprob_config(
-        test_prompts, logprob_prompt_logprob_list)
-    # Generate SamplingParams
-    vllm_sampling_params = [
-        SamplingParams(max_tokens=max_tokens,
-                       logprobs=num_lp,
-                       prompt_logprobs=num_plp,
-                       temperature=temperature,
-                       seed=1984)
-        for num_lp, num_plp in logprob_prompt_logprob_list
-    ]
-
     vllm_results = vllm_model.model.generate(
         test_prompts, sampling_params=vllm_sampling_params)
 
@@ -177,7 +160,7 @@ def _test_case_get_logprobs_and_prompt_logprobs(
                                for r in range(1, num_top_logprobs + 1))
 
             output_text = vllm_result.outputs[0].text
-            output_string_from_most_likely_tokens_lst: List[str] = []
+            output_string_from_most_likely_tokens_lst: list[str] = []
             for top_logprobs in vllm_result.outputs[0].logprobs:
                 top_logprob = next(iter(top_logprobs.values()))
                 output_string_from_most_likely_tokens_lst.append(
@@ -268,19 +251,16 @@ def _test_case_get_logprobs_and_prompt_logprobs(
             assert vllm_result.prompt_logprobs is None
 
 
-#@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("batch_logprobs_composition",
-                         ["NONE", "SAMPLE", "PROMPT", "SAMPLE_PROMPT"])
+                         [NONE, SAMPLE, PROMPT, SAMPLE_PROMPT])
 @pytest.mark.parametrize("temperature", [0.0, 2.0])
 def test_get_logprobs_and_prompt_logprobs(
-    hf_model,
-    vllm_model,
-    batch_logprobs_composition: str,
-    temperature: float,
-    example_prompts,
-) -> None:
+        hf_model, vllm_model,
+        batch_logprobs_composition: BatchLogprobsComposition,
+        temperature: float, example_prompts: list[str],
+        monkeypatch: pytest.MonkeyPatch) -> None:
     """Test V1 Engine logprobs & prompt logprobs
-    
+
     Exercise a variety of combinations of `logprobs` and `prompt_logprobs`
     settings and validate that
     * The generated logprobs and prompt logprobs are consistent with the
@@ -293,100 +273,152 @@ def test_get_logprobs_and_prompt_logprobs(
     batch_logprobs_composition controls the logprobs configurations for
     requests in the batch under test.
 
+    APC tests run two test iterations so that cache hits occur.
+
+    To save time, only test one APC-enabled scenario
+    (sample & prompt logprobs enabled, temperature>0.0).
+
     Args:
-      hf_model
-      vllm_model
+      hf_model: HuggingFace reference model fixture
+      vllm_model: vLLM model fixture
       batch_logprobs_composition: logprobs configuration for test batch
-      example_prompts
-      monkeypatch
+      temperature: "temperature" sampling parameter
+      example_prompts: example prompt fixture
     """
-    _test_case_get_logprobs_and_prompt_logprobs(
-        hf_model=hf_model,
-        vllm_model=vllm_model,
-        batch_logprobs_composition=batch_logprobs_composition,
-        temperature=temperature,
-        example_prompts=example_prompts)
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")
+        do_apc = vllm_model.model.llm_engine.cache_config.enable_prefix_caching
+        if do_apc and (temperature < 2.0
+                       or batch_logprobs_composition != SAMPLE_PROMPT):
+            # Skip some test-cases to save time.
+            pytest.skip()
+        test_prompts = example_prompts
+
+        max_tokens = 5
+        hf_outputs = hf_model.generate_greedy(
+            test_prompts,
+            max_tokens=max_tokens,
+        )
+        hf_logprobs = hf_model.generate_greedy_logprobs(
+            test_prompts,
+            max_tokens=max_tokens,
+        )
+
+        # Batch has mixed sample params
+        # (different logprobs/prompt logprobs combos)
+        logprob_prompt_logprob_list = get_test_batch(
+            batch_logprobs_composition)
+
+        # Ensure that each test prompt has a logprob config for testing
+        logprob_prompt_logprob_list = _repeat_logprob_config(
+            test_prompts, logprob_prompt_logprob_list)
+        # Generate SamplingParams
+        vllm_sampling_params = [
+            SamplingParams(max_tokens=max_tokens,
+                           logprobs=num_lp,
+                           prompt_logprobs=num_plp,
+                           temperature=temperature,
+                           seed=1984)
+            for num_lp, num_plp in logprob_prompt_logprob_list
+        ]
+        for _ in range(2 if do_apc else 1):
+            _run_and_validate(
+                vllm_model=vllm_model,
+                test_prompts=test_prompts,
+                vllm_sampling_params=vllm_sampling_params,
+                hf_logprobs=hf_logprobs,
+                hf_outputs=hf_outputs,
+                logprob_prompt_logprob_list=logprob_prompt_logprob_list,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                do_apc=do_apc)
 
 
-def test_max_logprobs(monkeypatch):
+def test_max_logprobs(monkeypatch: pytest.MonkeyPatch):
     """vLLM v1 engine should fail a request with `logprobs > max_logprobs`
-    
     Should also fail for `prompt_logprobs > max_logprobs`
-    
-    Args:
-      monkeypatch
+    APC should not matter as this test checks basic request validation.
     """
-    override_backend_env_variable(monkeypatch, "FLASH_ATTN")
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")
 
-    runner = VllmRunner("facebook/opt-125m",
-                        max_logprobs=1,
-                        enable_prefix_caching=False,
-                        max_model_len=256)
-    vllm_sampling_params = SamplingParams(logprobs=1)
-    # should pass
-    runner.generate(["Hello world"], sampling_params=vllm_sampling_params)
+        runner = VllmRunner("facebook/opt-125m",
+                            max_logprobs=1,
+                            enable_prefix_caching=False,
+                            max_model_len=256)
+        vllm_sampling_params = SamplingParams(logprobs=1)
+        # should pass
+        runner.generate(["Hello world"], sampling_params=vllm_sampling_params)
 
-    bad_sampling_params = SamplingParams(logprobs=2)
-    with pytest.raises(ValueError):
-        runner.generate(["Hello world"], sampling_params=bad_sampling_params)
+        bad_sampling_params = SamplingParams(logprobs=2)
+        with pytest.raises(ValueError):
+            runner.generate(["Hello world"],
+                            sampling_params=bad_sampling_params)
 
 
-def test_none_logprobs(vllm_model, example_prompts, monkeypatch):
+def test_none_logprobs(vllm_model, example_prompts,
+                       monkeypatch: pytest.MonkeyPatch):
     """Engine should return `logprobs` and `prompt_logprobs` as `None`
-    
+
     Args:
       vllm_model: vLLM model fixture
       example_prompts: list of example prompts (test fixture)
-      monkeypatch: supports editing env vars and rolling back changes
-                   after the test
     """
-    max_tokens = 5
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")
+        max_tokens = 5
 
-    sampling_params_logprobs_none = SamplingParams(max_tokens=max_tokens,
-                                                   logprobs=None,
-                                                   prompt_logprobs=None,
-                                                   temperature=0.0)
-    results_logprobs_none = vllm_model.model.generate(
-        example_prompts, sampling_params=sampling_params_logprobs_none)
+        sampling_params_logprobs_none = SamplingParams(
+            max_tokens=max_tokens,
+            logprobs=None,
+            prompt_logprobs=None,
+            temperature=0.0,
+        )
+        results_logprobs_none = vllm_model.model.generate(
+            example_prompts,
+            sampling_params=sampling_params_logprobs_none,
+        )
 
-    for i in range(len(results_logprobs_none)):
-        # Check sample logprobs are None
-        assert results_logprobs_none[i].outputs[0].logprobs is None
-        assert results_logprobs_none[i].outputs[0].cumulative_logprob is None
-        # Check prompt logprobs are None
-        assert results_logprobs_none[i].prompt_logprobs is None
+        for i in range(len(results_logprobs_none)):
+            # Check sample logprobs are None
+            assert results_logprobs_none[i].outputs[0].logprobs is None
+            assert results_logprobs_none[i].outputs[
+                0].cumulative_logprob is None
+            # Check prompt logprobs are None
+            assert results_logprobs_none[i].prompt_logprobs is None
 
 
-def test_zero_logprobs(vllm_model, example_prompts, monkeypatch):
+def test_zero_logprobs(vllm_model, example_prompts,
+                       monkeypatch: pytest.MonkeyPatch):
     """Engine should return sampled token and prompt token logprobs
-    
+
     Args:
       vllm_model: vLLM model fixture
       example_prompts: list of example prompts (test fixture)
-      monkeypatch: supports editing env vars and rolling back changes
-                   after the test
     """
-    max_tokens = 5
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")
+        max_tokens = 5
 
-    sampling_params_logprobs_zero = SamplingParams(max_tokens=max_tokens,
-                                                   logprobs=0,
-                                                   prompt_logprobs=0,
-                                                   temperature=0.0)
-    results_logprobs_zero = vllm_model.model.generate(
-        example_prompts, sampling_params=sampling_params_logprobs_zero)
+        sampling_params_logprobs_zero = SamplingParams(max_tokens=max_tokens,
+                                                       logprobs=0,
+                                                       prompt_logprobs=0,
+                                                       temperature=0.0)
+        results_logprobs_zero = vllm_model.model.generate(
+            example_prompts, sampling_params=sampling_params_logprobs_zero)
 
-    for i in range(len(results_logprobs_zero)):
-        # Check that there is one sample logprob dict for each
-        # sample token
-        logprobs = results_logprobs_zero[i].outputs[0].logprobs
-        prompt_logprobs = results_logprobs_zero[i].prompt_logprobs
-        sampled_token_ids = results_logprobs_zero[i].outputs[0].token_ids
-        prompt_token_ids = results_logprobs_zero[i].prompt_token_ids
-        assert logprobs is not None
-        assert len(sampled_token_ids) == len(logprobs)
-        assert results_logprobs_zero[i].outputs[
-            0].cumulative_logprob is not None
-        # Check that there is one prompt logprob dict for each
-        # prompt token
-        assert prompt_logprobs is not None
-        assert len(prompt_token_ids) == len(prompt_logprobs)
+        for i in range(len(results_logprobs_zero)):
+            # Check that there is one sample logprob dict for each
+            # sample token
+            logprobs = results_logprobs_zero[i].outputs[0].logprobs
+            prompt_logprobs = results_logprobs_zero[i].prompt_logprobs
+            sampled_token_ids = results_logprobs_zero[i].outputs[0].token_ids
+            prompt_token_ids = results_logprobs_zero[i].prompt_token_ids
+            assert logprobs is not None
+            assert len(sampled_token_ids) == len(logprobs)
+            assert results_logprobs_zero[i].outputs[
+                0].cumulative_logprob is not None
+            # Check that there is one prompt logprob dict for each
+            # prompt token
+            assert prompt_logprobs is not None
+            assert len(prompt_token_ids) == len(prompt_logprobs)

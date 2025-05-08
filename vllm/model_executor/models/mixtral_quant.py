@@ -22,7 +22,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Mixtral model."""
-from typing import Iterable, List, Optional, Set, Tuple, Union
+from typing import Iterable, Optional, Set, Tuple, Union
 
 import numpy as np
 import torch
@@ -30,7 +30,7 @@ import torch.nn.functional as F
 from torch import nn
 from transformers import MixtralConfig
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention import Attention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -42,10 +42,10 @@ from vllm.model_executor.layers.linear import (QKVParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
@@ -165,6 +165,7 @@ class MixtralAttention(nn.Module):
 
     def __init__(
         self,
+        config: MixtralConfig,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
@@ -190,7 +191,9 @@ class MixtralAttention(nn.Module):
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_kv_heads == 0
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        self.head_dim = hidden_size // self.total_num_heads
+        # MixtralConfig has an optional head_dim argument
+        self.head_dim = getattr(config, "head_dim",
+                                self.hidden_size // self.total_num_heads)
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
@@ -229,13 +232,11 @@ class MixtralAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -254,6 +255,7 @@ class MixtralDecoderLayer(nn.Module):
         # Requires transformers > 4.32.0
         rope_theta = getattr(config, "rope_theta", 10000)
         self.self_attn = MixtralAttention(
+            config=config,
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             max_position=config.max_position_embeddings,
@@ -274,8 +276,6 @@ class MixtralDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
         # Self Attention
@@ -288,8 +288,6 @@ class MixtralDecoderLayer(nn.Module):
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
         )
 
         # Fully Connected
@@ -308,7 +306,6 @@ class MixtralModel(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
-        self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(
@@ -333,8 +330,6 @@ class MixtralModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
@@ -348,11 +343,8 @@ class MixtralModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        for i in range(self.start_layer, self.end_layer):
-            layer = self.layers[i]
-            hidden_states, residual = layer(positions, hidden_states,
-                                            kv_caches[i - self.start_layer],
-                                            attn_metadata, residual)
+        for layer in self.layers[self.start_layer:self.end_layer]:
+            hidden_states, residual = layer(positions, hidden_states, residual)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
@@ -379,7 +371,6 @@ class MixtralForCausalLM(nn.Module, SupportsPP):
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
@@ -390,13 +381,10 @@ class MixtralForCausalLM(nn.Module, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, intermediate_tensors,
+        hidden_states = self.model(input_ids, positions, intermediate_tensors,
                                    inputs_embeds)
         return hidden_states
 
@@ -408,14 +396,6 @@ class MixtralForCausalLM(nn.Module, SupportsPP):
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
-
-    def sample(
-        self,
-        logits: Optional[torch.Tensor],
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
@@ -431,6 +411,11 @@ class MixtralForCausalLM(nn.Module, SupportsPP):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
+            if name.endswith("scale"):
+                # Remapping the name of FP8 kv-scale.
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue

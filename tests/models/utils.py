@@ -1,15 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import warnings
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
 
 import torch
+import torch.nn.functional as F
 
 from vllm.config import ModelConfig, TaskOption
 from vllm.inputs import InputContext
 from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
 
-TokensText = Tuple[List[int], str]
+from .registry import HF_EXAMPLE_MODELS
+
+if TYPE_CHECKING:
+    from ..conftest import HfRunner
+
+TokensText = tuple[list[int], str]
 
 
 def check_outputs_equal(
@@ -46,7 +53,7 @@ def check_outputs_equal(
 # * List of top sample logprobs for each sampled token
 #
 # Assumes prompt logprobs were not requested.
-TokensTextLogprobs = Tuple[List[int], str, Optional[Union[List[Dict[int,
+TokensTextLogprobs = tuple[list[int], str, Optional[Union[list[dict[int,
                                                                     float]],
                                                           SampleLogprobs]]]
 
@@ -57,8 +64,8 @@ TokensTextLogprobs = Tuple[List[int], str, Optional[Union[List[Dict[int,
 # * Optional list of top sample logprobs for each sampled token
 #
 # Assumes prompt logprobs were not requested.
-TextTextLogprobs = Tuple[List[str], str, Optional[Union[List[Dict[str, float]],
-                                                        List[Dict[str,
+TextTextLogprobs = tuple[list[str], str, Optional[Union[list[dict[str, float]],
+                                                        list[dict[str,
                                                                   Logprob]]]]]
 
 # Representation of generated sequence as a tuple of
@@ -68,9 +75,9 @@ TextTextLogprobs = Tuple[List[str], str, Optional[Union[List[Dict[str, float]],
 # * Optional list of top prompt logprobs for each prompt token
 #
 # Allows prompt logprobs to be requested.
-TokensTextLogprobsPromptLogprobs = Tuple[
-    List[int], str, Optional[Union[List[Dict[int, float]], SampleLogprobs]],
-    Optional[Union[List[Optional[Dict[int, float]]], PromptLogprobs]]]
+TokensTextLogprobsPromptLogprobs = tuple[
+    list[int], str, Optional[Union[list[dict[int, float]], SampleLogprobs]],
+    Optional[Union[list[Optional[dict[int, float]]], PromptLogprobs]]]
 
 
 def check_logprobs_close(
@@ -248,19 +255,19 @@ def check_logprobs_close(
                     warnings.warn(fail_msg, stacklevel=2)
 
 
-def build_model_context(model_name: str,
-                        task: TaskOption = "auto",
-                        tokenizer_name: Optional[str] = None,
-                        trust_remote_code: bool = False,
-                        dtype: Optional[Union[str, torch.dtype]] = None,
-                        mm_processor_kwargs: Optional[Dict] = None,
-                        limit_mm_per_prompt: Optional[Dict] = None):
+def build_model_context(
+    model_id: str,
+    task: TaskOption = "auto",
+    dtype: Union[str, torch.dtype] = "auto",
+    model_config_kwargs: Optional[dict[str, Any]] = None,
+    mm_processor_kwargs: Optional[dict[str, Any]] = None,
+    limit_mm_per_prompt: Optional[dict[str, int]] = None,
+    disable_mm_preprocessor_cache: bool = True,
+):
     """Creates an InputContext for a given model.
 
     Args:
-        model_name: Name of the model being considered.
-        tokenizer_name: Name of the tokenizer being considered.
-        trust_remote_code: Whether or not to allow loading remote code.
+        model_id: ID of the model being considered.
         mm_processor_kwargs: optional processor kwargs for to be leveraged
             in the input processor, mapper, dummy data creation, etc.
         limit_mm_per_prompt: Multimodal limits.
@@ -268,20 +275,83 @@ def build_model_context(model_name: str,
     Returns:
         InputContext for the model being considered.
     """
-    if tokenizer_name is None:
-        tokenizer_name = model_name
-    if dtype is None:
-        dtype = "half"
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
+    model_info.check_available_online(on_fail="skip")
+    model_info.check_transformers_version(on_fail="skip")
 
+    model_config_kwargs = model_config_kwargs or {}
     model_config = ModelConfig(
-        model_name,
+        model_id,
         task=task,
-        tokenizer=tokenizer_name,
-        tokenizer_mode="auto",
-        trust_remote_code=trust_remote_code,
+        tokenizer=model_info.tokenizer or model_id,
+        tokenizer_mode=model_info.tokenizer_mode,
+        trust_remote_code=model_info.trust_remote_code,
         dtype=dtype,
         seed=0,
         mm_processor_kwargs=mm_processor_kwargs,
         limit_mm_per_prompt=limit_mm_per_prompt,
+        disable_mm_preprocessor_cache=disable_mm_preprocessor_cache,
+        hf_overrides=model_info.hf_overrides,
+        **model_config_kwargs,
     )
     return InputContext(model_config)
+
+
+def check_embeddings_close(
+    *,
+    embeddings_0_lst: Sequence[list[float]],
+    embeddings_1_lst: Sequence[list[float]],
+    name_0: str,
+    name_1: str,
+    tol: float = 1e-3,
+) -> None:
+    assert len(embeddings_0_lst) == len(embeddings_1_lst)
+
+    for prompt_idx, (embeddings_0, embeddings_1) in enumerate(
+            zip(embeddings_0_lst, embeddings_1_lst)):
+        assert len(embeddings_0) == len(embeddings_1), (
+            f"Length mismatch: {len(embeddings_0)} vs. {len(embeddings_1)}")
+
+        sim = F.cosine_similarity(torch.tensor(embeddings_0),
+                                  torch.tensor(embeddings_1),
+                                  dim=0)
+
+        fail_msg = (f"Test{prompt_idx}:"
+                    f"\n{name_0}:\t{embeddings_0[:16]!r}"
+                    f"\n{name_1}:\t{embeddings_1[:16]!r}")
+
+        assert sim >= 1 - tol, fail_msg
+
+
+def matryoshka_fy(tensor: torch.Tensor, dimensions: int):
+    tensor = torch.tensor(tensor)
+    tensor = tensor[..., :dimensions]
+    tensor = F.normalize(tensor, p=2, dim=1)
+    return tensor
+
+
+class EmbedModelInfo(NamedTuple):
+    name: str
+    is_matryoshka: bool
+    matryoshka_dimensions: Optional[list[int]] = None
+    architecture: str = ""
+    enable_test: bool = True
+
+
+def run_embedding_correctness_test(
+    hf_model: "HfRunner",
+    inputs: list[str],
+    vllm_outputs: Sequence[list[float]],
+    dimensions: Optional[int] = None,
+):
+    hf_outputs = hf_model.encode(inputs)
+    if dimensions:
+        hf_outputs = matryoshka_fy(hf_outputs, dimensions)
+
+    check_embeddings_close(
+        embeddings_0_lst=hf_outputs,
+        embeddings_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
+        tol=1e-2,
+    )

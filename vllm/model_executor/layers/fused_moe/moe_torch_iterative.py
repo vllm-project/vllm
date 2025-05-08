@@ -10,7 +10,9 @@ def fused_moe(
     w2: torch.Tensor,
     gating_output: torch.Tensor,
     topk: int,
-    renormalize: bool,
+    global_num_experts: int,
+    expert_map: torch.Tensor = None,
+    renormalize: bool = False,
 ) -> torch.Tensor:
     """
     Args:
@@ -18,6 +20,7 @@ def fused_moe(
         w1: [num_experts, intermediate_size * 2, hidden_size]
         w2: [num_experts, hidden_size, intermediate_size]
         gating_output: [*, num_experts]
+        expert_map: [num_experts]
     """
     orig_shape = hidden_states.shape
     hidden_size = hidden_states.shape[-1]
@@ -27,12 +30,15 @@ def fused_moe(
     dtype = hidden_states.dtype
 
     hidden_states = hidden_states.view(num_tokens, hidden_size)
-    gating_output = gating_output.view(num_tokens, num_experts)
+    gating_output = gating_output.view(num_tokens, global_num_experts)
     topk_weights = gating_output.softmax(dim=-1, dtype=torch.float)
     topk_weights, selected_experts = topk_weights.topk(topk, dim=-1)
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
     topk_weights = topk_weights.to(dtype)
+
+    if expert_map is not None:
+        selected_experts = expert_map[selected_experts]
 
     final_hidden_states = None
     for expert_idx in range(num_experts):

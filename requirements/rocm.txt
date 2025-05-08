@@ -1,0 +1,16 @@
+# Common dependencies
+-r common.txt
+
+numba == 0.60.0; python_version == '3.9' # v0.61 doesn't support Python 3.9. Required for N-gram speculative decoding
+numba == 0.61.2; python_version > '3.9'
+
+# Dependencies for AMD GPUs
+boto3
+botocore
+datasets
+ray>=2.10.0,<2.45.0
+peft
+pytest-asyncio
+tensorizer>=2.9.0
+runai-model-streamer==0.11.0
+runai-model-streamer-s3==0.11.0

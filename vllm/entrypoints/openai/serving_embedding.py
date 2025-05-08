@@ -3,7 +3,8 @@
 import asyncio
 import base64
 import time
-from typing import AsyncGenerator, Final, List, Literal, Optional, Union, cast
+from collections.abc import AsyncGenerator
+from typing import Final, Literal, Optional, Union, cast
 
 import numpy as np
 from fastapi import Request
@@ -20,6 +21,7 @@ from vllm.entrypoints.openai.protocol import (EmbeddingChatRequest,
                                               ErrorResponse, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.logger import init_logger
 from vllm.outputs import (EmbeddingOutput, EmbeddingRequestOutput,
                           PoolingRequestOutput)
@@ -31,7 +33,7 @@ logger = init_logger(__name__)
 def _get_embedding(
     output: EmbeddingOutput,
     encoding_format: Literal["float", "base64"],
-) -> Union[List[float], str]:
+) -> Union[list[float], str]:
     if encoding_format == "float":
         return output.embedding
     elif encoding_format == "base64":
@@ -79,26 +81,23 @@ class OpenAIServingEmbedding(OpenAIServing):
             return error_check_ret
 
         encoding_format = request.encoding_format
-        if request.dimensions is not None:
-            return self.create_error_response(
-                "dimensions is currently not supported")
 
-        model_name = request.model
+        model_name = self._get_model_name(request.model)
         request_id = f"embd-{self._base_request_id(raw_request)}"
         created_time = int(time.time())
 
-        truncate_prompt_tokens = None
+        truncate_prompt_tokens = request.truncate_prompt_tokens
 
-        if request.truncate_prompt_tokens is not None:
-            if request.truncate_prompt_tokens <= self.max_model_len:
-                truncate_prompt_tokens = request.truncate_prompt_tokens
-            else:
-                return self.create_error_response(
-                    "truncate_prompt_tokens value is "
-                    "greater than max_model_len."
-                    " Please, select a smaller truncation size.")
+        pooling_params = request.to_pooling_params()
 
         try:
+            pooling_params.verify(self.model_config)
+        except ValueError as e:
+            return self.create_error_response(str(e))
+
+        try:
+            truncate_prompt_tokens = _validate_truncation_size(
+                self.max_model_len, truncate_prompt_tokens)
             (
                 lora_request,
                 prompt_adapter_request,
@@ -138,15 +137,13 @@ class OpenAIServingEmbedding(OpenAIServing):
                      truncate_prompt_tokens=truncate_prompt_tokens,
                      add_special_tokens=request.add_special_tokens,
                  )
-        except ValueError as e:
+        except (ValueError, TypeError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
         # Schedule the request and get the result generator.
-        generators: List[AsyncGenerator[PoolingRequestOutput, None]] = []
+        generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
         try:
-            pooling_params = request.to_pooling_params()
-
             for i, engine_prompt in enumerate(engine_prompts):
                 request_id_item = f"{request_id}-{i}"
 
@@ -178,7 +175,7 @@ class OpenAIServingEmbedding(OpenAIServing):
         num_prompts = len(engine_prompts)
 
         # Non-streaming response
-        final_res_batch: List[Optional[PoolingRequestOutput]]
+        final_res_batch: list[Optional[PoolingRequestOutput]]
         final_res_batch = [None] * num_prompts
         try:
             async for i, res in result_generator:
@@ -186,7 +183,7 @@ class OpenAIServingEmbedding(OpenAIServing):
 
             assert all(final_res is not None for final_res in final_res_batch)
 
-            final_res_batch_checked = cast(List[PoolingRequestOutput],
+            final_res_batch_checked = cast(list[PoolingRequestOutput],
                                            final_res_batch)
 
             response = self.request_output_to_embedding_response(
@@ -206,13 +203,13 @@ class OpenAIServingEmbedding(OpenAIServing):
 
     def request_output_to_embedding_response(
         self,
-        final_res_batch: List[PoolingRequestOutput],
+        final_res_batch: list[PoolingRequestOutput],
         request_id: str,
         created_time: int,
         model_name: str,
         encoding_format: Literal["float", "base64"],
     ) -> EmbeddingResponse:
-        items: List[EmbeddingResponseData] = []
+        items: list[EmbeddingResponseData] = []
         num_prompt_tokens = 0
 
         for idx, final_res in enumerate(final_res_batch):

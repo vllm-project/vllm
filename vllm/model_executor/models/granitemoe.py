@@ -22,13 +22,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only GraniteMoe model."""
-from typing import Iterable, List, Optional, Set, Tuple
+from typing import Iterable, Optional, Set, Tuple
 
 import torch
 from torch import nn
 from transformers.models.granitemoe import GraniteMoeConfig
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -41,7 +41,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -49,7 +48,7 @@ from vllm.sequence import IntermediateTensors
 
 from . import mixtral
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import make_layers, maybe_prefix
+from .utils import AutoWeightsLoader, make_layers, maybe_prefix
 
 
 class GraniteMoeMoE(nn.Module):
@@ -173,13 +172,11 @@ class GraniteMoeAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -226,8 +223,6 @@ class GraniteMoeDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         # Self Attention
         residual = hidden_states
@@ -235,8 +230,6 @@ class GraniteMoeDecoderLayer(nn.Module):
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
         )
         hidden_states = residual + hidden_states * self.residual_multiplier
         residual = hidden_states
@@ -258,7 +251,8 @@ class GraniteMoeModel(nn.Module):
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
 
-        self.padding_idx = config.pad_token_id
+        self.config = config
+        self.quant_config = quant_config  # Required by MixtralModel
         lora_vocab = (lora_config.lora_extra_vocab_size *
                       (lora_config.max_loras or 1)) if lora_config else 0
         self.vocab_size = config.vocab_size + lora_vocab
@@ -287,8 +281,6 @@ class GraniteMoeModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -303,11 +295,8 @@ class GraniteMoeModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        for i in range(self.start_layer, self.end_layer):
-            layer = self.layers[i]
-            hidden_states = layer(positions, hidden_states,
-                                  kv_caches[i - self.start_layer],
-                                  attn_metadata)
+        for layer in self.layers[self.start_layer:self.end_layer]:
+            hidden_states = layer(positions, hidden_states)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
@@ -315,113 +304,6 @@ class GraniteMoeModel(nn.Module):
             })
         hidden_states = self.norm(hidden_states)
         return hidden_states
-
-
-class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
-    fall_back_to_pt_during_load = False
-
-    packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-    }
-
-    # LoRA specific attributes
-    supported_lora_modules = [
-        "qkv_proj",
-        "o_proj",
-        "embed_tokens",
-        "lm_head",
-        "layer",
-    ]
-    embedding_modules = {
-        "embed_tokens": "input_embeddings",
-        "lm_head": "output_embeddings",
-    }
-    embedding_padding_modules = ["lm_head"]
-
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
-        config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
-
-        self.config = config
-        self.lora_config = lora_config
-        self.quant_config = quant_config  # Required by MixtralForCausalLM
-
-        self.model = GraniteMoeModel(vllm_config=vllm_config,
-                                     prefix=maybe_prefix(prefix, "model"))
-        self.unpadded_vocab_size = config.vocab_size
-        if lora_config:
-            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
-        self.lm_head = ParallelLMHead(
-            self.unpadded_vocab_size,
-            config.hidden_size,
-            org_num_embeddings=config.vocab_size,
-            padding_size=DEFAULT_VOCAB_PADDING_SIZE
-            # We need bigger padding if using lora for kernel
-            # compatibility
-            if not lora_config else lora_config.lora_vocab_padding_size,
-            quant_config=quant_config,
-        )
-        if config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
-
-        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                config.vocab_size,
-                                                scale=1 /
-                                                self.config.logits_scaling)
-
-        self.sampler = get_sampler()
-
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, intermediate_tensors,
-                                   inputs_embeds)
-        return hidden_states
-
-    def compute_logits(
-            self, hidden_states: torch.Tensor,
-            sampling_metadata: SamplingMetadata) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
-        return logits
-
-    def make_empty_intermediate_tensors(
-            self, batch_size: int, dtype: torch.dtype,
-            device: torch.device) -> IntermediateTensors:
-        return IntermediateTensors({
-            "hidden_states":
-            torch.zeros((batch_size, self.config.hidden_size),
-                        dtype=dtype,
-                        device=device),
-            "residual":
-            torch.zeros((batch_size, self.config.hidden_size),
-                        dtype=dtype,
-                        device=device),
-        })
-
-    def sample(
-        self,
-        logits: Optional[torch.Tensor],
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
@@ -453,9 +335,101 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                       ".block_sparse_moe.gate.weight")
                 assert gate_name not in new_weights
                 new_weights[gate_name] = p
-            elif n == 'lm_head.weight' and self.config.tie_word_embeddings:
-                pass
             else:
                 new_weights[n] = p
-        return mixtral.MixtralForCausalLM.load_weights(self,
-                                                       new_weights.items())
+        return mixtral.MixtralModel.load_weights(self, new_weights.items())
+
+
+class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+    fall_back_to_pt_during_load = False
+
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+    }
+
+    # LoRA specific attributes
+    embedding_modules = {
+        "embed_tokens": "input_embeddings",
+        "lm_head": "output_embeddings",
+    }
+    embedding_padding_modules = ["lm_head"]
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+
+        self.config = config
+        self.lora_config = lora_config
+
+        self.model = GraniteMoeModel(vllm_config=vllm_config,
+                                     prefix=maybe_prefix(prefix, "model"))
+        self.unpadded_vocab_size = config.vocab_size
+        if lora_config:
+            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
+        self.lm_head = ParallelLMHead(
+            self.unpadded_vocab_size,
+            config.hidden_size,
+            org_num_embeddings=config.vocab_size,
+            padding_size=DEFAULT_VOCAB_PADDING_SIZE
+            # We need bigger padding if using lora for kernel
+            # compatibility
+            if not lora_config else lora_config.lora_vocab_padding_size,
+            quant_config=quant_config,
+        )
+        if config.tie_word_embeddings:
+            self.lm_head.weight = self.model.embed_tokens.weight
+
+        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
+                                                config.vocab_size,
+                                                scale=1 /
+                                                self.config.logits_scaling)
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        hidden_states = self.model(input_ids, positions, intermediate_tensors,
+                                   inputs_embeds)
+        return hidden_states
+
+    def compute_logits(
+            self, hidden_states: torch.Tensor,
+            sampling_metadata: SamplingMetadata) -> Optional[torch.Tensor]:
+        logits = self.logits_processor(self.lm_head, hidden_states,
+                                       sampling_metadata)
+        return logits
+
+    def make_empty_intermediate_tensors(
+            self, batch_size: int, dtype: torch.dtype,
+            device: torch.device) -> IntermediateTensors:
+        return IntermediateTensors({
+            "hidden_states":
+            torch.zeros((batch_size, self.config.hidden_size),
+                        dtype=dtype,
+                        device=device),
+            "residual":
+            torch.zeros((batch_size, self.config.hidden_size),
+                        dtype=dtype,
+                        device=device),
+        })
+
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head."]
+                           if self.config.tie_word_embeddings else None),
+        )
+        return loader.load_weights(weights)

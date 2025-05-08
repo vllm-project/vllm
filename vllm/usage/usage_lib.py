@@ -9,7 +9,7 @@ import time
 from enum import Enum
 from pathlib import Path
 from threading import Thread
-from typing import Any, Dict, Optional, Union
+from typing import Any, Optional, Union
 from uuid import uuid4
 
 import cpuinfo
@@ -19,6 +19,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.connections import global_http_connection
+from vllm.utils import cuda_device_count_stateless, cuda_get_device_properties
 from vllm.version import __version__ as VLLM_VERSION
 
 _config_home = envs.VLLM_CONFIG_ROOT
@@ -27,7 +28,7 @@ _USAGE_STATS_DO_NOT_TRACK_PATH = os.path.join(_config_home, "do_not_track")
 _USAGE_STATS_ENABLED = None
 _USAGE_STATS_SERVER = envs.VLLM_USAGE_STATS_SERVER
 
-_GLOBAL_RUNTIME_DATA: Dict[str, Union[str, int, bool]] = {}
+_GLOBAL_RUNTIME_DATA = dict[str, Union[str, int, bool]]()
 
 _USAGE_ENV_VARS_TO_COLLECT = [
     "VLLM_USE_MODELSCOPE",
@@ -150,7 +151,7 @@ class UsageMessage:
     def report_usage(self,
                      model_architecture: str,
                      usage_context: UsageContext,
-                     extra_kvs: Optional[Dict[str, Any]] = None) -> None:
+                     extra_kvs: Optional[dict[str, Any]] = None) -> None:
         t = Thread(target=self._report_usage_worker,
                    args=(model_architecture, usage_context, extra_kvs or {}),
                    daemon=True)
@@ -158,22 +159,30 @@ class UsageMessage:
 
     def _report_usage_worker(self, model_architecture: str,
                              usage_context: UsageContext,
-                             extra_kvs: Dict[str, Any]) -> None:
+                             extra_kvs: dict[str, Any]) -> None:
         self._report_usage_once(model_architecture, usage_context, extra_kvs)
         self._report_continous_usage()
 
     def _report_usage_once(self, model_architecture: str,
                            usage_context: UsageContext,
-                           extra_kvs: Dict[str, Any]) -> None:
+                           extra_kvs: dict[str, Any]) -> None:
         # Platform information
         from vllm.platforms import current_platform
         if current_platform.is_cuda_alike():
-            device_property = torch.cuda.get_device_properties(0)
-            self.gpu_count = torch.cuda.device_count()
-            self.gpu_type = device_property.name
-            self.gpu_memory_per_device = device_property.total_memory
+            self.gpu_count = cuda_device_count_stateless()
+            self.gpu_type, self.gpu_memory_per_device = (
+                cuda_get_device_properties(0, ("name", "total_memory")))
         if current_platform.is_cuda():
             self.cuda_runtime = torch.version.cuda
+        if current_platform.is_tpu():
+            try:
+                import torch_xla
+                self.gpu_count = torch_xla.runtime.world_size()
+                self.gpu_type = torch_xla.tpu.get_tpu_type()
+                self.gpu_memory_per_device = (
+                    torch_xla.core.xla_model.get_memory_info()["bytes_limit"])
+            except Exception:
+                pass
         self.provider = _detect_cloud_provider()
         self.architecture = platform.machine()
         self.platform = platform.platform()
@@ -227,7 +236,7 @@ class UsageMessage:
             self._write_to_file(data)
             self._send_to_server(data)
 
-    def _send_to_server(self, data: Dict[str, Any]) -> None:
+    def _send_to_server(self, data: dict[str, Any]) -> None:
         try:
             global_http_client = global_http_connection.get_sync_client()
             global_http_client.post(_USAGE_STATS_SERVER, json=data)
@@ -235,7 +244,7 @@ class UsageMessage:
             # silently ignore unless we are using debug log
             logging.debug("Failed to send usage data to server")
 
-    def _write_to_file(self, data: Dict[str, Any]) -> None:
+    def _write_to_file(self, data: dict[str, Any]) -> None:
         os.makedirs(os.path.dirname(_USAGE_STATS_JSON_PATH), exist_ok=True)
         Path(_USAGE_STATS_JSON_PATH).touch(exist_ok=True)
         with open(_USAGE_STATS_JSON_PATH, "a") as f:

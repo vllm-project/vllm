@@ -1,18 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import io
 import json
 import os
 import sys
 import time
 import traceback
 from dataclasses import dataclass, field
-from typing import List, Optional, Union
+from typing import Optional, Union
 
 import aiohttp
 import huggingface_hub.constants
 from tqdm.asyncio import tqdm
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
+
+# NOTE(simon): do not import vLLM here so the benchmark script
+# can run without vLLM installed.
 
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
@@ -25,11 +29,11 @@ class RequestFuncInput:
     output_len: int
     model: str
     model_name: Optional[str] = None
-    best_of: int = 1
     logprobs: Optional[int] = None
     extra_body: Optional[dict] = None
     multi_modal_content: Optional[dict] = None
     ignore_eos: bool = False
+    language: Optional[str] = None
 
 
 @dataclass
@@ -39,8 +43,8 @@ class RequestFuncOutput:
     latency: float = 0.0
     output_tokens: int = 0
     ttft: float = 0.0  # Time to first token
-    itl: List[float] = field(
-        default_factory=list)  # List of inter-token latencies
+    itl: list[float] = field(
+        default_factory=list)  # list of inter-token latencies
     tpot: float = 0.0  # avg next-token latencies
     prompt_len: int = 0
     error: str = ""
@@ -56,13 +60,12 @@ async def async_request_tgi(
     async with aiohttp.ClientSession(trust_env=True,
                                      timeout=AIOHTTP_TIMEOUT) as session:
         params = {
-            "best_of": request_func_input.best_of,
             "max_new_tokens": request_func_input.output_len,
             "do_sample": True,
             "temperature": 0.01,  # TGI does not accept 0.0 temperature.
             "top_p": 0.99,  # TGI does not accept 1.0 top_p.
             "truncate": request_func_input.prompt_len,
-            # TGI does not accept ignore_eos flag.
+            "ignore_eos_token": request_func_input.ignore_eos,
         }
         payload = {
             "inputs": request_func_input.prompt,
@@ -70,6 +73,10 @@ async def async_request_tgi(
         }
         output = RequestFuncOutput()
         output.prompt_len = request_func_input.prompt_len
+        if request_func_input.ignore_eos:
+            output.output_tokens = request_func_input.output_len
+        else:
+            output.output_tokens = None
 
         ttft = 0.0
         st = time.perf_counter()
@@ -128,7 +135,6 @@ async def async_request_trt_llm(
 
     async with aiohttp.ClientSession(trust_env=True,
                                      timeout=AIOHTTP_TIMEOUT) as session:
-        assert request_func_input.best_of == 1
         payload = {
             "accumulate_tokens": True,
             "text_input": request_func_input.prompt,
@@ -193,9 +199,9 @@ async def async_request_deepspeed_mii(
 ) -> RequestFuncOutput:
     async with aiohttp.ClientSession(trust_env=True,
                                      timeout=AIOHTTP_TIMEOUT) as session:
-        assert request_func_input.best_of == 1
 
         payload = {
+            "model": request_func_input.model,
             "prompt": request_func_input.prompt,
             "max_tokens": request_func_input.output_len,
             "temperature": 0.01,  # deepspeed-mii does not accept 0.0 temp.
@@ -216,7 +222,15 @@ async def async_request_deepspeed_mii(
                 if response.status == 200:
                     parsed_resp = await response.json()
                     output.latency = time.perf_counter() - st
-                    output.generated_text = parsed_resp["text"][0]
+                    if "choices" in parsed_resp:
+                        output.generated_text = parsed_resp["choices"][0][
+                            "text"]
+                    elif "text" in parsed_resp:
+                        output.generated_text = parsed_resp["text"][0]
+                    else:
+                        output.error = ("Unexpected response format: "
+                                        "neither 'choices' nor 'text' found")
+                        output.success = False
                     output.success = True
                 else:
                     output.error = response.reason or ""
@@ -247,7 +261,7 @@ async def async_request_openai_completions(
                 if request_func_input.model_name else request_func_input.model,
             "prompt": request_func_input.prompt,
             "temperature": 0.0,
-            "best_of": request_func_input.best_of,
+            "repetition_penalty": 1.0,
             "max_tokens": request_func_input.output_len,
             "logprobs": request_func_input.logprobs,
             "stream": True,
@@ -336,7 +350,7 @@ async def async_request_openai_chat_completions(
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith(
-        "chat/completions"
+        ("chat/completions", "profile")
     ), "OpenAI Chat Completions API URL must end with 'chat/completions'."
 
     async with aiohttp.ClientSession(trust_env=True,
@@ -426,16 +440,125 @@ async def async_request_openai_chat_completions(
     return output
 
 
+async def async_request_openai_audio(
+    request_func_input: RequestFuncInput,
+    pbar: Optional[tqdm] = None,
+) -> RequestFuncOutput:
+    # Lazy import without PlaceholderModule to avoid vllm dep.
+    import soundfile
+    api_url = request_func_input.api_url
+    assert api_url.endswith(
+        ("transcriptions", "translations"
+         )), "OpenAI Chat Completions API URL must end with 'transcriptions' "
+    "or `translations`."
+
+    async with aiohttp.ClientSession(trust_env=True,
+                                     timeout=AIOHTTP_TIMEOUT) as session:
+        content = [{"type": "text", "text": request_func_input.prompt}]
+        payload = {
+            "model": request_func_input.model_name \
+                if request_func_input.model_name else request_func_input.model,
+            "temperature": 0.0,
+            "max_completion_tokens": request_func_input.output_len,
+            "stream": True,
+            "language": "en",
+            # Flattened due to multipart/form-data
+            "stream_include_usage": True,
+            "stream_continuous_usage_stats": True
+        }
+        if request_func_input.extra_body:
+            payload.update(request_func_input.extra_body)
+        headers = {
+            "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+        }
+
+        # Send audio file
+        def to_bytes(y, sr):
+            buffer = io.BytesIO()
+            soundfile.write(buffer, y, sr, format="WAV")
+            buffer.seek(0)
+            return buffer
+
+        with to_bytes(*request_func_input.multi_modal_content['audio']) as f:
+            form = aiohttp.FormData()
+            form.add_field('file', f, content_type='audio/wav')
+            for key, value in payload.items():
+                form.add_field(key, str(value))
+
+            output = RequestFuncOutput()
+            output.prompt_len = request_func_input.prompt_len
+
+            generated_text = ""
+            ttft = 0.0
+            st = time.perf_counter()
+            most_recent_timestamp = st
+            try:
+                async with session.post(url=api_url,
+                                        data=form,
+                                        headers=headers) as response:
+                    if response.status == 200:
+                        async for chunk_bytes in response.content:
+                            chunk_bytes = chunk_bytes.strip()
+                            if not chunk_bytes:
+                                continue
+
+                            chunk = chunk_bytes.decode("utf-8").removeprefix(
+                                "data: ")
+                            if chunk != "[DONE]":
+                                timestamp = time.perf_counter()
+                                data = json.loads(chunk)
+
+                                if choices := data.get("choices"):
+                                    content = choices[0]["delta"].get(
+                                        "content")
+                                    # First token
+                                    if ttft == 0.0:
+                                        ttft = timestamp - st
+                                        output.ttft = ttft
+
+                                    # Decoding phase
+                                    else:
+                                        output.itl.append(
+                                            timestamp - most_recent_timestamp)
+
+                                    generated_text += content or ""
+                                elif usage := data.get("usage"):
+                                    output.output_tokens = usage.get(
+                                        "completion_tokens")
+
+                                most_recent_timestamp = timestamp
+
+                        output.generated_text = generated_text
+                        output.success = True
+                        output.latency = most_recent_timestamp - st
+                    else:
+                        output.error = response.reason or ""
+                        output.success = False
+            except Exception:
+                output.success = False
+                exc_info = sys.exc_info()
+                output.error = "".join(traceback.format_exception(*exc_info))
+
+        if pbar:
+            pbar.update(1)
+        return output
+
+
 def get_model(pretrained_model_name_or_path: str) -> str:
     if os.getenv('VLLM_USE_MODELSCOPE', 'False').lower() == 'true':
         from modelscope import snapshot_download
 
-        model_path = snapshot_download(
-            model_id=pretrained_model_name_or_path,
-            local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
-            ignore_file_pattern=[".*.pt", ".*.safetensors", ".*.bin"])
+        from vllm.model_executor.model_loader.weight_utils import get_lock
 
-        return model_path
+        # Use file lock to prevent multiple processes from
+        # downloading the same model weights at the same time.
+        with get_lock(pretrained_model_name_or_path):
+            model_path = snapshot_download(
+                model_id=pretrained_model_name_or_path,
+                local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+                ignore_file_pattern=[".*.pt", ".*.safetensors", ".*.bin"])
+
+            return model_path
     return pretrained_model_name_or_path
 
 
@@ -478,7 +601,14 @@ ASYNC_REQUEST_FUNCS = {
     "deepspeed-mii": async_request_deepspeed_mii,
     "openai": async_request_openai_completions,
     "openai-chat": async_request_openai_chat_completions,
+    "openai-audio": async_request_openai_audio,
     "tensorrt-llm": async_request_trt_llm,
     "scalellm": async_request_openai_completions,
     "sglang": async_request_openai_completions,
 }
+
+OPENAI_COMPATIBLE_BACKENDS = [
+    k for k, v in ASYNC_REQUEST_FUNCS.items()
+    if v in (async_request_openai_completions,
+             async_request_openai_chat_completions)
+]

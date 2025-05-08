@@ -43,7 +43,7 @@ vLLM is flexible and easy to use with:
 - Tensor parallelism and pipeline parallelism support for distributed inference
 - Streaming outputs
 - OpenAI-compatible API server
-- Support NVIDIA GPUs, AMD CPUs and GPUs, Intel CPUs, Gaudi® accelerators and GPUs, PowerPC CPUs, TPU, and AWS Trainium and Inferentia Accelerators.
+- Support NVIDIA GPUs, AMD CPUs and GPUs, Intel CPUs, Gaudi® accelerators and GPUs, IBM Power CPUs, TPU, and AWS Trainium and Inferentia Accelerators.
 - Prefix caching support
 - Multi-lora support
 
@@ -62,11 +62,13 @@ For more information, check out the following:
 :caption: Getting Started
 :maxdepth: 1
 
-getting_started/installation/index
+getting_started/installation
 getting_started/quickstart
 getting_started/examples/examples_index
 getting_started/troubleshooting
 getting_started/faq
+getting_started/v1_user_guide
+
 :::
 
 % What does vLLM support?
@@ -75,9 +77,9 @@ getting_started/faq
 :caption: Models
 :maxdepth: 1
 
+models/supported_models
 models/generative_models
 models/pooling_models
-models/supported_models
 models/extensions/index
 :::
 
@@ -101,6 +103,15 @@ features/compatibility_matrix
 % Details about running vLLM
 
 :::{toctree}
+:caption: Training
+:maxdepth: 1
+
+training/trl.md
+training/rlhf.md
+
+:::
+
+:::{toctree}
 :caption: Inference and Serving
 :maxdepth: 1
 
@@ -121,6 +132,7 @@ serving/integrations/index
 :caption: Deployment
 :maxdepth: 1
 
+deployment/security
 deployment/docker
 deployment/k8s
 deployment/nginx
@@ -157,7 +169,9 @@ design/multiprocessing
 :caption: V1 Design Documents
 :maxdepth: 2
 
+design/v1/torch_compile
 design/v1/prefix_caching
+design/v1/metrics
 :::
 
 % How to contribute to the vLLM project
@@ -167,6 +181,7 @@ design/v1/prefix_caching
 :maxdepth: 2
 
 contributing/overview
+contributing/deprecation_policy
 contributing/profiling/profiling_index
 contributing/dockerfile/dockerfile
 contributing/model/index
@@ -179,11 +194,8 @@ contributing/vulnerability_management
 :caption: API Reference
 :maxdepth: 2
 
-api/offline_inference/index
-api/engine/index
-api/inference_params
-api/multimodal/index
-api/model/index
+api/summary
+api/vllm/vllm
 :::
 
 % Latest news and acknowledgements

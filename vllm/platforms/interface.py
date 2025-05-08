@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-
 import enum
 import platform
 import random
@@ -9,13 +8,21 @@ from typing import TYPE_CHECKING, NamedTuple, Optional, Tuple, Union
 import numpy as np
 import torch
 
+from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ModelConfig, VllmConfig
+    from vllm.lora.request import LoRARequest
+    from vllm.pooling_params import PoolingParams
+    from vllm.sampling_params import SamplingParams
     from vllm.utils import FlexibleArgumentParser
 else:
+    ModelConfig = None
     VllmConfig = None
+    LoRARequest = None
+    PoolingParams = None
+    SamplingParams = None
     FlexibleArgumentParser = None
 
 logger = init_logger(__name__)
@@ -29,12 +36,14 @@ def in_wsl() -> bool:
 class _Backend(enum.Enum):
     FLASH_ATTN = enum.auto()
     FLASH_ATTN_VLLM_V1 = enum.auto()
+    TRITON_ATTN_VLLM_V1 = enum.auto()
     XFORMERS = enum.auto()
     ROCM_FLASH = enum.auto()
+    ROCM_AITER_MLA = enum.auto()
     TORCH_SDPA = enum.auto()
-    OPENVINO = enum.auto()
     FLASHINFER = enum.auto()
-    TRITON_MLA = enum.auto()
+    TRITON_MLA = enum.auto()  # Supported by V1
+    FLASHMLA = enum.auto()  # Supported by V1
     HPU_ATTN = enum.auto()
     PALLAS = enum.auto()
     PALLAS_VLLM_V1 = enum.auto()
@@ -51,7 +60,6 @@ class PlatformEnum(enum.Enum):
     XPU = enum.auto()
     CPU = enum.auto()
     NEURON = enum.auto()
-    OPENVINO = enum.auto()
     OOT = enum.auto()
     UNSPECIFIED = enum.auto()
 
@@ -111,6 +119,8 @@ class Platform:
 
     supported_quantization: list[str] = []
 
+    additional_env_vars: list[str] = []
+
     def is_cuda(self) -> bool:
         return self._enum == PlatformEnum.CUDA
 
@@ -132,15 +142,15 @@ class Platform:
     def is_neuron(self) -> bool:
         return self._enum == PlatformEnum.NEURON
 
-    def is_openvino(self) -> bool:
-        return self._enum == PlatformEnum.OPENVINO
-
     def is_out_of_tree(self) -> bool:
         return self._enum == PlatformEnum.OOT
 
     def is_cuda_alike(self) -> bool:
-        """Stateless version of :func:`torch.cuda.is_available`."""
+        """Stateless version of {func}`torch.cuda.is_available`."""
         return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
+
+    def is_sleep_mode_available(self) -> bool:
+        return self._enum == PlatformEnum.CUDA
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
@@ -155,7 +165,7 @@ class Platform:
         cls,
         device_id: int = 0,
     ) -> Optional[DeviceCapability]:
-        """Stateless version of :func:`torch.cuda.get_device_capability`."""
+        """Stateless version of {func}`torch.cuda.get_device_capability`."""
         return None
 
     @classmethod
@@ -170,7 +180,7 @@ class Platform:
         The ``capability`` argument can either be:
 
         - A tuple ``(major, minor)``.
-        - An integer ``<major><minor>``. (See :meth:`DeviceCapability.to_int`)
+        - An integer ``<major><minor>``. (See {meth}`DeviceCapability.to_int`)
         """
         current_capability = cls.get_device_capability(device_id=device_id)
         if current_capability is None:
@@ -231,7 +241,7 @@ class Platform:
                                 parser: Optional[FlexibleArgumentParser] = None
                                 ) -> None:
         """
-        Do some pre-registeration or update action for the current platform.
+        Do some pre-registration or update action for the current platform.
 
         This function is called before global VllmConfig is initialized or cli
         arguments are parsed. It's used for out-of-tree platforms to register or
@@ -323,11 +333,121 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
+    def get_infinity_values(cls, dtype: torch.dtype) -> Tuple[float, float]:
+        """
+        Return the platform specific values for (-inf, inf)
+        """
+        return float("-inf"), float("inf")
+
+    @classmethod
+    def can_update_inplace(cls) -> bool:
+        """
+        Checks if the platform allows inplace memory updates
+        """
+        return True
+
+    @classmethod
+    def get_lora_vocab_padding_size(cls) -> int:
+        """
+        Returns how much padding the LoRA logits need for kernels
+        """
+        return 256
+
+    @classmethod
     def get_device_communicator_cls(cls) -> str:
         """
         Get device specific communicator class for distributed communication.
         """
         return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
+
+    @classmethod
+    def supports_mx(cls) -> bool:
+        """
+        Returns whether the current platform supports MX types.
+        """
+        return False
+
+    @classmethod
+    def supports_fp8(cls) -> bool:
+        """
+        Returns whether the current platform supports FP8 types.
+        """
+        return False
+
+    @classmethod
+    def is_fp8_fnuz(cls) -> bool:
+        """
+        Returns whether the preferred FP8 type is FNUZ on the current platform.
+
+        There are two representations of FP8, OCP FP8 and FNUZ FP8.
+        The OCP specification can be found at https://tinyurl.com/b7jvwpft.
+        The FNUZ specification can be found at https://tinyurl.com/5n6hwwu5.
+
+        AMD's MI300 and MI325 have native hardware support for FNUZ. All other
+        hardware has converged on the OCP FP8 standard.
+        """
+        return False
+
+    @classmethod
+    def fp8_dtype(cls) -> torch.dtype:
+        """
+        Returns the preferred FP8 type on the current platform.
+
+        See the documentation for is_fp8_fnuz for details.
+        """
+        return torch.float8_e4m3fn
+
+    @classmethod
+    def use_all_gather(cls) -> bool:
+        """
+        Whether to use allgather in LogitsProcessor to gather the logits.
+        """
+        import vllm.envs as envs
+        from vllm.config import get_current_vllm_config
+
+        parallel_config = get_current_vllm_config().parallel_config
+        return (envs.VLLM_USE_V1
+                or parallel_config.distributed_executor_backend
+                == "external_launcher")
+
+    @classmethod
+    def supports_v1(cls, model_config: ModelConfig) -> bool:
+        """Returns whether the current platform can support v1 for the supplied
+        model configuration.
+        """
+        return False
+
+    @classmethod
+    def use_custom_allreduce(cls) -> bool:
+        """
+        Returns if custom allreduce is supported on the current platform
+        """
+        return False
+
+    @classmethod
+    def validate_request(
+        cls,
+        prompt: PromptType,
+        params: Union[SamplingParams, PoolingParams],
+        processed_inputs: ProcessorInputs,
+    ) -> None:
+        """Raises if this request is unsupported on this platform"""
+
+    def __getattr__(self, key: str):
+        device = getattr(torch, self.device_type, None)
+        if device is not None and hasattr(device, key):
+            return getattr(device, key)
+        else:
+            logger.warning("Current platform %s does not have '%s'" \
+            " attribute.", self.device_type, key)
+            return None
+
+    @classmethod
+    def get_cu_count(cls, device_id: int = 0) -> int:
+        """
+        Returns the total number of compute units (CU) on single GPU.
+        """
+        raise NotImplementedError
 
 
 class UnspecifiedPlatform(Platform):
