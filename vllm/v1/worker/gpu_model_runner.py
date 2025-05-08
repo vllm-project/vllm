@@ -1043,48 +1043,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, IntermediateTensors]:
 
-        def maybe_setup_kv_connector():
-            # Update KVConnector with the KVConnector metadata forward().
-            if has_kv_transfer_group():
-                kv_connector = get_kv_transfer_group()
-                assert isinstance(kv_connector, KVConnectorBase_V1)
-                assert scheduler_output.kv_connector_metadata is not None
-                kv_connector.bind_connector_metadata(
-                    scheduler_output.kv_connector_metadata)
-
-                # Background KV cache transfers happen here.
-                # These transfers are designed to be async and the requests
-                # involved may be disjoint from the running requests.
-                # Do this here to save a collective_rpc.
-                kv_connector.start_load_kv(get_forward_context())
-
-        def maybe_wait_for_save():
-            if has_kv_transfer_group():
-                kv_connector = get_kv_transfer_group()
-                kv_connector.wait_for_save()
-
-        def maybe_get_finished() -> tuple[set[str], set[str]]:
-            if has_kv_transfer_group():
-                kv_connector = get_kv_transfer_group()
-                return kv_connector.get_finished()
-            return set(), set()
-
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
-            # KV send/recv even if no work to do.
-            with set_forward_context(None, self.vllm_config):
-                maybe_setup_kv_connector()
-                maybe_wait_for_save()
-                finished_sending, finished_recving = maybe_get_finished()
+            if not has_kv_transfer_group():
+                # Return empty ModelRunnerOutput if there's no work to do.
+                return EMPTY_MODEL_RUNNER_OUTPUT
 
-            # Return empty ModelRunnerOutput if there's no work to do.
-            output = EMPTY_MODEL_RUNNER_OUTPUT
-
-            if len(finished_sending) > 0 or len(finished_recving) > 0:
-                output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
-                output.finished_sending = finished_sending
-                output.finished_recving = finished_recving
-            return output
+            return self.kv_connector_no_forward(scheduler_output)
 
         # Prepare the decoder inputs.
         attn_metadata, logits_indices, spec_decode_metadata = (
@@ -1161,7 +1126,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         with set_forward_context(attn_metadata,
                                  self.vllm_config,
                                  num_tokens=num_input_tokens):
-            maybe_setup_kv_connector()
+            self.maybe_setup_kv_connector(scheduler_output)
 
             model_output = self.model(
                 input_ids=input_ids,
@@ -1170,8 +1135,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 inputs_embeds=inputs_embeds,
             )
 
-            maybe_wait_for_save()
-            finished_sending, finished_recving = maybe_get_finished()
+            self.maybe_wait_for_kv_save()
+            finished_sending, finished_recving = (
+                self.get_finished_kv_transfers())
 
         if self.use_aux_hidden_state_outputs:
             hidden_states, aux_hidden_states = model_output
@@ -1360,6 +1326,50 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             finished_sending=finished_sending,
             finished_recving=finished_recving,
         )
+
+    def kv_connector_no_forward(
+            self, scheduler_output: SchedulerOutput) -> ModelRunnerOutput:
+        # KV send/recv even if no work to do.
+        with set_forward_context(None, self.vllm_config):
+            self.maybe_setup_kv_connector(scheduler_output)
+            finished_sending, finished_recving = (
+                self.get_finished_kv_transfers())
+
+        if not finished_sending and not finished_recving:
+            return EMPTY_MODEL_RUNNER_OUTPUT
+
+        output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
+        output.finished_sending = finished_sending
+        output.finished_recving = finished_recving
+        return output
+
+    @staticmethod
+    def maybe_setup_kv_connector(scheduler_output: SchedulerOutput):
+        # Update KVConnector with the KVConnector metadata forward().
+        if has_kv_transfer_group():
+            kv_connector = get_kv_transfer_group()
+            assert isinstance(kv_connector, KVConnectorBase_V1)
+            assert scheduler_output.kv_connector_metadata is not None
+            kv_connector.bind_connector_metadata(
+                scheduler_output.kv_connector_metadata)
+
+            # Background KV cache transfers happen here.
+            # These transfers are designed to be async and the requests
+            # involved may be disjoint from the running requests.
+            # Do this here to save a collective_rpc.
+            kv_connector.start_load_kv(get_forward_context())
+
+    @staticmethod
+    def maybe_wait_for_kv_save() -> None:
+        if has_kv_transfer_group():
+            get_kv_transfer_group().wait_for_save()
+
+    @staticmethod
+    def get_finished_kv_transfers(
+    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+        if has_kv_transfer_group():
+            return get_kv_transfer_group().get_finished()
+        return None, None
 
     def generate_draft_token_ids(
         self,
