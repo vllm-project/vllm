@@ -303,13 +303,13 @@ class AutoRoundConfig(QuantizationConfig):
             IPEXConfig
         if isinstance(layer, (LinearBase, ParallelLMHead)):
             if "awq" in self.packing_format:
-                conifg = IPEXConfig(method="awq", weight_bits=weight_bits,
+                config = IPEXConfig(method="awq", weight_bits=weight_bits,
                                     group_size=group_size)
-                return IPEXAWQLinearMethod(conifg)
+                return IPEXAWQLinearMethod(config)
             elif "gptq" in self.packing_format:
-                conifg = IPEXConfig(method="gptq", weight_bits=weight_bits,
+                config = IPEXConfig(method="gptq", weight_bits=weight_bits,
                                     group_size=group_size)
-                return IPEXGPTQLinearMethod(conifg)
+                return IPEXGPTQLinearMethod(config)
             else:
                 raise ValueError(
                     f"ipex backend only supports awq "
