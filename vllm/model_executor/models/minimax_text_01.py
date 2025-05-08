@@ -608,6 +608,7 @@ class MiniMaxText01DecoderLayer(nn.Module):
                 config.max_model_len, int):
             max_position_embeddings = min(config.max_position_embeddings,
                                           config.max_model_len)
+        config.attention_type = 1
         if config.attention_type == 0:
             use_headxdim = True
             hidden_inner = (head_dim * config.num_attention_heads
@@ -642,7 +643,7 @@ class MiniMaxText01DecoderLayer(nn.Module):
         else:
             raise ValueError(
                 f"Unsupported attention type: {self.config.attention_type}")
-
+        config.attention_type = 0
         if expert_num == 1:
             self.mlp = MiniMaxText01MLP(
                 hidden_size=self.hidden_size,
