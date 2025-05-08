@@ -1413,7 +1413,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             if model_input.attn_metadata is not None:
                 model_input.attn_metadata.enable_kv_scales_calculation = False
 
-            self.execute_model(model_input, kv_caches, intermediate_tensors)
+            self.execute_model(model_input, kv_caches, intermediate_tensors, 
+                               request_ids_to_seq_ids=model_input.request_ids_to_seq_ids, 
+                               finished_requests_ids = model_input.finished_requests_ids)
             torch.cuda.synchronize()
             if self.lora_config:
                 self._remove_dummy_loras()
