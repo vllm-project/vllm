@@ -16,7 +16,8 @@ from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config)
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
-from vllm.distributed.parallel_state import get_pp_group, graph_capture
+from vllm.distributed.parallel_state import (get_pp_group, get_tp_group,
+                                             graph_capture)
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
@@ -1136,13 +1137,27 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states, aux_hidden_states = output
         else:
             hidden_states = output
-
         if not get_pp_group().is_last_rank:
             # For mid-pipeline stages, return the hidden states.
-            return hidden_states
-
-        sample_hidden_states = hidden_states[logits_indices]
-        logits = self.model.compute_logits(sample_hidden_states, None)
+            if not self.parallel_config.pipeline_parallel_broadcast_output:
+                return hidden_states
+            assert isinstance(hidden_states, IntermediateTensors)
+            get_pp_group().send_tensor_dict(hidden_states.tensors,
+                                            all_gather_group=get_tp_group())
+            model_output_broadcast_data = {}
+        else:
+            sample_hidden_states = hidden_states[logits_indices]
+            logits = self.model.compute_logits(sample_hidden_states, None)
+            model_output_broadcast_data = {
+                "logits": logits,
+            }
+        pp_group_ranks = len(get_pp_group().ranks)
+        last_rank_in_group = pp_group_ranks - 1
+        if len(get_pp_group().ranks) > 0:
+            model_output_broadcast_data = get_pp_group().broadcast_tensor_dict(
+                model_output_broadcast_data, src=last_rank_in_group)
+        assert model_output_broadcast_data is not None
+        logits = model_output_broadcast_data["logits"]
 
         # Apply structured output bitmasks if present
         if scheduler_output.grammar_bitmask is not None:
