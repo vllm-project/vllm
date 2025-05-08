@@ -138,7 +138,7 @@ def main():
         api_key="-",
     )
 
-    model = "Qwen/Qwen2.5-3B-Instruct"
+    model = client.models.list().data[0].id
 
     print("Guided Choice Completion:")
     print(guided_choice_completion(client, model))

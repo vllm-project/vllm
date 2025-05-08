@@ -59,7 +59,7 @@ and San Francisco?
     }]
 
     response = client.chat.completions.create(
-        model="meta-llama/Llama-3.1-8B-Instruct",
+        model=client.models.list().data[0].id,
         messages=messages,
         response_format={
             "type":
