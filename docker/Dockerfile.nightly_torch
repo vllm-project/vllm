@@ -309,5 +309,7 @@ ENV HF_HUB_ENABLE_HF_TRANSFER 1
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements/nightly_torch_test.txt
 
-#################### UNITTEST IMAGE #############################
+# Logging to confirm the torch versions
+RUN pip freeze | grep -E 'torch|xformers|vllm|flashinfer'
 
+#################### UNITTEST IMAGE #############################

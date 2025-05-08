@@ -39,7 +39,7 @@ steps:
   - pip install -r ../../requirements/docs.txt
   - SPHINXOPTS=\"-W\" make html
   # Check API reference (if it fails, you may have missing mock imports)
-  - grep \"sig sig-object py\" build/html/api/inference_params.html
+  - grep \"sig sig-object py\" build/html/api/vllm/vllm.sampling_params.html
 
 - label: Async Engine, Inputs, Utils, Worker Test # 24min
   source_file_dependencies:
@@ -408,7 +408,7 @@ steps:
   - vllm/model_executor/layers/quantization
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - bash ./run-tests.sh -c configs/models-small.txt -t 1
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-small.txt --tp-size=1
 
 - label: OpenAI API correctness
   source_file_dependencies:
@@ -713,4 +713,4 @@ steps:
   - vllm/model_executor/layers/quantization
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - bash ./run-tests.sh -c configs/models-large.txt -t 4
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
