@@ -302,9 +302,8 @@ class KVCacheManager:
             return KVCacheBlocks(new_blocks)
 
         if delay_cache_blocks:
-            # P/D: delay caching the blocks if we need to wait for the
-            # KVs to be recved from remote, but update num_cached_block
-            # with the prefix cache hits to avoid double caching later.
+            # P/D: delay caching blocks if we have to recv from
+            # remote. Update state for locally cached blocks.
             assert request.request_id not in self.num_cached_block
             self.num_cached_block[request.request_id] = len(
                 new_computed_block_list)
