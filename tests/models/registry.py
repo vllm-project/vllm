@@ -182,7 +182,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "JAISLMHeadModel": _HfExamplesInfo("inceptionai/jais-13b-chat"),
     "JambaForCausalLM": _HfExamplesInfo("ai21labs/AI21-Jamba-1.5-Mini",
                                         extras={"tiny": "ai21labs/Jamba-tiny-dev"}),  # noqa: E501
-    "LlamaForCausalLM": _HfExamplesInfo("meta-llama/Llama-3.2-1B-Instruct"),
+    "LlamaForCausalLM": _HfExamplesInfo("meta-llama/Llama-3.2-1B-Instruct",
+                                        extras={"guard": "meta-llama/Llama-Guard-3-1B",  # noqa: E501
+                                                "hermes": "NousResearch/Hermes-3-Llama-3.1-8B"}),  # noqa: E501
     "LLaMAForCausalLM": _HfExamplesInfo("decapoda-research/llama-7b-hf",
                                         is_available_online=False),
     "MambaForCausalLM": _HfExamplesInfo("state-spaces/mamba-130m-hf"),
@@ -378,7 +380,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     # Therefore, we borrow the BartTokenizer from the original Bart model
     "Florence2ForConditionalGeneration": _HfExamplesInfo("microsoft/Florence-2-base",  # noqa: E501
                                                          tokenizer="Isotr0py/Florence-2-tokenizer",
-                                                         trust_remote_code=True),  # noqa: E501
+                                                         trust_remote_code=True,),  # noqa: E501
     "MllamaForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-3.2-11B-Vision-Instruct"),  # noqa: E501
     "WhisperForConditionalGeneration": _HfExamplesInfo("openai/whisper-large-v3"),  # noqa: E501
 }
