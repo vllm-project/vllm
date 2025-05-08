@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import torch
 from fractions import Fraction
 from typing import Any, Dict, List, Optional, Union
 
+import torch
+
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import (
-    LinearBase, UnquantizedLinearMethod)
-from vllm.model_executor.layers.quantization.base_config import \
-    QuantizationConfig
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead)
+from vllm.model_executor.layers.linear import (LinearBase,
+                                               UnquantizedLinearMethod)
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -150,13 +150,13 @@ class AutoRoundConfig(QuantizationConfig):
               sym)
         if backend == "auto" or "marlin" in backend:
             if isinstance(layer, FusedMoE):
-                from vllm.model_executor.layers.quantization.utils.\
-                marlin_utils import (check_moe_marlin_supports_layer)
+                from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+                    check_moe_marlin_supports_layer)
                 use_marlin = check_moe_marlin_supports_layer(layer, group_size)
             else:
-                from vllm.model_executor.layers.quantization.utils.\
-                marlin_utils import (check_moe_marlin_supports_layer, \
-                    check_marlin_supported)
+                from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+                    check_marlin_supported, check_moe_marlin_supports_layer,
+                    marlin_utils)
                 AWQ_TYPE_MAP = {
                     4: scalar_types.uint4,
                     8: scalar_types.uint8,
@@ -192,8 +192,8 @@ class AutoRoundConfig(QuantizationConfig):
         if isinstance(layer, FusedMoE):
             if use_marlin:
                 return AWQMoEMethod(quant_args_marlin)
-            from vllm.model_executor.layers.quantization.moe_wna16 import \
-                MoeWNA16Config
+            from vllm.model_executor.layers.quantization.moe_wna16 import (
+                MoeWNA16Config)
             config = {
                 "linear_quant_method": "awq",
                 "weight_bits": weight_bits,
@@ -225,12 +225,12 @@ class AutoRoundConfig(QuantizationConfig):
               sym)
         if backend == "auto" or "marlin" in backend:
             if isinstance(layer, FusedMoE):
-                from vllm.model_executor.layers.quantization.utils.\
-                marlin_utils import (check_moe_marlin_supports_layer)
+                from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+                    check_moe_marlin_supports_layer)
                 use_marlin = check_moe_marlin_supports_layer(layer, group_size)
             else:
-                from vllm.model_executor.layers.quantization.utils.\
-                marlin_utils import (check_marlin_supported)
+                from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+                    check_marlin_supported)
                 GPTQ_TYPE_MAP = {
                     (4, True): scalar_types.uint4b8,
                     (8, True): scalar_types.uint8b128,
@@ -268,8 +268,8 @@ class AutoRoundConfig(QuantizationConfig):
 
         if isinstance(layer, FusedMoE):
             if use_marlin:
-                from vllm.model_executor.layers.quantization.moe_wna16 \
-                    import MoeWNA16Config
+                from vllm.model_executor.layers.quantization.moe_wna16 import (
+                    MoeWNA16Config)
                 config = {
                     "linear_quant_method": "gptq",
                     "weight_bits": weight_bits,
@@ -298,9 +298,8 @@ class AutoRoundConfig(QuantizationConfig):
                 return UnquantizedLinearMethod()
             else:
                 return None
-        from vllm.model_executor.layers.quantization.ipex_quant import \
-            IPEXGPTQLinearMethod, IPEXAWQLinearMethod, \
-            IPEXConfig
+        from vllm.model_executor.layers.quantization.ipex_quant import (
+            IPEXAWQLinearMethod, IPEXConfig, IPEXGPTQLinearMethod)
         if isinstance(layer, (LinearBase, ParallelLMHead)):
             if "awq" in self.packing_format:
                 config = IPEXConfig(method="awq", weight_bits=weight_bits,
