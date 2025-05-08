@@ -5,7 +5,8 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
-from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
+                                               UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -56,9 +57,27 @@ class TorchAOConfig(QuantizationConfig):
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["TorchAOLinearMethod"]:
-        if isinstance(layer, LinearBase):
-            return TorchAOLinearMethod(self)
-        return None
+        if not isinstance(layer, LinearBase):
+            return None
+
+        from torchao.quantization import AOPerModuleConfig
+
+        module_fqn = prefix
+        if isinstance(self.torchao_config, AOPerModuleConfig):
+            module_fqn_to_config = self.torchao_config.module_fqn_to_config
+            c = None
+            if module_fqn in module_fqn_to_config:
+                c = module_fqn_to_config[module_fqn]
+            else:
+                c = module_fqn_to_config.get("_default", None)
+            if c is not None:
+                print("c:", c)
+                current_torchao_config = TorchAOConfig(c)
+                return TorchAOLinearMethod(current_torchao_config)
+            else:
+                return UnquantizedLinearMethod()
+
+        return TorchAOLinearMethod(self)
 
     def get_scaled_act_names(self) -> List[str]:
         return []
