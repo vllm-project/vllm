@@ -277,12 +277,10 @@ class AutoRoundConfig(QuantizationConfig):
             return GPTQMarlinMoEMethod(quant_args_marlin)
 
         if isinstance(layer, (LinearBase, ParallelLMHead)):
-            if self.check_quantized(weight_bits):
-                return (
-                    GPTQMarlinLinearMethod
-                    if use_marlin else GPTQLinearMethod)(
-                    quant_args)
-            return UnquantizedLinearMethod()
+            if use_marlin:
+                return GPTQMarlinLinearMethod(quant_args_marlin)
+            else:
+                return GPTQLinearMethod(quant_args)
 
         return None
 
