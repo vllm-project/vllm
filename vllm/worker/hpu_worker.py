@@ -299,9 +299,6 @@ class HPUWorker(LocalOrDistributedWorkerBase):
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
 
-    def finish_measurements(self):
-        self.model_runner.finish_measurements()
-
     @property
     def do_metadata_broadcast(self) -> bool:
         return self.parallel_config.tensor_parallel_size > 1
@@ -472,12 +469,13 @@ class HPUCacheEngine(CacheEngine):
         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
             num_blocks, self.block_size, self.num_kv_heads, self.head_size)
         kv_cache: List[Tuple[torch.Tensor, torch.Tensor]] = []
+        dtype = self.dtype
+        if device != 'hpu' and self.dtype == torch.float8_e4m3fn:
+            dtype = torch.uint8
         for _ in range(self.num_attention_layers):
-            key_cache = torch.zeros(kv_cache_shape,
-                                    dtype=self.dtype,
-                                    device=device)
+            key_cache = torch.zeros(kv_cache_shape, dtype=dtype, device=device)
             value_cache = torch.zeros(kv_cache_shape,
-                                      dtype=self.dtype,
+                                      dtype=dtype,
                                       device=device)
             kv_layer = (key_cache, value_cache)
             kv_cache.append(kv_layer)
