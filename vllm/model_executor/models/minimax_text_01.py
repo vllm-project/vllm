@@ -495,11 +495,11 @@ class MiniMaxText01LinearAttention(nn.Module):
             hidden = self._decode_infer(q, k, v, kv_cache,
                                         state_indices_tensor, attn_metadata)
 
-        hidden = self.norm._forward(hidden)
-        gate, _ = self.output_gate(hidden_states)
-        hidden = F.sigmoid(gate) * hidden
-        hidden = hidden.to(hidden_states.dtype)
-        hidden, _ = self.out_proj(hidden)
+        # hidden = self.norm._forward(hidden)
+        # gate, _ = self.output_gate(hidden_states)
+        # hidden = F.sigmoid(gate) * hidden
+        # hidden = hidden.to(hidden_states.dtype)
+        # hidden, _ = self.out_proj(hidden)
         return hidden
 
 
