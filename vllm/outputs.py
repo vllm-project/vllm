@@ -103,6 +103,9 @@ class RequestOutput:
         encoder_prompt_token_ids: The token IDs of the encoder prompt.
                                   None if decoder-only.
         num_cached_tokens: The number of tokens with prefix cache hit.
+                           Over the lifetime of the request, this number
+                           is possible to be refreshed if it is preempted
+                           and resumed.
     """
 
     def __init__(
