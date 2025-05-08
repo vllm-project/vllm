@@ -73,15 +73,15 @@ class HPUPoolingModelRunner(
             lora_mask, lora_logits_mask = self.create_lora_mask(
                 input_tokens, model_input.lora_ids, attn_metadata.is_prompt)
 
-        num_layers = self.model_config.get_num_layers(self.parallel_config)
+        #num_layers = self.model_config.get_num_layers(self.parallel_config)
         # use an empty tensor instead of `None`` to force Dynamo to pass
         # it by reference, rather by specializing on the value ``None``.
         # the `dtype` argument does not matter, and we use `float32` as
         # a placeholder (it has wide hardware support).
-        kv_caches = [
-            torch.tensor([], dtype=torch.float32, device=self.device)
-            for _ in range(num_layers)
-        ]
+        #kv_caches = [
+        #    torch.tensor([], dtype=torch.float32, device=self.device)
+        #    for _ in range(num_layers)
+        #]
 
         execute_model_kwargs = {
             "input_ids": model_input.input_tokens,

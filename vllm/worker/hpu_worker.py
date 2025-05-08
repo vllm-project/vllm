@@ -65,11 +65,9 @@ class HPUWorker(LocalOrDistributedWorkerBase):
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
-
+        ModelRunnerClass: Type[HPUModelRunnerBase] = HPUModelRunner
         if self.model_config.runner_type == "pooling":
             ModelRunnerClass = HPUPoolingModelRunner
-        else:
-            ModelRunnerClass = HPUModelRunner
         self.model_runner: HPUModelRunnerBase = ModelRunnerClass(
             vllm_config=vllm_config, is_driver_worker=is_driver_worker)
         # Uninitialized cache engine. Will be initialized by
@@ -315,7 +313,8 @@ class HPUWorker(LocalOrDistributedWorkerBase):
         set_random_seed(self.model_config.seed)
 
     def finish_measurements(self):
-        self.model_runner.finish_measurements()
+        if hasattr(self.model_runner, 'finish_measurements'):
+            self.model_runner.finish_measurements()
 
     @property
     def do_metadata_broadcast(self) -> bool:
@@ -399,7 +398,8 @@ class HPUWorker(LocalOrDistributedWorkerBase):
             "Prompt Adapter is not implemented for HPU backend.")
 
     def shutdown_inc(self):
-        self.model_runner.shutdown_inc()
+        if hasattr(self.model_runner, 'shutdown_inc'):
+            self.model_runner.shutdown_inc()
 
     @property
     def max_model_len(self) -> int:
