@@ -70,7 +70,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace2: torch.Tensor,
         expert_num_tokens: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        N = w1.shape[1]
+        N = w1.size(1)
         if (self.allow_deep_gemm and self.use_fp8_w8a8 and N > 512
                 and _valid_deep_gemm(hidden_states, w1, w2, expert_map)):
             return self.deep_gemm_expert.apply(

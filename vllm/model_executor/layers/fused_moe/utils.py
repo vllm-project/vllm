@@ -39,7 +39,7 @@ def _fp8_quantize(
         assert len(block_shape) == 2
         _, block_k = block_shape[0], block_shape[1]
         A, A_scale = per_token_group_quant_fp8(A, block_k)
-        assert cdiv(A.shape[-1], block_k) == A_scale.shape[-1]
+        assert cdiv(A.size(-1), block_k) == A_scale.size(-1)
 
     return A, A_scale
 
@@ -66,7 +66,7 @@ def _int8_quantize(
         assert len(block_shape) == 2
         _, block_k = block_shape[0], block_shape[1]
         A, A_scale = per_token_group_quant_int8(A, block_k)
-        assert cdiv(A.shape[-1], block_k) == A_scale.shape[-1]
+        assert cdiv(A.size(-1), block_k) == A_scale.size(-1)
 
     return A, A_scale
 

@@ -35,7 +35,7 @@ class StandardDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         apply_router_weight_on_input: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         if apply_router_weight_on_input:
-            topk = topk_ids.shape[1]
+            topk = topk_ids.size(1)
             # TODO: this only works for topK=1, will need to update for topK>1
             assert topk == 1, \
                 "apply_router_weight_on_input is only implemented for topk=1"
