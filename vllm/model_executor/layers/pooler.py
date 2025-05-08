@@ -118,7 +118,7 @@ class CLSPool(SimplePooler):
         else:
             first_token_flat_indices = torch.zeros_like(prompt_lens)
             first_token_flat_indices[1:] += torch.cumsum(prompt_lens,
-                                                        dim=0)[:-1]
+                                                         dim=0)[:-1]
         return hidden_states[first_token_flat_indices]
 
 

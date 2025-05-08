@@ -83,4 +83,4 @@ class PoolingTensors:
             prompt_offsets_t = None
         return cls(prompt_lens=prompt_lens_t.to(device=device,
                                                 non_blocking=True),
-                    prompt_offsets=prompt_offsets_t)
+                   prompt_offsets=prompt_offsets_t)

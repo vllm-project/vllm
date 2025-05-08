@@ -26,7 +26,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest
 from vllm.utils import bind_kv_cache
 from vllm.worker.cache_engine import CacheEngine
-from vllm.worker.hpu_model_runner import HPUModelRunner
+from vllm.worker.hpu_model_runner import HPUModelRunner, HPUModelRunnerBase
 from vllm.worker.hpu_pooling_model_runner import HPUPoolingModelRunner
 from vllm.worker.model_runner_base import ModelRunnerBase
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
