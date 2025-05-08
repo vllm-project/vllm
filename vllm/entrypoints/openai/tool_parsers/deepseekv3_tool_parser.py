@@ -230,6 +230,7 @@ class DeepSeekV3ToolParser(ToolParser):
                 delta = DeltaMessage(tool_calls=[], content=text)
                 return delta
 
+            current_tool_call = dict()
             if tool_call_portion:
                 current_tool_call_matches = (
                     self.stream_tool_call_portion_regex.findall(
@@ -237,10 +238,8 @@ class DeepSeekV3ToolParser(ToolParser):
                 if len(current_tool_call_matches) > 0:
                     tool_type, tool_name, tool_args = current_tool_call_matches[
                         0]
-                    current_tool_call = {
-                        "name": tool_name,
-                        "arguments": tool_args,
-                    }
+                    current_tool_call["name"] = tool_name
+                    current_tool_call["arguments"] = tool_args
                 else:
                     current_tool_call_name_matches = (
                         self.stream_tool_call_name_regex.findall(
@@ -248,15 +247,11 @@ class DeepSeekV3ToolParser(ToolParser):
                     if len(current_tool_call_name_matches) > 0:
                         tool_type, tool_name = current_tool_call_name_matches[
                             0]
-                        current_tool_call = {
-                            "name": tool_name,
-                            "arguments": ""
-                        }
+                        current_tool_call["name"] = tool_name
+                        current_tool_call["arguments"] = ""
                     else:
                         logger.debug("Not enough token")
                         return None
-            else:
-                current_tool_call = None
 
             # case - we haven't sent the tool name yet. If it's available, send
             #   it. otherwise, wait until it's available.
