@@ -84,6 +84,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_CUSTOM_PAGED_ATTN: bool = True
+    VLLM_QUARK_EMU_MEM_OPT: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -110,6 +111,7 @@ if TYPE_CHECKING:
     VLLM_USE_DEEP_GEMM: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
+    VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
 
 
 def get_default_cache_root():
@@ -583,6 +585,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: (os.getenv("VLLM_ROCM_CUSTOM_PAGED_ATTN", "True").lower() in
              ("true", "1")),
 
+    # If set, when running in Quark emulation mode, do not dequantize the
+    # weights at load time. Instead, dequantize weights on-the-fly during
+    # kernel execution.
+    # This allows running larger models at the cost of slower inference.
+    # This flag has no effect when not running in Quark emulation mode.
+    "VLLM_QUARK_EMU_MEM_OPT":
+    lambda: bool(int(os.getenv("VLLM_QUARK_EMU_MEM_OPT", "0"))),
+
     # Divisor for dynamic query scale factor calculation for FP8 KV Cache
     "Q_SCALE_CONSTANT":
     lambda: int(os.getenv("Q_SCALE_CONSTANT", "200")),
@@ -727,6 +737,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # limit will actually be zero-copy decoded.
     "VLLM_MSGPACK_ZERO_COPY_THRESHOLD":
     lambda: int(os.getenv("VLLM_MSGPACK_ZERO_COPY_THRESHOLD", "256")),
+
+    # If set, allow insecure serialization using pickle.
+    # This is useful for environments where it is deemed safe to use the
+    # insecure method and it is needed for some reason.
+    "VLLM_ALLOW_INSECURE_SERIALIZATION":
+    lambda: bool(int(os.getenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "0"))),
 }
 
 # end-env-vars-definition

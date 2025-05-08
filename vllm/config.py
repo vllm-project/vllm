@@ -2701,8 +2701,8 @@ class LoRAConfig:
     lora_extra_vocab_size: int = 256
     """Maximum size of extra vocabulary that can be present in a LoRA adapter
     (added to the base model vocabulary)."""
-    # This is a constant.
-    lora_vocab_padding_size: ClassVar[int] = 256
+    lora_vocab_padding_size: ClassVar[int] = current_platform\
+        .get_lora_vocab_padding_size()
     long_lora_scaling_factors: Optional[tuple[float, ...]] = None
     """Specify multiple scaling factors (which can be different from base model
     scaling factor - see eg. Long LoRA) to allow for multiple LoRA adapters
@@ -2730,6 +2730,7 @@ class LoRAConfig:
         factors.append(self.fully_sharded_loras)
         factors.append(self.lora_dtype)
         factors.append(self.lora_extra_vocab_size)
+        factors.append(self.lora_vocab_padding_size)
         factors.append(self.long_lora_scaling_factors)
         factors.append(self.bias_enabled)
         hash_str = hashlib.md5(str(factors).encode(),
@@ -3569,6 +3570,7 @@ class CompilationConfig:
         - {attr}`cudagraph_capture_sizes`
         - {attr}`cudagraph_num_of_warmups`
         - {attr}`cudagraph_copy_inputs`
+        - {attr}`full_cuda_graph`
     - Inductor compilation:
         - {attr}`use_inductor`
         - {attr}`compile_sizes`
@@ -3676,6 +3678,11 @@ class CompilationConfig:
     are always used, it can set this to False. Otherwise, it should
     set this to True, and the compiler will copy the input to an
     internally managed buffer. Default is False."""
+    full_cuda_graph: bool = False
+    """whether to use a full cuda graph for the entire forward pass rather than
+    splitting certain operations such as attention into subgraphs. Thus this
+    flag cannot be used together with splitting_ops. This may provide
+    performance benefits for smaller models."""
 
     class PassConfig(BaseModel):
         """
@@ -3907,10 +3914,14 @@ class CompilationConfig:
             self.max_capture_size] = self.max_capture_size
 
     def set_splitting_ops_for_v1(self):
-        # If default, override splitting ops for piecewise cudagraph on V1.
         # NOTE: this function needs to be called
+        if self.splitting_ops and self.full_cuda_graph:
+            raise ValueError("full_cuda_graph cannot be used together with "
+                             "splitting_ops, as Full CUDA graph will override "
+                             f"the splitting_ops: {self.splitting_ops}")
+
         if not self.splitting_ops:
-            self.splitting_ops = [
+            self.splitting_ops = [] if self.full_cuda_graph else [
                 "vllm.unified_attention",
                 "vllm.unified_attention_with_output",
             ]
@@ -4216,6 +4227,12 @@ class VllmConfig:
                 "Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
+        if self.compilation_config.full_cuda_graph and \
+            not self.model_config.disable_cascade_attn:
+            logger.warning_once(
+                "full_cuda_graph is not supported with "
+                "cascade attention. Disabling cascade attention.")
+            self.model_config.disable_cascade_attn = True
 
         if self.model_config and self.model_config.use_mla and \
             not (current_platform.is_cuda() or current_platform.is_rocm()):
