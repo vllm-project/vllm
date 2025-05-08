@@ -294,13 +294,8 @@ class Glm4vVisionAttention(nn.Module):
         q, k, v = (rearrange(x, "s b ... -> b s ...").contiguous()
                    for x in (q, k, v))
         if rotary_pos_emb is not None:
-            use_flash_attn = self.attn_backend == _Backend.FLASH_ATTN
-            q = apply_rotary_pos_emb_vision(q,
-                                            rotary_pos_emb,
-                                            use_flash_attn=use_flash_attn)
-            k = apply_rotary_pos_emb_vision(k,
-                                            rotary_pos_emb,
-                                            use_flash_attn=use_flash_attn)
+            q = apply_rotary_pos_emb_vision(q, rotary_pos_emb)
+            k = apply_rotary_pos_emb_vision(k, rotary_pos_emb)
 
         if self.attn_backend == _Backend.FLASH_ATTN:
             # from vllm_flash_attn.flash_attn_interface import (
@@ -977,6 +972,12 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
             pixel_values = image_input["pixel_values"].type(self.visual.dtype)
             image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
 
+            # FIXME： 用于保存image embed，适配 transformers时可用
+            # if image_embeds.shape[0] == 1250:
+            #     from safetensors.torch import save_file
+            #     save_file({"image_embeds": image_embeds}, "/mnt/image_embed.safetensors")
+            #     print("save with:\n", image_embeds)
+
         # Split concatenated embeddings for each image item.
         merge_size = self.visual.spatial_merge_size
         sizes = grid_thw.prod(-1) // merge_size // merge_size
@@ -1135,6 +1136,7 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
                     video_input=video_input)
                 input_ids = None
 
+        # FIXME: 用于测试语言模型是否工作，可以在这里保存和载入 embed 和position
         # from safetensors.torch import load_file
         # loaded_embeds = load_file("/mnt/embed.safetensors")
         # loaded_positions = load_file("/mnt/positions.safetensors")
@@ -1144,14 +1146,14 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
         # print(f"Loaded positions with shape {positions.shape}")
         # intermediate_tensors = None
 
-        # V0 版本似乎只有一开始的检验过不去
-        if inputs_embeds is not None:
-            if positions.shape[1] != inputs_embeds.shape[0]:
-                print("======")
-                print(inputs_embeds.shape)
-                print(positions.shape)
-                pad_len = inputs_embeds.shape[0] - positions.shape[1]
-                positions = torch.nn.functional.pad(positions, (0, pad_len), value=0)
+        # FIXME: V0 版本似乎只有一开始的检验过不去，后续的推理能推，问题和V1一样。
+        # if inputs_embeds is not None:
+        #     if positions.shape[1] != inputs_embeds.shape[0]:
+        #         print("======")
+        #         print(inputs_embeds.shape)
+        #         print(positions.shape)
+        #         pad_len = inputs_embeds.shape[0] - positions.shape[1]
+        #         positions = torch.nn.functional.pad(positions, (0, pad_len), value=0)
 
         hidden_states = self.language_model.model(
             input_ids=input_ids,
@@ -1166,9 +1168,8 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.language_model.compute_logits(hidden_states,
-                                                    sampling_metadata)
-        return logits
+        return self.language_model.compute_logits(hidden_states,
+                                                  sampling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
@@ -1182,5 +1183,6 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
         """
         return MultiModelKeys.from_string_field(
             language_model="language_model",
-            connector="visual.",
-            tower_model="visual.merger.")
+            connector="visual.merger.",
+            tower_model="visual.",
+        )
