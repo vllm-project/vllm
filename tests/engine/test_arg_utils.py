@@ -240,7 +240,7 @@ def test_compilation_config():
     # set to string form of a dict
     args = parser.parse_args([
         "--compilation-config",
-        "{'level': 3, 'cudagraph_capture_sizes': [1, 2, 4, 8]}",
+        '{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}',
     ])
     assert (args.compilation_config.level == 3 and
             args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8])
@@ -248,7 +248,7 @@ def test_compilation_config():
     # set to string form of a dict
     args = parser.parse_args([
         "--compilation-config="
-        "{'level': 3, 'cudagraph_capture_sizes': [1, 2, 4, 8]}",
+        '{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}',
     ])
     assert (args.compilation_config.level == 3 and
             args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8])
