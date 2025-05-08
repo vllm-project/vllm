@@ -368,7 +368,8 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         self.indices_len[:] = indices_len
         xm.mark_step()
 
-    def _update_prefill_metada(self, token_lora_tensor: torch.Tensor) -> None:
+    def _update_prefill_metadata(self,
+                                 token_lora_tensor: torch.Tensor) -> None:
         self.batch_size = 1
         self._lora_indices_per_batch[:self.
                                      batch_size] = token_lora_tensor[:self.
