@@ -1171,10 +1171,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if not get_pp_group().is_last_rank:
             # For mid-pipeline stages, return the hidden states.
-            return hidden_states
-
-        sample_hidden_states = hidden_states[logits_indices]
-        logits = self.model.compute_logits(sample_hidden_states, None)
+            if not self.parallel_config.pipeline_parallel_broadcast_output:
+                return hidden_states
+            assert isinstance(hidden_states, IntermediateTensors)
+            get_pp_group().send_tensor_dict(hidden_states.tensors,
+                                            all_gather_group=get_tp_group())
+            model_output_broadcast_data = {}
+        else:
+            sample_hidden_states = hidden_states[logits_indices]
+            logits = self.model.compute_logits(sample_hidden_states, None)
+            model_output_broadcast_data = {
+                "logits": logits,
+            }
+        pp_group_ranks = len(get_pp_group().ranks)
+        last_rank_in_group = pp_group_ranks - 1
+        if len(get_pp_group().ranks) > 0:
+            model_output_broadcast_data = get_pp_group().broadcast_tensor_dict(
+                model_output_broadcast_data, src=last_rank_in_group)
+        assert model_output_broadcast_data is not None
+        logits = model_output_broadcast_data["logits"]
 
         # Apply structured output bitmasks if present
         if scheduler_output.grammar_bitmask is not None:
