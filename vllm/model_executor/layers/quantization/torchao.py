@@ -9,7 +9,7 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+    QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
 
 
@@ -56,7 +56,7 @@ class TorchAOConfig(QuantizationConfig):
         return cls(ao_config)
 
     def get_quant_method(self, layer: torch.nn.Module,
-                         prefix: str) -> Optional["TorchAOLinearMethod"]:
+                         prefix: str) -> Optional["QuantizeMethodBase"]:
         if not isinstance(layer, LinearBase):
             return None
 
@@ -71,7 +71,6 @@ class TorchAOConfig(QuantizationConfig):
             else:
                 c = module_fqn_to_config.get("_default", None)
             if c is not None:
-                print("c:", c)
                 current_torchao_config = TorchAOConfig(c)
                 return TorchAOLinearMethod(current_torchao_config)
             else:
