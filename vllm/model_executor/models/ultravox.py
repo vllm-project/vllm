@@ -173,6 +173,41 @@ class UltravoxMultiModalProcessor(
 
         return output
 
+    async def _call_hf_processor_async(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        # Text-only input not supported in composite processor
+        if not mm_data.get("audios", []):
+            prompt_ids = self.info.get_tokenizer().encode(
+                prompt, add_special_tokens=False)
+            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
+            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+
+        mm_data = dict(mm_data)
+        audios = mm_data.pop("audios", [])
+        assert isinstance(audios, list)
+
+        feature_extractor = self.info.get_feature_extractor()
+        mm_kwargs = dict(
+            **mm_kwargs,
+            sampling_rate=feature_extractor.sampling_rate,
+            include_audio_num_chunks=True,
+        )
+
+        item_processor_data = dict(**mm_data, audios=audios)
+
+        output = await super()._call_hf_processor_async(
+            prompt=prompt,
+            mm_data=item_processor_data,
+            mm_kwargs=mm_kwargs,
+        )
+        output['audio_features'] = output.pop('audio_values')
+
+        return output
+
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,

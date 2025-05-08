@@ -107,6 +107,20 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
             mm_placeholders={},
         )
 
+    async def apply_async(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data: MultiModalDataDict,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        return_mm_hashes: bool = False,
+    ) -> MultiModalInputs:
+        return self.apply(
+            prompt=prompt,
+            mm_data=mm_data,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            return_mm_hashes=return_mm_hashes,
+        )
+
 
 @MULTIMODAL_REGISTRY.register_processor(
     PrithviGeoSpatialMAEMultiModalProcessor,

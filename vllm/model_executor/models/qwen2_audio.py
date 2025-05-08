@@ -150,6 +150,8 @@ class Qwen2AudioMultiModalProcessor(
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, Any],
     ) -> BatchFeature:
+        mm_data = dict(mm_data)
+
         # NOTE - we rename audios -> audio in mm data because transformers has
         # deprecated audios for the qwen2audio processor and will remove
         # support for it in transformers 4.54.
@@ -170,6 +172,39 @@ class Qwen2AudioMultiModalProcessor(
         )
 
         return super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+        )
+
+    async def _call_hf_processor_async(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, Any],
+    ) -> BatchFeature:
+        mm_data = dict(mm_data)
+
+        # NOTE - we rename audios -> audio in mm data because transformers has
+        # deprecated audios for the qwen2audio processor and will remove
+        # support for it in transformers 4.54.
+        audios = mm_data.pop("audios", [])
+        if audios:
+            mm_data["audio"] = audios
+
+        # Text-only input not supported in composite processor
+        if not mm_data.get("audio", []):
+            prompt_ids = self.info.get_tokenizer().encode(prompt)
+            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
+            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+
+        feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
+        mm_kwargs = dict(
+            **mm_kwargs,
+            sampling_rate=feature_extractor.sampling_rate,
+        )
+
+        return await super()._call_hf_processor_async(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,

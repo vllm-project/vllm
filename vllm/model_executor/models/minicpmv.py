@@ -22,6 +22,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only MiniCPM-V model compatible with HuggingFace weights."""
+import asyncio
 import math
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
@@ -559,6 +560,35 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
         return image_inputs
 
+    async def process_images_async(
+        self,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, NestedTensors]:
+        if (images := mm_data.get("images")) is None:
+            return {}
+
+        parsed_images = (self._get_data_parser().parse_mm_data({
+            "image": images
+        }).get_items("image",
+                     (MiniCPMVImageEmbeddingItems, ImageProcessorItems)))
+
+        if isinstance(parsed_images, MiniCPMVImageEmbeddingItems):
+            image_inputs = {}
+        else:
+            image_inputs = await self._base_call_hf_processor_async(
+                prompts=[self.info.image_pattern] * len(parsed_images),
+                mm_data={"images": [[image] for image in parsed_images]},
+                mm_kwargs=mm_kwargs,
+                out_keys={"pixel_values", "image_sizes", "tgt_sizes"},
+            )
+
+        tokenizer = self.info.get_tokenizer()
+        unk_token_id = tokenizer.get_vocab()["<unk>"]
+        image_inputs["image_token_id"] = torch.tensor(unk_token_id)
+
+        return image_inputs
+
     def process_videos(
         self,
         mm_data: Mapping[str, object],
@@ -597,6 +627,44 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
         return video_inputs
 
+    async def process_videos_async(
+        self,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, NestedTensors]:
+        if (videos := mm_data.get("videos")) is None:
+            return {}
+
+        parsed_videos = (self._get_data_parser().parse_mm_data({
+            "video": videos
+        }).get_items("video",
+                     (MiniCPMVVideoEmbeddingItems, VideoProcessorItems)))
+
+        if isinstance(parsed_videos, MiniCPMVVideoEmbeddingItems):
+            video_inputs = {}
+        else:
+            video_inputs = await self._base_call_hf_processor_async(
+                prompts=[
+                    self.info.image_pattern * len(video)
+                    for video in parsed_videos
+                ],
+                mm_data={"images": list(parsed_videos)},
+                mm_kwargs={
+                    **mm_kwargs,
+                    "max_slice_nums":
+                    self.info.get_video_max_slice_num(),
+                },
+                out_keys={"pixel_values", "image_sizes", "tgt_sizes"},
+            )
+
+        video_inputs = {f"video_{k}": v for k, v in video_inputs.items()}
+
+        tokenizer = self.info.get_tokenizer()
+        unk_token_id = tokenizer.get_vocab()["<unk>"]
+        video_inputs["video_token_id"] = torch.tensor(unk_token_id)
+
+        return video_inputs
+
     def process_mm_inputs(
         self,
         mm_data: Mapping[str, object],
@@ -606,6 +674,18 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
             **self.process_images(mm_data, mm_kwargs),
             **self.process_videos(mm_data, mm_kwargs),
         }
+
+    async def process_mm_inputs_async(
+        self,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, NestedTensors]:
+        image_inputs, video_inputs = await asyncio.gather(
+            self.process_images_async(mm_data, mm_kwargs),
+            self.process_videos_async(mm_data, mm_kwargs),
+        )
+
+        return {**image_inputs, **video_inputs}
 
     def _base_call_hf_processor(
         self,
@@ -625,8 +705,10 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         else:
             inputs = defaultdict[str, list[torch.Tensor]](list)
 
-            for i, prompt in enumerate(prompts):
-                inputs_one = super()._call_hf_processor(
+            base_call_hf_processor = super()._call_hf_processor
+
+            def get_inputs_one(i: int, prompt: str):
+                return base_call_hf_processor(
                     prompt=prompt,
                     mm_data={
                         k: v[i]
@@ -635,6 +717,52 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
                     mm_kwargs=mm_kwargs,
                 )
 
+            inputs_all = [
+                get_inputs_one(i, prompt) for i, prompt in enumerate(prompts)
+            ]
+
+            for inputs_one in inputs_all:
+                for k, v in inputs_one.items():
+                    assert len(v) == 1, (k, len(v))
+                    inputs[k].append(v[0])
+
+        return {k: inputs[k] for k in out_keys}
+
+    async def _base_call_hf_processor_async(
+        self,
+        prompts: list[str],
+        mm_data: Mapping[str, Sequence[object]],
+        mm_kwargs: Mapping[str, object],
+        *,
+        out_keys: set[str],
+    ) -> dict[str, NestedTensors]:
+        # This processor supports zipping prompt and mm_data together
+        if self.info.get_model_version() == (2, 6):
+            inputs = await super()._call_hf_processor_async(
+                prompt=prompts,  # type: ignore
+                mm_data=mm_data,
+                mm_kwargs=mm_kwargs,
+            )
+        else:
+            inputs = defaultdict[str, list[torch.Tensor]](list)
+
+            base_call_hf_processor_async = super()._call_hf_processor_async
+
+            async def get_inputs_one(i: int, prompt: str):
+                return await base_call_hf_processor_async(
+                    prompt=prompt,
+                    mm_data={
+                        k: v[i]
+                        for k, v in mm_data.items()
+                    },
+                    mm_kwargs=mm_kwargs,
+                )
+
+            inputs_all = await asyncio.gather(
+                *(get_inputs_one(i, prompt)
+                  for i, prompt in enumerate(prompts)))
+
+            for inputs_one in inputs_all:
                 for k, v in inputs_one.items():
                     assert len(v) == 1, (k, len(v))
                     inputs[k].append(v[0])
@@ -651,6 +779,22 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
         input_ids = torch.tensor([tokenizer.encode(prompt)])
         mm_inputs = self.process_mm_inputs(mm_data, mm_kwargs)
+
+        return BatchFeature({
+            "input_ids": input_ids,
+            **mm_inputs,
+        })
+
+    async def _call_hf_processor_async(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        tokenizer = self.info.get_tokenizer()
+
+        input_ids = torch.tensor([tokenizer.encode(prompt)])
+        mm_inputs = await self.process_mm_inputs_async(mm_data, mm_kwargs)
 
         return BatchFeature({
             "input_ids": input_ids,

@@ -22,6 +22,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only MiniCPM-O model compatible with HuggingFace weights."""
+import asyncio
 from collections.abc import Iterable, Mapping, Sequence
 from typing import (Any, Callable, Literal, Optional, Set, Tuple, TypedDict,
                     Union)
@@ -298,6 +299,48 @@ class MiniCPMOMultiModalProcessor(
 
         return audio_inputs
 
+    async def process_audios_async(
+        self,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, NestedTensors]:
+        if (audios := mm_data.get("audios")) is None:
+            return {}
+
+        parsed_audios = (self._get_data_parser().parse_mm_data({
+            "audio": audios
+        }).get_items("audio",
+                     (MiniCPMOAudioEmbeddingItems, AudioProcessorItems)))
+
+        if isinstance(parsed_audios, MiniCPMOAudioEmbeddingItems):
+            audio_inputs = {}
+        else:
+            audio_inputs = await self._base_call_hf_processor_async(
+                prompts=[self.info.audio_pattern] * len(parsed_audios),
+                mm_data={"audios": [[audio] for audio in parsed_audios]},
+                mm_kwargs={
+                    **mm_kwargs,
+                    "chunk_input": True,
+                },
+                out_keys={"audio_features", "audio_feature_lens"},
+            )
+
+            # Avoid padding since we need the output for each audio to be
+            # independent of other audios for the cache to work correctly
+            unpadded_audio_features = [
+                feat[:, :feature_len] for feat, feature_len in zip(
+                    audio_inputs["audio_features"],
+                    audio_inputs["audio_feature_lens"],
+                )
+            ]
+            audio_inputs["audio_features"] = unpadded_audio_features
+
+        tokenizer = self.info.get_tokenizer()
+        unk_token_id = tokenizer.get_vocab()["<unk>"]
+        audio_inputs["audio_token_id"] = torch.tensor(unk_token_id)
+
+        return audio_inputs
+
     def process_mm_inputs(
         self,
         mm_data: Mapping[str, object],
@@ -307,6 +350,18 @@ class MiniCPMOMultiModalProcessor(
             **super().process_mm_inputs(mm_data, mm_kwargs),
             **self.process_audios(mm_data, mm_kwargs),
         }
+
+    async def process_mm_inputs_async(
+        self,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, NestedTensors]:
+        base_inputs, audio_inputs = await asyncio.gather(
+            super().process_mm_inputs_async(mm_data, mm_kwargs),
+            self.process_audios_async(mm_data, mm_kwargs),
+        )
+
+        return {**base_inputs, **audio_inputs}
 
     def _get_prompt_updates(
         self,

@@ -1020,6 +1020,18 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]
             self.info._get_image_processor_kwargs(**mm_kwargs),
         )
 
+    async def _call_hf_processor_async(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        return await self.info.ctx.call_hf_processor_async(
+            self.info.get_hf_processor(**mm_kwargs),
+            dict(text=prompt, **mm_data),
+            self.info._get_image_processor_kwargs(**mm_kwargs),
+        )
+
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,

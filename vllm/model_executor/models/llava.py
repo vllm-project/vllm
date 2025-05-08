@@ -301,6 +301,39 @@ class PixtralHFMultiModalProcessor(
             mm_kwargs=mm_kwargs,
         )
 
+        return self._postprocess_hf(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            processed_outputs=processed_outputs,
+        )
+
+    async def _call_hf_processor_async(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        processed_outputs = await super()._call_hf_processor_async(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+        )
+
+        return self._postprocess_hf(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            processed_outputs=processed_outputs,
+        )
+
+    def _postprocess_hf(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        processed_outputs: BatchFeature,
+    ) -> BatchFeature:
         pixel_values = processed_outputs.get("pixel_values")
         if pixel_values is not None:
             # Before/after https://github.com/huggingface/transformers/pull/35122
@@ -788,6 +821,48 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
         hf_processor_mm_kwargs: Mapping[str, object],
         return_mm_hashes: bool = False,
     ) -> MultiModalInputs:
+        mm_inputs = super().apply(
+            prompt=prompt,
+            mm_data=mm_data,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            return_mm_hashes=return_mm_hashes,
+        )
+
+        return self._postprocess_inputs(
+            prompt=prompt,
+            mm_data=mm_data,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            mm_inputs=mm_inputs,
+        )
+
+    async def apply_async(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data: MultiModalDataDict,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        return_mm_hashes: bool = False,
+    ) -> MultiModalInputs:
+        mm_inputs = await super().apply_async(
+            prompt=prompt,
+            mm_data=mm_data,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            return_mm_hashes=return_mm_hashes,
+        )
+
+        return self._postprocess_inputs(
+            prompt=prompt,
+            mm_data=mm_data,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            mm_inputs=mm_inputs,
+        )
+
+    def _postprocess_inputs(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data: MultiModalDataDict,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        mm_inputs: MultiModalInputs,
+    ) -> MultiModalInputs:
         hf_config = self.info.get_hf_config()
         image_token_id = hf_config.image_token_index
 
@@ -797,13 +872,10 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
             image_height=-1,
         )
 
-        result = super().apply(prompt, mm_data, hf_processor_mm_kwargs,
-                               return_mm_hashes)
-
         mm_items = self._to_mm_items(mm_data)
         mm_item_counts = mm_items.get_all_counts()
-        mm_kwargs = result["mm_kwargs"]
-        mm_hashes = result["mm_hashes"]
+        mm_kwargs = mm_inputs["mm_kwargs"]
+        mm_hashes = mm_inputs["mm_hashes"]
 
         # We reimplement the functionality of MLlavaProcessor from
         # https://github.com/TIGER-AI-Lab/Mantis.git
@@ -823,7 +895,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
         ])
 
         prompt_ids, prompt, _ = self._apply_prompt_updates(
-            result["prompt_token_ids"],
+            mm_inputs["prompt_token_ids"],
             mantis_mm_repls,
             mm_item_counts,
         )
