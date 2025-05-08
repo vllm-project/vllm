@@ -2874,7 +2874,9 @@ class MultiModalConfig:
     - "mp" mode degrades throughput for the vast majority of models except for
     Idefics3 (SmolVLM v1).
     - "mt" mode improves throughput only if the image processor doesn't already
-    have built-in parallelism (e.g. through NumPy).
+    has built-in parallelism (most notably via NumPy).
+    - For offline inference, you should use async engine (which enables multiple
+    inputs to be processed concurrently) to take advantage of parallelism.
 
     Nevertheless, you should run the benchmarks under <gh-dir:benchmarks> to
     determine the parallelism to use for your particular model and setup.
