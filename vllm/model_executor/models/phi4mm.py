@@ -955,11 +955,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
             self.unpadded_vocab_size,
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
-            padding_size=(
-                DEFAULT_VOCAB_PADDING_SIZE
-                # We need bigger padding if using lora for kernel
-                # compatibility
-                if not lora_config else lora_config.lora_vocab_padding_size),
+            padding_size=DEFAULT_VOCAB_PADDING_SIZE,
             quant_config=quant_config,
         )
         if config.tie_word_embeddings:
