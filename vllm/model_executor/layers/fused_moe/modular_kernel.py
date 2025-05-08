@@ -57,21 +57,21 @@ def _moe_problem_size(
     to be kept in mind.
     """
     assert w1.dim() == 3 and w2.dim() == 3
-    E, N, _ = w1.shape
-    K = w2.shape[1]
+    E, N, _ = w1.size()
+    K = w2.size(1)
 
     if a1.dim() == 2:
         # Make sure we are using the correct a1 (pre-permute).
-        assert topk_ids.shape[0] == a1.shape[0], \
-            f"{topk_ids.shape[0]} != {a1.shape[0]}"
-        M = a1.shape[0]
+        assert topk_ids.size(0) == a1.size(0), \
+            f"{topk_ids.size(0)} != {a1.size(0)}"
+        M = a1.size(0)
     else:
         assert a1.dim() == 3
-        assert a1.shape[0] == E, f"{a1.shape[0]} == {E}"
-        M = a1.shape[1]  # This is max_num_tokens
+        assert a1.size(0) == E, f"{a1.size(0)} == {E}"
+        M = a1.size(1)  # This is max_num_tokens
 
     assert topk_ids.dim() == 2
-    topk = topk_ids.shape[1]
+    topk = topk_ids.size(1)
 
     return E, M, N, K, topk
 
@@ -171,7 +171,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
 
     def activation(self, activation: str, output: torch.Tensor,
                    input: torch.Tensor) -> None:
-        assert output.shape[-1] * 2 == input.shape[-1]
+        assert output.size(-1) * 2 == input.size(-1)
         if activation == "silu":
             torch.ops._C.silu_and_mul(output, input)
         elif activation == "gelu":
@@ -320,7 +320,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         if global_num_experts == -1:
             global_num_experts = E
 
-        output = a1 if inplace else torch.empty_like(a1)
+        output = a1 if inplace else torch.zeros_like(a1)
 
         workspace13_shape, workspace2_shape, workspace_dtype = (
             self.fused_experts.workspace_shapes(a1, M, N, K, top_k,
@@ -328,10 +328,10 @@ class FusedMoEModularKernel(torch.nn.Module):
 
         # We can reuse the memory between cache1 and cache3 because by the time
         # we need cache3, we're done with cache1
-        workspace13 = torch.empty(workspace13_shape,
+        workspace13 = torch.zeros(workspace13_shape,
                                   device=a1.device,
                                   dtype=workspace_dtype)
-        workspace2 = torch.empty(workspace2_shape,
+        workspace2 = torch.zeros(workspace2_shape,
                                  device=a1.device,
                                  dtype=workspace_dtype)
 

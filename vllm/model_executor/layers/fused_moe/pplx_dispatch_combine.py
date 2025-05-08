@@ -43,20 +43,20 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
-        num_tokens = a1.shape[0]  # M
-        hidden_dim = a1.shape[-1]  # K
+        num_tokens = a1.size(0)  # M
+        hidden_dim = a1.size(-1)  # K
 
-        assert rank_topk_ids.shape[0] == num_tokens
+        assert rank_topk_ids.size(0) == num_tokens
         # assert expert_map is None, "NYI"
 
         # Is this always going to be a1.device?
         device = a1.device
 
         if apply_router_weight_on_input:
-            topk = rank_topk_ids.shape[1]
+            topk = rank_topk_ids.size(1)
             # TODO: this only works for topK=1, will need to update for topK>1
-            assert topk == 1, \
-                "apply_router_weight_on_input is only implemented for topk=1"
+            assert topk == 1, (
+                "apply_router_weight_on_input is only implemented for topk=1")
             a1 = a1 * rank_topk_weights.to(a1.dtype)
 
         per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
@@ -101,8 +101,8 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
                 device=device,
             )
 
-        # This argument is optional, defaults to indices.shape[0]
-        # There's not much point setting this unless it is != indices.shape[0]
+        # This argument is optional, defaults to indices.size(0)
+        # There's not much point setting this unless it is != indices.size(0)
         bound_m = None
 
         self.a2a.dispatch(
@@ -125,23 +125,22 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
     ) -> None:
-        num_tokens = output.shape[0]  # M
+        num_tokens = output.size(0)  # M
         # This argument is optional
-        # There's not much point setting this unless it is != topk_ids.shape[0]
+        # There's not much point setting this unless it is != topk_ids.size(0)
         bound_m = None
 
-        assert topk_ids.shape[0] == num_tokens
-        assert output.shape[0] <= self.max_num_tokens, \
-            f"{output.shape[0]} <= {self.max_num_tokens}"
-        assert output.shape[1] == fused_expert_output.shape[-1]
+        assert topk_ids.size(0) == num_tokens
+        assert output.size(0) <= self.max_num_tokens, (
+            f"{output.size(0)} <= {self.max_num_tokens}")
+        assert output.size(1) == fused_expert_output.size(-1)
 
         # Set weights to 1 if we did them in dispatch. This is hacky.
         if apply_router_weight_on_input:
             topk_weights = torch.ones_like(topk_weights)
 
-        self.a2a.combine(
-            out_tokens=output,
-            indices=topk_ids,  #.to(torch.uint32),
-            weights=topk_weights,
-            expert_y=fused_expert_output,
-            bound_m=bound_m)
+        self.a2a.combine(out_tokens=output,
+                         indices=topk_ids,
+                         weights=topk_weights,
+                         expert_y=fused_expert_output,
+                         bound_m=bound_m)

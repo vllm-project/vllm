@@ -22,9 +22,9 @@ def _moe_permute(
     Determine the sorted_token_ids, expert_ids for the given problem size.
     Permute the hidden states and scales according to `sorted_token_ids`.
     """
-    top_k_num = curr_topk_ids.shape[1]
+    top_k_num = curr_topk_ids.size(1)
 
-    tokens_in_chunk, _ = curr_hidden_states.shape
+    tokens_in_chunk = curr_hidden_states.sizze(0)
 
     sorted_token_ids, expert_ids, num_tokens_post_padded = (
         moe_align_block_size(curr_topk_ids,
@@ -62,8 +62,8 @@ def _moe_unpermute_and_reduce(
     Unpermute the final result and apply topk_weights, then perform the final
     reduction on the hidden states.
     """
-    M, topk = topk_weight.shape
-    K = curr_hidden.shape[-1]
+    M, topk = topk_weight.size()
+    K = curr_hidden.size(-1)
     if inv_perm is not None:
         curr_hidden = curr_hidden[inv_perm, ...]
     curr_hidden = curr_hidden.view(-1, topk, K)
@@ -110,7 +110,7 @@ def moe_permute(
     - m_indices: m_indices for grouped gemm in deepgemm,`m_indices[i]` records
     the group which the j-th row of the LHS belong to.`
     """
-    n_token, n_hidden = hidden_states.shape
+    n_token, n_hidden = hidden_states.size()
     assert (n_hidden * hidden_states.element_size()
             ) % 16 == 0, "permue kernel need hidden dim align to 16B"
     permuted_row_size = n_token * topk
@@ -170,7 +170,7 @@ def moe_unpermute(
     - hidden_states (torch.Tensor): The reduced and unpermuted activation
       tensor.
     """
-    n_token, n_hidden = topk_weights.shape[0], permuted_hidden_states.shape[-1]
+    n_token, n_hidden = topk_weights.size(0), permuted_hidden_states.size(-1)
     assert (n_hidden * permuted_hidden_states.element_size()
             ) % 16 == 0, "unpermue kernel need hidden dim align to 16B"
     hidden_states = torch.empty((n_token, n_hidden),

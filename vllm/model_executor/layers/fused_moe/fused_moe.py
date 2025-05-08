@@ -1576,12 +1576,12 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ) -> torch.Tensor:
         # Check constraints.
         if self.use_int4_w4a16:
-            assert hidden_states.shape[-1] // 2 == w1.shape[
-                2], "Hidden size mismatch"
+            assert hidden_states.size(-1) // 2 == w1.size(2), (
+                "Hidden size mismatch")
         else:
-            assert hidden_states.shape[-1] == w1.shape[2], \
-                (f"Hidden size mismatch {hidden_states.shape[-1]} "
-                 f"!= {w1.shape[2]}")
+            assert hidden_states.size(-1) == w1.size(2), \
+                (f"Hidden size mismatch {hidden_states.size(-1)} "
+                 f"!= {w1.size(2)}")
 
         assert hidden_states.is_contiguous(
         ), "Hidden_states must be contiguous"
@@ -1637,9 +1637,9 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 moe_align_block_size(topk_ids, config['BLOCK_SIZE_M'],
                                      global_num_experts, expert_map))
         else:
-            max_num_tokens = hidden_states.shape[1]
+            max_num_tokens = hidden_states.size(1)
             sorted_token_ids = torch.arange(0,
-                                            hidden_states.shape[0] *
+                                            hidden_states.size(0) *
                                             max_num_tokens,
                                             device=hidden_states.device,
                                             dtype=torch.int)
@@ -1655,7 +1655,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                                  device=hidden_states.device,
                                                  dtype=torch.int32)
             num_tokens_post_padded.fill_(max_num_tokens)
-            hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
+            hidden_states = hidden_states.view(-1, hidden_states.size(-1))
 
         invoke_fused_moe_kernel(hidden_states,
                                 w1,

@@ -50,8 +50,8 @@ def _valid_deep_gemm(hidden_states: torch.Tensor,
         logger.debug("DeepGemm disabled: expert map NYI.")
         return False
 
-    M = hidden_states.shape[0]
-    _, K, N = w2.shape
+    M = hidden_states.size(0)
+    _, K, N = w2.size()
     if not _valid_deep_gemm_shape(M, N, K):
         logger.debug("DeepGemm disabled: unalinged problem size.")
         return False
@@ -113,10 +113,10 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         import deep_gemm as dg
 
         a1q = hidden_states
-        _, N, K = w1.shape
+        _, N, K = w1.size()
 
         assert global_num_experts != -1
-        assert w2.shape[1] == K
+        assert w2.size(1) == K
 
         a1q, a1q_scale, _, expert_ids, inv_perm = _moe_permute(
             a1q,
@@ -128,7 +128,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         )
 
         # Note: M_sum is different than the pre-permuted shape of a1q.
-        M_sum = a1q.shape[0]
+        M_sum = a1q.size(0)
         workspace1 = _resize_cache(workspace13, (M_sum, N))
         workspace2 = _resize_cache(workspace2, (M_sum, N // 2))
         workspace3 = _resize_cache(workspace13, (M_sum, K))

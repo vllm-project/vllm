@@ -395,7 +395,7 @@ def invoke_moe_batched_triton_kernel(
     assert max_num_tokens % BLOCK_M == 0
 
     grid = (expert_num_tokens.size(0), triton.cdiv(max_num_tokens, BLOCK_M) *
-            triton.cdiv(B.shape[1], BLOCK_N))
+            triton.cdiv(B.size(1), BLOCK_N))
 
     batched_triton_kernel[grid](
         A,
@@ -493,17 +493,17 @@ class BatchedDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         assert a1.dim() == 2
         assert topk_ids.dim() == 2
-        assert topk_ids.shape[0] == a1.shape[0]
+        assert topk_ids.size(0) == a1.size(0)
 
         if apply_router_weight_on_input:
-            topk = topk_ids.shape[1]
+            topk = topk_ids.size(1)
             # TODO: this only works for topK=1, will need to update for topK>1
             assert topk == 1, \
                 "apply_router_weight_on_input is only implemented for topk=1"
             a1.mul_(topk_weights.to(a1.dtype))
 
-        num_tokens, hidden_dim = a1.shape
-        topk = topk_ids.shape[1]
+        num_tokens, hidden_dim = a1.size()
+        topk = topk_ids.size(1)
 
         if self.max_num_tokens is None:
             tokens_per_expert = torch.bincount(topk_ids.view(-1),
@@ -543,10 +543,10 @@ class BatchedDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
     ) -> None:
-        num_tokens = topk_ids.shape[0]
-        num_local_experts = fused_expert_output.shape[0]
-        K = fused_expert_output.shape[-1]
-        assert output.shape[0] == num_tokens and output.shape[1] == K
+        num_tokens = topk_ids.size(0)
+        num_local_experts = fused_expert_output.size(0)
+        K = fused_expert_output.size(-1)
+        assert output.size(0) == num_tokens and output.size(1) == K
 
         output.fill_(0)
 
@@ -559,7 +559,7 @@ class BatchedDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
             rows = torch.count_nonzero(topks)
             rhs = fused_expert_output[expert_id - first_expert, :rows, :]
             if not apply_router_weight_on_input:
-                rhs.mul_(topk_weights[topkws].view(rhs.shape[0], 1))
+                rhs.mul_(topk_weights[topkws].view(rhs.size(0), 1))
             output[topks] = output[topks] + rhs
 
 
@@ -599,8 +599,8 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ) -> Tuple[int, int, torch.dtype]:
         assert a.dim() == 2
         num_dp = self.world_size // self.dp_size
-        max_num_tokens = a.shape[
-            0] if self.max_num_tokens is None else self.max_num_tokens
+        max_num_tokens = a.size(
+            0) if self.max_num_tokens is None else self.max_num_tokens
         #print(f"WORKSPACE {max_num_tokens} {num_dp}")
         workspace13 = num_experts * max_num_tokens * num_dp * K
         workspace2 = max_num_tokens * num_dp * N
@@ -627,10 +627,10 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ) -> torch.Tensor:
         assert hidden_states.dim() == 3
         assert expert_num_tokens is not None
-        hidden_dim = hidden_states.shape[-1]
+        hidden_dim = hidden_states.size(-1)
 
         if self.max_num_tokens is None:
-            max_num_tokens = hidden_states.shape[1]
+            max_num_tokens = hidden_states.size(1)
         else:
             max_num_tokens = self.max_num_tokens
 
@@ -638,16 +638,16 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         num_experts = global_num_experts
         out = _resize_cache(workspace13,
                             (num_experts, max_num_tokens * num_dp, hidden_dim))
-        num_local_experts = w1.shape[0]
-        assert num_local_experts == w1.shape[
-            0], f"{num_local_experts} == {w1.shape[0]}"
+        num_local_experts = w1.size(0)
+        assert num_local_experts == w1.size(0), (
+            f"{num_local_experts} == {w1.size(0)}")
 
-        N = w1.shape[1] // 2
+        N = w1.size(1) // 2
 
         # Not cudagraph friendly
         assert (torch.cuda.is_current_stream_capturing()
-                or torch.all(expert_num_tokens <= max_num_tokens)), (
-                    f"{expert_num_tokens} <= {max_num_tokens}")
+                or torch.all(expert_num_tokens <= max_num_tokens * num_dp)), (
+                    f"{expert_num_tokens} <= {max_num_tokens * num_dp}")
 
         for expert in range(num_local_experts):
             # Indexing expert_num_tokens doesn't work w/cudagraphs
@@ -699,8 +699,8 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ) -> Tuple[int, int, torch.dtype]:
         assert a.dim() == 2
         num_dp = self.world_size // self.dp_size
-        max_num_tokens = a.shape[
-            0] if self.max_num_tokens is None else self.max_num_tokens
+        max_num_tokens = a.size(
+            0) if self.max_num_tokens is None else self.max_num_tokens
         workspace13 = num_experts * max_num_tokens * num_dp * max(K, N)
         workspace2 = num_experts * max_num_tokens * num_dp * (N // 2)
         return (workspace13, workspace2, a.dtype)
@@ -726,12 +726,12 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ) -> torch.Tensor:
         # Check constraints.
         if self.use_int4_w4a16:
-            assert hidden_states.shape[-1] // 2 == w1.shape[
-                2], "Hidden size mismatch"
+            assert hidden_states.size(-1) // 2 == w1.size(2), (
+                "Hidden size mismatch")
         else:
-            assert hidden_states.shape[-1] == w1.shape[2], \
-                (f"Hidden size mismatch {hidden_states.shape[-1]} "
-                 f"!= {w1.shape[2]}")
+            assert hidden_states.size(-1) == w1.size(2), (
+                f"Hidden size mismatch {hidden_states.size(-1)} "
+                f"!= {w1.size(2)}")
 
         assert hidden_states.is_contiguous(
         ), "Hidden_states must be contiguous"
@@ -745,8 +745,8 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         E, num_tokens, N, K, top_k_num = mk._moe_problem_size(
             hidden_states, w1, w2, topk_ids)
 
-        assert w1.shape[0] == E
-        assert w2.shape[0] == E
+        assert w1.size(0) == E
+        assert w2.size(0) == E
 
         config_dtype = get_config_dtype_str(use_fp8_w8a8=self.use_fp8_w8a8,
                                             use_int8_w8a16=self.use_int8_w8a16,
@@ -754,8 +754,8 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                             dtype=hidden_states.dtype)
 
         config = try_get_optimal_moe_config(
-            w1.shape,
-            w2.shape,
+            w1.size(),
+            w2.size(),
             top_k_num,
             config_dtype,
             num_tokens,
@@ -797,13 +797,13 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                          config=config,
                                          block_shape=self.block_shape)
 
-        # Fix activations
-        if True:
-            assert activation == "silu"
+        if activation == "silu":
             invoke_batched_silu_and_mul(output=intermediate_cache2,
                                         input=intermediate_cache1,
                                         expert_num_tokens=expert_num_tokens)
         else:
+            # TODO: would be nice to use expert_num_tokens here to reduce
+            # garbage compute
             self.activation(activation, intermediate_cache2.view(-1, N // 2),
                             intermediate_cache1.view(-1, N))
 
