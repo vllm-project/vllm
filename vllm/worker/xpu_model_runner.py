@@ -553,8 +553,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
                 "XPUModelRunner does not support multi-step execution.")
 
         model_executable = self.model
-        if (self.observability_config is not None
-                and self.observability_config.collect_model_forward_time):
+        if self.must_collect_model_fwd_time():
             model_forward_start_time = time.time()
         with set_forward_context(model_input.attn_metadata, self.vllm_config,
                                  model_input.virtual_engine):
@@ -569,8 +568,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
         if not get_pp_group().is_last_rank:
             return hidden_or_intermediate_states
 
-        if (self.observability_config is not None
-                and self.observability_config.collect_model_forward_time):
+        if self.must_collect_model_fwd_time():
             model_forward_end_time = time.time()
 
         # Compute the logits.
@@ -589,9 +587,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
         )
-        if (self.observability_config is not None
-                and self.observability_config.collect_model_forward_time
-                and output is not None):
+        if (self.must_collect_model_fwd_time() and output is not None):
             model_forward_time = (model_forward_end_time -
                                   model_forward_start_time)
             # If there are multiple workers, we are still tracking the latency

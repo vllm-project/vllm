@@ -247,6 +247,11 @@ class ModelRunnerBase(ABC, Generic[T]):
 
         return self.generators
 
+    def must_collect_model_fwd_time(self):
+        if self.observability_config is not None:
+            return self.observability_config.collect_model_forward_time
+        return False
+
 
 class ModelRunnerWrapperBase:
     """
