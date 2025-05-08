@@ -66,8 +66,6 @@ class Qwen3ReasoningParser(ReasoningParser):
         """
         if self.think_end_token_id not in input_ids:
             return input_ids
-        elif input_ids[-1] == self.think_end_token_id:
-            return []
         else:
             return input_ids[input_ids.index(self.think_end_token_id) + 1:]
 
