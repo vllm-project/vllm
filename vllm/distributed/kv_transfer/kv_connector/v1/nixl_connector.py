@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-    from vllm.v1.request import Request
+    from vllm.v1.request import Request, RequestStatus
 
 GET_META_MSG = b"get_meta_msg"
 
@@ -125,6 +125,14 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
 
+    def request_finished(
+        self,
+        request: "Request",
+        blocks: "KVCacheBlocks",
+    ) -> tuple[bool, Optional[KVTransferParams]]:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.request_finished(request, blocks)
+
     ############################################################
     # Worker Side Methods
     ############################################################
@@ -214,6 +222,38 @@ class NixlConnectorScheduler:
         self._reqs_need_recv.clear()
 
         return meta
+
+    def request_finished(
+        self,
+        request: "Request",
+        blocks: "KVCacheBlocks",
+    ) -> tuple[bool, Optional[KVTransferParams]]:
+        """
+        Once a request is finished, determine whether request blocks
+        should be freed now or will be sent asynchronously and freed later.
+        """
+
+        if (not request.do_remote_decode
+                or request.status != RequestStatus.FINISHED_LENGTH_CAPPED):
+            return False, None
+
+        # Get computed blocks.
+        all_block_ids = blocks.get_block_ids()
+        last_block_full = request.num_computed_tokens % self.block_size == 0
+        computed_block_ids = (all_block_ids
+                              if last_block_full else all_block_ids[:-1])
+
+        # If prompt < block_size, then there will be no KV xfer so free blocks
+        # immediately.
+        delay_free_blocks = len(computed_block_ids) > 0
+
+        return delay_free_blocks, KVTransferParams(
+            do_remote_prefill=True,
+            remote_block_ids=computed_block_ids,
+            remote_engine_id=self.vllm_config.kv_transfer_config.engine_id,
+            remote_host=envs.VLLM_NIXL_SIDE_CHANNEL_HOST,
+            remote_port=envs.VLLM_NIXL_SIDE_CHANNEL_PORT,
+        )
 
 
 class NixlConnectorWorker:

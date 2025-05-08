@@ -20,6 +20,7 @@ def test_basic_lifecycle():
     NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
 
     request = create_request(request_id=1,
+                             max_tokens=1,
                              num_tokens=NUM_TOKENS,
                              do_remote_decode=True)
 
@@ -41,9 +42,9 @@ def test_basic_lifecycle():
 
     # Ensure the request is finished after 1 tokens.
     assert request.is_finished()
-    assert request.status == RequestStatus.FINISHED_REMOTE_DECODE
+    assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
     output = engine_core_outputs.outputs[0]
-    assert output.finish_reason == FinishReason.REMOTE_DECODE
+    assert output.finish_reason == FinishReason.LENGTH
     assert output.kv_transfer_params is not None
 
     # Request freed in Scheduler and in Persistent Batch ...
@@ -101,6 +102,7 @@ def test_short_prompt_lifecycle():
     # Not enough tokens for full block.
     NUM_TOKENS = vllm_config.cache_config.block_size // 2
     request = create_request(request_id=1,
+                             max_tokens=1,
                              num_tokens=NUM_TOKENS,
                              do_remote_decode=True)
 
