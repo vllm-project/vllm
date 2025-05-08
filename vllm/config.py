@@ -2879,7 +2879,7 @@ class MultiModalConfig:
     inputs to be processed concurrently) to take advantage of parallelism.
 
     Nevertheless, you should run the benchmarks under <gh-dir:benchmarks> to
-    determine the parallelism to use for your particular model and setup.
+    determine the parallelism mode to use for your particular model and setup.
     """
 
     def compute_hash(self) -> str:
