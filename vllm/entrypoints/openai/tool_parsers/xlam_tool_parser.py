@@ -37,7 +37,7 @@ class xLAMToolParser(ToolParser):
         self.json_code_block_patterns = [
             r"```(?:json)?\s*([\s\S]*?)```",
             r"\[TOOL_CALLS\]([\s\S]*?)(?=\n|$)",
-            r"<tool_call>([\s\S]*?)</tool_call>"
+            r"<tool_call>([\s\S]*?)</tool_call>",
         ]
         self.thinking_tag_pattern = r"</think>([\s\S]*)"
 
@@ -45,7 +45,7 @@ class xLAMToolParser(ToolParser):
             self, model_output: str) -> tuple[Optional[str], Optional[str]]:
         """
         Preprocess the model output to extract content and potential tool calls.
-        
+
         Returns:
             Tuple of (content, potential_tool_calls_json)
         """
@@ -86,7 +86,7 @@ class xLAMToolParser(ToolParser):
                     except json.JSONDecodeError:
                         continue
         # If the entire output is a valid JSON array, treat it as tool calls # noqa: E501
-        if model_output.strip().startswith('['):
+        if model_output.strip().startswith("["):
             try:
                 json.loads(model_output)
                 return None, model_output
@@ -115,17 +115,17 @@ class xLAMToolParser(ToolParser):
             # Ensure it's an array
             if not isinstance(tool_calls_data, list):
                 logger.debug("Tool calls data is not an array")
-                return ExtractedToolCallInformation(tools_called=False,
-                                                    tool_calls=[],
-                                                    content=content
-                                                    or model_output)
+                return ExtractedToolCallInformation(
+                    tools_called=False,
+                    tool_calls=[],
+                    content=content or model_output,
+                )
 
             tool_calls: list[ToolCall] = []
 
             for idx, call in enumerate(tool_calls_data):
-                if not isinstance(
-                        call,
-                        dict) or "name" not in call or "arguments" not in call:
+                if (not isinstance(call, dict) or "name" not in call
+                        or "arguments" not in call):
                     logger.debug("Invalid tool call format at index %d", idx)
                     continue
 
@@ -134,14 +134,17 @@ class xLAMToolParser(ToolParser):
                     type="function",
                     function=FunctionCall(
                         name=call["name"],
-                        arguments=json.dumps(call["arguments"]) if isinstance(
-                            call["arguments"], dict) else call["arguments"]))
+                        arguments=(json.dumps(call["arguments"]) if isinstance(
+                            call["arguments"], dict) else call["arguments"]),
+                    ),
+                )
                 tool_calls.append(tool_call)
 
-            return ExtractedToolCallInformation(tools_called=len(tool_calls)
-                                                > 0,
-                                                tool_calls=tool_calls,
-                                                content=content)
+            return ExtractedToolCallInformation(
+                tools_called=len(tool_calls) > 0,
+                tool_calls=tool_calls,
+                content=content,
+            )
 
         except Exception as e:
             logger.exception("Error extracting tool calls: %s", str(e))
@@ -166,7 +169,8 @@ class xLAMToolParser(ToolParser):
             return DeltaMessage(content=delta_text)
 
         # Continue with streaming logic on the potential tool calls
-        flags = Allow.ALL if self.current_tool_name_sent else Allow.ALL & ~Allow.STR  # noqa: E501
+        flags = (Allow.ALL if self.current_tool_name_sent else Allow.ALL
+                 & ~Allow.STR)  # noqa: E501
 
         try:
             tool_call_arr = []
@@ -184,12 +188,8 @@ class xLAMToolParser(ToolParser):
                     start_idx += end_idx
                     tool_call_arr.append(obj)
             except partial_json_parser.core.exceptions.MalformedJSON:
-                logger.debug('not enough tokens to parse into JSON yet')
+                logger.debug("not enough tokens to parse into JSON yet")
                 return None
-
-            # Get current tool call based on state
-            current_tool_call: dict = tool_call_arr[self.current_tool_id] \
-                if len(tool_call_arr) > 0 else {}
 
             # Case 1: No tools parsed yet
             if len(tool_call_arr) == 0:
@@ -201,22 +201,31 @@ class xLAMToolParser(ToolParser):
 
                 # Handle any remaining arguments from previous tool
                 if self.current_tool_id >= 0:
-                    cur_arguments = current_tool_call.get("arguments")
-                    if cur_arguments:
-                        cur_args_json = json.dumps(cur_arguments)
-                        sent = len(self.streamed_args[self.current_tool_id])
-                        argument_diff = cur_args_json[sent:]
+                    # Get current tool call based on state
+                    current_tool_call = tool_call_arr[self.current_tool_id]
 
-                        if argument_diff:
-                            delta = DeltaMessage(tool_calls=[
-                                DeltaToolCall(index=self.current_tool_id,
-                                              function=DeltaFunctionCall(
-                                                  arguments=argument_diff).
-                                              model_dump(exclude_none=True))
-                            ])
-                            self.streamed_args[
-                                self.current_tool_id] += argument_diff
-                            return delta
+                    # Handle the case where current_tool_call might be a list
+                    if (isinstance(current_tool_call, dict)
+                            and "arguments" in current_tool_call):
+                        cur_arguments = current_tool_call.get("arguments")
+                        if cur_arguments:
+                            cur_args_json = json.dumps(cur_arguments)
+                            sent = len(
+                                self.streamed_args[self.current_tool_id])
+                            argument_diff = cur_args_json[sent:]
+
+                            if argument_diff:
+                                delta = DeltaMessage(tool_calls=[
+                                    DeltaToolCall(
+                                        index=self.current_tool_id,
+                                        function=DeltaFunctionCall(
+                                            arguments=argument_diff).
+                                        model_dump(exclude_none=True),
+                                    )
+                                ])
+                                self.streamed_args[
+                                    self.current_tool_id] += argument_diff
+                                return delta
 
                 # Setup new tool
                 self.current_tool_id = len(tool_call_arr) - 1
@@ -225,52 +234,77 @@ class xLAMToolParser(ToolParser):
                 logger.debug("starting new tool %d", self.current_tool_id)
                 return None
 
+            # Get current tool call based on state
+            current_tool_call = tool_call_arr[self.current_tool_id]
+
             # Case 3: Send tool name if not sent yet
-            elif not self.current_tools_sent[self.current_tool_id]:
-                function_name = current_tool_call.get("name")
-                if function_name:
-                    delta = DeltaMessage(tool_calls=[
-                        DeltaToolCall(
-                            index=self.current_tool_id,
-                            type="function",
-                            id=f"call_{self.current_tool_id}_{random_uuid()}",
-                            function=DeltaFunctionCall(
-                                name=function_name).model_dump(
-                                    exclude_none=True))
-                    ])
-                    self.current_tools_sent[self.current_tool_id] = True
-                    return delta
+            if not self.current_tools_sent[self.current_tool_id]:
+                # Handle different types of current_tool_call
+                if (isinstance(current_tool_call, dict)
+                        and "name" in current_tool_call):
+                    function_name = current_tool_call.get("name")
+                    if function_name:
+                        delta = DeltaMessage(tool_calls=[
+                            DeltaToolCall(
+                                index=self.current_tool_id,
+                                type="function",
+                                id=
+                                f"call_{self.current_tool_id}_{random_uuid()}",
+                                function=DeltaFunctionCall(
+                                    name=function_name).model_dump(
+                                        exclude_none=True),
+                            )
+                        ])
+                        self.current_tools_sent[self.current_tool_id] = True
+                        return delta
+                elif (isinstance(current_tool_call, list)
+                      and len(current_tool_call) > 0):
+                    # This case should not happen in normal operation, but handle it gracefully  # noqa: E501
+                    logger.warning(
+                        "Unexpected list in current_tool_call during streaming"
+                    )
                 return None
 
             # Case 4: Stream arguments
             else:
-                cur_arguments = current_tool_call.get("arguments")
-                if cur_arguments:
-                    sent = len(self.streamed_args[self.current_tool_id])
-                    cur_args_json = json.dumps(cur_arguments)
-                    prev_arguments = self.prev_tool_calls[
-                        self.current_tool_id].get("arguments")
+                # Handle different types of current_tool_call for arguments
+                if (isinstance(current_tool_call, dict)
+                        and "arguments" in current_tool_call):
+                    cur_arguments = current_tool_call.get("arguments")
+                    if cur_arguments:
+                        sent = len(self.streamed_args[self.current_tool_id])
+                        cur_args_json = json.dumps(cur_arguments)
+                        prev_arguments = None
+                        if (self.prev_tool_calls and len(self.prev_tool_calls)
+                                > self.current_tool_id):
+                            prev_tool_call = self.prev_tool_calls[
+                                self.current_tool_id]
+                            if isinstance(prev_tool_call, dict):
+                                prev_arguments = prev_tool_call.get(
+                                    "arguments")
 
-                    argument_diff = None
-                    if is_complete[self.current_tool_id]:
-                        argument_diff = cur_args_json[sent:]
-                    elif prev_arguments:
-                        prev_args_json = json.dumps(prev_arguments)
-                        if cur_args_json != prev_args_json:
-                            prefix = find_common_prefix(
-                                prev_args_json, cur_args_json)
-                            argument_diff = prefix[sent:]
+                        argument_diff = None
+                        if is_complete[self.current_tool_id]:
+                            argument_diff = cur_args_json[sent:]
+                        elif prev_arguments:
+                            prev_args_json = json.dumps(prev_arguments)
+                            if cur_args_json != prev_args_json:
+                                prefix = find_common_prefix(
+                                    prev_args_json, cur_args_json)
+                                argument_diff = prefix[sent:]
 
-                    if argument_diff is not None:
-                        delta = DeltaMessage(tool_calls=[
-                            DeltaToolCall(index=self.current_tool_id,
-                                          function=DeltaFunctionCall(
-                                              arguments=argument_diff).
-                                          model_dump(exclude_none=True))
-                        ])
-                        self.streamed_args[
-                            self.current_tool_id] += argument_diff
-                        return delta
+                        if argument_diff is not None:
+                            delta = DeltaMessage(tool_calls=[
+                                DeltaToolCall(
+                                    index=self.current_tool_id,
+                                    function=DeltaFunctionCall(
+                                        arguments=argument_diff).model_dump(
+                                            exclude_none=True),
+                                )
+                            ])
+                            self.streamed_args[
+                                self.current_tool_id] += argument_diff
+                            return delta
 
             self.prev_tool_calls = tool_call_arr
             return None

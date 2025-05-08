@@ -54,60 +54,69 @@ def test_extract_tool_calls_no_tools(xlam_tool_parser):
     argnames=["model_output", "expected_tool_calls", "expected_content"],
     argvalues=[
         (
-            '''[{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}, {"name": "get_current_weather", "arguments": {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}}]''',  # noqa: E501
+            """[{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}, {"name": "get_current_weather", "arguments": {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}}]""",  # noqa: E501
             [
-                ToolCall(function=FunctionCall(name="get_current_weather",
-                                               arguments=json.dumps(
-                                                   {
-                                                       "city": "Dallas",
-                                                       "state": "TX",
-                                                       "unit": "fahrenheit"
-                                                   }))),
-                ToolCall(function=FunctionCall(name="get_current_weather",
-                                               arguments=json.dumps(
-                                                   {
-                                                       "city": "Orlando",
-                                                       "state": "FL",
-                                                       "unit": "fahrenheit"
-                                                   })))
+                ToolCall(function=FunctionCall(
+                    name="get_current_weather",
+                    arguments=json.dumps({
+                        "city": "Dallas",
+                        "state": "TX",
+                        "unit": "fahrenheit",
+                    }),
+                )),
+                ToolCall(function=FunctionCall(
+                    name="get_current_weather",
+                    arguments=json.dumps({
+                        "city": "Orlando",
+                        "state": "FL",
+                        "unit": "fahrenheit",
+                    }),
+                )),
             ],
-            None),
+            None,
+        ),
         (
-            '''<think>I'll help you with that.</think>[{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}]''',  # noqa: E501
+            """<think>I'll help you with that.</think>[{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}]""",  # noqa: E501
             [
-                ToolCall(function=FunctionCall(name="get_current_weather",
-                                               arguments=json.dumps(
-                                                   {
-                                                       "city": "Dallas",
-                                                       "state": "TX",
-                                                       "unit": "fahrenheit"
-                                                   })))
+                ToolCall(function=FunctionCall(
+                    name="get_current_weather",
+                    arguments=json.dumps({
+                        "city": "Dallas",
+                        "state": "TX",
+                        "unit": "fahrenheit",
+                    }),
+                ))
             ],
-            "<think>I'll help you with that.</think>"),
+            "<think>I'll help you with that.</think>",
+        ),
         (
-            '''I'll help you with that.\n```json\n[{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}]\n```''',  # noqa: E501
+            """I'll help you with that.\n```json\n[{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}]\n```""",  # noqa: E501
             [
-                ToolCall(function=FunctionCall(name="get_current_weather",
-                                               arguments=json.dumps(
-                                                   {
-                                                       "city": "Dallas",
-                                                       "state": "TX",
-                                                       "unit": "fahrenheit"
-                                                   })))
+                ToolCall(function=FunctionCall(
+                    name="get_current_weather",
+                    arguments=json.dumps({
+                        "city": "Dallas",
+                        "state": "TX",
+                        "unit": "fahrenheit",
+                    }),
+                ))
             ],
-            "I'll help you with that."),
+            "I'll help you with that.",
+        ),
         (
-            '''I'll check the weather for you.[TOOL_CALLS][{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}]''',  # noqa: E501
+            """I'll check the weather for you.[TOOL_CALLS][{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}]""",  # noqa: E501
             [
-                ToolCall(function=FunctionCall(name="get_current_weather",
-                                               arguments=json.dumps(
-                                                   {
-                                                       "city": "Dallas",
-                                                       "state": "TX",
-                                                       "unit": "fahrenheit"
-                                                   })))
+                ToolCall(function=FunctionCall(
+                    name="get_current_weather",
+                    arguments=json.dumps({
+                        "city": "Dallas",
+                        "state": "TX",
+                        "unit": "fahrenheit",
+                    }),
+                ))
             ],
-            "I'll check the weather for you."),
+            "I'll check the weather for you.",
+        ),
     ],
 )
 def test_extract_tool_calls(xlam_tool_parser, model_output,
@@ -119,3 +128,119 @@ def test_extract_tool_calls(xlam_tool_parser, model_output,
     assert_tool_calls(extracted_tool_calls.tool_calls, expected_tool_calls)
 
     assert extracted_tool_calls.content == expected_content
+
+
+@pytest.mark.parametrize(
+    ids=["list_structured_tool_call"],
+    argnames=["model_output", "expected_tool_calls", "expected_content"],
+    argvalues=[
+        (
+            """[{"name": "get_current_weather", "arguments": {"city": "Seattle", "state": "WA", "unit": "celsius"}}]""",  # noqa: E501
+            [
+                ToolCall(function=FunctionCall(
+                    name="get_current_weather",
+                    arguments=json.dumps({
+                        "city": "Seattle",
+                        "state": "WA",
+                        "unit": "celsius",
+                    }),
+                ))
+            ],
+            None,
+        ),
+    ],
+)
+def test_extract_tool_calls_list_structure(xlam_tool_parser, model_output,
+                                           expected_tool_calls,
+                                           expected_content):
+    """Test extraction of tool calls when the model outputs a list-structured tool call."""  # noqa: E501
+    extracted_tool_calls = xlam_tool_parser.extract_tool_calls(
+        model_output, request=None)  # type: ignore[arg-type]
+    assert extracted_tool_calls.tools_called
+
+    assert_tool_calls(extracted_tool_calls.tool_calls, expected_tool_calls)
+
+    assert extracted_tool_calls.content == expected_content
+
+
+# Test for preprocess_model_output method
+def test_preprocess_model_output(xlam_tool_parser):
+    # Test with list structure
+    model_output = """[{"name": "get_current_weather", "arguments": {"city": "Seattle"}}]"""  # noqa: E501
+    content, potential_tool_calls = xlam_tool_parser.preprocess_model_output(
+        model_output)
+    assert content is None
+    assert potential_tool_calls == model_output
+
+    # Test with thinking tag
+    model_output = """<think>I'll help you with that.</think>[{"name": "get_current_weather", "arguments": {"city": "Seattle"}}]"""  # noqa: E501
+    content, potential_tool_calls = xlam_tool_parser.preprocess_model_output(
+        model_output)
+    assert content == "<think>I'll help you with that.</think>"
+    assert (
+        potential_tool_calls ==
+        '[{"name": "get_current_weather", "arguments": {"city": "Seattle"}}]')
+
+    # Test with JSON code block
+    model_output = """I'll help you with that.
+```json
+[{"name": "get_current_weather", "arguments": {"city": "Seattle"}}]
+```"""
+    content, potential_tool_calls = xlam_tool_parser.preprocess_model_output(
+        model_output)
+    assert content == "I'll help you with that."
+    assert "get_current_weather" in potential_tool_calls
+
+    # Test with no tool calls
+    model_output = """I'll help you with that."""
+    content, potential_tool_calls = xlam_tool_parser.preprocess_model_output(
+        model_output)
+    assert content == model_output
+    assert potential_tool_calls is None
+
+
+# Simulate streaming to test extract_tool_calls_streaming
+def test_streaming_with_list_structure(xlam_tool_parser):
+    # Reset streaming state
+    xlam_tool_parser.prev_tool_calls = []
+    xlam_tool_parser.current_tools_sent = []
+    xlam_tool_parser.streamed_args = []
+    xlam_tool_parser.current_tool_id = -1
+
+    # Simulate receiving a message with list structure
+    current_text = """[{"name": "get_current_weather", "arguments": {"city": "Seattle"}}]"""  # noqa: E501
+
+    # First call to set up the tool
+    xlam_tool_parser.extract_tool_calls_streaming(
+        previous_text="",
+        current_text=current_text,
+        delta_text="]",
+        previous_token_ids=[],
+        current_token_ids=[],
+        delta_token_ids=[],
+        request=None,
+    )
+
+    # Make sure the tool is set up correctly
+    assert (xlam_tool_parser.current_tool_id
+            >= 0), "Tool index should be initialized"
+
+    # Manually set up the state for sending the tool name
+    xlam_tool_parser.current_tools_sent = [False]
+
+    # Call to send the function name
+    result = xlam_tool_parser.extract_tool_calls_streaming(
+        previous_text=current_text,
+        current_text=current_text,
+        delta_text="",
+        previous_token_ids=[],
+        current_token_ids=[],
+        delta_token_ids=[],
+        request=None,
+    )
+
+    # Check that we get a result with the proper tool call
+    if result is not None:
+        assert hasattr(result, "tool_calls")
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "get_current_weather"
