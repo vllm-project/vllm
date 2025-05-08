@@ -464,7 +464,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
         
         return request_ids_to_seq_ids
 
-    def calculate_finished_requests_ids(self,scheduler_output: SchedulerOutput):
+    def calculate_finished_requests_ids(self, scheduler_output: SchedulerOutput):
         return scheduler_output.finished_req_ids
 
     def forward(
@@ -487,6 +487,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             scheduler_output = kwargs["scheduler_output"]
             kwargs["request_ids_to_seq_ids"] = self.calculate_request_ids_to_seq_ids(scheduler_output)
             kwargs["finished_requests_ids"] = self.calculate_finished_requests_ids(scheduler_output)
+            print("minimax_vl_01 add request_ids_to_seq_ids and finished_requests_ids")
 
         if  self.minimax_cache is None:
             self.minimax_cache = MinimaxCacheManager(dtype=self._dtype,
