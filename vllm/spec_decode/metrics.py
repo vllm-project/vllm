@@ -47,6 +47,9 @@ class SpecDecodeWorkerMetrics(
     # The number of speculative tokens per sequence.
     num_spec_tokens: int
 
+    # Mean length of the speculative sequence that is accepted by the sampler.
+    mean_accepted_tokens: float
+
 
 Timer = Callable[[], float]
 
@@ -75,6 +78,8 @@ class AsyncMetricsCollector:
             0, dtype=torch.long, device="cpu", pin_memory=pin_memory)
         self._aggregate_num_emitted_tokens = torch.tensor(
             0, dtype=torch.long, device="cpu", pin_memory=pin_memory)
+        self._aggregate_mean_accepted_tokens = torch.tensor(
+            0, dtype=torch.float, device="cpu", pin_memory=pin_memory)
         self._aggregate_num_draft_tokens = 0
 
         self._rejsample_metrics_collect_interval_s = collect_interval_s
@@ -137,6 +142,9 @@ class AsyncMetricsCollector:
                 non_blocking=True)
             self._aggregate_num_emitted_tokens.copy_(
                 self.spec_decode_sampler.num_emitted_tokens, non_blocking=True)
+            self._aggregate_mean_accepted_tokens.copy_(
+                self.spec_decode_sampler.mean_accepted_tokens,
+                non_blocking=True)
             # Number of draft tokens is calculated on CPU, so no copy is
             # required.
             self._aggregate_num_draft_tokens = (
@@ -166,6 +174,7 @@ class AsyncMetricsCollector:
 
         accepted_tokens = self._aggregate_num_accepted_tokens.item()
         emitted_tokens = self._aggregate_num_emitted_tokens.item()
+        mean_accepted_tokens = self._aggregate_mean_accepted_tokens.item()
         draft_tokens = self._aggregate_num_draft_tokens
 
         max_num_emitted_tokens = self.get_max_num_emitted_tokens(
@@ -184,6 +193,7 @@ class AsyncMetricsCollector:
         return SpecDecodeWorkerMetrics(
             num_spec_tokens=k,
             draft_acceptance_rate=draft_acceptance_rate,
+            mean_accepted_tokens=mean_accepted_tokens,
             system_efficiency=system_efficiency,
             accepted_tokens=accepted_tokens,
             draft_tokens=draft_tokens,
