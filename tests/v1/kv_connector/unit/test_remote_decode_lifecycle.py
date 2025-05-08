@@ -124,3 +124,55 @@ def test_short_prompt_lifecycle():
     # We need one more call to schedule() to clear data for persistent batch.
     _ = scheduler.schedule()
     assert_scheduler_empty(scheduler)
+
+
+def test_prefix_cache_lifecycle():
+    """Test lifecycle of a Remote Decode request with short prompt."""
+
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(vllm_config)
+
+    # Prime the KVCache.
+    BLOCK_SIZE = vllm_config.cache_config.block_size
+    NUM_EXTERNAL_FULL_BLOCKS = 3
+    NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
+
+    request_normal = create_request(request_id=1, num_tokens=NUM_TOKENS)
+
+    scheduler.add_request(request_normal)
+    scheduler_output = scheduler.schedule()
+    model_runner_output = create_model_runner_output(reqs=[request_normal],
+                                                     use_eos=True)
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+    scheduler.schedule()
+    scheduler.update_from_output(scheduler_output, EMPTY_MODEL_RUNNER_OUTPUT)
+
+    #####################
+    # Actual Test: confirm we send all blocks.
+
+    # Step (1): Send the KV Transfer.
+    NUM_EXTERNAL_FULL_BLOCKS -= 1
+    NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
+
+    request_remote = create_request(request_id=1,
+                                    num_tokens=NUM_TOKENS,
+                                    do_remote_decode=True)
+
+    scheduler.add_request(request_remote)
+    scheduler_output = scheduler.schedule()
+    model_runner_output = create_model_runner_output(reqs=[request_remote])
+    eco = scheduler.update_from_output(scheduler_output, model_runner_output)
+    kv_transfer_params = eco.outputs[0].kv_transfer_params
+
+    # Ensure we send all block ids, even if there is a cache hit.
+    assert (len(
+        kv_transfer_params.remote_block_ids) == NUM_EXTERNAL_FULL_BLOCKS)
+
+    # STEP (2): Ensure it is freed.
+    scheduler_output = scheduler.schedule()
+    scheduler.schedule()
+    model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
+    model_runner_output.finished_sending = [request_remote.request_id]
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+    _ = scheduler.schedule()
+    assert_scheduler_empty(scheduler)

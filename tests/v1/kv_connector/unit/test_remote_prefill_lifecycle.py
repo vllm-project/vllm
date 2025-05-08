@@ -9,7 +9,7 @@ from .utils import (assert_scheduler_empty, create_model_runner_output,
 
 
 def test_basic_lifecycle():
-    """Test Remote Prefills Lifecycle."""
+    """Test lifecycle of a remote prefill."""
 
     vllm_config = create_vllm_config()
     scheduler = create_scheduler(vllm_config)
