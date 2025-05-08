@@ -273,6 +273,7 @@ class DeepSeekV3ToolParser(ToolParser):
                     ])
                 else:
                     return None
+
             # case -- otherwise, send the tool call delta
 
             # if the tool call portion is None, send the delta as text
@@ -319,48 +320,38 @@ class DeepSeekV3ToolParser(ToolParser):
             #   autocompleting the JSON
             elif cur_arguments and not prev_arguments:
 
-                logger.debug("finding %s in %s", delta_text, cur_arguments)
-
-                # get the location where previous args differ from current
-                if delta_text not in cur_arguments[:-2]:
-                    return None
-                args_delta_start_loc = cur_arguments[:-2].rindex(
-                    delta_text) + len(delta_text)
-
-                # use that to find the actual delta
-                arguments_delta = cur_arguments[:args_delta_start_loc]
-                logger.debug("First tokens in arguments received: %s",
-                             arguments_delta)
-
                 delta = DeltaMessage(tool_calls=[
                     DeltaToolCall(
                         index=self.current_tool_id,
                         function=DeltaFunctionCall(
-                            arguments=arguments_delta).model_dump(
+                            arguments=cur_arguments).model_dump(
                                 exclude_none=True),
                     )
                 ])
                 self.streamed_args_for_tool[
-                    self.current_tool_id] += arguments_delta
+                    self.current_tool_id] = cur_arguments
 
             # last case -- we have an update to existing arguments.
             elif cur_arguments and prev_arguments:
                 if (isinstance(delta_text, str)
-                        and len(delta_text.rstrip()) >= 1
-                        and delta_text.rstrip()[-1] == "}"):
-                    delta_text = delta_text.rstrip()[:-1]
+                        and cur_arguments != prev_arguments
+                        and len(cur_arguments) > len(prev_arguments)
+                        and cur_arguments.startswith(prev_arguments)):
+                    delta_arguments = cur_arguments[len(prev_arguments):]
+                    logger.debug("got diff %s", delta_text)
 
-                logger.debug("got diff %s", delta_text)
-
-                delta = DeltaMessage(tool_calls=[
-                    DeltaToolCall(
-                        index=self.current_tool_id,
-                        function=DeltaFunctionCall(
-                            arguments=delta_text).model_dump(
-                                exclude_none=True),
-                    )
-                ])
-                self.streamed_args_for_tool[self.current_tool_id] += delta_text
+                    delta = DeltaMessage(tool_calls=[
+                        DeltaToolCall(
+                            index=self.current_tool_id,
+                            function=DeltaFunctionCall(
+                                arguments=delta_arguments).model_dump(
+                                    exclude_none=True),
+                        )
+                    ])
+                    self.streamed_args_for_tool[
+                        self.current_tool_id] = cur_arguments
+                else:
+                    delta = None
 
             # handle saving the state for the current tool into
             # the "prev" list for use in diffing for the next iteration
