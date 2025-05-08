@@ -397,6 +397,8 @@ class ModelConfig:
     available.\n
     - "vllm" will use the vLLM model implementation.\n
     - "transformers" will use the Transformers model implementation."""
+    use_fp8_scales: bool = True
+    """If true, pass the fp8 scales to the ROCm Triton attention backend"""
 
     def compute_hash(self) -> str:
         """
@@ -4339,10 +4341,12 @@ def set_current_vllm_config(vllm_config: VllmConfig, check_compile=False):
     old_vllm_config = _current_vllm_config
     from vllm.compilation.counter import compilation_counter
     num_models_seen = compilation_counter.num_models_seen
+    was_raised = False
     try:
         _current_vllm_config = vllm_config
         yield
     except Exception:
+        was_raised = True
         raise
     else:
         logger.debug("enabled custom ops: %s",
@@ -4363,7 +4367,8 @@ def set_current_vllm_config(vllm_config: VllmConfig, check_compile=False):
                 " if you want it to be supported.",
                 vllm_config.model_config.model)
     finally:
-        _current_vllm_config = old_vllm_config
+        if was_raised:
+            _current_vllm_config = old_vllm_config
 
 
 def get_current_vllm_config() -> VllmConfig:

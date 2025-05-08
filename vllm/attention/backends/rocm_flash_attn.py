@@ -16,6 +16,7 @@ from vllm.attention.backends.utils import (CommonAttentionState,
                                            CommonMetadataBuilder)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
+from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import use_rocm_custom_paged_attention
@@ -766,9 +767,15 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                             query.dtype,
                             seq_lens,
                             make_attn_mask=causal_mask)  # type: ignore
+
+                    vllm_config = get_current_vllm_config()
+                    vllm_config_use_fp8_scales = (
+                        True if vllm_config is None or vllm_config.model_config
+                        is None else vllm_config.model_config.use_fp8_scales)
                     use_fp8_scales = (layer._q_scale and layer._k_scale
                                       and layer._v_scale and layer._prob_scale
-                                      and envs.VLLM_ROCM_USE_FP8_SCALES)
+                                      and vllm_config_use_fp8_scales)
+
                     full_scales = (
                         layer._q_scale, layer._k_scale, layer._v_scale,
                         layer._prob_scale) if use_fp8_scales else None
