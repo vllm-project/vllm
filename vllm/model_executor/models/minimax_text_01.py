@@ -495,11 +495,11 @@ class MiniMaxText01LinearAttention(nn.Module):
             hidden = self._decode_infer(q, k, v, kv_cache,
                                         state_indices_tensor, attn_metadata)
 
-        # hidden = self.norm._forward(hidden)
-        # gate, _ = self.output_gate(hidden_states)
-        # hidden = F.sigmoid(gate) * hidden
-        # hidden = hidden.to(hidden_states.dtype)
-        # hidden, _ = self.out_proj(hidden)
+        hidden = self.norm._forward(hidden)
+        gate, _ = self.output_gate(hidden_states)
+        hidden = F.sigmoid(gate) * hidden
+        hidden = hidden.to(hidden_states.dtype)
+        hidden, _ = self.out_proj(hidden)
         return hidden
 
 
@@ -608,7 +608,6 @@ class MiniMaxText01DecoderLayer(nn.Module):
                 config.max_model_len, int):
             max_position_embeddings = min(config.max_position_embeddings,
                                           config.max_model_len)
-        config.attention_type = 1
         if config.attention_type == 0:
             use_headxdim = True
             hidden_inner = (head_dim * config.num_attention_heads
@@ -643,7 +642,7 @@ class MiniMaxText01DecoderLayer(nn.Module):
         else:
             raise ValueError(
                 f"Unsupported attention type: {self.config.attention_type}")
-        config.attention_type = 0
+
         if expert_num == 1:
             self.mlp = MiniMaxText01MLP(
                 hidden_size=self.hidden_size,
@@ -844,7 +843,7 @@ class MiniMaxText01Model(nn.Module):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers, layer_fn, prefix=f"{prefix}.layers")
-        
+
         self.minimax_cache: Optional[MinimaxCacheManager] = None
 
         rope_theta = getattr(config, "rope_theta", 10000)
@@ -1008,7 +1007,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
         flash_layer_count = sum(1 for attn_type in self.config.attn_type_list
                                 if attn_type == 1)
         self.kv_cache = [torch.tensor([]) for _ in range(flash_layer_count)]
-        
+
         linear_layer_nums = sum(1 for i in range(config.num_hidden_layers)
                                 if config.attn_type_list[i] == 0)
         max_slots_number = vllm_config.scheduler_config.max_num_seqs
@@ -1038,11 +1037,12 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs) -> torch.Tensor:
-        if  self.minimax_cache is None:
-            self.minimax_cache = MinimaxCacheManager(dtype=self._dtype,
-                                            cache_shape=self.cache_shape)
+        if self.minimax_cache is None:
+            self.minimax_cache = MinimaxCacheManager(
+                dtype=self._dtype, cache_shape=self.cache_shape)
         minimax_cache_params = self.minimax_cache.current_run_tensors(**kwargs)
-        hidden_states = self.model(input_ids, positions, self.minimax_cache, minimax_cache_params, intermediate_tensors,
+        hidden_states = self.model(input_ids, positions, self.minimax_cache,
+                                   minimax_cache_params, intermediate_tensors,
                                    inputs_embeds, **kwargs)
 
         return hidden_states

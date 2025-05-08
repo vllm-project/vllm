@@ -7,12 +7,10 @@ import torch.nn as nn
 from transformers import BatchFeature
 from transformers.models.llava_next.modeling_llava_next import (
     get_anyres_image_grid_shape, unpad_image)
-from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.distributed.parallel_state import (
-    get_pp_group, get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size)
-from .minimax_cache import MinimaxCacheManager, MinimaxCacheParams
+
 from vllm.config import VllmConfig
+from vllm.distributed.parallel_state import (
+    get_tensor_model_parallel_world_size)
 from vllm.jsontree import json_map_leaves
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -29,6 +27,7 @@ from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .llava import (BaseLlavaMultiModalProcessor, LlavaDummyInputsBuilder,
                     init_vision_tower_for_llava)
 from .llava_next import LlavaNextProcessingInfo
+from .minimax_cache import MinimaxCacheManager
 from .pixtral import PixtralHFVisionModel
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
@@ -198,15 +197,19 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             config.text_config, "attn_type_list", False) or getattr(
                 config.text_config, "decoder_attention_types", False)
         if not self.decoder_attention_types:
-            self.decoder_attention_types = [1] * config.text_config.num_hidden_layers
+            self.decoder_attention_types = [
+                1
+            ] * config.text_config.num_hidden_layers
         self.minimax_cache: Optional[MinimaxCacheManager] = None
-        linear_layer_nums = sum(1 for i in range(config.text_config.num_hidden_layers)
-                                if self.decoder_attention_types[i] == 0)
+        linear_layer_nums = sum(
+            1 for i in range(config.text_config.num_hidden_layers)
+            if self.decoder_attention_types[i] == 0)
         max_slots_number = vllm_config.scheduler_config.max_num_seqs
         self.cache_shape = (linear_layer_nums, max_slots_number,
                             config.text_config.num_attention_heads //
                             get_tensor_model_parallel_world_size(),
-                            config.text_config.head_dim, config.text_config.head_dim)
+                            config.text_config.head_dim,
+                            config.text_config.head_dim)
         self.vision_feature_layer = config.vision_feature_layer
         self.vocab_size = config.text_config.vocab_size
         self.pad_token_id = -1
@@ -447,26 +450,6 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return self._process_image_input(image_input)
 
-    def calculate_request_ids_to_seq_ids(self, scheduler_output: SchedulerOutput):
-        request_ids_to_seq_ids = {}
-        
-        for new_req_data in scheduler_output.scheduled_new_reqs:
-            req_id = new_req_data.req_id
-            request_ids_to_seq_ids[req_id] = [0]  
-        
-        for req_data in scheduler_output.scheduled_cached_reqs:
-            req_id = req_data.req_id
-            sampling_params = req_data.sampling_params
-            if hasattr(sampling_params, 'n') and sampling_params.n > 1:
-                request_ids_to_seq_ids[req_id] = list(range(sampling_params.n))
-            else:
-                request_ids_to_seq_ids[req_id] = [0]
-        
-        return request_ids_to_seq_ids
-
-    def calculate_finished_requests_ids(self, scheduler_output: SchedulerOutput):
-        return scheduler_output.finished_req_ids
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -482,21 +465,15 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             inputs_embeds = self.get_input_embeddings(input_ids,
                                                       vision_embeddings)
             input_ids = None
-        
-        if "scheduler_output" in kwargs:
-            scheduler_output = kwargs["scheduler_output"]
-            kwargs["request_ids_to_seq_ids"] = self.calculate_request_ids_to_seq_ids(scheduler_output)
-            kwargs["finished_requests_ids"] = self.calculate_finished_requests_ids(scheduler_output)
-            print("minimax_vl_01 add request_ids_to_seq_ids and finished_requests_ids")
 
         if "request_ids_to_seq_ids" not in kwargs:
             kwargs["request_ids_to_seq_ids"] = {}
         if "finished_requests_ids" not in kwargs:
             kwargs["finished_requests_ids"] = []
 
-        if  self.minimax_cache is None:
-            self.minimax_cache = MinimaxCacheManager(dtype=self._dtype,
-                                            cache_shape=self.cache_shape)
+        if self.minimax_cache is None:
+            self.minimax_cache = MinimaxCacheManager(
+                dtype=self._dtype, cache_shape=self.cache_shape)
         minimax_cache_params = self.minimax_cache.current_run_tensors(**kwargs)
 
         hidden_states = self.language_model.model(input_ids,
