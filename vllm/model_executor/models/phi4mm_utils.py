@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 
-class Block(nn.Module):
+class BlockBase(nn.Module):
     """Block abstract module"""
 
     def __init__(self, input_size, output_size):
@@ -1602,7 +1602,7 @@ class AttModule(nn.Module):
         return x, memory, pos_emb, att_mask
 
 
-class AttBlock(Block, AttModule):
+class AttBlock(BlockBase, AttModule):
     """Attention Block module to support both Attention and Block module."""
 
     def memory_dims(self, max_len=False):

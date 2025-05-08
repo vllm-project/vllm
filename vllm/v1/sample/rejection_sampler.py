@@ -3,10 +3,9 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-import triton
-import triton.language as tl
 
 from vllm.logger import init_logger
+from vllm.triton_utils import tl, triton
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -75,7 +74,7 @@ class RejectionSampler(nn.Module):
                 outside of the rejection sampler with the default sampling
                 strategy. It allows for more flexibility in the sampling
                 process such as top_p, top_k sampling.
-            sampling_metadata (SamplingMetadata):
+            sampling_metadata (vllm.v1.sample.metadata.SamplingMetadata):
                 Additional metadata needed for sampling, such as temperature,
                 top-k/top-p parameters, or other relevant information.
         Returns:

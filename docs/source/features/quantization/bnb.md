@@ -14,7 +14,7 @@ pip install bitsandbytes>=0.45.3
 
 vLLM reads the model's config file and supports both in-flight quantization and pre-quantized checkpoint.
 
-You can find bitsandbytes quantized models on <https://huggingface.co/models?other=bitsandbytes>.
+You can find bitsandbytes quantized models on <https://huggingface.co/models?search=bitsandbytes>.
 And usually, these repositories have a config.json file that includes a quantization_config section.
 
 ## Read quantized checkpoint

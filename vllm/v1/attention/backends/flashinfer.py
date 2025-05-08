@@ -14,9 +14,11 @@ import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
 from vllm.attention.layer import Attention
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import (VllmConfig, get_current_vllm_config,
+                         get_layers_from_vllm_config)
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
+from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -81,12 +83,10 @@ def get_per_layer_parameters(
     to use during `plan`.
     """
 
-    layers = vllm_config.compilation_config.static_forward_context
+    layers = get_layers_from_vllm_config(vllm_config, Attention)
     per_layer_params: dict[str, PerLayerParameters] = {}
 
     for key, layer in layers.items():
-        assert isinstance(layer, Attention)
-
         impl = layer.impl
         assert isinstance(impl, FlashInferImpl)
 
@@ -183,9 +183,6 @@ class FlashInferMetadata:
     prefill_wrapper: Optional[BatchPrefillWithPagedKVCacheWrapper] = None
     decode_wrapper: Optional[BatchDecodeWithPagedKVCacheWrapper] = None
     cascade_wrapper: Optional[MultiLevelCascadeAttentionWrapper] = None
-
-    # For logging.
-    num_input_tokens: int = 0  # Number of tokens including padding.
 
     @property
     def query_start_loc(self):
@@ -398,16 +395,15 @@ class FlashInferMetadataBuilder:
                 )
 
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int):
+              common_prefix_len: int,
+              common_attn_metadata: CommonAttentionMetadata):
         assert self._num_decodes + self._num_prefills == num_reqs
         assert (self._num_decode_tokens +
                 self._num_prefill_tokens == num_actual_tokens)
         page_size = self.runner.block_size
         device = self.runner.device
-        qo_indptr = self.runner.query_start_loc_cpu[:num_reqs + 1].to(
-            self.runner.device, non_blocking=True)
-        seq_lens = self.runner.seq_lens_cpu[:num_reqs].to(self.runner.device,
-                                                          non_blocking=True)
+        qo_indptr = common_attn_metadata.query_start_loc
+        seq_lens = common_attn_metadata.seq_lens
         block_table = (
             self.runner.input_batch.block_table.get_device_tensor()[:num_reqs])
         slot_mapping = self.runner.slot_mapping_cpu[:num_actual_tokens].to(

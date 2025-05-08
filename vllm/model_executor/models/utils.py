@@ -66,7 +66,7 @@ class WeightsMapper:
 
 class AutoWeightsLoader:
     """
-    Helper class to load weights into a :class:`torch.nn.Module`. It is able
+    Helper class to load weights into a {class}`torch.nn.Module`. It is able
     to automatically detect child modules and parameters while iterating over
     the weights only once.
 
@@ -273,7 +273,7 @@ def init_vllm_registered_model(
     Helper function to initialize an inner model registered to vLLM,
     based on the arguments passed to the outer vLLM model.
     """
-    from vllm.model_executor.model_loader.loader import _initialize_model
+    from vllm.model_executor.model_loader.utils import initialize_model
 
     if hf_config is None and architectures is not None:
         # So that the architectures field is overridden
@@ -283,7 +283,7 @@ def init_vllm_registered_model(
         vllm_config = vllm_config.with_hf_config(hf_config,
                                                  architectures=architectures)
 
-    return _initialize_model(vllm_config=vllm_config, prefix=prefix)
+    return initialize_model(vllm_config=vllm_config, prefix=prefix)
 
 
 @overload

@@ -36,6 +36,10 @@ def parse_args():
         help="downloaded from the eagle repo " \
         "https://github.com/SafeAILab/EAGLE/blob/main/eagle/data/"
     )
+    parser.add_argument("--method",
+                        type=str,
+                        default='eagle',
+                        choices=['eagle', 'eagle3'])
     parser.add_argument("--max_num_seqs", type=int, default=8)
     parser.add_argument("--num_prompts", type=int, default=80)
     parser.add_argument("--num_spec_tokens", type=int, default=2)
@@ -52,8 +56,14 @@ def main():
 
     args = parse_args()
 
-    model_dir = "meta-llama/Meta-Llama-3-8B-Instruct"
-    eagle_dir = "abhigoyal/EAGLE-LLaMA3-Instruct-8B-vllm"
+    model_dir = "meta-llama/Llama-3.1-8B-Instruct"
+
+    if args.method == 'eagle':
+        eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
+    elif args.method == 'eagle3':
+        eagle_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
+    else:
+        raise ValueError(f"unknown method: {args.method}")
 
     max_model_len = 2048
 
@@ -81,7 +91,7 @@ def main():
         max_num_seqs=args.max_num_seqs,
         gpu_memory_utilization=0.8,
         speculative_config={
-            "method": "eagle",
+            "method": args.method,
             "model": eagle_dir,
             "num_speculative_tokens": args.num_spec_tokens,
             "draft_tensor_parallel_size": args.draft_tp,
@@ -94,6 +104,9 @@ def main():
 
     outputs = llm.generate(prompt_token_ids=prompt_ids,
                            sampling_params=sampling_params)
+
+    if not hasattr(outputs, "metrics") or outputs.metrics is None:
+        return
 
     # calculate the average number of accepted tokens per forward pass, +1 is
     # to account for the token from the target model that's always going to be
@@ -108,6 +121,11 @@ def main():
     print(f"mean acceptance length: \
         {sum(acceptance_counts) / acceptance_counts[0]:.2f}")
     print("-" * 50)
+
+    # print acceptance at each token position
+    for i in range(len(acceptance_counts)):
+        print(f"acceptance at token {i}:"
+              f"{acceptance_counts[i] / (acceptance_counts[0]):.2f}")
 
 
 if __name__ == "__main__":

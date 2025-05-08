@@ -201,6 +201,9 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
             if self.prompt_adapter_config is not None:
                 raise ValueError("TP1DraftModelRunner has no support for "
                                  "prompt_adapter_config")
+            if model_input.inputs_embeds is not None:
+                raise ValueError("TP1DraftModelRunner has no support for "
+                                 "inputs_embeds")
             if model_input.multi_modal_kwargs:
                 raise ValueError(
                     "TP1DraftModelRunner has no support for multi_modal_kwargs"
@@ -242,9 +245,16 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
 
         # Get model
         if use_cuda_graph:
-            graph_batch_size = model_input.input_tokens.shape[0]
-            model_executable = (self.graph_runners[model_input.virtual_engine]
-                                [graph_batch_size])
+            if model_input.inputs_embeds is None:
+                graph_batch_size = model_input.input_tokens.shape[0]
+                model_executable = (
+                    self.graph_runners[model_input.virtual_engine][(
+                        graph_batch_size, False)])
+            else:
+                graph_batch_size = model_input.inputs_embeds.shape[0]
+                model_executable = (
+                    self.graph_runners[model_input.virtual_engine][(
+                        graph_batch_size, True)])
 
             if previous_hidden_states is not None:
                 hidden_states = torch.cat([
@@ -281,6 +291,7 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                                      self.vllm_config):
                 hidden_states = model_executable(
                     input_ids=model_input.input_tokens,
+                    inputs_embeds=None,
                     positions=model_input.input_positions,
                     intermediate_tensors=intermediate_tensors,
                     **MultiModalKwargs.as_kwargs(multi_modal_kwargs,

@@ -14,6 +14,7 @@ from vllm.model_executor.layers.sampler import (PromptLogprobs, SampleLogprobs,
                                                 SamplerOutput,
                                                 SamplingMetadata, get_logprobs,
                                                 get_pythonized_sample_results)
+from vllm.platforms import current_platform
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
                            Logprob, SequenceGroupMetadata, SequenceOutput)
 from vllm.utils import PyObjectCache, async_tensor_h2d, current_stream
@@ -158,8 +159,8 @@ class StatefulModelInput(BroadcastableModelInput):
     is_first_multi_step: bool = False
     base_output_proc_callback: Optional[Callable] = None
     # ping-pong data structures for multi-step to wait on the previous step
-    step_cuda_events: List[torch.cuda.Event] = field(
-        default_factory=lambda: [torch.cuda.Event(blocking=True)] * 2)
+    step_cuda_events: List[current_platform.Event] = field(
+        default_factory=lambda: [current_platform.Event(blocking=True)] * 2)
     num_seqs: int = -1
     num_queries: int = -1
     num_single_step_prefills: int = 0
@@ -733,11 +734,11 @@ def _pythonize_sampler_output(
     cache: Optional[PythonizationCache],
 ) -> None:
     """ This function is only called when the output tensors are ready. 
-    See :class:`ModelOutput`. 
+    See {class}`ModelOutput`. 
     
     Modifies `output.outputs` and `pinned_sampled_token_buffer` in-place, 
     adding a Pythonized output data structure
-    (:class:`CompletionSequenceGroupOutput`) for each :class:`SequenceGroup`.
+    ({class}`CompletionSequenceGroupOutput`) for each {class}`SequenceGroup`.
 
     Args:
       model_input

@@ -766,6 +766,12 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                             query.dtype,
                             seq_lens,
                             make_attn_mask=causal_mask)  # type: ignore
+                    use_fp8_scales = (layer._q_scale and layer._k_scale
+                                      and layer._v_scale and layer._prob_scale
+                                      and self.kv_cache_dtype == "fp8")
+                    full_scales = (
+                        layer._q_scale, layer._k_scale, layer._v_scale,
+                        layer._prob_scale) if use_fp8_scales else None
                     self.triton_attn_func(
                         query,
                         key,
@@ -779,6 +785,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         self.scale,
                         attn_masks[0][None]
                         if attn_masks is not None else None,
+                        full_scales,
                     )
                 elif self.use_naive_attn:
                     if self.num_kv_heads != self.num_heads:

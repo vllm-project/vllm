@@ -13,7 +13,6 @@ from vllm.attention.backends.xformers import XFormersMetadata
 
 @dataclass
 class Mamba2Metadata:
-    has_prefill: bool
 
     has_initial_states: torch.Tensor
     prep_initial_states: bool
@@ -24,21 +23,23 @@ class Mamba2Metadata:
     chunk_offsets: torch.Tensor
 
 
-def _seq_idx_to_chunk_indices_offsets(seq_idx, chunk_size: int):
+def _query_start_loc_to_chunk_indices_offsets(query_start_loc: torch.Tensor,
+                                              chunk_size: int,
+                                              total_seqlens: int):
 
-    # convert seq_idx to chunk indices and offsets
-    # - derive the cu_seqlens
-    _, cu_seqlens = torch.where(seq_idx.diff())
-    cu_seqlens += 1
+    cu_seqlens = query_start_loc[1:]  # remove prepended 0
 
     # outputs will have length expansion of chunks that do not divide
     # chunk_size
-    N = math.ceil(seq_idx.shape[-1] / chunk_size) + (cu_seqlens % chunk_size
-                                                     > 0).sum()
-    chunk_indices = torch.arange(N, dtype=torch.int, device=seq_idx.device)
-    chunk_offsets = torch.zeros((N, ), dtype=torch.int, device=seq_idx.device)
+    N = math.ceil(total_seqlens / chunk_size) + (cu_seqlens[:-1] % chunk_size
+                                                 > 0).sum()
+    chunk_indices = torch.arange(N,
+                                 dtype=torch.int,
+                                 device=query_start_loc.device)
+    chunk_offsets = torch.zeros((N, ),
+                                dtype=torch.int,
+                                device=query_start_loc.device)
 
-    cu_seqlens = cu_seqlens.tolist() + [seq_idx.shape[-1]]
     p = 0  # num of insertions
     for s, e in zip(cu_seqlens[:-1], cu_seqlens[1:]):
 
@@ -60,48 +61,49 @@ def _seq_idx_to_chunk_indices_offsets(seq_idx, chunk_size: int):
 
 def prepare_mamba2_metadata(
     chunk_size: int,
-    input_ids: torch.Tensor,
     attn_metadata: AttentionMetadata,
 ) -> Mamba2Metadata:
 
+    # compute number of prefill and decode requests
+    # NOTE: in V0 we assume prefills are before decodes
+    num_prefills = attn_metadata.num_prefills
+    num_prefill_tokens = attn_metadata.num_prefill_tokens
+
+    seq_idx = None
+    chunk_indices, chunk_offsets = None, None
     # Need flags to indicate if there are initial states
     # currently we really only support the FlashAttention backend
     has_initial_states = None
     prep_initial_states = False
-    if (isinstance(attn_metadata, (FlashAttentionMetadata, XFormersMetadata,
-                                   PlaceholderAttentionMetadata))
-            and attn_metadata.context_lens_tensor is not None):
-        has_initial_states = attn_metadata.context_lens_tensor > 0
-        # precompute flag to avoid device syncs later in mamba2 forwards
-        prep_initial_states = torch.any(has_initial_states).item()
 
-    has_prefill = attn_metadata.num_prefills > 0
+    # Compute seq_idx, chunk_indices and chunk_offsets for prefill only
+    if num_prefills > 0:
+        if (isinstance(attn_metadata,
+                       (FlashAttentionMetadata, XFormersMetadata,
+                        PlaceholderAttentionMetadata))
+                and attn_metadata.context_lens_tensor is not None):
+            has_initial_states = \
+                attn_metadata.context_lens_tensor[:num_prefills] > 0  #[batch,]
+            # precompute flag to avoid device syncs in mamba2 layer forwards
+            # prep is only needed for mamba2 ssd prefill processing
+            prep_initial_states = torch.any(has_initial_states).item()
 
-    seq_idx = None
-    chunk_indices, chunk_offsets = None, None
-    if has_prefill:
-        seq_idx = torch.zeros_like(input_ids, dtype=torch.int32)
-        for i, (srt, end) in enumerate(
-                zip(
-                    attn_metadata.query_start_loc,
-                    attn_metadata.query_start_loc[1:],
-                )):
-            seq_idx[srt:end] = i
+        query_start_loc = attn_metadata.query_start_loc[:num_prefills + 1]
+        seq_idx = torch.repeat_interleave(torch.arange(
+            num_prefills, dtype=torch.int32, device=query_start_loc.device),
+                                          query_start_loc.diff(),
+                                          output_size=num_prefill_tokens)
         seq_idx.unsqueeze_(0)
 
-        # compute metadata for chunked prefill.
-        # actually this is only needed if there are initial states,
-        # but this is determinable only from attention metadata yet
-        # unavailable from the top-level model forward. Rather than
-        # complicating things to extract said metadata, we simply just
-        # compute them once at the top level model forward and reuse
-        # them in mamba layers. If not needed, they will be ignored
-        # inside mamba kernels.
-        chunk_indices, chunk_offsets = _seq_idx_to_chunk_indices_offsets(
-            seq_idx, chunk_size)
+        # We compute metadata for chunked prefill once at the top level model
+        # forward and reuse them in mamba layers. If not needed, they will be
+        # ignored inside mamba kernels.
+        if prep_initial_states:
+            chunk_indices, chunk_offsets = \
+                _query_start_loc_to_chunk_indices_offsets(
+                query_start_loc, chunk_size, num_prefill_tokens)
 
-    return Mamba2Metadata(has_prefill=has_prefill,
-                          has_initial_states=has_initial_states,
+    return Mamba2Metadata(has_initial_states=has_initial_states,
                           prep_initial_states=prep_initial_states,
                           chunk_size=chunk_size,
                           seq_idx=seq_idx,

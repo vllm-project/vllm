@@ -12,7 +12,7 @@ UNSUPPORTED_MODELS_V1 = [
     "openai/whisper-large-v3",  # transcription
     "facebook/bart-large-cnn",  # encoder decoder
     "mistralai/Mamba-Codestral-7B-v0.1",  # mamba
-    "ibm-ai-platform/Bamba-9B",  # hybrid
+    "hmellor/bamba-tiny-random",  # hybrid
     "BAAI/bge-m3",  # embedding
 ]
 
@@ -57,7 +57,8 @@ def test_unsupported_configs(monkeypatch):
         with pytest.raises(NotImplementedError):
             AsyncEngineArgs(
                 model=MODEL,
-                guided_decoding_backend="lm-format-enforcer:no-fallback",
+                guided_decoding_backend="lm-format-enforcer",
+                guided_decoding_disable_fallback=True,
             ).create_engine_config()
 
         with pytest.raises(NotImplementedError):

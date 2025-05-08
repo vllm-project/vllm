@@ -537,7 +537,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
         Unlike in LLaVA-1.5, the number of image tokens inputted to the language
         model depends on the original size of the input image. Including the
         original image token in the input, the required number of image tokens
-        is given by :func:`get_llava_next_image_feature_size`.
+        is given by {func}`get_llava_next_image_feature_size`.
 
         This way, the `positions` and `attn_metadata` are consistent
         with the `input_ids`.
@@ -548,8 +548,9 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
             pixel_values: The pixels in each grid patch for each input image.
             image_sizes: The original `(height, width)` for each input image.
 
-        See also:
-            :class:`LlavaNextImageInputs`
+        :::{seealso}
+        {class}`LlavaNextImageInputs`
+        :::
         """
         if intermediate_tensors is not None:
             inputs_embeds = None

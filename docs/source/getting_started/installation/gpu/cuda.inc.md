@@ -1,6 +1,6 @@
 # Installation
 
-vLLM contains pre-compiled C++ and CUDA (12.1) binaries.
+vLLM contains pre-compiled C++ and CUDA (12.6) binaries.
 
 ## Requirements
 
@@ -23,12 +23,12 @@ Therefore, it is recommended to install vLLM with a **fresh new** environment. I
 You can install vLLM using either `pip` or `uv pip`:
 
 ```console
-# Install vLLM with CUDA 12.4.
+# Install vLLM with CUDA 12.6.
 pip install vllm # If you are using pip.
 uv pip install vllm # If you are using uv.
 ```
 
-As of now, vLLM's binaries are compiled with CUDA 12.4 and public PyTorch release versions by default. We also provide vLLM binaries compiled with CUDA 12.1, 11.8, and public PyTorch release versions:
+As of now, vLLM's binaries are compiled with CUDA 12.6 and public PyTorch release versions by default. We also provide vLLM binaries compiled with CUDA 12.8, 11.8, and public PyTorch release versions:
 
 ```console
 # Install vLLM with CUDA 11.8.

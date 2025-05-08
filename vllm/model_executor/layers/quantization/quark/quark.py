@@ -1,26 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import fnmatch
-import re
 from typing import Any, Dict, List, Optional, cast
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
     QuarkMoEMethod)
 from vllm.model_executor.layers.quantization.quark.schemes import (
-    QuarkScheme, QuarkW8A8Fp8, QuarkW8A8Int8)
+    QuarkScheme, QuarkW4A4MXFP4, QuarkW8A8Fp8, QuarkW8A8Int8)
 from vllm.model_executor.layers.quantization.quark.utils import (
     deep_compare, should_ignore_layer)
 from vllm.platforms import current_platform
 
 __all__ = ["QuarkLinearMethod"]
+
+logger = init_logger(__name__)
 
 
 class QuarkConfig(QuantizationConfig):
@@ -48,7 +51,7 @@ class QuarkConfig(QuantizationConfig):
     def get_min_capability(cls) -> int:
         return 70
 
-    def get_name(self) -> str:
+    def get_name(self) -> QuantizationMethods:
         return "quark"
 
     def get_quant_method(self, layer: torch.nn.Module,
@@ -67,6 +70,7 @@ class QuarkConfig(QuantizationConfig):
             return QuarkLinearMethod(self)
         if isinstance(layer, Attention):
             return QuarkKVCacheMethod(self)
+
         if isinstance(layer, FusedMoE):
             return QuarkMoEMethod.get_moe_method(self,
                                                  module=layer,
@@ -124,6 +128,13 @@ class QuarkConfig(QuantizationConfig):
             # output_tensors corresponding to the kv_cache layer.
             for q_config in q_configs:
                 q_config["output_tensors"] = None
+
+            # In case q_proj output is also quantized, remove the configuration
+            # to keep qkv consistency.
+            q_proj_q_config = cast(Dict[str, Any],
+                                   layer_quant_config.get("*q_proj"))
+            if q_proj_q_config is not None:
+                q_proj_q_config["output_tensors"] = None
 
         return cls(quant_config=config,
                    kv_cache_group=kv_cache_group,
@@ -198,6 +209,54 @@ class QuarkConfig(QuantizationConfig):
         # Only symmetric weight quantization supported.
         return is_int8_dtype and is_tensor and is_weight_symmetric and is_static
 
+    def _is_mx_fp4(self, weight_quant: Optional[Dict[str, Any]],
+                   input_quant: Optional[Dict[str, Any]]) -> bool:
+        # Confirm weights and input quantized.
+        if weight_quant is None or input_quant is None:
+            logger.debug("Quark model is not in MX-FP4 format: "
+                         "weight_quant or input_quant not set")
+            return False
+
+        # Input and weight dtype needs to be fp4.
+        if weight_quant.get("dtype") != "fp4" or input_quant.get(
+                "dtype") != "fp4":
+            logger.debug("Quark model is not in MX-FP4 format: dtype not fp4")
+            return False
+
+        # Input and weight qscheme needs to be per group.
+        if weight_quant.get("qscheme") != "per_group" or input_quant.get(
+                "qscheme") != "per_group":
+            logger.debug("Quark model is not in MX-FP4 format: not per_group")
+            return False
+
+        # Input and weight group size needs to be 32.
+        if weight_quant.get("group_size") != 32 or input_quant.get(
+                "group_size") != 32:
+            logger.debug(
+                "Quark model is not in MX-FP4 format: not group_size=32")
+            return False
+
+        # Weights need to use static quantization.
+        if weight_quant.get("is_dynamic") is True:
+            logger.debug(
+                "Quark model is not in MX-FP4 format: not weight static")
+            return False
+
+        # Activations need to use dynamic quantization.
+        if input_quant.get("is_dynamic") is False:
+            logger.debug(
+                "Quark model is not in MX-FP4 format: not activation dynamic")
+            return False
+
+        # Activations and weight scales need to be in e8m0 format.
+        if weight_quant.get("scale_format") != "e8m0" or input_quant.get(
+                "scale_format") != "e8m0":
+            logger.debug(
+                "Quark model is not in MX-FP4 format: not scale_format e8m0")
+            return False
+
+        return True
+
     def _find_matched_config(self, layer_name: str,
                              module: torch.nn.Module) -> Dict[str, Any]:
 
@@ -262,6 +321,8 @@ class QuarkConfig(QuantizationConfig):
             return QuarkW8A8Int8(qscheme=weight_qscheme,
                                  is_static_input_scheme=True,
                                  input_symmetric=input_config.get("symmetric"))
+        elif self._is_mx_fp4(weight_config, input_config):
+            return QuarkW4A4MXFP4(weight_config, input_config)
 
         raise NotImplementedError("No quark compatible scheme was found. "
                                   f"Weight config: {weight_config}, "
@@ -289,25 +350,14 @@ class QuarkConfig(QuantizationConfig):
         :param name: param name
         :return: matching param name for KV cache scale in vLLM
         """
-        if self.kv_cache_group is None or len(self.kv_cache_group) == 0:
-            return None
-
-        kv_proj_names = [
-            re.split(r"[*.]", kv_cache)[-1] for kv_cache in self.kv_cache_group
-        ]
-        if name.endswith(".output_scale"):
-            if len(kv_proj_names) == 1 and kv_proj_names[0] in name:
-                kv_output_scale_name = "." + kv_proj_names[0] + ".output_scale"
-                return name.replace(kv_output_scale_name, ".attn.k_scale")
-
-            elif len(kv_proj_names) == 2:
-                for kv_proj_name in kv_proj_names:
-                    if kv_proj_name in name and kv_proj_name == "k_proj":
-                        return name.replace(".k_proj.output_scale",
-                                            ".attn.k_scale")
-                    elif kv_proj_name in name and kv_proj_name == "v_proj":
-                        return name.replace(".v_proj.output_scale",
-                                            ".attn.v_scale")
+        if name.endswith(".output_scale") and ".k_proj" in name:
+            return name.replace(".k_proj.output_scale", ".attn.k_scale")
+        if name.endswith(".output_scale") and ".v_proj" in name:
+            return name.replace(".v_proj.output_scale", ".attn.v_scale")
+        if name.endswith(".output_scale") and ".q_proj" in name:
+            return name.replace(".q_proj.output_scale", ".attn.q_scale")
+        if name.endswith("self_attn.prob_output_scale"):
+            return name.replace(".prob_output_scale", ".attn.prob_scale")
 
         # If no matches, return None
         return None

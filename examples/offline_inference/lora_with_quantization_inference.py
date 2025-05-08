@@ -75,43 +75,38 @@ def initialize_engine(model: str, quantization: str,
                       lora_repo: Optional[str]) -> LLMEngine:
     """Initialize the LLMEngine."""
 
-    if quantization == "bitsandbytes":
-        # QLoRA (https://arxiv.org/abs/2305.14314) is a quantization technique.
-        # It quantizes the model when loading, with some config info from the
-        # LoRA adapter repo. So need to set the parameter of load_format and
-        # qlora_adapter_name_or_path as below.
-        engine_args = EngineArgs(model=model,
-                                 quantization=quantization,
-                                 qlora_adapter_name_or_path=lora_repo,
-                                 enable_lora=True,
-                                 max_lora_rank=64)
-    else:
-        engine_args = EngineArgs(model=model,
-                                 quantization=quantization,
-                                 enable_lora=True,
-                                 max_loras=4)
+    engine_args = EngineArgs(model=model,
+                             quantization=quantization,
+                             enable_lora=True,
+                             max_lora_rank=64,
+                             max_loras=4)
     return LLMEngine.from_engine_args(engine_args)
 
 
 def main():
     """Main function that sets up and runs the prompt processing."""
 
-    test_configs = [{
-        "name": "qlora_inference_example",
-        'model': "huggyllama/llama-7b",
-        'quantization': "bitsandbytes",
-        'lora_repo': 'timdettmers/qlora-flan-7b'
-    }, {
-        "name": "AWQ_inference_with_lora_example",
-        'model': 'TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ',
-        'quantization': "awq",
-        'lora_repo': 'jashing/tinyllama-colorist-lora'
-    }, {
-        "name": "GPTQ_inference_with_lora_example",
-        'model': 'TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ',
-        'quantization': "gptq",
-        'lora_repo': 'jashing/tinyllama-colorist-lora'
-    }]
+    test_configs = [
+        # QLoRA (https://arxiv.org/abs/2305.14314)
+        {
+            "name": "qlora_inference_example",
+            'model': "huggyllama/llama-7b",
+            'quantization': "bitsandbytes",
+            'lora_repo': 'timdettmers/qlora-flan-7b'
+        },
+        {
+            "name": "AWQ_inference_with_lora_example",
+            'model': 'TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ',
+            'quantization': "awq",
+            'lora_repo': 'jashing/tinyllama-colorist-lora'
+        },
+        {
+            "name": "GPTQ_inference_with_lora_example",
+            'model': 'TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ',
+            'quantization': "gptq",
+            'lora_repo': 'jashing/tinyllama-colorist-lora'
+        }
+    ]
 
     for test_config in test_configs:
         print(

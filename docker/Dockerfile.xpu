@@ -40,12 +40,6 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,source=.git,target=.git \
     python3 setup.py install
 
-# Please refer xpu doc, we need manually install intel-extension-for-pytorch 2.6.10+xpu due to there are some conflict dependencies with torch 2.6.0+xpu
-# FIXME: This will be fix in ipex 2.7. just leave this here for awareness.
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install intel-extension-for-pytorch==2.6.10+xpu \
-    --extra-index-url=https://pytorch-extension.intel.com/release-whl/stable/xpu/us/
-
 CMD ["/bin/bash"]
 
 FROM vllm-base AS vllm-openai

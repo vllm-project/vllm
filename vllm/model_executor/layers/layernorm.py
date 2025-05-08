@@ -168,7 +168,8 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        from vllm_hpu_extension.ops import HPUFusedRMSNorm
+        from vllm_hpu_extension.kernels import rms_norm
+        HPUFusedRMSNorm = rms_norm()
         if HPUFusedRMSNorm is None:
             return self.forward_native(x, residual)
         if residual is not None:
@@ -240,7 +241,10 @@ class GemmaRMSNorm(CustomOp):
         """PyTorch-native implementation equivalent to forward()."""
         orig_dtype = x.dtype
         if residual is not None:
-            x = x + residual
+            if orig_dtype == torch.float16:
+                x = x + residual.float()
+            else:
+                x = x + residual
             residual = x
 
         x = x.float()

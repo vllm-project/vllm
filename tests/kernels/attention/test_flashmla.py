@@ -5,11 +5,11 @@ import random
 
 import pytest
 import torch
-import triton
 
 from vllm.attention.ops.flashmla import (flash_mla_with_kvcache,
                                          get_mla_metadata,
                                          is_flashmla_supported)
+from vllm.triton_utils import triton
 
 
 def cal_diff(x: torch.Tensor, y: torch.Tensor, name: str) -> None:

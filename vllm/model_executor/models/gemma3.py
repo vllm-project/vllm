@@ -146,7 +146,9 @@ class Gemma3Attention(nn.Module):
 
         # TODO(woosuk): Add reference to the original HF implementation.
         layer_idx = extract_layer_index(prefix)
-        self.is_sliding = bool((layer_idx + 1) % config.sliding_window_pattern)
+        self.is_sliding = (getattr(
+            config, "interleaved_sliding_window", None) is not None and bool(
+                (layer_idx + 1) % config.sliding_window_pattern))
         # Initialize the rotary embedding.
         if self.is_sliding:
             # Local attention. Override the values in config.json.

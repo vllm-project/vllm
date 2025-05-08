@@ -7,11 +7,10 @@
 #  - Thomas Parnell <tpa@zurich.ibm.com>
 
 import torch
-import triton
-import triton.language as tl
 
 from vllm import _custom_ops as ops
 from vllm.platforms.rocm import use_rocm_custom_paged_attention
+from vllm.triton_utils import tl, triton
 
 from .prefix_prefill import context_attention_fwd
 
@@ -289,7 +288,7 @@ def chunked_prefill_paged_decode(
         max_num_partitions = ((max_seq_len + _PARTITION_SIZE_ROCM - 1) //
                               _PARTITION_SIZE_ROCM)
         assert _PARTITION_SIZE_ROCM % block_size == 0
-        total_num_seq = query.shape[0]
+        total_num_seq = block_table.shape[0]
         tmp_output = torch.empty(
             size=(total_num_seq, num_query_heads, max_num_partitions,
                   head_size),

@@ -205,7 +205,9 @@ def copy_slice(from_tensor: torch.Tensor, to_tensor: torch.Tensor,
     return to_tensor[:length].copy_(from_tensor[:length], non_blocking=True)
 
 
-def report_usage_stats(vllm_config, usage_context: UsageContext) -> None:
+def report_usage_stats(
+        vllm_config,
+        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT) -> None:
     """Report usage statistics if enabled."""
 
     if not is_usage_stats_enabled():

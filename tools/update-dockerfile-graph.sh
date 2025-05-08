@@ -4,8 +4,11 @@
 
 set -euo pipefail
 
-# Check if docker/Dockerfile is staged for commit
-if git diff --cached --name-only | grep -q "^docker/Dockerfile$"; then
+# Accept file paths as arguments
+FILES=("$@")
+
+# Check if docker/Dockerfile is among the provided files
+if printf '%s\n' "${FILES[@]}" | grep -q "^docker/Dockerfile$"; then
   echo "docker/Dockerfile has changed, attempting to update dependency graph..."
 
   # Check if Docker is installed and running
@@ -75,4 +78,4 @@ if git diff --cached --name-only | grep -q "^docker/Dockerfile$"; then
   fi
 fi
 
-exit 0 
+exit 0

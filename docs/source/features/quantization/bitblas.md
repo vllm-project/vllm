@@ -20,8 +20,8 @@ vLLM reads the model's config file and supports pre-quantized checkpoints.
 
 You can find pre-quantized models on:
 
-- [Hugging Face (BitBLAS)](https://huggingface.co/models?other=bitblas)
-- [Hugging Face (GPTQ)](https://huggingface.co/models?other=gptq)
+- [Hugging Face (BitBLAS)](https://huggingface.co/models?search=bitblas)
+- [Hugging Face (GPTQ)](https://huggingface.co/models?search=gptq)
 
 Usually, these repositories have a `quantize_config.json` file that includes a `quantization_config` section.
 

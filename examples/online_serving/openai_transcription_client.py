@@ -46,11 +46,15 @@ async def stream_openai_response():
         "model": "openai/whisper-large-v3",
     }
     url = openai_api_base + "/audio/transcriptions"
+    headers = {"Authorization": f"Bearer {openai_api_key}"}
     print("transcription result:", end=' ')
     async with httpx.AsyncClient() as client:
         with open(str(winning_call), "rb") as f:
-            async with client.stream('POST', url, files={'file': f},
-                                     data=data) as response:
+            async with client.stream('POST',
+                                     url,
+                                     files={'file': f},
+                                     data=data,
+                                     headers=headers) as response:
                 async for line in response.aiter_lines():
                     # Each line is a JSON object prefixed with 'data: '
                     if line:

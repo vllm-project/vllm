@@ -100,9 +100,8 @@ class PPTestSettings:
                               eager_mode=True,
                               chunked_prefill=False),
             ],
-            # only ray is supported for V1
-            distributed_backends=["mp", "ray", "ray"],
-            vllm_major_versions=["0", "0", "1"],
+            distributed_backends=["mp", "mp", "ray", "ray"],
+            vllm_major_versions=["0", "1", "0", "1"],
             task=task,
             test_options=PPTestOptions(multi_node_only=multi_node_only,
                                        load_format=load_format),
@@ -161,12 +160,12 @@ TEXT_GENERATION_MODELS = {
     "deepseek-ai/DeepSeek-V2-Lite-Chat": PPTestSettings.fast(),
     "LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct": PPTestSettings.fast(),
     "tiiuae/falcon-7b": PPTestSettings.fast(),
-    "google/gemma-2b": PPTestSettings.fast(),
+    "google/gemma-1.1-2b-it": PPTestSettings.fast(),
     "google/gemma-2-9b": PPTestSettings.fast(),
     "gpt2": PPTestSettings.fast(),
     "bigcode/starcoder": PPTestSettings.fast(),
     "EleutherAI/gpt-j-6b": PPTestSettings.fast(),
-    "EleutherAI/pythia-12b": PPTestSettings.fast(),
+    "EleutherAI/pythia-1.4b": PPTestSettings.fast(),
     "ibm/PowerLM-3b": PPTestSettings.fast(),
     "ibm/PowerMoE-3b": PPTestSettings.fast(),
     # Uses Llama
@@ -195,7 +194,7 @@ TEXT_GENERATION_MODELS = {
     "microsoft/Phi-3-small-8k-instruct": PPTestSettings.fast(),
     "microsoft/Phi-3.5-MoE-instruct": PPTestSettings.detailed(multi_node_only=True, load_format="dummy"),  # noqa: E501
     "Qwen/Qwen-7B-Chat": PPTestSettings.fast(),
-    "Qwen/Qwen2-7B-Instruct": PPTestSettings.fast(),
+    "Qwen/Qwen2.5-0.5B-Instruct": PPTestSettings.fast(),
     "Qwen/Qwen1.5-MoE-A2.7B-Chat": PPTestSettings.fast(),
     "stabilityai/stablelm-3b-4e1t": PPTestSettings.fast(),
     "bigcode/starcoder2-3b": PPTestSettings.fast(),
@@ -350,6 +349,11 @@ def _compare_tp(
         # Temporary. Currently when zeromq + SPMD is used, it does not properly
         # terminate because of a Ray Compiled Graph issue.
         common_args.append("--disable-frontend-multiprocessing")
+    elif distributed_backend == "mp":
+        # Both V0/V1 of multiprocessing executor support PP
+        pp_env = {
+            "VLLM_USE_V1": vllm_major_version,
+        }
     else:
         pp_env = None
 

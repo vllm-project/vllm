@@ -96,7 +96,7 @@ void rms_norm_dynamic_per_token_quant_dispatch(
     std::optional<at::Tensor> const& scale_ub,
     std::optional<at::Tensor>& residual) {
   int32_t hidden_size = input.size(-1);
-  int32_t num_tokens = input.numel() / hidden_size;
+  auto num_tokens = input.numel() / hidden_size;
 
   dim3 grid(num_tokens);
   dim3 block(std::min(hidden_size, 1024));

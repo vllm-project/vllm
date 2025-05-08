@@ -73,7 +73,22 @@ Currently, there are no pre-built ROCm wheels.
     You might need to downgrade the "ninja" version to 1.10 it is not used when compiling flash-attention-2 (e.g. `pip install ninja==1.10.2.4`)
     :::
 
-3. Build vLLM. For example, vLLM on ROCM 6.3 can be built with the following steps:
+3. If you choose to build AITER yourself to use a certain branch or commit, you can build AITER using the following steps:
+
+    ```console
+    python3 -m pip uninstall -y aiter
+    git clone --recursive https://github.com/ROCm/aiter.git
+    cd aiter
+    git checkout $AITER_BRANCH_OR_COMMIT
+    git submodule sync; git submodule update --init --recursive
+    python3 setup.py develop
+    ```
+
+    :::{note}
+    You will need to config the `$AITER_BRANCH_OR_COMMIT` for your purpose.
+    :::
+
+4. Build vLLM. For example, vLLM on ROCM 6.3 can be built with the following steps:
 
     ```bash
     $ pip install --upgrade pip

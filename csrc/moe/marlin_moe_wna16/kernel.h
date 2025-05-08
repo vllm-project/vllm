@@ -18,7 +18,7 @@
       const float *__restrict__ topk_weights_ptr, int top_k,                \
       bool mul_topk_weights, bool is_ep, int num_groups, int prob_m,        \
       int prob_n, int prob_k, int *locks, bool use_atomic_add,              \
-      bool use_fp32_reduce
+      bool use_fp32_reduce, int max_shared_mem
 
 namespace MARLIN_NAMESPACE_NAME {
 template <typename scalar_t,  // compute dtype, half or nv_float16
@@ -33,11 +33,9 @@ template <typename scalar_t,  // compute dtype, half or nv_float16
                                       // only works when thread_m_blocks == 1
           const int stages,  // number of stages for the async global->shared
                              // fetch pipeline
-          const bool has_act_order,  // whether act_order is enabled
-          const bool has_zp,         // whether zero-points are enabled
-          const int group_blocks,    // number of consecutive 16x16 blocks
-                                     // with a separate quantization scale
-          const bool is_zp_float     // is zero point of float16 type?
+          const int group_blocks,  // number of consecutive 16x16 blocks
+                                   // with a separate quantization scale
+          const bool is_zp_float   // is zero point of float16 type?
           >
 __global__ void Marlin(MARLIN_KERNEL_PARAMS);
 

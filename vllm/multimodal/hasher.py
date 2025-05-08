@@ -31,16 +31,20 @@ class MultiModalHasher:
             return obj.encode("utf-8")
         if isinstance(obj, bytes):
             return obj
-        if isinstance(obj, Image.Image):
-            return obj.tobytes()
-
-        # Convertible to NumPy arrays
-        if isinstance(obj, torch.Tensor):
-            obj = obj.numpy()
         if isinstance(obj, (int, float)):
-            obj = np.array(obj)
+            return np.array(obj).tobytes()
+
+        if isinstance(obj, Image.Image):
+            return cls.item_to_bytes("image", np.array(obj.convert("RGBA")))
+        if isinstance(obj, torch.Tensor):
+            return cls.item_to_bytes("tensor", obj.numpy())
         if isinstance(obj, np.ndarray):
-            return obj.tobytes()
+            return cls.item_to_bytes(
+                "ndarray", {
+                    "dtype": obj.dtype.str,
+                    "shape": obj.shape,
+                    "data": obj.data.tobytes(),
+                })
 
         logger.warning(
             "No serialization method found for %s. "
@@ -53,14 +57,22 @@ class MultiModalHasher:
         cls,
         key: str,
         obj: object,
+    ) -> bytes:
+        return b''.join(kb + vb for kb, vb in cls.iter_item_to_bytes(key, obj))
+
+    @classmethod
+    def iter_item_to_bytes(
+        cls,
+        key: str,
+        obj: object,
     ) -> Iterable[tuple[bytes, bytes]]:
         # Recursive cases
         if isinstance(obj, (list, tuple)):
             for i, elem in enumerate(obj):
-                yield from cls.item_to_bytes(f"{key}.{i}", elem)
+                yield from cls.iter_item_to_bytes(f"{key}.{i}", elem)
         elif isinstance(obj, dict):
             for k, v in obj.items():
-                yield from cls.item_to_bytes(f"{key}.{k}", v)
+                yield from cls.iter_item_to_bytes(f"{key}.{k}", v)
         else:
             key_bytes = cls.serialize_item(key)
             value_bytes = cls.serialize_item(obj)
@@ -71,7 +83,7 @@ class MultiModalHasher:
         hasher = blake3()
 
         for k, v in kwargs.items():
-            for k_bytes, v_bytes in cls.item_to_bytes(k, v):
+            for k_bytes, v_bytes in cls.iter_item_to_bytes(k, v):
                 hasher.update(k_bytes)
                 hasher.update(v_bytes)
 

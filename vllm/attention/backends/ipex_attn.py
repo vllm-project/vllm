@@ -143,10 +143,9 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-        self.need_mask = (self.alibi_slopes is not None
-                          or self.sliding_window is not None)
+        self.need_mask = (self.sliding_window is not None)
         if logits_soft_cap is None:
-            logits_soft_cap = 0
+            logits_soft_cap = -1
         self.logits_soft_cap = logits_soft_cap
 
         supported_head_sizes = PagedAttention.get_supported_head_sizes()
@@ -234,11 +233,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                                                     dim=1)
 
                 if attn_metadata.attn_bias is None:
-                    if self.alibi_slopes is not None:
-                        att_masks = _make_alibi_bias(
-                            self.alibi_slopes, query.dtype,
-                            attn_metadata.seq_lens)  # type: ignore
-                    elif self.sliding_window is not None:
+                    if self.sliding_window is not None:
                         att_masks = _make_sliding_window_bias(
                             attn_metadata.seq_lens, self.sliding_window,
                             query.dtype)  # type: ignore
@@ -258,6 +253,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                     output,
                     attn_metadata.seqlen_q,
                     attn_metadata.seqlen_q,
+                    self.alibi_slopes,
                     attn_metadata.max_seqlen,
                     attn_metadata.max_seqlen,
                     pdropout=0.0,
@@ -266,6 +262,8 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                     is_causal=True,
                     return_softmax=False,
                     gen_=None,
+                    window_size_left=-1,
+                    window_size_right=-1,
                     logits_soft_cap=self.logits_soft_cap,
                 )
             else:

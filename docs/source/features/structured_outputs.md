@@ -2,8 +2,11 @@
 
 # Structured Outputs
 
-vLLM supports the generation of structured outputs using [outlines](https://github.com/dottxt-ai/outlines), [lm-format-enforcer](https://github.com/noamgat/lm-format-enforcer), or [xgrammar](https://github.com/mlc-ai/xgrammar) as backends for the guided decoding.
-This document shows you some examples of the different options that are available to generate structured outputs.
+vLLM supports the generation of structured outputs using
+[xgrammar](https://github.com/mlc-ai/xgrammar) or
+[guidance](https://github.com/guidance-ai/llguidance) as backends.
+This document shows you some examples of the different options that are
+available to generate structured outputs.
 
 ## Online Serving (OpenAI API)
 
@@ -15,10 +18,17 @@ The following parameters are supported, which must be added as extra parameters:
 - `guided_regex`: the output will follow the regex pattern.
 - `guided_json`: the output will follow the JSON schema.
 - `guided_grammar`: the output will follow the context free grammar.
-- `guided_whitespace_pattern`: used to override the default whitespace pattern for guided json decoding.
-- `guided_decoding_backend`: used to select the guided decoding backend to use. Additional backend-specific options can be supplied in a comma separated list following a colon after the backend name. For example `"xgrammar:no-fallback"` will not allow vLLM to fallback to a different backend on error.
+- `structural_tag`: Follow a JSON schema within a set of specified tags within the generated text.
 
-You can see the complete list of supported parameters on the [OpenAI-Compatible Server](#openai-compatible-server)page.
+You can see the complete list of supported parameters on the [OpenAI-Compatible Server](#openai-compatible-server) page.
+
+Structured outputs are supported by default in the OpenAI-Compatible Server. You
+may choose to specify the backend to use by setting the
+`--guided-decoding-backend` flag to `vllm serve`. The default backend is `auto`,
+which will try to choose an appropriate backend based on the details of the
+request. You may also choose a specific backend, along with
+some options. A full set of options is available in the `vllm serve --help`
+text.
 
 Now let´s see an example for each of the cases, starting with the `guided_choice`, as it´s the easiest one:
 
@@ -96,12 +106,15 @@ print(completion.choices[0].message.content)
 ```
 
 :::{tip}
-While not strictly necessary, normally it´s better to indicate in the prompt that a JSON needs to be generated and which fields and how should the LLM fill them.
-This can improve the results notably in most cases.
+While not strictly necessary, normally it´s better to indicate in the prompt the
+JSON schema and how the fields should be populated.  This can improve the
+results notably in most cases.
 :::
 
-Finally we have the `guided_grammar`, which probably is the most difficult one to use but it´s really powerful, as it allows us to define complete languages like SQL queries.
-It works by using a context free EBNF grammar, which for example we can use to define a specific format of simplified SQL queries, like in the example below:
+Finally we have the `guided_grammar` option, which is probably the most
+difficult to use, but it´s really powerful. It allows us to define complete
+languages like SQL queries.  It works by using a context free EBNF grammar.
+As an example, we can use to define a specific format of simplified SQL queries:
 
 ```python
 simplified_sql_grammar = """
@@ -226,6 +239,8 @@ Step #2: explanation="Next, let's isolate 'x' by dividing both sides of the equa
 Answer: x = -29/8
 ```
 
+An example of using `structural_tag` can be found here: <gh-file:examples/online_serving/openai_chat_completion_structured_outputs_structural_tag.py>
+
 ## Offline Inference
 
 Offline inference allows for the same types of guided decoding.
@@ -236,11 +251,11 @@ The main available options inside `GuidedDecodingParams` are:
 - `regex`
 - `choice`
 - `grammar`
-- `backend`
-- `whitespace_pattern`
+- `structural_tag`
 
-These parameters can be used in the same way as the parameters from the Online Serving examples above.
-One example for the usage of the `choices` parameter is shown below:
+These parameters can be used in the same way as the parameters from the Online
+Serving examples above.  One example for the usage of the `choice` parameter is
+shown below:
 
 ```python
 from vllm import LLM, SamplingParams

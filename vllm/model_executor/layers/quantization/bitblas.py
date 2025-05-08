@@ -5,6 +5,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.utils.bitblas_utils import (
@@ -100,7 +101,7 @@ class BitBLASConfig(QuantizationConfig):
                 f"quant_method={self.quant_method})")
 
     @classmethod
-    def get_name(cls) -> str:
+    def get_name(cls) -> QuantizationMethods:
         return "bitblas"
 
     @classmethod
@@ -139,8 +140,8 @@ class BitBLASConfig(QuantizationConfig):
                    lm_head_quantized)
 
     @classmethod
-    def override_quantization_method(cls, hf_quant_cfg,
-                                     user_quant) -> Optional[str]:
+    def override_quantization_method(
+            cls, hf_quant_cfg, user_quant) -> Optional[QuantizationMethods]:
         # compat: autogptq >=0.8.0 use checkpoint_format: str
         # compat: autogptq <=0.7.1 is_bitblas_format: bool
         is_bitblas_format = (hf_quant_cfg.get("checkpoint_format") == "bitblas"

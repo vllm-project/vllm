@@ -43,19 +43,19 @@ class BlockHashType(NamedTuple):
 # This aligns with the behavior of Python's hash() function, which also uses
 # a random seed if PYTHONHASHSEED is not set.
 NONE_HASH = int.from_bytes(os.urandom(32), byteorder="big") if os.getenv(
-    'PYTHONHASHSEED') is not None else sha256(os.getenv('PYTHONHASHSEED'))
+    'PYTHONHASHSEED') is None else sha256(os.getenv('PYTHONHASHSEED'))
 
 
 class PrefixCachingMetrics:
-    """Metrics for prefix caching with a hit rate of the most recent N requests.
+    """Metrics for prefix caching with a hit rate of the max recent N requests.
 
     Args:
-        interval: The number of the most recent requests to aggregate.
+        max_recent_requests: The number of the max recent requests to aggregate.
             Defaults to 1000.
     """
 
-    def __init__(self, interval: int = 1000):
-        self.interval = interval
+    def __init__(self, max_recent_requests: int = 1000):
+        self.max_recent_requests = max_recent_requests
         # The current aggregated values.
         self.aggregated_requests = 0
         self.aggregated_query_total = 0
@@ -70,7 +70,7 @@ class PrefixCachingMetrics:
         are being scheduled and are looking for computed blocks.
 
         When there are more than `interval` requests, the oldest set of
-        requestsare removed from the metrics.
+        requests are removed from the metrics.
 
         Args:
             stats: The prefix cache stats.
@@ -87,7 +87,7 @@ class PrefixCachingMetrics:
         self.aggregated_query_hit += stats.hits
 
         # Remove the oldest stats if the number of requests exceeds.
-        if self.aggregated_requests > self.interval:
+        if self.aggregated_requests > self.max_recent_requests:
             old_requests, old_queries, old_hits = self.query_queue.popleft()
             self.aggregated_requests -= old_requests
             self.aggregated_query_total -= old_queries
@@ -275,7 +275,10 @@ def need_extra_keys(request: Request) -> bool:
 
     # Multimodal requests need to include the MM hash.
     # LoRA requests need to include the LoRA ID.
-    return bool(request.mm_positions) or (request.lora_request is not None)
+    # Request with provided cache salt need to include the salt.
+    return bool(request.mm_positions) or (request.lora_request
+                                          is not None) or (request.cache_salt
+                                                           is not None)
 
 
 def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
@@ -380,8 +383,10 @@ def generate_block_hash_extra_keys(
     mm_extra_keys, new_start_mm_idx = _gen_mm_extra_hash_keys(
         request, start_token_idx, end_token_idx, start_mm_idx)
     lora_extra_keys: list[int] = _gen_lora_extra_hash_keys(request)
+    cache_salt_keys: list[str] = [request.cache_salt] if (
+        start_token_idx == 0 and request.cache_salt) else []
 
-    extra_keys: list[Any] = lora_extra_keys + mm_extra_keys
+    extra_keys: list[Any] = lora_extra_keys + mm_extra_keys + cache_salt_keys
 
     if not extra_keys:
         return None, new_start_mm_idx
@@ -657,10 +662,10 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
 def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
     """
     Only models with one type of KV cache are supported yet. This function tries
-    to convert the KV cache specs to one type if the model is a hybrid model 
+    to convert the KV cache specs to one type if the model is a hybrid model
     with multiple type of KV cache. It will convert all SlidingWindowSpec to
     FullAttentionSpec if both types are present.
-    
+
     Args:
         kv_cache_spec: The kv cache spec of each attention layer in the model
     """

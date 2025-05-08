@@ -2,11 +2,10 @@
 from typing import Optional, Tuple
 
 import torch
-import triton
-import triton.language as tl
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.triton_utils import tl, triton
 from vllm.utils import round_up
 
 
