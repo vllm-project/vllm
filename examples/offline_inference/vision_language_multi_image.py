@@ -447,7 +447,6 @@ def load_ovis2(question: str, image_urls: list[str]) -> ModelRequestData:
         trust_remote_code=True,
         dtype="half",
         limit_mm_per_prompt={"image": len(image_urls)},
-        hf_overrides={"architectures": ["Ovis2ForConditionalGeneration"]},
     )
 
     placeholder = '\n'.join(

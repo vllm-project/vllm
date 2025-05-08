@@ -15,7 +15,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" PyTorch Ovis2 model."""
+""" PyTorch Ovis model."""
 from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
                     TypedDict, Union)
 
@@ -43,9 +43,9 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.ovis2 import (BaseVisualTokenizerConfig,
-                                                   OvisConfig)
-from vllm.transformers_utils.processors.ovis2 import OvisProcessor
+from vllm.transformers_utils.configs.ovis import (BaseVisualTokenizerConfig,
+                                                  OvisConfig)
+from vllm.transformers_utils.processors.ovis import OvisProcessor
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal
 from .utils import merge_multimodal_embeddings
@@ -199,7 +199,7 @@ class VisualTokenizer(torch.nn.Module):
         return tokens
 
 
-class Ovis2ImagePatchInputs(TypedDict):
+class OvisImagePatchInputs(TypedDict):
     type: Literal["image_patches"]
     flat_data: torch.Tensor
     """
@@ -241,7 +241,7 @@ class VisualEmbedding(torch.nn.Embedding):
         return self.weight.dtype
 
 
-class Ovis2ProcessingInfo(BaseProcessingInfo):
+class OvisProcessingInfo(BaseProcessingInfo):
 
     def get_hf_config(self):
         return self.ctx.get_hf_config(OvisConfig)
@@ -284,7 +284,7 @@ class Ovis2ProcessingInfo(BaseProcessingInfo):
         return ImageSize(width=width * 9 * 2, height=height * 9 * 2)
 
 
-class Ovis2DummyInputsBuilder(BaseDummyInputsBuilder[Ovis2ProcessingInfo]):
+class OvisDummyInputsBuilder(BaseDummyInputsBuilder[OvisProcessingInfo]):
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
@@ -309,7 +309,7 @@ class Ovis2DummyInputsBuilder(BaseDummyInputsBuilder[Ovis2ProcessingInfo]):
         return mm_data
 
 
-class Ovis2MultiModalProcessor(BaseMultiModalProcessor[Ovis2ProcessingInfo]):
+class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
 
     def image_indicators_to_visual_tokens(
         self,
@@ -394,10 +394,10 @@ class Ovis2MultiModalProcessor(BaseMultiModalProcessor[Ovis2ProcessingInfo]):
         ]
 
 
-@MULTIMODAL_REGISTRY.register_processor(Ovis2MultiModalProcessor,
-                                        info=Ovis2ProcessingInfo,
-                                        dummy_inputs=Ovis2DummyInputsBuilder)
-class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal):
+@MULTIMODAL_REGISTRY.register_processor(OvisMultiModalProcessor,
+                                        info=OvisProcessingInfo,
+                                        dummy_inputs=OvisDummyInputsBuilder)
+class Ovis(nn.Module, SupportsMultiModal):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -428,7 +428,7 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal):
         #    self.language_model.make_empty_intermediate_tensors)
 
     def _parse_and_validate_image_input(
-            self, **kwargs: object) -> Optional[Ovis2ImagePatchInputs]:
+            self, **kwargs: object) -> Optional[OvisImagePatchInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
         indicator_tokens = kwargs.pop("indicator_tokens", None)
 
@@ -444,7 +444,7 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal):
                 raise ValueError("Incorrect type of indicator_tokens. "
                                  f"Got type: {type(pixel_values)}")
 
-            return Ovis2ImagePatchInputs(
+            return OvisImagePatchInputs(
                 type="image_patches",
                 flat_data=flatten_bn(flatten_bn(pixel_values), concat=True),
                 patches_per_image=[
@@ -457,7 +457,7 @@ class Ovis2ForConditionalGeneration(nn.Module, SupportsMultiModal):
         raise AssertionError("This line should be unreachable.")
 
     def _process_image_input(
-            self, image_input: Ovis2ImagePatchInputs) -> MultiModalEmbeddings:
+            self, image_input: OvisImagePatchInputs) -> MultiModalEmbeddings:
         image_patches_flat = image_input["flat_data"]
         patches_per_image = image_input["patches_per_image"]
         indicator_tokens = image_input["indicator_tokens"]

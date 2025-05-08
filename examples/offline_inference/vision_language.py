@@ -737,7 +737,6 @@ def run_ovis2(questions: list[str], modality: str) -> ModelRequestData:
         max_num_seqs=2,
         trust_remote_code=True,
         dtype="half",
-        hf_overrides={"architectures": ["Ovis2ForConditionalGeneration"]},
         limit_mm_per_prompt={modality: 1},
     )
 
