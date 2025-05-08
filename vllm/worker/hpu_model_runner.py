@@ -687,6 +687,26 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         msg = f"Loading model weights took in total {m.get_summary_string()}"
         logger.info(msg)
 
+    def _phase(self, attn_metadata):
+        phase_type: PhaseType
+        is_prompt = attn_metadata.is_prompt
+        is_prefix_prefill = is_prompt and attn_metadata.block_list is not None
+        if is_prompt and is_prefix_prefill:
+            phase_type = PhaseType.PREFIX_PREFILL
+        elif is_prompt and not is_prefix_prefill:
+            phase_type = PhaseType.PREFILL
+        elif not is_prompt:
+            phase_type = PhaseType.DECODE
+        else:
+            raise ValueError("Unrecognized pass type, likely due to malformed "
+                             "attention metadata")
+        return phase_type
+
+    def _num_blocks(self, attn_metadata):
+        if attn_metadata.block_list is None:
+            return 0
+        return attn_metadata.block_list.numel()
+
     def _check_config(self, batch_size, seq_len, attn_metadata, warmup_mode):
         is_prefix_caching = self.vllm_config.cache_config.enable_prefix_caching
         cfg: Optional[tuple] = None
@@ -1969,26 +1989,6 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
     def finish_measurements(self):
         from neural_compressor.torch.quantization import finalize_calibration
         finalize_calibration(self.model.model)
-
-    def _num_blocks(self, attn_metadata):
-        if attn_metadata.block_list is None:
-            return 0
-        return attn_metadata.block_list.numel()
-
-    def _phase(self, attn_metadata):
-        phase_type: PhaseType
-        is_prompt = attn_metadata.is_prompt
-        is_prefix_prefill = is_prompt and attn_metadata.block_list is not None
-        if is_prompt and is_prefix_prefill:
-            phase_type = PhaseType.PREFIX_PREFILL
-        elif is_prompt and not is_prefix_prefill:
-            phase_type = PhaseType.PREFILL
-        elif not is_prompt:
-            phase_type = PhaseType.DECODE
-        else:
-            raise ValueError("Unrecognized pass type, likely due to malformed "
-                             "attention metadata")
-        return phase_type
 
     def _get_seq_ids(self, model_input):
         return ([
