@@ -3,6 +3,7 @@
 # ruff: noqa
 import json
 import random
+import re
 import string
 
 from vllm import LLM
@@ -48,12 +49,9 @@ model_name = "mistralai/Mistral-7B-Instruct-v0.3"
 # or switch to "mistralai/Mistral-Nemo-Instruct-2407"
 # or "mistralai/Mistral-Large-Instruct-2407"
 # or any other mistral model with function calling ability
+# First-time usage: ensure access permission to the models.
 
 sampling_params = SamplingParams(max_tokens=8192, temperature=0.0)
-llm = LLM(model=model_name,
-          tokenizer_mode="mistral",
-          config_format="mistral",
-          load_format="mistral")
 
 
 def generate_random_id(length=9):
@@ -109,32 +107,66 @@ messages = [{
     "Can you tell me what the temperate will be in Dallas, in fahrenheit?"
 }]
 
-outputs = llm.chat(messages, sampling_params=sampling_params, tools=tools)
-output = outputs[0].outputs[0].text.strip()
 
-# append the assistant message
-messages.append({
-    "role": "assistant",
-    "content": output,
-})
+def chat_with_model(llm: LLM, messages: list) -> str:
+    outputs = llm.chat(messages, sampling_params=sampling_params, tools=tools)
+    return outputs[0].outputs[0].text.strip()
 
-# let's now actually parse and execute the model's output simulating an API call by using the
-# above defined function
-tool_calls = json.loads(output)
-tool_answers = [
-    tool_funtions[call['name']](**call['arguments']) for call in tool_calls
-]
 
-# append the answer as a tool message and let the LLM give you an answer
-messages.append({
-    "role": "tool",
-    "content": "\n\n".join(tool_answers),
-    "tool_call_id": generate_random_id(),
-})
+def main():
+    llm = LLM(model=model_name,
+              tokenizer_mode="mistral",
+              config_format="mistral",
+              load_format="mistral")
 
-outputs = llm.chat(messages, sampling_params, tools=tools)
+    # Get the model's raw response
+    output = chat_with_model(llm, messages)
+    print("-" * 50)
+    print("Model raw response:", repr(output))
+    print("-" * 50)
 
-print(outputs[0].outputs[0].text.strip())
-# yields
-#   'The weather in Dallas, TX is 85 degrees fahrenheit. '
-#   'It is partly cloudly, with highs in the 90's.'
+    # Remove the '[TOOL_CALLS]' prefix if it exists, otherwise will cause the json parse fail
+    output = re.sub(r'^\[TOOL_CALLS\]', '', output)
+
+    # append the assistant message
+    messages.append({
+        "role": "assistant",
+        "content": output,
+    })
+
+    # let's now actually parse and execute the model's output simulating an API call by using the
+    # above defined function
+    # Parse the output as JSON
+    tool_calls = None
+    try:
+        tool_calls = json.loads(output)
+        tool_answers = [
+            tool_funtions[call['name']](**call['arguments'])
+            for call in tool_calls
+        ]
+
+        # append the answer as a tool message and let the LLM give you an answer
+        messages.append({
+            "role": "tool",
+            "content": "\n\n".join(tool_answers),
+            "tool_call_id": generate_random_id(),
+        })
+    except json.JSONDecodeError:
+        print(
+            "JSON parsing failed, the model returned non-structured content: ",
+            output)
+
+    print("-" * 50)
+    if tool_calls:
+        final_output = chat_with_model(llm, messages)
+        print("\nFinal model response with tool calls:\n", final_output)
+    else:
+        print("\nNo valid tool calls were found.")
+    print("-" * 50)
+    # yields
+    #   'The weather in Dallas, TX is 85 degrees fahrenheit. '
+    #   'It is partly cloudly, with highs in the 90's.'
+
+
+if __name__ == "__main__":
+    main()
