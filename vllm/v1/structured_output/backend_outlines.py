@@ -28,8 +28,8 @@ else:
 # Python 3.11+ sre_parse and sre_constants
 # are deprecated, so we must import them from re
 if sys.version_info >= (3, 11):
-    from re import _constants as sre_constants
-    from re import _parser as sre_parse
+    from re import _constants as sre_constants # type: ignore[attr-defined]
+    from re import _parser as sre_parse # type: ignore[attr-defined]
 else:
     import sre_constants
     import sre_parse
