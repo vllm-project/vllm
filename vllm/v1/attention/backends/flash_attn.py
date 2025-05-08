@@ -28,6 +28,143 @@ if TYPE_CHECKING:
 if current_platform.is_cuda():
     from vllm.vllm_flash_attn import (flash_attn_varlen_func,
                                       get_scheduler_metadata)
+if current_platform.is_rocm():
+    import aiter
+
+    from vllm.triton_utils import tl, triton
+    from vllm.utils import direct_register_custom_op
+
+    @triton.jit
+    def _vllm_layout_trans_kernel(
+        k_buffer_ptr,
+        v_buffer_ptr,
+        k_values_ptr,
+        v_values_ptr,
+        b_seq_lens_loc,
+        block_table,
+        block_table_stride_0,
+        E_DIM: tl.constexpr,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        batch_idx = tl.program_id(0)
+        block_idx = tl.program_id(1)
+        batch_token_indexes = tl.load(b_seq_lens_loc + batch_idx +
+                                      tl.arange(0, 2))
+        batch_token_start, batch_token_end = tl.split(batch_token_indexes)
+        seq_len = batch_token_end - batch_token_start
+        if block_idx * BLOCK_SIZE < seq_len:
+            block_mask = (block_idx * BLOCK_SIZE +
+                          tl.arange(0, BLOCK_SIZE)[:, None]) < seq_len
+
+            kv_idx = tl.load(block_table + batch_idx * block_table_stride_0 +
+                             block_idx)
+
+            kv_buffer_off = kv_idx * BLOCK_SIZE * E_DIM + tl.arange(
+                0, BLOCK_SIZE)[:, None] * E_DIM + tl.arange(0, E_DIM)[None, :]
+            k_vals = tl.load(k_buffer_ptr + kv_buffer_off,
+                             mask=block_mask,
+                             other=0.0)
+            v_vals = tl.load(v_buffer_ptr + kv_buffer_off,
+                             mask=block_mask,
+                             other=0.0)
+
+            kv_values_off = batch_token_start * E_DIM + \
+                block_idx * BLOCK_SIZE * E_DIM + \
+                tl.arange(0, BLOCK_SIZE)[:, None] * E_DIM + \
+                tl.arange(0, E_DIM)[None, :]
+            tl.store(k_values_ptr + kv_values_off, k_vals, mask=block_mask)
+            tl.store(v_values_ptr + kv_values_off, v_vals, mask=block_mask)
+
+    def vllm_layout_trans(b_seq_lens_loc, block_table, k_buffer, v_buffer,
+                          max_seq_len, total_tokens):
+        H_KV = v_buffer.shape[2]
+        D = v_buffer.shape[3]
+        BLOCK_SIZE = v_buffer.shape[1]
+        dtype = k_buffer.dtype
+        k_values = torch.empty((total_tokens, H_KV, D),
+                               dtype=dtype,
+                               device="cuda")
+        v_values = torch.empty((total_tokens, H_KV, D),
+                               dtype=dtype,
+                               device="cuda")
+
+        grid = (block_table.shape[0],
+                (max_seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE)
+
+        _vllm_layout_trans_kernel[grid](k_buffer,
+                                        v_buffer,
+                                        k_values,
+                                        v_values,
+                                        b_seq_lens_loc,
+                                        block_table,
+                                        block_table.stride(0),
+                                        E_DIM=H_KV * D,
+                                        BLOCK_SIZE=BLOCK_SIZE)
+
+        return k_values, v_values
+
+    def _flash_attn_varlen_func(
+        q: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        out: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        cu_seqlens_k: torch.Tensor,
+        total_tokens: int,
+        max_seqlen_q: int,
+        max_seqlen_k: int,
+        softmax_scale: float,
+        window_size: Optional[list[int]],  # -1 means infinite context window
+        alibi_slopes: Optional[list[float]],
+        block_table: torch.Tensor,
+    ) -> torch.Tensor:
+        k, v = vllm_layout_trans(cu_seqlens_k, block_table, k_cache, v_cache,
+                                 max_seqlen_k, total_tokens)
+        output = aiter.flash_attn_varlen_func(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=max_seqlen_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_k=max_seqlen_k,
+            softmax_scale=softmax_scale,
+            causal=True,
+            alibi_slopes=alibi_slopes,
+            window_size=window_size,
+            out=out,
+        )
+        return output
+
+    def flash_attn_varlen_func_fake(
+        q: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        out: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        cu_seqlens_k: torch.Tensor,
+        total_tokens: int,
+        max_seqlen_q: int,
+        max_seqlen_k: int,
+        softmax_scale: float,
+        window_size: Optional[list[int]],  # -1 means infinite context window
+        alibi_slopes: Optional[list[float]],
+        block_table: torch.Tensor,
+    ) -> torch.Tensor:
+        return torch.empty(q.shape[0],
+                           q.shape[1],
+                           v_cache.shape[-2],
+                           dtype=torch.float8_e4m3fnuz,
+                           device="cuda")
+
+    try:
+        direct_register_custom_op("flash_attn_varlen_func",
+                                  _flash_attn_varlen_func, ["out"],
+                                  flash_attn_varlen_func_fake)
+        flash_attn_varlen_func = torch.ops.vllm.flash_attn_varlen_func
+
+    except AttributeError:
+        flash_attn_varlen_func = _flash_attn_varlen_func
 
 logger = init_logger(__name__)
 
@@ -83,6 +220,8 @@ class FlashAttentionMetadata:
     query_start_loc: torch.Tensor
     max_seq_len: int
     seq_lens: torch.Tensor
+    cu_seq_lens: torch.Tensor
+    total_tokens: int
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
 
@@ -321,12 +460,20 @@ class FlashAttentionMetadataBuilder:
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata):
         max_seq_len = self.runner.seq_lens_np[:num_reqs].max()
+        total_tokens = self.runner.seq_lens_np[:num_reqs].sum()
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
         block_table = (
             self.runner.input_batch.block_table.get_device_tensor()[:num_reqs])
         slot_mapping = self.runner.slot_mapping[:num_actual_tokens]
 
+        cu_seq_lens = torch.zeros(seq_lens.shape[0] + 1,
+                                  dtype=torch.int32,
+                                  device="cuda")
+        torch.cumsum(seq_lens,
+                     dim=0,
+                     dtype=cu_seq_lens.dtype,
+                     out=cu_seq_lens[1:])
         if self.aot_sliding_window is None:
             self.aot_sliding_window = (-1, -1)
             # For the AOT scheduler we need the sliding window value to be
@@ -440,6 +587,8 @@ class FlashAttentionMetadataBuilder:
             query_start_loc=query_start_loc,
             max_seq_len=max_seq_len,
             seq_lens=seq_lens,
+            cu_seq_lens=cu_seq_lens,
+            total_tokens=total_tokens,
             block_table=block_table,
             slot_mapping=slot_mapping,
             use_cascade=use_cascade,
@@ -605,28 +754,46 @@ class FlashAttentionImpl(AttentionImpl):
                 scheduler_metadata = attn_metadata.scheduler_metadata
 
             descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
-
-            flash_attn_varlen_func(
-                q=query[:num_actual_tokens],
-                k=key_cache,
-                v=value_cache,
-                out=output[:num_actual_tokens],
-                cu_seqlens_q=cu_seqlens_q,
-                max_seqlen_q=max_seqlen_q,
-                seqused_k=seqused_k,
-                max_seqlen_k=max_seqlen_k,
-                softmax_scale=self.scale,
-                causal=True,
-                alibi_slopes=self.alibi_slopes,
-                window_size=self.sliding_window,
-                block_table=block_table,
-                softcap=self.logits_soft_cap,
-                scheduler_metadata=scheduler_metadata,
-                fa_version=self.vllm_flash_attn_version,
-                q_descale=layer._q_scale.expand(descale_shape),
-                k_descale=layer._k_scale.expand(descale_shape),
-                v_descale=layer._v_scale.expand(descale_shape),
-            )
+            if current_platform.is_rocm():
+                cu_seq_lens = attn_metadata.cu_seq_lens
+                total_tokens = attn_metadata.total_tokens
+                flash_attn_varlen_func(
+                    query[:num_actual_tokens],
+                    key_cache,
+                    value_cache,
+                    out=output[:num_actual_tokens],
+                    cu_seqlens_q=cu_seqlens_q,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_k=max_seqlen_k,
+                    total_tokens=total_tokens,
+                    softmax_scale=self.scale,
+                    alibi_slopes=self.alibi_slopes,
+                    window_size=list(self.sliding_window),
+                    block_table=block_table,
+                    cu_seqlens_k=cu_seq_lens,
+                )
+            else:
+                flash_attn_varlen_func(
+                    q=query[:num_actual_tokens],
+                    k=key_cache,
+                    v=value_cache,
+                    out=output[:num_actual_tokens],
+                    cu_seqlens_q=cu_seqlens_q,
+                    max_seqlen_q=max_seqlen_q,
+                    seqused_k=seqused_k,
+                    max_seqlen_k=max_seqlen_k,
+                    softmax_scale=self.scale,
+                    causal=True,
+                    alibi_slopes=self.alibi_slopes,
+                    window_size=self.sliding_window,
+                    block_table=block_table,
+                    softcap=self.logits_soft_cap,
+                    scheduler_metadata=scheduler_metadata,
+                    fa_version=self.vllm_flash_attn_version,
+                    q_descale=layer._q_scale.expand(descale_shape),
+                    k_descale=layer._k_scale.expand(descale_shape),
+                    v_descale=layer._v_scale.expand(descale_shape),
+                )
             return output
 
         assert not use_local_attn, (

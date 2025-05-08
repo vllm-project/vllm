@@ -8,6 +8,7 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
+from vllm.utils import direct_register_custom_op
 
 
 def is_rocm_aiter_rmsnorm_enabled() -> bool:
@@ -42,29 +43,67 @@ def fused_add_rms_norm(
     return x, residual
 
 
-def rocm_aiter_rms_norm(x: torch.Tensor, weight: torch.Tensor,
-                        variance_epsilon: float) -> torch.Tensor:
+if is_rocm_aiter_rmsnorm_enabled():
 
-    import aiter as rocm_aiter
-    return rocm_aiter.rms_norm(x, weight, variance_epsilon)
+    def _rocm_aiter_rms_norm(x: torch.Tensor, weight: torch.Tensor,
+                             variance_epsilon: float) -> torch.Tensor:
 
+        import aiter as rocm_aiter
+        return rocm_aiter.rms_norm(x, weight, variance_epsilon)
 
-def rocm_aiter_fused_add_rms_norm(
-        x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
-        variance_epsilon: float) -> Tuple[torch.Tensor, torch.Tensor]:
+    def rocm_aiter_rms_norm_fake(input: torch.Tensor, weight: torch.Tensor,
+                                 variance_epsilon: float) -> torch.Tensor:
+        return input.clone()
 
-    import aiter as rocm_aiter
+    try:
+        direct_register_custom_op(
+            op_name="rocm_aiter_rms_norm",
+            op_func=_rocm_aiter_rms_norm,
+            mutates_args=[],
+            fake_impl=rocm_aiter_rms_norm_fake,
+        )
+        rocm_aiter_rms_norm = torch.ops.vllm.rocm_aiter_rms_norm
 
-    # Assuming the correct signature for rmsnorm2d_fwd_with_add
-    rocm_aiter.rmsnorm2d_fwd_with_add(
-        x,  # output
-        x,  # input
-        residual,  # residual input
-        residual,  # residual output
-        weight,
-        variance_epsilon,
-    )
-    return x, residual
+    except AttributeError:
+        rocm_aiter_rms_norm = _rocm_aiter_rms_norm
+
+    def _rocm_aiter_fused_add_rms_norm(
+            input: torch.Tensor, residual_in: torch.Tensor,
+            weight: torch.Tensor,
+            variance_epsilon: float) -> Tuple[torch.Tensor, torch.Tensor]:
+
+        import aiter as rocm_aiter
+        residual_out = torch.empty_like(residual_in)
+        output = torch.empty_like(input)
+        rocm_aiter.rmsnorm2d_fwd_with_add(
+            output,  # output
+            input,  # input
+            residual_in,  # residual input
+            residual_out,  # residual output
+            weight,
+            variance_epsilon,
+        )
+
+        return output, residual_out
+
+    def rocm_aiter_fused_add_rms_norm_fake(
+            input: torch.Tensor, residual_in: torch.Tensor,
+            weight: torch.Tensor,
+            variance_epsilon: float) -> Tuple[torch.Tensor, torch.Tensor]:
+        return input.clone(), residual_in.clone()
+
+    try:
+        direct_register_custom_op(
+            op_name="rocm_aiter_fused_add_rms_norm",
+            op_func=_rocm_aiter_fused_add_rms_norm,
+            mutates_args=[],
+            fake_impl=rocm_aiter_fused_add_rms_norm_fake,
+        )
+        rocm_aiter_fused_add_rms_norm = \
+            torch.ops.vllm.rocm_aiter_fused_add_rms_norm
+
+    except AttributeError:
+        rocm_aiter_fused_add_rms_norm = _rocm_aiter_fused_add_rms_norm
 
 
 def dispatch_cuda_rmsnorm_func(add_residual: bool):
