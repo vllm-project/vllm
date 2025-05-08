@@ -223,7 +223,7 @@ def _compare_sp(
         "--distributed-executor-backend",
         distributed_backend,
         "--compilation_config",
-        str(compilation_config),
+        json.dumps(compilation_config),
     ]
 
     tp_env = {
