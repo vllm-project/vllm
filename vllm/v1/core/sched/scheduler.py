@@ -981,8 +981,8 @@ class Scheduler(SchedulerInterface):
         computed_block_ids = (all_block_ids
                               if last_block_full else all_block_ids[:-1])
 
-        # If prompt < block_size, then there will be no KV xfer.
-        # Add to the no-op list so we can free w/o memory leak.
+        # If prompt < block_size, then there will be no KV xfer so free blocks
+        # immediately.
         delay_free_blocks = len(computed_block_ids) > 0
         self._free_request(request, delay_free_blocks=delay_free_blocks)
 
