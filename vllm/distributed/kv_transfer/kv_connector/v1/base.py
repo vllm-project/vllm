@@ -23,7 +23,7 @@ The class provides the following primitives:
 import enum
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
@@ -73,9 +73,9 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
-    def get_finished(self) -> tuple[set[str], set[str]]:
+    def get_finished(self) -> tuple[Optional[set[str]], Optional[set[str]]]:
         """Get the finished recving and sending requests."""
-        return set(), set()
+        return None, None
 
     @property
     def role(self) -> KVConnectorRole:

@@ -679,7 +679,6 @@ class Scheduler(SchedulerInterface):
         new_running: list[Request] = []
         outputs: list[EngineCoreOutput] = []
         spec_decoding_stats: Optional[SpecDecodingStats] = None
-        send_kv_no_op: list[str] = []
 
         # NOTE(woosuk): As len(self.running) can be up to 1K or more, the below
         # loop can be a performance bottleneck. We should do our best to avoid
@@ -777,7 +776,7 @@ class Scheduler(SchedulerInterface):
                 kv_transfer_params = None
                 if request.do_remote_decode and not stopped:
                     kv_transfer_params = self._set_finished_remote_decode(
-                        request, send_kv_no_op)
+                        request)
                     stopped = True
 
                 # Add EngineCoreOutput for this Request.
@@ -801,7 +800,7 @@ class Scheduler(SchedulerInterface):
                 new_running.append(request)
 
         # P/D: update state for finished KV Transfers.
-        self._update_from_kv_xfer_finished(model_runner_output, send_kv_no_op)
+        self._update_from_kv_xfer_finished(model_runner_output)
 
         # Return the cached request data to the queue so they can be reused.
         for req_data in scheduler_output.scheduled_cached_reqs:
@@ -959,7 +958,6 @@ class Scheduler(SchedulerInterface):
     def _set_finished_remote_decode(
         self,
         request: Request,
-        send_kv_no_op: list[str],
     ) -> KVTransferParams:
         """
         P/D: put request into a FINISHED_REMOTE_DECODE state.
@@ -973,7 +971,6 @@ class Scheduler(SchedulerInterface):
 
         assert request.do_remote_decode
         request.status = RequestStatus.FINISHED_REMOTE_DECODE
-        self._free_request(request, delay_free_blocks=True)
 
         # Get computed blocks.
         all_block_ids = [
@@ -986,8 +983,8 @@ class Scheduler(SchedulerInterface):
 
         # If prompt < block_size, then there will be no KV xfer.
         # Add to the no-op list so we can free w/o memory leak.
-        if len(computed_block_ids) == 0:
-            send_kv_no_op.append(request.request_id)
+        delay_free_blocks = len(computed_block_ids) > 0
+        self._free_request(request, delay_free_blocks=delay_free_blocks)
 
         # TODO(rob): we could make the creation of the KVTransferParams
         # per Connector to allow for true pluggabilty.
@@ -999,11 +996,8 @@ class Scheduler(SchedulerInterface):
             remote_port=envs.VLLM_NIXL_SIDE_CHANNEL_PORT,
         )
 
-    def _update_from_kv_xfer_finished(
-        self,
-        model_runner_output: ModelRunnerOutput,
-        send_kv_no_op: list[str],
-    ):
+    def _update_from_kv_xfer_finished(self,
+                                      model_runner_output: ModelRunnerOutput):
         """
         P/D: update the scheduler state based on the output.
 
@@ -1019,7 +1013,4 @@ class Scheduler(SchedulerInterface):
             self.finished_recving_kv_req_ids.add(req_id)
         for req_id in (model_runner_output.finished_sending or ()):
             logger.debug("Finished sending KV transfer for request %s", req_id)
-            self._free_blocks(self.requests[req_id])
-        for req_id in send_kv_no_op:
-            logger.debug("No op sending KV transfer for request %s", req_id)
             self._free_blocks(self.requests[req_id])
