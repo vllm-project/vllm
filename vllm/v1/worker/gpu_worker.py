@@ -275,12 +275,13 @@ class Worker(WorkerBase):
 
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
-        if not self.vllm_config.parallel_config.pipeline_parallel_broadcast_output:
-            if not get_pp_group().is_last_rank:
-                assert isinstance(output, IntermediateTensors)
-                get_pp_group().send_tensor_dict(output.tensors,
-                                                all_gather_group=get_tp_group())
-                return None
+        parallel_config = self.vllm_config.parallel_config
+        if not parallel_config.pipeline_parallel_broadcast_output and \
+            not get_pp_group().is_last_rank:
+            assert isinstance(output, IntermediateTensors)
+            get_pp_group().send_tensor_dict(output.tensors,
+                                            all_gather_group=get_tp_group())
+            return None
         assert isinstance(output, ModelRunnerOutput)
         return output if self.is_driver_worker else None
 
