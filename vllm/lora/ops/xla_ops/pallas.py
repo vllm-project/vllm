@@ -28,7 +28,7 @@ LoRA Laning Optimization for TPU Matrix Multiplication
 
 When we run with the TPU we need to keep its MXU (matrix multiplication unit)
 well fed to achieve maximum utilisation.
-The MXU can perform an (8x128) by (128x128) matmul once every 8 cycles.
+The (TPU v5) MXU can perform an (8x128) by (128x128) matmul once every 8 cycles.
 
 LoRA computations typically take a series of T (1xD) vectors and matmul them
 with a (DxL) matrix (shrinking) followed by another matmul with a (LxD) matrix
@@ -200,40 +200,40 @@ def _bgmv_shrink_kernel(bT: int, bL: int, n_lora_lanes: int, lane_size: int,
 
 @functools.partial(jax.jit,
                    static_argnames=[
-                       "TOKEN_BLOCK", "LORA_BLOCK", "DIM_BLOCK",
-                       "N_LORA_LANES", "LANE_SIZE"
+                       "token_block", "lora_block", "dim_block",
+                       "n_lora_lanes", "lane_size"
                    ])
 def _bgmv_shrink(
         idxs: jax.Array,  # (T, ) int32
         inputs: jax.Array,  # (T, D) model dtype
         loras: jax.Array,  # (N, L, D) model dtype
         *,
-        TOKEN_BLOCK: int,
-        LORA_BLOCK: int,
-        DIM_BLOCK: int,
-        N_LORA_LANES: int,
-        LANE_SIZE: int) -> jax.Array:  # (T, L) model dtype
+        token_block: int,
+        lora_block: int,
+        dim_block: int,
+        n_lora_lanes: int,
+        lane_size: int) -> jax.Array:  # (T, L) model dtype
     T, D = inputs.shape
     N, L, _ = loras.shape
 
     return pl.pallas_call(
-        kernel=functools.partial(_bgmv_shrink_kernel, TOKEN_BLOCK, LORA_BLOCK,
-                                 N_LORA_LANES, LANE_SIZE, N),
+        kernel=functools.partial(_bgmv_shrink_kernel, token_block, lora_block,
+                                 n_lora_lanes, lane_size, N),
         out_shape=jax.ShapeDtypeStruct((T, L), dtype=inputs.dtype),
         grid_spec=pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=1,
-            grid=(T // TOKEN_BLOCK, L // LORA_BLOCK, D // DIM_BLOCK),
+            grid=(T // token_block, L // lora_block, D // dim_block),
             in_specs=[
-                pl.BlockSpec((TOKEN_BLOCK, DIM_BLOCK),
+                pl.BlockSpec((token_block, dim_block),
                              lambda i, j, k, block_idx: (i, k)),
-                pl.BlockSpec((N, LORA_BLOCK, DIM_BLOCK),
+                pl.BlockSpec((N, lora_block, dim_block),
                              lambda i, j, k, block_idx: (0, j, k)),
             ],
-            out_specs=pl.BlockSpec((TOKEN_BLOCK, LORA_BLOCK),
+            out_specs=pl.BlockSpec((token_block, lora_block),
                                    lambda i, j, k, block_idx: (i, j)),
             scratch_shapes=[
-                pltpu.VMEM((TOKEN_BLOCK, LORA_BLOCK), jnp.float32),
-                pltpu.VMEM((TOKEN_BLOCK, LORA_BLOCK), jnp.float32)
+                pltpu.VMEM((token_block, lora_block), jnp.float32),
+                pltpu.VMEM((token_block, lora_block), jnp.float32)
             ]),
         compiler_params=pltpu.TPUCompilerParams(
             dimension_semantics=("parallel", "parallel", "arbitrary")),
@@ -258,34 +258,34 @@ def bgmv_shrink_xla(inputs: torch.Tensor, loras: torch.Tensor,
     T, _ = inputs.shape
     N, L, D = loras.shape
 
-    TOKEN_BLOCK = get_bounded_value(16, next_multiple_of(T, 16), 128)
-    LORA_BLOCK = LORA_RANK_BLOCK_SIZE
-    DIM_BLOCK = largest_divisor(D, [256, 512, 1024])
+    token_block = get_bounded_value(16, next_multiple_of(T, 16), 128)
+    lora_block = LORA_RANK_BLOCK_SIZE
+    dim_block = largest_divisor(D, [256, 512, 1024])
 
     # See if we can fit multiple LoRAs in a register. This would activate LoRA
     # laning
-    N_LORA_LANES = math.ceil(LORA_BLOCK / L)
-    LANE_SIZE = min(L, LORA_BLOCK)
-    if N_LORA_LANES > 1 and N > 1:
-        pad_N = next_multiple_of(N, N_LORA_LANES) - N
+    n_lora_lanes = math.ceil(lora_block / L)
+    lane_size = min(L, lora_block)
+    if n_lora_lanes > 1 and N > 1:
+        pad_N = next_multiple_of(N, n_lora_lanes) - N
         new_N = N + pad_N
 
         loras = torch.nn.functional.pad(loras, (0, 0, 0, 0, 0, pad_N))
-        loras = loras.reshape((new_N // N_LORA_LANES, LORA_BLOCK, D))
+        loras = loras.reshape((new_N // n_lora_lanes, lora_block, D))
         N, L, D = loras.shape
 
     # Pad the loras' rank if it's too low. This is to allow it to fit in a TPU
     # register. This has to happen in pytorch, doing it in Jax will lead to NaNs
     pad_L = 0
-    if LORA_BLOCK > L or L % LORA_BLOCK != 0:
-        pad_L = next_multiple_of(L, LORA_BLOCK) - L
+    if lora_block > L or L % lora_block != 0:
+        pad_L = next_multiple_of(L, lora_block) - L
     pad_D = 0
-    if DIM_BLOCK > D or D % DIM_BLOCK != 0:
-        pad_D = next_multiple_of(D, DIM_BLOCK) - D
+    if dim_block > D or D % dim_block != 0:
+        pad_D = next_multiple_of(D, dim_block) - D
 
     pad_T = 0
-    if TOKEN_BLOCK > T or T % TOKEN_BLOCK != 0:
-        pad_T = next_multiple_of(T, TOKEN_BLOCK) - T
+    if token_block > T or T % token_block != 0:
+        pad_T = next_multiple_of(T, token_block) - T
 
     if pad_D != 0 or pad_L != 0:
         loras = torch.nn.functional.pad(loras, (0, pad_D, 0, pad_L, 0, 0))
@@ -297,11 +297,11 @@ def bgmv_shrink_xla(inputs: torch.Tensor, loras: torch.Tensor,
     jax_import_guard()
     kernel = make_kernel_from_pallas(
         functools.partial(_bgmv_shrink,
-                          TOKEN_BLOCK=TOKEN_BLOCK,
-                          LORA_BLOCK=LORA_BLOCK,
-                          DIM_BLOCK=DIM_BLOCK,
-                          N_LORA_LANES=N_LORA_LANES,
-                          LANE_SIZE=LANE_SIZE), bgmv_shrink_shape_function)
+                          token_block=token_block,
+                          lora_block=lora_block,
+                          dim_block=dim_block,
+                          n_lora_lanes=n_lora_lanes,
+                          lane_size=lane_size), bgmv_shrink_shape_function)
 
     return kernel(idxs, inputs, loras)[:T, :L]
 
@@ -316,10 +316,10 @@ def bgmv_shrink_non_xla(inputs: torch.Tensor, loras: torch.Tensor,
 
     N, L, _ = loras.shape
 
-    LORA_BLOCK = LORA_RANK_BLOCK_SIZE
-    N_LORA_LANES = math.ceil(LORA_BLOCK / L)
-    if N_LORA_LANES > 1 and N > 1:
-        L = LORA_BLOCK
+    lora_block = LORA_RANK_BLOCK_SIZE
+    n_lora_lanes = math.ceil(lora_block / L)
+    if n_lora_lanes > 1 and N > 1:
+        L = lora_block
 
     return torch.empty((T, L), device=inputs.device)
 
@@ -368,36 +368,36 @@ def _bgmv_expand_kernel(bT: int, bL: int, max_num_loras: int, idx_ref, inp_ref,
 
 
 @functools.partial(jax.jit,
-                   static_argnames=["TOKEN_BLOCK", "LORA_BLOCK", "DIM_BLOCK"])
+                   static_argnames=["token_block", "lora_block", "dim_block"])
 def _bgmv_expand(
         idxs: jax.Array,  # (T, ) int32
         inputs: jax.Array,  # (T, D) model dtype
         loras: jax.Array,  # (N, L, D) model dtype
         *,
-        TOKEN_BLOCK: int,
-        LORA_BLOCK: int,
-        DIM_BLOCK: int) -> jax.Array:  # (T, L) model dtype
+        token_block: int,
+        lora_block: int,
+        dim_block: int) -> jax.Array:  # (T, L) model dtype
     T, D = inputs.shape
     N, _, L = loras.shape
 
     return pl.pallas_call(
-        kernel=functools.partial(_bgmv_expand_kernel, TOKEN_BLOCK, LORA_BLOCK,
+        kernel=functools.partial(_bgmv_expand_kernel, token_block, lora_block,
                                  N),
         out_shape=jax.ShapeDtypeStruct((T, L), dtype=inputs.dtype),
         grid_spec=pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=1,
-            grid=(T // TOKEN_BLOCK, L // LORA_BLOCK, D // DIM_BLOCK),
+            grid=(T // token_block, L // lora_block, D // dim_block),
             in_specs=[
-                pl.BlockSpec((TOKEN_BLOCK, DIM_BLOCK),
+                pl.BlockSpec((token_block, dim_block),
                              lambda i, j, k, block_idx: (i, k)),
-                pl.BlockSpec((N, DIM_BLOCK, LORA_BLOCK),
+                pl.BlockSpec((N, dim_block, lora_block),
                              lambda i, j, k, block_idx: (0, k, j)),
             ],
-            out_specs=pl.BlockSpec((TOKEN_BLOCK, LORA_BLOCK),
+            out_specs=pl.BlockSpec((token_block, lora_block),
                                    lambda i, j, k, block_idx: (i, j)),
             scratch_shapes=[
-                pltpu.VMEM((TOKEN_BLOCK, LORA_BLOCK), jnp.float32),
-                pltpu.VMEM((TOKEN_BLOCK, LORA_BLOCK), jnp.float32)
+                pltpu.VMEM((token_block, lora_block), jnp.float32),
+                pltpu.VMEM((token_block, lora_block), jnp.float32)
             ]),
         compiler_params=pltpu.TPUCompilerParams(
             dimension_semantics=("parallel", "parallel", "arbitrary")),
@@ -422,35 +422,35 @@ def bgmv_expand_xla(inputs: torch.Tensor, loras: torch.Tensor,
     T, DI = inputs.shape
     N, D, L = loras.shape
 
-    TOKEN_BLOCK = get_bounded_value(16, next_multiple_of(T, 16), 128)
-    LORA_BLOCK = largest_divisor(L, [256, 512, 1024])
-    DIM_BLOCK = LORA_RANK_BLOCK_SIZE
+    token_block = get_bounded_value(16, next_multiple_of(T, 16), 128)
+    lora_block = largest_divisor(L, [256, 512, 1024])
+    dim_block = LORA_RANK_BLOCK_SIZE
 
     # See if we can fit multiple LoRAs in a register. This would activate LoRA
     # laning
-    N_LORA_LANES = math.ceil(DIM_BLOCK / D)
-    if D != DI and N_LORA_LANES > 1 and N > 1:
-        pad_N = next_multiple_of(N, N_LORA_LANES) - N
+    n_lora_lanes = math.ceil(dim_block / D)
+    if D != DI and n_lora_lanes > 1 and N > 1:
+        pad_N = next_multiple_of(N, n_lora_lanes) - N
         new_N = N + pad_N
 
         loras = torch.nn.functional.pad(loras, (0, 0, 0, 0, 0, pad_N))
-        loras = loras.reshape((new_N // N_LORA_LANES, DIM_BLOCK, L))
-        idxs = idxs // N_LORA_LANES
+        loras = loras.reshape((new_N // n_lora_lanes, dim_block, L))
+        idxs = idxs // n_lora_lanes
         N, D, L = loras.shape
 
     # Pad the loras' rank if it's too low. This is to allow it to fit in a TPU
     # register. This has to happen in pytorch, doing it in Jax will lead to NaNs
     pad_L = 0
-    if LORA_BLOCK > L or L % LORA_BLOCK != 0:
-        pad_L = next_multiple_of(L, LORA_BLOCK) - L
+    if lora_block > L or L % lora_block != 0:
+        pad_L = next_multiple_of(L, lora_block) - L
 
     pad_D = 0
-    if DIM_BLOCK > D or D % DIM_BLOCK != 0:
-        pad_D = next_multiple_of(D, DIM_BLOCK) - D
+    if dim_block > D or D % dim_block != 0:
+        pad_D = next_multiple_of(D, dim_block) - D
 
     pad_T = 0
-    if TOKEN_BLOCK > T or T % TOKEN_BLOCK != 0:
-        pad_T = next_multiple_of(T, TOKEN_BLOCK) - T
+    if token_block > T or T % token_block != 0:
+        pad_T = next_multiple_of(T, token_block) - T
 
     if pad_D != 0 or pad_L != 0:
         loras = torch.nn.functional.pad(loras, (0, pad_L, 0, pad_D, 0, 0))
@@ -463,9 +463,9 @@ def bgmv_expand_xla(inputs: torch.Tensor, loras: torch.Tensor,
 
     kernel = make_kernel_from_pallas(
         functools.partial(_bgmv_expand,
-                          TOKEN_BLOCK=TOKEN_BLOCK,
-                          LORA_BLOCK=LORA_BLOCK,
-                          DIM_BLOCK=DIM_BLOCK), bgmv_expand_shape_function)
+                          token_block=token_block,
+                          lora_block=lora_block,
+                          dim_block=dim_block), bgmv_expand_shape_function)
 
     return kernel(idxs, inputs, loras)[:T, :L]
 
