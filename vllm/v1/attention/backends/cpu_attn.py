@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 import numpy as np
-import torch
 
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.backends.torch_sdpa import (TorchSDPABackendImpl,
@@ -44,21 +43,6 @@ class TorchSDPABackend:
     ) -> tuple[int, ...]:
         return PagedAttention.get_kv_cache_shape(num_blocks, block_size,
                                                  num_kv_heads, head_size)
-
-    @staticmethod
-    def swap_blocks(
-        src_kv_cache: torch.Tensor,
-        dst_kv_cache: torch.Tensor,
-        src_to_dst: torch.Tensor,
-    ) -> None:
-        PagedAttention.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
-
-    @staticmethod
-    def copy_blocks(
-        kv_caches: list[torch.Tensor],
-        src_to_dists: torch.Tensor,
-    ) -> None:
-        PagedAttention.copy_blocks(kv_caches, src_to_dists)
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
