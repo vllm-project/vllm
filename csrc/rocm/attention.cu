@@ -1784,9 +1784,9 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
       VTOKENS_PER_LANE,
       CONTIGUOUS_KV_ELEMS_16B_LOAD);  // optimized for 16B fetches; assumes
                                       // minimum block size is 16
-  constexpr int VHELOOP =
-      HEAD_SIZE / 16 / NWARPS;  // head_size distributed across warps; each wmma
-                                // instr works on 16 head elements
+  constexpr int VHELOOP = DIVIDE_ROUND_UP(
+      (HEAD_SIZE / 16), NWARPS);  // head_size distributed across warps; each
+                                  // wmma instr works on 16 head elements
 
   int vphysical_block_number[VTLOOP][VBLOCKS_PER_LANE];
 
@@ -2555,9 +2555,9 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
       VTOKENS_PER_LANE,
       CONTIGUOUS_KV_ELEMS_16B_LOAD);  // optimized for 16B fetches; assumes
                                       // minimum block size is 16
-  constexpr int VHELOOP =
-      HEAD_SIZE / 16 / NWARPS;  // head_size distributed across warps; each wmma
-                                // instr works on 16 head elements
+  constexpr int VHELOOP = DIVIDE_ROUND_UP(
+      (HEAD_SIZE / 16), NWARPS);  // head_size distributed across warps; each
+                                  // wmma instr works on 16 head elements
 
   int vphysical_block_number[VTLOOP][VBLOCKS_PER_LANE];
 
