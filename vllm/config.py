@@ -2868,6 +2868,16 @@ class MultiModalConfig:
     parallel_processor_backend: ParallelProcessorBackend = "uni"
     """
     EXPERIMENTAL: Configures running the multi-modal processor in parallel.
+
+    Our own testing has shown that in general:
+
+    - "mp" mode degrades throughput for the vast majority of models except for
+    Idefics3 (SmolVLM v1).
+    - "mt" mode improves throughput only if the image processor doesn't already
+    have built-in parallelism (e.g. through NumPy).
+
+    Nevertheless, you should run the benchmarks under <gh-dir:benchmarks> to
+    determine the parallelism to use for your particular model and setup.
     """
 
     def compute_hash(self) -> str:
