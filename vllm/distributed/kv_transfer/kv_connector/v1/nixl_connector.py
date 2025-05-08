@@ -599,8 +599,6 @@ class NixlConnectorWorker:
 
         num_local_blocks = len(local_block_ids)
         num_remote_blocks = len(remote_block_ids)
-        print(f"{num_local_blocks=}")
-        print(f"{num_remote_blocks=}")
         assert num_local_blocks > 0
         assert num_local_blocks <= num_remote_blocks
 
