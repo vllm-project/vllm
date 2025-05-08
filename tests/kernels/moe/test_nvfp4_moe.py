@@ -12,6 +12,10 @@ from tests.kernels.quantization.nvfp4_utils import (dequantize_nvfp4_to_dtype,
                                                     FLOAT4_E2M1_MAX,
                                                     FLOAT8_E4M3_MAX)
 
+if not current_platform.has_device_capability(100):
+    pytest.skip(reason="Nvfp4 Requires compute capability of 10 or above.",
+                allow_module_level=True)
+
 MNK_FACTORS = [
     (2, 1024, 1024),
     (2, 1024, 1536),
