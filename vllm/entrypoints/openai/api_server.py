@@ -41,7 +41,8 @@ from vllm.entrypoints.chat_utils import (load_chat_template,
                                          resolve_mistral_chat_template)
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.cli_args import (make_arg_parser,
+from vllm.entrypoints.openai.cli_args import (log_non_default_args,
+                                              make_arg_parser,
                                               validate_parsed_serve_args)
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -936,10 +937,11 @@ async def init_app_state(
                 chat_template=resolved_chat_template)
         else:
             hf_chat_template = resolve_hf_chat_template(
+                vllm_config.model_config,
                 tokenizer,
                 chat_template=None,
                 tools=None,
-                trust_remote_code=model_config.trust_remote_code)
+            )
 
             if hf_chat_template != resolved_chat_template:
                 logger.warning(
@@ -967,7 +969,6 @@ async def init_app_state(
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
         enable_auto_tools=args.enable_auto_tool_choice,
         tool_parser=args.tool_call_parser,
-        enable_reasoning=args.enable_reasoning,
         reasoning_parser=args.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
     ) if model_config.runner_type == "generate" else None
@@ -1041,7 +1042,7 @@ def create_server_socket(addr: tuple[str, int]) -> socket.socket:
 
 async def run_server(args, **uvicorn_kwargs) -> None:
     logger.info("vLLM API server version %s", VLLM_VERSION)
-    logger.info("args: %s", args)
+    log_non_default_args(args)
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
@@ -1053,7 +1054,7 @@ async def run_server(args, **uvicorn_kwargs) -> None:
                        f"(chose from {{ {','.join(valid_tool_parses)} }})")
 
     valid_reasoning_parses = ReasoningParserManager.reasoning_parsers.keys()
-    if args.enable_reasoning \
+    if args.reasoning_parser \
         and args.reasoning_parser not in valid_reasoning_parses:
         raise KeyError(
             f"invalid reasoning parser: {args.reasoning_parser} "

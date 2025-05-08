@@ -801,10 +801,11 @@ class FusedMoE(torch.nn.Module):
                 scoring_func=scoring_func,
                 e_score_correction_bias=e_score_correction_bias)
         elif custom_routing_function is None:
-            topk_weights, topk_ids = fused_topk(hidden_states=hidden_states,
-                                                gating_output=router_logits,
-                                                topk=top_k,
-                                                renormalize=renormalize)
+            topk_weights, topk_ids, token_expert_indices = fused_topk(
+                hidden_states=hidden_states,
+                gating_output=router_logits,
+                topk=top_k,
+                renormalize=renormalize)
         else:
             topk_weights, topk_ids = custom_routing_function(
                 hidden_states=hidden_states,
