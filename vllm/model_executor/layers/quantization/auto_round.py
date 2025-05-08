@@ -33,8 +33,8 @@ class AutoRoundConfig(QuantizationConfig):
             group_size: int,
             sym: bool = True,
             packing_format: str = "auto_round:auto_gptq",
-            block_name_to_quantize: Union[str, List[str]] = None,
-            extra_config: Optional[Dict[str, Any]] = None,
+            block_name_to_quantize: Optional[Union[str, List[str]]] = None,
+            extra_config: Optional[Dict[str, Any, None]] = None,
             data_type: str = "int",
             backend: str = "auto",
     ) -> None:
@@ -163,15 +163,16 @@ class AutoRoundConfig(QuantizationConfig):
                 }
                 use_marlin = (
                         (weight_bits, sym) in AWQ_TYPE_MAP and
-                        check_marlin_supported(AWQ_TYPE_MAP[(weight_bits, sym)],
-                                               group_size)
+                        check_marlin_supported(AWQ_TYPE_MAP[(weight_bits)],
+                                               group_size,
+                                               not sym)
                 )
         else:
             use_marlin = False
         if use_marlin:
             from vllm.model_executor.layers.quantization.awq_marlin import (
                 AWQMarlinConfig, AWQMarlinLinearMethod, AWQMoEMethod)
-            quant_args = AWQMarlinConfig(
+            quant_args_marlin = AWQMarlinConfig(
                 weight_bits=weight_bits,
                 group_size=group_size,
                 zero_point=not sym,
@@ -190,7 +191,7 @@ class AutoRoundConfig(QuantizationConfig):
 
         if isinstance(layer, FusedMoE):
             if use_marlin:
-                return AWQMoEMethod(quant_args)
+                return AWQMoEMethod(quant_args_marlin)
             from vllm.model_executor.layers.quantization.moe_wna16 import \
                 MoeWNA16Config
             config = {
@@ -204,7 +205,7 @@ class AutoRoundConfig(QuantizationConfig):
 
         if isinstance(layer, (LinearBase, ParallelLMHead)):
             if use_marlin:
-                return AWQMarlinLinearMethod(quant_args)
+                return AWQMarlinLinearMethod(quant_args_marlin)
             else:
                 return AWQLinearMethod(quant_args)
         return None
@@ -237,14 +238,15 @@ class AutoRoundConfig(QuantizationConfig):
                 use_marlin = (
                         (weight_bits, sym) in GPTQ_TYPE_MAP and
                         check_marlin_supported(
-                            GPTQ_TYPE_MAP[(weight_bits, sym)], group_size)
+                            GPTQ_TYPE_MAP[(weight_bits, sym)], group_size,
+                            has_zp=not sym)
                 )
         else:
             use_marlin = False
         if use_marlin:
             from vllm.model_executor.layers.quantization.gptq_marlin import (
                 GPTQMarlinConfig, GPTQMarlinLinearMethod, GPTQMarlinMoEMethod)
-            quant_args = GPTQMarlinConfig(
+            quant_args_marlin = GPTQMarlinConfig(
                 weight_bits=weight_bits,
                 group_size=group_size,
                 is_sym=sym,
@@ -277,7 +279,7 @@ class AutoRoundConfig(QuantizationConfig):
                 }
                 return MoeWNA16Config.from_config(config).get_quant_method(
                     layer, prefix)
-            return GPTQMarlinMoEMethod(quant_args)
+            return GPTQMarlinMoEMethod(quant_args_marlin)
 
         if isinstance(layer, (LinearBase, ParallelLMHead)):
             if self.check_quantized(weight_bits):
