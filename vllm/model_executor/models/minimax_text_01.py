@@ -426,9 +426,10 @@ class MiniMaxText01LinearAttention(nn.Module):
                                   n_attention_heads, 1, 1)
         return slopes
 
-    def _prefill_and_mix_infer(self, q, k, v, kv_cache, state_indices_tensor,
-                               attn_metadata):
+    def _prefill_and_mix_infer(self, q, k, v, kv_cache, state_indices_tensor):
         hidden = []
+        forward_context = get_forward_context()
+        attn_metadata = forward_context.attn_metadata
         for _prefill_idx in range(getattr(attn_metadata, "num_prefills", 0)):
             if _prefill_idx >= len(attn_metadata.query_start_loc):
                 break
