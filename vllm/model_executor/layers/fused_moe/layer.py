@@ -70,6 +70,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        ep_rank: Optional[int] = None,
     ) -> torch.Tensor:
         raise NotImplementedError
 
@@ -157,6 +158,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        ep_rank: Optional[int] = None,
     ) -> torch.Tensor:
         return self.forward(
             x=x,
@@ -173,7 +175,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
             activation=activation,
-            apply_router_weight_on_input=apply_router_weight_on_input)
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            ep_rank=ep_rank)
 
     def forward_cuda(
         self,
@@ -192,6 +195,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        ep_rank: Optional[int] = None,
     ) -> torch.Tensor:
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
@@ -268,7 +272,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
-        **kwargs,
+        ep_rank: Optional[int] = None,
     ):
         if use_grouped_topk or custom_routing_function is not None:
             topk_weights, topk_ids = FusedMoE.select_experts(
@@ -644,6 +648,7 @@ class FusedMoE(torch.nn.Module):
 
         if is_hpu and isinstance(self.quant_method, UnquantizedFusedMoEMethod):
             self.moe_op.w13_list[expert_id].set_weight(orig_exp_data)
+        torch.hpu.synchronize()
 
     def _load_w2(self,
                  expert_data: torch.Tensor,
@@ -665,6 +670,7 @@ class FusedMoE(torch.nn.Module):
         expert_data.copy_(loaded_weight)
         if is_hpu and isinstance(self.quant_method, UnquantizedFusedMoEMethod):
             self.moe_op.w2_list[expert_id].set_weight(expert_data)
+        torch.hpu.synchronize()
 
     def _load_single_value(self, param: torch.nn.Parameter,
                            loaded_weight: torch.Tensor, expert_id: int):
@@ -928,6 +934,7 @@ class FusedMoE(torch.nn.Module):
             e_score_correction_bias=self.e_score_correction_bias,
             activation=self.activation,
             apply_router_weight_on_input=self.apply_router_weight_on_input,
+            ep_rank=self.ep_rank,
         )
 
         if self.dp_size > 1:

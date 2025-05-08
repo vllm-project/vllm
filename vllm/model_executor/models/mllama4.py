@@ -242,7 +242,7 @@ class Llama4VisionAttention(nn.Module):
             base=config.rope_theta,
             rope_scaling={"rope_type": "mllama4"},
             is_neox_style=False,
-            dtype=torch.complex64,  # important
+            dtype='auto',  # important
         )
 
     def forward(
@@ -759,7 +759,7 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         # NOTE: In v1, inputs_embeds is always generated at model runner,
         # this condition is for v0 compatibility.
-        elif inputs_embeds is None:
+        elif inputs_embeds is None and "pixel_values" in kwargs:
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
             inputs_embeds = self.get_input_embeddings(input_ids,
                                                       vision_embeddings)

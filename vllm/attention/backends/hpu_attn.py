@@ -368,6 +368,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         max_seq_len: int = 4096,
         attn_type: str = AttentionType.DECODER,
         use_irope: bool = False,
+        **kwargs,
     ) -> None:
         super(AttentionImpl, self).__init__()
         if use_irope:
@@ -457,7 +458,6 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 k_scale=layer._k_scale_float,
                 v_scale=layer._k_scale_float,
             )
-
         batch_size, seq_len, hidden_size = query.shape
         _, seq_len_kv, _ = key.shape
 

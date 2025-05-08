@@ -99,11 +99,13 @@ class Llama4MoE(nn.Module):
             hidden_states=hidden_states,
             router_logits=router_logits,
         )
-        experts_out = routed_out + shared_out
+        out_shape = shared_out.shape
+        experts_out = routed_out + shared_out.view(*routed_out.shape)
 
         if self.tp_size > 1:
             experts_out = tensor_model_parallel_all_reduce(experts_out)
 
+        experts_out = experts_out.view(*out_shape)
         return experts_out
 
 
@@ -221,10 +223,15 @@ class Llama4Attention(nn.Module):
         if self.rotary_emb is not None:
             q, k = self.rotary_emb(positions, q, k)
         if self.qk_norm is not None:
-            q = q.reshape(-1, self.num_heads, self.head_dim)
-            q = self.qk_norm(q.float()).reshape(-1, self.q_size).to(q.dtype)
-            k = k.reshape(-1, self.num_kv_heads, self.head_dim)
-            k = self.qk_norm(k.float()).reshape(-1, self.kv_size).to(k.dtype)
+            # q = q.reshape(-1, self.num_heads, self.head_dim)
+            # q = self.qk_norm(q.float()).reshape(-1, self.q_size).to(q.dtype)
+            B, S, _ = q.shape
+            q = q.view(B, S, self.num_heads, self.head_dim)
+            q = self.qk_norm(q.float()).to(q.dtype)
+            q = q.view(B, S, self.q_size)
+            k = k.view(B, S, self.num_kv_heads, self.head_dim)
+            k = self.qk_norm(k.float()).to(k.dtype)
+            k = k.view(B, S, self.kv_size)
 
         # We are applying temperature tuning (https://arxiv.org/abs/2501.19399)
         # to NoPE layers, where the inference-time temperature tuning function
@@ -258,7 +265,6 @@ class Llama4DecoderLayer(nn.Module):
         rope_theta = config.rope_theta
         rope_scaling = config.rope_scaling
         max_position_embeddings = config.max_position_embeddings
-
         self.self_attn = Llama4Attention(
             config=config,
             hidden_size=self.hidden_size,
