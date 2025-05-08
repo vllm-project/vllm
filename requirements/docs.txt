@@ -12,8 +12,6 @@ commonmark # Required by sphinx-argparse when using :markdownhelp:
 # packages to install to build the documentation
 cachetools
 pydantic >= 2.8
--f https://download.pytorch.org/whl/cpu
-torch
 py-cpuinfo
 transformers
 mistral_common >= 1.5.4

@@ -39,7 +39,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Data Parallel Inference")
     parser.add_argument("--model",
                         type=str,
-                        default="ibm-research/PowerMoE-3b",
+                        default="/home/test/test01/Llama-2-7b-chat-hf",
                         help="Model name or path")
     parser.add_argument("--dp-size",
                         type=int,
@@ -47,7 +47,7 @@ def parse_args():
                         help="Data parallel size")
     parser.add_argument("--tp-size",
                         type=int,
-                        default=2,
+                        default=1,
                         help="Tensor parallel size")
     parser.add_argument("--node-size",
                         type=int,
@@ -75,6 +75,7 @@ def main(model, dp_size, local_dp_rank, global_dp_rank, dp_master_ip,
     os.environ["VLLM_DP_SIZE"] = str(dp_size)
     os.environ["VLLM_DP_MASTER_IP"] = dp_master_ip
     os.environ["VLLM_DP_MASTER_PORT"] = str(dp_master_port)
+    os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
 
     # CUDA_VISIBLE_DEVICES for each DP rank is set automatically inside the
     # engine processes.
@@ -112,7 +113,7 @@ def main(model, dp_size, local_dp_rank, global_dp_rank, dp_master_ip,
     llm = LLM(model=model,
               tensor_parallel_size=GPUs_per_dp_rank,
               enforce_eager=True,
-              enable_expert_parallel=True)
+              enable_expert_parallel=False)
     outputs = llm.generate(prompts, sampling_params)
     # Print the outputs.
     for i, output in enumerate(outputs):

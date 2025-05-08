@@ -2,5 +2,4 @@
 -r common.txt
 
 # Dependencies for Neuron devices
-torch-neuronx >= 2.5.0
 neuronx-cc
