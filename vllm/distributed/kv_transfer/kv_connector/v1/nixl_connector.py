@@ -595,10 +595,15 @@ class NixlConnectorWorker:
         # saturate IB with heterogeneous TP sizes. We should remove the staging
         # blocks until we are ready.
 
-        assert len(local_block_ids) > 0
-        print(f"{local_block_ids=}")
-        print(f"{remote_block_ids=}")
-        assert len(local_block_ids) == len(remote_block_ids)
+        num_local_blocks = len(local_block_ids)
+        num_remote_blocks = len(remote_block_ids)
+        assert num_local_blocks > 0
+        assert num_local_blocks <= num_remote_blocks
+
+        # If we have prefix cache hit, then we will have fewer (uncomputed)
+        # local blocks and only need to read these uncomputed blocks.
+        if num_local_blocks < num_remote_blocks:
+            remote_block_ids = remote_block_ids[-num_local_blocks:]
 
         # Get side handles.
         local_xfer_side_handle = self.src_xfer_side_handle
