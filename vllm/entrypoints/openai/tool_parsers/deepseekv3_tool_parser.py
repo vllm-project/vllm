@@ -233,20 +233,20 @@ class DeepSeekV3ToolParser(ToolParser):
             current_tool_call = dict()
             if tool_call_portion:
                 current_tool_call_matches = (
-                    self.stream_tool_call_portion_regex.findall(
+                    self.stream_tool_call_portion_regex.match(
                         tool_call_portion))
-                if len(current_tool_call_matches) > 0:
-                    tool_type, tool_name, tool_args = current_tool_call_matches[
-                        0]
+                if current_tool_call_matches:
+                    tool_type, tool_name, tool_args = (
+                        current_tool_call_matches.groups())
                     current_tool_call["name"] = tool_name
                     current_tool_call["arguments"] = tool_args
                 else:
                     current_tool_call_name_matches = (
-                        self.stream_tool_call_name_regex.findall(
+                        self.stream_tool_call_name_regex.match(
                             tool_call_portion))
-                    if len(current_tool_call_name_matches) > 0:
-                        tool_type, tool_name = current_tool_call_name_matches[
-                            0]
+                    if current_tool_call_name_matches:
+                        tool_type, tool_name = (
+                            current_tool_call_name_matches.groups())
                         current_tool_call["name"] = tool_name
                         current_tool_call["arguments"] = ""
                     else:
