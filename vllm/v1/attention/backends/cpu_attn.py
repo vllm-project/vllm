@@ -6,6 +6,7 @@ from vllm.attention.backends.torch_sdpa import (TorchSDPABackendImpl,
                                                 TorchSDPAMetadata)
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.attention.ops.ipex_attn import PagedAttention
+from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.cpu_model_runner import CPUModelRunner
 from vllm.v1.worker.gpu_input_batch import InputBatch
@@ -106,7 +107,8 @@ class TorchSDPAMetadataBuilderV1:
         return True
 
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int):
+              common_prefix_len: int,
+              common_attn_metadata: CommonAttentionMetadata):
         runner = self.runner
         seq_lens_np = runner.seq_lens_np[:num_reqs]
         num_prompt_req = self.num_prompt_req
