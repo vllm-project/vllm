@@ -102,7 +102,7 @@ def test_structured_output(
     #
     sampling_params = SamplingParams(
         temperature=1.0,
-        max_tokens=1000,
+        max_tokens=4096,
         guided_decoding=GuidedDecodingParams(json=sample_json_schema))
     outputs = llm.generate(prompts=[
         (f"Give an example JSON for an employee profile that fits this "
@@ -131,7 +131,7 @@ def test_structured_output(
     #
     sampling_params = SamplingParams(
         temperature=1.0,
-        max_tokens=100,
+        max_tokens=4096,
         n=2,
         guided_decoding=GuidedDecodingParams(json_object=True))
 
@@ -161,7 +161,7 @@ def test_structured_output(
     #
     sampling_params = SamplingParams(
         temperature=1.0,
-        max_tokens=1000,
+        max_tokens=4096,
         guided_decoding=GuidedDecodingParams(json=unsupported_json_schema))
     if guided_decoding_backend.startswith("xgrammar"):
         with pytest.raises(ValueError,
@@ -426,7 +426,7 @@ def test_structured_output(
 
     sampling_params = SamplingParams(
         temperature=0.0,
-        max_tokens=100,
+        max_tokens=4096,
         guided_decoding=GuidedDecodingParams(
             structural_tag=json.dumps(structural_tag_config)))
 
