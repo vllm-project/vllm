@@ -1577,15 +1577,3 @@ def _get_padded_lora_rank(max_lora_rank: int, max_num_loras: int) -> int:
         return max_lora_rank
 
     return 1 << (LORA_RANK_BLOCK_SIZE // max_num_loras).bit_length()
-
-
-def _create_dummy_scheduled_tokens(total_tokens: int,
-                                   num_prompts: int) -> np.ndarray:
-    assert num_prompts <= total_tokens, "Expected num_prompts < total_tokens"
-    base_tokens = total_tokens // num_prompts
-    leftover_tokens = total_tokens % num_prompts
-
-    tokens = np.full((num_prompts, ), base_tokens, dtype=np.int32)
-    tokens[-1] += leftover_tokens
-
-    return tokens
