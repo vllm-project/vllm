@@ -1361,7 +1361,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
     def kv_connector_no_forward(
-            self, scheduler_output: SchedulerOutput) -> ModelRunnerOutput:
+            self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
         # KV send/recv even if no work to do.
         with set_forward_context(None, self.vllm_config):
             self.maybe_setup_kv_connector(scheduler_output)
