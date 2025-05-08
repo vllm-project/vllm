@@ -4,12 +4,19 @@ import subprocess
 import sys
 
 FORBIDDEN_IMPORT_RE = re.compile(r"^(from|import)\s+triton(\s|\.|$)")
-ALLOWED_LINE = "from vllm.triton_utils import triton"
+
+# the way allowed to import triton
+ALLOWED_LINES = {
+    "from vllm.triton_utils import triton",
+    "from vllm.triton_utils import tl",
+    "from vllm.triton_utils import tl, triton",
+}
 
 
 def is_forbidden_import(line: str) -> bool:
-    return bool(FORBIDDEN_IMPORT_RE.match(
-        line.strip())) and ALLOWED_LINE not in line.strip()
+    stripped = line.strip()
+    return bool(
+        FORBIDDEN_IMPORT_RE.match(stripped)) and stripped not in ALLOWED_LINES
 
 
 def parse_diff(diff: str) -> list[str]:
