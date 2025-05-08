@@ -187,7 +187,7 @@ class NixlConnectorScheduler:
     def update_state_after_alloc(self, request: "Request",
                                  blocks: "KVCacheBlocks",
                                  num_external_tokens: int):
-        if request.do_remote_prefill and num_external_tokens > 0:
+        if request.do_remote_prefill:
             # Get unhashed blocks to pull from remote.
             self._reqs_need_recv[request.request_id] = (
                 request, blocks.get_unhashed_block_ids())
@@ -597,13 +597,17 @@ class NixlConnectorWorker:
         # saturate IB with heterogeneous TP sizes. We should remove the staging
         # blocks until we are ready.
 
+        # Full prefix cache hit: do not need to read remote blocks,
+        # just notify P worker that we have the blocks we need.
         num_local_blocks = len(local_block_ids)
-        num_remote_blocks = len(remote_block_ids)
-        assert num_local_blocks > 0
-        assert num_local_blocks <= num_remote_blocks
+        if num_local_blocks == 0:
+            self.nixl_wrapper.send_notif(dst_engine_id,
+                                         notif_msg=request_id.encode("utf-8"))
+            return
 
-        # If we have prefix cache hit, then we will have fewer (uncomputed)
-        # local blocks and only need to read these uncomputed blocks.
+        # Partial prefix cache hit: just read uncomputed blocks blocks.
+        num_remote_blocks = len(remote_block_ids)
+        assert num_local_blocks <= num_remote_blocks
         if num_local_blocks < num_remote_blocks:
             remote_block_ids = remote_block_ids[-num_local_blocks:]
 
