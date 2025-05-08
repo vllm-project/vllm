@@ -146,7 +146,8 @@ def _test_processing_correctness_hf(
     batch_idx: int,
     ignore_mm_keys: Optional[set[str]] = None,
 ):
-    if model_config.hf_config.model_type in ("mllama", "whisper", "ultravox"):
+    if model_config.hf_config.model_type in ("mllama", "ovis", "ultravox",
+                                             "whisper"):
         # For some multimodal models, tokenizer will always add bos_token
         # at the beginning of prompt by default, causing hf_processor outputs
         # incorrect token ids. So we need use `add_special_tokens=False` here

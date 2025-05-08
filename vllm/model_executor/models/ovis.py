@@ -333,9 +333,9 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if not mm_data:
-            #    # Avoid warning from HF logger for text-only input
-            prompt_ids = self.info.get_tokenizer().encode(prompt)
-            # prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids) nope
+            # Avoid warning from HF logger for text-only input
+            tokenizer = self.info.get_tokenizer()
+            prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
         processed_outputs = super()._call_hf_processor(
