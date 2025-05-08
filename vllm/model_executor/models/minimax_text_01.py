@@ -426,13 +426,17 @@ class MiniMaxText01LinearAttention(nn.Module):
                                   n_attention_heads, 1, 1)
         return slopes
 
-    def _prefill_and_mix_infer(self, q, k, v, kv_cache, state_indices_tensor):
-        forward_context = get_forward_context()
-        attn_metadata = forward_context.attn_metadata
+    def _prefill_and_mix_infer(self, q, k, v, kv_cache, state_indices_tensor,
+                               attn_metadata):
         hidden = []
         for _prefill_idx in range(getattr(attn_metadata, "num_prefills", 0)):
+            if _prefill_idx >= len(attn_metadata.query_start_loc):
+                break
+            if _prefill_idx >= len(state_indices_tensor):
+                break
             _start = attn_metadata.query_start_loc[_prefill_idx]
             _end = attn_metadata.query_start_loc[_prefill_idx + 1]
+            slot_id = state_indices_tensor[_prefill_idx]
             qs = q[_start:_end].transpose(0, 1).contiguous()
             ks = k[_start:_end].transpose(0, 1).contiguous()
             vs = v[_start:_end].transpose(0, 1).contiguous()
@@ -452,6 +456,10 @@ class MiniMaxText01LinearAttention(nn.Module):
             hidden.append(
                 self._decode_infer(q, k, v, kv_cache, state_indices_tensor,
                                    attn_metadata))
+
+        if not hidden:
+            return torch.empty((0, q.size(-1)), device=q.device, dtype=q.dtype)
+
         hidden = torch.concat(hidden, dim=0).contiguous()
         return hidden
 
