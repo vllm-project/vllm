@@ -5,10 +5,10 @@
 Note: these tests will only pass on L4 GPU.
 """
 import pytest
-from vllm.platforms import current_platform
-from vllm.utils import STR_BACKEND_ENV_VAR
 
 from tests.quantization.utils import is_quant_method_supported
+from vllm.platforms import current_platform
+from vllm.utils import STR_BACKEND_ENV_VAR
 
 from ..utils import check_logprobs_close
 

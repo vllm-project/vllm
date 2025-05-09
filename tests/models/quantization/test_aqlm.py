@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 import pytest
-from vllm.platforms import current_platform
 
 from tests.quantization.utils import is_quant_method_supported
+from vllm.platforms import current_platform
 
 # These ground truth generations were generated using `transformers==4.38.1
 # aqlm==1.1.0 torch==2.2.0`

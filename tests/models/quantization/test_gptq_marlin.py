@@ -11,10 +11,10 @@ up to 3 times to see if we pass.
 import os
 
 import pytest
-from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
-from vllm.platforms import current_platform
 
 from tests.quantization.utils import is_quant_method_supported
+from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
+from vllm.platforms import current_platform
 
 from ..utils import check_logprobs_close
 
