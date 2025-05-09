@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.platforms import current_platform
@@ -14,6 +15,10 @@ from vllm.platforms import current_platform
 if current_platform.get_device_capability() < (9, 0):
     pytest.skip("FP8 Triton requires CUDA 9.0 or higher",
                 allow_module_level=True)
+
+vllm_config = VllmConfig()
+vllm_config.scheduler_config.max_num_seqs = 128
+vllm_config.scheduler_config.max_model_len = 8192
 
 
 def native_w8a8_per_token_matmul(A, B, As, Bs, output_dtype=torch.float16):
@@ -137,20 +142,21 @@ def test_w8a8_fp8_fused_moe(M, N, K, E, topk, dtype, seed):
     w2_s = torch.rand(E, K, device=w2_fp32.device) * factor_for_scale
     score = torch.randn((M, E), dtype=dtype)
 
-    ref_out = torch_w8a8_per_column_moe(a, w1, w2, w1_s, w2_s, score, topk)
-    out = fused_moe(
-        a,
-        w1,
-        w2,
-        score,
-        topk,
-        renormalize=False,
-        use_fp8_w8a8=True,  # using fp8
-        per_channel_quant=True,
-        w1_scale=w1_s,
-        w2_scale=w2_s,
-        block_shape=None,  # Not using block quantization
-    )
+    with set_current_vllm_config(vllm_config):
+        ref_out = torch_w8a8_per_column_moe(a, w1, w2, w1_s, w2_s, score, topk)
+        out = fused_moe(
+            a,
+            w1,
+            w2,
+            score,
+            topk,
+            renormalize=False,
+            use_fp8_w8a8=True,  # using fp8
+            per_channel_quant=True,
+            w1_scale=w1_s,
+            w2_scale=w2_s,
+            block_shape=None,  # Not using block quantization
+        )
 
     # Check results
     rel_diff = (torch.mean(
