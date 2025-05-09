@@ -1,4 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+import importlib
+import os
+import sys
 
 import pytest
 import torch
@@ -10,9 +13,8 @@ from vllm.utils import GiB_bytes, sha256
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 # disable yapf here as it formats differently than isort such that both fail
 # yapf: disable
-from vllm.v1.core.kv_cache_utils import (NONE_HASH, BlockHashType,
-                                         FreeKVCacheBlockQueue, KVCacheBlock,
-                                         PrefixCachingMetrics,
+from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
+                                         KVCacheBlock, PrefixCachingMetrics,
                                          estimate_max_model_len,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens,
@@ -63,9 +65,26 @@ def new_kv_cache_spec(block_size=16,
 
 
 def test_none_hash():
-    assert NONE_HASH is not None
-    assert isinstance(NONE_HASH, int)
-    assert NONE_HASH != 0
+    import vllm.v1.core.kv_cache_utils
+    # case 1: PYTHONHASHSEED is not set, use random
+    old_hash_seed_env = os.getenv('PYTHONHASHSEED')
+    os.unsetenv('PYTHONHASHSEED')
+
+    reloaded_kv_cache_utils = importlib.reload(vllm.v1.core.kv_cache_utils)
+    assert reloaded_kv_cache_utils.NONE_HASH is not None
+    assert isinstance(reloaded_kv_cache_utils.NONE_HASH, int)
+    assert reloaded_kv_cache_utils.NONE_HASH != 0
+    if old_hash_seed_env is not None:
+        os.environ['PYTHONHASHSEED'] = old_hash_seed_env
+
+    # case 2: PYTHONHASHSEED is set, use the seed
+    os.environ['PYTHONHASHSEED'] = 'python hash seed'
+    reloaded_kv_cache_utils = importlib.reload(vllm.v1.core.kv_cache_utils)
+    assert reloaded_kv_cache_utils.NONE_HASH is not None
+    assert isinstance(reloaded_kv_cache_utils.NONE_HASH, int)
+    assert sha256('python hash seed') == reloaded_kv_cache_utils.NONE_HASH
+    if old_hash_seed_env is not None:
+        os.environ['PYTHONHASHSEED'] = old_hash_seed_env
 
 
 def test_kv_cache_block():
