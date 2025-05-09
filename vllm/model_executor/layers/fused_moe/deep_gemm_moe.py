@@ -215,6 +215,42 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                       output=output)
 
 
+def _customized_moe_permute(
+    curr_hidden_states: torch.Tensor,
+    a1q_scale: Optional[torch.Tensor],
+    curr_topk_ids: torch.Tensor,
+    global_num_experts: int,
+    expert_map: Optional[torch.Tensor],
+    block_m: int,
+):
+    fill_invalid_expert = 0
+    topk = curr_topk_ids.shape[1]
+    tokens_in_chunk, _ = curr_hidden_states.shape
+    num_tokens = topk * tokens_in_chunk
+    (permuted_hidden_states, expert_first_token_offset, inv_permuted_idx,
+     permuted_idx, m_indices) = moe_permute(curr_hidden_states, curr_topk_ids,
+                                            topk, global_num_experts,
+                                            expert_map, block_m,
+                                            fill_invalid_expert)
+    permuted_idx = permuted_idx.clamp(max=num_tokens - 1)
+    if a1q_scale is not None:
+        a1q_scale = a1q_scale[permuted_idx // topk]
+    return (permuted_hidden_states, a1q_scale, permuted_idx, m_indices,
+            inv_permuted_idx, expert_first_token_offset)
+
+
+def _customized_moe_unpermute_and_reduce(
+    curr_hidden: torch.Tensor,
+    inv_perm: Optional[torch.Tensor],
+    topk_weight: torch.Tensor,
+    first_token_offset: torch.Tensor,
+) -> torch.Tensor:
+    M, topk = topk_weight.shape
+    output = moe_unpermute(curr_hidden, topk_weight, inv_perm,
+                           first_token_offset, topk)
+    return output
+
+
 def deep_gemm_moe_fp8(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,

@@ -63,19 +63,14 @@ def benchmark_permute(
 
     def run():
         if use_customized_permute:
-            (permuted_hidden_states, first_token_off, inv_perm_idx, m_indices) = (
-                moe_permute(
-                    qhidden_states,
-                    topk_weights=topk_weights,
-                    topk_ids=topk_ids,
-                    token_expert_indices=token_expert_indices,
-                    topk=topk,
-                    n_expert=num_experts,
-                    n_local_expert=num_experts,
-                    expert_map=None,
-                    align_block_size=align_block_size,
-                )
-            )
+            (permuted_hidden_states, first_token_off, inv_perm_idx,
+             permuted_idx, m_indices) = moe_permute(
+                                        qhidden_states,
+                                        topk_ids=topk_ids,
+                                        topk=topk,
+                                        n_expert=num_experts,
+                                        expert_map=None,
+                                        align_block_size=align_block_size)
         else:
             (
                 permuted_hidden_states,
@@ -150,24 +145,20 @@ def benchmark_unpermute(
 
     def prepare():
         if use_customized_permute:
-            (permuted_hidden_states, first_token_off, inv_perm_idx, m_indices) = (
-                moe_permute(
-                    qhidden_states,
-                    topk_weights=topk_weights,
-                    topk_ids=topk_ids,
-                    token_expert_indices=token_expert_indices,
-                    topk=topk,
-                    n_expert=num_experts,
-                    n_local_expert=num_experts,
-                    expert_map=None,
-                    align_block_size=align_block_size,
-                )
-            )
+            (permuted_hidden_states, first_token_off, inv_perm_idx,
+             permuted_idx, m_indices) = moe_permute(
+                                        qhidden_states,
+                                        topk_ids=topk_ids,
+                                        topk=topk,
+                                        n_expert=num_experts,
+                                        expert_map=None,
+                                        align_block_size=align_block_size)
             # convert to fp16/bf16 as gemm output
             return (
                 permuted_hidden_states.to(dtype),
                 first_token_off,
                 inv_perm_idx,
+                permuted_idx,
                 m_indices,
             )
         else:
@@ -191,17 +182,10 @@ def benchmark_unpermute(
 
     def run(input: tuple):
         if use_customized_permute:
-            (permuted_hidden_states, first_token_off, inv_perm_idx, m_indices) = input
-            moe_unpermute(
-                permuted_hidden_states,
-                topk_weights,
-                topk_ids,
-                inv_perm_idx,
-                first_token_off,
-                topk,
-                num_experts,
-                num_experts,
-            )
+            (permuted_hidden_states, first_token_off, inv_perm_idx,
+             permuted_idx, m_indices) = input
+            moe_unpermute(permuted_hidden_states, topk_weights, inv_perm_idx,
+                          first_token_off, topk)
         else:
             (
                 permuted_hidden_states,
