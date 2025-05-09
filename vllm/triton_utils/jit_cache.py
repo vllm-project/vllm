@@ -24,6 +24,7 @@ from triton import KernelInterface
 from triton import __version__ as triton_version
 from triton.runtime.autotuner import OutOfResources
 from triton.runtime.driver import driver
+import torch
 
 from vllm.logger import init_logger
 
@@ -62,10 +63,8 @@ class PreparedKernel:
         launch_metadata,
         launch_enter_hook,
         launch_exit_hook,
-        non_const_arg_names,
-        const_arg_list,
-        assume_const_vals_dict,
         update_only_arg_names,
+        bound_args,
         cache_key,
         device,
     ):
@@ -86,24 +85,25 @@ class PreparedKernel:
         self.launch_enter_hook = launch_enter_hook
         self.launch_exit_hook = launch_exit_hook
 
-        self.non_const_arg_names = non_const_arg_names
-        self.non_const_vals_lst = []
-        self.update_args_index = {}
-        # We construct the list of arguments that are passed to the combiled
-        # kernel beforehand. For the arguments that could change each time the
-        # kernel is called, store a dummy value that will be set each time
-        # __call__ is called. For the arguments that are labelld as assume to
-        # be constant, we skip this step and use the initial stored values.
-        for i, arg_n in enumerate(self.non_const_arg_names):
-            if arg_n in update_only_arg_names:
-                self.update_args_index[arg_n] = i
-                self.non_const_vals_lst.append("dummy_value")
-            else:
-                self.non_const_vals_lst.append(assume_const_vals_dict[arg_n])
+        self.bound_args = bound_args
+        self.update_only_arg_names = update_only_arg_names
+        # self.non_const_vals_lst = []
+        # self.update_args_index = {}
+        # # We construct the list of arguments that are passed to the combiled
+        # # kernel beforehand. For the arguments that could change each time the
+        # # kernel is called, store a dummy value that will be set each time
+        # # __call__ is called. For the arguments that are labelld as assume to
+        # # be constant, we skip this step and use the initial stored values.
+        # for i, arg_n in enumerate(self.non_const_arg_names):
+        #     if arg_n in update_only_arg_names:
+        #         self.update_args_index[arg_n] = i
+        #         self.non_const_vals_lst.append("dummy_value")
+        #     else:
+        #         self.non_const_vals_lst.append(assume_const_vals_dict[arg_n])
 
-        # self.non_const_vals_lst.extend(const_arg_list)
-        # FIXME: why do I need to add dummy values for the constexpr?
-        self.non_const_vals_lst.extend([0 for e in const_arg_list])
+        # # self.non_const_vals_lst.extend(const_arg_list)
+        # # FIXME: why do I need to add dummy values for the constexpr?
+        # self.non_const_vals_lst.extend([torch.Tensor(0) for e in const_arg_list])
 
         self.device = device
         self._init_handles()
@@ -133,8 +133,10 @@ class PreparedKernel:
     def __call__(self, *args, **kwargs):
         assert len(args) == 0
 
-        for arg_n, idx in self.update_args_index.items():
-            self.non_const_vals_lst[idx] = kwargs[arg_n]
+        # for arg_n, idx in self.update_args_index.items():
+        #     self.non_const_vals_lst[idx] = kwargs[arg_n]
+        for arg_n in self.update_only_arg_names:
+            self.bound_args[arg_n] = kwargs[arg_n]
 
         if self.cache_launch_grid:
             grid_0, grid_1, grid_2 = self.concrete_grid
@@ -160,7 +162,8 @@ class PreparedKernel:
             self.launch_metadata,
             self.launch_enter_hook,
             self.launch_exit_hook,
-            *self.non_const_vals_lst,
+            # *self.non_const_vals_lst,
+            *self.bound_args.values(),
         )
 
     def get_key(self):
@@ -218,6 +221,14 @@ class JitCache(KernelInterface):
         more or less redo what JITFunction.run is doing
         (c.f. triton/python/triton/runtime/jit.py:565)
         """
+        import debugpy
+        import os
+
+        # host_addr = os.environ.get("TRITON_BACKEND_DEBUG_ADDR", "0.0.0.0")
+        # pdb_port = int(os.environ.get("TRITON_BACKEND_DEBUG_PORT", "5679"))
+        # debugpy.listen((host_addr, pdb_port))
+        # print(f"[debugpy] listening at {host_addr}:{pdb_port}; wait for client...\n")
+        # debugpy.wait_for_client()
 
         kwargs["warmup"] = True
         compile_start = time.time()
@@ -279,10 +290,8 @@ class JitCache(KernelInterface):
             launch_metadata,
             self.fn.CompiledKernel.launch_enter_hook,
             self.fn.CompiledKernel.launch_exit_hook,
-            non_const_arg_names,
-            const_arg_list,
-            assume_const_vals_dict,
             update_only_arg_names,
+            bound_args,
             self.cache_index_func(kwargs),
             device,
         )
