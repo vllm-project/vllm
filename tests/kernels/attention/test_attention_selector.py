@@ -102,7 +102,10 @@ def test_env(
                                                    block_size,
                                                    False,
                                                    use_mla=use_mla)
-                        assert backend.get_name() == name
+                        if use_v1 and name != "TRITON_MLA":
+                            assert backend.get_name() == f"{name}_VLLM_V1"
+                        else:
+                            assert backend.get_name() == name
                     else:
                         with pytest.raises(ValueError) as exc_info:
                             get_attn_backend(16,

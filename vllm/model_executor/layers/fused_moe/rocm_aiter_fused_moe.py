@@ -145,7 +145,7 @@ def rocm_aiter_fmoe_fp8_blockscale_g1u1_fake(
         block_shape: List[int],
         smooth_scale: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-    return torch.empty_like(a1, dtype=torch.bf16)
+    return torch.empty_like(a1, dtype=hidden_states_dtype)
 
 
 def rocm_aiter_asm_moe_impl(hidden_states: torch.Tensor,
