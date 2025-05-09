@@ -75,4 +75,6 @@ else
     aws s3 cp ./nightly/vllm/vllm/index.html "s3://vllm-wheels/nightly/vllm/index.html"
 fi
 
+# Upload wheel and index to versioned path
 aws s3 cp "$wheel" "s3://vllm-wheels/$version/"
+aws s3 cp index.html "s3://vllm-wheels/$version/vllm/index.html"
