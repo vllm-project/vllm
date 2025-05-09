@@ -168,10 +168,15 @@ class RocmPlatform(Platform):
                     raise ValueError(
                         f" The selected backend, {selected_backend.name},"
                         f"does not support block size {block_size}.")
-            elif selected_backend == _Backend.ROCM_AITER_MLA:
+            elif selected_backend == _Backend.ROCM_AITER_MLA \
+                or selected_backend == _Backend.ROCM_AITER_MLA_VLLM_V1:
                 if block_size == 1:
-                    logger.info("Using AITER MLA backend.")
-                    return "vllm.attention.backends.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
+                    if use_v1:
+                        logger.info("Using AITER MLA backend on V1 engine.")
+                        return "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
+                    else:
+                        logger.info("Using AITER MLA backend")
+                        return "vllm.attention.backends.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
                 else:
                     raise ValueError(
                         f" The selected backend, {selected_backend.name},"
