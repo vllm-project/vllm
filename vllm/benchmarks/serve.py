@@ -38,22 +38,21 @@ from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
 
 from vllm.benchmarks.endpoint_request_func import (ASYNC_REQUEST_FUNCS,
-                                                  OPENAI_COMPATIBLE_BACKENDS,
-                                                  RequestFuncInput,
-                                                  RequestFuncOutput)
+                                                   OPENAI_COMPATIBLE_BACKENDS,
+                                                   RequestFuncInput,
+                                                   RequestFuncOutput)
 
 try:
     from vllm.transformers_utils.tokenizer import get_tokenizer
 except ImportError:
     from vllm.benchmarks.endpoint_request_func import get_tokenizer
 
-from vllm.benchmarks.datasets import (AIMODataset, BurstGPTDataset,
+from vllm.benchmarks.datasets import (AIMODataset, ASRDataset, BurstGPTDataset,
                                       ConversationDataset, HuggingFaceDataset,
-                                      InstructCoderDataset, RandomDataset,
+                                      InstructCoderDataset, MTBenchDataset,
+                                      NextEditPredictionDataset, RandomDataset,
                                       SampleRequest, ShareGPTDataset,
-                                      SonnetDataset, VisionArenaDataset,
-                                      MTBenchDataset, NextEditPredictionDataset,
-                                      ASRDataset,)
+                                      SonnetDataset, VisionArenaDataset)
 from vllm.benchmarks.utils import (convert_to_pytorch_benchmark_format,
                                    write_to_json)
 
@@ -536,6 +535,7 @@ def save_to_pytorch_benchmark_format(args: argparse.Namespace,
         # Don't use json suffix here as we don't want CI to pick it up
         pt_file = f"{os.path.splitext(file_name)[0]}.pytorch.json"
         write_to_json(pt_file, pt_records)
+
 
 def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
