@@ -62,6 +62,16 @@ class CarDescription(BaseModel):
     car_type: CarType
 
 
+def _load_json(s: str, backend: str) -> str:
+    if backend != "xgrammar":
+        return json.loads(s)
+
+    # xgrammar specific workarounds
+    # https://github.com/mlc-ai/xgrammar/issues/286
+    s = re.sub(r'[\x00-\x1F\x7F-\xFF]', '', s)
+    return json.loads(s)
+
+
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
     "model_name, guided_decoding_backend, tokenizer_mode, speculative_config",
