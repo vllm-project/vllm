@@ -1063,7 +1063,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 softmax_scale,
                 None,  # bias
             )
-        if is_vllm_fa:
+        elif is_vllm_fa:
             attn_out = self.flash_attn_varlen_func(
                 q=q,
                 k=k,
