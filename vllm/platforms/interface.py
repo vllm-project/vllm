@@ -39,7 +39,8 @@ class _Backend(enum.Enum):
     TRITON_ATTN_VLLM_V1 = enum.auto()
     XFORMERS = enum.auto()
     ROCM_FLASH = enum.auto()
-    ROCM_AITER_MLA = enum.auto()
+    ROCM_AITER_MLA = enum.auto()  # Supported by V1
+    ROCM_AITER_MLA_VLLM_V1 = enum.auto()
     TORCH_SDPA = enum.auto()
     FLASHINFER = enum.auto()
     TRITON_MLA = enum.auto()  # Supported by V1
@@ -120,6 +121,14 @@ class Platform:
     supported_quantization: list[str] = []
 
     additional_env_vars: list[str] = []
+
+    @property
+    def supported_dtypes(self) -> list[torch.dtype]:
+        """Returns the supported dtypes for the current platform."""
+        # Be careful with the order of the dtypes. The first dtype will
+        # be used as the default dtype fallback for the current platform,
+        # when encountering unsupported dtypes in "auto" dtype.
+        return [torch.bfloat16, torch.float16, torch.float32]
 
     def is_cuda(self) -> bool:
         return self._enum == PlatformEnum.CUDA

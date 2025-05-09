@@ -48,7 +48,8 @@ def test_selector(monkeypatch: pytest.MonkeyPatch):
         m.setenv(STR_BACKEND_ENV_VAR, "ROCM_AITER_MLA")
         backend = get_attn_backend(576, torch.bfloat16, "auto", 1, False,
                                    False, True)
-        assert backend.get_name() == "ROCM_AITER_MLA"
+        assert (backend.get_name() == "ROCM_AITER_MLA"
+                or backend.get_name() == "ROCM_AITER_MLA_VLLM_V1")
 
         # If attention backend is None
         # If use_mla is true
@@ -58,4 +59,5 @@ def test_selector(monkeypatch: pytest.MonkeyPatch):
         m.setenv("VLLM_ROCM_USE_AITER", "1")
         backend = get_attn_backend(576, torch.bfloat16, "auto", 1, False,
                                    False, True)
-        assert backend.get_name() == "ROCM_AITER_MLA"
+        assert (backend.get_name() == "ROCM_AITER_MLA"
+                or backend.get_name() == "ROCM_AITER_MLA_VLLM_V1")

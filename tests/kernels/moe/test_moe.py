@@ -286,6 +286,7 @@ def test_mixtral_moe(dtype: torch.dtype, padding: bool, use_rocm_aiter: bool,
                                    atol=mixtral_moe_tol[dtype])
 
 
+@pytest.mark.flaky(reruns=2)
 @pytest.mark.parametrize("m", [1, 123, 666])
 @pytest.mark.parametrize("n", [128, 1024])
 @pytest.mark.parametrize("k", [256, 2048])

@@ -7,6 +7,7 @@ anything-llm
 bentoml
 cerebrium
 chatbox
+dify
 dstack
 helm
 lws
