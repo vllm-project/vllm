@@ -232,7 +232,7 @@ def deserialize():
                   load_format="tensorizer",
                   tensor_parallel_size=args.tensor_parallel_size,
                   model_loader_extra_config=tensorizer_config,
-                  enable_lora=True
+                  enable_lora=True,
         )
         sampling_params = SamplingParams(
             temperature=0,
