@@ -186,9 +186,14 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         kv_buffer = kv_c_and_k_pe_cache.unsqueeze(2)
 
-        aiter_mla_decode_fwd(q, kv_buffer, o, self.scale,
+        aiter_mla_decode_fwd(q,
+                             kv_buffer,
+                             o,
+                             attn_metadata.qo_indptr,
+                             attn_metadata.max_query_len,
                              attn_metadata.decode.paged_kv_indptr,
                              attn_metadata.decode.paged_kv_indices,
-                             attn_metadata.decode.paged_kv_last_page_len)
+                             attn_metadata.decode.paged_kv_last_page_len,
+                             sm_scale=self.scale)
 
         return self._v_up_proj(o)
