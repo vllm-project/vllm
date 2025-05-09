@@ -380,7 +380,6 @@ class MLACommonMetadataBuilder(Generic[M]):
                 dtype=model_config.dtype,
                 device=runner.device,
             )
-            self.page_size = self.kv_cache_spec.block_size
         self.block_table = block_table
 
     def reorder_batch(self, input_batch: "InputBatch",
