@@ -127,7 +127,8 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
                 intermediate_size=config.shared_expert_intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                reduce_results=False,
+                reduce_results=self.experts.must_reduce_shared_expert_outputs(
+                ),
             )
         else:
             self.shared_expert = None
