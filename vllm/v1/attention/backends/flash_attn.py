@@ -18,6 +18,7 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import cdiv
+from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -290,6 +291,7 @@ class FlashAttentionMetadataBuilder:
 
     def __init__(self, runner: "GPUModelRunner"):
         model_config = runner.model_config
+        compilation_config = runner.vllm_config.compilation_config
 
         self.runner = runner
         self.num_heads_q = model_config.get_num_attention_heads(
@@ -299,7 +301,14 @@ class FlashAttentionMetadataBuilder:
         self.headdim = model_config.get_head_size()
         self.page_size = self.runner.block_size
 
-        self.aot_schedule = (get_flash_attn_version() == 3)
+        if get_flash_attn_version() == 3:
+            self.aot_schedule = not compilation_config.full_cuda_graph
+            if not self.aot_schedule:
+                logger.warning(
+                    "AOT Schedule is disabled when using full_cuda_graph")
+        else:
+            self.aot_schedule = False
+
         # Sliding window size to be used with the AOT scheduler will be
         # populated on first build() call.
         self.aot_sliding_window: Optional[tuple[int, int]] = None
@@ -309,17 +318,14 @@ class FlashAttentionMetadataBuilder:
         return False
 
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int):
+              common_prefix_len: int,
+              common_attn_metadata: CommonAttentionMetadata):
         max_seq_len = self.runner.seq_lens_np[:num_reqs].max()
-        query_start_loc_cpu = self.runner.query_start_loc_cpu[:num_reqs + 1]
-        query_start_loc = query_start_loc_cpu.to(self.runner.device,
-                                                 non_blocking=True)
-        seq_lens_cpu = self.runner.seq_lens_cpu[:num_reqs]
-        seq_lens = seq_lens_cpu.to(self.runner.device, non_blocking=True)
+        query_start_loc = common_attn_metadata.query_start_loc
+        seq_lens = common_attn_metadata.seq_lens
         block_table = (
             self.runner.input_batch.block_table.get_device_tensor()[:num_reqs])
-        slot_mapping = self.runner.slot_mapping_cpu[:num_actual_tokens].to(
-            self.runner.device, non_blocking=True).long()
+        slot_mapping = self.runner.slot_mapping[:num_actual_tokens]
 
         if self.aot_sliding_window is None:
             self.aot_sliding_window = (-1, -1)

@@ -123,10 +123,11 @@ def rocm_aiter_fmoe_fp8_blockscale_g1u1_impl(
 
     fmoe_fp8_blockscale_g1u1(out_asm, a1, w1, w2, sorted_token_ids,
                              sorted_weight_buf, sorted_expert_ids,
-                             num_valid_ids, topk, w1_scale.view(local_E, -1),
-                             w2_scale.view(local_E, -1),
-                             a1_scale.t().contiguous(), *block_shape,
-                             smooth_scale)
+                             num_valid_ids, topk,
+                             a1_scale.t().contiguous(),
+                             w1_scale.view(local_E, -1),
+                             w2_scale.view(local_E,
+                                           -1), *block_shape, smooth_scale)
 
     return out_asm
 
@@ -145,7 +146,7 @@ def rocm_aiter_fmoe_fp8_blockscale_g1u1_fake(
         block_shape: List[int],
         smooth_scale: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-    return torch.empty_like(a1, dtype=torch.bf16)
+    return torch.empty_like(a1, dtype=hidden_states_dtype)
 
 
 def rocm_aiter_asm_moe_impl(hidden_states: torch.Tensor,
