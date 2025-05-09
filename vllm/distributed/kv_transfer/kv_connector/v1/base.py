@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Optional
 import torch
 
 from vllm.logger import init_logger
+from vllm.sampling_params import KVTransferParams
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -198,7 +199,7 @@ class KVConnectorBase_V1(ABC):
         Returns:
             the number of tokens that can be loaded from the 
             external KV cache beyond what is already computed.
-            true if the external KV cache tokens will be loaded
+            True if the external KV cache tokens will be loaded
             asynchronously (between scheduler steps).
         """
         pass
@@ -225,3 +226,22 @@ class KVConnectorBase_V1(ABC):
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
         pass
+
+    # TODO: KVTransferParams is currently specific to NixlConnector,
+    #  make it generic
+    def request_finished(
+        self,
+        request: "Request",
+        blocks: "KVCacheBlocks",
+    ) -> tuple[bool, Optional[KVTransferParams]]:
+        """
+        Called when a request has finished, before its blocks are freed.
+
+        Returns:
+            True if the request is being saved/sent asynchronously and blocks
+            should not be freed until the request_id is returned from
+            get_finished().
+            Optional KVTransferParams to be included in the request outputs
+            returned by the engine.
+        """
+        return False, None
