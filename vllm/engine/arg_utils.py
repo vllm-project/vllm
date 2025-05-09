@@ -1463,7 +1463,7 @@ class EngineArgs:
             device_memory = 0
 
         # NOTE(Kuntai): Setting large `max_num_batched_tokens` for A100 reduces
-        # throughput, see PR # ??? for more details.
+        # throughput, see PR #17885 for more details.
         # So here we do an extra device name check to prevent such regression.
         if device_memory >= 70 * GiB_bytes and "a100" not in device_name:
             # For GPUs like H100 and MI300x, use larger default values.
