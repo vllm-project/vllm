@@ -236,12 +236,11 @@ def test_gptq_marlin_gemm(
     if quant_type == scalar_types.float4_e2m1f:
         if group_size != 16 or act_order:
             return
-        w_ref, marlin_q_w, marlin_s = rand_marlin_weight_fp4_like(
+        w_ref, marlin_q_w, marlin_s, marlin_s2 = rand_marlin_weight_fp4_like(
             b_weight.T, group_size)
         g_idx = None
         sort_indices = None
         marlin_zp = None
-        marlin_s2 = None
     elif quant_type == scalar_types.float8_e4m3fn:
         if group_size not in [-1, 128]:
             return

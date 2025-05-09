@@ -251,6 +251,9 @@ def rand_marlin_weight_fp4_like(weight, group_size):
     device = weight.device
 
     scales = weight.view(size_n, -1, group_size).abs().max(-1)[0] / 6
+    global_scale = scales.max() / 448
+    scales = (scales / global_scale).to(torch.float8_e4m3fn)
+
     fp4_weight = torch.randint(0,
                                256, (size_n, size_k // 2),
                                dtype=torch.uint8,
@@ -268,8 +271,9 @@ def rand_marlin_weight_fp4_like(weight, group_size):
 
     weight_ref = torch.cat(
         [fp4_weight_part_2.unsqueeze(2),
-         fp4_weight_part_1.unsqueeze(2)], 2).view(
-             size_n, size_k) * scales.repeat_interleave(group_size, 1)
+         fp4_weight_part_1.unsqueeze(2)], 2).view(size_n, size_k)
+    weight_ref = weight_ref * global_scale.to(weight.dtype) * \
+        scales.repeat_interleave(group_size, 1).to(weight.dtype)
 
     marlin_qweight = ops.gptq_marlin_repack(
         b_q_weight=fp4_weight.view(torch.int32).T.contiguous(),
@@ -279,11 +283,20 @@ def rand_marlin_weight_fp4_like(weight, group_size):
         num_bits=4,
     )
 
-    marlin_scales = marlin_permute_scales(s=scales.T,
+    marlin_scales = marlin_permute_scales(s=scales.T.to(weight.dtype),
                                           size_k=size_k,
                                           size_n=size_n,
                                           group_size=group_size)
+    marlin_scales = marlin_scales.view(marlin_scales.size(0) // 2, 2, -1, 8)
+    marlin_scales = marlin_scales.permute(0, 2, 1, 3).reshape(
+        marlin_scales.size(0) * 2, -1)
+    marlin_scales = marlin_scales.view(-1, 4)[:, [0, 2, 1, 3]].view(
+        marlin_scales.size(0), -1).to(torch.float8_e4m3fn)
+    marlin_scales = ops.marlin_fp8_scales_preprocess(marlin_scales)
 
-    marlin_scales = fp4_fused_exponent_bias_into_scales(marlin_scales)
+    if weight.dtype == torch.half:
+        global_scale = global_scale * (2.0**7)
+    elif weight.dtype == torch.bfloat16:
+        global_scale = global_scale * (2.0**119)
 
-    return weight_ref.T, marlin_qweight, marlin_scales
+    return weight_ref.T, marlin_qweight, marlin_scales, global_scale

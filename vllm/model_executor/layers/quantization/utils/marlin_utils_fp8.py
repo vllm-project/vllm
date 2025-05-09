@@ -293,7 +293,7 @@ def pack_fp8_to_int32(fp8_tensor: torch.Tensor,
     return int32_tensor.T.contiguous() if size_k_first else int32_tensor
 
 
-def marlin_quant_fp8_torch(weight, group_size):
+def marlin_quant_fp8_torch(weight, group_size, is_moe=False):
     size_n, size_k = weight.shape
     device = weight.device
 
@@ -321,5 +321,7 @@ def marlin_quant_fp8_torch(weight, group_size):
                                           size_k=size_k,
                                           size_n=size_n,
                                           group_size=group_size)
+    if not is_moe:
+        marlin_scales = fp8_fused_exponent_bias_into_scales(marlin_scales)
 
     return weight_ref.T, marlin_qweight, marlin_scales
