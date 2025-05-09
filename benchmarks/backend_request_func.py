@@ -235,12 +235,17 @@ async def async_request_openai_completions(
             "model": request_func_input.model,
             "prompt": request_func_input.prompt,
             "temperature": 0.0,
-            "best_of": request_func_input.best_of,
             "max_tokens": request_func_input.output_len,
             "logprobs": request_func_input.logprobs,
             "stream": True,
-            "ignore_eos": request_func_input.ignore_eos,
         }
+        # Temporary workaround! This is already fixed on latest vLLM/main.
+        # Just run it over when rebasing.
+        if request_func_input.best_of is not None and request_func_input.best_of > 1:
+            payload["best_of"] = request_func_input.best_of
+        if request_func_input.ignore_eos:
+            payload["ignore_eos"] = request_func_input.ignore_eos
+
         headers = {
             "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"
         }
