@@ -23,9 +23,11 @@ class XlaQKVParallelLinear(nn.Module):
                  mesh: Optional["xs.Mesh"] = None):
         super().__init__()
         assert isinstance(qkv_linear, QKVParallelLinear)
-        assert qkv_linear.bias is None, "Bias is not supported for QKVLinear"
-        assert qkv_linear.return_bias is False, \
-            "Return bias is not supported for QKVLinear"
+        # assert qkv_linear.bias is None, "Bias is not supported for QKVLinear"
+        # assert qkv_linear.return_bias is False, \
+        #     "Return bias is not supported for QKVLinear"
+        self.skip_bias_add = qkv_linear.skip_bias_add
+        self.return_bias = qkv_linear.return_bias
         assert qkv_linear.tp_size == 1, "TP > 1 is only supported under SPMD."
         self._load_and_shard_weight_from_qkv_linear(qkv_linear)
         if mesh is not None:
@@ -38,6 +40,13 @@ class XlaQKVParallelLinear(nn.Module):
         xs.mark_sharding(self.q_weight, mesh, ('x', None))
         xs.mark_sharding(self.k_weight, mesh, ('x', None))
         xs.mark_sharding(self.v_weight, mesh, ('x', None))
+        if self.q_bias is not None:
+            self.q_bias = Parameter(self.q_bias.to('xla'), requires_grad=False)
+            xs.mark_sharding(self.q_bias, mesh, ('x', ))
+            self.k_bias = Parameter(self.k_bias.to('xla'), requires_grad=False)
+            xs.mark_sharding(self.k_bias, mesh, ('x', ))
+            self.v_bias = Parameter(self.v_bias.to('xla'), requires_grad=False)
+            xs.mark_sharding(self.v_bias, mesh, ('x', ))
 
     def _load_and_shard_weight_from_qkv_linear(self, qkv_linear: nn.Module):
         q_proj_size, k_proj_size, _ = qkv_linear.output_sizes
@@ -53,10 +62,31 @@ class XlaQKVParallelLinear(nn.Module):
         self.register_parameter("k_weight", k_weight)
         self.register_parameter("v_weight", v_weight)
 
+        if qkv_linear.bias is not None:
+            q_bias = Parameter(qkv_linear.bias[:q_proj_size],
+                               requires_grad=False)
+            k_bias = Parameter(qkv_linear.bias[q_proj_size:q_proj_size +
+                                               k_proj_size],
+                               requires_grad=False)
+            v_bias = Parameter(qkv_linear.bias[q_proj_size + k_proj_size:],
+                               requires_grad=False)
+            self.register_parameter("q_bias", q_bias)
+            self.register_parameter("k_bias", k_bias)
+            self.register_parameter("v_bias", v_bias)
+        else:
+            self.register_parameter("q_bias", None)
+            self.register_parameter("k_bias", None)
+            self.register_parameter("v_bias", None)
+
     def forward(self, input):
-        q_proj = F.linear(input, self.q_weight)
-        k_proj = F.linear(input, self.k_weight)
-        v_proj = F.linear(input, self.v_weight)
+        # Same forward functionality as QKVParallelLinear, but doing qkv porj
+        # separately.
+        q_bias = self.q_bias if not self.skip_bias_add else None
+        k_bias = self.k_bias if not self.skip_bias_add else None
+        v_bias = self.v_bias if not self.skip_bias_add else None
+        q_proj = F.linear(input, self.q_weight, q_bias)
+        k_proj = F.linear(input, self.k_weight, k_bias)
+        v_proj = F.linear(input, self.v_weight, v_bias)
         # The q/k/v projections will be split outside of the QKVParallelLinear.
         # Because we are replacing XlaQKVParallelLinear with the
         # QKVParallelLinear, we need to concatenate q, k, and v projections to
@@ -65,7 +95,11 @@ class XlaQKVParallelLinear(nn.Module):
         # The concat and the following split will be noop, and should be
         # optimized away by the compiler.
         qkv_proj = torch.cat([q_proj, k_proj, v_proj], dim=-1)
-        return qkv_proj
+        output_bias = torch.cat([q_bias, k_bias, v_bias], dim=-1) if \
+                            self.skip_bias_add else None
+        if not self.return_bias:
+            return qkv_proj
+        return qkv_proj, output_bias
 
 
 def wrap_column_parallel_linear(layer: torch.nn.Module,
@@ -85,7 +119,16 @@ def wrap_row_parallel_linear(layer: torch.nn.Module, mesh) -> torch.nn.Module:
     return layer
 
 
+def wrap_qkv_parallel_linear(layer: torch.nn.Module, mesh) -> torch.nn.Module:
+    # TODO: Should use FQN to check class type.
+    assert isinstance(layer, QKVParallelLinear)
+    xla_layer = XlaQKVParallelLinear(layer, mesh)
+    logger.info(f"Applied qkv parallel sharding to {layer}")
+    return xla_layer
+
+
 MODULE_TYPE_TO_WRAPPING_FUNC = OrderedDict([
+    (QKVParallelLinear, wrap_qkv_parallel_linear),
     (ColumnParallelLinear, wrap_column_parallel_linear),
     (RowParallelLinear, wrap_row_parallel_linear),
 ])
@@ -109,7 +152,12 @@ def shard_model(model: torch.nn.Module, mesh: "xs.Mesh") -> None:
                 assert parent is not None and name is not None, (
                     "Top Level module is not expected to be wrapped.")
                 if parent is not None and name is not None:
-                    setattr(parent, name, wrapped_module)
+                    if wrapped_module is not module:
+                        # Wrapped module and module are different py object.
+                        # The original module should be replaced by the
+                        # wrapped_module.
+                        logger.info(f"replace {module} with {wrapped_module}")
+                        setattr(parent, name, wrapped_module)
 
                 module = wrapped_module
                 break

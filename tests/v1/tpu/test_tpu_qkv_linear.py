@@ -56,32 +56,45 @@ def _get_spmd_mesh():
     return MESH
 
 
+@pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize("mesh", [None, _get_spmd_mesh()])
-def test_xla_qkv_linear(mesh):
+@pytest.mark.parametrize("device", ['cpu', 'xla'])
+@torch.no_grad()
+def test_xla_qkv_linear(bias, mesh, device):
 
     qkv_linear = QKVParallelLinear(
         hidden_size=4096,
         head_size=128,
         total_num_heads=32,
         total_num_kv_heads=8,
-        bias=False,
+        bias=bias,
         params_dtype=torch.bfloat16,
         return_bias=False,
     )
 
-    qkv_linear.weight.data = torch.rand_like(qkv_linear.weight.data)
+    qkv_linear.weight.data = torch.rand_like(qkv_linear.weight.data) / 10
+    if bias:
+        qkv_linear.bias.data = torch.rand_like(qkv_linear.bias.data)
 
     xla_qkv_linear = XlaQKVParallelLinear(qkv_linear, mesh=mesh)
 
-    qkv_linear = qkv_linear.to('xla')
-    xla_qkv_linear = xla_qkv_linear.to('xla')
+    qkv_linear = qkv_linear.to(device)
+    xla_qkv_linear = xla_qkv_linear.to(device)
 
     # Create an input tensor
-    input_tensor = torch.randn(10, 4096, dtype=torch.bfloat16).to('xla')
+    input_tensor = torch.rand(10, 4096, dtype=torch.bfloat16) / 10
+    input_tensor = input_tensor.to(device)
 
     # Forward pass
     output = qkv_linear(input_tensor)
 
     xla_output = xla_qkv_linear(input_tensor)
 
+    print(f"check any result is nan {torch.any(torch.isnan(output.cpu()))}")
+    print(
+        f"check any result is nan {torch.any(torch.isnan(xla_output.cpu()))}")
+    print(f"output.cpu(): {output.cpu()}")
+    print(f"xla_output.cpu(): {xla_output.cpu()}")
+
+    print(torch.max(torch.abs(output.cpu() - xla_output.cpu())))
     assert torch.allclose(output.cpu(), xla_output.cpu())
