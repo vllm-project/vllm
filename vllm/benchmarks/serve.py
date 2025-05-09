@@ -37,7 +37,7 @@ import numpy as np
 from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
 
-from vllm.benchmarks.backend_request_func import (ASYNC_REQUEST_FUNCS,
+from vllm.benchmarks.endpoint_request_func import (ASYNC_REQUEST_FUNCS,
                                                   OPENAI_COMPATIBLE_BACKENDS,
                                                   RequestFuncInput,
                                                   RequestFuncOutput)
@@ -45,13 +45,15 @@ from vllm.benchmarks.backend_request_func import (ASYNC_REQUEST_FUNCS,
 try:
     from vllm.transformers_utils.tokenizer import get_tokenizer
 except ImportError:
-    from vllm.benchmarks.backend_request_func import get_tokenizer
+    from vllm.benchmarks.endpoint_request_func import get_tokenizer
 
 from vllm.benchmarks.datasets import (AIMODataset, BurstGPTDataset,
                                       ConversationDataset, HuggingFaceDataset,
                                       InstructCoderDataset, RandomDataset,
                                       SampleRequest, ShareGPTDataset,
-                                      SonnetDataset, VisionArenaDataset)
+                                      SonnetDataset, VisionArenaDataset,
+                                      MTBenchDataset, NextEditPredictionDataset,
+                                      ASRDataset,)
 from vllm.benchmarks.utils import (convert_to_pytorch_benchmark_format,
                                    write_to_json)
 

@@ -27,6 +27,8 @@ from io import BytesIO
 from typing import Any, Callable, Optional, Union
 
 import numpy as np
+import pandas as pd
+from datasets import load_dataset
 from PIL import Image
 from transformers import PreTrainedTokenizerBase
 
@@ -62,6 +64,7 @@ class SampleRequest:
 
 class BenchmarkDataset(ABC):
     DEFAULT_SEED = 0
+    IS_MULTIMODAL = False
 
     def __init__(
         self,
@@ -70,9 +73,7 @@ class BenchmarkDataset(ABC):
     ) -> None:
         """
         Initialize the BenchmarkDataset with an optional dataset path and random
-        seed.  
-        
-        Args:
+        seed.  Args:
             dataset_path (Optional[str]): Path to the dataset. If None, it
             indicates that a default or random dataset might be used.
             random_seed (int): Seed value for reproducible shuffling or
@@ -314,13 +315,15 @@ class RandomDataset(BenchmarkDataset):
         )
 
         vocab_size = tokenizer.vocab_size
+        num_special_tokens = tokenizer.num_special_tokens_to_add()
+        real_input_len = input_len - num_special_tokens
 
         prefix_token_ids = (np.random.randint(
             0, vocab_size, size=prefix_len).tolist() if prefix_len > 0 else [])
 
         # New sampling logic: [X * (1 - b), X * (1 + b)]
-        input_low = int(input_len * (1 - range_ratio))
-        input_high = int(input_len * (1 + range_ratio))
+        input_low = int(real_input_len * (1 - range_ratio))
+        input_high = int(real_input_len * (1 + range_ratio))
         output_low = int(output_len * (1 - range_ratio))
         output_high = int(output_len * (1 + range_ratio))
 
@@ -343,6 +346,17 @@ class RandomDataset(BenchmarkDataset):
                          vocab_size).tolist()
             token_sequence = prefix_token_ids + inner_seq
             prompt = tokenizer.decode(token_sequence)
+            # After decoding the prompt we have to encode and decode it again.
+            # This is done because in some cases N consecutive tokens
+            # give a string tokenized into != N number of tokens.
+            # For example for GPT2Tokenizer:
+            # [6880, 6881] -> ['Ġcalls', 'here'] ->
+            # [1650, 939, 486] -> ['Ġcall', 'sh', 'ere']
+            # To avoid uncontrolled change of the prompt length,
+            # the encoded sequence is truncated before being decode again.
+            re_encoded_sequence = tokenizer.encode(
+                prompt, add_special_tokens=False)[:input_lens[i]]
+            prompt = tokenizer.decode(re_encoded_sequence)
             total_input_len = prefix_len + int(input_lens[i])
             requests.append(
                 SampleRequest(
@@ -528,13 +542,6 @@ class BurstGPTDataset(BenchmarkDataset):
         if self.dataset_path is None:
             raise ValueError("dataset_path must be provided for loading data.")
 
-        try:
-            import pandas as pd
-        except ImportError as e:
-            raise ImportError(
-                "Pandas is required for BurstGPTDataset. Please install it "
-                "using `pip install pandas`.") from e
-
         df = pd.read_csv(self.dataset_path)
         # Filter to keep only GPT-4 rows.
         gpt4_df = df[df["Model"] == "GPT-4"]
@@ -609,13 +616,6 @@ class HuggingFaceDataset(BenchmarkDataset):
 
     def load_data(self) -> None:
         """Load data from HuggingFace datasets."""
-        try:
-            from datasets import load_dataset
-        except ImportError as e:
-            raise ImportError(
-                "Hugging Face datasets library is required for this dataset. "
-                "Please install it using `pip install datasets`.") from e
-
         self.data = load_dataset(
             self.dataset_path,
             name=self.dataset_subset,
@@ -635,6 +635,7 @@ class ConversationDataset(HuggingFaceDataset):
     SUPPORTED_DATASET_PATHS = {
         'lmms-lab/LLaVA-OneVision-Data', 'Aeala/ShareGPT_Vicuna_unfiltered'
     }
+    IS_MULTIMODAL = True
 
     def sample(self,
                tokenizer: PreTrainedTokenizerBase,
@@ -699,6 +700,7 @@ class VisionArenaDataset(HuggingFaceDataset):
         "lmarena-ai/vision-arena-bench-v0.1":
         lambda x: x["turns"][0][0]["content"]
     }
+    IS_MULTIMODAL = True
 
     def sample(
         self,
@@ -771,6 +773,60 @@ class InstructCoderDataset(HuggingFaceDataset):
             if len(sampled_requests) >= num_requests:
                 break
             prompt = f"{item['instruction']}:\n{item['input']}"
+            prompt_len = len(tokenizer(prompt).input_ids)
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                ))
+        self.maybe_oversample_requests(sampled_requests, num_requests)
+        return sampled_requests
+
+
+# -----------------------------------------------------------------------------
+# MT-Bench Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class MTBenchDataset(HuggingFaceDataset):
+    """
+    MT-Bench Dataset.
+    https://huggingface.co/datasets/philschmid/mt-bench
+
+    We create a single turn dataset for MT-Bench. 
+    This is similar to Spec decoding benchmark setup in vLLM
+    https://github.com/vllm-project/vllm/blob/9d98ab5ec/examples/offline_inference/eagle.py#L14-L18
+    """ # noqa: E501
+
+    DEFAULT_OUTPUT_LEN = 256  # avg len used in SD bench in vLLM
+    SUPPORTED_DATASET_PATHS = {
+        "philschmid/mt-bench",
+    }
+
+    def sample(self,
+               tokenizer: PreTrainedTokenizerBase,
+               num_requests: int,
+               output_len: Optional[int] = None,
+               enable_multimodal_chat: bool = False,
+               **kwargs) -> list:
+        output_len = (output_len
+                      if output_len is not None else self.DEFAULT_OUTPUT_LEN)
+        sampled_requests = []
+
+        for item in self.data:
+            if len(sampled_requests) >= num_requests:
+                break
+            prompt = item['turns'][0]
+
+            # apply template
+            prompt = tokenizer.apply_chat_template([{
+                "role": "user",
+                "content": prompt
+            }],
+                                                   add_generation_prompt=True,
+                                                   tokenize=False)
+
             prompt_len = len(tokenizer(prompt).input_ids)
             sampled_requests.append(
                 SampleRequest(
@@ -917,3 +973,80 @@ class NextEditPredictionDataset(HuggingFaceDataset):
                 break
         self.maybe_oversample_requests(samples, num_requests)
         return samples
+
+
+# -----------------------------------------------------------------------------
+# ASR Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class ASRDataset(HuggingFaceDataset):
+    """
+    Dataset class for processing a ASR dataset for transcription.
+    Tested on the following set:
+
+    +----------------+----------------------------------------+--------------------------+-----------------------------+
+    | Dataset        | Domain                                 | Speaking Style           | hf-subset                   |
+    +----------------+----------------------------------------+--------------------------+-----------------------------+
+    | TED-LIUM       | TED talks                              | Oratory                  | release1, release2, release3|
+    |                |                                        |                          | release3-speaker-adaptation |
+    | VoxPopuli      | European Parliament                    | Oratory                  | en, de, it, fr,  ...        |
+    | LibriSpeech    | Audiobook                              | Narrated                 | "LIUM/tedlium"              |
+    | GigaSpeech     | Audiobook, podcast, YouTube            | Narrated, spontaneous    | xs, s, m, l, xl, dev, test  |
+    | SPGISpeech     | Financial meetings                     | Oratory, spontaneous     | S, M, L, dev, test          |
+    | AMI            | Meetings                               | Spontaneous              | ihm, sdm                    |
+    +----------------+----------------------------------------+--------------------------+-----------------------------+
+
+    """ # noqa: E501
+    SUPPORTED_DATASET_PATHS = {
+        "openslr/librispeech_asr", "facebook/voxpopuli", "LIUM/tedlium",
+        "edinburghcstr/ami", "speechcolab/gigaspeech", "kensho/spgispeech"
+    }
+
+    DEFAULT_OUTPUT_LEN = 128
+    IS_MULTIMODAL = True
+
+    # TODO Whisper-specific. Abstract interface when more models are supported.
+    TRANSCRIPTION_PREAMBLE = "<|startoftranscript|><|en|><|transcribe|>"\
+                              "<|notimestamps|>"
+    skip_long_audios: bool = True
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        output_len: Optional[int] = None,
+        **kwargs,
+    ) -> list:
+        import librosa
+        output_len = (output_len
+                      if output_len is not None else self.DEFAULT_OUTPUT_LEN)
+        prompt = ASRDataset.TRANSCRIPTION_PREAMBLE
+        prompt_len = len(tokenizer(prompt).input_ids)
+        sampled_requests = []
+        skipped = 0
+        for item in self.data:
+            if len(sampled_requests) >= num_requests:
+                break
+            audio = item["audio"]
+            y, sr = audio["array"], audio["sampling_rate"]
+            duration_s = librosa.get_duration(y=y, sr=sr)
+            # Whisper max supported duration
+            if self.skip_long_audios and duration_s > 30:
+                skipped += 1
+                continue
+
+            mm_content = {"audio": (y, sr)}
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                    multi_modal_data=mm_content,
+                ))
+        if skipped:
+            logger.warning("%d samples discarded from dataset due to" \
+                           " their length being greater than" \
+                           " what Whisper supports.", skipped)
+        self.maybe_oversample_requests(sampled_requests, num_requests)
+        return sampled_requests
