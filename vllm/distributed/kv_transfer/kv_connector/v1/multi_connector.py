@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import copy
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
@@ -15,6 +15,8 @@ from vllm.v1.core.sched.output import SchedulerOutput
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
+    from vllm.sampling_params import KVTransferParams
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -41,6 +43,15 @@ class MultiConnector(KVConnectorBase_V1):
 
         # A mapping from request id to the connector that is assigned to it.
         self._requests_to_connector: dict[str, KVConnectorBase_V1] = {}
+
+        # Keeps track of *additional* remaining async saves (beyond 1) to be
+        # finished per request. Not needed for async loads since we only allow
+        # a single connector to load.
+        self._extra_async_saves: dict[str, int] = {}
+
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+        for c in self._connectors:
+            c.register_kv_caches(kv_caches)
 
     # We must override the base class method here because we need to bind
     # the metadata to each connector in the order of the connectors in the
@@ -76,6 +87,30 @@ class MultiConnector(KVConnectorBase_V1):
         for c in self._connectors:
             c.wait_for_save()
 
+    def get_finished(self) -> tuple[Optional[set[str]], Optional[set[str]]]:
+        finished_recving, finished_sending = set(), set()
+        for c in self._connectors:
+            recving, sending = c.get_finished()
+            if not recving and not sending:
+                continue
+            # Aggregate finished recving request ids.
+            finished_recving.update(recving or ())
+            # Aggregate finished sending request ids - only include
+            # once we've drained the "extra" count (for cases where
+            # more than one connector is async-saving the same request).
+            for req_id in sending or ():
+                extra_pending = self._extra_async_saves.get(req_id)
+                if extra_pending is None:
+                    finished_sending.add(req_id)
+                    continue
+                assert extra_pending > 0
+                if extra_pending == 1:
+                    del self._extra_async_saves[req_id]
+                else:
+                    self._extra_async_saves[req_id] = extra_pending - 1
+
+        return finished_recving or None, finished_sending or None
+
     # ==============================
     # Scheduler-side methods
     # ==============================
@@ -83,28 +118,49 @@ class MultiConnector(KVConnectorBase_V1):
         self,
         request: "Request",
         num_computed_tokens: int,
-    ) -> int:
+    ) -> tuple[int, bool]:
         for c in self._connectors:
-            toks = c.get_num_new_matched_tokens(request, num_computed_tokens)
+            toks, load_async = c.get_num_new_matched_tokens(
+                request, num_computed_tokens)
             # The first connector that has new matched tokens will be assigned
             # to this request.
             if toks > 0:
                 self._requests_to_connector[request.request_id] = c
-                return toks
-        return 0
+                return toks, load_async
+        return 0, False
 
     def update_state_after_alloc(self, request: "Request",
-                                 block_ids: list[int],
+                                 blocks: "KVCacheBlocks",
                                  num_external_tokens: int):
         # If the request is not assigned to any connector, we do nothing.
         if request.request_id not in self._requests_to_connector:
             return
         # We assume that the request is assigned to only one connector.
         c = self._requests_to_connector.pop(request.request_id)
-        c.update_state_after_alloc(request, block_ids, num_external_tokens)
+        c.update_state_after_alloc(request, blocks, num_external_tokens)
 
     def build_connector_meta(
             self,
             scheduler_output: SchedulerOutput) -> MultiKVConnectorMetadata:
         return MultiKVConnectorMetadata(
             c.build_connector_meta(scheduler_output) for c in self._connectors)
+
+    def request_finished(
+        self,
+        request: "Request",
+        blocks: "KVCacheBlocks",
+    ) -> tuple[bool, Optional["KVTransferParams"]]:
+        async_saves = 0
+        kv_txfer_params = None
+        for c in self._connectors:
+            async_save, txfer_params = c.request_finished(request, blocks)
+            if async_save:
+                async_saves += 1
+            if txfer_params is not None:
+                if kv_txfer_params is not None:
+                    raise RuntimeError(
+                        "Only one connector can produce KVTransferParams")
+                kv_txfer_params = txfer_params
+        if async_saves > 1:
+            self._extra_async_saves[request.request_id] = async_saves - 1
+        return async_saves > 0, kv_txfer_params
