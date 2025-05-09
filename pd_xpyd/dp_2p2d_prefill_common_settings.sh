@@ -18,7 +18,7 @@ model_len=16384
 max_num_batched_tokens=16384
 max_num_seqs=512
 input_min=500
-input_max=4096
+input_max=16384
 output_max=2200
 
 unset VLLM_PROMPT_BS_BUCKET_MIN VLLM_PROMPT_BS_BUCKET_STEP VLLM_PROMPT_BS_BUCKET_MAX

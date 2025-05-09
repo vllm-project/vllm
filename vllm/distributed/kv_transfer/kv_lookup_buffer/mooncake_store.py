@@ -37,13 +37,20 @@ class MooncakeStoreConfig:
         """Load the config from a JSON file."""
         with open(file_path) as fin:
             config = json.load(fin)
+        rank_id = torch.distributed.get_rank()
+        rank_id = rank_id % 8
+        # please check mlx interface name on your node!! 
+        if rank_id == 0:
+            device = "mlx5_0"
+        else:
+            device = "mlx5_" + str(rank_id+2)
         return MooncakeStoreConfig(
             local_hostname=config.get("local_hostname"),
             metadata_server=config.get("metadata_server"),
             global_segment_size=config.get("global_segment_size", 53687091200),
-            local_buffer_size=config.get("local_buffer_size", 1073741824),
+            local_buffer_size=config.get("local_buffer_size", 10737418240),
             protocol=config.get("protocol", "tcp"),
-            device_name=config.get("device_name", ""),
+            device_name=device,
             master_server_address=config.get("master_server_address"),
         )
 

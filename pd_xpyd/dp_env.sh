@@ -16,12 +16,12 @@ export VLLM_GRAPH_PROMPT_RATIO=0
 export VLLM_DELAYED_SAMPLING="true"
 
 # params
-model_len=8192
-max_num_batched_tokens=8192
+model_len=16384
+max_num_batched_tokens=16384
 max_num_seqs=16
 input_min=800
-input_max=4096
-output_max=4096
+input_max=16384
+output_max=16384
 
 unset VLLM_PROMPT_BS_BUCKET_MIN VLLM_PROMPT_BS_BUCKET_STEP VLLM_PROMPT_BS_BUCKET_MAX
 unset VLLM_PROMPT_SEQ_BUCKET_MIN VLLM_PROMPT_SEQ_BUCKET_STEP VLLM_PROMPT_SEQ_BUCKET_MAX
