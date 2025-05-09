@@ -111,6 +111,7 @@ if TYPE_CHECKING:
     VLLM_USE_DEEP_GEMM: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
+    VLLM_TRITON_ENABLE_JITCACHE: bool = False
 
 
 def get_default_cache_root():
@@ -736,6 +737,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # limit will actually be zero-copy decoded.
     "VLLM_MSGPACK_ZERO_COPY_THRESHOLD":
     lambda: int(os.getenv("VLLM_MSGPACK_ZERO_COPY_THRESHOLD", "256")),
+    
+    # Enable the JITCache for Triton Kernels
+    # see triton_utils/jitcache.py
+    "VLLM_TRITON_ENABLE_JITCACHE":
+    lambda: bool(int(os.getenv("VLLM_TRITON_ENABLE_JITCACHE", "0"))),
 }
 
 # end-env-vars-definition
