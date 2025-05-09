@@ -172,6 +172,11 @@ class OpenAIServingCompletion(OpenAIServing):
                 trace_headers = (None if raw_request is None else await
                                  self._get_trace_headers(raw_request.headers))
 
+                # Mypy inconsistently requires this second cast in different
+                # environments. It shouldn't be necessary (redundant from above)
+                # but pre-commit in CI fails without it.
+                engine_prompt = cast(Union[EmbedsPrompt, TokensPrompt],
+                                     engine_prompt)
                 if isinstance(sampling_params, BeamSearchParams):
                     generator = self.engine_client.beam_search(
                         prompt=engine_prompt,
