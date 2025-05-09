@@ -4,7 +4,6 @@ FROM ${BASE_IMAGE} as habana-base
 USER root
 
 ENV VLLM_TARGET_DEVICE="hpu"
-ENV HABANA_SOFTWARE_VERSION="1.20.0-545"
 
 RUN dnf -y update --best --allowerasing --skip-broken && dnf clean all
 
