@@ -62,8 +62,8 @@ torch::Tensor marlin_fp8_scales_preprocess(torch::Tensor scales) {
     torch::Tensor out_scales = torch::empty_like(scales);
     cudaStream_t stream = at::cuda::getCurrentCUDAStream(dev);
     marlin_fp8_scales_preprocess_kernel<<<256, 512, 0, stream>>>(
-        reinterpret_cast<int4*>(scales.data_ptr()),
-        reinterpret_cast<int4*>(out_scales.data_ptr()),
+        reinterpret_cast<int4*>(scales.data_ptr<at::Float8_e4m3fn>()),
+        reinterpret_cast<int4*>(out_scales.data_ptr<at::Float8_e4m3fn>()),
         scales.nbytes()
     );
 

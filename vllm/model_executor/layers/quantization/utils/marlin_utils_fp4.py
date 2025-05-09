@@ -73,7 +73,6 @@ def apply_fp4_marlin_linear(
                                   use_atomic_add=use_atomic_add,
                                   use_fp32_reduce=use_fp32_reduce)
 
-
     if bias is not None:
         output.add_(bias)  # In-place add
 
@@ -118,12 +117,12 @@ def prepare_fp4_layer_for_marlin(layer: torch.nn.Module) -> None:
                                          size_n=part_size_n,
                                          group_size=16)
 
-    weight_scale = ops.marlin_fp8_scales_preprocess(weight_scale)
     weight_scale = weight_scale.view(weight_scale.size(0) // 2, 2, -1, 8)
     weight_scale = weight_scale.permute(0, 2, 1, 3).reshape(
         weight_scale.size(0) * 2, -1)
     weight_scale = weight_scale.view(-1, 4)[:, [0, 2, 1, 3]].view(
         weight_scale.size(0), -1).to(torch.float8_e4m3fn)
+    weight_scale = ops.marlin_fp8_scales_preprocess(weight_scale)
     layer.weight_scale = torch.nn.Parameter(weight_scale, requires_grad=False)
 
     weight_scale_2 = layer.weight_scale_2
