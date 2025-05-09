@@ -153,6 +153,7 @@ async def send_request_to_service(client_info: dict, endpoint: str,
     req_data = req_data.copy()
     req_data['do_remote_decode'] = True
     req_data["stream"] = False
+    req_data["max_tokens"] = 1
     if "stream_options" in req_data:
         del req_data["stream_options"]
     headers = {
