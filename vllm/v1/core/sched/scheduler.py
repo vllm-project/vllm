@@ -1,4 +1,3 @@
-# ruff: noqa: E501
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
@@ -6,7 +5,7 @@ from __future__ import annotations
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Optional, Union
+from typing import Optional, Union
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
@@ -722,22 +721,18 @@ class Scheduler(SchedulerInterface):
 
             if new_token_ids and self.structured_output_manager.should_advance(
                     request):
-                if TYPE_CHECKING:
-                    assert request.structured_output_request is not None
-                    assert request.structured_output_request.grammar is not None
-                request.structured_output_request.grammar.accept_tokens(
-                    req_id,
-                    new_token_ids,
-                )
+                # NOTE: structured_output_request
+                # should not be None if use_structured_output, we have
+                # check above, so safe to ignore type warning
+                request.structured_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
+                    req_id, new_token_ids)
 
             # Add newly generated spec token ids to the request.
             if spec_token_ids is not None:
                 if self.structured_output_manager.should_advance(request):
-                    if TYPE_CHECKING:
-                        assert request.structured_output_request is not None
-                        assert request.structured_output_request.grammar is not None
+                    metadata = request.structured_output_request
                     # Needs to happen after new_token_ids are accepted.
-                    request.spec_token_ids = request.structured_output_request.grammar.validate_tokens(
+                    request.spec_token_ids = metadata.grammar.validate_tokens(  # type: ignore[union-attr]
                         spec_token_ids[req_index])
                 else:
                     request.spec_token_ids = spec_token_ids[req_index]
