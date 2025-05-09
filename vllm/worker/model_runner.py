@@ -1220,7 +1220,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         pattern: Optional[str] = None,
         max_size: Optional[int] = None,
     ) -> None:
-        from vllm.model_executor.model_loader.loader import ShardedStateLoader
+        from vllm.model_executor.model_loader import ShardedStateLoader
         ShardedStateLoader.save_model(
             self.model,
             path,
@@ -1232,7 +1232,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self,
         tensorizer_config: TensorizerConfig,
     ) -> None:
-        from vllm.model_executor.model_loader.loader import TensorizerLoader
+        from vllm.model_executor.model_loader import TensorizerLoader
         TensorizerLoader.save_model(
             self.model,
             tensorizer_config=tensorizer_config,
@@ -1565,7 +1565,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 # product.
                 cudagraph_capture_sizes = self.vllm_config.compilation_config\
                     .cudagraph_capture_sizes
-                cudagraph_inputs_embeds = (True, False)
+                cudagraph_inputs_embeds = ((
+                    True, False) if self.model_config.enable_prompt_embeds else
+                                           (False, ))
                 compilation_cases = itertools.product(
                     cudagraph_capture_sizes,
                     cudagraph_inputs_embeds,

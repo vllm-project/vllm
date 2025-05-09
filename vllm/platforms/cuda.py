@@ -454,10 +454,4 @@ finally:
 
 CudaPlatform = NvmlCudaPlatform if nvml_available else NonNvmlCudaPlatform
 
-try:
-    from sphinx.ext.autodoc.mock import _MockModule
-
-    if not isinstance(pynvml, _MockModule):
-        CudaPlatform.log_warnings()
-except ModuleNotFoundError:
-    CudaPlatform.log_warnings()
+CudaPlatform.log_warnings()

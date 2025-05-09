@@ -54,7 +54,7 @@ if TYPE_CHECKING:
     from vllm.executor.executor_base import ExecutorBase
     from vllm.model_executor.layers.quantization.base_config import (
         QuantizationConfig)
-    from vllm.model_executor.model_loader.loader import BaseModelLoader
+    from vllm.model_executor.model_loader import BaseModelLoader
 
     ConfigType = type[DataclassInstance]
 else:
@@ -268,7 +268,7 @@ class ModelConfig:
     It can be a branch name, a tag name, or a commit id. If unspecified, will
     use the default version."""
     rope_scaling: dict[str, Any] = field(default_factory=dict)
-    """RoPE scaling configuration in JSON format. For example,
+    """RoPE scaling configuration. For example,
     `{"rope_type":"dynamic","factor":2.0}`."""
     rope_theta: Optional[float] = None
     """RoPE theta. Use with `rope_scaling`. In some cases, changing the RoPE
@@ -321,6 +321,10 @@ class ModelConfig:
     """Skip initialization of tokenizer and detokenizer. Expects valid
     `prompt_token_ids` and `None` for prompt from the input. The generated
     output will contain token ids."""
+    enable_prompt_embeds: bool = False
+    """If `True`, enables passing text embeddings as inputs via the
+    `prompt_embeds` key. Note that enabling this will double the time required
+    for graph compilation."""
     served_model_name: Optional[Union[str, list[str]]] = None
     """The model name(s) used in the API. If multiple names are provided, the
     server will respond to any of the provided names. The model name in the
@@ -346,14 +350,13 @@ class ModelConfig:
     (stored in `~/.huggingface`)."""
     hf_overrides: HfOverrides = field(default_factory=dict)
     """If a dictionary, contains arguments to be forwarded to the Hugging Face
-    config. If a callable, it is called to update the HuggingFace config. When
-    specified via CLI, the argument must be a valid JSON string."""
+    config. If a callable, it is called to update the HuggingFace config."""
     mm_processor_kwargs: Optional[dict[str, Any]] = None
     """Arguments to be forwarded to the model's processor for multi-modal data,
     e.g., image processor. Overrides for the multi-modal processor obtained
     from `AutoProcessor.from_pretrained`. The available overrides depend on the
     model that is being run. For example, for Phi-3-Vision: `{"num_crops": 4}`.
-    When specified via CLI, the argument must be a valid JSON string."""
+    """
     disable_mm_preprocessor_cache: bool = False
     """If `True`, disable caching of the multi-modal preprocessor/mapper (not
     recommended)."""
@@ -361,15 +364,14 @@ class ModelConfig:
     """Initialize non-default neuron config or override default neuron config
     that are specific to Neuron devices, this argument will be used to
     configure the neuron config that can not be gathered from the vllm
-    arguments. e.g. `{"cast_logits_dtype": "bloat16"}`. When specified via CLI,
-    the argument must be a valid JSON string."""
+    arguments. e.g. `{"cast_logits_dtype": "bloat16"}`."""
     pooler_config: Optional["PoolerConfig"] = field(init=False)
     """Pooler config which controls the behaviour of output pooling in pooling
     models."""
     override_pooler_config: Optional[Union[dict, "PoolerConfig"]] = None
     """Initialize non-default pooling config or override default pooling config
     for the pooling model. e.g. `{"pooling_type": "mean", "normalize": false}`.
-    When specified via CLI, the argument must be a valid JSON string."""
+    """
     logits_processor_pattern: Optional[str] = None
     """Optional regex pattern specifying valid logits processor qualified names
     that can be passed with the `logits_processors` extra completion argument.
@@ -385,8 +387,7 @@ class ModelConfig:
     """Overrides or sets generation config. e.g. `{"temperature": 0.5}`. If
     used with `--generation-config auto`, the override parameters will be
     merged with the default config from the model. If used with
-    `--generation-config vllm`, only the override parameters are used.
-    When specified via CLI, the argument must be a valid JSON string."""
+    `--generation-config vllm`, only the override parameters are used."""
     enable_sleep_mode: bool = False
     """Enable sleep mode for the engine (only cuda platform is supported)."""
     model_impl: Union[str, ModelImpl] = ModelImpl.AUTO.value
@@ -1556,8 +1557,7 @@ class LoadConfig:
     cache directory of Hugging Face."""
     model_loader_extra_config: dict = field(default_factory=dict)
     """Extra config for model loader. This will be passed to the model loader
-    corresponding to the chosen load_format. This should be a JSON string that
-    will be parsed into a dictionary."""
+    corresponding to the chosen load_format."""
     ignore_patterns: Optional[Union[list[str], str]] = None
     """The list of patterns to ignore when loading the model. Default to
     "original/**/*" to avoid repeated loading of llama's checkpoints."""
@@ -1911,10 +1911,10 @@ class SchedulerConfig:
 
     cuda_graph_sizes: list[int] = field(default_factory=lambda: [512])
     """Cuda graph capture sizes, default is 512.
-    1. if one value is provided, then the capture list would follow the pattern:
-        [1, 2, 4] + [i for i in range(8, cuda_graph_sizes + 1, 8)]
-    2. more than one value (e.g. 1 2 128) is provided,
-        then the capture list will follow the provided list."""
+    1. if one value is provided, then the capture list would follow the
+    pattern: [1, 2, 4] + [i for i in range(8, cuda_graph_sizes + 1, 8)]
+    2. more than one value (e.g. 1 2 128) is provided, then the capture list
+    will follow the provided list."""
 
     delay_factor: float = 0.0
     """Apply a delay (of delay factor multiplied by previous
@@ -2050,6 +2050,13 @@ class SchedulerConfig:
                     _MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
                 )
 
+            # When using default settings,
+            # Ensure max_num_batched_tokens does not exceed model limit.
+            # Some models (e.g., Whisper) have embeddings tied to max length.
+            self.max_num_batched_tokens = min(
+                self.max_num_seqs * self.max_model_len,
+                self.max_num_batched_tokens)
+
         self.max_num_encoder_input_tokens = self.max_num_batched_tokens
         self.encoder_cache_size = self.max_num_batched_tokens
 
@@ -2089,6 +2096,13 @@ class SchedulerConfig:
                 f"max_num_batched_tokens ({self.max_num_batched_tokens}) must "
                 "be greater than or equal to max_num_seqs "
                 f"({self.max_num_seqs}).")
+
+        if self.max_num_batched_tokens > self.max_num_seqs * self.max_model_len:
+            logger.warning(
+                "max_num_batched_tokens (%d) exceeds max_num_seqs"
+                "* max_model_len (%d). This may lead to unexpected behavior.",
+                self.max_num_batched_tokens,
+                self.max_num_seqs * self.max_model_len)
 
         if self.num_lookahead_slots < 0:
             raise ValueError(
@@ -2273,6 +2287,9 @@ class SpeculativeConfig:
     """Scaling factor for entropy-based threshold, applied when using
     `TypicalAcceptanceSampler`."""
 
+    speculative_token_tree: Optional[str] = None
+    """Specifies the tree structure for speculative token generation. 
+    """
     # required configuration params passed from engine
     target_model_config: ModelConfig = field(default=None,
                                              init=True)  # type: ignore
@@ -2447,10 +2464,11 @@ class SpeculativeConfig:
                             "Chunked prefill and EAGLE are not compatible "
                             "when using V0.")
 
+                    from vllm.platforms import current_platform
                     from vllm.transformers_utils.configs.eagle import (
                         EAGLEConfig)
                     if isinstance(self.draft_model_config.hf_config,
-                                  EAGLEConfig):
+                                  EAGLEConfig) or current_platform.is_neuron():
                         pass
                     else:
                         eagle_config = EAGLEConfig(
@@ -2690,8 +2708,8 @@ class LoRAConfig:
     lora_extra_vocab_size: int = 256
     """Maximum size of extra vocabulary that can be present in a LoRA adapter
     (added to the base model vocabulary)."""
-    # This is a constant.
-    lora_vocab_padding_size: ClassVar[int] = 256
+    lora_vocab_padding_size: ClassVar[int] = current_platform\
+        .get_lora_vocab_padding_size()
     long_lora_scaling_factors: Optional[tuple[float, ...]] = None
     """Specify multiple scaling factors (which can be different from base model
     scaling factor - see eg. Long LoRA) to allow for multiple LoRA adapters
@@ -2719,6 +2737,7 @@ class LoRAConfig:
         factors.append(self.fully_sharded_loras)
         factors.append(self.lora_dtype)
         factors.append(self.lora_extra_vocab_size)
+        factors.append(self.lora_vocab_padding_size)
         factors.append(self.long_lora_scaling_factors)
         factors.append(self.bias_enabled)
         hash_str = hashlib.md5(str(factors).encode(),
@@ -2826,7 +2845,6 @@ class MultiModalConfig:
                                                  "limit_mm_per_prompt")
     """
     The maximum number of input items allowed per prompt for each modality.
-    This should be a JSON string that will be parsed into a dictionary.
     Defaults to 1 (V0) or 999 (V1) for each modality.
 
     For example, to allow up to 16 images and 2 videos per prompt:
@@ -2889,7 +2907,7 @@ class PoolerConfig:
     pooling_type: Optional[str] = None
     """
     The pooling method of the pooling model. This should be a key in
-    :class:`vllm.model_executor.layers.pooler.PoolingType`.
+    {class}`vllm.model_executor.layers.pooler.PoolingType`.
     """
 
     normalize: Optional[bool] = None
@@ -2955,10 +2973,12 @@ def _get_and_verify_dtype(
 ) -> torch.dtype:
     # NOTE: getattr(config, "torch_dtype", torch.float32) is not correct
     # because config.torch_dtype can be None.
-    config_dtype = getattr(config.get_text_config(), "torch_dtype", None)
+    config_dtype = getattr(config, "torch_dtype", None)
 
-    # Fallback for multi-modal models if the root config
+    # Fallbacks for multi-modal models if the root config
     # does not define torch_dtype
+    if config_dtype is None:
+        config_dtype = getattr(config.get_text_config(), "torch_dtype", None)
     if config_dtype is None and hasattr(config, "vision_config"):
         config_dtype = getattr(config.vision_config, "torch_dtype", None)
 
@@ -3145,6 +3165,14 @@ def _get_and_verify_max_len(
     # derived length from the HF model config.
     if max_model_len is None:
         max_model_len = int(derived_max_model_len)
+        if current_platform.is_tpu():
+            logger.warning(
+                "--max-model-len is not specified, "
+                "it's currently using model's default length %s, "
+                "which might be too large."
+                "Please input with --max-model-len based on your "
+                "request input length and output length, to avoid "
+                "unnecessary degradation.", max_model_len)
     elif max_model_len > derived_max_model_len:
         # Some models might have a separate key for specifying model_max_length
         # that will be bigger than derived_max_model_len. We compare user input
@@ -3591,6 +3619,10 @@ class CompilationConfig(BaseModel):
             are always used, it can set this to False. Otherwise, it should
             set this to True, and the compiler will copy the input to an
             internally managed buffer. Default is False.
+        - full_cuda_graph: whether to use a full cuda graph for the entire forward 
+            pass rather than splitting certain operations such as attention into subgraphs. 
+            Thus this flag cannot be used together with splitting_ops. This may provide 
+            performance benefits for smaller models.
     - Inductor compilation:
         - use_inductor: whether to use inductor compilation.
             - False: inductor compilation is not used. graph runs in eager.
@@ -3635,6 +3667,7 @@ class CompilationConfig(BaseModel):
     cudagraph_num_of_warmups: int = 0
     cudagraph_capture_sizes: Optional[list[int]] = None
     cudagraph_copy_inputs: bool = False
+    full_cuda_graph: bool = False
 
     class PassConfig(BaseModel):
         """
@@ -3857,10 +3890,14 @@ class CompilationConfig(BaseModel):
             self.max_capture_size] = self.max_capture_size
 
     def set_splitting_ops_for_v1(self):
-        # If default, override splitting ops for piecewise cudagraph on V1.
         # NOTE: this function needs to be called
+        if self.splitting_ops and self.full_cuda_graph:
+            raise ValueError("full_cuda_graph cannot be used together with "
+                             "splitting_ops, as Full CUDA graph will override "
+                             f"the splitting_ops: {self.splitting_ops}")
+
         if not self.splitting_ops:
-            self.splitting_ops = [
+            self.splitting_ops = [] if self.full_cuda_graph else [
                 "vllm.unified_attention",
                 "vllm.unified_attention_with_output",
             ]
@@ -4137,6 +4174,12 @@ class VllmConfig:
                 "Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
+        if self.compilation_config.full_cuda_graph and \
+            not self.model_config.disable_cascade_attn:
+            logger.warning_once(
+                "full_cuda_graph is not supported with "
+                "cascade attention. Disabling cascade attention.")
+            self.model_config.disable_cascade_attn = True
 
         if self.model_config and self.model_config.use_mla and \
             not (current_platform.is_cuda() or current_platform.is_rocm()):

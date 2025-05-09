@@ -275,7 +275,7 @@ class OpenAIServing:
         add_special_tokens: bool = True,
     ) -> TextTokensPrompt:
         """
-        A simpler implementation of :meth:`_tokenize_prompt_input_or_inputs`
+        A simpler implementation of {meth}`_tokenize_prompt_input_or_inputs`
         that assumes single input.
         """
         return next(
@@ -296,7 +296,7 @@ class OpenAIServing:
         add_special_tokens: bool = True,
     ) -> Iterator[TextTokensPrompt]:
         """
-        A simpler implementation of :meth:`_tokenize_prompt_input_or_inputs`
+        A simpler implementation of {meth}`_tokenize_prompt_input_or_inputs`
         that assumes multiple inputs.
         """
         for text in prompt_inputs:
@@ -394,11 +394,11 @@ class OpenAIServing:
         model_config = self.model_config
 
         resolved_content_format = resolve_chat_template_content_format(
+            model_config,
             chat_template,
             tool_dicts,
             chat_template_content_format,
             tokenizer,
-            trust_remote_code=model_config.trust_remote_code,
         )
         conversation, mm_data_future = parse_chat_messages_futures(
             messages,
@@ -425,8 +425,8 @@ class OpenAIServing:
             )
         else:
             request_prompt = apply_hf_chat_template(
+                model_config,
                 tokenizer,
-                trust_remote_code=model_config.trust_remote_code,
                 conversation=conversation,
                 **_chat_template_kwargs,
             )
