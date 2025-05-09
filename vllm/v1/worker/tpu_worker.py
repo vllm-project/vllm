@@ -41,9 +41,6 @@ class TPUWorker:
         distributed_init_method: str,
         is_driver_worker: bool = False,
     ):
-        if envs.VLLM_TORCHAX_ENABLED:
-            torch._sync = lambda *args, **kwargs: None
-        
         self.is_driver_worker = is_driver_worker
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
