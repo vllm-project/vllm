@@ -84,6 +84,10 @@ class Scheduler(SchedulerInterface):
 
         self.block_size = self.cache_config.block_size
 
+        # Track total tokens in waiting queue
+        self._waiting_tokens = 0
+        # Track total tokens in preempted requests
+        self._preempted_tokens = 0
         # req_id -> Request
         self.requests: dict[str, Request] = {}
         # Priority queues for requests.
@@ -143,6 +147,18 @@ class Scheduler(SchedulerInterface):
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
         )
+
+    def _get_request_total_tokens(self, request: Request) -> int:
+        """Calculate total tokens (prompt + decode) for a request.
+
+        This function calculates the total tokens that will be
+        needed for a request, including both prompt tokens and
+        future decode tokens.
+        """
+        prompt_tokens = len(request.prompt_token_ids)
+        max_new_tokens = 0 if request.max_tokens is None\
+            else request.max_tokens
+        return prompt_tokens + max_new_tokens
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -232,6 +248,8 @@ class Scheduler(SchedulerInterface):
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
                     preempted_req = self.running.pop()
+                    preempted_tokens = preempted_req.num_computed_tokens
+                    self._preempted_tokens += preempted_tokens
                     self.kv_cache_manager.free(preempted_req)
                     preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0
@@ -378,6 +396,8 @@ class Scheduler(SchedulerInterface):
                     # The request cannot be scheduled.
                     break
 
+                request_total_tokens = self._get_request_total_tokens(request)
+
                 # KVConnector: update internal state after allocation.
                 # This information is used to determine if a load is
                 # needed for this request.
@@ -388,6 +408,7 @@ class Scheduler(SchedulerInterface):
                     )
 
                 self.waiting.popleft()
+                self._waiting_tokens -= request_total_tokens
                 if request.use_structured_output:
                     structured_output_request_ids[
                         request.request_id] = req_index
@@ -779,6 +800,7 @@ class Scheduler(SchedulerInterface):
     def add_request(self, request: Request) -> None:
         self.waiting.append(request)
         self.requests[request.request_id] = request
+        self._waiting_tokens += self._get_request_total_tokens(request)
         if self.log_stats:
             request.record_event(EngineCoreEventType.QUEUED)
 
@@ -808,6 +830,7 @@ class Scheduler(SchedulerInterface):
                 self.running.remove(request)
             else:
                 self.waiting.remove(request)
+                self._waiting_tokens -= self._get_request_total_tokens(request)
             request.status = finished_status
             self._free_request(request)
 
@@ -840,7 +863,9 @@ class Scheduler(SchedulerInterface):
         return SchedulerStats(
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
+            num_tokens_waiting=self._waiting_tokens,
             gpu_cache_usage=self.kv_cache_manager.usage,
+            num_tokens_preempted=self._preempted_tokens,
             prefix_cache_stats=prefix_cache_stats,
             spec_decoding_stats=spec_decoding_stats,
         )
