@@ -386,9 +386,6 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
         pytest.skip(
             f"Skipping test; bad size m={M}, n={N}, k={K}, topk={topk}, E={E}")
 
-    # if N <= 512:
-    #     pytest.skip("Skipping N <= 512 until performance issues solved.")
-
     vllm_config = VllmConfig()
 
     torch.manual_seed(seed)

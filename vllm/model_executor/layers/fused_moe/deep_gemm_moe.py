@@ -41,14 +41,11 @@ def _valid_deep_gemm(hidden_states: torch.Tensor,
         return False
 
     align = dg.get_m_alignment_for_contiguous_layout()
+    M = hidden_states.shape[0]
     _, K, N = w2.shape
 
-    # For now, disable DeepGemm for small N until better permute/unpermute
-    # ops are available.
-    # if N <= 512:
-    #     return False
 
-    if N % align != 0 or K % align != 0:
+    if align > M or N % align != 0 or K % align != 0:
         return False
 
     return (hidden_states.is_contiguous() and w1.is_contiguous()
