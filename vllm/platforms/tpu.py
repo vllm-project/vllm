@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import TYPE_CHECKING, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Optional, Tuple, Union, cast
 
 import torch
 from tpu_info import device
@@ -13,9 +13,10 @@ from vllm.sampling_params import SamplingParams, SamplingType
 from .interface import Platform, PlatformEnum, _Backend
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config import BlockSize, ModelConfig, VllmConfig
     from vllm.pooling_params import PoolingParams
 else:
+    BlockSize = None
     ModelConfig = None
     VllmConfig = None
     PoolingParams = None
@@ -94,7 +95,7 @@ class TpuPlatform(Platform):
         cache_config = vllm_config.cache_config
         # For v0, the default block size is 16.
         if cache_config and cache_config.block_size is None:
-            cache_config.block_size = 16
+            cache_config.block_size = cast(BlockSize, 16)
         compilation_config = vllm_config.compilation_config
 
         # TPU only supports DYNAMO_ONCE compilation level
@@ -118,7 +119,7 @@ class TpuPlatform(Platform):
             from vllm.v1.attention.backends.pallas import (
                 PallasAttentionBackend)
             cache_config.block_size = PallasAttentionBackend.get_page_size(
-                vllm_config)
+                vllm_config)  # type: ignore[assignment]
             min_page_size = PallasAttentionBackend.get_min_page_size(
                 vllm_config)
             if min_page_size > cache_config.block_size:
@@ -128,7 +129,7 @@ class TpuPlatform(Platform):
                     cache_config.block_size,
                     min_page_size,
                 )
-                cache_config.block_size = min_page_size
+                cache_config.block_size = min_page_size  # type: ignore[assignment]
 
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config

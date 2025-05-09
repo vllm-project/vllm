@@ -5,6 +5,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections import deque
+from dataclasses import asdict
 from itertools import count
 from queue import Queue
 from typing import Any, Callable, Optional, Union
@@ -284,7 +285,7 @@ class EventPublisherFactory:
         if not config:
             return NullEventPublisher()
 
-        config_dict = config.model_dump()
+        config_dict = asdict(config)
 
         kind = config_dict.pop("publisher", "null")
         config_dict.pop("enable_kv_cache_events")

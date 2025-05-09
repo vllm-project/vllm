@@ -206,7 +206,7 @@ def _compare_sp(
         'compile_sizes': [4, 8],
         'splitting_ops': [],
         'pass_config': {
-            'enable_sequence_parallism': sp_enabled,
+            'enable_sequence_parallelism': sp_enabled,
             'enable_noop': True,
             'enable_fusion': True,
         },
@@ -223,7 +223,7 @@ def _compare_sp(
         "--distributed-executor-backend",
         distributed_backend,
         "--compilation_config",
-        str(compilation_config),
+        json.dumps(compilation_config),
     ]
 
     tp_env = {

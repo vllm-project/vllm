@@ -1820,6 +1820,14 @@ def get_cuda_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
     return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
 
 
+def is_in_doc_build() -> bool:
+    try:
+        from sphinx.ext.autodoc.mock import _MockModule
+        return isinstance(zmq, _MockModule)
+    except ModuleNotFoundError:
+        return False
+
+
 def import_from_path(module_name: str, file_path: Union[str, os.PathLike]):
     """
     Import a Python file according to its file path.
