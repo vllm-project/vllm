@@ -20,7 +20,8 @@ def get_aiter_mla_metadata(max_batch_size: int, block_size: int,
     paged_kv_last_page_lens = torch.full((max_batch_size, ),
                                          block_size,
                                          dtype=torch.int32)
-    return paged_kv_indices, paged_kv_indptr, paged_kv_last_page_lens
+    qo_indptr = torch.zeros(max_batch_size + 1, dtype=torch.int, device=device)
+    return paged_kv_indices, paged_kv_indptr, paged_kv_last_page_lens, qo_indptr
 
 
 def aiter_mla_decode_fwd(
@@ -28,6 +29,8 @@ def aiter_mla_decode_fwd(
     kv_buffer: torch.Tensor,
     o: torch.Tensor,
     sm_scale: float,
+    qo_indptr: torch.Tensor,
+    max_seqlen_qo: int,
     kv_indptr: Optional[torch.Tensor] = None,
     kv_indices: Optional[torch.Tensor] = None,
     kv_last_page_lens: Optional[torch.Tensor] = None,
@@ -60,9 +63,11 @@ def mla_decode_fwd_impl(
     mla_decode_fwd(q,
                    kv_buffer.view(-1, 1, 1, q.shape[-1]),
                    o,
+                   qo_indptr,
                    kv_indptr,
                    kv_indices,
                    kv_last_page_lens,
+                   max_seqlen_qo,
                    sm_scale=sm_scale,
                    logit_cap=logit_cap)
 

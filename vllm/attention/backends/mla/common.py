@@ -1213,9 +1213,9 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
             attn_output, attn_softmax_lse = \
                 self._flash_attn_varlen_diff_headdims(
-                q=q,
-                k=k,
-                v=v,
+                q,
+                k,
+                v,
                 cu_seqlens_q=prefill_metadata.query_start_loc,
                 cu_seqlens_k=prefill_metadata.context_chunk_cu_seq_lens[i],
                 max_seqlen_q=prefill_metadata.max_query_len,
@@ -1267,9 +1267,9 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 
         output = self._flash_attn_varlen_diff_headdims(
-            q=q,
-            k=k,
-            v=v,
+            q,
+            k,
+            v,
             cu_seqlens_q=prefill_metadata.query_start_loc,
             cu_seqlens_k=prefill_metadata.query_start_loc,
             max_seqlen_q=prefill_metadata.max_prefill_seq_len,
