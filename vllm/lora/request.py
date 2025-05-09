@@ -31,6 +31,8 @@ class LoRARequest(
     lora_local_path: Optional[str] = msgspec.field(default=None)
     long_lora_max_len: Optional[int] = None
     base_model_name: Optional[str] = msgspec.field(default=None)
+    tensorizer_config: "TensorizerConfig" = None  # type: ignore # noqa: F821
+
 
     def __post_init__(self):
         if self.lora_local_path:
