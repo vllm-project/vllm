@@ -39,8 +39,8 @@ def fp4_marlin_process_scales(marlin_scales):
     # We assume that weight_scale (FP8-S1E4M3) is always greater
     # than or equal to 0. So we can convert
     # (weight_scale * (2 ** 7) to a special FP8-S0E5M3 format.
-    # After multiply by 2 ** 7, the top bit of FP8-S0E5M3 would always be 1
-    # hen weight_scale > 0. This allows us to have an exponent bias
+    # After multiplying by 2 ** 7, the top bit of FP8-S0E5M3 would always be 1
+    # when weight_scale > 0. This allows us to have an exponent bias
     # closer to zero after dequantization.
 
     marlin_scales = (marlin_scales * (2**7)).view(torch.int16) << 1
