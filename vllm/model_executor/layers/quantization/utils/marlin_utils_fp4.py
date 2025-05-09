@@ -168,6 +168,7 @@ def prepare_moe_fp4_layer_for_marlin(layer: torch.nn.Module) -> None:
 
     # WORKSPACE
     device = layer.w13_weight.device
+    param_dtype = layer.params_dtype
     layer.workspace = marlin_make_workspace_new(device, 4)
     perm = torch.empty(0, dtype=torch.int, device=device)
 
@@ -206,14 +207,8 @@ def prepare_moe_fp4_layer_for_marlin(layer: torch.nn.Module) -> None:
         group_size = layer.weight_block_size[1]
 
     for name in ["w13", "w2"]:
-        if name + "_weight_scale" in dir(layer):
-            new_name = name + "_weight_scale"
-            scales = getattr(layer, new_name).to(layer.orig_dtype)
-            delattr(layer, new_name)
-        elif name + "_weight_scale_inv" in dir(layer):
-            new_name = name + "_weight_scale_inv"
-            scales = getattr(layer, new_name).to(layer.orig_dtype)
-            delattr(layer, new_name)
+        scales = getattr(layer, name + "_weight_scale").to(param_dtype)
+        global_scale = getattr(layer, name + "_weight_scale_2").to(param_dtype)
 
         tensor_list = []
         if "w13" in name:
@@ -221,46 +216,21 @@ def prepare_moe_fp4_layer_for_marlin(layer: torch.nn.Module) -> None:
         else:
             size_n, size_k = k, n
 
-        # marlin kernel only support channel-wise and group-wise quantization
-        # we need to convert the scales
-        if layer.weight_block_size is None:
-            if scales.nelement() == e:
-                # tensor-wise quantization -> channel-wise quantization
-                # (e, 1, 1) =>(repeat)=> (e, 1, size_n)
-                scales = scales.view(e, 1, 1).repeat_interleave(size_n, 2)
-            elif scales.nelement() > e and scales.nelement() != e * size_n:
-                assert (e * size_n) % scales.nelement() == 0
-                s_size = scales.nelement() // e
-                # tensor-wise quantization (for gate-up proj)
-                #     -> channel-wise quantization
-                # (e, 1, s_size) =>(repeat)=> (e, 1, size_n)
-                scales = scales.view(e, 1, s_size)
-                scales = scales.repeat_interleave(size_n // s_size, 2)
-            else:
-                # channel-wise quantization
-                # (e, 1, size_n)
-                scales = scales.view(e, 1, size_n)
-        else:
-            # block-wise quantization -> group-wise quantization
-            # (e, size_k // block_size[1], ceil(size_n / block_size[0]))
-            #  =>(repeat)=> (e, size_k // block_size[1], size_n)
-            block_n = layer.weight_block_size[0]
-            scales = scales.permute(0, 2, 1).repeat_interleave(block_n, 2)
-            # size_n may not divisible by block_size[0]
-            scales = scales[..., :size_n].contiguous()
-
         for i in range(e):
-            marlin_scales = marlin_permute_scales(s=scales[i],
+            marlin_scales = marlin_permute_scales(s=scales[i].T,
                                                   size_k=size_k,
                                                   size_n=size_n,
                                                   group_size=group_size)
+            marlin_scales = fp4_marlin_process_scales(marlin_scales)
             tensor_list.append(marlin_scales)
 
         scales = torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
-        scales = fp4_fused_exponent_bias_into_scales(scales)
         scales = torch.nn.Parameter(scales, requires_grad=False)
-
         setattr(layer, name + "_weight_scale", scales)
+
+        global_scale = fp4_marlin_process_global_scale(global_scale)
+        global_scale = torch.nn.Parameter(global_scale, requires_grad=False)
+        setattr(layer, name + "_weight_scale_2", global_scale)
 
 
 def rand_marlin_weight_fp4_like(weight, group_size):
