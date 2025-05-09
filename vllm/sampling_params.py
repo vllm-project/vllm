@@ -13,7 +13,6 @@ from typing_extensions import deprecated
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 
 logger = init_logger(__name__)
 
@@ -186,9 +185,9 @@ class SamplingParams(
         logits_processors: list of functions that modify logits based on
             previously generated tokens, and optionally prompt tokens as
             a first argument.
-        truncate_prompt_tokens: If set to -1, will use the truncation size 
-            supported by the model. If set to an integer k, will use only 
-            the last k tokens from the prompt (i.e., left truncation). 
+        truncate_prompt_tokens: If set to -1, will use the truncation size
+            supported by the model. If set to an integer k, will use only
+            the last k tokens from the prompt (i.e., left truncation).
             Defaults to None (i.e., no truncation).
         guided_decoding: If provided, the engine will construct a guided
             decoding logits processor from these parameters. Defaults to None.
@@ -491,13 +490,8 @@ class SamplingParams(
             for add_prefix_space in [False, True]:
                 prefix = " " if add_prefix_space else ""
                 prompt = prefix + bad_word.lstrip()
-
-                if isinstance(tokenizer, MistralTokenizer):
-                    # Mistral tokenizers should not add special tokens
-                    prompt_token_ids = tokenizer.encode(text=prompt)
-                else:
-                    prompt_token_ids = tokenizer.encode(
-                        text=prompt, add_special_tokens=False)
+                prompt_token_ids = tokenizer.encode(text=prompt,
+                                                    add_special_tokens=False)
 
                 # If no space at the beginning
                 # or if prefix space produces a new word token

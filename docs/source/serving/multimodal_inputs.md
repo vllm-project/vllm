@@ -213,10 +213,13 @@ Our OpenAI-compatible server accepts multi-modal data via the [Chat Completions 
 
 :::{important}
 A chat template is **required** to use Chat Completions API.
+For HF format models, the default chat template is defined inside `chat_template.json` or `tokenizer_config.json`.
 
-Although most models come with a chat template, for others you have to define one yourself.
-The chat template can be inferred based on the documentation on the model's HuggingFace repo.
-For example, LLaVA-1.5 (`llava-hf/llava-1.5-7b-hf`) requires a chat template that can be found here: <gh-file:examples/template_llava.jinja>
+If no default chat template is available, we will first look for a built-in fallback in <gh-file:vllm/transformers_utils/chat_templates/registry.py>.
+If no fallback is available, an error is raised and you have to provide the chat template manually via the `--chat-template` argument.
+
+For certain models, we provide alternative chat templates inside <gh-dir:vllm/examples>.
+For example, VLM2Vec uses <gh-file:examples/template_vlm2vec.jinja> which is different from the default one for Phi-3-Vision.
 :::
 
 ### Image Inputs

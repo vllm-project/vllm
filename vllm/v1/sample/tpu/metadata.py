@@ -31,8 +31,10 @@ class TPUSupportedSamplingMetadata:
 
     all_greedy: bool = True
 
-    # unsupported, you need to return an extra tensor of static size BxV
-    max_num_logprobs = None
+    # Whether logprobs are to be gathered in this batch of request. To balance
+    # out compile time and runtime, a fixed `max_number_logprobs` value is used
+    # when gathering logprobs, regardless of the values specified in the batch.
+    logprobs: bool = False
 
     # TODO No penalties for now
     no_penalties: bool = True
@@ -84,10 +86,12 @@ class TPUSupportedSamplingMetadata:
                 we want to pre-compile a graph with sampling parameters, even if
                 they are not strictly needed for greedy decoding.
         """
+        needs_logprobs = input_batch.max_num_logprobs>0 if \
+            input_batch.max_num_logprobs else False
         # Early return to avoid unnecessary cpu to tpu copy
         if (input_batch.all_greedy is True
                 and generate_params_if_all_greedy is False):
-            return cls(all_greedy=True)
+            return cls(all_greedy=True, logprobs=needs_logprobs)
 
         num_reqs = input_batch.num_reqs
 
@@ -115,4 +119,5 @@ class TPUSupportedSamplingMetadata:
             top_k=input_batch.top_k_cpu_tensor[:padded_num_reqs].to(
                 xla_device),
             min_p=input_batch.min_p_cpu_tensor[:padded_num_reqs].to(
-                xla_device))
+                xla_device),
+            logprobs=needs_logprobs)
