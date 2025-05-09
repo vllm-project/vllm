@@ -5,7 +5,8 @@ import json
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from concurrent.futures.thread import ThreadPoolExecutor
 from http import HTTPStatus
-from typing import Annotated, Any, Callable, Optional, TypedDict, Union, cast
+from typing import (Annotated, Any, Callable, Optional, TypedDict, Union, cast,
+                    overload)
 
 import torch
 from fastapi import Request
@@ -350,13 +351,13 @@ class OpenAIServing:
         , each input can be a string or array of tokens. Note that each request
         can pass one or more inputs.
         """
-        # Although our type checking is based on mypy,
-        # VSCode Pyright extension should still work properly
-        # "is True" is required for Pyright to perform type narrowing
-        # See: https://github.com/microsoft/pyright/issues/7672
-        request_prompts = []
-        if input_or_inputs:
-            request_prompts.extend([
+
+        if input_or_inputs is not None:
+            # Although our type checking is based on mypy,
+            # VSCode Pyright extension should still work properly
+            # "is False" is required for Pyright to perform type narrowing
+            # See: https://github.com/microsoft/pyright/issues/7672
+            return [
                 self._normalize_prompt_text_to_input(
                     request,
                     tokenizer,
@@ -370,11 +371,35 @@ class OpenAIServing:
                     prompt_ids=prompt_input["content"],
                     truncate_prompt_tokens=truncate_prompt_tokens)
                 for prompt_input in parse_and_batch_prompt(input_or_inputs)
-            ])
-        request_prompts.extend(
-            self._load_prompt_embeds(request.prompt_embeds,
-                                     truncate_prompt_tokens))
-        return request_prompts
+            ]
+        if not isinstance(request, CompletionRequest):
+            raise ValueError(
+                "Using prompt embeddings with any request other than a"
+                " CompletionRequest is not supported.")
+        return self._load_prompt_embeds(request.prompt_embeds,
+                                        truncate_prompt_tokens)
+
+    @overload
+    async def _preprocess_completion(
+        self,
+        request: CompletionLikeRequest,
+        tokenizer: AnyTokenizer,
+        input_or_inputs: Union[str, list[str], list[int], list[list[int]]],
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = ...,
+        add_special_tokens: bool = ...,
+    ) -> tuple[list[TextTokensPrompt], list[EngineTokensPrompt]]:
+        ...
+
+    @overload
+    async def _preprocess_completion(
+        self,
+        request: CompletionRequest,
+        tokenizer: AnyTokenizer,
+        input_or_inputs: None,
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = ...,
+        add_special_tokens: bool = ...,
+    ) -> tuple[list[EmbedsPrompt], list[EngineEmbedsPrompt]]:
+        ...
 
     async def _preprocess_completion(
         self,
@@ -386,6 +411,12 @@ class OpenAIServing:
         add_special_tokens: bool = True,
     ) -> tuple[Union[list[TextTokensPrompt], list[EmbedsPrompt]], Union[
             list[EngineTokensPrompt], list[EngineEmbedsPrompt]]]:
+        if not isinstance(request,
+                          CompletionRequest) and input_or_inputs is None:
+            raise ValueError(
+                "Prompt embeds with non-completion requests is not"
+                " currently supported.")
+
         request_prompts = await self._tokenize_prompt_input_or_inputs_async(
             request,
             tokenizer,
