@@ -24,15 +24,31 @@ ARG PYTHON_VERSION=3.12
 ARG TARGETPLATFORM
 ENV DEBIAN_FRONTEND=noninteractive
 
+# By parameterizing the Deadsnakes repository URL, we allow third-party to use
+# their own mirror. When doing so, we don't benefit from the transparent
+# installation of the GPG key of the PPA, as done by add-apt-repository, so we
+# also need a URL for the GPG key.
+ARG DEADSNAKES_MIRROR_URL
+ARG DEADSNAKES_GPGKEY_URL
+
 # Install Python and other dependencies
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
     && apt-get update -y \
     && apt-get install -y ccache software-properties-common git curl sudo \
-    && for i in 1 2 3; do \
-        add-apt-repository -y ppa:deadsnakes/ppa && break || \
-        { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
-    done \
+    && if [ ! -z ${DEADSNAKES_MIRROR_URL} ] ; then \
+        if [ ! -z "${DEADSNAKES_GPGKEY_URL}" ] ; then \
+            mkdir -p -m 0755 /etc/apt/keyrings ; \
+            curl -L ${DEADSNAKES_GPGKEY_URL} | gpg --dearmor > /etc/apt/keyrings/deadsnakes.gpg ; \
+            sudo chmod 644 /etc/apt/keyrings/deadsnakes.gpg ; \
+            echo "deb [signed-by=/etc/apt/keyrings/deadsnakes.gpg] ${DEADSNAKES_MIRROR_URL} $(lsb_release -cs) main" > /etc/apt/sources.list.d/deadsnakes.list ; \
+        fi ; \
+    else \
+        for i in 1 2 3; do \
+            add-apt-repository -y ppa:deadsnakes/ppa && break || \
+            { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
+        done ; \
+    fi \
     && apt-get update -y \
     && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
@@ -40,6 +56,7 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
     && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
+
 # Install uv for faster pip installs
 RUN --mount=type=cache,target=/root/.cache/uv \
     python3 -m pip install uv
@@ -201,6 +218,13 @@ ARG TARGETPLATFORM
 
 SHELL ["/bin/bash", "-c"]
 
+# By parameterizing the Deadsnakes repository URL, we allow third-party to use
+# their own mirror. When doing so, we don't benefit from the transparent
+# installation of the GPG key of the PPA, as done by add-apt-repository, so we
+# also need a URL for the GPG key.
+ARG DEADSNAKES_MIRROR_URL
+ARG DEADSNAKES_GPGKEY_URL
+
 RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
     echo "export PYTHON_VERSION_STR=${PYTHON_VERSION_STR}" >> /etc/environment
 
@@ -210,10 +234,19 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && apt-get update -y \
     && apt-get install -y ccache software-properties-common git curl wget sudo vim python3-pip \
     && apt-get install -y ffmpeg libsm6 libxext6 libgl1 \
-    && for i in 1 2 3; do \
-        add-apt-repository -y ppa:deadsnakes/ppa && break || \
-        { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
-    done \
+    && if [ ! -z ${DEADSNAKES_MIRROR_URL} ] ; then \
+        if [ ! -z "${DEADSNAKES_GPGKEY_URL}" ] ; then \
+            mkdir -p -m 0755 /etc/apt/keyrings ; \
+            curl -L ${DEADSNAKES_GPGKEY_URL} | gpg --dearmor > /etc/apt/keyrings/deadsnakes.gpg ; \
+            sudo chmod 644 /etc/apt/keyrings/deadsnakes.gpg ; \
+            echo "deb [signed-by=/etc/apt/keyrings/deadsnakes.gpg] ${DEADSNAKES_MIRROR_URL} $(lsb_release -cs) main" > /etc/apt/sources.list.d/deadsnakes.list ; \
+        fi ; \
+    else \
+        for i in 1 2 3; do \
+            add-apt-repository -y ppa:deadsnakes/ppa && break || \
+            { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
+        done ; \
+    fi \
     && apt-get update -y \
     && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv libibverbs-dev \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
