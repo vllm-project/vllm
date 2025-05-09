@@ -911,7 +911,7 @@ torch::Tensor moe_wna16_marlin_gemm(
     if (b_q_type == vllm::kFE2M1f) {
       scales_ptr = b_scales.data_ptr<at::Float8_e4m3fn>();
     } else {
-      scales_ptr = b_scales.data_ptr<at::Half>();
+      scales_ptr = b_scales.data_ptr<at::BFloat16>();
     }
 
     MARLIN_NAMESPACE_NAME::marlin_mm<nv_bfloat16>(
