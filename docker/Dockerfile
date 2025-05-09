@@ -385,6 +385,8 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 # $ ls dist
 # $ # upload the wheel to a public location, e.g. https://wheels.vllm.ai/flashinfer/524304395bd1d8cd7d07db083859523fcaa246a4/flashinfer_python-0.2.1.post1+cu124torch2.5-cp38-abi3-linux_x86_64.whl
 
+# Allow specifying a version, Git revision or local .whl file
+ARG FLASHINFER_WHEEL="git+https://github.com/flashinfer-ai/flashinfer@v0.2.2.post1"
 RUN --mount=type=cache,target=/root/.cache/uv \
 . /etc/environment && \
 if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
@@ -397,7 +399,7 @@ if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
         if [ "$CUDA_MAJOR" -lt 12 ]; then \
             export FLASHINFER_ENABLE_SM90=0; \
         fi; \
-        uv pip install --system --no-build-isolation "git+https://github.com/flashinfer-ai/flashinfer@21ea1d2545f74782b91eb8c08fd503ac4c0743fc" ; \
+        uv pip install --system --no-build-isolation "${FLASHINFER_WHEEL}" ; \
     fi \
 fi
 COPY examples examples
