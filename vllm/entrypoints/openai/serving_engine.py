@@ -381,7 +381,7 @@ class OpenAIServing:
             add_special_tokens=add_special_tokens,
         )
 
-        engine_prompts = [
+        engine_prompts: list[Union[TokensPrompt, EmbedsPrompt]] = [
             request_prompt if "prompt_embeds" in request_prompt else
             TokensPrompt(prompt_token_ids=request_prompt["prompt_token_ids"])
             for request_prompt in request_prompts

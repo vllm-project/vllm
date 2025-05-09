@@ -130,9 +130,10 @@ class OpenAIServingCompletion(OpenAIServing):
         try:
             for i, engine_prompt in enumerate(engine_prompts):
                 sampling_params: Union[SamplingParams, BeamSearchParams]
-                default_max_tokens = self.max_model_len - len(
-                    engine_prompt.get("prompt_token_ids", [])
-                    or engine_prompt.get("prompt_embeds", []))
+                prompt_token_ids = engine_prompt.get("prompt_token_ids", [])
+                prompt_embeds = engine_prompt.get("prompt_embeds", [])
+                default_max_tokens = self.max_model_len - len(prompt_token_ids
+                                                              or prompt_embeds)
 
                 if request.use_beam_search:
                     sampling_params = request.to_beam_search_params(
@@ -278,8 +279,8 @@ class OpenAIServingCompletion(OpenAIServing):
                 prompt_text = res.prompt
 
                 # Prompt details are excluded from later streamed outputs
-                if res.prompt_token_ids is not None:
-                    num_prompt_tokens[prompt_idx] = len(res.prompt_token_ids)
+                if prompt_token_ids is not None:
+                    num_prompt_tokens[prompt_idx] = len(prompt_token_ids)
 
                 delta_token_ids: GenericSequence[int]
                 out_logprobs: Optional[GenericSequence[Optional[dict[
