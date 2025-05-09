@@ -64,29 +64,19 @@ class KVConnectorBase_V1(ABC):
         self._vllm_config = vllm_config
         self._role = role
 
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
-        """
-        Initialize with the KV caches. Useful for pre-registering the
-        KV Caches in the KVConnector (e.g. for NIXL).
-
-        Args: kv_caches:
-            dictionary of layer names, kv cache
-        """
-        return
-
-    def get_finished(self) -> tuple[Optional[set[str]], Optional[set[str]]]:
-        """Get the finished recving and sending requests."""
-        return None, None
-
     @property
     def role(self) -> KVConnectorRole:
         return self._role
 
+    # ==============================
+    # Worker-side methods
+    # ==============================
+
     def bind_connector_metadata(
             self, connector_metadata: KVConnectorMetadata) -> None:
-        """Set the connector metadata from the scheduler.
+        """Set the connector metadata which came from the scheduler.
 
-        This function should be called by the model runner every time 
+        This function should be called by the model runner every time
         before the model execution. The metadata will be used for runtime
         KV cache loading and saving.
 
@@ -98,7 +88,7 @@ class KVConnectorBase_V1(ABC):
     def clear_connector_metadata(self) -> None:
         """Clear the connector metadata.
 
-        This function should be called by the model runner every time 
+        This function should be called by the model runner every time
         after the model execution.
         """
         self._connector_metadata = KVConnectorMetadata()
@@ -113,9 +103,15 @@ class KVConnectorBase_V1(ABC):
         """
         return self._connector_metadata
 
-    # ==============================
-    # Worker-side methods
-    # ==============================
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+        """
+        Initialize with the KV caches. Useful for pre-registering the
+        KV Caches in the KVConnector (e.g. for NIXL).
+
+        Args: kv_caches:
+            dictionary of layer names, kv cache
+        """
+        return
 
     @abstractmethod
     def start_load_kv(self, forward_context: "ForwardContext",
@@ -177,6 +173,10 @@ class KVConnectorBase_V1(ABC):
         This prevents overwrites of paged KV buffer before saving done.
         """
         pass
+
+    def get_finished(self) -> tuple[Optional[set[str]], Optional[set[str]]]:
+        """Get the finished recving and sending requests."""
+        return None, None
 
     # ==============================
     # Scheduler-side methods
