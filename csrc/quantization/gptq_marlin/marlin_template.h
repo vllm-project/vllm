@@ -580,7 +580,16 @@ __global__ void Marlin(
   // we scale a `half2` tile in column-major layout in the former and in
   // row-major in the latter case.
   int s_sh_rd;
-  if constexpr (group_blocks != -1)
+  if constexpr (group_blocks != -1 && w_type == vllm::kFE2M1f) {
+    auto warp_id = threadIdx.x / 32;
+    int n_warps = thread_n_blocks / 4;
+    int warp_row = warp_id / n_warps;
+
+    s_sh_rd = 8 * ((threadIdx.x / 32) % (thread_n_blocks / 4)) +
+              (threadIdx.x % 32) / 4;
+    s_sh_rd = s_sh_rd * 2 + warp_row % 2;
+
+  } else if constexpr (group_blocks != -1)
     s_sh_rd = 8 * ((threadIdx.x / 32) % (thread_n_blocks / 4)) +
               (threadIdx.x % 32) / 4;
   else if constexpr (group_blocks == -1 &&
@@ -904,7 +913,7 @@ __global__ void Marlin(
           cur_k += k_iter_size * (k % b_sh_wr_iters);
 
           int k_blocks = cur_k / 16;
-          int cur_group_id = k_blocks / group_blocks;
+          int cur_group_id = k_blocks / (group_blocks * (w_type == vllm::kFE2M1f ? 2 : 1));
 
           int4* sh_s_stage = sh_s + s_sh_stage * pipe;
 
@@ -914,8 +923,7 @@ __global__ void Marlin(
           } else {
             reinterpret_cast<int2*>(&frag_s[k % 2])[0] =
                 reinterpret_cast<int2*>(sh_s_stage)[
-                  s_sh_rd + cur_group_id / 2 * 2 * s_sh_stride +
-                  cur_group_id % 2];
+                  s_sh_rd + cur_group_id * (2 * s_sh_stride)];
           }
         }
       }
