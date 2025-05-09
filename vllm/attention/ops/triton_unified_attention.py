@@ -29,6 +29,20 @@ def apply_softcap(S, x):
 
 @jitcache(
     check_keys=[],
+    assume_const=[
+        "scale",
+        "k_scale",
+        "v_scale",
+        "query_stride_1",
+        "output_stride_1",
+        "stride_k_cache_0",
+        "stride_k_cache_1",
+        "stride_k_cache_2",
+        "stride_k_cache_4",
+        "stride_v_cache_0",
+        "stride_v_cache_1",
+        "stride_v_cache_2",
+    ],
 )
 @triton.jit
 def kernel_unified_attention_2d(

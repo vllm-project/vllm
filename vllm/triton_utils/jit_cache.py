@@ -163,11 +163,11 @@ class JitCache(KernelInterface):
         assume_const=None,
     ):
         if not envs.VLLM_TRITON_ENABLE_JITCACHE:
-            # we are deactivated -> do nothing and overwrite self.run
-            #  with JitFunction.run
+            # we are deactivated -> do nothing and set self.run 
+            #  to JitFunction.run
             self.run = fn.run
             return
-        # we depend on the triton version, right now, only 3.3 is supported
+        # we depend on the triton version, this implementation supports only 3.3
         if not (int(triton_version.split(".")[0]) == 3
                 and int(triton_version.split(".")[1]) == 3):
             logger.warning_once("JITCache is incompatible to installed Triton " \
@@ -176,7 +176,7 @@ class JitCache(KernelInterface):
             self.run = fn.run
             return
         fn_name = str(fn).split(":")[1][:-1] 
-        logger.info_once("JITCache for Triton kernel %s is activated.", fn_name)
+        logger.info_once("JITCache for Triton kernel '%s' is activated.", fn_name)
         
         self.arg_names = arg_names
         self.fn = fn
