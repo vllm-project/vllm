@@ -150,11 +150,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     f"FA3. Current attention backend is {attn_backend_name}, "
                     f"FlashAttention version is {flash_attn_version}.")
 
+        self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
+
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
-
-        self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
 
         encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
             model_config=model_config,
