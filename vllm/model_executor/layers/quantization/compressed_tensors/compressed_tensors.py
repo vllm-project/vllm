@@ -23,7 +23,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsMoEMethod)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     W4A16SPARSE24_SUPPORTED_BITS, WNA16_SUPPORTED_BITS, CompressedTensors24,
-    CompressedTensorsScheme, CompressedTensorsW4A4Fp4,
+    CompressedTensorsScheme, CompressedTensorsW4A16Fp4,
     CompressedTensorsW4A16Sparse24, CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8, CompressedTensorsW8A16Fp8,
     CompressedTensorsWNA16)
@@ -332,7 +332,7 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         # Detect If Mixed Precision
         if self._is_fp4a16_nvfp4(weight_quant, input_quant):
-            return CompressedTensorsW4A4Fp4()
+            return CompressedTensorsW4A16Fp4()
 
         if self._is_wNa16_group_channel(weight_quant, input_quant):
             if (self.quant_format == CompressionFormat.marlin_24.value
