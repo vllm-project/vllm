@@ -139,7 +139,9 @@ class StructuredOutputManager:
         ordered_seq = sorted(structured_output_request_ids.items(),
                              key=lambda x: x[1])
 
-        # Reset the relevant part of the bitmask before filling
+        # Note that for thinking support, we will need to
+        # reset the relevant part of the bitmask for consequent
+        # request here.
         bitmask_tensor[:(len(ordered_seq) * (1 + max_num_spec_tokens))].fill_(
             self._full_mask)
 
@@ -157,7 +159,7 @@ class StructuredOutputManager:
 
             state_advancements = 0
             req_tokens = scheduled_spec_decode_tokens.get(req_id, []) + [None]
-            for token in req_tokens:
+            for i, token in enumerate(req_tokens):
                 if apply_bitmask and not request.grammar.is_terminated():
                     request.grammar.fill_bitmask(bitmask_tensor,
                                                  cumulative_index)
