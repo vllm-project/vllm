@@ -8,6 +8,7 @@
 
 import triton
 import triton.language as tl
+from vllm.triton_utils.jit_cache import jitcache
 
 from vllm.logger import init_logger
 
@@ -26,7 +27,9 @@ def apply_softcap(S, x):
     p2 = tl.exp(-Sdiv)
     return x * (p1 - p2) / (p1 + p2)
 
-
+@jitcache(
+    check_keys=[],
+)
 @triton.jit
 def kernel_unified_attention_2d(
     output_ptr,  # [num_tokens, num_query_heads, head_size]
