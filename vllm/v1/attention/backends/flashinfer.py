@@ -463,7 +463,7 @@ class FlashInferMetadataBuilder:
             paged_kv_indptr=paged_kv_indptr,
             paged_kv_indices=paged_kv_indices,
             paged_kv_last_page_len=paged_kv_last_page_len,
-            num_qo_heads=self.kv_cache_spec.num_query_heads,
+            num_qo_heads=self.runner.num_query_heads,
             num_kv_heads=self.kv_cache_spec.num_kv_heads,
             head_dim=self.kv_cache_spec.head_size,
             page_size=page_size,

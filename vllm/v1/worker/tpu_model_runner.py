@@ -437,7 +437,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 if attn_module.sliding_window is not None:
                     kv_cache_spec[layer_name] = SlidingWindowSpec(
                         block_size=block_size,
-                        num_query_heads=attn_module.num_heads,
                         num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
                         dtype=attn_module.dtype,
@@ -447,7 +446,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 else:
                     kv_cache_spec[layer_name] = FullAttentionSpec(
                         block_size=block_size,
-                        num_query_heads=attn_module.num_heads,
                         num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
                         dtype=attn_module.dtype,

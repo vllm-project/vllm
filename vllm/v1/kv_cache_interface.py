@@ -56,7 +56,6 @@ class KVCacheSpec:
 
 @dataclass
 class AttentionSpec(KVCacheSpec):
-    num_query_heads: int
     num_kv_heads: int
     head_size: int
     dtype: torch.dtype
@@ -75,7 +74,7 @@ class FullAttentionSpec(AttentionSpec):
 
     @property
     def type_id(self) -> str:
-        return f"full_attention_{self.num_query_heads}_{self.num_kv_heads}_{self.block_size}_{self.page_size_bytes}"  # noqa
+        return f"full_attention_{self.num_kv_heads}_{self.block_size}_{self.page_size_bytes}"  # noqa
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_model_len = vllm_config.model_config.max_model_len
@@ -91,7 +90,7 @@ class SlidingWindowSpec(AttentionSpec):
 
     @property
     def type_id(self) -> str:
-        return f"sliding_window_{self.sliding_window}_{self.num_query_heads}_{self.num_kv_heads}_{self.block_size}_{self.page_size_bytes}"  # noqa
+        return f"sliding_window_{self.sliding_window}_{self.num_kv_heads}_{self.block_size}_{self.page_size_bytes}"  # noqa
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_model_len = vllm_config.model_config.max_model_len
