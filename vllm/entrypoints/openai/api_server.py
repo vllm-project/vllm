@@ -434,12 +434,11 @@ async def tokenize(request: TokenizeRequest, raw_request: Request):
             return JSONResponse(content=generator.model_dump())
     except Exception as e:
         logger.error("Error in tokenization: %s", str(e))
-        return JSONResponse(
-            content=ErrorResponse(
-                message=str(e),
-                type="TokenizationError",
-                code=HTTPStatus.UNPROCESSABLE_ENTITY).model_dump(),
-            status_code=HTTPStatus.UNPROCESSABLE_ENTITY)
+        return JSONResponse(content=ErrorResponse(
+            message=str(e),
+            type="TokenizationError",
+            code=HTTPStatus.UNPROCESSABLE_ENTITY).model_dump(),
+                            status_code=HTTPStatus.UNPROCESSABLE_ENTITY)
 
     assert_never(generator)
 
@@ -458,12 +457,11 @@ async def detokenize(request: DetokenizeRequest, raw_request: Request):
             return JSONResponse(content=generator.model_dump())
     except Exception as e:
         logger.error("Error in detokenization: %s", str(e))
-        return JSONResponse(
-            content=ErrorResponse(
-                message=str(e),
-                type="TokenizationError",
-                code=HTTPStatus.UNPROCESSABLE_ENTITY).model_dump(),
-            status_code=HTTPStatus.UNPROCESSABLE_ENTITY)
+        return JSONResponse(content=ErrorResponse(
+            message=str(e),
+            type="TokenizationError",
+            code=HTTPStatus.UNPROCESSABLE_ENTITY).model_dump(),
+                            status_code=HTTPStatus.UNPROCESSABLE_ENTITY)
 
     assert_never(generator)
 
@@ -500,15 +498,15 @@ async def create_chat_completion(request: ChatCompletionRequest,
                                 status_code=generator.code)
         elif isinstance(generator, ChatCompletionResponse):
             return JSONResponse(content=generator.model_dump())
-        return StreamingResponse(content=generator, media_type="text/event-stream")
+        return StreamingResponse(content=generator,
+                                 media_type="text/event-stream")
     except Exception as e:
         logger.error("Error in chat completion: %s", str(e))
-        return JSONResponse(
-            content=ErrorResponse(
-                message=str(e),
-                type="ChatCompletionError",
-                code=HTTPStatus.UNPROCESSABLE_ENTITY).model_dump(),
-            status_code=HTTPStatus.UNPROCESSABLE_ENTITY)
+        return JSONResponse(content=ErrorResponse(
+            message=str(e),
+            type="ChatCompletionError",
+            code=HTTPStatus.UNPROCESSABLE_ENTITY).model_dump(),
+                            status_code=HTTPStatus.UNPROCESSABLE_ENTITY)
 
 
 @router.post("/v1/completions", dependencies=[Depends(validate_json_request)])
@@ -640,30 +638,30 @@ async def create_transcriptions(request: Annotated[TranscriptionRequest,
     try:
         audio_data = await request.file.read()
     except Exception as e:
-        logger.error("Error in reading audio data: %s", str(e), ",audio file should be a fastapi.UploadFile object.")
-        return JSONResponse(
-            content=ErrorResponse(
-                message=str(e),
-                type="AudioDataError",
-                code=HTTPStatus.UNPROCESSABLE_ENTITY).model_dump(),
-            status_code=HTTPStatus.UNPROCESSABLE_ENTITY)
+        logger.error("Error in reading audio data: %s", str(e),
+                     ",audio file should be a fastapi.UploadFile object.")
+        return JSONResponse(content=ErrorResponse(
+            message=str(e),
+            type="AudioDataError",
+            code=HTTPStatus.UNPROCESSABLE_ENTITY).model_dump(),
+                            status_code=HTTPStatus.UNPROCESSABLE_ENTITY)
     try:
         generator = await handler.create_transcription(audio_data, request,
-                                                   raw_request)
+                                                       raw_request)
         if isinstance(generator, ErrorResponse):
             return JSONResponse(content=generator.model_dump(),
                                 status_code=generator.code)
         elif isinstance(generator, TranscriptionResponse):
             return JSONResponse(content=generator.model_dump())
-        return StreamingResponse(content=generator, media_type="text/event-stream")
+        return StreamingResponse(content=generator,
+                                 media_type="text/event-stream")
     except Exception as e:
         logger.error("Error in transcriptions: %s", str(e))
-        return JSONResponse(
-            content=ErrorResponse(
-                message=str(e),
-                type="TranscriptionError",
-                code=HTTPStatus.UNPROCESSABLE_ENTITY).model_dump(),
-            status_code=HTTPStatus.UNPROCESSABLE_ENTITY)
+        return JSONResponse(content=ErrorResponse(
+            message=str(e),
+            type="TranscriptionError",
+            code=HTTPStatus.UNPROCESSABLE_ENTITY).model_dump(),
+                            status_code=HTTPStatus.UNPROCESSABLE_ENTITY)
 
 
 @router.post("/rerank", dependencies=[Depends(validate_json_request)])
@@ -784,12 +782,11 @@ async def invocations(raw_request: Request):
         body = await raw_request.json()
     except Exception as e:
         logger.error("Error in parsing request body: %s", str(e))
-        return JSONResponse(
-            content=ErrorResponse(
-                message=str(e),
-                type="RequestBodyError",
-                code=HTTPStatus.UNPROCESSABLE_ENTITY).model_dump(),
-            status_code=HTTPStatus.UNPROCESSABLE_ENTITY)
+        return JSONResponse(content=ErrorResponse(
+            message=str(e),
+            type="RequestBodyError",
+            code=HTTPStatus.UNPROCESSABLE_ENTITY).model_dump(),
+                            status_code=HTTPStatus.UNPROCESSABLE_ENTITY)
     task = raw_request.app.state.task
 
     if task not in TASK_HANDLERS:

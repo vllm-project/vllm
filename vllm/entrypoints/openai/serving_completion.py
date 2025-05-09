@@ -4,9 +4,9 @@ import asyncio
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
+from http import HTTPStatus
 from typing import Optional, Union, cast
 
-import jinja2
 from fastapi import Request
 
 from vllm.config import ModelConfig
@@ -33,8 +33,6 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import merge_async_iterators
-from vllm.entrypoints.openai.protocol import ErrorResponse
-from http import HTTPStatus
 
 logger = init_logger(__name__)
 
@@ -114,14 +112,12 @@ class OpenAIServingCompletion(OpenAIServing):
                 truncate_prompt_tokens=request.truncate_prompt_tokens,
                 add_special_tokens=request.add_special_tokens,
             )
-        
+
         except Exception as e:
             logger.exception("Error in preprocessing prompt inputs")
-            return ErrorResponse(
-                message=str(e),
-                type="ChatCompletionError",
-                code=HTTPStatus.UNPROCESSABLE_ENTITY)
-
+            return ErrorResponse(message=str(e),
+                                 type="ChatCompletionError",
+                                 code=HTTPStatus.UNPROCESSABLE_ENTITY)
 
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[RequestOutput, None]] = []
