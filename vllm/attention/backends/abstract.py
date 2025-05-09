@@ -282,8 +282,24 @@ class AttentionImpl(ABC, Generic[T]):
         kv_cache: torch.Tensor,
         attn_metadata: T,
         output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         raise NotImplementedError
+
+    def fused_output_quant_supported(self, dtype: torch.dtype, static: bool,
+                                     per_token: bool):
+        """
+        Does this attention implementation support fused output quantization.
+        This is used by the AttnFusionPass to only fuse output quantization
+        onto implementations that support it.
+
+        TODO(luka) merge parameters into QuantDescriptor
+        :param dtype: quantized dtype
+        :param static: static or dynamic quantization
+        :param per_token: per-token or per-tensor quantization
+        :return: is fusion supported for this type of quantization
+        """
+        return False
 
 
 class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
@@ -298,6 +314,7 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
         kv_cache: torch.Tensor,
         attn_metadata: T,
         output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         raise NotImplementedError
 

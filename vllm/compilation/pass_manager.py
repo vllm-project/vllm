@@ -10,6 +10,7 @@ from vllm.logger import init_logger
 from .activation_quant_fusion import ActivationQuantFusionPass
 from .fix_functionalization import FixFunctionalizationPass
 from .fusion import FusionPass
+from .fusion_attn import AttnFusionPass
 from .inductor_pass import CustomGraphPass, InductorPass, get_pass_context
 from .noop_elimination import NoOpEliminationPass
 from .sequence_parallelism import SequenceParallelismPass
@@ -56,6 +57,9 @@ class PostGradPassManager(CustomGraphPass):
 
         if self.pass_config.enable_sequence_parallelism:
             self.passes += [SequenceParallelismPass(config)]
+
+        if self.pass_config.enable_attn_fusion:
+            self.passes += [AttnFusionPass(config)]
 
         self.fix_functionalization = FixFunctionalizationPass(config)
 
