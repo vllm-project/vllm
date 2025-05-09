@@ -482,6 +482,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if batch_changed or batch_reordered:
             self.input_batch.refresh_sampling_metadata()
 
+
+    def save_tensorized_model(
+        self,
+        tensorizer_config,
+    ) -> None:
+        from vllm.model_executor.model_loader import TensorizerLoader
+        TensorizerLoader.save_model(
+            self.model,
+            tensorizer_config=tensorizer_config,
+        )
+
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
