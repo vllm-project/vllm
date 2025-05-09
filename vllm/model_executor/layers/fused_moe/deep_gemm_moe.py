@@ -9,6 +9,8 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size)
+from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
+    moe_permute, moe_unpermute)
 from vllm.model_executor.layers.fused_moe.utils import (_fp8_perm,
                                                         _fp8_quantize,
                                                         _resize_cache)
@@ -39,15 +41,14 @@ def _valid_deep_gemm(hidden_states: torch.Tensor,
         return False
 
     align = dg.get_m_alignment_for_contiguous_layout()
-    M = hidden_states.shape[0]
     _, K, N = w2.shape
 
     # For now, disable DeepGemm for small N until better permute/unpermute
     # ops are available.
-    if N <= 512:
-        return False
+    # if N <= 512:
+    #     return False
 
-    if align > M or N % align != 0 or K % align != 0:
+    if N % align != 0 or K % align != 0:
         return False
 
     return (hidden_states.is_contiguous() and w1.is_contiguous()
@@ -79,20 +80,19 @@ def _moe_permute(
                              pad_sorted_ids=True))
 
     inv_perm: Optional[torch.Tensor] = None
-
     num_tokens = top_k_num * tokens_in_chunk
-    sorted_token_ids = sorted_token_ids.clamp(max=num_tokens - 1)
+    sorted_token_ids_clamp = sorted_token_ids.clamp(max=num_tokens - 1)
     expert_ids = torch.repeat_interleave(expert_ids, block_m, dim=0)
     inv_perm = torch.argsort(sorted_token_ids)[:num_tokens]
 
     # Permute according to sorted token ids.
     curr_hidden_states = _fp8_perm(curr_hidden_states,
-                                   sorted_token_ids // top_k_num)
+                                   sorted_token_ids_clamp // top_k_num)
 
     if a1q_scale is not None:
-        a1q_scale = a1q_scale[sorted_token_ids // top_k_num]
+        a1q_scale = a1q_scale[sorted_token_ids_clamp // top_k_num]
 
-    return (curr_hidden_states, a1q_scale, sorted_token_ids, expert_ids,
+    return (curr_hidden_states, a1q_scale, sorted_token_ids_clamp, expert_ids,
             inv_perm)
 
 
@@ -112,6 +112,42 @@ def _moe_unpermute_and_reduce(
     curr_hidden = curr_hidden.view(-1, topk, K)
     curr_hidden.mul_(topk_weight.view(M, -1, 1))
     ops.moe_sum(curr_hidden, out)
+
+
+def _customized_moe_permute(
+    curr_hidden_states: torch.Tensor,
+    a1q_scale: Optional[torch.Tensor],
+    curr_topk_ids: torch.Tensor,
+    global_num_experts: int,
+    expert_map: Optional[torch.Tensor],
+    block_m: int,
+):
+    fill_invalid_expert = 0
+    topk = curr_topk_ids.shape[1]
+    tokens_in_chunk, _ = curr_hidden_states.shape
+    num_tokens = topk * tokens_in_chunk
+    (permuted_hidden_states, expert_first_token_offset, inv_permuted_idx,
+     permuted_idx, m_indices) = moe_permute(curr_hidden_states, curr_topk_ids,
+                                            topk, global_num_experts,
+                                            expert_map, block_m,
+                                            fill_invalid_expert)
+    permuted_idx = permuted_idx.clamp(max=num_tokens - 1)
+    if a1q_scale is not None:
+        a1q_scale = a1q_scale[permuted_idx // topk]
+    return (permuted_hidden_states, a1q_scale, permuted_idx, m_indices,
+            inv_permuted_idx, expert_first_token_offset)
+
+
+def _customized_moe_unpermute_and_reduce(
+    curr_hidden: torch.Tensor,
+    inv_perm: Optional[torch.Tensor],
+    topk_weight: torch.Tensor,
+    first_token_offset: torch.Tensor,
+) -> torch.Tensor:
+    M, topk = topk_weight.shape
+    output = moe_unpermute(curr_hidden, topk_weight, inv_perm,
+                           first_token_offset, topk)
+    return output
 
 
 def deep_gemm_moe_fp8(
@@ -254,10 +290,14 @@ def deep_gemm_moe_fp8(
         qcurr_hidden_states, a1q_scale = _fp8_quantize(curr_hidden_states,
                                                        a1_scale, block_shape)
 
+        # (qcurr_hidden_states_, a1q_scale_, sorted_token_ids_, expert_ids_,
+        #  inv_perm_) = _moe_permute(qcurr_hidden_states, a1q_scale,
+        #                           curr_topk_ids, global_num_experts,
+        #                           expert_map=expert_map, block_m=block_m)
         (qcurr_hidden_states, a1q_scale, sorted_token_ids, expert_ids,
-         inv_perm) = _moe_permute(qcurr_hidden_states, a1q_scale,
-                                  curr_topk_ids, global_num_experts,
-                                  expert_map, block_m)
+         inv_perm, first_token_offset) = _customized_moe_permute(
+             qcurr_hidden_states, a1q_scale, curr_topk_ids, global_num_experts,
+             expert_map, block_m)
 
         # Adjust the intermediate cache size and config for the last chunk.
         # Note that in most cases we only have one chunk so the cache size
@@ -287,8 +327,11 @@ def deep_gemm_moe_fp8(
         dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
             (qworkspace2, a2q_scale), (w2, w2_scale), workspace3, expert_ids)
 
-        _moe_unpermute_and_reduce(
-            out_hidden_states[begin_chunk_idx:end_chunk_idx],
-            workspace3.view(*workspace3.shape), inv_perm, curr_topk_weights)
+        # _moe_unpermute_and_reduce(
+        #     out_hidden_states[begin_chunk_idx:end_chunk_idx],
+        #     workspace3.view(*workspace3.shape), inv_perm, curr_topk_weights)
+        out_hidden_states[begin_chunk_idx:end_chunk_idx] = \
+          _customized_moe_unpermute_and_reduce(workspace3.view(*workspace3.shape),
+          inv_perm, curr_topk_weights, first_token_offset)
 
     return out_hidden_states
