@@ -125,8 +125,6 @@ repos:
     name: Update Dockerfile dependency graph
     entry: tools/update-dockerfile-graph.sh
     language: script
-    files: ^docker/Dockerfile$
-    pass_filenames: false
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion

@@ -25,11 +25,10 @@ Currently only the forward kernel is supported, and contains these features:
 from typing import Optional
 
 import torch
-import triton
-import triton.language as tl
 
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 
 SUPPORTED_LAYOUTS = ['thd', 'bhsd', 'bshd']
 
