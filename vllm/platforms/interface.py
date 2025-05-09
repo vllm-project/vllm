@@ -122,6 +122,14 @@ class Platform:
 
     additional_env_vars: list[str] = []
 
+    @property
+    def supported_dtypes(self) -> list[torch.dtype]:
+        """Returns the supported dtypes for the current platform."""
+        # Be careful with the order of the dtypes. The first dtype will
+        # be used as the default dtype fallback for the current platform,
+        # when encountering unsupported dtypes in "auto" dtype.
+        return [torch.bfloat16, torch.float16, torch.float32]
+
     def is_cuda(self) -> bool:
         return self._enum == PlatformEnum.CUDA
 
