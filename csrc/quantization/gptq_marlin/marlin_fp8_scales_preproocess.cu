@@ -1,6 +1,7 @@
 
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
+#include "core/registration.h"
 
 
 __global__ void marlin_fp8_scales_preprocess_kernel(int4* __restrict__ in_ptr,
