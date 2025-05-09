@@ -496,11 +496,12 @@ class MLACommonMetadataBuilder(Generic[M]):
                 max_context_chunk = (self.chunked_prefill_workspace_size //
                                      num_prefills_with_context_cpu)
 
-                # align max_context_chunk to page_size by rounding down,
-                # currently the `gather_cache` kernel cannot handle
-                # `context_chunk_starts` that are not aligned to page_size
-                max_context_chunk = round_down(max_context_chunk,
-                                               self.page_size)
+                if self.aot_schedule:
+                    # align max_context_chunk to page_size by rounding down,
+                    # currently the `gather_cache` kernel cannot handle
+                    # `context_chunk_starts` that are not aligned to page_size
+                    max_context_chunk = round_down(max_context_chunk,
+                                                   self.page_size)
 
                 assert max_context_chunk > 0
                 num_chunks = cdiv(max_context_len_cpu, max_context_chunk)
