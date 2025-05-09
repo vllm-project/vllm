@@ -31,6 +31,7 @@ if current_platform.is_cuda():
 if current_platform.is_rocm():
     import aiter
 
+    from vllm.attention.ops.triton_unified_attention import unified_attention
     from vllm.triton_utils import tl, triton
     from vllm.utils import direct_register_custom_op
 
@@ -757,21 +758,42 @@ class FlashAttentionImpl(AttentionImpl):
             if current_platform.is_rocm():
                 cu_seq_lens = attn_metadata.cu_seq_lens
                 total_tokens = attn_metadata.total_tokens
-                flash_attn_varlen_func(
-                    query[:num_actual_tokens],
-                    key_cache,
-                    value_cache,
-                    out=output[:num_actual_tokens],
-                    cu_seqlens_q=cu_seqlens_q,
-                    max_seqlen_q=max_seqlen_q,
-                    max_seqlen_k=max_seqlen_k,
-                    total_tokens=total_tokens,
-                    softmax_scale=self.scale,
-                    alibi_slopes=self.alibi_slopes,
-                    window_size=list(self.sliding_window),
-                    block_table=block_table,
-                    cu_seqlens_k=cu_seq_lens,
-                )
+                if num_actual_tokens < 4096:
+                    unified_attention(
+                        q=query[:num_actual_tokens],
+                        k=key_cache,
+                        v=value_cache,
+                        out=output[:num_actual_tokens],
+                        cu_seqlens_q=cu_seqlens_q,
+                        max_seqlen_q=max_seqlen_q,
+                        seqused_k=seqused_k,
+                        max_seqlen_k=max_seqlen_k,
+                        softmax_scale=self.scale,
+                        causal=True,
+                        alibi_slopes=self.alibi_slopes,
+                        window_size=self.sliding_window,
+                        block_table=block_table,
+                        softcap=self.logits_soft_cap,
+                        q_descale=None,  # Not supported
+                        k_descale=layer._k_scale.expand(descale_shape),
+                        v_descale=layer._v_scale.expand(descale_shape),
+                    )
+                else:
+                    flash_attn_varlen_func(
+                        query[:num_actual_tokens],
+                        key_cache,
+                        value_cache,
+                        out=output[:num_actual_tokens],
+                        cu_seqlens_q=cu_seqlens_q,
+                        max_seqlen_q=max_seqlen_q,
+                        max_seqlen_k=max_seqlen_k,
+                        total_tokens=total_tokens,
+                        softmax_scale=self.scale,
+                        alibi_slopes=self.alibi_slopes,
+                        window_size=list(self.sliding_window),
+                        block_table=block_table,
+                        cu_seqlens_k=cu_seq_lens,
+                    )
             else:
                 flash_attn_varlen_func(
                     q=query[:num_actual_tokens],
