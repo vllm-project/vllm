@@ -85,8 +85,19 @@ class PreparedKernel:
         self.launch_enter_hook = launch_enter_hook
         self.launch_exit_hook = launch_exit_hook
 
-        self.bound_args = bound_args
-        self.update_only_arg_names = update_only_arg_names
+        self.arg_list = []
+        self.update_args_index = {}
+        # We construct the list of arguments that are passed to the combiled
+        # kernel beforehand. For the arguments that could change each time the
+        # kernel is called, store a dummy value that will be set each time
+        # __call__ is called. For the arguments that are labelled as assume to
+        # be constant, we skip this step and use the initial stored values.
+        for i, arg_n in enumerate(bound_args.keys()):
+            if arg_n in update_only_arg_names:
+                self.update_args_index[arg_n] = i
+                self.arg_list.append("dummy_value")
+            else:
+                self.arg_list.append(bound_args[arg_n])
 
         self.device = device
         self._init_handles()
@@ -116,9 +127,8 @@ class PreparedKernel:
     def __call__(self, *args, **kwargs):
         assert len(args) == 0
 
-        # we update only the values we need to update
-        for arg_n in self.update_only_arg_names:
-            self.bound_args[arg_n] = kwargs[arg_n]
+        for arg_n, idx in self.update_args_index.items():
+            self.arg_list[idx] = kwargs[arg_n]
 
         if self.cache_launch_grid:
             grid_0, grid_1, grid_2 = self.concrete_grid
@@ -144,7 +154,7 @@ class PreparedKernel:
             self.launch_metadata,
             self.launch_enter_hook,
             self.launch_exit_hook,
-            *self.bound_args.values(),
+            *self.arg_list,
         )
 
     def get_key(self):
@@ -185,10 +195,8 @@ class JitCache(KernelInterface):
             self.base_fn = self.base_fn.fn
         self.cache_lock = cache_lock
         self.cache_launch_grid = cache_launch_grid
-        self.dynamic_mode = False
         self.run = self._run_static
         if self.cache_lock is None:
-            self.dynamic_mode = True
             self.run = self._run_dynamic
         self.check_keys = check_keys
         self.assume_const = assume_const
