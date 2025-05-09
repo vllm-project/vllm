@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
-import prometheus_client
 
 from vllm.config import SpeculativeConfig
 from vllm.logger import init_logger
@@ -116,6 +115,8 @@ class SpecDecodingProm:
 
     def __init__(self, speculative_config: Optional[SpeculativeConfig],
                  labelnames: list[str], labelvalues: list[str]):
+        import prometheus_client
+
         self.spec_decoding_enabled = speculative_config is not None
         if not self.spec_decoding_enabled:
             return
