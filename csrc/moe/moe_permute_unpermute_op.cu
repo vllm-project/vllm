@@ -9,8 +9,7 @@
 #if defined(CUDA_VERSION) && (CUDA_VERSION >= 12000)
 
 void moe_permute(
-    const torch::Tensor& input,  // [n_token, hidden]
-    // const torch::Tensor& topk_weights,               //[n_token, topk]
+    const torch::Tensor& input,                      // [n_token, hidden]
     const torch::Tensor& topk_ids,                   // [n_token, topk]
     const torch::Tensor& token_expert_indicies,      // [n_token, topk]
     const std::optional<torch::Tensor>& expert_map,  // [n_expert]
@@ -21,8 +20,6 @@ void moe_permute(
     torch::Tensor& inv_permuted_idx,           // [n_token, topk]
     torch::Tensor& permuted_idx,               // [permute_size]
     torch::Tensor& m_indices) {                // [align_expand_m]
-  //   TORCH_CHECK(topk_weights.scalar_type() == at::ScalarType::Float,
-  //               "topk_weights must be float32");
   TORCH_CHECK(expert_first_token_offset.scalar_type() == at::ScalarType::Long,
               "expert_first_token_offset must be int64");
   TORCH_CHECK(topk_ids.scalar_type() == at::ScalarType::Int,

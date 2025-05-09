@@ -76,12 +76,9 @@ def _moe_unpermute_and_reduce(
 
 def moe_permute(
     hidden_states: torch.Tensor,
-    # topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    # token_expert_indices: torch.Tensor,
     topk: int,
     n_expert: int,
-    # n_local_expert: int,
     expert_map: Optional[torch.Tensor] = None,
     align_block_size: Optional[int] = None,
     fill_invalid_expert: int = -1
@@ -92,12 +89,9 @@ def moe_permute(
       for each expert.
     Parameters:
     - hidden_states (torch.Tensor): The input tensor to the MoE layer.
-    # - topk_weights (torch.Tensor): topk expert route weight for each token.
     - topk_ids (torch.Tensor): topk expert route id for each token.
-    # - token_expert_indices (torch.Tensor): indice for expanded hidden.
     - topk (int): The number of top-k experts to select.
     - n_expert (int): The number of expert.
-    # - n_local_expert (int): The number of expert in current EP rank.
     - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
         from the global expert space to the local expert space of the expert 
         parallel shard.
@@ -164,12 +158,9 @@ def moe_permute(
 def moe_unpermute(
     permuted_hidden_states: torch.Tensor,
     topk_weights: torch.Tensor,
-    # topk_ids: torch.Tensor,
     inv_permuted_idx: torch.Tensor,
     expert_first_token_offset: torch.Tensor,
     topk: int,
-    # n_expert: int,
-    # n_local_expert: int,
 ) -> torch.Tensor:
     """
     This function expands and permutes activation to gathering uncontinuous
@@ -177,13 +168,10 @@ def moe_unpermute(
     Parameters:
     - permuted_hidden_states (torch.Tensor): permuted activation.
     - topk_weights (torch.Tensor): topk expert route weight for each token.
-    # - topk_ids (torch.Tensor): topk expert route id for each token.
     - inv_permuted_idx (torch.Tensor): row idx map for moe_unpermute.
     - expert_first_token_offset (torch.Tensor): offset of the first token
        of each expert for grouped gemm.
     - topk (int): The number of top-k experts to select.
-    # - n_expert (int): The number of expert.
-    # - n_local_expert (int): The number of expert in current EP rank.
     Returns:
     - hidden_states (torch.Tensor): The reduced and unpermuted activation
       tensor.
