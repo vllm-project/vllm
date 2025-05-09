@@ -43,8 +43,16 @@ def apply_w8a8_block_fp8_linear(
     input_2d = input.view(-1, input.shape[-1])
     output_shape = [*input.shape[:-1], weight.shape[0]]
 
+    # TODO: update this after switching to public sm90 block scale gemm
+    # as it also supports weight.shape % 128 != 0
     shape_supported_by_cutlass = (weight.shape[0] % 128 == 0
                                   and weight.shape[1] % 128 == 0)
+    if current_platform.has_device_capability(100):
+        def ceil_div(x: int, y: int) -> int:
+            return (x + y - 1) // y
+        shape_supported_by_cutlass = (ceil_div(weight.shape[0], 128) == weight_scale.shape[0]
+                                      and ceil_div(weight.shape[1], 128) == weight_scale.shape[1])
+
     if current_platform.is_rocm():
         # TODO this is never used, as cutlass_block_fp8_supported is False
         scale_a_shape = ((input_2d.shape[-1] // block_size[1], ) +
