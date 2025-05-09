@@ -206,7 +206,7 @@ def _compare_sp(
         'compile_sizes': [4, 8],
         'splitting_ops': [],
         'pass_config': {
-            'enable_sequence_parallism': sp_enabled,
+            'enable_sequence_parallelism': sp_enabled,
             'enable_noop': True,
             'enable_fusion': True,
         },
