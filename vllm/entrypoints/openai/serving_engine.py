@@ -497,7 +497,8 @@ class OpenAIServing:
     ) -> list[EmbedsPrompt]:
 
         def _load_and_validate_embed(embed: bytes) -> EmbedsPrompt:
-            tensor = torch.load(io.BytesIO(base64.b64decode(embed)))
+            tensor = torch.load(io.BytesIO(base64.b64decode(embed)),
+                                weights_only=True)
             assert isinstance(
                 tensor,
                 (torch.FloatTensor, torch.BFloat16Tensor, torch.HalfTensor))
