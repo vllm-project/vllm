@@ -779,10 +779,6 @@ def awq_marlin_repack(b_q_weight: torch.Tensor, size_k: int, size_n: int,
     return torch.ops._C.awq_marlin_repack(b_q_weight, size_k, size_n, num_bits)
 
 
-def marlin_fp8_scales_preprocess(scales: torch.Tensor) -> torch.Tensor:
-    return torch.ops._C.marlin_fp8_scales_preprocess(scales)
-
-
 def gptq_marlin_moe_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
                            size_k: int, size_n: int,
                            num_bits: int) -> torch.Tensor:

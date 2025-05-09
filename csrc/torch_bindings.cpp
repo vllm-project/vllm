@@ -299,11 +299,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       {stride_tag});
   // conditionally compiled so impl registration is in source file
 
-  // process marlin fp8 scales (used for W4A16-FP4)
-  ops.def("marlin_fp8_scales_preprocess(Tensor scales) -> Tensor",
-          {stride_tag});
-  // conditionally compiled so impl registration is in source file
-
   // gptq_marlin repack from GPTQ.
   ops.def(
       "gptq_marlin_repack(Tensor b_q_weight, Tensor perm, "

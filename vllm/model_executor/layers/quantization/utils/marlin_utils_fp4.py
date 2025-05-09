@@ -24,7 +24,7 @@ def is_fp4_marlin_supported():
 def fp4_marlin_process_scales(marlin_scales):
     assert (marlin_scales >= 0).all()
 
-    # convert to half first we would convert to fp8 later
+    # convert to half first, we would convert to fp8 later
     marlin_scales = marlin_scales.to(torch.half)
 
     # 8 is the number of scale number using by one thread
@@ -39,13 +39,13 @@ def fp4_marlin_process_scales(marlin_scales):
     # We assume that weight_scale (FP8-S1E4M3) is always greater
     # than or equal to 0. So we can convert
     # (weight_scale * (2 ** 7) to a special FP8-S0E5M3 format.
-
-    # Why multiply 2 ** 7 ?
-    # After by 2 ** 7, the top bit of FP8-S0E5M3 would always be 1
+    # After multiply by 2 ** 7, the top bit of FP8-S0E5M3 would always be 1
     # hen weight_scale > 0. This allows us to have an exponent bias
     # closer to zero after dequantization.
-    marlin_scales = marlin_scales.to(torch.float8_e4m3fn)
-    marlin_scales = ops.marlin_fp8_scales_preprocess(marlin_scales)
+
+    marlin_scales = (marlin_scales * (2**7)).view(torch.int16) << 1
+    marlin_scales = marlin_scales.view(torch.float8_e4m3fn)
+    marlin_scales = marlin_scales[:, 1::2].contiguous()
 
     return marlin_scales
 

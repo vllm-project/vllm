@@ -352,7 +352,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
        "csrc/quantization/marlin/qqq/marlin_qqq_gemm_kernel.cu"
        "csrc/quantization/gptq_marlin/gptq_marlin.cu"
        "csrc/quantization/gptq_marlin/gptq_marlin_repack.cu"
-       "csrc/quantization/gptq_marlin/marlin_fp8_scales_preproocess.cu"
        "csrc/quantization/gptq_marlin/awq_marlin_repack.cu")
     set_gencode_flags_for_srcs(
       SRCS "${MARLIN_SRCS}"
