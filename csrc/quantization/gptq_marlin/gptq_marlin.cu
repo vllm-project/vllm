@@ -315,14 +315,14 @@ bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
     BIGGROUP_GET_IF_M234(W_TYPE, 8, 4, 128)  \
     BIGGROUP_GET_IF_M234(W_TYPE, 4, 8, 128)
 
-  #define FP4_GET_IF_M1(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)        \
+  #define FP4_GET_IF_M1(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)       \
     _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, 1, NUM_THREADS, false) \
-    _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false)
+    _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false) \
 
-  #define FP4_GET_IF_M234(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)       \
-    _GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false) \
-    _GET_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false) \
-    _GET_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false)
+  #define FP4_GET_IF_M234(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)   \
+    _GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false)  \
+    _GET_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false)  \
+    _GET_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false) \
 
   #define FP4_GET_IF(W_TYPE)            \
     FP4_GET_IF_M1(W_TYPE, 8, 8, 256)    \
@@ -453,7 +453,7 @@ exec_config_t determine_exec_config(const vllm::ScalarType& q_type, int prob_m,
 }
 
 template <typename scalar_t>
-void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
+void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s, void* s2,
                void* zp, void* g_idx, void* perm, void* a_tmp, int prob_m,
                int prob_n, int prob_k, int lda, void* workspace,
                vllm::ScalarType const& q_type, bool has_act_order,
@@ -504,6 +504,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
   int4* C_ptr = (int4*)C;
   int4* C_tmp_ptr = (int4*)C_tmp;
   const int4* s_ptr = (const int4*)s;
+  const uint16_t* s2_ptr = (const uint16_t*)s2;
   const int4* zp_ptr = (const int4*)zp;
   const int* g_idx_ptr = (const int*)g_idx;
   const int* perm_ptr = (const int*)perm;
@@ -622,7 +623,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
     // avoid ">>>" being formatted to "> > >"
     // clang-format off
     kernel<<<blocks, num_threads, max_shared_mem_new, stream>>>(
-        A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, zp_ptr, g_idx_ptr, num_groups,
+        A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, s2_ptr, zp_ptr, g_idx_ptr, num_groups,
         prob_m_split, prob_n, prob_k, lda, locks, part_use_atomic_add,
         use_fp32_reduce, max_shared_mem_new);
     // clang-format on
@@ -638,6 +639,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
 torch::Tensor gptq_marlin_gemm(
     torch::Tensor& a, std::optional<torch::Tensor> c_or_none,
     torch::Tensor& b_q_weight, torch::Tensor& b_scales,
+    std::optional<torch::Tensor> const& global_scale_or_none,
     std::optional<torch::Tensor> const& b_zeros_or_none,
     std::optional<torch::Tensor> const& g_idx_or_none,
     std::optional<torch::Tensor> const& perm_or_none, torch::Tensor& workspace,
@@ -780,6 +782,17 @@ torch::Tensor gptq_marlin_gemm(
     }
   }
 
+  torch::Tensor global_scale;
+  if (global_scale_or_none.has_value()) {
+    global_scale = global_scale_or_none.value();
+    TORCH_CHECK(b_q_type == vllm::kFE2M1f,
+                "global_scale can only be used for float4_e2m1f.");
+  } else {
+    global_scale = torch::empty({0}, options);
+    TORCH_CHECK(b_q_type != vllm::kFE2M1f,
+                "the global_scale parameter must be passed for float4_e2m1f.");
+  }
+
   torch::Tensor b_zeros;
   if (b_zeros_or_none.has_value()) {
     b_zeros = b_zeros_or_none.value();
@@ -842,19 +855,34 @@ torch::Tensor gptq_marlin_gemm(
 
   int dev = a.get_device();
   if (a.scalar_type() == at::ScalarType::Half) {
+    void* scales_ptr;
+    if (b_q_type == vllm::kFE2M1f) {
+      scales_ptr = b_scales.data_ptr<at::Float8_e4m3fn>();
+    } else {
+      scales_ptr = b_scales.data_ptr<at::Half>();
+    }
+
     marlin::marlin_mm<half>(
         a.data_ptr<at::Half>(), b_q_weight.data_ptr(), c.data_ptr<at::Half>(),
-        c_tmp.data_ptr<float>(), b_scales.data_ptr<at::Half>(),
+        c_tmp.data_ptr<float>(), scales_ptr, global_scale.data_ptr<at::Half>(),
         b_zeros.data_ptr(), g_idx.data_ptr(), perm.data_ptr(),
         a_tmp.data_ptr<at::Half>(), size_m, size_n, size_k, a.stride(0),
         workspace.data_ptr(), b_q_type, has_act_order, is_k_full, has_zp,
         num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
         thread_k, thread_n, sms, use_atomic_add, use_fp32_reduce, is_zp_float);
   } else if (a.scalar_type() == at::ScalarType::BFloat16) {
+    void* scales_ptr;
+    if (b_q_type == vllm::kFE2M1f) {
+      scales_ptr = b_scales.data_ptr<at::Float8_e4m3fn>();
+    } else {
+      scales_ptr = b_scales.data_ptr<at::BFloat16>();
+    }
+
     marlin::marlin_mm<nv_bfloat16>(
         a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(),
         c.data_ptr<at::BFloat16>(), c_tmp.data_ptr<float>(),
-        b_scales.data_ptr<at::BFloat16>(), b_zeros.data_ptr(), g_idx.data_ptr(),
+        scales_ptr, global_scale.data_ptr<at::BFloat16>(),
+        b_zeros.data_ptr(), g_idx.data_ptr(),
         perm.data_ptr(), a_tmp.data_ptr<at::BFloat16>(), size_m, size_n, size_k,
         a.stride(0), workspace.data_ptr(), b_q_type, has_act_order, is_k_full,
         has_zp, num_groups, group_size, dev,

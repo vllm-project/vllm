@@ -290,11 +290,12 @@ __global__ void Marlin(
     const int4* __restrict__ B,  // 4bit quantized weight matrix of shape kxn
     int4* __restrict__ C,        // fp16 output buffer of shape mxn
     int4* __restrict__ C_tmp,    // fp32 tmp output buffer (for reduce)
-    const int4* __restrict__ scales_ptr,  // fp16 quantization scales of shape
-                                          // (k/groupsize)xn
-    const int4* __restrict__ zp_ptr,      // 4bit packed zero-points of shape
-                                          // (k/groupsize)x(n/pack_factor)
-    const int* __restrict__ g_idx,        // int32 group indices of shape k
+    const int4* __restrict__ scales_ptr,      // fp16 quantization scales of shape
+                                              // (k/groupsize)xn
+    const uint16_t* __restrict__ scale2_ptr,  // fp16 global scale (for nvfp4 only)
+    const int4* __restrict__ zp_ptr,          // 4bit packed zero-points of shape
+                                              // (k/groupsize)x(n/pack_factor)
+    const int* __restrict__ g_idx,            // int32 group indices of shape k
     int num_groups,        // number of scale groups per output channel
     int prob_m,            // batch dimension m
     int prob_n,            // output dimension n
@@ -332,6 +333,13 @@ __global__ void Marlin(
       !is_int_type ||
       has_zp && !is_zp_float && !std::is_same<scalar_t, nv_bfloat16>::value ||
       has_zp && !is_zp_float && !(w_type == vllm::kU8);
+
+  scalar_t2 global_scale;
+
+  if constexpr (w_type == vllm::kFE2M1f) {
+    uint16_t val = scale2_ptr[0];
+    global_scale = Dtype::num2num2(*reinterpret_cast<scalar_t*>(&val));
+  }
 
   constexpr bool has_act_order = group_blocks == 0;
   constexpr int m_block_size = m_block_size_8 ? 8 : (16 * thread_m_blocks);
@@ -489,7 +497,7 @@ __global__ void Marlin(
   constexpr int s_sh_stride = 16 * thread_n_blocks / 8;
   constexpr int s_tb_groups =
       !has_act_order && group_blocks != -1 && group_blocks < thread_k_blocks
-          ? thread_k_blocks / group_blocks
+          ? thread_k_blocks / group_blocks / (w_type == vllm::kFE2M1f ? 2 : 1)
           : 1;
   constexpr int s_sh_stage = s_tb_groups * s_sh_stride;
   int s_gl_rd_delta = s_gl_stride;
@@ -548,7 +556,7 @@ __global__ void Marlin(
     if constexpr (group_blocks == -1) {
       s_gl_rd = s_sh_stride * slice_col + threadIdx.x;
     } else {
-      s_gl_rd = s_gl_stride * ((thread_k_blocks * slice_row) / group_blocks) +
+      s_gl_rd = s_gl_stride * ((thread_k_blocks * slice_row) / group_blocks) / (w_type == vllm::kFE2M1f ? 2 : 1) +
                 s_sh_stride * slice_col + threadIdx.x;
     }
   }
@@ -900,8 +908,15 @@ __global__ void Marlin(
 
           int4* sh_s_stage = sh_s + s_sh_stage * pipe;
 
-          reinterpret_cast<int4*>(&frag_s[k % 2])[0] =
-              sh_s_stage[s_sh_rd + cur_group_id * s_sh_stride];
+          if constexpr(w_type_id != vllm::kFE2M1f.id()) {
+            reinterpret_cast<int4*>(&frag_s[k % 2])[0] =
+                sh_s_stage[s_sh_rd + cur_group_id * s_sh_stride];
+          } else {
+            reinterpret_cast<int2*>(&frag_s[k % 2])[0] =
+                reinterpret_cast<int2*>(sh_s_stage)[
+                  s_sh_rd + cur_group_id / 2 * 2 * s_sh_stride +
+                  cur_group_id % 2];
+          }
         }
       }
 
@@ -1109,6 +1124,14 @@ __global__ void Marlin(
         reinterpret_cast<int4*>(&frag_zp)[0] =
             reinterpret_cast<int4*>(&frag_zpf[k2])[0];
       }
+    }
+
+    if constexpr (w_type == vllm::kFE2M1f) {
+      int s_quant_0 = reinterpret_cast<int*>(frag_s[k2])[0];
+      int s_quant_1 = reinterpret_cast<int*>(frag_s[k2])[1];
+
+      dequant_fp8_scales<scalar_t2>(s_quant_0, reinterpret_cast<scalar_t2*>(&frag_s[k2]));
+      dequant_fp8_scales<scalar_t2>(s_quant_1, reinterpret_cast<scalar_t2*>(&frag_s[k2]) + 2);
     }
 
   // We have the m dimension as the inner loop in order to encourage overlapping
@@ -1414,6 +1437,10 @@ __global__ void Marlin(
                     w_type.size_bits() == 4 &&
                     (has_zp && dequant_skip_flop || !has_zp)) {
         res = __hmul2(res, s[0]);
+      }
+
+      if constexpr(w_type == vllm::kFE2M1f) {
+        res = __hmul2(res, global_scale);
       }
 
       if constexpr (m_block_size_8) {

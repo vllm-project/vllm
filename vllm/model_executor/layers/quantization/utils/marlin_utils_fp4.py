@@ -39,10 +39,10 @@ def apply_fp4_marlin_linear(
         input: torch.Tensor,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
+        weight_scale_2: torch.Tensor,
         workspace: torch.Tensor,
         size_n: int,
         size_k: int,
-        extra_scale_factor: int = 1,
         bias: Optional[torch.Tensor] = None,
         use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT) -> torch.Tensor:
     # For GPUs that lack FP4 hardware support, we can leverage the
@@ -57,13 +57,11 @@ def apply_fp4_marlin_linear(
                                                   device=input.device,
                                                   dtype=input.dtype)
 
-    if extra_scale_factor != 1 and size_n > size_k:
-        reshaped_x = reshaped_x * extra_scale_factor
-
     output = ops.gptq_marlin_gemm(a=reshaped_x,
                                   c=None,
                                   b_q_weight=weight,
                                   b_scales=weight_scale,
+                                  global_scale=weight_scale_2,
                                   b_zeros=None,
                                   g_idx=None,
                                   perm=None,
@@ -75,8 +73,6 @@ def apply_fp4_marlin_linear(
                                   use_atomic_add=use_atomic_add,
                                   use_fp32_reduce=use_fp32_reduce)
 
-    if extra_scale_factor != 1 and size_n <= size_k:
-        output = output * extra_scale_factor
 
     if bias is not None:
         output.add_(bias)  # In-place add
@@ -116,26 +112,30 @@ def prepare_fp4_layer_for_marlin(layer: torch.nn.Module) -> None:
 
     # WEIGHT SCALES
     # Permute scales
-    scales = layer.weight_scale.to(torch.float32) * \
-        layer.weight_scale_2.to(torch.float32)
+    weight_scale = layer.weight_scale.T.to(param_dtype)
+    weight_scale = marlin_permute_scales(s=weight_scale,
+                                         size_k=part_size_k,
+                                         size_n=part_size_n,
+                                         group_size=16)
 
-    layer.marlin_extra_scale_factor = 1
-    if scales.max() >= 2:
-        # We would scaling the `scales` tensors later, it would overflow
-        # if the value is greater than or equal to 2 ** fp4_exponent = 4.
-        # So we first divide the scales by a certain value to avoid overflow.
-        # Afterwards, we will multiply the computation results of
-        # the Marlin kernel by this value.
-        s = 2**(scales.max() / 2).log2().ceil().item()
-        layer.marlin_extra_scale_factor = s
-        scales = scales / s
+    weight_scale = ops.marlin_fp8_scales_preprocess(weight_scale)
+    weight_scale = weight_scale.view(weight_scale.size(0) // 2, 2, -1, 8)
+    weight_scale = weight_scale.permute(0, 2, 1, 3).reshape(
+        weight_scale.size(0) * 2, -1)
+    weight_scale = weight_scale.view(-1, 4)[:, [0, 2, 1, 3]].view(
+        weight_scale.size(0), -1).to(torch.float8_e4m3fn)
+    layer.weight_scale = torch.nn.Parameter(weight_scale, requires_grad=False)
 
-    marlin_scales = marlin_permute_scales(s=scales.T.to(param_dtype),
-                                          size_k=part_size_k,
-                                          size_n=part_size_n,
-                                          group_size=16)
-    marlin_scales = fp4_fused_exponent_bias_into_scales(marlin_scales)
-    layer.weight_scale = torch.nn.Parameter(marlin_scales, requires_grad=False)
+    weight_scale_2 = layer.weight_scale_2
+    if param_dtype == torch.half:
+        weight_scale_2 = weight_scale_2 * (2.0**7)
+    elif param_dtype == torch.bfloat16:
+        weight_scale_2 = weight_scale_2 * (2.0**119)
+
+    layer.weight_scale_2 = torch.nn.Parameter(weight_scale_2.to(param_dtype),
+                                              requires_grad=False)
+
+    return
 
 
 def prepare_moe_fp4_layer_for_marlin(layer: torch.nn.Module) -> None:

@@ -404,10 +404,10 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
                 input=x,
                 weight=layer.weight,
                 weight_scale=layer.weight_scale,
+                weight_scale_2=layer.weight_scale_2,
                 workspace=layer.workspace,
                 size_n=layer.output_size_per_partition,
                 size_k=layer.input_size_per_partition,
-                extra_scale_factor=layer.marlin_extra_scale_factor,
                 bias=bias)
 
         output_dtype = x.dtype

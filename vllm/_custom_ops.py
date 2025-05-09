@@ -328,6 +328,7 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
                                c: Optional[torch.Tensor],
                                b_q_weight: torch.Tensor,
                                b_scales: torch.Tensor,
+                               global_scale: Optional[torch.Tensor],
                                b_zeros: Optional[torch.Tensor],
                                g_idx: Optional[torch.Tensor],
                                perm: Optional[torch.Tensor],
@@ -778,6 +779,10 @@ def awq_marlin_repack(b_q_weight: torch.Tensor, size_k: int, size_n: int,
     return torch.ops._C.awq_marlin_repack(b_q_weight, size_k, size_n, num_bits)
 
 
+def marlin_fp8_scales_preprocess(scales: torch.Tensor) -> torch.Tensor:
+    return torch.ops._C.marlin_fp8_scales_preprocess(scales)
+
+
 def gptq_marlin_moe_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
                            size_k: int, size_n: int,
                            num_bits: int) -> torch.Tensor:
@@ -810,6 +815,7 @@ def gptq_marlin_gemm(a: torch.Tensor,
                      c: Optional[torch.Tensor],
                      b_q_weight: torch.Tensor,
                      b_scales: torch.Tensor,
+                     global_scale: Optional[torch.Tensor],
                      b_zeros: Optional[torch.Tensor],
                      g_idx: Optional[torch.Tensor],
                      perm: Optional[torch.Tensor],
@@ -822,8 +828,9 @@ def gptq_marlin_gemm(a: torch.Tensor,
                      use_atomic_add: bool = False,
                      use_fp32_reduce: bool = False,
                      is_zp_float: bool = False) -> torch.Tensor:
-    return torch.ops._C.gptq_marlin_gemm(a, c, b_q_weight, b_scales, b_zeros,
-                                         g_idx, perm, workspace, b_q_type.id,
+    return torch.ops._C.gptq_marlin_gemm(a, c, b_q_weight, b_scales, global_scale,
+                                         b_zeros, g_idx, perm, workspace,
+                                         b_q_type.id,
                                          size_m, size_n, size_k, is_k_full,
                                          use_atomic_add, use_fp32_reduce,
                                          is_zp_float)
