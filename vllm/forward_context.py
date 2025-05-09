@@ -27,10 +27,8 @@ batchsize_forward_time: defaultdict = defaultdict(list)
 
 @dataclass
 class DPMetadata:
-    max_tokens_across_dp: torch.Tensor
-    num_tokens_across_dp: torch.Tensor
+    max_tokens_across_dp_cpu: torch.Tensor
     cu_tokens_across_dp_cpu: torch.Tensor
-    dp_rank_num_tokens: torch.Tensor
 
 
 @dataclass
@@ -93,16 +91,10 @@ def set_forward_context(attn_metadata: Any,
                                          dtype=torch.int32)
         from vllm.distributed.parallel_state import get_dp_group
         dist.all_reduce(num_tokens_tensor, group=get_dp_group().cpu_group)
-        #TODO device? (tms)
-        max_tokens_across_dp = torch.max(
-            num_tokens_tensor)  #.to(device="cuda")
+        max_tokens_across_dp_cpu = torch.max(num_tokens_tensor)
         cu_tokens_across_dp_cpu = torch.cumsum(num_tokens_tensor, dim=0)
-        dp_rank_num_tokens = torch.tensor(
-            [num_tokens],
-            dtype=torch.uint32,
-            device=vllm_config.device_config.device)
-        dp_metadata = DPMetadata(max_tokens_across_dp, num_tokens_tensor,
-                                 cu_tokens_across_dp_cpu, dp_rank_num_tokens)
+        dp_metadata = DPMetadata(max_tokens_across_dp_cpu,
+                                 cu_tokens_across_dp_cpu)
 
     global _forward_context
     prev_context = _forward_context

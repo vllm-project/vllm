@@ -70,7 +70,7 @@ class FusedMoEParallelConfig:
 
     @property
     def use_pplx_kernels(self):
-        return self.use_ep and has_pplx
+        return self.dp_size > 1 and self.use_ep and has_pplx
 
     @staticmethod
     def make(tp_size_: int, dp_size_: int,
@@ -277,6 +277,12 @@ class AllToAllCache:
         self._cache: WeakValueDictionary = WeakValueDictionary()
         self._lock = threading.RLock()  # Reentrant lock for thread safety
 
+    def destroy(self):
+        with self._lock:
+            # TODO: can we do del self._cache?
+            for _, a2a in self._cache.items():
+                a2a.destroy()
+
     def get_or_create(self, **kwargs):
         assert has_pplx
         import pplx_kernels as pplx
@@ -287,7 +293,9 @@ class AllToAllCache:
         with self._lock:
             instance = self._cache.get(key)
             if instance is None:
-                # TODO: should be intranode
+                # TODO (varun): Add support to switch to intranode
+                # when all communications are within the same
+                # node.
                 instance = pplx.AllToAll.internode(**kwargs)
                 self._cache[key] = instance
             return instance
@@ -676,7 +684,7 @@ def _construct_dispatch_combine(
     dp_size = moe.ep_size // moe.dp_size  # dp_size actually means TP.
     rank = moe.ep_rank
 
-    if moe.use_ep and has_pplx:
+    if moe.use_pplx_kernels:
         logger.debug("using pplx dispatch")
 
         all_to_all = get_all_to_all(
@@ -1236,17 +1244,27 @@ class FusedMoE(torch.nn.Module):
 
         return buffer
 
-    def must_reduce_shared_outputs(self) -> bool:
-        return self.dp_size > 1 and self.use_ep and has_pplx
+    def must_reduce_shared_expert_outputs(self) -> bool:
+        """
+        The shared_experts are typically computed using the RowParallelLinear
+        layer. The result of this function is typically used as
+        the reduce_results argument to the module.
+        When just tensor-parallel is used, it is not required to reduce
+        the shared_experts results immediately. Instead we reduce at the
+        once at the end of the MoE op. (Refer to DeepSeekV2MoE module)
+        With EP and the pplx kernels - this is no longer viable as all
+        GPU ranks in DP, produce the complete set of hidden_states.
+        Therefore it is required that we reduce the shared_experts output
+        early.
+        """
+        return self.use_pplx_kernels
 
     def maybe_all_reduce_tensor_model_parallel(
             self, final_hidden_states: torch.Tensor):
         """
-        The pplx combine kernel reduce across GPU ranks by default. The pplx
-        kernels are used when EP is enabled. In that case, this function is a
-        no-op.
+        The pplx combine kernel reduces across GPU ranks by default.
         """
-        if self.dp_size > 1 and self.use_ep and has_pplx:
+        if self.use_pplx_kernels:
             return final_hidden_states
         else:
             return tensor_model_parallel_all_reduce(final_hidden_states)
@@ -1291,7 +1309,7 @@ class FusedMoE(torch.nn.Module):
                     final_hidden_states)
 
         ctx = get_forward_context()
-        max_tokens_across_dp = ctx.dp_metadata.max_tokens_across_dp
+        max_tokens_across_dp = ctx.dp_metadata.max_tokens_across_dp_cpu
         moe_dp_chunk_size_per_rank = MOE_DP_CHUNK_SIZE
 
         num_tokens = full_hidden_states.size(0)
@@ -1313,7 +1331,7 @@ class FusedMoE(torch.nn.Module):
     def forward_impl(self, hidden_states: torch.Tensor,
                      router_logits: torch.Tensor):
         assert self.quant_method is not None
-        if self.dp_size > 1 and self.use_ep and has_pplx:
+        if self.moe_parallel_config.use_pplx_kernels:
             return self.forward_impl_chunked(hidden_states, router_logits)
 
         if self.dp_size > 1:

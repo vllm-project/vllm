@@ -13,65 +13,6 @@ from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 
 
 @triton.jit
-def batched_silu_and_mul_kernel(
-        output,  # [E, MAX_NUM_TOKENS, D]
-        input,  # [E, MAX_NUM_TOKENS, D * 2]
-        expert_num_tokens,  # [E]
-        stride_oe,
-        stride_om,
-        stride_ie,
-        stride_im,
-        compute_type: tl.constexpr,
-        D,
-        BLOCK_M: tl.constexpr,
-        BLOCK_D: tl.constexpr):
-
-    expert_id = tl.program_id(axis=0)
-    e_num_tokens = tl.load(expert_num_tokens + expert_id)
-    if e_num_tokens == 0:
-        # early exit
-        return
-
-    pid_m = tl.program_id(axis=1)
-    cta_m_start = pid_m * BLOCK_M
-    if cta_m_start >= e_num_tokens:
-        # early exit
-        return
-
-    cta_input_ptr = input + expert_id * stride_ie + cta_m_start * stride_im
-    cta_output_ptr = output + expert_id * stride_oe + cta_m_start * stride_om
-
-    cta_m_size = min(BLOCK_M, e_num_tokens - cta_m_start)
-    offs_m = tl.arange(0, BLOCK_M)[:, None]
-    mask_m = offs_m < cta_m_size
-
-    cta_input_ptrs = cta_input_ptr + offs_m * stride_im
-    cta_output_ptrs = cta_output_ptr + offs_m * stride_om
-
-    # offset by D
-    offs_D = tl.arange(0, BLOCK_D)
-    cta_input_ptrs = cta_input_ptrs + offs_D
-    cta_output_ptrs = cta_output_ptrs + offs_D
-
-    for d in range(0, tl.cdiv(D, BLOCK_D)):
-        mask_D = offs_D < (D - (d * BLOCK_D))
-        mask_tile = mask_m & mask_D
-
-        x_tile = tl.load(cta_input_ptrs, mask=mask_tile,
-                         other=0.0).to(dtype=tl.float32)
-        y_tile = tl.load(cta_input_ptrs + D, mask=mask_tile, other=0.0)
-
-        # silu and mul
-        out_tile = (x_tile * (1.0 /
-                              (1.0 + tl.exp(-x_tile)))).to(dtype=compute_type)
-        out_tile = out_tile * y_tile
-        tl.store(cta_output_ptrs, out_tile, mask=mask_tile)
-
-        cta_input_ptrs = cta_input_ptrs + BLOCK_D
-        cta_output_ptrs = cta_output_ptrs + BLOCK_D
-
-
-@triton.jit
 def moe_mmk(
         a_ptrs,
         b_ptrs,
@@ -438,33 +379,6 @@ def invoke_moe_batched_triton_kernel(
         BLOCK_K=BLOCK_K)
 
 
-def invoke_batched_silu_and_mul(
-        output: torch.Tensor,  #[E, MAX_TOKENS, D]
-        input: torch.Tensor,  #[E, MAX_TOKENS, D * 2]
-        expert_num_tokens: torch.Tensor):
-
-    num_experts = output.size(0)
-    max_num_tokens = output.size(1)
-    D = output.size(2)
-
-    BLOCK_D = 1024
-    BLOCK_M = 1
-
-    compute_tl_dtype = {
-        torch.float16: tl.float16,
-        torch.float32: tl.float32,
-        torch.bfloat16: tl.bfloat16
-    }[output.dtype]
-
-    #print(f"compute type {compute_tl_dtype}")
-
-    grid = (num_experts, triton.cdiv(max_num_tokens, BLOCK_M))
-    batched_silu_and_mul_kernel[grid](output, input, expert_num_tokens,
-                                      output.stride(0), output.stride(1),
-                                      input.stride(0), input.stride(1),
-                                      compute_tl_dtype, D, BLOCK_M, BLOCK_D)
-
-
 def rank_chunk(num, r, w):
     rem = num % w
     return (num // w) + (1 if r < rem else 0)
@@ -797,15 +711,10 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                          config=config,
                                          block_shape=self.block_shape)
 
-        if activation == "silu":
-            invoke_batched_silu_and_mul(output=intermediate_cache2,
-                                        input=intermediate_cache1,
-                                        expert_num_tokens=expert_num_tokens)
-        else:
-            # TODO: would be nice to use expert_num_tokens here to reduce
-            # garbage compute
-            self.activation(activation, intermediate_cache2.view(-1, N // 2),
-                            intermediate_cache1.view(-1, N))
+        # TODO: would be nice to use expert_num_tokens here to reduce
+        # garbage compute
+        self.activation(activation, intermediate_cache2.view(-1, N // 2),
+                        intermediate_cache1.view(-1, N))
 
         #qintermediate_cache2 = intermediate_cache2
         a2q_scale = a2_scale

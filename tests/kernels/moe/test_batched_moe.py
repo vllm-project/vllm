@@ -7,7 +7,7 @@ import torch
 import triton.language as tl
 
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-    invoke_batched_silu_and_mul, invoke_moe_batched_triton_kernel)
+    invoke_moe_batched_triton_kernel)
 
 
 @dataclass
@@ -103,75 +103,5 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
 
     ref_output = ref_impl(tensors.A, tensors.B, ref_output,
                           tensors.num_expert_tokens)
-    #torch.cuda.synchronize()
-    #print (f"ref output {ref_output}")
-    #print (f"test output {test_output}")
 
     torch.testing.assert_close(test_output, ref_output, atol=1e-3, rtol=1e-3)
-
-
-@dataclass
-class BatchedSiluMulConfig:
-    dtype: torch.dtype
-    num_experts: int
-    max_tokens_per_expert: int
-    D: int
-
-
-@dataclass
-class BatchedSiluMulTensors:
-    input: torch.Tensor
-    output: torch.Tensor
-    expert_num_tokens: torch.Tensor
-
-    @staticmethod
-    def make_tensors(config: BatchedSiluMulConfig):
-        input = torch.randn(
-            (config.num_experts, config.max_tokens_per_expert, config.D * 2),
-            device="cuda",
-            dtype=config.dtype) / 50.0
-        output = torch.zeros(
-            (config.num_experts, config.max_tokens_per_expert, config.D),
-            device="cuda",
-            dtype=config.dtype)
-        num_expert_tokens = torch.randint(low=0,
-                                          high=config.max_tokens_per_expert,
-                                          size=(config.num_experts, ),
-                                          device="cuda",
-                                          dtype=torch.int32)
-        return BatchedSiluMulTensors(input, output, num_expert_tokens)
-
-
-def ref_batched_silu_mul(output: torch.Tensor, input: torch.Tensor,
-                         num_expert_tokens: torch.Tensor) -> torch.Tensor:
-
-    num_expert_tokens_cpu = num_expert_tokens.clone()
-    num_expert_tokens_cpu = num_expert_tokens_cpu.to(device="cpu")
-    num_experts = num_expert_tokens.size(0)
-
-    for e in range(num_experts):
-        num_tokens = num_expert_tokens_cpu[e].item()
-        out_part = output[e, :num_tokens, :]
-        in_part = input[e, :num_tokens, :]
-        torch.ops._C.silu_and_mul(out_part, in_part)
-
-
-@pytest.mark.parametrize("num_experts", [16, 32])
-@pytest.mark.parametrize("max_tokens_per_expert", [128])
-@pytest.mark.parametrize("D", [128, 256])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_batched_silu_mul(num_experts: int, max_tokens_per_expert: int, D: int,
-                          dtype: torch.dtype):
-
-    config = BatchedSiluMulConfig(dtype, num_experts, max_tokens_per_expert, D)
-    tensors = BatchedSiluMulTensors.make_tensors(config)
-
-    test_out = tensors.output
-    ref_out = torch.zeros_like(test_out)
-
-    ref_batched_silu_mul(ref_out, tensors.input, tensors.expert_num_tokens)
-
-    invoke_batched_silu_and_mul(test_out, tensors.input,
-                                tensors.expert_num_tokens)
-
-    torch.testing.assert_close(test_out, ref_out)

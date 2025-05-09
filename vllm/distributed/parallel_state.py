@@ -968,6 +968,9 @@ def pplx_finalize():
     if PPLX_DID_INIT:
         from pplx_kernels.nvshmem import nvshmem_finalize
         logger.info("PPLX finalize")
+        from vllm.model_executor.layers.fused_moe.layer import (
+            _all_to_all_cache)
+        _all_to_all_cache.destroy()
         nvshmem_finalize()
 
 
