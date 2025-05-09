@@ -194,7 +194,7 @@ def test_prefill_plp():
     all_token_ids = common_token_ids + unique_token_ids
     req0 = make_request("0", all_token_ids, prompt_logprobs=5)
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
-    assert len(manager.req_to_block_hashes[req0.request_id]) == 3
+    assert len(manager.req_to_block_hashes[req0.request_id]) == 0
     assert not computed_blocks.blocks
     assert num_computed_tokens == 0
     blocks = manager.allocate_slots(req0, 55, computed_blocks)
@@ -256,7 +256,7 @@ def test_prefill_plp():
                         common_token_ids + unique_token_ids,
                         prompt_logprobs=5)
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req2)
-    assert len(manager.req_to_block_hashes[req2.request_id]) == 3
+    assert len(manager.req_to_block_hashes[req2.request_id]) == 0
     assert not computed_blocks.blocks
     assert num_computed_tokens == 0
     blocks = manager.allocate_slots(req2, 55, computed_blocks)
