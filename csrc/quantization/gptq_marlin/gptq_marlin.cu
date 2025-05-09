@@ -789,7 +789,7 @@ torch::Tensor gptq_marlin_gemm(
                 "global_scale can only be used for float4_e2m1f.");
   } else {
     global_scale = torch::empty({0}, options);
-    TORCH_CHECK(b_q_type != vllm::kFE2M1f,
+    TORCH_CHECK(!(b_q_type == vllm::kFE2M1f),
                 "the global_scale parameter must be passed for float4_e2m1f.");
   }
 

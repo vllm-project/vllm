@@ -58,6 +58,7 @@ def apply_fp8_marlin_linear(
                                   c=None,
                                   b_q_weight=weight,
                                   b_scales=weight_scale,
+                                  global_scale=None,
                                   b_zeros=None,
                                   g_idx=None,
                                   perm=None,

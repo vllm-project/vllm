@@ -241,6 +241,7 @@ def test_gptq_marlin_gemm(
         g_idx = None
         sort_indices = None
         marlin_zp = None
+        marlin_s2 = None
     elif quant_type == scalar_types.float8_e4m3fn:
         if group_size not in [-1, 128]:
             return
@@ -251,6 +252,7 @@ def test_gptq_marlin_gemm(
         g_idx = None
         sort_indices = None
         marlin_zp = None
+        marlin_s2 = None
     elif has_zp:
         if group_size == 16:
             return
@@ -258,12 +260,14 @@ def test_gptq_marlin_gemm(
             b_weight, quant_type, group_size)
         g_idx = None
         sort_indices = None
+        marlin_s2 = None
     else:
         if group_size == 16:
             return
         w_ref, marlin_q_w, marlin_s, g_idx, sort_indices, _ = marlin_quantize(
             b_weight, quant_type, group_size, act_order)
         marlin_zp = None
+        marlin_s2 = None
 
     workspace = marlin_make_workspace_new(w_ref.device)
 
@@ -279,6 +283,7 @@ def test_gptq_marlin_gemm(
         None,
         marlin_q_w,
         marlin_s,
+        marlin_s2,
         marlin_zp,
         g_idx,
         sort_indices,
