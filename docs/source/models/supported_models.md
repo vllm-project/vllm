@@ -1032,9 +1032,9 @@ Specified using `--task generate`.
   * ✅︎
   * ✅︎
 - * `Ovis`
-  * Ovis2, Ovis1.6, Ovis1.5
+  * Ovis2, Ovis1.6
   * T + I<sup>+</sup>
-  * `AIDC-AI/Ovis2-1B`, `AIDC-AI/Ovis1.6-Llama3.2-3B`, `AIDC-AI/Ovis1.5-Gemma2-9B`, etc.
+  * `AIDC-AI/Ovis2-1B`, `AIDC-AI/Ovis1.6-Llama3.2-3B`, etc.
   *
   *
   * ✅︎

@@ -356,8 +356,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                         transformers_version_reason="Use of deprecated imports which have been removed.",  # noqa: E501
                                         extras={"phi3.5": "microsoft/Phi-3.5-vision-instruct"}),  # noqa: E501
     "Ovis": _HfExamplesInfo("AIDC-AI/Ovis2-1B", trust_remote_code=True,
-                            extras={"1.6": "AIDC-AI/Ovis1.6-Llama3.2-3B",
-                                    "1.5": "AIDC-AI/Ovis1.5-Gemma2-9B",}),  # noqa: E501
+                            extras={"1.6": "AIDC-AI/Ovis1.6-Llama3.2-3B"}),  # noqa: E501
     "Phi4MMForCausalLM": _HfExamplesInfo("microsoft/Phi-4-multimodal-instruct",
                                         trust_remote_code=True),
     "PixtralForConditionalGeneration": _HfExamplesInfo("mistralai/Pixtral-12B-2409",  # noqa: E501
