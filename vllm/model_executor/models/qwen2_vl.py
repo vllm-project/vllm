@@ -64,7 +64,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
-from vllm.platforms import _Backend
+from vllm.platforms import _Backend, current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
 from vllm.transformers_utils.processor import (
@@ -230,14 +230,13 @@ def apply_rotary_emb_torch(x: torch.Tensor,
 
 
 def apply_rotary_pos_emb_vision(t: torch.Tensor,
-                                freqs: torch.Tensor,
-                                use_flash_attn=False) -> torch.Tensor:
+                                freqs: torch.Tensor) -> torch.Tensor:
     t_ = t.float()
     cos = freqs.cos()
     sin = freqs.sin()
     apply_rotary_emb = apply_rotary_emb_torch
-    if use_flash_attn:
-        from flash_attn.layers.rotary import apply_rotary_emb
+    if current_platform.is_cuda():
+        from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
     output = apply_rotary_emb(t_, cos, sin).type_as(t)
     return output
 
@@ -760,9 +759,11 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
     ) -> Qwen2VLProcessor:
         return self.ctx.get_hf_processor(
             Qwen2VLProcessor,
-            image_processor=self.get_image_processor(min_pixels=min_pixels,
-                                                     max_pixels=max_pixels,
-                                                     size=size),
+            image_processor=self.get_image_processor(
+                min_pixels=min_pixels,
+                max_pixels=max_pixels,
+                size=size,
+                use_fast=kwargs.get("use_fast")),
             **kwargs,
         )
 

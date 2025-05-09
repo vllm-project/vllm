@@ -294,6 +294,7 @@ class FlashAttentionMetadataBuilder:
     def __init__(self, runner: "GPUModelRunner", kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):
         model_config = runner.model_config
+        compilation_config = runner.vllm_config.compilation_config
 
         self.runner = runner
         self.num_heads_q = model_config.get_num_attention_heads(
@@ -305,7 +306,14 @@ class FlashAttentionMetadataBuilder:
         self.kv_cache_spec = kv_cache_spec
         self.block_table = block_table
 
-        self.aot_schedule = (get_flash_attn_version() == 3)
+        if get_flash_attn_version() == 3:
+            self.aot_schedule = not compilation_config.full_cuda_graph
+            if not self.aot_schedule:
+                logger.warning(
+                    "AOT Schedule is disabled when using full_cuda_graph")
+        else:
+            self.aot_schedule = False
+
         # Sliding window size to be used with the AOT scheduler will be
         # populated on first build() call.
         self.aot_sliding_window: Optional[tuple[int, int]] = None
@@ -322,8 +330,15 @@ class FlashAttentionMetadataBuilder:
         seq_lens = common_attn_metadata.seq_lens
         block_table = self.block_table
         block_table_tensor = block_table.get_device_tensor()[:num_reqs]
-        slot_mapping = block_table.slot_mapping_cpu[:num_actual_tokens].to(
-            self.runner.device, non_blocking=True).long()
+
+        block_table.slot_mapping[:num_actual_tokens].copy_(
+            block_table.slot_mapping_cpu[:num_actual_tokens],
+            non_blocking=True)
+        # Fill unused with -1. Needed for reshape_and_cache in full cuda graph
+        # mode.
+        block_table.slot_mapping[num_actual_tokens:].fill_(-1)
+
+        slot_mapping = block_table.slot_mapping[:num_actual_tokens]
 
         if self.aot_sliding_window is None:
             self.aot_sliding_window = (-1, -1)

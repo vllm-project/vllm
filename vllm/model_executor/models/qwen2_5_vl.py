@@ -297,13 +297,8 @@ class Qwen2_5_VisionAttention(nn.Module):
         q, k, v = (rearrange(x, "s b ... -> b s ...").contiguous()
                    for x in (q, k, v))
         if rotary_pos_emb is not None:
-            use_flash_attn = self.attn_backend == _Backend.FLASH_ATTN
-            q = apply_rotary_pos_emb_vision(q,
-                                            rotary_pos_emb,
-                                            use_flash_attn=use_flash_attn)
-            k = apply_rotary_pos_emb_vision(k,
-                                            rotary_pos_emb,
-                                            use_flash_attn=use_flash_attn)
+            q = apply_rotary_pos_emb_vision(q, rotary_pos_emb)
+            k = apply_rotary_pos_emb_vision(k, rotary_pos_emb)
 
         if self.attn_backend == _Backend.FLASH_ATTN:
             # from vllm_flash_attn.flash_attn_interface import (
@@ -763,9 +758,11 @@ class Qwen2_5_VLProcessingInfo(Qwen2VLProcessingInfo):
 
         return self.ctx.get_hf_processor(
             Qwen2_5_VLProcessor,
-            image_processor=self.get_image_processor(min_pixels=min_pixels,
-                                                     max_pixels=max_pixels,
-                                                     size=size),
+            image_processor=self.get_image_processor(
+                min_pixels=min_pixels,
+                max_pixels=max_pixels,
+                size=size,
+                use_fast=kwargs.get("use_fast")),
             **kwargs,
         )
 
