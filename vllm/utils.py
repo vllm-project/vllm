@@ -70,11 +70,6 @@ import vllm.envs as envs
 import vllm.triton_utils  # noqa: F401
 from vllm.logger import enable_trace_function_call, init_logger
 
-if sys.version_info >= (3, 12):
-    from typing import override
-else:
-    override = lambda x: x
-
 if TYPE_CHECKING:
     from argparse import Namespace
 

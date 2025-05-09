@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from collections.abc import Iterable
 from typing import Callable
 
-from vllm.utils import cdiv, override
+from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHashType, KVCacheBlock
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheSpec,
@@ -80,14 +79,14 @@ class SingleTypeKVCacheManager(ABC):
         """
 
         num_required_blocks = cdiv(num_tokens, self.block_size)
-        num_new_blocks = num_required_blocks - len(new_computed_blocks) - \
-            len(self.req_to_blocks[request_id])
+        num_new_blocks = (num_required_blocks - len(new_computed_blocks) -
+                          len(self.req_to_blocks[request_id]))
         # If a computed block of a request is an eviction candidate (in the
         # free queue and ref_cnt == 0), it will be changed from a free block
         # to a computed block when the request is allocated, so we also count
         # it as needed to be allocated.
-        num_evictable_computed_blocks = sum(blks.ref_cnt == 0
-                                            for blks in new_computed_blocks)
+        num_evictable_computed_blocks = sum(blk.ref_cnt == 0
+                                            for blk in new_computed_blocks)
         return ((num_new_blocks + num_evictable_computed_blocks) *
                 self.num_kv_cache_groups)
 
@@ -104,9 +103,9 @@ class SingleTypeKVCacheManager(ABC):
         """
         if request_id not in self.num_cached_block:
             # A new request.
-            req_to_blocks = self.req_to_blocks[request_id]
-            assert len(req_to_blocks) == 0
-            req_to_blocks.extend(new_computed_blocks)
+            req_blocks = self.req_to_blocks[request_id]
+            assert len(req_blocks) == 0
+            req_blocks.extend(new_computed_blocks)
             self.num_cached_block[request_id] = len(new_computed_blocks)
         else:
             # A running request. Should not have new computed blocks.
@@ -126,13 +125,12 @@ class SingleTypeKVCacheManager(ABC):
         Returns:
             The new allocated blocks.
         """
+        req_blocks = self.req_to_blocks[request_id]
         num_required_blocks = cdiv(num_tokens, self.block_size)
-        num_new_blocks = max(
-            num_required_blocks - len(self.req_to_blocks[request_id]), 0)
+        num_new_blocks = num_required_blocks - len(req_blocks)
         if num_new_blocks <= 0:
             return []
         else:
-            req_blocks = self.req_to_blocks[request_id]
             # Should not exceed the maximum number of blocks per request.
             # This is especially because the block table has the shape
             # [..., max_num_blocks_per_req].
@@ -142,7 +140,7 @@ class SingleTypeKVCacheManager(ABC):
 
             new_blocks = self.block_pool.get_new_blocks(
                 num_new_blocks * self.num_kv_cache_groups)
-            self.req_to_blocks[request_id].extend(new_blocks)
+            req_blocks.extend(new_blocks)
             return new_blocks
 
     def cache_blocks(self, request: Request, block_hashes: list[BlockHashType],
@@ -173,16 +171,16 @@ class SingleTypeKVCacheManager(ABC):
 
     def free(self, request_id: str) -> None:
         # Default to [] in case a request is freed (aborted) before alloc.
-        blocks = self.req_to_blocks.pop(request_id, [])
-        ordered_blocks: Iterable[KVCacheBlock] = blocks
+        req_blocks = self.req_to_blocks.pop(request_id, [])
 
         # Free blocks in reverse order so that the tail blocks are
         # freed first.
-        ordered_blocks = reversed(blocks)
+        ordered_blocks = reversed(req_blocks)
 
         self.block_pool.free_blocks(ordered_blocks)
         self.num_cached_block.pop(request_id, None)
 
+    @abstractmethod
     def get_num_common_prefix_blocks(self, request_id: str,
                                      num_running_requests: int) -> int:
         """
@@ -195,14 +193,8 @@ class SingleTypeKVCacheManager(ABC):
         Returns:
             The number of common prefix blocks.
         """
-        blocks = self.req_to_blocks[request_id]
-        num_common_blocks = 0
-        for block in blocks:
-            if block.ref_cnt == num_running_requests:
-                num_common_blocks += 1
-            else:
-                break
-        return num_common_blocks
+
+        raise NotImplementedError
 
     @abstractmethod
     def find_longest_cache_hit(
@@ -263,6 +255,17 @@ class FullAttentionManager(SingleTypeKVCacheManager):
                               num_computed_tokens: int) -> None:
         # No need to remove blocks for full attention.
         pass
+
+    def get_num_common_prefix_blocks(self, request_id: str,
+                                     num_running_requests: int) -> int:
+        blocks = self.req_to_blocks[request_id]
+        num_common_blocks = 0
+        for block in blocks:
+            if block.ref_cnt == num_running_requests:
+                num_common_blocks += 1
+            else:
+                break
+        return num_common_blocks
 
 
 class SlidingWindowManager(SingleTypeKVCacheManager):
@@ -336,13 +339,13 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             blocks[i] = self._null_block
         self.block_pool.free_blocks(removed_blocks)
 
-    @override
     def get_num_common_prefix_blocks(self, request_id: str,
                                      num_running_requests: int) -> int:
         """
         NOTE(Chen): The prefix blocks are null blocks for sliding window layers.
-        So it's not correct to count ref_cnt. Return 0 here for correctness.
-        Need to support cascade attention + sliding window in the future.
+        So it's not correct to count ref_cnt like FullAttentionManager. Return 
+        0 here for correctness. Need to support cascade attention + sliding 
+        window in the future.
         """
         return 0
 
