@@ -13,7 +13,6 @@ def get_sliding_window_manager(sliding_window_spec, block_pool):
                                 block_pool,
                                 use_eagle=False,
                                 num_kv_cache_groups=1,
-                                max_model_len=1000,
                                 caching_hash_fn=lambda x: x)
 
 

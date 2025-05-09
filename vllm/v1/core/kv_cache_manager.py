@@ -71,7 +71,6 @@ class KVCacheManager:
             block_pool=self.block_pool,
             use_eagle=self.use_eagle,
             num_kv_cache_groups=1,
-            max_model_len=max_model_len,
             caching_hash_fn=self.caching_hash_fn,
         )
 
@@ -225,8 +224,9 @@ class KVCacheManager:
         # the new prefix caching hits
         num_computed_tokens = (request.num_computed_tokens +
                                len(new_computed_block_list) * self.block_size)
-        num_tokens_need_slot = (num_computed_tokens + num_new_tokens +
-                                num_lookahead_tokens)
+        num_tokens_need_slot = min(
+            num_computed_tokens + num_new_tokens + num_lookahead_tokens,
+            self.max_model_len)
         num_blocks_to_allocate = (
             self.single_type_manager.get_num_blocks_to_allocate(
                 request_id=request.request_id,

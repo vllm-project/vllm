@@ -23,7 +23,6 @@ class SingleTypeKVCacheManager(ABC):
         block_pool: BlockPool,
         use_eagle: bool,
         num_kv_cache_groups: int,
-        max_model_len: int,
         caching_hash_fn: Callable,
     ) -> None:
         """
@@ -34,7 +33,6 @@ class SingleTypeKVCacheManager(ABC):
             use_eagle: Whether to use eagle.
             num_kv_cache_groups: The number of kv cache groups managed by this 
                 manager.
-            max_model_len: The maximum model length.
             caching_hash_fn: The caching hash function.
         """
 
@@ -56,7 +54,6 @@ class SingleTypeKVCacheManager(ABC):
         # This is only used to track the RUNNING requests, we do not track the
         # data for reempted ones.
         self.num_cached_block: dict[str, int] = {}
-        self.max_num_blocks_per_req = cdiv(max_model_len, self.block_size)
 
         self.num_kv_cache_groups = num_kv_cache_groups
         self.caching_hash_fn = caching_hash_fn
@@ -131,13 +128,6 @@ class SingleTypeKVCacheManager(ABC):
         if num_new_blocks <= 0:
             return []
         else:
-            # Should not exceed the maximum number of blocks per request.
-            # This is especially because the block table has the shape
-            # [..., max_num_blocks_per_req].
-            num_new_blocks = min(num_new_blocks,
-                                 self.max_num_blocks_per_req - len(req_blocks))
-            assert num_new_blocks >= 0
-
             new_blocks = self.block_pool.get_new_blocks(
                 num_new_blocks * self.num_kv_cache_groups)
             req_blocks.extend(new_blocks)
