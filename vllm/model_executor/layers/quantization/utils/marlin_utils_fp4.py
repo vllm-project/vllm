@@ -25,7 +25,7 @@ def fp4_marlin_process_scales(marlin_scales):
     assert (marlin_scales >= 0).all()
 
     # convert to half first we would convert to fp8 later
-    marlin_scales = marlin_scales.torch(torch.half)
+    marlin_scales = marlin_scales.to(torch.half)
 
     # 8 is the number of scale number using by one thread
     marlin_scales = marlin_scales.view(marlin_scales.size(0) // 2, 2, -1, 8)
@@ -60,7 +60,7 @@ def fp4_marlin_process_global_scale(global_scale):
     # exponent_bias_fp16 = 2 ** 4 - 2 ** 1 = 14
     # exponent_bias_bf16 = 2 ** 7 - 2 ** 1 = 126
     exponent_bias = 2**(target_exponent - 1) - 2**(fp4_exponent - 1)
-    return global_scale * (2.0 * (exponent_bias - 7))
+    return global_scale * (2.0**(exponent_bias - 7))
 
 
 def apply_fp4_marlin_linear(
