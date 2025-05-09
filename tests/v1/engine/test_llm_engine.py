@@ -6,6 +6,7 @@ from typing import Optional
 import pytest
 
 from vllm import LLM, SamplingParams
+from vllm.v1.metrics.reader import Counter, Gauge, Histogram, Metric
 
 MODEL = "facebook/opt-125m"
 DTYPE = "half"
@@ -97,3 +98,52 @@ def test_parallel_sampling(vllm_model, example_prompts) -> None:
             raise AssertionError(
                 f"{len(completion_counts)} unique completions; expected"
                 f" {n}. Repeats: {repeats}")
+
+
+def test_engine_metrics(vllm_runner, monkeypatch, example_prompts):
+    max_tokens = 100
+    with vllm_runner(
+            MODEL,
+            disable_log_stats=False,
+    ) as vllm_model:
+        model: LLM = vllm_model.model
+        sampling_params = SamplingParams(temperature=0.0,
+                                         max_tokens=max_tokens)
+        outputs = model.generate(example_prompts, sampling_params)
+
+        n_prompts = len(example_prompts)
+        assert len(outputs) == n_prompts
+
+        total_tokens = 0
+        for out in outputs:
+            assert len(out.outputs) == 1
+            total_tokens += len(out.outputs[0].token_ids)
+        assert total_tokens == max_tokens * n_prompts
+
+        metrics = model.get_metrics()
+
+        def find_metric(name) -> list[Metric]:
+            found = []
+            for metric in metrics:
+                if metric.name == name:
+                    found.append(metric)
+            return found
+
+        num_requests_running = find_metric("vllm:num_requests_running")
+        assert len(num_requests_running) == 1
+        assert isinstance(num_requests_running[0], Gauge)
+        assert num_requests_running[0].value == .0
+
+        generation_tokens = find_metric("vllm:generation_tokens")
+        assert len(generation_tokens) == 1
+        assert isinstance(generation_tokens[0], Counter)
+        assert generation_tokens[0].value == total_tokens
+
+        request_generation_tokens = find_metric(
+            "vllm:request_generation_tokens")
+        assert len(request_generation_tokens) == 1
+        assert isinstance(request_generation_tokens[0], Histogram)
+        assert "+Inf" in request_generation_tokens[0].buckets
+        assert request_generation_tokens[0].buckets["+Inf"] == n_prompts
+        assert request_generation_tokens[0].count == n_prompts
+        assert request_generation_tokens[0].sum == total_tokens
