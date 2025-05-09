@@ -131,9 +131,6 @@ __global__ void preprocessTopkIdKernel(int* topk_id_ptr, int size,
                                        int num_experts) {
   auto tidx = threadIdx.x;
   auto bidx = blockIdx.x;
-  auto lidx = tidx & 31;
-  auto widx = tidx >> 5;
-  auto warp_count = (blockDim.x + 31) >> 5;
   auto offset = bidx * blockDim.x;
   auto bound = min(offset + blockDim.x, size);
   extern __shared__ int smem_expert_map[];
