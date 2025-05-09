@@ -123,10 +123,22 @@ class CompilerManager:
 
         # no compiler cached the graph, or the cache is disabled,
         # we need to compile it
-        compiled_graph, handle = self.compiler.compile(
-            graph, example_inputs, additional_inductor_config, runtime_shape)
+        try:
+            compiled_graph, handle = self.compiler.compile(
+                graph, example_inputs, additional_inductor_config,
+                runtime_shape)
 
-        assert compiled_graph is not None, "Failed to compile the graph"
+            assert compiled_graph is not None, "Failed to compile the graph"
+        except Exception:
+            # Ideally we'd just delete the incomplete artifact. This is
+            # not easily doable until we use torch._inductor.standalone_compile.
+            logger.warning(
+                "torch.compile compilation failed. vLLM's cache dir may have "
+                "an incomplete compiled artifact in it. If you run into "
+                "problems while re-running the model, like "
+                "`assert hash_str is not None` "
+                "please try deleting the cache dir %s first.", self.cache_dir)
+            raise
 
         # store the artifact in the cache
         if handle is not None:
