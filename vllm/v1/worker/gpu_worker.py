@@ -76,6 +76,13 @@ class Worker(WorkerBase):
         else:
             self.profiler = None
 
+    def save_tensorized_model(
+        self,
+        tensorizer_config,
+    ) -> None:
+        self.model_runner.save_tensorized_model(
+            tensorizer_config=tensorizer_config, )
+
     def sleep(self, level: int = 1) -> None:
         free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
 

@@ -10,6 +10,7 @@ from collections.abc import Generator
 from dataclasses import dataclass
 from functools import partial
 from typing import BinaryIO, Optional, Union
+import json
 
 import torch
 from torch import nn
@@ -456,6 +457,7 @@ def tensorize_vllm_model(engine_args: EngineArgs,
        Intended to be used separately from running a vLLM server since it
        creates its own Engine instance.
     """
+    import vllm.worker.worker
     engine_config = engine_args.create_engine_config()
     tensorizer_config.verify_with_model_config(engine_config.model_config)
     tensorizer_config.verify_with_parallel_config(
@@ -473,6 +475,8 @@ def tensorize_vllm_model(engine_args: EngineArgs,
         ) as stream:
             stream.write(encryption_params.key)
 
+    if not envs.VLLM_USE_V1:
+        raise RuntimeError("Tensorizer requires the env var VLLM_USE_V1=0 set.")
     engine = LLMEngine.from_engine_args(engine_args)
     engine.model_executor.collective_rpc(
         "save_tensorized_model",
@@ -489,6 +493,9 @@ def tensorize_lora_adapter(lora_path: str,
 
     Serializes the files in the tensorizer_config.lora_dir
     """
+    from huggingface_hub import snapshot_download
+    import safetensors
+
     lora_files = snapshot_download(repo_id=lora_path)
 
     # Current LoRA loading logic in
