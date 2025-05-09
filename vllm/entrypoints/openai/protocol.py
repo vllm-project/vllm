@@ -409,7 +409,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         "repetition_penalty": 1.0,
         "temperature": 1.0,
         "top_p": 1.0,
-        "top_k": -1,
+        "top_k": 0,
         "min_p": 0.0,
     }
 
@@ -853,7 +853,7 @@ class CompletionRequest(OpenAIBaseModel):
         "repetition_penalty": 1.0,
         "temperature": 1.0,
         "top_p": 1.0,
-        "top_k": -1,
+        "top_k": 0,
         "min_p": 0.0,
     }
 
@@ -1679,7 +1679,7 @@ class TranscriptionRequest(OpenAIBaseModel):
         "repetition_penalty": 1.0,
         "temperature": 1.0,
         "top_p": 1.0,
-        "top_k": -1,
+        "top_k": 0,
         "min_p": 0.0,
     }
 
