@@ -107,7 +107,7 @@ class RequestMetrics:
         scheduler_time: The time spent in the scheduler when this request was
                         being considered by the scheduler.
         model_forward_time: The time spent in the model forward pass when this
-                            request was in the batch.
+                           request was in the batch.
         model_execute_time: The time spent in the model execute function. This
                             will include model forward, block/sync across
                             workers, cpu-gpu sync time and sampling time.
@@ -117,7 +117,7 @@ class RequestMetrics:
                                       e.g., when it's [10, 8, 4, 2] for a req, 
                                       it means there were 10 forward passes in
                                       total, and there were 8, 4, 2 accepted 
-                                      tokens at 1st, 2nd, 3rd speculation step. 
+                                      tokens at 1st, 2nd, 3rd speculation step.
     """
     arrival_time: float
     last_token_time: float
