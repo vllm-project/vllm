@@ -833,6 +833,7 @@ class EngineArgs:
         parser.add_argument('--use-v2-block-manager',
                             action='store_true',
                             default=True,
+                            deprecated=True,
                             help='[DEPRECATED] block manager v1 has been '
                             'removed and SelfAttnBlockSpaceManager (i.e. '
                             'block manager v2) is now the default. '
@@ -1318,6 +1319,7 @@ class EngineArgs:
             "FLASHMLA",
             "FLASHINFER",
             "FLASHINFER_VLLM_V1",
+            "ROCM_AITER_MLA",
         ]
         if (envs.is_set("VLLM_ATTENTION_BACKEND")
                 and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS):
