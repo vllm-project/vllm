@@ -390,7 +390,7 @@ def engine_client(request: Request) -> EngineClient:
 
 
 @router.get("/health")
-async def health(raw_request: Request) -> Response:
+async def health(raw_request: Request) -> JSONResponse:
     """Health check."""
     await engine_client(raw_request).check_health()
     return JSONResponse(content={}, status_code=200)
@@ -415,7 +415,7 @@ async def get_server_load_metrics(request: Request):
 
 
 @router.api_route("/ping", methods=["GET", "POST"])
-async def ping(raw_request: Request) -> Response:
+async def ping(raw_request: Request) -> JSONResponse:
     """Ping check. Endpoint required for SageMaker"""
     return await health(raw_request)
 
