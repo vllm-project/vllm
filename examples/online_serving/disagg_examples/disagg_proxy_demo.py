@@ -254,6 +254,7 @@ class Proxy:
 
             kv_prepare_request = request.copy()
             kv_prepare_request["max_tokens"] = 1
+            kv_prepare_request["min_tokens"] = 0
 
             prefill_instance = self.schedule(self.prefill_cycler)
             try:
@@ -290,6 +291,7 @@ class Proxy:
             # add params to request
             kv_prepare_request = request.copy()
             kv_prepare_request["max_tokens"] = 1
+            kv_prepare_request["min_tokens"] = 0
 
             # prefill stage
             prefill_instance = self.schedule(self.prefill_cycler)
