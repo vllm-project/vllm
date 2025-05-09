@@ -19,7 +19,7 @@ __global__ void expandInputRowsKernel(
   int expert_id = sorted_experts[expanded_dest_row];
 
   extern __shared__ int64_t smem_expert_first_token_offset[];
-  int64_t align_expanded_row_accumulate = 0;
+
   if constexpr (ALIGN_BLOCK_SIZE) {
     // load g2s
     for (int idx = threadIdx.x; idx < num_local_experts + 1;
@@ -134,7 +134,6 @@ __global__ void finalizeMoeRoutingKernel(
     int64_t const orig_cols, int64_t const k, int64_t const* num_valid_ptr) {
   assert(orig_cols % 4 == 0);
   int64_t const original_row = blockIdx.x;
-  int64_t const num_rows = gridDim.x;
   auto const offset = original_row * orig_cols;
   OutputType* reduced_row_ptr = reduced_unpermuted_output + offset;
   int64_t const num_valid = *num_valid_ptr;
@@ -160,7 +159,6 @@ __global__ void finalizeMoeRoutingKernel(
        elem_index += stride) {
     ComputeElem thread_output;
     thread_output.fill(0);
-    float row_rescale{0.f};
     for (int k_idx = 0; k_idx < k; ++k_idx) {
       int64_t const expanded_original_row = original_row * k + k_idx;
       int64_t const expanded_permuted_row =
@@ -169,7 +167,6 @@ __global__ void finalizeMoeRoutingKernel(
       int64_t const k_offset = original_row * k + k_idx;
       float const row_scale = scales[k_offset];
 
-      // Check after row_rescale has accumulated
       if (CHECK_SKIPPED && expanded_permuted_row >= num_valid) {
         continue;
       }
