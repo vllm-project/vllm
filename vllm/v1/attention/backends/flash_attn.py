@@ -758,7 +758,7 @@ class FlashAttentionImpl(AttentionImpl):
             if current_platform.is_rocm():
                 cu_seq_lens = attn_metadata.cu_seq_lens
                 total_tokens = attn_metadata.total_tokens
-                if num_actual_tokens < 4096:
+                if max_seqlen_q <= 1:
                     unified_attention(
                         q=query[:num_actual_tokens],
                         k=key_cache,
