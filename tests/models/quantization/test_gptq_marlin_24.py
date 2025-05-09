@@ -8,6 +8,7 @@ Marlin/GPTQ models are in the top 3 selections of each other.
 from dataclasses import dataclass
 
 import pytest
+from vllm.platforms import current_platform
 
 from tests.quantization.utils import is_quant_method_supported
 
@@ -38,7 +39,8 @@ model_pairs = [
 
 
 @pytest.mark.flaky(reruns=2)
-@pytest.mark.skipif(not is_quant_method_supported("gptq_marlin_24"),
+@pytest.mark.skipif(not is_quant_method_supported("gptq_marlin_24")
+                    or current_platform.is_rocm(),
                     reason="Marlin24 is not supported on this GPU type.")
 @pytest.mark.parametrize("model_pair", model_pairs)
 @pytest.mark.parametrize("dtype", ["half"])
