@@ -26,13 +26,11 @@ from typing import Optional, Tuple
 import torch
 from torch import nn
 from transformers.cache_utils import Cache
+from transformers.models.qwen2.configuration_qwen2 import Qwen2Config
 from transformers.models.qwen2.modeling_qwen2 import (Qwen2Attention,
                                                       Qwen2ForCausalLM,
-                                                      Qwen2MLP,
-                                                      Qwen2Model,
+                                                      Qwen2MLP,Qwen2Model,
                                                       Qwen2RMSNorm)
-
-from transformers.models.qwen2.configuration_qwen2 import Qwen2Config
 
 
 class MiMoConfig(Qwen2Config):
