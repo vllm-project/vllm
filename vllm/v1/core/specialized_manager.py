@@ -136,7 +136,7 @@ class SingleTypeKVCacheManager(ABC):
             # [..., max_num_blocks_per_req].
             num_new_blocks = min(num_new_blocks,
                                  self.max_num_blocks_per_req - len(req_blocks))
-            assert num_new_blocks > 0
+            assert num_new_blocks >= 0
 
             new_blocks = self.block_pool.get_new_blocks(
                 num_new_blocks * self.num_kv_cache_groups)
