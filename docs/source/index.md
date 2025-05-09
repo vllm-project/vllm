@@ -98,6 +98,7 @@ features/automatic_prefix_caching
 features/disagg_prefill
 features/spec_decode
 features/compatibility_matrix
+features/sleep_mode
 :::
 
 % Details about running vLLM
