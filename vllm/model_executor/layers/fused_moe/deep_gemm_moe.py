@@ -41,14 +41,10 @@ def _valid_deep_gemm(hidden_states: torch.Tensor,
         return False
 
     align = dg.get_m_alignment_for_contiguous_layout()
+    M = hidden_states.shape[0]
     _, K, N = w2.shape
 
-    # For now, disable DeepGemm for small N until better permute/unpermute
-    # ops are available.
-    # if N <= 512:
-    #     return False
-
-    if N % align != 0 or K % align != 0:
+    if align > M or N % align != 0 or K % align != 0:
         return False
 
     return (hidden_states.is_contiguous() and w1.is_contiguous()
@@ -290,8 +286,8 @@ def deep_gemm_moe_fp8(
         qcurr_hidden_states, a1q_scale = _fp8_quantize(curr_hidden_states,
                                                        a1_scale, block_shape)
 
-        # (qcurr_hidden_states_, a1q_scale_, sorted_token_ids_, expert_ids_,
-        #  inv_perm_) = _moe_permute(qcurr_hidden_states, a1q_scale,
+        # (qcurr_hidden_states, a1q_scale, sorted_token_ids, expert_ids,
+        #  inv_perm) = _moe_permute(qcurr_hidden_states, a1q_scale,
         #                           curr_topk_ids, global_num_experts,
         #                           expert_map=expert_map, block_m=block_m)
         (qcurr_hidden_states, a1q_scale, sorted_token_ids, expert_ids,
