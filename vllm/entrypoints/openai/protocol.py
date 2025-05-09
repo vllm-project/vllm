@@ -1583,13 +1583,11 @@ class TranscriptionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/audio/createTranscription
 
-    file: Union[UploadFile, str] = Field(
-        default=None,
-        description="""
-        The audio file object (not file name) to transcribe, in one of these
-        formats: flac, mp3, mp4, mpeg, mpga, m4a, ogg, wav, or webm.
-        """,
-    )
+    file: UploadFile
+    """
+    The audio file object (not file name) to transcribe, in one of these
+    formats: flac, mp3, mp4, mpeg, mpga, m4a, ogg, wav, or webm.
+    """
 
     model: Optional[str] = None
     """ID of the model to use.
