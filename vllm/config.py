@@ -2971,7 +2971,7 @@ def _get_and_verify_dtype(
                     compute_str = f" (with compute capability {version_str})"
                 fallback_dtype = current_platform.supported_dtypes[0]
                 logger.warning(
-                    "Your %s device%s hasn't supported %s. " \
+                    "Your %s device%s doesn't support %s. " \
                     "Falling back to %s for compatibility.",
                     device_name, compute_str, torch_dtype, fallback_dtype
                     )
