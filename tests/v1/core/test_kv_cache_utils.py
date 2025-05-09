@@ -539,7 +539,7 @@ def test_allocate_with_lookahead():
                                       max_model_len=100)
     blocks = kv_cache_manager.allocate_slots(
         request,
-        num_tokens=3,
+        num_new_tokens=3,
         num_lookahead_tokens=2,  # Total required: 3+2=5 tokens
     )
     assert len(blocks.blocks) == 2  # ceil(5/4)=2 blocks
@@ -550,7 +550,7 @@ def test_allocate_with_lookahead():
     # required_blocks = ceil((3 + 2) /4) = 2
     blocks = kv_cache_manager.allocate_slots(
         request,
-        num_tokens=3,
+        num_new_tokens=3,
         num_lookahead_tokens=2,
     )
     assert len(blocks.blocks) == 2
@@ -561,7 +561,7 @@ def test_allocate_with_lookahead():
                                       max_model_len=100)
     blocks = kv_cache_manager.allocate_slots(
         request,
-        num_tokens=3,
+        num_new_tokens=3,
         num_lookahead_tokens=4,
     )
     assert len(blocks.blocks) == 2
