@@ -1529,12 +1529,11 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
     def maybe_assemble_group(
             self, seq_group: SequenceGroup) -> Optional[SequenceGroup]:
 
-        # in the streaming mode, we will return the assembled sequence
-        # for the first remaining sequence, and then return None for the
-        # rest of sequences
+        # in the streaming mode, we will return the assembled sequence for the
+        # last remaining sequence, and return None for the rest of sequences
         if self.streaming:
-            first_remaining_id = next(iter(self.to_be_finished))
-            if seq_group.request_id == first_remaining_id:
+            last_remaining_id = list(self.to_be_finished)[-1]
+            if seq_group.request_id == last_remaining_id:
                 return self.assembled_seq_group
             return None
 

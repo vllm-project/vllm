@@ -557,7 +557,8 @@ class OpenAIServingChat(OpenAIServing):
                     if finish_reason_sent[i]:
                         continue
 
-                    if request.logprobs and request.top_logprobs is not None:
+                    if request.logprobs and request.top_logprobs is not None \
+                        and output.token_ids:
                         assert output.logprobs is not None, (
                             "Did not output logprobs")
                         logprobs = self._create_chat_logprobs(
