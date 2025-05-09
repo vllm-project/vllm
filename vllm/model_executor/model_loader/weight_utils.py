@@ -441,6 +441,8 @@ def safetensors_weights_iterator(
     ):
         with safe_open(st_file, framework="pt") as f:
             for name in f.keys():  # noqa: SIM118
+                # Torchax does not support loading 
+                # safetensors files.
                 if envs.VLLM_TORCHAX_ENABLED:
                     import torchax
                     torchax.disable_globally()

@@ -6,14 +6,15 @@ from typing import Optional
 import torch
 import torch.distributed
 import torch.nn as nn
+
 import vllm.envs as envs
 if envs.VLLM_TORCHAX_ENABLED:
     import jax 
-else:
-    import torch_xla.core.xla_model as xm
-    import torch_xla.debug.profiler as xp
-    import torch_xla.runtime as xr
+import torch_xla.core.xla_model as xm
+import torch_xla.debug.profiler as xp
+import torch_xla.runtime as xr
 
+import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
@@ -120,37 +121,38 @@ class TPUWorker:
             rank = jax.process_index()
         else:
             rank = xr.global_ordinal()
-        if not envs.VLLM_TORCHAX_ENABLED:
-            if self.model_config.seed is not None:
+        
+        if self.model_config.seed is not None:
+            if not envs.VLLM_TORCHAX_ENABLED:
                 xm.set_rng_state(self.model_config.seed, self.device)
 
-            # Increase the cache size limit, which is the maximum number of
-            # dynamo graphs that can be compiled.
-            # TODO (NickLucche) On gsm we compile 80+ graphs.
-            # Re-evaluate limit, with MM we may get close to this limit.
-            torch._dynamo.config.cache_size_limit = 128
-            # Use persistent cache to avoid XLA recompilation.
-            # NOTE(woosuk): Set per-rank cache path since different ranks
-            # can have slightly different XLA graphs.
-            world_size = self.parallel_config.world_size
-            # The PyTorch/XLA compilation cache uses the Torch IR to generate keys.
-            # Consequently, changes in optimization flags, which affect compilation
-            # results, don't change the cache key. This can result in the wrong
-            # compilation being used. To prevent this, disabling the XLA compilation
-            # cache during development is recommended.We can disable it by
-            # `export VLLM_XLA_CACHE_PATH=`
-            if envs.VLLM_XLA_CACHE_PATH:
-                per_rank_path = os.path.join(envs.VLLM_XLA_CACHE_PATH,
-                                            f"tp{world_size}_rank{rank}")
-                xr.initialize_cache(per_rank_path, readonly=False)
+        # Increase the cache size limit, which is the maximum number of
+        # dynamo graphs that can be compiled.
+        # TODO (NickLucche) On gsm we compile 80+ graphs.
+        # Re-evaluate limit, with MM we may get close to this limit.
+        torch._dynamo.config.cache_size_limit = 128
+        # Use persistent cache to avoid XLA recompilation.
+        # NOTE(woosuk): Set per-rank cache path since different ranks
+        # can have slightly different XLA graphs.
+        world_size = self.parallel_config.world_size
+        # The PyTorch/XLA compilation cache uses the Torch IR to generate keys.
+        # Consequently, changes in optimization flags, which affect compilation
+        # results, don't change the cache key. This can result in the wrong
+        # compilation being used. To prevent this, disabling the XLA compilation
+        # cache during development is recommended.We can disable it by
+        # `export VLLM_XLA_CACHE_PATH=`
+        if envs.VLLM_XLA_CACHE_PATH:
+            per_rank_path = os.path.join(envs.VLLM_XLA_CACHE_PATH,
+                                         f"tp{world_size}_rank{rank}")
+            xr.initialize_cache(per_rank_path, readonly=False)
 
         # Init ModelRunner here, so that we have access to self.device.
         self.model_runner = TPUModelRunner(self.vllm_config, self.device)
 
         if rank == 0:
             # If usage stat is enabled, collect relevant info.
-            report_usage_stats(self.vllm_config)        
-    
+            report_usage_stats(self.vllm_config)
+
     def determine_available_memory(self) -> int:
         kv_caches: dict[str, torch.Tensor] = {}
         kv_cache_spec = self.model_runner.get_kv_cache_spec()
@@ -178,8 +180,7 @@ class TPUWorker:
         self.model_runner.profile_run(self.model_runner.max_num_tokens)
 
         # Synchronize before measuring the memory usage.
-        if not envs.VLLM_TORCHAX_ENABLED:
-            xm.wait_device_ops()
+        xm.wait_device_ops()
 
         # During the profiling run, the model runs without KV cache. After
         # the profiling run, the model always runs with KV cache. Here we clear
@@ -207,7 +208,6 @@ class TPUWorker:
             current_mem = m["bytes_in_use"]
             # TODO: Torchax OOMs if we use the same heuristic as torchxla.
             profiled = m["peak_bytes_in_use"]
-
 
         # Calculate the TPU KV cache size based on profiling.
         usable_memory_size = int(total_memory_size *
