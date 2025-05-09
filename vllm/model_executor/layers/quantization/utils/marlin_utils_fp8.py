@@ -271,7 +271,6 @@ def prepare_moe_fp8_layer_for_marlin(layer: torch.nn.Module,
             tensor_list.append(marlin_scales)
 
         scales = torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
-        scales = fp8_fused_exponent_bias_into_scales(scales)
         scales = torch.nn.Parameter(scales, requires_grad=False)
 
         setattr(layer, name + "_weight_scale", scales)
@@ -321,6 +320,5 @@ def marlin_quant_fp8_torch(weight, group_size):
                                           size_k=size_k,
                                           size_n=size_n,
                                           group_size=group_size)
-    marlin_scales = fp8_fused_exponent_bias_into_scales(marlin_scales)
 
     return weight_ref.T, marlin_qweight, marlin_scales
