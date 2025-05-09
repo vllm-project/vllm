@@ -181,7 +181,7 @@ def cutlass_moe_fp8(
     return c2.sum(dim=1)
 
 
-FLOAT4_E2M1_MAX = scalar_types.float4_e2m1fn.max()
+FLOAT4_E2M1_MAX = scalar_types.float4_e2m1f.max()
 FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
 MAX_TOKENS_PER_EXPERT = 65536
 

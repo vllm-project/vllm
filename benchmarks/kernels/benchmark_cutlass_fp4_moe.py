@@ -32,7 +32,7 @@ DEFAULT_TP_SIZES = [1]
 
 PER_ACT_TOKEN_OPTS = [False]
 PER_OUT_CH_OPTS = [False]
-FLOAT4_E2M1_MAX = scalar_types.float4_e2m1fn.max()
+FLOAT4_E2M1_MAX = scalar_types.float4_e2m1f.max()
 FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
 
 

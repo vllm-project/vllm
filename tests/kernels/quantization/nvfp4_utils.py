@@ -3,7 +3,7 @@ import torch
 
 from vllm.scalar_type import scalar_types
 
-FLOAT4_E2M1_MAX = scalar_types.float4_e2m1fn.max()
+FLOAT4_E2M1_MAX = scalar_types.float4_e2m1f.max()
 FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
 
 kE2M1ToFloat = torch.tensor([0., 0.5, 1., 1.5, 2., 3., 4., 6.],
