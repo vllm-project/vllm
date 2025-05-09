@@ -17,7 +17,7 @@ from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     moe_permute, moe_permute_unpermute_supported, moe_unpermute)
 from vllm.platforms import current_platform
 
-NUM_EXPERTS = [16, 64]
+NUM_EXPERTS = [16, 64, 256]
 TOP_KS = [2, 4, 6, 8]
 EP_SIZE = [1, 4, 16]
 current_platform.seed_everything(0)
@@ -168,10 +168,6 @@ def torch_unpermute(permuted_hidden_states: torch.Tensor,
                        device="cuda")
     mask[valid_row_idx] = True
     permuted_hidden_states[~mask] = 0
-    # idx = src_row_id2dst_row_id_map.flatten()[
-    #     token_expert_indices.flatten()].reshape(token_expert_indices.shape)
-    # output = permuted_hidden_states[idx, ...] * topk_weights[..., None]
-    # output = output.sum(dim=1).to(permuted_hidden_states.dtype)
 
     permuted_hidden_states = permuted_hidden_states[
         src_row_id2dst_row_id_map.flatten(), ...]

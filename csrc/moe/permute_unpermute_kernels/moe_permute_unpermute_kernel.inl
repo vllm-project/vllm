@@ -133,7 +133,6 @@ __global__ void finalizeMoeRoutingKernel(
     int64_t const orig_cols, int64_t const k, int64_t const* num_valid_ptr) {
   assert(orig_cols % 4 == 0);
   int64_t const original_row = blockIdx.x;
-  int64_t const num_rows = gridDim.x;
   auto const offset = original_row * orig_cols;
   OutputType* reduced_row_ptr = reduced_unpermuted_output + offset;
   int64_t const num_valid = *num_valid_ptr;
@@ -167,7 +166,6 @@ __global__ void finalizeMoeRoutingKernel(
       int64_t const k_offset = original_row * k + k_idx;
       float const row_scale = scales[k_offset];
 
-      // Check after row_rescale has accumulated
       if (CHECK_SKIPPED && expanded_permuted_row >= num_valid) {
         continue;
       }
