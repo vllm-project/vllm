@@ -461,10 +461,8 @@ class MLACommonMetadataBuilder(Generic[M]):
         device = self.runner.device
         block_table = self.block_table
         block_table_tensor = block_table.get_device_tensor()[:num_reqs]
-
-        block_table.slot_mapping[:num_actual_tokens].copy_(
-            block_table.slot_mapping_cpu[:num_actual_tokens],
-            non_blocking=True)
+        slot_mapping = block_table.slot_mapping_cpu[:num_actual_tokens].to(
+            device, non_blocking=True).long()
 
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
@@ -556,7 +554,7 @@ class MLACommonMetadataBuilder(Generic[M]):
         return self.metadata_cls(
             num_actual_tokens=num_actual_tokens,
             query_start_loc=query_start_loc,
-            slot_mapping=block_table.slot_mapping,
+            slot_mapping=slot_mapping,
             head_dim=self.runner.model_config.get_head_size(),
             # MLACommonMetadata Chunk prefill specific
             num_decodes=self._num_decodes,
