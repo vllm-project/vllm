@@ -82,6 +82,15 @@ ARG PIP_EXTRA_INDEX_URL
 ARG PIP_PYTORCH_CUDA_INDEX_BASE_URL=https://download.pytorch.org/whl
 ARG PIP_PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL=https://download.pytorch.org/whl/nightly
 
+# PIP supports multiple authentication schemes, including keyring
+# By parameterizing the PIP_KEYRING_PROVIDER variable and setting it to
+# disabled by default, we allow third-party to use keyring authentication for
+# their private Python indexes, while not changing the default behavior which
+# is no authentication.
+#
+# Reference: https://pip.pypa.io/en/stable/topics/authentication/#keyring-support
+ARG PIP_KEYRING_PROVIDER=disabled
+
 # Install uv for faster pip installs
 RUN --mount=type=cache,target=/root/.cache/uv \
     python3 -m pip install uv
@@ -337,6 +346,15 @@ ARG PIP_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL
 ARG PIP_PYTORCH_CUDA_INDEX_BASE_URL=https://download.pytorch.org/whl
 ARG PIP_PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL=https://download.pytorch.org/whl/nightly
+
+# PIP supports multiple authentication schemes, including keyring
+# By parameterizing the PIP_KEYRING_PROVIDER variable and setting it to
+# disabled by default, we allow third-party to use keyring authentication for
+# their private Python indexes, while not changing the default behavior which
+# is no authentication.
+#
+# Reference: https://pip.pypa.io/en/stable/topics/authentication/#keyring-support
+ARG PIP_KEYRING_PROVIDER=disabled
 
 # Install uv for faster pip installs
 RUN --mount=type=cache,target=/root/.cache/uv \
