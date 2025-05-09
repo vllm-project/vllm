@@ -525,7 +525,7 @@ Make the response as short as possible.
 
         sampling_params = SamplingParams(
             temperature=0.1,
-            max_tokens=200,
+            max_tokens=4096,
             guided_decoding=GuidedDecodingParams(json=reasoning_schema))
         outputs = llm.generate(prompts=[reasoning_prompt],
                                sampling_params=sampling_params,
