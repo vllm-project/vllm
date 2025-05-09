@@ -735,7 +735,6 @@ class FusedMoE(torch.nn.Module):
                     tp_rank=self.tp_rank)
             return
 
-
         # Case weight scales, zero_points and offset
         if ("scale" in weight_name or "zero" in weight_name
                 or "offset" in weight_name):

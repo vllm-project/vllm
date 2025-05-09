@@ -2,15 +2,15 @@
 import pytest
 import torch
 
+from tests.kernels.quantization.nvfp4_utils import (FLOAT4_E2M1_MAX,
+                                                    FLOAT8_E4M3_MAX,
+                                                    dequantize_nvfp4_to_dtype)
 from tests.kernels.utils import torch_moe
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.cutlass_moe import cutlass_moe_fp4
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.platforms import current_platform
-from tests.kernels.quantization.nvfp4_utils import (dequantize_nvfp4_to_dtype,
-                                                    FLOAT4_E2M1_MAX,
-                                                    FLOAT8_E4M3_MAX)
 
 if not current_platform.has_device_capability(100):
     pytest.skip(reason="Nvfp4 Requires compute capability of 10 or above.",

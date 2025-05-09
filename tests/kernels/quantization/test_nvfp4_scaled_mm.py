@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 import pytest
 import torch
+from nvfp4_utils import (FLOAT4_E2M1_MAX, FLOAT8_E4M3_MAX,
+                         dequantize_nvfp4_to_dtype)
 
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
-from nvfp4_utils import (dequantize_nvfp4_to_dtype, FLOAT4_E2M1_MAX,
-                         FLOAT8_E4M3_MAX)
 
 if not current_platform.has_device_capability(100):
     pytest.skip(reason="Nvfp4 Requires compute capability of 10 or above.",
