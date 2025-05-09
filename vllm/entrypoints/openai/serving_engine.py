@@ -5,12 +5,13 @@ import json
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from concurrent.futures.thread import ThreadPoolExecutor
 from http import HTTPStatus
-from typing import Annotated, Any, Callable, Optional, TypedDict, Union
+from typing import Annotated, Any, Callable, Optional, TypedDict, Union, cast
 
 import torch
 from fastapi import Request
 from pydantic import Field
 from starlette.datastructures import Headers
+from typing_extensions import TypeIs, assert_never
 
 import vllm.envs as envs
 from vllm.config import ModelConfig
@@ -38,7 +39,8 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser
 # yapf: enable
-from vllm.inputs import TokensPrompt
+from vllm.inputs.data import EmbedsPrompt as EngineEmbedsPrompt
+from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -74,6 +76,16 @@ class EmbedsPrompt(TypedDict):
 
 
 RequestPrompt = Union[list[int], str, TextTokensPrompt, EmbedsPrompt]
+
+
+def is_text_tokens_prompt(prompt: RequestPrompt) -> TypeIs[TextTokensPrompt]:
+    return (isinstance(prompt, dict) and "prompt_token_ids" in prompt
+            and "prompt_embeds" not in prompt)
+
+
+def is_embeds_prompt(prompt: RequestPrompt) -> TypeIs[EmbedsPrompt]:
+    return (isinstance(prompt, dict) and "prompt_token_ids" not in prompt
+            and "prompt_embeds" in prompt)
 
 
 class OpenAIServing:
@@ -368,11 +380,12 @@ class OpenAIServing:
         self,
         request: CompletionLikeRequest,
         tokenizer: AnyTokenizer,
-        input_or_inputs: Union[str, list[str], list[int], list[list[int]]],
+        input_or_inputs: Optional[Union[str, list[str], list[int],
+                                        list[list[int]]]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
         add_special_tokens: bool = True,
     ) -> tuple[Union[list[TextTokensPrompt], list[EmbedsPrompt]], Union[
-            list[TokensPrompt], list[EmbedsPrompt]]]:
+            list[EngineTokensPrompt], list[EngineEmbedsPrompt]]]:
         request_prompts = await self._tokenize_prompt_input_or_inputs_async(
             request,
             tokenizer,
@@ -381,13 +394,31 @@ class OpenAIServing:
             add_special_tokens=add_special_tokens,
         )
 
-        engine_prompts: list[Union[TokensPrompt, EmbedsPrompt]] = [
-            request_prompt if "prompt_embeds" in request_prompt else
-            TokensPrompt(prompt_token_ids=request_prompt["prompt_token_ids"])
-            for request_prompt in request_prompts
-        ]
+        # This list has a weird type hint. This should be a union of lists, not
+        # a list of unions, but mypy does not play nicely with the variance of
+        # typeddicts, and there's no way to easily assert which list type we
+        # received from request_prompts. So the compromise is we type the list
+        # as a union as we build it, and then cast it to the correct type when
+        # we return.
+        # This casting is safe because we know the list can only be full of
+        # either EngineTokensPrompt or EngineEmbedsPrompt, but not a mix.
+        engine_prompts: list[Union[EngineTokensPrompt,
+                                   EngineEmbedsPrompt]] = []
+        for request_prompt in request_prompts:
+            if is_embeds_prompt(request_prompt):
+                engine_prompts.append(
+                    EngineEmbedsPrompt(
+                        prompt_embeds=request_prompt["prompt_embeds"]))
+            elif is_text_tokens_prompt(request_prompt):
+                engine_prompts.append(
+                    EngineTokensPrompt(
+                        prompt_token_ids=request_prompt["prompt_token_ids"]))
+            else:
+                assert_never(request_prompt)
 
-        return request_prompts, engine_prompts
+        return request_prompts, cast(
+            Union[list[EngineTokensPrompt], list[EngineEmbedsPrompt]],
+            engine_prompts)
 
     async def _preprocess_chat(
         self,
@@ -405,7 +436,7 @@ class OpenAIServing:
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
         add_special_tokens: bool = False,
     ) -> tuple[list[ConversationMessage], Sequence[RequestPrompt],
-               list[TokensPrompt]]:
+               list[EngineTokensPrompt]]:
         model_config = self.model_config
 
         resolved_content_format = resolve_chat_template_content_format(
@@ -478,7 +509,7 @@ class OpenAIServing:
                 prompt=tokenizer.decode(request_prompt),
                 prompt_token_ids=request_prompt)
 
-        engine_prompt = TokensPrompt(
+        engine_prompt = EngineTokensPrompt(
             prompt_token_ids=prompt_inputs["prompt_token_ids"])
         if mm_data is not None:
             engine_prompt["multi_modal_data"] = mm_data
