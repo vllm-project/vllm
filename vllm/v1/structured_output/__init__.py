@@ -10,6 +10,7 @@ from vllm.logger import init_logger
 from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
                                                      StructuredOutputGrammar)
+from vllm.v1.utils import runtime_to_value_error
 
 if TYPE_CHECKING:
     import numpy as np
@@ -61,6 +62,7 @@ class StructuredOutputManager:
         grammar = self.executor.submit(self._async_create_grammar, request)
         request.structured_output_request.grammar = grammar  # type: ignore[assignment]
 
+    @runtime_to_value_error
     def _async_create_grammar(
         self,
         request: Request,
