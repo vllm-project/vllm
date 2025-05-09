@@ -7,7 +7,6 @@ import hashlib
 import inspect
 import json
 import re
-import sys
 import textwrap
 import warnings
 from collections import Counter
@@ -34,7 +33,7 @@ from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
                                                      QuantizationMethods,
                                                      get_quantization_config)
 from vllm.model_executor.models import ModelRegistry
-from vllm.platforms import CpuArchEnum, current_platform
+from vllm.platforms import current_platform
 from vllm.tracing import is_otel_available, otel_import_error_traceback
 from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
@@ -54,7 +53,7 @@ if TYPE_CHECKING:
     from vllm.executor.executor_base import ExecutorBase
     from vllm.model_executor.layers.quantization.base_config import (
         QuantizationConfig)
-    from vllm.model_executor.model_loader.loader import BaseModelLoader
+    from vllm.model_executor.model_loader import BaseModelLoader
 
     ConfigType = type[DataclassInstance]
 else:
@@ -2050,6 +2049,13 @@ class SchedulerConfig:
                     _MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
                 )
 
+            # When using default settings,
+            # Ensure max_num_batched_tokens does not exceed model limit.
+            # Some models (e.g., Whisper) have embeddings tied to max length.
+            self.max_num_batched_tokens = min(
+                self.max_num_seqs * self.max_model_len,
+                self.max_num_batched_tokens)
+
         self.max_num_encoder_input_tokens = self.max_num_batched_tokens
         self.encoder_cache_size = self.max_num_batched_tokens
 
@@ -2089,6 +2095,13 @@ class SchedulerConfig:
                 f"max_num_batched_tokens ({self.max_num_batched_tokens}) must "
                 "be greater than or equal to max_num_seqs "
                 f"({self.max_num_seqs}).")
+
+        if self.max_num_batched_tokens > self.max_num_seqs * self.max_model_len:
+            logger.warning(
+                "max_num_batched_tokens (%d) exceeds max_num_seqs"
+                "* max_model_len (%d). This may lead to unexpected behavior.",
+                self.max_num_batched_tokens,
+                self.max_num_seqs * self.max_model_len)
 
         if self.num_lookahead_slots < 0:
             raise ValueError(
@@ -2273,6 +2286,9 @@ class SpeculativeConfig:
     """Scaling factor for entropy-based threshold, applied when using
     `TypicalAcceptanceSampler`."""
 
+    speculative_token_tree: Optional[str] = None
+    """Specifies the tree structure for speculative token generation. 
+    """
     # required configuration params passed from engine
     target_model_config: ModelConfig = field(default=None,
                                              init=True)  # type: ignore
@@ -2447,10 +2463,11 @@ class SpeculativeConfig:
                             "Chunked prefill and EAGLE are not compatible "
                             "when using V0.")
 
+                    from vllm.platforms import current_platform
                     from vllm.transformers_utils.configs.eagle import (
                         EAGLEConfig)
                     if isinstance(self.draft_model_config.hf_config,
-                                  EAGLEConfig):
+                                  EAGLEConfig) or current_platform.is_neuron():
                         pass
                     else:
                         eagle_config = EAGLEConfig(
@@ -2690,8 +2707,8 @@ class LoRAConfig:
     lora_extra_vocab_size: int = 256
     """Maximum size of extra vocabulary that can be present in a LoRA adapter
     (added to the base model vocabulary)."""
-    # This is a constant.
-    lora_vocab_padding_size: ClassVar[int] = 256
+    lora_vocab_padding_size: ClassVar[int] = current_platform\
+        .get_lora_vocab_padding_size()
     long_lora_scaling_factors: Optional[tuple[float, ...]] = None
     """Specify multiple scaling factors (which can be different from base model
     scaling factor - see eg. Long LoRA) to allow for multiple LoRA adapters
@@ -2719,6 +2736,7 @@ class LoRAConfig:
         factors.append(self.fully_sharded_loras)
         factors.append(self.lora_dtype)
         factors.append(self.lora_extra_vocab_size)
+        factors.append(self.lora_vocab_padding_size)
         factors.append(self.long_lora_scaling_factors)
         factors.append(self.bias_enabled)
         hash_str = hashlib.md5(str(factors).encode(),
@@ -2969,6 +2987,7 @@ def _get_and_verify_dtype(
     if isinstance(dtype, str):
         dtype = dtype.lower()
         if dtype == "auto":
+            # Set default dtype from model config
             if config_dtype == torch.float32:
                 # Following common practice, we use float16 for float32 models
                 torch_dtype = torch.float16
@@ -2976,37 +2995,33 @@ def _get_and_verify_dtype(
                 torch_dtype = config_dtype
 
             if config.model_type == "plamo2":
-                logger.info(
+                logger.warning(
                     "For PLaMo2, we cast models to bfloat16 instead of using "
                     "float16 by default. This is because float16 does not work."
                 )
                 torch_dtype = torch.bfloat16
 
+            # Deal with torch dtype fallback for device compatibility.
             from vllm.platforms import current_platform
-            if (current_platform.is_cpu()
-                    and current_platform.get_cpu_architecture()
-                    == CpuArchEnum.POWERPC
-                    and (config_dtype == torch.float16
-                         or config_dtype == torch.float32)):
-                logger.info(
-                    "For POWERPC, we cast models to bfloat16 instead of "
-                    "using float16 by default. Float16 is not currently "
-                    "supported for POWERPC.")
-                torch_dtype = torch.bfloat16
+            if torch_dtype not in current_platform.supported_dtypes:
+                device_name = current_platform.get_device_name()
 
-            # TODO: change this condition to check if the platform support bf16
-            # instead of checking the OS. For instance M2 shall supports bf16
-            # already. But we need to modify `cpu_extension.cmake` to activate
-            # the feature in the build.
-            if (current_platform.is_cpu() and sys.platform.startswith("darwin")
-                    and current_platform.get_cpu_architecture()
-                    == CpuArchEnum.ARM and config_dtype == torch.bfloat16):
-                logger.info("For macOS with Apple Silicon, currently bfloat16 "
-                            "is not supported. Setting dtype to float16.")
-                torch_dtype = torch.float16
+                if ((capability := current_platform.get_device_capability())
+                        is None):
+                    compute_str = ""
+                else:
+                    version_str = capability.as_version_str()
+                    compute_str = f" (with compute capability {version_str})"
+                fallback_dtype = current_platform.supported_dtypes[0]
+                logger.warning(
+                    "Your %s device%s doesn't support %s. " \
+                    "Falling back to %s for compatibility.",
+                    device_name, compute_str, torch_dtype, fallback_dtype
+                    )
+                torch_dtype = fallback_dtype
 
-            if current_platform.is_hpu() and config_dtype == torch.float16:
-                logger.info(
+            if current_platform.is_hpu() and torch_dtype == torch.float16:
+                logger.warning(
                     "For HPU, we cast models to bfloat16 instead of "
                     "using float16 by default. Please specify `dtype` if you "
                     "want to use float16.")
@@ -3600,6 +3615,10 @@ class CompilationConfig(BaseModel):
             are always used, it can set this to False. Otherwise, it should
             set this to True, and the compiler will copy the input to an
             internally managed buffer. Default is False.
+        - full_cuda_graph: whether to use a full cuda graph for the entire forward 
+            pass rather than splitting certain operations such as attention into subgraphs. 
+            Thus this flag cannot be used together with splitting_ops. This may provide 
+            performance benefits for smaller models.
     - Inductor compilation:
         - use_inductor: whether to use inductor compilation.
             - False: inductor compilation is not used. graph runs in eager.
@@ -3644,6 +3663,7 @@ class CompilationConfig(BaseModel):
     cudagraph_num_of_warmups: int = 0
     cudagraph_capture_sizes: Optional[list[int]] = None
     cudagraph_copy_inputs: bool = False
+    full_cuda_graph: bool = False
 
     class PassConfig(BaseModel):
         """
@@ -3866,10 +3886,14 @@ class CompilationConfig(BaseModel):
             self.max_capture_size] = self.max_capture_size
 
     def set_splitting_ops_for_v1(self):
-        # If default, override splitting ops for piecewise cudagraph on V1.
         # NOTE: this function needs to be called
+        if self.splitting_ops and self.full_cuda_graph:
+            raise ValueError("full_cuda_graph cannot be used together with "
+                             "splitting_ops, as Full CUDA graph will override "
+                             f"the splitting_ops: {self.splitting_ops}")
+
         if not self.splitting_ops:
-            self.splitting_ops = [
+            self.splitting_ops = [] if self.full_cuda_graph else [
                 "vllm.unified_attention",
                 "vllm.unified_attention_with_output",
             ]
@@ -4146,6 +4170,12 @@ class VllmConfig:
                 "Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
+        if self.compilation_config.full_cuda_graph and \
+            not self.model_config.disable_cascade_attn:
+            logger.warning_once(
+                "full_cuda_graph is not supported with "
+                "cascade attention. Disabling cascade attention.")
+            self.model_config.disable_cascade_attn = True
 
         if self.model_config and self.model_config.use_mla and \
             not (current_platform.is_cuda() or current_platform.is_rocm()):
