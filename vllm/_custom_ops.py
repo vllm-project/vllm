@@ -1268,6 +1268,7 @@ def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
 
 def moe_wna16_marlin_gemm(input: torch.Tensor, output: Optional[torch.Tensor],
                           b_qweight: torch.Tensor, b_scales: torch.Tensor,
+                          global_scale: Optional[torch.Tensor],
                           b_qzeros: Optional[torch.Tensor],
                           g_idx: Optional[torch.Tensor],
                           perm: Optional[torch.Tensor],
@@ -1282,11 +1283,11 @@ def moe_wna16_marlin_gemm(input: torch.Tensor, output: Optional[torch.Tensor],
                           use_fp32_reduce: bool,
                           is_zp_float: bool) -> torch.Tensor:
     return torch.ops._moe_C.moe_wna16_marlin_gemm(
-        input, output, b_qweight, b_scales, b_qzeros, g_idx, perm, workspace,
-        sorted_token_ids, expert_ids, num_tokens_past_padded, topk_weights,
-        moe_block_size, top_k, mul_topk_weights, is_ep, b_q_type.id, size_m,
-        size_n, size_k, is_k_full, use_atomic_add, use_fp32_reduce,
-        is_zp_float)
+        input, output, b_qweight, b_scales, global_scale, b_qzeros, g_idx,
+        perm, workspace, sorted_token_ids, expert_ids, num_tokens_past_padded,
+        topk_weights, moe_block_size, top_k, mul_topk_weights, is_ep,
+        b_q_type.id, size_m, size_n, size_k, is_k_full, use_atomic_add,
+        use_fp32_reduce, is_zp_float)
 
 
 if supports_moe_ops and hasattr(torch.ops._moe_C, "marlin_gemm_moe"):
