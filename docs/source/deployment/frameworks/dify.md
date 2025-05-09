@@ -31,6 +31,8 @@ cp .env.example .env
 docker compose up -d
 ```
 
+- Open the browser to access `http://localhost/install`, config the basic login information and login.
+
 - In the top-right user menu (under the profile icon), go to Settings, then click `Model Provider`, and locate the `vLLM` provider to install it.
 
 - Fill in the model provider details as follows:
