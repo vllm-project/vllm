@@ -33,6 +33,7 @@ QuantizationMethods = Literal[
     "quark",
     "moe_wna16",
     "torchao",
+    "bitnet_bitblas",
 ]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
