@@ -1732,8 +1732,7 @@ class TranscriptionRequest(OpenAIBaseModel):
         if isinstance(data.get("file"), str):
             raise HTTPException(
                 status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
-                detail=("Unsupported type for 'file'. Audio file should be a "
-                        "'fastapi.UploadFile' object, not 'str'.")
+                detail="Expected 'file' to be a file-like object, not 'str'.",
             )
 
         stream_opts = ["stream_include_usage", "stream_continuous_usage_stats"]
