@@ -45,8 +45,8 @@ def fused_add_rms_norm(
 
 if is_rocm_aiter_rmsnorm_enabled():
 
-    def _rocm_aiter_rms_norm(x: torch.Tensor, weight: torch.Tensor,
-                             variance_epsilon: float) -> torch.Tensor:
+    def rocm_aiter_rms_norm_impl(x: torch.Tensor, weight: torch.Tensor,
+                                 variance_epsilon: float) -> torch.Tensor:
 
         import aiter as rocm_aiter
         return rocm_aiter.rms_norm(x, weight, variance_epsilon)
@@ -58,16 +58,16 @@ if is_rocm_aiter_rmsnorm_enabled():
     try:
         direct_register_custom_op(
             op_name="rocm_aiter_rms_norm",
-            op_func=_rocm_aiter_rms_norm,
+            op_func=rocm_aiter_rms_norm_impl,
             mutates_args=[],
             fake_impl=rocm_aiter_rms_norm_fake,
         )
         rocm_aiter_rms_norm = torch.ops.vllm.rocm_aiter_rms_norm
 
     except AttributeError:
-        rocm_aiter_rms_norm = _rocm_aiter_rms_norm
+        rocm_aiter_rms_norm = rocm_aiter_rms_norm_impl
 
-    def _rocm_aiter_fused_add_rms_norm(
+    def rocm_aiter_fused_add_rms_norm_impl(
             input: torch.Tensor, residual_in: torch.Tensor,
             weight: torch.Tensor,
             variance_epsilon: float) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -95,7 +95,7 @@ if is_rocm_aiter_rmsnorm_enabled():
     try:
         direct_register_custom_op(
             op_name="rocm_aiter_fused_add_rms_norm",
-            op_func=_rocm_aiter_fused_add_rms_norm,
+            op_func=rocm_aiter_fused_add_rms_norm_impl,
             mutates_args=[],
             fake_impl=rocm_aiter_fused_add_rms_norm_fake,
         )
@@ -103,7 +103,7 @@ if is_rocm_aiter_rmsnorm_enabled():
             torch.ops.vllm.rocm_aiter_fused_add_rms_norm
 
     except AttributeError:
-        rocm_aiter_fused_add_rms_norm = _rocm_aiter_fused_add_rms_norm
+        rocm_aiter_fused_add_rms_norm = rocm_aiter_fused_add_rms_norm_impl
 
 
 def dispatch_cuda_rmsnorm_func(add_residual: bool):

@@ -103,7 +103,7 @@ if current_platform.is_rocm():
 
         return k_values, v_values
 
-    def _flash_attn_varlen_func(
+    def flash_attn_varlen_func_impl(
         q: torch.Tensor,
         k_cache: torch.Tensor,
         v_cache: torch.Tensor,
@@ -159,12 +159,12 @@ if current_platform.is_rocm():
 
     try:
         direct_register_custom_op("flash_attn_varlen_func",
-                                  _flash_attn_varlen_func, ["out"],
+                                  flash_attn_varlen_func_impl, ["out"],
                                   flash_attn_varlen_func_fake)
         flash_attn_varlen_func = torch.ops.vllm.flash_attn_varlen_func
 
     except AttributeError:
-        flash_attn_varlen_func = _flash_attn_varlen_func
+        flash_attn_varlen_func = flash_attn_varlen_func_impl
 
 logger = init_logger(__name__)
 
