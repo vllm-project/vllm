@@ -315,14 +315,14 @@ bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
     BIGGROUP_GET_IF_M234(W_TYPE, 8, 4, 128)  \
     BIGGROUP_GET_IF_M234(W_TYPE, 4, 8, 128)
 
-  #define FP4_GET_IF_M1(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)       \
+  #define FP4_GET_IF_M1(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)        \
     _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, 1, NUM_THREADS, false) \
-    _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false) \
+    _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false)
 
-  #define FP4_GET_IF_M234(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)   \
-    _GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false)  \
-    _GET_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false)  \
-    _GET_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false) \
+  #define FP4_GET_IF_M234(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)       \
+    _GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false) \
+    _GET_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false) \
+    _GET_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false)
 
   #define FP4_GET_IF(W_TYPE)            \
     FP4_GET_IF_M1(W_TYPE, 8, 8, 256)    \
@@ -453,9 +453,9 @@ exec_config_t determine_exec_config(const vllm::ScalarType& q_type, int prob_m,
 }
 
 template <typename scalar_t>
-void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s, void* s2,
-               void* zp, void* g_idx, void* perm, void* a_tmp, int prob_m,
-               int prob_n, int prob_k, int lda, void* workspace,
+void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
+               void* s2, void* zp, void* g_idx, void* perm, void* a_tmp,
+               int prob_m, int prob_n, int prob_k, int lda, void* workspace,
                vllm::ScalarType const& q_type, bool has_act_order,
                bool is_k_full, bool has_zp, int num_groups, int group_size,
                int dev, cudaStream_t stream, int thread_k_init,
@@ -880,12 +880,11 @@ torch::Tensor gptq_marlin_gemm(
 
     marlin::marlin_mm<nv_bfloat16>(
         a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(),
-        c.data_ptr<at::BFloat16>(), c_tmp.data_ptr<float>(),
-        scales_ptr, global_scale.data_ptr<at::BFloat16>(),
-        b_zeros.data_ptr(), g_idx.data_ptr(),
-        perm.data_ptr(), a_tmp.data_ptr<at::BFloat16>(), size_m, size_n, size_k,
-        a.stride(0), workspace.data_ptr(), b_q_type, has_act_order, is_k_full,
-        has_zp, num_groups, group_size, dev,
+        c.data_ptr<at::BFloat16>(), c_tmp.data_ptr<float>(), scales_ptr,
+        global_scale.data_ptr<at::BFloat16>(), b_zeros.data_ptr(),
+        g_idx.data_ptr(), perm.data_ptr(), a_tmp.data_ptr<at::BFloat16>(),
+        size_m, size_n, size_k, a.stride(0), workspace.data_ptr(), b_q_type,
+        has_act_order, is_k_full, has_zp, num_groups, group_size, dev,
         at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms,
         use_atomic_add, use_fp32_reduce, is_zp_float);
   } else {

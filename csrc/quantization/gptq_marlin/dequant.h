@@ -471,15 +471,12 @@ __device__ inline void dequant<nv_bfloat162, vllm::kFE2M1f.id(), false>(
 }
 
 template <typename scalar_t2>
-__device__ inline void dequant_fp8_scales(
-    int q, scalar_t2* frag_b);
-
+__device__ inline void dequant_fp8_scales(int q, scalar_t2* frag_b);
 
 template <>
-__device__ inline void dequant_fp8_scales<half2>(
-    int q, half2* frag_b) {
-
-  int Out1 = (q & 0xFF00FF00) >> 1;;
+__device__ inline void dequant_fp8_scales<half2>(int q, half2* frag_b) {
+  int Out1 = (q & 0xFF00FF00) >> 1;
+  ;
   q <<= 8;
   int Out2 = (q & 0xFF00FF00) >> 1;
 
@@ -488,10 +485,9 @@ __device__ inline void dequant_fp8_scales<half2>(
   frag_b[0] = *reinterpret_cast<const half2*>(&Out2);
 };
 
-
 template <>
-__device__ inline void dequant_fp8_scales<nv_bfloat162>(
-    int q, nv_bfloat162* frag_b) {
+__device__ inline void dequant_fp8_scales<nv_bfloat162>(int q,
+                                                        nv_bfloat162* frag_b) {
   constexpr int FP8_EXPONENT = 4, BF16_EXPONENT = 8;
   constexpr int RIGHT_SHIFT = BF16_EXPONENT - FP8_EXPONENT;
   constexpr int MASK = 0x7F007F00;

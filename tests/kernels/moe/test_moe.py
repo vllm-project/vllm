@@ -421,7 +421,7 @@ def test_fused_marlin_moe(
             sort_indices2_l.append(sort_indices2)
         else:
             w_ref2, qweight2, scales2 = marlin_quant_fp8_torch(
-                w2[i], group_size)
+                w2[i], group_size, True)
             w_ref2_l.append(w_ref2.T)
             qweight2_l.append(qweight2)
             scales2_l.append(scales2)

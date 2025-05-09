@@ -317,7 +317,7 @@ class HQQMarlinMethod(LinearMethodBase):
             self.output_size_per_partition,
             self.input_size_per_partition,
             True,  # is_k_full
-            False, # use atomic add
+            False,  # use atomic add
             True,  # use 32-bit reduce
             True,  # use float zp
         )
