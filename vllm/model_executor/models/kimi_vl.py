@@ -369,6 +369,9 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal):
         return self.multi_modal_projector(
             torch.cat(image_features)).split(lengths)
 
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
+
     def get_multimodal_embeddings(self,
                                   **kwargs: object) -> Optional[NestedTensors]:
         # Validate the multimodal input keyword arguments

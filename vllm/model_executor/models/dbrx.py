@@ -451,13 +451,9 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
                 break
 
             else:
-                # Remapping the name of FP8 kv-scale.
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
-                    continue
-
                 if is_pp_missing_parameter(name, self):
                     continue
+                # Remapping the name of FP8 kv-scale.
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name is None:
                     continue

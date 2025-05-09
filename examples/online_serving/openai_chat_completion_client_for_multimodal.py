@@ -5,7 +5,7 @@ and run online serving with OpenAI client.
 Launch the vLLM server with the following command:
 
 (single image inference with Llava)
-vllm serve llava-hf/llava-1.5-7b-hf --chat-template template_llava.jinja
+vllm serve llava-hf/llava-1.5-7b-hf
 
 (multi-image inference with Phi-3.5-vision-instruct)
 vllm serve microsoft/Phi-3.5-vision-instruct --task generate \

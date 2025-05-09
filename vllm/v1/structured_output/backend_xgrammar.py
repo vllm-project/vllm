@@ -9,7 +9,7 @@ import torch
 import vllm.envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.sampling_params import GuidedDecodingParams, SamplingParams
+from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 from vllm.utils import LazyLoader
@@ -37,16 +37,13 @@ class XgrammarBackend(StructuredOutputBackend):
             scheduler_config=vllm_config.scheduler_config,
             lora_config=vllm_config.lora_config)  # type: ignore[arg-type]
 
-        self.disable_any_whitespace = False
-        backend_options = GuidedDecodingParams(
-            backend=vllm_config.decoding_config.guided_decoding_backend
-        ).backend_options()
-        for option in backend_options:
-            if option == "disable-any-whitespace":
-                self.disable_any_whitespace = True
-            else:
-                raise ValueError(
-                    f"Unsupported option for the xgrammar backend: {option}")
+        self.disable_any_whitespace = \
+            vllm_config.decoding_config.disable_any_whitespace
+
+        self.num_speculative_tokens = 0
+        if self.vllm_config.speculative_config is not None:
+            self.num_speculative_tokens = \
+                self.vllm_config.speculative_config.num_speculative_tokens
 
         tokenizer = tokenizer_group.get_lora_tokenizer(None)
         self.vocab_size = vllm_config.model_config.get_vocab_size()
@@ -126,7 +123,10 @@ class XgrammarBackend(StructuredOutputBackend):
                 f"grammar is not of valid supported types. ({request_type!s})")
 
         return XgrammarGrammar(
-            matcher=xgr.GrammarMatcher(ctx),
+            matcher=xgr.GrammarMatcher(
+                ctx,
+                max_rollback_tokens=self.num_speculative_tokens,
+            ),
             vocab_size=self.vocab_size,
             ctx=ctx,
         )
@@ -144,7 +144,6 @@ class XgrammarGrammar(StructuredOutputGrammar):
     # supporting different backends, in the future.
     # For now, just xgrammar.
     #
-    # TODO: support max_rollback_tokens
     # https://xgrammar.mlc.ai/docs/api/python/index.html#xgrammar.GrammarMatcher.find_jump_forward_string
     # for jump-forward decoding
 
@@ -170,6 +169,27 @@ class XgrammarGrammar(StructuredOutputGrammar):
                 return False
             self.num_processed_tokens += 1
         return True
+
+    def validate_tokens(self, tokens: list[int]) -> list[int]:
+        """Checks if the list of tokens are accepted by the FSM in sequence.
+        Will not advance the FSM.
+
+        Returns the prefix list of tokens that are accepted by the FSM.
+        """
+        accepted_tokens = []
+        for token in tokens:
+            if self.matcher.accept_token(token):
+                accepted_tokens.append(token)
+            else:
+                break
+        if len(accepted_tokens) > 0:
+            # Rollback the FSM to the initial state
+            self.matcher.rollback(len(accepted_tokens))
+        return accepted_tokens
+
+    def rollback(self, num_tokens: int) -> None:
+        self.matcher.rollback(num_tokens)
+        self.num_processed_tokens -= num_tokens
 
     def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> None:
         self.matcher.fill_next_token_bitmask(bitmask, idx)

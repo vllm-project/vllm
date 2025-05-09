@@ -39,9 +39,9 @@ def decode_tokens(
 ) -> str:
     """
     Backend-agnostic equivalent of HF's
-    :code:`tokenizer.decode(token_ids, ...)`.
+    `tokenizer.decode(token_ids, ...)`.
 
-    :code:`skip_special_tokens=None` means to use the backend's default
+    `skip_special_tokens=None` means to use the backend's default
     settings.
     """
     if skip_special_tokens is not None:
@@ -55,19 +55,29 @@ def encode_tokens(
     tokenizer: AnyTokenizer,
     text: str,
     *,
+    truncation: Optional[bool] = None,
+    max_length: Optional[int] = None,
     add_special_tokens: Optional[bool] = None,
 ) -> list[int]:
     """
     Backend-agnostic equivalent of HF's
-    :code:`tokenizer.encode(text, ...)`.
+    `tokenizer.encode(text, ...)`.
 
-    :code:`add_special_tokens=None` means to use the backend's default
+    `add_special_tokens=None` means to use the backend's default
     settings.
     """
-    if add_special_tokens is not None:
-        return tokenizer.encode(text, add_special_tokens=add_special_tokens)
 
-    return tokenizer.encode(text)
+    kw_args: dict[str, Any] = {}
+    if max_length is not None:
+        kw_args["max_length"] = max_length
+
+    if truncation is not None:
+        kw_args["truncation"] = truncation
+
+    if add_special_tokens is not None:
+        kw_args["add_special_tokens"] = add_special_tokens
+
+    return tokenizer.encode(text, **kw_args)
 
 
 def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
