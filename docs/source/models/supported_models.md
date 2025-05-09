@@ -587,6 +587,11 @@ Specified using `--task generate`.
   * `MiniMaxAI/MiniMax-Text-01`, etc.
   *
   * ✅︎
+- * `MiMoForCausalLM`
+  * MiMo-7B-RL
+  * `XiaomiMiMo/MiMo-7B-RL`, etc.
+  *
+  * ✅︎
 - * `Zamba2ForCausalLM`
   * Zamba2
   * `Zyphra/Zamba2-7B-instruct`, `Zyphra/Zamba2-2.7B-instruct`, `Zyphra/Zamba2-1.2B-instruct`, etc.

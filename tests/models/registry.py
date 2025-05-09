@@ -191,6 +191,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Mamba2ForCausalLM": _HfExamplesInfo("mistralai/Mamba-Codestral-7B-v0.1",
                                          is_available_online=False),
     "FalconMambaForCausalLM": _HfExamplesInfo("tiiuae/falcon-mamba-7b-instruct"),  # noqa: E501
+    "MiMoForCausalLM": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL"),
     "MiniCPMForCausalLM": _HfExamplesInfo("openbmb/MiniCPM-2B-sft-bf16",
                                          trust_remote_code=True),
     "MiniCPM3ForCausalLM": _HfExamplesInfo("openbmb/MiniCPM3-4B",
