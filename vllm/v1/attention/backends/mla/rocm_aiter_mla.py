@@ -95,8 +95,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             paged_kv_last_page_len,
         )
 
-    def _build_decode(self, input_positions: torch.Tensor,
-                      block_table: torch.Tensor,
+    def _build_decode(self, block_table: torch.Tensor,
                       seq_lens: torch.Tensor) -> AiterMLADecodeMetadata:
 
         (
@@ -106,7 +105,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         ) = self._get_paged_kv_tensors(block_table, seq_lens)
 
         attn_metadata = AiterMLADecodeMetadata(
-            input_positions=input_positions,
             block_table=block_table,
             seq_lens=seq_lens,
             paged_kv_indptr=paged_kv_indptr,
