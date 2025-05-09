@@ -695,6 +695,7 @@ def ovis_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
             "qwen2": ("<|im_start|>user\n", "<|im_end|>\n"),
             "llama":
             ("<|start_header_id|>user<|end_header_id|>\n\n", "<|eot_id|>"),
+            "gemma2": ("<start_of_turn>user\n", "<end_of_turn>\n"),
         }
         for start, end in prompt_start_and_end.values():
             if start in text and end in text:
