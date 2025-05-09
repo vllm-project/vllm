@@ -110,13 +110,12 @@ async def get_guided_decoding_logits_processor(
 
     guided_params = maybe_backend_fallback(guided_params)
 
-    # CFG grammar not supported by LMFE, so we use outlines instead
-    if guided_params.backend == 'outlines':
+    if guided_params.backend_name == 'outlines':
         # NOTE: lazy import outlines to avoid https://github.com/vllm-project/vllm/issues/4193
         from vllm.model_executor.guided_decoding.outlines_decoding import (  # noqa
             get_outlines_guided_decoding_logits_processor)
         return await get_outlines_guided_decoding_logits_processor(
-            guided_params, tokenizer, reasoner)
+            guided_params, tokenizer, reasoner, model_config)
     if guided_params.backend == 'lm-format-enforcer':
         from vllm.model_executor.guided_decoding.lm_format_enforcer_decoding import (  # noqa
             get_local_lm_format_enforcer_guided_decoding_logits_processor)
@@ -151,14 +150,13 @@ def get_local_guided_decoding_logits_processor(
             reasoning_backend)
         reasoner = reasoner_class(tokenizer)
 
-    # CFG grammar not supported by LMFE, so we use outlines instead
     if guided_params.backend == 'outlines':
         # NOTE: lazy import outlines to avoid https://github.com/vllm-project/vllm/issues/4193
         from vllm.model_executor.guided_decoding.outlines_decoding import (  # noqa
             get_local_outlines_guided_decoding_logits_processor)
         return get_local_outlines_guided_decoding_logits_processor(
-            guided_params, tokenizer, reasoner)
-    if guided_params.backend == 'lm-format-enforcer':
+            guided_params, tokenizer, reasoner, model_config)
+    if guided_params.backend_name == 'lm-format-enforcer':
         from vllm.model_executor.guided_decoding.lm_format_enforcer_decoding import (  # noqa
             get_local_lm_format_enforcer_guided_decoding_logits_processor)
         return get_local_lm_format_enforcer_guided_decoding_logits_processor(
