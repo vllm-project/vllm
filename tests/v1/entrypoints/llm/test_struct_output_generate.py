@@ -30,7 +30,6 @@ EAGLE_SPEC_CONFIG = {
     "num_speculative_tokens": 5,
 }
 
-# yapf: disable
 PARAMS_MODELS_BACKENDS_TOKENIZER_MODE_REASONING_PARSER_SPEC_CONFIG = [
     ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "auto", None, None),
     ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto", None, None),
@@ -43,7 +42,6 @@ PARAMS_MODELS_BACKENDS_TOKENIZER_MODE_REASONING_PARSER_SPEC_CONFIG = [
     ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", None, NGRAM_SPEC_CONFIG),
     ("meta-llama/Meta-Llama-3.1-8B-Instruct", "xgrammar", "auto", None, EAGLE_SPEC_CONFIG)
 ]
-# yapf: enable
 
 PARAMS_MODELS_TOKENIZER_MODE = [
     ("mistralai/Ministral-8B-Instruct-2410", "auto"),
