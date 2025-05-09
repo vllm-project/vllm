@@ -31,6 +31,17 @@ ENV DEBIAN_FRONTEND=noninteractive
 ARG DEADSNAKES_MIRROR_URL
 ARG DEADSNAKES_GPGKEY_URL
 
+# The PyPA get-pip.py script is a self contained script+zip file, that provides
+# both the installer script and the pip base85-encoded zip archive. This allows
+# bootstrapping pip in environment where a dsitribution package does not exist.
+#
+# By parameterizing the URL for get-pip.py installation script, we allow
+# third-party to use their own copy of the script stored in a private mirror.
+# We set the default value to the PyPA owned get-pip.py script.
+#
+# Reference: https://pip.pypa.io/en/stable/installation/#get-pip-py
+ARG GET_PIP_URL="https://bootstrap.pypa.io/get-pip.py"
+
 # Install Python and other dependencies
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
@@ -54,7 +65,7 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
-    && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
+    && curl -sS ${GET_PIP_URL} | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
 
 # Install uv for faster pip installs
@@ -225,6 +236,17 @@ SHELL ["/bin/bash", "-c"]
 ARG DEADSNAKES_MIRROR_URL
 ARG DEADSNAKES_GPGKEY_URL
 
+# The PyPA get-pip.py script is a self contained script+zip file, that provides
+# both the installer script and the pip base85-encoded zip archive. This allows
+# bootstrapping pip in environment where a dsitribution package does not exist.
+#
+# By parameterizing the URL for get-pip.py installation script, we allow
+# third-party to use their own copy of the script stored in a private mirror.
+# We set the default value to the PyPA owned get-pip.py script.
+#
+# Reference: https://pip.pypa.io/en/stable/installation/#get-pip-py
+ARG GET_PIP_URL="https://bootstrap.pypa.io/get-pip.py"
+
 RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
     echo "export PYTHON_VERSION_STR=${PYTHON_VERSION_STR}" >> /etc/environment
 
@@ -252,7 +274,7 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
-    && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
+    && curl -sS ${GET_PIP_URL} | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
 # Install uv for faster pip installs
 RUN --mount=type=cache,target=/root/.cache/uv \
