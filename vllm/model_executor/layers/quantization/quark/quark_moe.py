@@ -336,7 +336,6 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
             layer.w2_weight_scale = None
 
             # This call is necessary to release the scales memory.
-            # TODO: is it still?
             torch.cuda.empty_cache()
 
     def apply(

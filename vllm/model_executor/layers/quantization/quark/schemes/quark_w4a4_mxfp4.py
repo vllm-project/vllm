@@ -47,7 +47,6 @@ class QuarkW4A4MXFP4(QuarkScheme):
             layer.weight_scale = None
 
             # This call is necessary to release the scales memory.
-            # TODO: is it still?
             torch.cuda.empty_cache()
 
     def create_weights(self, layer: torch.nn.Module,

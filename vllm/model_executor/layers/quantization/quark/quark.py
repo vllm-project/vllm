@@ -6,7 +6,6 @@ from typing import Any, Dict, List, Optional, cast
 import torch
 
 from vllm.logger import init_logger
-import vllm.envs as envs
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
