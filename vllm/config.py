@@ -7,7 +7,6 @@ import hashlib
 import inspect
 import json
 import re
-import sys
 import textwrap
 import warnings
 from collections import Counter
@@ -34,7 +33,7 @@ from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
                                                      QuantizationMethods,
                                                      get_quantization_config)
 from vllm.model_executor.models import ModelRegistry
-from vllm.platforms import CpuArchEnum, current_platform
+from vllm.platforms import current_platform
 from vllm.tracing import is_otel_available, otel_import_error_traceback
 from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
@@ -2988,6 +2987,7 @@ def _get_and_verify_dtype(
     if isinstance(dtype, str):
         dtype = dtype.lower()
         if dtype == "auto":
+            # Set default dtype from model config
             if config_dtype == torch.float32:
                 # Following common practice, we use float16 for float32 models
                 torch_dtype = torch.float16
@@ -2995,37 +2995,33 @@ def _get_and_verify_dtype(
                 torch_dtype = config_dtype
 
             if config.model_type == "plamo2":
-                logger.info(
+                logger.warning(
                     "For PLaMo2, we cast models to bfloat16 instead of using "
                     "float16 by default. This is because float16 does not work."
                 )
                 torch_dtype = torch.bfloat16
 
+            # Deal with torch dtype fallback for device compatibility.
             from vllm.platforms import current_platform
-            if (current_platform.is_cpu()
-                    and current_platform.get_cpu_architecture()
-                    == CpuArchEnum.POWERPC
-                    and (config_dtype == torch.float16
-                         or config_dtype == torch.float32)):
-                logger.info(
-                    "For POWERPC, we cast models to bfloat16 instead of "
-                    "using float16 by default. Float16 is not currently "
-                    "supported for POWERPC.")
-                torch_dtype = torch.bfloat16
+            if torch_dtype not in current_platform.supported_dtypes:
+                device_name = current_platform.get_device_name()
 
-            # TODO: change this condition to check if the platform support bf16
-            # instead of checking the OS. For instance M2 shall supports bf16
-            # already. But we need to modify `cpu_extension.cmake` to activate
-            # the feature in the build.
-            if (current_platform.is_cpu() and sys.platform.startswith("darwin")
-                    and current_platform.get_cpu_architecture()
-                    == CpuArchEnum.ARM and config_dtype == torch.bfloat16):
-                logger.info("For macOS with Apple Silicon, currently bfloat16 "
-                            "is not supported. Setting dtype to float16.")
-                torch_dtype = torch.float16
+                if ((capability := current_platform.get_device_capability())
+                        is None):
+                    compute_str = ""
+                else:
+                    version_str = capability.as_version_str()
+                    compute_str = f" (with compute capability {version_str})"
+                fallback_dtype = current_platform.supported_dtypes[0]
+                logger.warning(
+                    "Your %s device%s doesn't support %s. " \
+                    "Falling back to %s for compatibility.",
+                    device_name, compute_str, torch_dtype, fallback_dtype
+                    )
+                torch_dtype = fallback_dtype
 
-            if current_platform.is_hpu() and config_dtype == torch.float16:
-                logger.info(
+            if current_platform.is_hpu() and torch_dtype == torch.float16:
+                logger.warning(
                     "For HPU, we cast models to bfloat16 instead of "
                     "using float16 by default. Please specify `dtype` if you "
                     "want to use float16.")
