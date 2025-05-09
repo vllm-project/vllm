@@ -109,6 +109,8 @@ class TritonAttentionImpl(AttentionImpl):
                                       "are not implemented for "
                                       "TritonAttentionImpl")
 
+        self.fp8_dtype = current_platform.fp8_dtype()
+
     def forward(
         self,
         layer: torch.nn.Module,
@@ -162,8 +164,8 @@ class TritonAttentionImpl(AttentionImpl):
         )
 
         if self.kv_cache_dtype.startswith("fp8"):
-            key_cache = key_cache.view(current_platform.fp8_dtype())
-            value_cache = value_cache.view(current_platform.fp8_dtype())
+            key_cache = key_cache.view(self.fp8_dtype)
+            value_cache = value_cache.view(self.fp8_dtype)
             num_tokens, num_heads, head_size = query.shape
             assert layer._q_scale == 1.0, \
                 "A non 1.0 q_scale is not currently supported."
