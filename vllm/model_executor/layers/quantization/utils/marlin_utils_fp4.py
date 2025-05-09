@@ -21,18 +21,46 @@ def is_fp4_marlin_supported():
     return current_platform.has_device_capability(80)
 
 
-def fp4_fused_exponent_bias_into_scales(scales):
+def fp4_marlin_process_scales(marlin_scales):
+    assert (marlin_scales >= 0).all()
+
+    # convert to half first we would convert to fp8 later
+    marlin_scales = marlin_scales.torch(torch.half)
+
+    # 8 is the number of scale number using by one thread
+    marlin_scales = marlin_scales.view(marlin_scales.size(0) // 2, 2, -1, 8)
+    marlin_scales = marlin_scales.permute(0, 2, 1, 3).reshape(
+        marlin_scales.size(0) * 2, -1)
+
+    # fit the layout of fp8 dequantization
+    marlin_scales = marlin_scales.view(-1, 4)[:, [0, 2, 1, 3]].view(
+        marlin_scales.size(0), -1)
+
+    # We assume that weight_scale (FP8-S1E4M3) is always greater
+    # than or equal to 0. So we can convert
+    # (weight_scale * (2 ** 7) to a special FP8-S0E5M3 format.
+
+    # Why multiply 2 ** 7 ?
+    # After by 2 ** 7, the top bit of FP8-S0E5M3 would always be 1
+    # hen weight_scale > 0. This allows us to have an exponent bias
+    # closer to zero after dequantization.
+    marlin_scales = marlin_scales.to(torch.float8_e4m3fn)
+    marlin_scales = ops.marlin_fp8_scales_preprocess(marlin_scales)
+
+    return marlin_scales
+
+
+def fp4_marlin_process_global_scale(global_scale):
+    assert global_scale.dtype in [torch.half, torch.bfloat16]
     fp4_exponent = 2
-    if scales.dtype == torch.half:
+    if global_scale.dtype == torch.half:
         target_exponent = 5
-    elif scales.dtype == torch.bfloat16:
+    elif global_scale.dtype == torch.bfloat16:
         target_exponent = 8
     # exponent_bias_fp16 = 2 ** 4 - 2 ** 1 = 14
     # exponent_bias_bf16 = 2 ** 7 - 2 ** 1 = 126
     exponent_bias = 2**(target_exponent - 1) - 2**(fp4_exponent - 1)
-    s = torch.ones_like(scales) * 2
-    s = s**exponent_bias
-    return scales * s
+    return global_scale * (2.0 * (exponent_bias - 7))
 
 
 def apply_fp4_marlin_linear(
@@ -116,22 +144,12 @@ def prepare_fp4_layer_for_marlin(layer: torch.nn.Module) -> None:
                                          size_k=part_size_k,
                                          size_n=part_size_n,
                                          group_size=16)
-
-    weight_scale = weight_scale.view(weight_scale.size(0) // 2, 2, -1, 8)
-    weight_scale = weight_scale.permute(0, 2, 1, 3).reshape(
-        weight_scale.size(0) * 2, -1)
-    weight_scale = weight_scale.view(-1, 4)[:, [0, 2, 1, 3]].view(
-        weight_scale.size(0), -1).to(torch.float8_e4m3fn)
-    weight_scale = ops.marlin_fp8_scales_preprocess(weight_scale)
+    weight_scale = fp4_marlin_process_scales(weight_scale)
     layer.weight_scale = torch.nn.Parameter(weight_scale, requires_grad=False)
 
-    weight_scale_2 = layer.weight_scale_2
-    if param_dtype == torch.half:
-        weight_scale_2 = weight_scale_2 * (2.0**7)
-    elif param_dtype == torch.bfloat16:
-        weight_scale_2 = weight_scale_2 * (2.0**119)
-
-    layer.weight_scale_2 = torch.nn.Parameter(weight_scale_2.to(param_dtype),
+    weight_scale_2 = layer.weight_scale_2.to(param_dtype)
+    weight_scale_2 = fp4_marlin_process_global_scale(weight_scale_2)
+    layer.weight_scale_2 = torch.nn.Parameter(weight_scale_2,
                                               requires_grad=False)
 
     return
@@ -287,16 +305,8 @@ def rand_marlin_weight_fp4_like(weight, group_size):
                                           size_k=size_k,
                                           size_n=size_n,
                                           group_size=group_size)
-    marlin_scales = marlin_scales.view(marlin_scales.size(0) // 2, 2, -1, 8)
-    marlin_scales = marlin_scales.permute(0, 2, 1, 3).reshape(
-        marlin_scales.size(0) * 2, -1)
-    marlin_scales = marlin_scales.view(-1, 4)[:, [0, 2, 1, 3]].view(
-        marlin_scales.size(0), -1).to(torch.float8_e4m3fn)
-    marlin_scales = ops.marlin_fp8_scales_preprocess(marlin_scales)
+    marlin_scales = fp4_marlin_process_scales(marlin_scales)
 
-    if weight.dtype == torch.half:
-        global_scale = global_scale * (2.0**7)
-    elif weight.dtype == torch.bfloat16:
-        global_scale = global_scale * (2.0**119)
+    global_scale = fp4_marlin_process_global_scale(global_scale)
 
     return weight_ref.T, marlin_qweight, marlin_scales, global_scale
