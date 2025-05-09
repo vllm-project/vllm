@@ -2050,8 +2050,9 @@ class SchedulerConfig:
                     _MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
                 )
 
-            # Ensure max_num_batched_tokens does not exceed model limit.
-            # Some models (e.g., Whisper) have embeddings tied to max length.
+            # When using default settings,
+            # ensure max_num_batched_tokens does not exceed the model limit.
+            # Some models (e.g., Whisper) have embeddings tied to the maximum sequence length..
             self.max_num_batched_tokens = min(
                 self.max_num_seqs * self.max_model_len,
                 self.max_num_batched_tokens)
@@ -2097,10 +2098,10 @@ class SchedulerConfig:
                 f"({self.max_num_seqs}).")
 
         if self.max_num_batched_tokens > self.max_num_seqs * self.max_model_len:
-            raise ValueError(
-                f"max_num_batched_tokens ({self.max_num_batched_tokens}) must "
-                "be less than or equal to max_num_seqs * max_model_len "
-                f"({self.max_num_seqs * self.max_model_len}).")
+            logger.warning(
+                f"max_num_batched_tokens ({self.max_num_batched_tokens}) exceeds "
+                f"max_num_seqs * max_model_len ({self.max_num_seqs * self.max_model_len}). "
+                "This may lead to unexpected behavior.")
 
         if self.num_lookahead_slots < 0:
             raise ValueError(
