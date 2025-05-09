@@ -691,7 +691,15 @@ def ovis_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         text_tokenizer = hf_model.model.get_text_tokenizer()
         images = [images] if isinstance(images, Image) else images
 
-        text = text.split("<|im_start|>user\n")[1].split("<|im_end|>\n")[0]
+        prompt_start_and_end = {
+            "qwen2": ("<|im_start|>user\n", "<|im_end|>\n"),
+            "llama":
+            ("<|start_header_id|>user<|end_header_id|>\n\n", "<|eot_id|>"),
+        }
+        for start, end in prompt_start_and_end.values():
+            if start in text and end in text:
+                text = text.split(start)[1].split(end)[0]
+                break
 
         prompt, input_ids, pixel_values = hf_model.model.preprocess_inputs(
             text_or_conversations=text, images=images)
