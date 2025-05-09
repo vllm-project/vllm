@@ -86,7 +86,7 @@ To improve privacy in shared environments, vLLM supports isolating prefix cache 
     {"role": "user", "content": "Here is a document with details about the world series: ..."},
     {"role": "user", "content": "Who won the world series in 2020?"}
   ],
-  "cache_salt": "Z3V2bmV3aGxza3ZubGFoZ3Zud3V3ZWZ2bmd0b3V2bnZmc2xpZ3RoZ2x2aQ=="
+  "cache_salt": "your-cache-salt"
 }
 ```
 
