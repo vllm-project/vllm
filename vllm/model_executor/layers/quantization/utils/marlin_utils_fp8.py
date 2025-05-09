@@ -322,4 +322,6 @@ def marlin_quant_fp8_torch(weight, group_size):
                                           size_n=size_n,
                                           group_size=group_size)
 
+    marlin_scales = fp8_fused_exponent_bias_into_scales(marlin_scales)
+
     return weight_ref.T, marlin_qweight, marlin_scales

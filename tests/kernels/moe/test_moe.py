@@ -16,10 +16,10 @@ from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.moe_torch_iterative import (
     fused_moe as iterative_moe)
+from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
+    rand_marlin_weight_fp4_like)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     marlin_quant_fp8_torch)
-from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
-    rand_marlin_weight_fp4_like)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     awq_marlin_quantize, marlin_quantize)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -368,8 +368,8 @@ def test_fused_marlin_moe(
 
     for i in range(w1.shape[0]):
         if quant_type == scalar_types.float4_e2m1f:
-            w_ref1, qweight1, scales1, global_scale1 = rand_marlin_weight_fp4_like(
-                w1[i], group_size)
+            w_ref1, qweight1, scales1, global_scale1 = \
+                rand_marlin_weight_fp4_like(w1[i], group_size)
 
             w_ref1_l.append(w_ref1.T)
             qweight1_l.append(qweight1)
@@ -419,8 +419,8 @@ def test_fused_marlin_moe(
 
     for i in range(w2.shape[0]):
         if quant_type == scalar_types.float4_e2m1f:
-            w_ref2, qweight2, scales2, global_scale2 = rand_marlin_weight_fp4_like(
-                w2[i], group_size)
+            w_ref2, qweight2, scales2, global_scale2 = \
+                rand_marlin_weight_fp4_like(w2[i], group_size)
 
             w_ref2_l.append(w_ref2.T)
             qweight2_l.append(qweight2)
