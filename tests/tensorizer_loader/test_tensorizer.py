@@ -13,17 +13,20 @@ import pytest
 import torch
 from huggingface_hub import snapshot_download
 
-from vllm import SamplingParams
+from vllm import SamplingParams, LLM
 from vllm.engine.arg_utils import EngineArgs
+from vllm.lora.request import LoRARequest
 # yapf conflicts with isort for this docstring
 # yapf: disable
-from vllm.model_executor.model_loader.tensorizer import (TensorizerConfig,
-                                                         TensorSerializer,
-                                                         is_vllm_tensorized,
-                                                         load_with_tensorizer,
-                                                         open_stream,
-                                                         serialize_vllm_model,
-                                                         tensorize_vllm_model)
+from vllm.model_executor.model_loader.tensorizer import (
+    TensorizerConfig,
+    TensorSerializer,
+    is_vllm_tensorized,
+    load_with_tensorizer,
+    open_stream,
+    serialize_vllm_model,
+    tensorize_vllm_model, tensorize_lora_adapter,
+)
 # yapf: enable
 from vllm.utils import PlaceholderModule, import_from_path
 
