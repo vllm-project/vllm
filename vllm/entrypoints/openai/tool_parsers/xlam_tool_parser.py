@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # ruff: noqa
-
+# type: ignore
 import json
 import re
 from collections.abc import Sequence
-from typing import Optional, Union
-
-from transformers import PreTrainedTokenizerBase
+from typing import Any, Dict, List, Optional, Union
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaFunctionCall, DeltaMessage,
@@ -16,6 +14,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
 from vllm.logger import init_logger
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
@@ -24,7 +23,7 @@ logger = init_logger(__name__)
 @ToolParserManager.register_module("xlam")
 class xLAMToolParser(ToolParser):
 
-    def __init__(self, tokenizer: PreTrainedTokenizerBase):
+    def __init__(self, tokenizer: AnyTokenizer):
         super().__init__(tokenizer)
 
         # Initialize state for streaming mode
@@ -35,7 +34,7 @@ class xLAMToolParser(ToolParser):
         ]  # Track arguments sent for each tool
 
         # For backward compatibility with tests
-        self.current_tools_sent = []
+        self.current_tools_sent: list[bool] = []
 
         # For backward compatibility with serving code
         self.prev_tool_call_arr = []
@@ -47,6 +46,13 @@ class xLAMToolParser(ToolParser):
             r"<tool_call>([\s\S]*?)</tool_call>",
         ]
         self.thinking_tag_pattern = r"</think>([\s\S]*)"
+
+        # Define streaming state type to be initialized later
+        self.streaming_state = {
+            "current_tool_index": -1,
+            "tool_ids": [],
+            "sent_tools": [],
+        }
 
     def preprocess_model_output(
             self, model_output: str) -> tuple[Optional[str], Optional[str]]:
@@ -455,20 +461,3 @@ class xLAMToolParser(ToolParser):
             logger.exception(f"Error in streaming tool calls: {e}")
             # If we encounter an error, just return the delta text as regular content
             return DeltaMessage(content=delta_text)
-
-    def reset_streaming_state(self):
-        """Reset the streaming state between different completion requests."""
-        # Reset primary streaming state
-        if hasattr(self, "streaming_state"):
-            del self.streaming_state
-
-        # Reset backward compatibility variables
-        self.prev_tool_call_arr = []
-        self.prev_tool_calls = []
-        self.current_tool_id = -1
-        self.current_tool_name_sent = False
-        self.streamed_args = []
-
-        # Reset test-specific state if it exists
-        if hasattr(self, "current_tools_sent"):
-            self.current_tools_sent = []
