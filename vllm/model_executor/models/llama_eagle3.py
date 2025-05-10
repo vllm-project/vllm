@@ -229,13 +229,9 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         return self.model.fc(hidden_states)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        skip_prefixes = None
-        # reuse target emeb_tokens if PP is not used
-        # if get_pp_group().is_first_rank:
-        #     skip_prefixes = ["model.embed_tokens."]
         loader = AutoWeightsLoader(
             self,
-            skip_prefixes=skip_prefixes,
+            skip_prefixes=None,
         )
 
         model_weights = {}

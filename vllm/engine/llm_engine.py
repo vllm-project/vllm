@@ -10,7 +10,7 @@ from functools import partial
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Deque, Dict,
                     Iterable, List, Literal, Mapping, NamedTuple, Optional)
 from typing import Sequence as GenericSequence
-from typing import Set, Tuple, Type, Union, cast, overload
+from typing import Set, Type, Union, cast, overload
 
 import torch
 from typing_extensions import TypeVar, deprecated
