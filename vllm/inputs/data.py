@@ -3,7 +3,7 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Generic, Literal, Optional, Union, cast
 
 import torch
-from typing_extensions import NotRequired, TypedDict, TypeVar
+from typing_extensions import NotRequired, TypedDict, TypeIs, TypeVar
 
 if TYPE_CHECKING:
     from vllm.multimodal.inputs import MultiModalDataDict, MultiModalInputs
@@ -97,6 +97,17 @@ where the decoder-prompt is not specified explicitly, or
 (3) as a member of a larger data structure encapsulating
 more than one prompt, i.e. {class}`ExplicitEncoderDecoderPrompt`
 """
+
+
+def is_tokens_prompt(prompt: SingletonPrompt) -> TypeIs[TokensPrompt]:
+    return (isinstance(prompt, dict) and "prompt_token_ids" in prompt
+            and "prompt_embeds" not in prompt)
+
+
+def is_embeds_prompt(prompt: SingletonPrompt) -> TypeIs[EmbedsPrompt]:
+    return (isinstance(prompt, dict) and "prompt_token_ids" not in prompt
+            and "prompt_embeds" in prompt)
+
 
 _T1_co = TypeVar("_T1_co",
                  bound=SingletonPrompt,
