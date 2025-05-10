@@ -393,7 +393,6 @@ VLM_TEST_SETTINGS = {
                 formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",   # noqa: E501
             ),
             limit_mm_per_prompt={"video": 4},
-            runner_mm_key="videos",
         )],
     ),
     "llava_next_video": VLMTestInfo(
@@ -621,6 +620,19 @@ VLM_TEST_SETTINGS = {
                 formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
             ),
             limit_mm_per_prompt={"image": 4},
+        )],
+    ),
+    "qwen2_5_omni-mixed-modalities": VLMTestInfo(
+        models=["Qwen/Qwen2.5-Omni-3B"],
+        test_type=VLMTestType.CUSTOM_INPUTS,
+        max_model_len=4096,
+        max_num_seqs=2,
+        auto_cls=AutoModelForTextToWaveform,
+        vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
+        patch_hf_runner=model_utils.qwen2_5_omni_patch_hf_runner,
+        custom_test_opts=[CustomTestOptions(
+            inputs=custom_inputs.mixed_modality_qwen2_5_omni(),
+            limit_mm_per_prompt={"audio": 1, "image": 1, "video": 1},
         )],
     ),
     # regression test for https://github.com/vllm-project/vllm/issues/15122

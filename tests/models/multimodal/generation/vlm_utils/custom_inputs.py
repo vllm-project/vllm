@@ -6,13 +6,16 @@ from typing import Callable
 import requests
 from PIL import Image
 
+from vllm.assets.audio import AudioAsset
+from vllm.assets.image import ImageAsset
+from vllm.assets.video import VideoAsset
 from vllm.multimodal.image import rescale_image_size
 from vllm.multimodal.video import (rescale_video_size, resize_video,
                                    sample_frames_from_video)
 
 from .....conftest import IMAGE_ASSETS, VIDEO_ASSETS
 from .builders import build_multi_image_inputs, build_single_image_inputs
-from .types import ImageSizeWrapper, SizeType
+from .types import ImageSizeWrapper, PromptWithMultiModalInput, SizeType
 
 
 def multi_image_multi_aspect_ratio_inputs(formatter: Callable[[str], str]):
@@ -32,24 +35,28 @@ def multi_image_multi_aspect_ratio_inputs(formatter: Callable[[str], str]):
         "<image>\nWhat is the season?",
     ]
     formatted_prompts = [formatter(prompt) for prompt in img_prompts]
-
-    return [(
-        formatted_prompts,
+    aspect_ratio_images = [
+        [stop_sign, cherry_blossom],
+        # Images with different sizes and aspect-ratios
         [
-            [stop_sign, cherry_blossom],
-            # Images with different sizes and aspect-ratios
-            [
-                rescale_image_size(stop_sign, 0.1),
-                stop_sign,
-            ],
-            [
-                stop_sign,
-                rescale_image_size(stop_sign, 0.25),
-                cherry_blossom.resize((183, 488)),
-                cherry_blossom.resize((488, 183))
-            ],
-            cherry_blossom,
-        ])]
+            rescale_image_size(stop_sign, 0.1),
+            stop_sign,
+        ],
+        [
+            stop_sign,
+            rescale_image_size(stop_sign, 0.25),
+            cherry_blossom.resize((183, 488)),
+            cherry_blossom.resize((488, 183))
+        ],
+        cherry_blossom,
+    ]
+
+    return [
+        PromptWithMultiModalInput.create(
+            prompts=formatted_prompts,
+            image_data=aspect_ratio_images,
+        )
+    ]
 
 
 def multi_video_multi_aspect_ratio_inputs(formatter: Callable[[str], str],
@@ -68,24 +75,28 @@ def multi_video_multi_aspect_ratio_inputs(formatter: Callable[[str], str],
         "<video>\nWhy is this video funny?",
     ]
     formatted_prompts = [formatter(prompt) for prompt in video_prompts]
-
-    return [(
-        formatted_prompts,
+    aspect_ratio_videos = [
+        [video, video],
+        # Videos with different sizes and aspect-ratios
         [
-            [video, video],
-            # Videos with different sizes and aspect-ratios
-            [
-                rescale_video_size(video, 0.1),
-                video,
-            ],
-            [
-                video,
-                rescale_video_size(video, 0.25),
-                resize_video(video, (183, 488)),
-                resize_video(video, (488, 183))
-            ],
+            rescale_video_size(video, 0.1),
             video,
-        ])]
+        ],
+        [
+            video,
+            rescale_video_size(video, 0.25),
+            resize_video(video, (183, 488)),
+            resize_video(video, (488, 183))
+        ],
+        video,
+    ]
+
+    return [
+        PromptWithMultiModalInput.create(
+            prompts=formatted_prompts,
+            video_data=aspect_ratio_videos,
+        )
+    ]
 
 
 def different_patch_input_cases_internvl():
@@ -120,3 +131,29 @@ def windows_attention_image_qwen2_5_vl():
 
     wrapped_sf = ImageSizeWrapper(type=SizeType.SIZE_FACTOR, data=[0.5])
     return build_single_image_inputs([image], [prompt], wrapped_sf)
+
+
+def mixed_modality_qwen2_5_omni(size_factor: float = 0.25):
+    default_system = (
+        "You are Qwen, a virtual human developed by the Qwen Team, Alibaba "
+        "Group, capable of perceiving auditory and visual inputs, as well as "
+        "generating text and speech.")
+    question = ("What is recited in the audio? "
+                "What is the content of this image? Why is this video funny?")
+    prompt = (f"<|im_start|>system\n{default_system}<|im_end|>\n"
+              "<|im_start|>user\n<|audio_bos|><|AUDIO|><|audio_eos|>"
+              "<|vision_bos|><|IMAGE|><|vision_eos|>"
+              "<|vision_bos|><|VIDEO|><|vision_eos|>"
+              f"{question}<|im_end|>\n"
+              f"<|im_start|>assistant\n")
+    audio = AudioAsset("mary_had_lamb").audio_and_sample_rate
+    video = VideoAsset(name="baby_reading", num_frames=4).np_ndarrays
+    image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
+    return [
+        PromptWithMultiModalInput.create(
+            prompts=[prompt],
+            image_data=[rescale_image_size(image, size_factor=size_factor)],
+            video_data=[video],
+            audio_data=[audio],
+        )
+    ]
