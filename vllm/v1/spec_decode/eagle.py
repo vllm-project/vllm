@@ -313,7 +313,8 @@ class EagleProposer:
             self.model.model.embed_tokens = target_model.model.embed_tokens
         else:
             assert "model.embed_tokens.weight" in loaded_weights, \
-            "For PP > 0, Eagle draft checkpoint should its own copy of the model.embed_tokens.weight"
+            "For PP > 0, Eagle draft checkpoint should its own copy of "
+            " the model.embed_tokens.weight"
             logger.info("EAGLE embedding weights are already loaded.")
 
         # share lm_head with the target model if needed

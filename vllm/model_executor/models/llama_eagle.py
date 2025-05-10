@@ -116,9 +116,9 @@ class LlamaModel(nn.Module):
             else:
 
                 # if PP disabled then draft will share embed with target
-                if get_pp_group().world_size == 1:
-                    if "embed_tokens." in name:
-                        continue
+                if get_pp_group().world_size == 1 and \
+                    "embed_tokens." in name:
+                    continue
 
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
