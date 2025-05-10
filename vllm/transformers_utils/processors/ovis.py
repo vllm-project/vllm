@@ -278,7 +278,6 @@ class OvisProcessor(ProcessorMixin):
         for token in image_placeholders:
             padded_placeholder_tokens.append(image_padding_token_id)
             if token == image_atom_token_id:
-                # Add 255 padding tokens after each image atom token
                 padded_placeholder_tokens.extend([image_padding_token_id] * self.image_segment_len)
         return padded_placeholder_tokens
 

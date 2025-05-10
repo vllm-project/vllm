@@ -16,6 +16,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """ PyTorch Ovis model."""
+import math
 from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
                     TypedDict, Union)
 
@@ -67,11 +68,11 @@ IMAGE_PAD_TOKEN_ID_MAP = {
 
 
 def st_argmax(y_soft: torch.Tensor, dim: int):  # straight-through softmax
-    index = y_soft.max(dim, keepdim=True)[1]
+    index = y_soft.argmax(dim, keepdim=True)
     y_hard = torch.zeros_like(
         y_soft, memory_format=torch.legacy_contiguous_format).scatter_(
             dim, index, 1.0)
-    ret = y_hard - y_soft.detach() + y_soft
+    ret = y_hard - y_soft + y_soft
     return ret
 
 
@@ -188,14 +189,12 @@ class VisualTokenizer(torch.nn.Module):
         # tokens' shape is [BatchSize, #Token, VocabSize-5], so padding with
         # [BatchSize, #Token, 5], after which, tokens' shape should become
         # [BatchSize, #Token, VocabSize]
-        batch_size, token_len, _ = tokens.shape
-        padding_tensor = torch.zeros(size=(batch_size, token_len,
-                                           len(IMAGE_INDICATOR_IDS)),
-                                     dtype=tokens.dtype,
-                                     device=tokens.device,
-                                     layout=tokens.layout,
-                                     requires_grad=False)
-        tokens = torch.cat((tokens, padding_tensor), dim=2)
+        tokens = torch.nn.functional.pad(
+            tokens,
+            (0, len(IMAGE_INDICATOR_IDS)),
+            mode="constant",
+            value=0,
+        )
         return tokens
 
 
@@ -255,14 +254,15 @@ class OvisProcessingInfo(BaseProcessingInfo):
 
     def get_image_segment_len(self) -> int:
         visual_tokenizer_config = self.get_hf_config().visual_tokenizer_config
-        vit_type = visual_tokenizer_config.backbone_config.model_type
-        if vit_type == "aimv2":
-            # 16 ** 2 -1
-            return 255
-        elif vit_type == "siglip_vision_model":
-            # 14 ** 2 -1
-            return 195
-        raise ValueError(f"Unsupported ViT backbone: {vit_type}. ")
+        image_size = visual_tokenizer_config.backbone_config.image_size
+        patch_size = visual_tokenizer_config.backbone_config.patch_size
+        hidden_stride = visual_tokenizer_config.hidden_stride
+        patch_grid_length = math.ceil(image_size / patch_size)
+        assert patch_grid_length % hidden_stride == 0, (
+            f"patch_grid_length {patch_grid_length} is not divisible by "
+            f"hidden_stride {hidden_stride}")
+        # minus 1 for presented image token
+        return (patch_grid_length // hidden_stride)**2 - 1
 
     def get_image_pad_token(self) -> str:
         hf_text_config = self.get_hf_config().get_text_config()
@@ -277,7 +277,10 @@ class OvisProcessingInfo(BaseProcessingInfo):
 
     def get_image_size_with_most_features(self) -> ImageSize:
         height, width = self.get_hf_processor().get_image_size()
-        return ImageSize(width=width * 9 * 2, height=height * 9 * 2)
+        hs = self.get_hf_config().visual_tokenizer_config.hidden_stride
+        # NOTE(Isotr0py): 9 is `max_partion` hardcoded in original code
+        # https://huggingface.co/AIDC-AI/Ovis2-1B/blob/main/modeling_ovis.py#L96
+        return ImageSize(width=width * hs * 9, height=height * hs * 9)
 
 
 class OvisDummyInputsBuilder(BaseDummyInputsBuilder[OvisProcessingInfo]):
