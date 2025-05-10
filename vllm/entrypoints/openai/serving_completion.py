@@ -75,6 +75,49 @@ class OpenAIServingCompletion(OpenAIServing):
             logger.info("Using default completion sampling params from %s: %s",
                         source, self.default_sampling_params)
 
+    async def create_completion_with_chunkwise_beam(
+            self,
+            request: CompletionRequest,
+            raw_request: Optional[Request] = None,
+    ) -> Union[AsyncGenerator[str, None], CompletionResponse, ErrorResponse]:
+        """
+        Chunkwise beam search hack
+        """
+        async def _get_new_beams(request: CompletionRequest):
+            request = request
+            og_max_tokens = request.max_tokens
+            request.max_tokens = 1
+            request.n = 3
+            request.use_beam_search = True
+            gen = await self.create_completion(
+                request,
+                raw_request=raw_request,
+            )
+            request.max_tokens = og_max_tokens
+            request.n = 1
+            request.use_beam_search = False
+            return gen
+
+        res = await _get_new_beams(request)
+        print(res.choices)
+        tasks = []
+        for choice in res.choices:
+            dup = request
+            dup.prompt = dup.prompt + " " + choice.text
+            tasks.append(
+                self.create_completion(
+                    dup,
+                    raw_request=raw_request,
+                )
+            )
+
+        responses = await asyncio.gather(*tasks)
+        longest = max(responses, key=lambda res: len(res.choices[0].text))
+        for response in responses:
+            print(response)
+
+        return longest
+
     async def create_completion(
         self,
         request: CompletionRequest,
