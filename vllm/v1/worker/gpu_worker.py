@@ -179,7 +179,8 @@ class Worker(WorkerBase):
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
 
-        _, total_gpu_memory = torch.cuda.mem_get_info()
+        old_free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
+        already_used_gpu_memory = total_gpu_memory - old_free_gpu_memory
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
         self.model_runner.profile_run()
@@ -195,7 +196,7 @@ class Worker(WorkerBase):
 
         # Get the peak memory allocation recorded by torch
         peak_memory = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
-
+        peak_memory -= already_used_gpu_memory 
         # Check for any memory left around that may have been allocated on the
         # gpu outside of `torch`. NCCL operations, for example, can use a few
         # GB during a forward pass
