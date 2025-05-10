@@ -121,9 +121,10 @@ class KVCacheManager:
                 - The number of computed tokens.
         """
 
-        # Request has already has its blocks, do not look up in block table.
-        # This can happen in P/D if blocks are injected by the scheduler.
-        if request.request_id in self.single_type_manager.req_to_blocks:
+        # Request already has blocks from async load via KVConnector.
+        num_existing_blocks = len(
+            self.single_type_manager.req_to_blocks[request.request_id])
+        if num_existing_blocks > 0:
             return KVCacheBlocks.create_empty(), request.num_computed_tokens
 
         # Prefix caching is disabled or

@@ -1138,7 +1138,6 @@ def test_kv_connector_handles_preemption():
 
     # Restarts the preempted request - generate 3rd token.
     # This will have a local and remote cache hit.
-    breakpoint()
     output = scheduler.schedule()
     _assert_right_scheduler_output(
         output,
