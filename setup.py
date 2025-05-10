@@ -631,7 +631,8 @@ def get_requirements() -> list[str]:
     elif _is_hpu():
         requirements = _read_requirements("hpu.txt")
     elif _is_tpu():
-        requirements = _read_requirements("tpu.txt")
+        # Add tpu_commons as a dependency for TPU builds.
+        requirements = _read_requirements("tpu.txt") + ["tpu_commons>=0.1.0"]
     elif _is_cpu():
         requirements = _read_requirements("cpu.txt")
     elif _is_xpu():
