@@ -343,6 +343,9 @@ class Scheduler(SchedulerInterface):
                 # Total computed tokens (local + external).
                 num_computed_tokens += num_external_tokens
 
+                # Update the statistic
+                request.num_cached_tokens = num_computed_tokens
+
                 # Number of tokens to be scheduled.
                 # We use `request.num_tokens` instead of
                 # `request.num_prompt_tokens` to consider the resumed requests,
@@ -749,7 +752,8 @@ class Scheduler(SchedulerInterface):
                         new_logprobs=new_logprobs,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         stop_reason=request.stop_reason,
-                        events=request.take_events()))
+                        events=request.take_events(),
+                        num_cached_tokens=request.num_cached_tokens))
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
