@@ -13,9 +13,10 @@ from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import LazyLoader
-from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
-                                                     StructuredOutputGrammar,
+from vllm.v1.structured_output.backend_types import (StructuredOutputGrammar,
                                                      StructuredOutputOptions)
+from vllm.v1.structured_output.bitmasking_grammar import (
+    BitmaskGrammar, BitmaskStructuredOutputBackend)
 from vllm.v1.structured_output.request import get_structured_output_key
 
 if TYPE_CHECKING:
@@ -54,10 +55,10 @@ def process_for_additional_properties(
     return guide_json_obj
 
 
-class GuidanceBackend(StructuredOutputBackend):
+class GuidanceBackend(BitmaskStructuredOutputBackend):
 
     def __init__(self, vllm_config: VllmConfig):
-        self.vllm_config = vllm_config
+        super().__init__(vllm_config)
         tokenizer_group = init_tokenizer_from_configs(
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
@@ -104,7 +105,7 @@ class GuidanceBackend(StructuredOutputBackend):
 
 
 @dataclass
-class GuidanceGrammar(StructuredOutputGrammar):
+class GuidanceGrammar(BitmaskGrammar):
     ll_matcher: llguidance.LLMatcher
     ll_tokenizer: llguidance.LLTokenizer
     vocab_size: int

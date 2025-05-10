@@ -7,9 +7,13 @@ from typing import TYPE_CHECKING, Optional
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.structured_output.backend_guidance import GuidanceBackend
-from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
-                                                     StructuredOutputGrammar)
+from vllm.v1.structured_output.backend_types import (
+    StructuredOutputBackend, StructuredOutputBatchMetaData,
+    StructuredOutputGrammar)
+from vllm.v1.structured_output.request import StructuredOutputRequest
+from vllm.v1.worker.gpu_input_batch import InputBatch
 
 if TYPE_CHECKING:
     import numpy as np
@@ -22,7 +26,10 @@ logger = init_logger(__name__)
 
 
 class StructuredOutputManager:
-    """Engine-level manager for structured output requests."""
+    """Engine-level manager for structured output requests.
+    This manager holds a backend property used to initialise and compile grammars
+    Each v1 request will then have the compiled grammar assigned to request.structured_output_request.grammar
+    """
 
     def __init__(self, vllm_config: VllmConfig):
         self.backend: Optional[StructuredOutputBackend] = None
@@ -77,69 +84,50 @@ class StructuredOutputManager:
         assert self.backend is not None
         return self.backend.compile_grammar(request_type, grammar_spec)
 
-    def grammar_bitmask(
+    def accept_tokens(self, request: Request, req_id: str,
+                      tokens: list[int]) -> bool:
+        """
+        Called in v1.core.sched.Scheduler.update_from_output after tokens have been accepted
+        Accepts a list of tokens and advances the FSM.
+        Returns True if the FSM was advanced successfully.
+        Returns False if the FSM failed to advance.
+        """
+        assert request.structured_output_request is not None and request.structured_output_request.grammar is not None
+        return request.structured_output_request.grammar.accept_tokens(
+            req_id, tokens)
+
+    def filter_logits(
         self,
-        requests: dict[str, Request],
+        input_batch: InputBatch,
+        device: torch.device,
+        scheduler_output: SchedulerOutput,
+        logits: torch.Tensor,
+        sample_hidden_states: torch.Tensor,
+    ) -> None:
+        """
+        Called in v1.worker.GPUModelRunner.execute_model immediately after the model forward pass"""
+        assert self.backend is not None
+        self.backend.filter_logits(input_batch, device, scheduler_output,
+                                   logits, sample_hidden_states)
+
+    def init_batch(
+        self, requests: dict[str, Request],
         structured_output_request_ids: dict[str, int],
-        scheduled_spec_decode_tokens: dict[str, list[int]],
-    ) -> Optional[npt.NDArray[np.int32]]:
-        # Prepare the structured output bitmask for this batch.
-        if not structured_output_request_ids:
-            return None
-
-        if self._grammar_bitmask is None:
-            assert self.backend is not None
-            max_batch_size = self.vllm_config.scheduler_config.max_num_seqs
-            if self.vllm_config.speculative_config is not None:
-                max_num_spec_tokens = self.vllm_config.\
-                    speculative_config.num_speculative_tokens
-            else:
-                max_num_spec_tokens = 0
-
-            # Allocate a bitmask for each token needing to be checked:
-            # one for each speculative position, and one more for the
-            # bonus token / non-speculative token.
-            self._grammar_bitmask = \
-                self.backend.allocate_token_bitmask(
-                    max_batch_size * (1 + max_num_spec_tokens))
-
-        # Generate a batched bitmask for all structured output requests.
-        # When speculative decoding is enabled, we need to include multiple
-        # masks for each request, one for each possible bonus token position.
-        # These are stored inline in the tensor and unpacked by the gpu runner.
-        cumulative_index = 0
-        ordered_seq = sorted(structured_output_request_ids.items(),
-                             key=lambda x: x[1])
-        # NOTE: This outer loop can likely be parallelized to improve
-        # performance of bitmask generation for large batches.
-        for req_id, _ in ordered_seq:
-            request = requests[req_id].structured_output_request
-            assert request is not None and request.grammar is not None
-            state_advancements = 0
-            req_tokens = scheduled_spec_decode_tokens.get(req_id, []) + [None]
-            for i, token in enumerate(req_tokens):
-                if not request.grammar.is_terminated():
-                    request.grammar.fill_bitmask(self._grammar_bitmask,
-                                                 cumulative_index)
-                    if token is not None:
-                        # In order to generate the correct bitmask for each
-                        # position in the speculative sequence, we advance
-                        # the FSM state for each speculative token and rollback
-                        # to restore the previous state when we are finished.
-                        assert request.grammar.accept_tokens(req_id, [token])
-                        state_advancements += 1
-                cumulative_index += 1
-            if state_advancements > 0:
-                request.grammar.rollback(state_advancements)
-
-        bitmask_tensor = self._grammar_bitmask
-        if cumulative_index < self._grammar_bitmask.shape[0]:
-            bitmask_tensor = self._grammar_bitmask[:cumulative_index]
-
-        # After finishing with the xgrammar operations, we convert to
-        # np.ndarray, because that is much more efficient for serialization
-        # and deserialization when sending this to the GPU workers.
-        return bitmask_tensor.numpy()
+        scheduled_spec_decode_tokens: dict[str, list[int]]
+    ) -> StructuredOutputBatchMetaData:
+        """
+        Called in the v1/core/sched/Scheduler.schedule to initialize the batch of requests.
+        At this point, we have completed scheduling for the current step.
+        The `structured_output_request_ids` dictionary maps request IDs
+        that use structured output to their corresponding indices in the
+        running queue.
+        """
+        assert self.backend is not None
+        return self.backend.init_batch(
+            requests,
+            structured_output_request_ids,
+            scheduled_spec_decode_tokens,
+        )
 
     def clear_backend(self) -> None:
         if self.backend is not None:
