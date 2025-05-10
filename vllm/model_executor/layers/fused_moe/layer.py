@@ -122,11 +122,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         layer.w2_weight.data = self._maybe_pad_weight(layer.w2_weight.data)
         # Lazy import to avoid importing triton.
         from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-            is_rocm_aiter_2stage_moe_enabled, is_rocm_aiter_moe_enabled,
-            shuffle_weights)
+            is_rocm_aiter_moe_enabled, shuffle_weights)
 
         self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
-        self.rocm_aiter_2stage_moe_enabled = is_rocm_aiter_2stage_moe_enabled()
+        self.rocm_aiter_2stage_moe_enabled = envs.VLLM_ROCM_USE_AITER_2STAGE_MOE
 
         if self.rocm_aiter_moe_enabled:
             # reshaping weights is required for aiter moe kernel.

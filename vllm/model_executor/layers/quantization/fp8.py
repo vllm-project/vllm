@@ -581,11 +581,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def process_weights_after_loading(self, layer: Module) -> None:
         # Lazy import to avoid importing triton too early.
         from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-            expand_weights, is_rocm_aiter_2stage_moe_enabled,
-            is_rocm_aiter_moe_enabled, shuffle_weights)
+            expand_weights, is_rocm_aiter_moe_enabled, shuffle_weights)
 
         self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
-        self.rocm_aiter_2stage_moe_enabled = is_rocm_aiter_2stage_moe_enabled()
+        self.rocm_aiter_2stage_moe_enabled = envs.VLLM_ROCM_USE_AITER_2STAGE_MOE
 
         # TODO (rob): refactor block quant into separate class.
         if self.block_quant:

@@ -16,13 +16,6 @@ def is_rocm_aiter_moe_enabled() -> bool:
         and envs.VLLM_ROCM_USE_AITER
 
 
-def is_rocm_aiter_2stage_moe_enabled() -> bool:
-    return current_platform.is_rocm() \
-        and envs.VLLM_ROCM_USE_AITER_2STAGE_MOE \
-        and envs.VLLM_ROCM_USE_AITER_MOE \
-        and envs.VLLM_ROCM_USE_AITER
-
-
 def rocm_aiter_asm_moe_tkw1_impl(
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
@@ -218,7 +211,6 @@ def rocm_aiter_ck_moe_2stages_impl(
     block_size: Optional[List[int]] = None,
     expert_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-
     from aiter.fused_moe_bf16_asm import ck_moe_2stages
     return ck_moe_2stages(a1=hidden_states,
                           w1=w1,
@@ -341,7 +333,6 @@ def rocm_aiter_fused_experts(
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     block_shape: Optional[List[int]] = None,
-    allow_deep_gemm: bool = False,
     use_ck_moe_2stages: bool = False,
 ) -> torch.Tensor:
 
