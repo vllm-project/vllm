@@ -9,6 +9,7 @@ from transformers import LlamaConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
@@ -140,10 +141,13 @@ class EagleLlamaForCausalLM(LlamaForCausalLM):
         return self.model(input_ids, positions, hidden_states)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        skip_prefixes = ["lm_head."]
+        # reuse target emeb_tokens if PP is not used
+        if get_pp_group().is_first_rank():
+            skip_prefixes.append("model.embed_tokens.")
         loader = AutoWeightsLoader(
             self,
-            skip_prefixes=(["lm_head.", "model.embed_tokens."]
-                           if self.config.tie_word_embeddings else None),
+            skip_prefixes=skip_prefixes,
         )
 
         model_weights = {}

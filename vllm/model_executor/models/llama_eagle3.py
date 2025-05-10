@@ -9,6 +9,7 @@ from transformers import LlamaConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -224,9 +225,12 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         return self.model.fc(hidden_states)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        skip_prefixes = None
+        if get_pp_group().is_first_rank():
+            skip_prefixes = ["model.embed_tokens."]
         loader = AutoWeightsLoader(
             self,
-            skip_prefixes=None,
+            skip_prefixes=skip_prefixes,
         )
 
         model_weights = {}
