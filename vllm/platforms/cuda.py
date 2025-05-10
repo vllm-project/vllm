@@ -18,6 +18,7 @@ from vllm.logger import init_logger
 from vllm.utils import import_pynvml
 
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
+from .utils import device_id_to_physical_device_id
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -32,24 +33,6 @@ pynvml = import_pynvml()
 # pytorch 2.5 uses cudnn sdpa by default, which will cause crash on some models
 # see https://github.com/huggingface/diffusers/issues/9704 for details
 torch.backends.cuda.enable_cudnn_sdp(False)
-
-
-def device_id_to_physical_device_id(device_id: int) -> int:
-    if "CUDA_VISIBLE_DEVICES" in os.environ:
-        device_ids = os.environ["CUDA_VISIBLE_DEVICES"].split(",")
-        if device_ids == [""]:
-            msg = (
-                "CUDA_VISIBLE_DEVICES is set to empty string, which means"
-                " GPU support is disabled. If you are using ray, please unset"
-                " the environment variable `CUDA_VISIBLE_DEVICES` inside the"
-                " worker/actor. "
-                "Check https://github.com/vllm-project/vllm/issues/8402 for"
-                " more information.")
-            raise RuntimeError(msg)
-        physical_device_id = device_ids[device_id]
-        return int(physical_device_id)
-    else:
-        return device_id
 
 
 def with_nvml_context(fn: Callable[_P, _R]) -> Callable[_P, _R]:
@@ -338,7 +321,8 @@ class NvmlCudaPlatform(CudaPlatformBase):
                               device_id: int = 0
                               ) -> Optional[DeviceCapability]:
         try:
-            physical_device_id = device_id_to_physical_device_id(device_id)
+            physical_device_id = device_id_to_physical_device_id(
+                device_id, cls.device_control_env_var)
             handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
             major, minor = pynvml.nvmlDeviceGetCudaComputeCapability(handle)
             return DeviceCapability(major=major, minor=minor)
@@ -360,20 +344,23 @@ class NvmlCudaPlatform(CudaPlatformBase):
     @classmethod
     @with_nvml_context
     def get_device_name(cls, device_id: int = 0) -> str:
-        physical_device_id = device_id_to_physical_device_id(device_id)
+        physical_device_id = device_id_to_physical_device_id(
+            device_id, cls.device_control_env_var)
         return cls._get_physical_device_name(physical_device_id)
 
     @classmethod
     @with_nvml_context
     def get_device_uuid(cls, device_id: int = 0) -> str:
-        physical_device_id = device_id_to_physical_device_id(device_id)
+        physical_device_id = device_id_to_physical_device_id(
+            device_id, cls.device_control_env_var)
         handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
         return pynvml.nvmlDeviceGetUUID(handle)
 
     @classmethod
     @with_nvml_context
     def get_device_total_memory(cls, device_id: int = 0) -> int:
-        physical_device_id = device_id_to_physical_device_id(device_id)
+        physical_device_id = device_id_to_physical_device_id(
+            device_id, cls.device_control_env_var)
         handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
         return int(pynvml.nvmlDeviceGetMemoryInfo(handle).total)
 
