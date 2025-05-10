@@ -66,7 +66,7 @@ The commit ID `0dfa347e8877a4d4ed19ee56c140fa518470028c` may change over time. P
 
 The server entrypoint accepts all other LoRA configuration parameters (`max_loras`, `max_lora_rank`, `max_cpu_loras`,
 etc.), which will apply to all forthcoming requests. Upon querying the `/models` endpoint, we should see our LoRA along
-with its base model:
+with its base model (if `jq` is not installed, you can follow [this guide](https://jqlang.org/download/) to install it.):
 
 ```bash
 curl localhost:8000/v1/models | jq .
@@ -134,13 +134,15 @@ curl -X POST http://localhost:8000/v1/load_lora_adapter \
 }'
 ```
 
-Upon a successful request, the API will respond with a 200 OK status code. If an error occurs, such as if the adapter
+Upon a successful request, the API will respond with a `200 OK` status code from `vllm serve`, and `curl` returns the response body: `Success: LoRA adapter 'sql_adapter' added successfully`. If an error occurs, such as if the adapter
 cannot be found or loaded, an appropriate error message will be returned.
 
 Unloading a LoRA Adapter:
 
 To unload a LoRA adapter that has been previously loaded, send a POST request to the `/v1/unload_lora_adapter` endpoint
 with the name or ID of the adapter to be unloaded.
+
+Upon a successful request, the API responds with a `200 OK` status code from `vllm serve`, and `curl` returns the response body: `Success: LoRA adapter 'sql_adapter' removed successfully`.
 
 Example request to unload a LoRA adapter:
 
