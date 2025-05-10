@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import warnings
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import msgspec
 
 from vllm.adapter_commons.request import AdapterRequest
+
+if TYPE_CHECKING:
+    from vllm.model_executor.model_loader.tensorizer_loader import (
+        TensorizerConfig)
 
 
 class LoRARequest(
