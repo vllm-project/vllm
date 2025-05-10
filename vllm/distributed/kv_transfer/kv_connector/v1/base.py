@@ -203,7 +203,7 @@ class KVConnectorBase_V1(ABC):
     # ==============================
 
     def set_kv_transfer_params(self, request: "Request"):
-        """Parse raw KV Transfer params """
+        """Parse raw KV Transfer params."""
         assert request.kv_transfer_params is None
         kv_transfer_params = self._KVTransferParams.from_raw_dict(
             request.raw_kv_transfer_params)
@@ -225,10 +225,10 @@ class KVConnectorBase_V1(ABC):
                 computed tokens for this request
 
         Returns:
-            the number of tokens that can be loaded from the 
-            external KV cache beyond what is already computed.
-            True if the external KV cache tokens will be loaded
-            asynchronously (between scheduler steps).
+            * the number of tokens that can be loaded from the 
+              external KV cache beyond what is already computed.
+            * true if external KV cache tokens will be loaded
+              asynchronously (between scheduler steps).
         """
         pass
 
