@@ -8,9 +8,7 @@
 
 # Import the implementation from tpu_commons
 from tpu_commons.sample.metadata import (
-    TPUSupportedSamplingMetadata as TPUSupportedSamplingMetadataBase,
-    DEFAULT_TPU_SAMPLING_PARAMS
-)
+    TPUSupportedSamplingMetadata as TPUSupportedSamplingMetadataBase)
 
 # DEFAULT_SAMPLING_PARAMS = dict(
 #     temperature=-1.0,
@@ -23,10 +21,13 @@ from tpu_commons.sample.metadata import (
 #     # repetition_penalties=0.0,
 # )
 
+
 # Wrapper classes that delegate to the implementation in tpu_commons
 class TPUSupportedSamplingMetadata(TPUSupportedSamplingMetadataBase):
     """Wrapper for TPUSupportedSamplingMetadata implementation from tpu_commons."""
     pass
+
+
 # @dataclass
 # class TPUSupportedSamplingMetadata:
 #     # This class exposes a more xla-friendly interface than SamplingMetadata
@@ -82,8 +83,8 @@ class TPUSupportedSamplingMetadata(TPUSupportedSamplingMetadataBase):
 #         """
 #         Copy sampling tensors slices from `input_batch` to on device tensors.
 
-#         `InputBatch._make_sampling_metadata` causes recompilation on XLA as it 
-#         slices dynamic shapes on device tensors. This impl moves the dynamic 
+#         `InputBatch._make_sampling_metadata` causes recompilation on XLA as it
+#         slices dynamic shapes on device tensors. This impl moves the dynamic
 #         ops to CPU and produces tensors of fixed `padded_num_reqs` size.
 
 #         Args:

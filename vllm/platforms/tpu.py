@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import TYPE_CHECKING, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Optional, Tuple, Union
 
 import torch
-from tpu_info import device
+# Import depedencies from tpu_common
+from tpu_commons.platforms.tpu import TpuPlatform as TpuPlatformBase
 
 import vllm.envs as envs
 from vllm.inputs import ProcessorInputs, PromptType
@@ -11,11 +12,6 @@ from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams, SamplingType
 
 from .interface import Platform, PlatformEnum, _Backend
-
-# Import depedencies from tpu_common
-from tpu_commons.platforms.tpu import (
-    TpuPlatform as TpuPlatformBase
-)
 
 if TYPE_CHECKING:
     from vllm.config import BlockSize, ModelConfig, VllmConfig

@@ -2,9 +2,10 @@
 
 # Import the implementation from tpu_commons
 from tpu_commons.attention.backends.pallas import (
-    PallasAttentionBackend as PallasAttentionBackendBase,
-    PallasMetadata as PallasMetadataBase,
-)
+    PallasAttentionBackend as PallasAttentionBackendBase)
+from tpu_commons.attention.backends.pallas import (
+    PallasMetadata as PallasMetadataBase)
+
 
 # Wrapper classes that delegate to the implementation in tpu_commons
 class PallasMetadata(PallasMetadataBase):

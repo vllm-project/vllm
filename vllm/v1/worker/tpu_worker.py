@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Import the implementation from tpu_commons
-from tpu_commons.worker.tpu_worker import (
-    TpuWorker as TpuWorkerBase,
-)
+from tpu_commons.worker.tpu_worker import TpuWorker as TpuWorkerBase
+
 
 #Wrapper classes that delegate to the implementation in tpu_commons
 class TpuWorker(TpuWorkerBase):
     """Wrapper for TPUWorker implementation from tpu_commons."""
-        pass
+    pass
+
 # """A TPU worker class."""
 # import os
 # from typing import Optional

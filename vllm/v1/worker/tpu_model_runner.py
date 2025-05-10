@@ -1,31 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-import bisect
-import gc
-import time
-from typing import TYPE_CHECKING, Optional, cast
-from unittest.mock import patch
+from typing import TYPE_CHECKING
 
-import numpy as np
 import torch
 import torch.distributed
-import torch.nn as nn
+# Import the implementation from tpu_commons
+from tpu_commons.worker.tpu_model_runner import (
+    TPUModelRunner as TPUModelRunnerBase)
+
+from vllm.config import VllmConfig
+
 # # TPU XLA related
 # import torch_xla.core.xla_model as xm
 # import torch_xla.runtime as xr
 
-# Import the implementation from tpu_commons
-from tpu_commons.worker.tpu_model_runner import (
-    TPUModelRunner as TPUModelRunnerBase,
-    _get_req_paddings,
-    _get_padded_num_reqs_with_upper_limit,
-    _get_token_paddings,
-    _get_padded_token_len,
-)
 
-import vllm.envs as envs
-from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.attention.layer import Attention
-from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 # from vllm.config import VllmConfig, get_layers_from_vllm_config
 # from vllm.forward_context import set_forward_context
 # from vllm.logger import init_logger
@@ -42,8 +30,6 @@ from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 # from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
 #                                         KVCacheConfig, KVCacheSpec,
 #                                         SlidingWindowSpec)
-from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
-                             ModelRunnerOutput)
 # from vllm.v1.sample.tpu.metadata import TPUSupportedSamplingMetadata
 # from vllm.v1.sample.tpu.sampler import Sampler as TPUSampler
 # from vllm.v1.utils import bind_kv_cache
@@ -53,7 +39,7 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
 # from .utils import sanity_check_mm_encoder_outputs
 
 if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
+    pass
 
 # logger = init_logger(__name__)
 
@@ -63,7 +49,6 @@ if TYPE_CHECKING:
 # INVALID_TOKEN_ID = -1
 # # Smallest output size
 # MIN_NUM_SEQS = 8
-
 
 # #########################################################
 # # Ways to avoid recompilation
@@ -102,6 +87,7 @@ if TYPE_CHECKING:
 # # pre-compilation.
 # class TPUModelRunner(LoRAModelRunnerMixin):
 
+
 # Wrapper classes that delegate to the implementation in tpu_commons
 class TPUModelRunner(TPUModelRunnerBase):
     """Wrapper for TPUModelRunner implementation from tpu_commons."""
@@ -113,6 +99,8 @@ class TPUModelRunner(TPUModelRunnerBase):
     ):
         # initialize the base class with the same parameters
         super().__init__(vllm_config, device)
+
+
 #         self.vllm_config = vllm_config
 #         self.model_config = vllm_config.model_config
 #         self.cache_config = vllm_config.cache_config
@@ -1331,7 +1319,7 @@ class TPUModelRunner(TPUModelRunnerBase):
 #             self, logits: torch.Tensor,
 #             sampling_metadata: TPUSupportedSamplingMetadata) -> torch.Tensor:
 #         """
-#         Sample with xla-friendly function. This function is to be traced 
+#         Sample with xla-friendly function. This function is to be traced
 #         separately from `forward` for lighter compilation overhead.
 #         """
 #         if sampling_metadata.all_greedy:
@@ -1450,7 +1438,6 @@ class TPUModelRunner(TPUModelRunnerBase):
 #         return MultiModalKwargs.as_kwargs(batched_dummy_mm_inputs,
 #                                           device=self.device)
 
-
 # def _get_req_paddings(min_req_size: int, max_req_size: int) -> list[int]:
 #     logger.info("Preparing request paddings:")
 #     # assert min_req_size is power of 2
@@ -1463,21 +1450,19 @@ class TPUModelRunner(TPUModelRunnerBase):
 #         num = _get_padded_num_reqs_with_upper_limit(num + 1, max_req_size)
 #     return paddings
 
-
 # def _get_padded_num_reqs_with_upper_limit(x: int, upper_limit: int) -> int:
 #     res = MIN_NUM_SEQS if x <= MIN_NUM_SEQS else 1 << (x - 1).bit_length()
 #     return min(res, upper_limit)
 
-
 # def _get_token_paddings(min_token_size: int, max_token_size: int,
 #                         padding_gap: int) -> list[int]:
-#     """Generate a list of padding size, starting from min_token_size, 
+#     """Generate a list of padding size, starting from min_token_size,
 #     ending with a number that can cover max_token_size
-    
+
 #     If padding_gap == 0 then:
 #         increase 2X each time (exponential)
 #     else:
-#         first increase the size to twice, 
+#         first increase the size to twice,
 #         then increase the padding size by padding_gap.
 #     """
 #     # assert min_token_size is power of 2
@@ -1506,7 +1491,6 @@ class TPUModelRunner(TPUModelRunnerBase):
 #             paddings.append(num)
 
 #     return paddings
-
 
 # def _get_padded_token_len(paddings: list[int], x: int) -> int:
 #     """Return the first element in paddings list greater or equal to x.

@@ -1,20 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import os
 from typing import Optional
 
 import torch
 from torch.distributed import ProcessGroup
-
-from vllm.config import get_current_vllm_config
-from vllm.logger import init_logger
-from vllm.platforms import current_platform
-
 # Import the implementation from tpu_commons
 from tpu_commons.distributed.tpu_communicator import (
-    TpuCommunicator as TpuCommunicatorBase,
-    USE_RAY,
-)
+    TpuCommunicator as TpuCommunicatorBase)
+
+from vllm.logger import init_logger
 
 from .base_device_communicator import DeviceCommunicatorBase
 
@@ -34,6 +28,7 @@ logger = init_logger(__name__)
 #     if USE_RAY:
 #         from vllm.executor import ray_utils
 
+
 # Wrapper class that delegates to the implementation in tpu_commons
 class TpuCommunicator(DeviceCommunicatorBase):
     """Wrapper for TpuCommunicator implementation from tpu_commons."""
@@ -43,7 +38,8 @@ class TpuCommunicator(DeviceCommunicatorBase):
                  device: Optional[torch.device] = None,
                  device_group: Optional[ProcessGroup] = None,
                  unique_name: str = ""):
-        DeviceCommunicatorBase.__init__(self, cpu_group, device, device_group, unique_name)
+        DeviceCommunicatorBase.__init__(self, cpu_group, device, device_group,
+                                        unique_name)
 
         # Create the base implementation.
         self._base_communicator = TpuCommunicatorBase(

@@ -2,14 +2,14 @@
 """Sampler layer implementing TPU supported operations."""
 
 # Import the implementation from tpu_commons
-from tpu_commons.sample.tpu.sampler import (
-    Sampler as SamplerBase,
-)
+from tpu_commons.sample.tpu.sampler import Sampler as SamplerBase
+
 
 # Wrapper class that delegates to the implementation in tpu_commons
 class Sampler(SamplerBase):
     """Wrapper for Sampler implementation from tpu_commons."""
     pass
+
 
 # import torch
 # import torch.nn as nn
@@ -19,7 +19,6 @@ class Sampler(SamplerBase):
 # from vllm.v1.sample.tpu.metadata import TPUSupportedSamplingMetadata
 
 # _SAMPLING_EPS = 1e-5
-
 
 # class Sampler(nn.Module):
 
