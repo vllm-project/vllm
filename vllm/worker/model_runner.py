@@ -1822,8 +1822,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         model_kwargs = {}
         if previous_hidden_states is not None:
             model_kwargs["previous_hidden_states"] = previous_hidden_states
-        if (self.observability_config is not None
-                and self.observability_config.collect_model_forward_time):
+        if self.must_collect_model_fwd_time():
             model_forward_start = torch.cuda.Event(enable_timing=True)
             model_forward_end = torch.cuda.Event(enable_timing=True)
             model_forward_start.record()
@@ -1842,8 +1841,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                     **model_kwargs,
                 )
 
-        if (self.observability_config is not None
-                and self.observability_config.collect_model_forward_time):
+        if self.must_collect_model_fwd_time():
             model_forward_end.record()
 
         # Sending KV cache in distributed KV cache transfer setting
@@ -1865,8 +1863,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                     and hidden_or_intermediate_states is not None
                     and isinstance(hidden_or_intermediate_states,
                                    IntermediateTensors)
-                    and self.observability_config is not None
-                    and self.observability_config.collect_model_forward_time):
+                    and self.must_collect_model_fwd_time()):
                 model_forward_end.synchronize()
                 model_forward_time = model_forward_start.elapsed_time(
                     model_forward_end)
@@ -1897,9 +1894,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
         )
-        if (self.observability_config is not None
-                and self.observability_config.collect_model_forward_time
-                and output is not None):
+        if (self.must_collect_model_fwd_time() and output is not None):
             model_forward_end.synchronize()
             model_forward_time = model_forward_start.elapsed_time(
                 model_forward_end)
