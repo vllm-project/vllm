@@ -437,6 +437,8 @@ class BertModel(nn.Module, SupportsQuant):
             attn_metadata = get_forward_context().attn_metadata
             seq_lens = None
             if attn_metadata is not None:  # Can be None during warmup
+                if isinstance(attn_metadata, dict):
+                    attn_metadata = next(iter(attn_metadata.values()))
                 seq_lens = getattr(attn_metadata, "seq_lens_tensor",
                                    attn_metadata.seq_lens)
                 assert seq_lens is not None
