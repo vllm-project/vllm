@@ -168,7 +168,7 @@ def test_prefix_cache_lifecycle():
 
     # Ensure we send all block ids, even if there is a cache hit.
     assert (len(
-        kv_transfer_params.remote_block_ids) == NUM_EXTERNAL_FULL_BLOCKS)
+        kv_transfer_params["remote_block_ids"]) == NUM_EXTERNAL_FULL_BLOCKS)
 
     # STEP (2): Ensure it is freed.
     scheduler_output = scheduler.schedule()

@@ -227,7 +227,8 @@ class NixlConnectorScheduler:
             self, request: "Request",
             num_computed_tokens: int) -> tuple[int, bool]:
         """For remote prefill, allocate for all tokens."""
-        if request.kv_transfer_params.do_remote_prefill:
+        if (request.kv_transfer_params is not None
+                and request.kv_transfer_params.do_remote_prefill):
             assert num_computed_tokens % self.block_size == 0
             rounded_num_prompt_tokens = round_down(
                 len(request.prompt_token_ids), self.block_size)
@@ -239,7 +240,8 @@ class NixlConnectorScheduler:
     def update_state_after_alloc(self, request: "Request",
                                  blocks: "KVCacheBlocks",
                                  num_external_tokens: int):
-        if request.kv_transfer_params.do_remote_prefill:
+        if (request.kv_transfer_params is not None
+                and request.kv_transfer_params.do_remote_prefill):
             # Get unhashed blocks to pull from remote.
             self._reqs_need_recv[request.request_id] = (
                 request, blocks.get_unhashed_block_ids())
@@ -277,8 +279,9 @@ class NixlConnectorScheduler:
         should be freed now or will be sent asynchronously and freed later.
         """
 
-        if (not request.kv_transfer_params.do_remote_decode
-                or request.status != RequestStatus.FINISHED_LENGTH_CAPPED):
+        if (request.kv_transfer_params is None
+                or (not request.kv_transfer_params.do_remote_decode)
+                or (request.status != RequestStatus.FINISHED_LENGTH_CAPPED)):
             return False, None
 
         # Get computed blocks.
