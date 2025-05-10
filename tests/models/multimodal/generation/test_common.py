@@ -476,6 +476,31 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         patch_hf_runner=model_utils.molmo_patch_hf_runner,
     ),
+    "ovis1_6-gemma2": VLMTestInfo(
+        models=["AIDC-AI/Ovis1.6-Gemma2-9B"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<bos><start_of_turn>user\n{img_prompt}<end_of_turn>\n<start_of_turn>model\n", # noqa: E501
+        img_idx_to_prompt=lambda idx: "<image>\n", # noqa: E501
+        max_model_len=4096,
+        max_num_seqs=2,
+        dtype="half",
+        # use sdpa mode for hf runner since ovis2 didn't work with flash_attn
+        hf_model_kwargs={"llm_attn_implementation": "sdpa"},
+        patch_hf_runner=model_utils.ovis_patch_hf_runner,
+        marks=[large_gpu_mark(min_gb=32)],
+    ),
+    "ovis1_6": VLMTestInfo(
+        models=["AIDC-AI/Ovis1.6-Llama3.2-3B"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nYou are a helpful and honest multimodal assistant.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n{img_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n", # noqa: E501
+        img_idx_to_prompt=lambda idx: "<image>\n", # noqa: E501
+        max_model_len=4096,
+        max_num_seqs=2,
+        dtype="half",
+        # use sdpa mode for hf runner since ovis2 didn't work with flash_attn
+        hf_model_kwargs={"llm_attn_implementation": "sdpa"},
+        patch_hf_runner=model_utils.ovis_patch_hf_runner,
+    ),
     "ovis2": VLMTestInfo(
         models=["AIDC-AI/Ovis2-1B"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
@@ -486,7 +511,7 @@ VLM_TEST_SETTINGS = {
         dtype="half",
         # use sdpa mode for hf runner since ovis2 didn't work with flash_attn
         hf_model_kwargs={"llm_attn_implementation": "sdpa"},
-        patch_hf_runner=model_utils.ovis2_patch_hf_runner,
+        patch_hf_runner=model_utils.ovis_patch_hf_runner,
     ),
     "phi3v": VLMTestInfo(
         models=["microsoft/Phi-3.5-vision-instruct"],
