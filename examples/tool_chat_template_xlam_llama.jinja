@@ -16,7 +16,7 @@
     {%- set messages = messages[1:] %}
     {{- system_message + "\n" }}
 {%- else %}
-    {%- set system_message = "You are a helpful assistant that can use tools. You are developed by Salesforce xLAM team." %}
+    {%- set system_message = "You are a helpful assistant. You are developed by Salesforce xLAM team." %}
     {% set format_instruction %}You have access to a set of tools. When using tools, make calls in a single JSON array: 
 
 [{"name": "tool_call_name", "arguments": {"arg1": "value1", "arg2": "value2"}}, ... (additional parallel tool calls as needed)]
