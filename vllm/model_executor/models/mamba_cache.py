@@ -35,15 +35,15 @@ class MambaCacheManager(ConstantSizeCache):
 
         # Initialize parent class
         super().__init__(max_batch_size)
-
+        self.device = vllm_config.device_config.device.type
         conv_state = torch.empty(size=(num_mamba_layers, max_batch_size) +
                                  conv_state_shape,
                                  dtype=dtype,
-                                 device="cuda")
+                                 device=self.device)
         temporal_state = torch.empty(size=(num_mamba_layers, max_batch_size) +
                                      temporal_state_shape,
                                      dtype=dtype,
-                                     device="cuda")
+                                     device=self.device)
 
         self._mamba_cache = (conv_state, temporal_state)
 
@@ -71,6 +71,7 @@ class MambaCacheManager(ConstantSizeCache):
         The buffer is used to maintain the Mamba Cache during the CUDA graph
         replay runs.
         """
+        assert self.device == "cuda"
         return self._mamba_cache, torch.as_tensor([PAD_SLOT_ID] * batch_size,
                                                   dtype=torch.int32,
                                                   device="cuda")
