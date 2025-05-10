@@ -207,6 +207,8 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.platforms import current_platform
 from vllm.utils import cdiv, round_down
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.worker.block_table import BlockTable
 
 try:
     from vllm.vllm_flash_attn import flash_attn_varlen_func
@@ -334,6 +336,8 @@ class MLACommonMetadataBuilder(Generic[M]):
 
     def __init__(self,
                  runner: "GPUModelRunner",
+                 kv_cache_spec: AttentionSpec,
+                 block_table: BlockTable,
                  metadata_cls: Optional[type[M]] = None):
         self.metadata_cls = metadata_cls \
             if metadata_cls is not None else MLACommonMetadata
@@ -346,10 +350,11 @@ class MLACommonMetadataBuilder(Generic[M]):
             runner.parallel_config)
         self.mla_dims = get_mla_dims(model_config)
         self.aot_schedule = is_vllm_fa and (get_flash_attn_version() == 3)
+        self.kv_cache_spec = kv_cache_spec
 
         # Dont try to access the runner on AMD
         if self.aot_schedule:
-            self.page_size = self.runner.block_size
+            self.page_size = self.kv_cache_spec.block_size
 
         if self.chunked_prefill_enabled:
             self.chunked_prefill_workspace_size = min(
@@ -375,6 +380,7 @@ class MLACommonMetadataBuilder(Generic[M]):
                 dtype=model_config.dtype,
                 device=runner.device,
             )
+        self.block_table = block_table
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -436,9 +442,10 @@ class MLACommonMetadataBuilder(Generic[M]):
 
         return modified_batch
 
-    def _build_decode(self, block_table: torch.Tensor, seq_lens: torch.Tensor):
+    def _build_decode(self, block_table_tensor: torch.Tensor,
+                      seq_lens: torch.Tensor):
         return MLACommonDecodeMetadata(
-            block_table=block_table,
+            block_table=block_table_tensor,
             seq_lens=seq_lens,
         )
 
@@ -451,9 +458,9 @@ class MLACommonMetadataBuilder(Generic[M]):
         # function. We should avoid GPU -> CPU sync as much as possible because
         # it blocks on all previous kernels.
         device = self.runner.device
-        block_table = (
-            self.runner.input_batch.block_table.get_device_tensor()[:num_reqs])
-        slot_mapping = self.runner.slot_mapping_cpu[:num_actual_tokens].to(
+        block_table = self.block_table
+        block_table_tensor = block_table.get_device_tensor()[:num_reqs]
+        slot_mapping = block_table.slot_mapping_cpu[:num_actual_tokens].to(
             device, non_blocking=True).long()
 
         query_start_loc = common_attn_metadata.query_start_loc
@@ -530,7 +537,7 @@ class MLACommonMetadataBuilder(Generic[M]):
                     self.chunked_prefill_workspace_size
 
             prefill_metadata = MLACommonPrefillMetadata(
-                block_table=block_table[reqs_start:, ...],
+                block_table=block_table_tensor[reqs_start:, ...],
                 query_start_loc=prefill_query_start_loc,
                 max_query_len=max_query_len,
                 chunked_context=chunked_context_metadata,
@@ -539,7 +546,7 @@ class MLACommonMetadataBuilder(Generic[M]):
         decode_metadata = None
         if self._num_decodes > 0:
             decode_metadata = self._build_decode(
-                block_table=block_table[:self._num_decodes, ...],
+                block_table_tensor=block_table_tensor[:self._num_decodes, ...],
                 seq_lens=seq_lens[:self._num_decodes],
             )
 

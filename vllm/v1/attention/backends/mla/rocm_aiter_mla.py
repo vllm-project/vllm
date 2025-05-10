@@ -14,6 +14,8 @@ from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonImpl,
                                                    MLACommonMetadata,
                                                    MLACommonMetadataBuilder)
+from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.worker.block_table import BlockTable
 
 # yapf: enable
 
@@ -59,8 +61,9 @@ class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
 
 class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
-    def __init__(self, runner):
-        super().__init__(runner)
+    def __init__(self, runner, kv_cache_spec: AttentionSpec,
+                 block_table: BlockTable):
+        super().__init__(runner, kv_cache_spec, block_table)
         max_model_len = self.runner.model_config.max_model_len
         assert max_model_len == 32768,\
             "AITER MLA requires max_model_len=32768"
