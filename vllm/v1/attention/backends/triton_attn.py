@@ -9,6 +9,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.ops.triton_unified_attention import unified_attention
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionMetadata, FlashAttentionMetadataBuilder)
 
@@ -108,6 +109,8 @@ class TritonAttentionImpl(AttentionImpl):
                                       "are not implemented for "
                                       "TritonAttentionImpl")
 
+        self.fp8_dtype = current_platform.fp8_dtype()
+
     def forward(
         self,
         layer: torch.nn.Module,
@@ -161,15 +164,18 @@ class TritonAttentionImpl(AttentionImpl):
         )
 
         if self.kv_cache_dtype.startswith("fp8"):
-            key_cache = key_cache.view(torch.float8_e4m3fn)
-            value_cache = value_cache.view(torch.float8_e4m3fn)
+            key_cache = key_cache.view(self.fp8_dtype)
+            value_cache = value_cache.view(self.fp8_dtype)
             num_tokens, num_heads, head_size = query.shape
             assert layer._q_scale == 1.0, \
                 "A non 1.0 q_scale is not currently supported."
-            query, _ = ops.scaled_fp8_quant(
-                query.reshape(
-                    (num_tokens, num_heads * head_size)).contiguous(),
-                layer._q_scale)
+            if not current_platform.is_rocm():
+                # Skip Q quantization on ROCm, since dequantizing back to
+                # f32 in the attention kernel is not supported.
+                query, _ = ops.scaled_fp8_quant(
+                    query.reshape(
+                        (num_tokens, num_heads * head_size)).contiguous(),
+                    layer._q_scale)
             query = query.reshape((num_tokens, num_heads, head_size))
 
         use_local_attn = \
