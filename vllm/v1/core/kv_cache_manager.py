@@ -134,7 +134,7 @@ class KVCacheManager:
         """
         # Request has already has its blocks, do not look up in block table.
         # This can happen in P/D if blocks are injected by the scheduler.
-        if self.req_to_blocks.get(request.request_id, None) is not None:
+        if self.req_to_blocks.get(request.request_id) is not None:
             return KVCacheBlocks.create_empty(), request.num_computed_tokens
 
         if not self.enable_caching:
