@@ -169,7 +169,7 @@ def make_local_attention_virtual_batches(
     query_start_loc_np: np.ndarray,
     seq_lens_np: np.ndarray,
     block_table: torch.Tensor,
-    page_size: int = 0,
+    block_size: int = 0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, torch.Tensor]:
     q_seqlens = query_start_loc_np[1:] - query_start_loc_np[:-1]
     actual_batch_size = seq_lens_np.shape[0]
@@ -240,14 +240,14 @@ def make_local_attention_virtual_batches(
     # For the example the local attention blocks start at:
     #                           _b0_  _____b1_____  _b2_
     #   k_seqstarts_absolute = [0, 4, 4, 8, 12, 16, 4, 8]
-    block_starts = k_seqstarts_absolute // page_size
-    assert attn_chunk_size % page_size == 0, \
+    block_starts = k_seqstarts_absolute // block_size
+    assert attn_chunk_size % block_size == 0, \
         f"attn_chunk_size {attn_chunk_size} is not " \
-        f"divisible by page_size {page_size}"
-    pages_per_local_batch = attn_chunk_size // page_size
+        f"divisible by block_size {block_size}"
+    pages_per_local_batch = attn_chunk_size // block_size
 
     # Create a block_table for the local attention blocks
-    # For out example if we have a block-table like (assuming page_size=2):
+    # For out example if we have a block-table like (assuming block_size=2):
     #   block_table = [
     #     [ 0,  1,  2,  3,  4,  5,  6,  7,  8,  9],  < batch 0
     #     [10, 11, 12, 13, 14, 15, 16, 17, 18, 19],  < batch 1
@@ -302,7 +302,7 @@ class FlashAttentionMetadataBuilder:
         self.num_heads_kv = model_config.get_num_kv_heads(
             runner.parallel_config)
         self.headdim = model_config.get_head_size()
-        self.page_size = kv_cache_spec.block_size
+        self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
         self.block_table = block_table
 
@@ -367,7 +367,7 @@ class FlashAttentionMetadataBuilder:
                     num_heads_q=self.num_heads_q,
                     num_heads_kv=self.num_heads_kv,
                     headdim=self.headdim,
-                    page_size=self.page_size,
+                    page_size=self.block_size,
                     cu_seqlens_q=cu_query_lens,
                     causal=causal,
                     window_size=self.aot_sliding_window,
@@ -383,7 +383,7 @@ class FlashAttentionMetadataBuilder:
                     self.runner.query_start_loc_np[:num_reqs + 1],
                     self.runner.seq_lens_np[:num_reqs],
                     block_table_tensor,
-                    self.page_size,
+                    self.block_size,
                 )
             local_query_start_loc = torch.from_numpy(virt_q_cu_seqlens_np).to(
                 self.runner.device, non_blocking=True)
