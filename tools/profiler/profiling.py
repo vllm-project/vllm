@@ -165,8 +165,7 @@ def determine_requests_per_step(context: ProfileContext) -> list[int]:
     return step_requests
 
 
-def run_profile(context: ProfileContext, 
-                json_output: Optional[str]):
+def run_profile(context: ProfileContext, json_output: Optional[str]):
     print("Run profile with:")
     for key, value in asdict(context).items():
         print(f"  {key} = {value}")
@@ -190,8 +189,7 @@ def run_profile(context: ProfileContext,
     # Create LLM
     engine_args_dict = asdict(context.engine_args)
     engine_args_dict["max_model_len"] = (
-        engine_args_dict["max_num_batched_tokens"]
-    )
+        engine_args_dict["max_num_batched_tokens"])
     llm = LLM(**engine_args_dict)
 
     batch_size = context.batch_size
@@ -202,22 +200,21 @@ def run_profile(context: ProfileContext,
     max_num_batched_tokens = scheduler_config.max_num_batched_tokens
     max_num_seqs = scheduler_config.max_num_seqs
 
-
-    # We will run the script with batch sizes. 
+    # We will run the script with batch sizes.
     # We assume that we will fail at some particular
     # prompt_len, bc batch_size x prompt_lens will give OOM error.
     prompt_lens = [
-        128, 256, 512, 1024, 1536, 2048,
-        4096, 8192, 16384, 32768, 65536
+        128, 256, 512, 1024, 1536, 2048, 4096, 8192, 16384, 32768, 65536
     ]
 
     for prompt_len in prompt_lens:
-        output_folder = f"./outputs/"
+        output_folder = "./outputs/"
         json_filename = f"profiling_bs{batch_size}_pl{prompt_len}.json"
         json_filename = output_folder + json_filename
 
         if batch_size * prompt_len > max_num_batched_tokens:
-            print(f"ERROR: chosen batch_size * prompt_len "
+            print(
+                f"ERROR: chosen batch_size * prompt_len "
                 f"({batch_size} * {prompt_len} = {batch_size * prompt_len}) "
                 f"is larger than max_num_batched_tokens "
                 f"({max_num_batched_tokens}) "
@@ -226,19 +223,17 @@ def run_profile(context: ProfileContext,
                 f"--max-num-batched-tokens")
             sys.exit(-1)
         if batch_size > max_num_seqs:
-            print(
-                f"ERROR: chosen batch_size ({batch_size}) is larger than "
-                f"max_num_seqs ({max_num_seqs}) "
-                f"and therefore cannot be run in a "
-                f"single profile step, please choose a smaller batch size")
+            print(f"ERROR: chosen batch_size ({batch_size}) is larger than "
+                  f"max_num_seqs ({max_num_seqs}) "
+                  f"and therefore cannot be run in a "
+                  f"single profile step, please choose a smaller batch size")
             sys.exit(-1)
         print("llm.llm_engine.model_config.max_model_len: ",
-            llm.llm_engine.model_config.max_model_len)
-        if (
-            prompt_len + max_output_len
-            > llm.llm_engine.model_config.max_model_len
-        ):
-            print(f"ERROR: chosen prompt_len + max_output_len ({prompt_len} + "
+              llm.llm_engine.model_config.max_model_len)
+        if (prompt_len + max_output_len
+                > llm.llm_engine.model_config.max_model_len):
+            print(
+                f"ERROR: chosen prompt_len + max_output_len ({prompt_len} + "
                 f"{max_output_len} = {prompt_len + max_output_len}) is larger "
                 f"than the model's max_model_len ({max_model_len}), please "
                 f"choose a smaller prompt_len or max_output_len, or increase "
@@ -257,8 +252,9 @@ def run_profile(context: ProfileContext,
                 sampling_params.max_tokens = next(output_len_generator)
                 assert isinstance(sampling_params.max_tokens, int)
 
-                prompt_token_ids = torch.randint(llm.get_tokenizer().vocab_size,
-                                                size=(prompt_len, )).tolist()
+                prompt_token_ids = torch.randint(
+                    llm.get_tokenizer().vocab_size,
+                    size=(prompt_len, )).tolist()
 
                 llm.llm_engine.add_request(
                     request_id=f"seq{i}",
@@ -296,7 +292,7 @@ def run_profile(context: ProfileContext,
         has_decode = len(decode_results_list) > 0
 
         # Always dumps the result to a json
-        
+
         if json_output:
 
             json_dict = {
@@ -322,11 +318,10 @@ def run_profile(context: ProfileContext,
                 context.save_chrome_traces_folder + "/prefill.json")
             for idx, decode_prof in enumerate(decode_profs):
                 decode_prof.profiler.export_chrome_trace(
-                    context.save_chrome_traces_folder
-                    + f"/decode_{idx + 1}.json"
-                )
+                    context.save_chrome_traces_folder +
+                    f"/decode_{idx + 1}.json")
             print("Traces saved as prefill.json and decode_1.json, etc."
-                f" in folder {context.save_chrome_traces_folder}")
+                  f" in folder {context.save_chrome_traces_folder}")
 
 
 if __name__ == "__main__":

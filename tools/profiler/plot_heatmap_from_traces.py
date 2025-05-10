@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import os
 import json
-import numpy as np
+import os
+
 import matplotlib.pyplot as plt
+import numpy as np
+
 from vllm.profiler.layerwise_profile import SummaryStatsEntry
 
 # === Configuration ===
@@ -11,12 +13,14 @@ OUTPUT_DIR = "./outputs"
 FIGURE_OUTPUT_DIR = "./heatmap_figures"
 os.makedirs(FIGURE_OUTPUT_DIR, exist_ok=True)
 
+
 # === Parse filename like profiling_bs16_pl2048.json ===
 def parse_filename(fname):
     parts = fname.replace(".json", "").split("_")
     bs = int(parts[1][2:])
     pl = int(parts[2][2:])
     return bs, pl
+
 
 # === Extract root-level CUDA time from summary_stats ===
 def extract_cuda_time(json_file, phase):
@@ -29,6 +33,7 @@ def extract_cuda_time(json_file, phase):
         return None
     root_entry = SummaryStatsEntry(**entries[0]["entry"])
     return root_entry.cuda_time_us / 1000.0  # ms
+
 
 # === Load all times into dict {(bs, pl): time} ===
 def load_profile_times(directory, phase):
@@ -43,6 +48,7 @@ def load_profile_times(directory, phase):
             time_map[(bs, pl)] = t
     return time_map
 
+
 # === Collect times ===
 prefill_times = load_profile_times(OUTPUT_DIR, "prefill")
 decode_times = load_profile_times(OUTPUT_DIR, "decode_1")
@@ -50,6 +56,7 @@ decode_times = load_profile_times(OUTPUT_DIR, "decode_1")
 # === Batch sizes and prompt lengths ===
 batch_sizes = sorted({k[0] for k in prefill_times})
 prompt_lens = sorted({k[1] for k in prefill_times})
+
 
 # === Create heatmap matrix ===
 def build_heatmap(time_data):
@@ -61,8 +68,10 @@ def build_heatmap(time_data):
                 t_mat[i, j] = time_data[key]
     return t_mat
 
+
 prefill_mat = build_heatmap(prefill_times)
 decode_mat = build_heatmap(decode_times)
+
 
 # === Plot heatmaps ===
 def plot_heatmap(data, title, filename, fmt=".1f", cmap="viridis"):
@@ -80,18 +89,19 @@ def plot_heatmap(data, title, filename, fmt=".1f", cmap="viridis"):
         for j in range(len(prompt_lens)):
             val = data[i, j]
             if not np.isnan(val):
-                ax.text(
-                    j, i, format(val, fmt),
-                    ha="center",
-                    va="center",
-                    fontsize=6,
-                    color="white"
-                )
+                ax.text(j,
+                        i,
+                        format(val, fmt),
+                        ha="center",
+                        va="center",
+                        fontsize=6,
+                        color="white")
 
     plt.colorbar(im, ax=ax)
     plt.tight_layout()
     plt.savefig(os.path.join(FIGURE_OUTPUT_DIR, filename))
     plt.close()
+
 
 # === Save ===
 plot_heatmap(prefill_mat, "Prefill - Time (ms)", "prefill_time.png")
