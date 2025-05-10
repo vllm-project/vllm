@@ -208,16 +208,16 @@ class NixlConnector(KVConnectorBase_V1):
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """NixlConnector does not do layerwise saving."""
-        return
+        pass
 
     def save_kv_layer(self, layer_name: str, kv_layer: torch.Tensor,
                       attn_metadata: "AttentionMetadata", **kwargs) -> None:
         """NixlConnector does not save explicitly."""
-        return
+        pass
 
     def wait_for_save(self):
         """NixlConnector does not save explicitly."""
-        return
+        pass
 
 
 class NixlConnectorScheduler:
