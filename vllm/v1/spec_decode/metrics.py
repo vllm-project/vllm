@@ -67,6 +67,8 @@ class SpecDecodingLogging:
             spec_decoding_stats.num_accepted_tokens_per_pos)
 
     def log(self, log_fn=logger.info):
+        if not self.num_drafts:
+            return
         num_drafts = np.sum(self.num_drafts)
         num_draft_tokens = np.sum(self.num_draft_tokens)
         num_accepted_tokens = np.sum(self.num_accepted_tokens)
