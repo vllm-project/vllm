@@ -170,10 +170,25 @@ def file_or_path_exists(model: Union[str, Path], config_name: str,
     if (local_path := Path(model)).exists():
         return (local_path / config_name).is_file()
 
-    # Offline mode support: Check if config file is cached already
-    cached_filepath = try_to_load_from_cache(repo_id=model,
-                                             filename=config_name,
-                                             revision=revision)
+    
+    try:
+
+        # Offline mode support: Check if config file is cached already
+        cached_filepath = try_to_load_from_cache(repo_id=model,
+                                                filename=config_name,
+                                                revision=revision)
+    
+    except Exception as e:
+        error_message = (
+                "Invalid repository ID or local directory specified:"
+                " '{model}'.\nPlease verify the following requirements:\n"
+                "1. Provide a valid Hugging Face repository ID.\n"
+                "2. Specify a local directory that contains a recognized "
+                "configuration file.\n"
+                ).format(model=model)
+
+        raise ValueError(error_message) from e
+
     if isinstance(cached_filepath, str):
         # The config file exists in cache- we can continue trying to load
         return True
@@ -276,33 +291,21 @@ def get_config(
         model = Path(model).parent
 
     if config_format == ConfigFormat.AUTO:
-        try:
-            if is_gguf or file_or_path_exists(
-                    model, HF_CONFIG_NAME, revision=revision):
-                config_format = ConfigFormat.HF
-            elif file_or_path_exists(model,
-                                     MISTRAL_CONFIG_NAME,
-                                     revision=revision):
-                config_format = ConfigFormat.MISTRAL
-            else:
-                raise ValueError(
-                    "Could not detect config format for no config file found. "
-                    "Ensure your model has either config.json (HF format) "
-                    "or params.json (Mistral format).")
+       
+        if is_gguf or file_or_path_exists(
+                model, HF_CONFIG_NAME, revision=revision):
+            config_format = ConfigFormat.HF
+        elif file_or_path_exists(model,
+                                    MISTRAL_CONFIG_NAME,
+                                    revision=revision):
+            config_format = ConfigFormat.MISTRAL
+        else:
+            raise ValueError(
+                "Could not detect config format for no config file found. "
+                "Ensure your model has either config.json (HF format) "
+                "or params.json (Mistral format).")
 
-        except Exception as e:
-            error_message = (
-                "Invalid repository ID or local directory specified:"
-                " '{model}'.\nPlease verify the following requirements:\n"
-                "1. Provide a valid Hugging Face repository ID.\n"
-                "2. Specify a local directory that contains a recognized "
-                "configuration file.\n"
-                "   - For Hugging Face models: ensure the presence of a "
-                "'config.json'.\n"
-                "   - For Mistral models: ensure the presence of a "
-                "'params.json'.\n").format(model=model)
-
-            raise ValueError(error_message) from e
+        
 
     if config_format == ConfigFormat.HF:
         config_dict, _ = PretrainedConfig.get_config_dict(
