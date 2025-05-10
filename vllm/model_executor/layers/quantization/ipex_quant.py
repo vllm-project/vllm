@@ -6,6 +6,7 @@ import torch
 
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.awq import (AWQLinearMethod,
                                                          is_layer_skipped_awq)
 from vllm.model_executor.layers.quantization.base_config import (
@@ -58,7 +59,7 @@ class IPEXConfig(QuantizationConfig):
                 f"group_size={self.group_size})")
 
     @classmethod
-    def get_name(cls) -> str:
+    def get_name(cls) -> QuantizationMethods:
         return "ipex"
 
     @classmethod
@@ -97,8 +98,8 @@ class IPEXConfig(QuantizationConfig):
                    lm_head_quantized)
 
     @classmethod
-    def override_quantization_method(cls, hf_quant_cfg,
-                                     user_quant) -> Optional[str]:
+    def override_quantization_method(
+            cls, hf_quant_cfg, user_quant) -> Optional[QuantizationMethods]:
         if not current_platform.is_cpu() and not current_platform.is_xpu():
             return None
 

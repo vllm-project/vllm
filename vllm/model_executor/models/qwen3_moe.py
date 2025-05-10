@@ -225,12 +225,12 @@ class Qwen3MoeAttention(nn.Module):
         # Add qk-norm
         q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim,
                            self.head_dim)
-        q_by_head = self.q_norm.forward_native(q_by_head)
+        q_by_head = self.q_norm(q_by_head)
         q = q_by_head.view(q.shape)
 
         k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim,
                            self.head_dim)
-        k_by_head = self.k_norm.forward_native(k_by_head)
+        k_by_head = self.k_norm(k_by_head)
         k = k_by_head.view(k.shape)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
@@ -459,11 +459,10 @@ class Qwen3MoeModel(nn.Module):
                             ".kv_scale", ".attn.kv_scale")
                         if remapped_kv_scale_name not in params_dict:
                             logger.warning_once(
-                                "Found kv scale in the checkpoint "
-                                f"(e.g. {name}), but not found the expected "
-                                f"name in the model "
-                                f"(e.g. {remapped_kv_scale_name}). "
-                                "kv-scale is not loaded.")
+                                "Found kv scale in the checkpoint (e.g. %s), but not found the expected name in the model (e.g. %s). kv-scale is not loaded.",  # noqa: E501
+                                name,
+                                remapped_kv_scale_name,
+                            )
                             continue
                         else:
                             name = remapped_kv_scale_name

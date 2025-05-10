@@ -436,6 +436,34 @@ def load_nvlm_d(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+# Ovis2
+def load_ovis2(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "AIDC-AI/Ovis2-1B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=2,
+        trust_remote_code=True,
+        dtype="half",
+        limit_mm_per_prompt={"image": len(image_urls)},
+        hf_overrides={"architectures": ["Ovis2ForConditionalGeneration"]},
+    )
+
+    placeholder = '\n'.join(
+        [f'Image {i+1}: <image>' for i in range(len(image_urls))]) + '\n'
+    prompt = ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+              f"<|im_start|>user\n{placeholder}"
+              f"{question}<|im_end|>\n"
+              "<|im_start|>assistant\n")
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
 def load_pixtral_hf(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "mistral-community/pixtral-12b"
 
@@ -685,6 +713,7 @@ model_example_map = {
     "mistral3": load_mistral3,
     "mllama": load_mllama,
     "NVLM_D": load_nvlm_d,
+    "ovis2": load_ovis2,
     "phi3_v": load_phi3v,
     "phi4_mm": load_phi4mm,
     "pixtral_hf": load_pixtral_hf,

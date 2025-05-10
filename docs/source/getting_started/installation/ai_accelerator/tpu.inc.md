@@ -158,7 +158,7 @@ sudo apt-get install libopenblas-base libopenmpi-dev libomp-dev
 Run the setup script:
 
 ```bash
-VLLM_TARGET_DEVICE="tpu" python setup.py develop
+VLLM_TARGET_DEVICE="tpu" python -m pip install -e .
 ```
 
 ## Set up using Docker

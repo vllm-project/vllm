@@ -5,15 +5,16 @@
 import json
 import re
 import time
-from argparse import Namespace
+from http import HTTPStatus
 from typing import Annotated, Any, ClassVar, Literal, Optional, Union
 
 import torch
-from fastapi import UploadFile
+from fastapi import HTTPException, UploadFile
 from pydantic import (BaseModel, ConfigDict, Field, TypeAdapter,
                       ValidationInfo, field_validator, model_validator)
 from typing_extensions import TypeAlias
 
+from vllm import envs
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.logger import init_logger
 from vllm.pooling_params import PoolingParams
@@ -24,23 +25,7 @@ from vllm.utils import random_uuid, resolve_obj_by_qualname
 
 logger = init_logger(__name__)
 
-# torch is mocked during docs generation,
-# so we have to provide the values as literals
-_MOCK_LONG_INFO = Namespace(min=-9223372036854775808, max=9223372036854775807)
-_LONG_INFO: Union["torch.iinfo", Namespace]
-
-try:
-    from sphinx.ext.autodoc.mock import _MockModule
-
-    if isinstance(torch, _MockModule):
-        _LONG_INFO = _MOCK_LONG_INFO
-    else:
-        _LONG_INFO = torch.iinfo(torch.long)
-except ModuleNotFoundError:
-    _LONG_INFO = torch.iinfo(torch.long)
-
-assert _LONG_INFO.min == _MOCK_LONG_INFO.min
-assert _LONG_INFO.max == _MOCK_LONG_INFO.max
+_LONG_INFO = torch.iinfo(torch.long)
 
 
 class OpenAIBaseModel(BaseModel):
@@ -408,6 +393,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "If specified with 'logprobs', tokens are represented "
             " as strings of the form 'token_id:{token_id}' so that tokens "
             "that are not JSON-encodable can be identified."))
+    cache_salt: Optional[str] = Field(
+        default=None,
+        description=(
+            "If specified, the prefix cache will be salted with the provided "
+            "string to prevent an attacker to guess prompts in multi-user "
+            "environments. The salt should be random, protected from "
+            "access by 3rd parties, and long enough to be "
+            "unpredictable (e.g., 43 characters base64-encoded, corresponding "
+            "to 256 bit). Not supported by vLLM engine V0."))
 
     # doc: end-chat-completion-extra-params
 
@@ -416,7 +410,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         "repetition_penalty": 1.0,
         "temperature": 1.0,
         "top_p": 1.0,
-        "top_k": -1,
+        "top_k": 0,
         "min_p": 0.0,
     }
 
@@ -726,6 +720,20 @@ class ChatCompletionRequest(OpenAIBaseModel):
                              "`add_generation_prompt` to True.")
         return data
 
+    @model_validator(mode="before")
+    @classmethod
+    def check_cache_salt_support(cls, data):
+        if data.get("cache_salt") is not None:
+            if not envs.VLLM_USE_V1:
+                raise ValueError(
+                    "Parameter 'cache_salt' is not supported with "
+                    "this instance of vLLM, which uses engine V0.")
+            if not isinstance(data["cache_salt"],
+                              str) or not data["cache_salt"]:
+                raise ValueError("Parameter 'cache_salt' must be a "
+                                 "non-empty string if provided.")
+        return data
+
 
 class CompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
@@ -846,7 +854,7 @@ class CompletionRequest(OpenAIBaseModel):
         "repetition_penalty": 1.0,
         "temperature": 1.0,
         "top_p": 1.0,
-        "top_k": -1,
+        "top_k": 0,
         "min_p": 0.0,
     }
 
@@ -1014,7 +1022,7 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
     encoding_format: Literal["float", "base64"] = "float"
     dimensions: Optional[int] = None
     user: Optional[str] = None
-    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
 
     # doc: begin-embedding-pooling-params
     additional_data: Optional[Any] = None
@@ -1049,7 +1057,7 @@ class EmbeddingChatRequest(OpenAIBaseModel):
     encoding_format: Literal["float", "base64"] = "float"
     dimensions: Optional[int] = None
     user: Optional[str] = None
-    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
 
     # doc: begin-chat-embedding-pooling-params
     additional_data: Optional[Any] = None
@@ -1116,7 +1124,7 @@ class ScoreRequest(OpenAIBaseModel):
     model: Optional[str] = None
     text_1: Union[list[str], str]
     text_2: Union[list[str], str]
-    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
 
     # doc: begin-score-pooling-params
     additional_data: Optional[Any] = None
@@ -1142,7 +1150,7 @@ class RerankRequest(OpenAIBaseModel):
     query: str
     documents: list[str]
     top_n: int = Field(default_factory=lambda: 0)
-    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
 
     # doc: begin-rerank-pooling-params
     additional_data: Optional[Any] = None
@@ -1622,9 +1630,9 @@ class TranscriptionRequest(OpenAIBaseModel):
 
     # doc: begin-transcription-extra-params
     stream: Optional[bool] = False
-    """Custom field not present in the original OpenAI definition. When set, 
+    """Custom field not present in the original OpenAI definition. When set,
     it will enable output to be streamed in a similar fashion as the Chat
-    Completion endpoint. 
+    Completion endpoint.
     """
     # Flattened stream option to simplify form data.
     stream_include_usage: Optional[bool] = False
@@ -1642,7 +1650,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     """
 
     top_p: Optional[float] = None
-    """Enables nucleus (top-p) sampling, where tokens are selected from the 
+    """Enables nucleus (top-p) sampling, where tokens are selected from the
     smallest possible set whose cumulative probability exceeds `p`.
     """
 
@@ -1650,7 +1658,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     """Limits sampling to the `k` most probable tokens at each step."""
 
     min_p: Optional[float] = None
-    """Filters out tokens with a probability lower than `min_p`, ensuring a 
+    """Filters out tokens with a probability lower than `min_p`, ensuring a
     minimum likelihood threshold during sampling.
     """
 
@@ -1672,7 +1680,7 @@ class TranscriptionRequest(OpenAIBaseModel):
         "repetition_penalty": 1.0,
         "temperature": 1.0,
         "top_p": 1.0,
-        "top_k": -1,
+        "top_k": 0,
         "min_p": 0.0,
     }
 
@@ -1720,7 +1728,13 @@ class TranscriptionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def validate_stream_options(cls, data):
+    def validate_transcription_request(cls, data):
+        if isinstance(data.get("file"), str):
+            raise HTTPException(
+                status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+                detail="Expected 'file' to be a file-like object, not 'str'.",
+            )
+
         stream_opts = ["stream_include_usage", "stream_continuous_usage_stats"]
         stream = data.get("stream", False)
         if any(bool(data.get(so, False)) for so in stream_opts) and not stream:

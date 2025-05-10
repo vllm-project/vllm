@@ -354,9 +354,8 @@ class PixtralHFMultiModalProcessor(
         image_token_id = hf_config.image_token_index
         image_end_id = vocab[processor.image_end_token]
 
-        vision_config = hf_config.vision_config
-        assert isinstance(vision_config, PixtralVisionConfig)
-        encoder_info = PixtralHFEncoderInfo(vision_config)
+        assert isinstance(hf_config.vision_config, PixtralVisionConfig)
+        encoder_info = PixtralHFEncoderInfo(hf_config)
 
         def get_replacement(item_idx: int):
             images = mm_items.get_items("image", ImageProcessorItems)
@@ -396,14 +395,12 @@ def _build_llava_or_pixtral_hf_processor(
     dummy_inputs: BaseDummyInputsBuilder[_I],
     *,
     cache: Optional[ProcessingCache] = None,
-    enable_sanity_checks: bool = True,
 ) -> BaseMultiModalProcessor:
     if isinstance(info, PixtralHFProcessingInfo):
         return PixtralHFMultiModalProcessor(
             info,
             dummy_inputs,  # type: ignore
             cache=cache,
-            enable_sanity_checks=enable_sanity_checks,
         )
 
     if isinstance(info, LlavaProcessingInfo):
@@ -411,7 +408,6 @@ def _build_llava_or_pixtral_hf_processor(
             info,
             dummy_inputs,  # type: ignore
             cache=cache,
-            enable_sanity_checks=enable_sanity_checks,
         )
 
     raise NotImplementedError(type(info))
@@ -725,8 +721,9 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
                 batch.
             pixel_values: The pixels in each input image.
 
-        See also:
-            :class:`LlavaImageInputs`
+        :::{seealso}
+        {class}`LlavaImageInputs`
+        :::
         """
         if intermediate_tensors is not None:
             inputs_embeds = None

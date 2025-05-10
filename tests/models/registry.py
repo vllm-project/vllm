@@ -72,12 +72,15 @@ class _HfExamplesInfo:
             return
 
         current_version = TRANSFORMERS_VERSION
+        cur_base_version = Version(current_version).base_version
         min_version = self.min_transformers_version
         max_version = self.max_transformers_version
         msg = f"`transformers=={current_version}` installed, but `transformers"
-        if min_version and Version(current_version) < Version(min_version):
+        # Only check the base version for the min/max version, otherwise preview
+        # models cannot be run because `x.yy.0.dev0`<`x.yy.0`
+        if min_version and Version(cur_base_version) < Version(min_version):
             msg += f">={min_version}` is required to run this model."
-        elif max_version and Version(current_version) > Version(max_version):
+        elif max_version and Version(cur_base_version) > Version(max_version):
             msg += f"<={max_version}` is required to run this model."
         else:
             return
@@ -120,7 +123,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                          trust_remote_code=True),
     "BaichuanForCausalLM": _HfExamplesInfo("baichuan-inc/Baichuan2-7B-chat",
                                          trust_remote_code=True),
-    "BambaForCausalLM": _HfExamplesInfo("ibm-ai-platform/Bamba-9B"),
+    "BambaForCausalLM": _HfExamplesInfo("ibm-ai-platform/Bamba-9B",
+                                        extras={"tiny": "hmellor/bamba-tiny-random"}),  # noqa: E501
     "BloomForCausalLM": _HfExamplesInfo("bigscience/bloom-560m",
                                         {"1b": "bigscience/bloomz-1b1"}),
     "ChatGLMModel": _HfExamplesInfo("THUDM/chatglm3-6b",
@@ -162,6 +166,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                           {"1b": "EleutherAI/pythia-1.4b"}),
     "GraniteForCausalLM": _HfExamplesInfo("ibm/PowerLM-3b"),
     "GraniteMoeForCausalLM": _HfExamplesInfo("ibm/PowerMoE-3b"),
+    "GraniteMoeHybridForCausalLM": _HfExamplesInfo("ibm-granite/granite-4.0-tiny-preview",  # noqa: E501
+                                                   min_transformers_version="4.52.0"),  # noqa: E501
     "GraniteMoeSharedForCausalLM": _HfExamplesInfo("ibm-research/moe-7b-1b-active-shared-experts"),  # noqa: E501
     "Grok1ModelForCausalLM": _HfExamplesInfo("hpcai-tech/grok-1",
                                              trust_remote_code=True),
@@ -176,7 +182,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "JAISLMHeadModel": _HfExamplesInfo("inceptionai/jais-13b-chat"),
     "JambaForCausalLM": _HfExamplesInfo("ai21labs/AI21-Jamba-1.5-Mini",
                                         extras={"tiny": "ai21labs/Jamba-tiny-dev"}),  # noqa: E501
-    "LlamaForCausalLM": _HfExamplesInfo("meta-llama/Llama-3.2-1B-Instruct"),
+    "LlamaForCausalLM": _HfExamplesInfo("meta-llama/Llama-3.2-1B-Instruct",
+                                        extras={"guard": "meta-llama/Llama-Guard-3-1B",  # noqa: E501
+                                                "hermes": "NousResearch/Hermes-3-Llama-3.1-8B"}),  # noqa: E501
     "LLaMAForCausalLM": _HfExamplesInfo("decapoda-research/llama-7b-hf",
                                         is_available_online=False),
     "MambaForCausalLM": _HfExamplesInfo("state-spaces/mamba-130m-hf"),
@@ -191,7 +199,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                                 trust_remote_code=True),
     "MistralForCausalLM": _HfExamplesInfo("mistralai/Mistral-7B-Instruct-v0.1"),
     "MixtralForCausalLM": _HfExamplesInfo("mistralai/Mixtral-8x7B-Instruct-v0.1",  # noqa: E501
-                                          {"falcon3": "ehristoforu/Falcon3-MoE-2x7B-Insruct"}),  # noqa: E501
+                                          {"tiny": "TitanML/tiny-mixtral"}),  # noqa: E501
     "QuantMixtralForCausalLM": _HfExamplesInfo("mistral-community/Mixtral-8x22B-v0.1-AWQ"),  # noqa: E501
     "MptForCausalLM": _HfExamplesInfo("mpt", is_available_online=False),
     "MPTForCausalLM": _HfExamplesInfo("mosaicml/mpt-7b"),
@@ -217,16 +225,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Qwen2ForCausalLM": _HfExamplesInfo("Qwen/Qwen2-0.5B-Instruct",
                                         extras={"2.5": "Qwen/Qwen2.5-0.5B-Instruct"}), # noqa: E501
     "Qwen2MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen1.5-MoE-A2.7B-Chat"),
-    "Qwen3ForCausalLM": _HfExamplesInfo(
-        "Qwen/Qwen3-8B",
-        is_available_online=False,
-        min_transformers_version="4.51"
-    ),
-    "Qwen3MoeForCausalLM": _HfExamplesInfo(
-        "Qwen/Qwen3-MoE-15B-A2B",
-        is_available_online=False,
-        min_transformers_version="4.51"
-    ),
+    "Qwen3ForCausalLM": _HfExamplesInfo("Qwen/Qwen3-8B"),
+    "Qwen3MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen3-30B-A3B"),
     "RWForCausalLM": _HfExamplesInfo("tiiuae/falcon-40b",
                                      is_available_online=False),
     "StableLMEpochForCausalLM": _HfExamplesInfo("stabilityai/stablelm-zephyr-3b",  # noqa: E501
@@ -337,6 +337,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "MiniCPMV": _HfExamplesInfo("openbmb/MiniCPM-Llama3-V-2_5",
                                 extras={"2.6": "openbmb/MiniCPM-V-2_6"},  # noqa: E501
                                 trust_remote_code=True),
+    "MiniMaxVL01ForConditionalGeneration": _HfExamplesInfo("MiniMaxAI/MiniMax-VL-01", # noqa: E501
+                                              trust_remote_code=True),
     "Mistral3ForConditionalGeneration": _HfExamplesInfo("mistralai/Mistral-Small-3.1-24B-Instruct-2503",  # noqa: E501
                                                         extras={"fp8": "nm-testing/Mistral-Small-3.1-24B-Instruct-2503-FP8-dynamic"}),  # noqa: E501
     "MolmoForCausalLM": _HfExamplesInfo("allenai/Molmo-7B-D-0924",
@@ -353,6 +355,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                         max_transformers_version="4.48",
                                         transformers_version_reason="Use of deprecated imports which have been removed.",  # noqa: E501
                                         extras={"phi3.5": "microsoft/Phi-3.5-vision-instruct"}),  # noqa: E501
+    "Ovis2ForConditionalGeneration": _HfExamplesInfo("AIDC-AI/Ovis2-1B",
+                                                    trust_remote_code=True,
+                                                    hf_overrides={"architectures": ["Ovis2ForConditionalGeneration"]}), # noqa: E501
     "Phi4MMForCausalLM": _HfExamplesInfo("microsoft/Phi-4-multimodal-instruct",
                                         trust_remote_code=True),
     "PixtralForConditionalGeneration": _HfExamplesInfo("mistralai/Pixtral-12B-2409",  # noqa: E501
@@ -364,8 +369,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Qwen2AudioForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2-Audio-7B-Instruct"),  # noqa: E501
     "Qwen2VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2-VL-2B-Instruct"),  # noqa: E501
     "Qwen2_5_VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2.5-VL-3B-Instruct"),  # noqa: E501
-    "Qwen2_5OmniModel": _HfExamplesInfo("Qwen/Qwen2.5-Omni-7B",  # noqa: E501
-                                                                  min_transformers_version="4.52"),  # noqa: E501
+    "Qwen2_5OmniModel": _HfExamplesInfo("Qwen/Qwen2.5-Omni-3B",
+                                        min_transformers_version="4.52"),
     "SkyworkR1VChatModel": _HfExamplesInfo("Skywork/Skywork-R1V-38B"),
     "SmolVLMForConditionalGeneration": _HfExamplesInfo("HuggingFaceTB/SmolVLM2-2.2B-Instruct"),  # noqa: E501
     "UltravoxModel": _HfExamplesInfo("fixie-ai/ultravox-v0_5-llama-3_2-1b",  # noqa: E501
@@ -375,7 +380,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     # Therefore, we borrow the BartTokenizer from the original Bart model
     "Florence2ForConditionalGeneration": _HfExamplesInfo("microsoft/Florence-2-base",  # noqa: E501
                                                          tokenizer="Isotr0py/Florence-2-tokenizer",
-                                                         trust_remote_code=True),  # noqa: E501
+                                                         trust_remote_code=True,),  # noqa: E501
     "MllamaForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-3.2-11B-Vision-Instruct"),  # noqa: E501
     "WhisperForConditionalGeneration": _HfExamplesInfo("openai/whisper-large-v3"),  # noqa: E501
 }

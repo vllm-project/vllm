@@ -9,6 +9,7 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.fp8 import (Fp8Config,
@@ -50,7 +51,7 @@ class PTPCFp8Config(Fp8Config):
                          ignored_layers=ignored_layers)
 
     @classmethod
-    def get_name(cls) -> str:
+    def get_name(cls) -> QuantizationMethods:
         return "ptpc_fp8"
 
     @classmethod

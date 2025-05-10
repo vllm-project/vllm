@@ -227,6 +227,7 @@ class MistralTokenizer(TokenizerBase):
         else:
             assert Path(
                 path_or_repo_id).is_file(), f"Invalid path: {path_or_repo_id}"
+            tokenizer_file = str(Path(path_or_repo_id))
 
         from mistral_common.tokens.tokenizers.mistral import (
             MistralTokenizer as PublicMistralTokenizer)
@@ -359,6 +360,8 @@ class MistralTokenizer(TokenizerBase):
 
     def encode(self,
                text: str,
+               truncation: Optional[bool] = None,
+               max_length: Optional[int] = None,
                add_special_tokens: Optional[bool] = None) -> List[int]:
         # `encode` should only be used for prompt completion
         # it should never be used for chat_completion.
