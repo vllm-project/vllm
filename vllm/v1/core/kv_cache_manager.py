@@ -117,7 +117,7 @@ class KVCacheManager:
 
         Returns:
             A tuple containing:
-                - A list of new blocks that are computed for the request.
+                - A list of blocks that are computed for the request.
                 - The number of computed tokens.
         """
 
