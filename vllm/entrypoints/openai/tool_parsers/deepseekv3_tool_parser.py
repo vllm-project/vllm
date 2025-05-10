@@ -18,7 +18,7 @@ from vllm.utils import random_uuid
 logger = init_logger(__name__)
 
 
-@ToolParserManager.register_module("deepseekv3")
+@ToolParserManager.register_module("deepseek_v3")
 class DeepSeekV3ToolParser(ToolParser):
 
     def __init__(self, tokenizer: AnyTokenizer):

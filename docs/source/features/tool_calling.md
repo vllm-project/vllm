@@ -236,12 +236,12 @@ For Qwen2.5, the chat template in tokenizer_config.json has already included sup
 
 Flags: `--tool-call-parser hermes`
 
-### DeepSeek-V3 Models (`deepseekv3`)
+### DeepSeek-V3 Models (`deepseek_v3`)
 
 Supported models:
 * `deepseek-ai/DeepSeek-V3-0324`
 
-Flags: `--tool-call-parser deepseekv3 --chat-template examples/tool_chat_template_deepseekv3.jinja`
+Flags: `--tool-call-parser deepseek_v3 --chat-template examples/tool_chat_template_deepseekv3.jinja`
 
 ### Models with Pythonic Tool Calls (`pythonic`)
 
