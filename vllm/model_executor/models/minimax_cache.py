@@ -33,3 +33,10 @@ class MinimaxCacheManager(ConstantSizeCache):
         for cache_t in self.cache:
             cache_t[:, to_index].copy_(cache_t[:, from_index],
                                        non_blocking=True)
+    
+    def current_run_tensors(self, **kwargs) -> MinimaxCacheParams:
+        """
+        Return the tensors for the current run as MinimaxCacheParams.
+        """
+        cache_tensors, state_indices_tensor = super().current_run_tensors(**kwargs)
+        return MinimaxCacheParams(cache_tensors, state_indices_tensor)
