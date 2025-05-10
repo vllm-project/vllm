@@ -10,6 +10,7 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
+from vllm.v1.engine.additional_heads import AdditionalHeadsProcessor
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
@@ -81,6 +82,7 @@ class RequestState:
         prompt: Optional[str],
         prompt_token_ids: list[int],
         logprobs_processor: LogprobsProcessor,
+        additional_heads_processor: AdditionalHeadsProcessor,
         detokenizer: IncrementalDetokenizer,
         max_tokens_param: Optional[int],
         arrival_time: float,
@@ -96,6 +98,7 @@ class RequestState:
         self.prompt_token_ids = prompt_token_ids
         self.prompt_len = len(prompt_token_ids)
         self.logprobs_processor = logprobs_processor
+        self.additional_heads_processor = additional_heads_processor
         self.detokenizer = detokenizer
         self.max_tokens_param = max_tokens_param
         self.is_prefilling = True
@@ -130,6 +133,8 @@ class RequestState:
                 tokenizer=tokenizer,
                 request=request,
             ),
+            additional_heads_processor=AdditionalHeadsProcessor.
+            from_new_request(request=request, ),
             detokenizer=IncrementalDetokenizer.from_new_request(
                 tokenizer=tokenizer,
                 request=request,
@@ -211,11 +216,18 @@ class RequestState:
         if delta and logprobs:
             logprobs = logprobs[-len(token_ids):]
 
+        # Prepare additional heads, based on delta mode
+        additional_heads = (
+            self.additional_heads_processor.additional_head_outputs or None)
+        if delta and additional_heads:
+            additional_heads = additional_heads[-len(token_ids):]
+
         return CompletionOutput(
             index=self.request_index,
             text=text,
             token_ids=token_ids,
             logprobs=logprobs,
+            additional_heads=additional_heads,
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
             finish_reason=str(finish_reason) if finished else None,
             stop_reason=stop_reason if finished else None)
@@ -345,8 +357,11 @@ class OutputProcessor:
                 finish_reason = FinishReason.STOP
                 stop_reason = stop_string
 
-            # 3) Compute sample and prompt logprobs for request, if required.
+            # 3) Compute sample and prompt logprobs as well as additional heads
+            # for request, if required.
             req_state.logprobs_processor.update_from_output(engine_core_output)
+            req_state.additional_heads_processor.update_from_output(
+                engine_core_output)
 
             # 4) Create and handle RequestOutput objects.
             if request_output := req_state.make_request_output(

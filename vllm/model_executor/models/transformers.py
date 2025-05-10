@@ -261,9 +261,20 @@ class TransformersModel(nn.Module):
         num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
         start, end = get_pp_indices(self.config.num_hidden_layers,
                                     self.pp_rank, self.pp_size)
-        return {
-            i:
-            Attention(
+
+        attention_instances = {}
+        if hasattr(self.config, "global_attention_layers") and isinstance(
+                self.config.global_attention_layers, list):
+            global_attention_layers = self.config.global_attention_layers
+        else:
+            global_attention_layers = None
+
+        for i in range(start, end):
+            sliding_window = None
+            if i in global_attention_layers:
+                assert self.config.sliding_window is not None
+                sliding_window = self.config.sliding_window
+            attention_instances[i] = Attention(
                 num_heads=num_heads,
                 head_size=head_size,
                 # NOTE: We use Llama scale as default, if it's set by
@@ -272,9 +283,10 @@ class TransformersModel(nn.Module):
                 num_kv_heads=num_kv_heads,
                 cache_config=self.cache_config,
                 quant_config=self.quant_config,
+                per_layer_sliding_window=sliding_window,
                 prefix=f"{i}.attn")
-            for i in range(start, end)
-        }
+
+        return attention_instances
 
     def init_buffers(self, module: nn.Module):
         """
@@ -356,6 +368,15 @@ class TransformersModel(nn.Module):
             return IntermediateTensors({"hidden_states": hidden_states})
 
         return hidden_states
+
+    def compute_additional_head(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> Optional[torch.Tensor]:
+        if get_pp_group().is_last_rank and hasattr(self.model,
+                                                   "compute_additional_head"):
+            return self.model.compute_additional_head(hidden_states)
+        return None
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
@@ -450,6 +471,14 @@ class TransformersForCausalLM(nn.Module, SupportsQuant, SupportsLoRA,
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
+
+    def compute_additional_head(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> Optional[torch.Tensor]:
+        if hasattr(self.model, "compute_additional_head"):
+            return self.model.compute_additional_head(hidden_states)
+        return None
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

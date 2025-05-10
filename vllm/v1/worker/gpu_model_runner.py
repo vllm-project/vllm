@@ -36,7 +36,8 @@ from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
                                         KVCacheConfig, KVCacheSpec,
                                         SlidingWindowSpec)
-from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
+from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AdditionalHeadOutputs,
+                             AdditionalHeadOutputsPerRequest, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
@@ -1169,6 +1170,40 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         sample_hidden_states = hidden_states[logits_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
 
+        additional_head_indices_mask = [
+            (i in self.input_batch.run_additional_heads)
+            for i in range(self.input_batch.num_reqs)
+        ]
+        run_additional_heads = any(additional_head_indices_mask)
+
+        if run_additional_heads:
+            assert hasattr(self.model, "compute_additional_head")
+
+            # NOTE: In theory not all logit indices need additional
+            # head outputs and we could save some flops by masking.
+            # In practice, this is a small number of flops and this
+            # is simpler/introduces less overhead.
+            additional_heads_tensor = self.model.compute_additional_head(
+                sample_hidden_states, )
+
+            # Should be num_decode_tokens x additional_head_size
+            assert len(additional_heads_tensor.shape) == 2
+
+            # Don't return the additional head outputs where they aren't needed.
+            additional_head_outputs = AdditionalHeadOutputs(
+                additional_head_outputs=[
+                    AdditionalHeadOutputsPerRequest(
+                        additional_head_outputs=
+                        additional_head_outputs_per_request, )
+                    if mask else None
+                    for additional_head_outputs_per_request, mask in zip(
+                        additional_heads_tensor.tolist(),
+                        additional_head_indices_mask)
+                ], )
+
+        else:
+            additional_head_outputs = None
+
         # Apply structured output bitmasks if present
         if scheduler_output.grammar_bitmask is not None:
             self.apply_grammar_bitmask(scheduler_output, logits)
@@ -1341,6 +1376,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_token_ids=spec_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
+            additional_head_outputs=additional_head_outputs,
         )
 
     def generate_draft_token_ids(

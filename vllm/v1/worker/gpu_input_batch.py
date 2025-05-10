@@ -206,6 +206,9 @@ class InputBatch:
         # that are currently in the prefill phase.
         self.num_prompt_logprobs: dict[str, int] = {}
 
+        # req_idx -> bool
+        self.run_additional_heads: dict[int, bool] = {}
+
         # To accumulate prompt logprobs tensor chunks across prefill steps.
         self.in_progress_prompt_logprobs_cpu: dict[str, LogprobsTensors] = {}
 
@@ -317,6 +320,9 @@ class InputBatch:
         if sampling_params.logit_bias is not None:
             self.logit_bias[req_index] = sampling_params.logit_bias
 
+        if sampling_params.additional_heads:
+            self.run_additional_heads[req_index] = True
+
         if sampling_params.allowed_token_ids:
             self.has_allowed_token_ids.add(req_id)
             if self.allowed_token_ids_mask_cpu_tensor is None:
@@ -374,6 +380,7 @@ class InputBatch:
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
         self.num_prompt_logprobs.pop(req_id, None)
+        self.run_additional_heads.pop(req_index, None)
         self.in_progress_prompt_logprobs_cpu.pop(req_id, None)
 
         # LoRA
