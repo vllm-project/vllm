@@ -476,29 +476,13 @@ class OpenAIServingCompletion(OpenAIServing):
 
         request_metadata.final_usage_info = usage
 
-        kv_transfer_params = final_res_batch[0].kv_transfer_params
-        if kv_transfer_params is not None:
-            remote_engine_id = kv_transfer_params.remote_engine_id
-            remote_block_ids = kv_transfer_params.remote_block_ids
-            remote_host = kv_transfer_params.remote_host
-            remote_port = kv_transfer_params.remote_port
-        else:
-            remote_engine_id = None
-            remote_block_ids = None
-            remote_host = None
-            remote_port = None
-
         return CompletionResponse(
             id=request_id,
             created=created_time,
             model=model_name,
             choices=choices,
             usage=usage,
-            remote_engine_id=remote_engine_id,
-            remote_block_ids=remote_block_ids,
-            remote_host=remote_host,
-            remote_port=remote_port,
-        )
+            kv_transfer_params=final_res_batch[0].kv_transfer_params)
 
     def _create_completion_logprobs(
         self,

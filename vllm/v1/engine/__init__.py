@@ -10,7 +10,7 @@ import msgspec
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs
 from vllm.multimodal.inputs import PlaceholderRange
-from vllm.sampling_params import KVTransferParams, SamplingParams
+from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 
@@ -105,7 +105,7 @@ class EngineCoreOutput(
     finish_reason: Optional[FinishReason] = None
     stop_reason: Union[int, str, None] = None
     events: Optional[list[EngineCoreEvent]] = None
-    kv_transfer_params: Optional[KVTransferParams] = None
+    kv_transfer_params: Optional[dict[str, Any]] = None
 
     @property
     def finished(self) -> bool:

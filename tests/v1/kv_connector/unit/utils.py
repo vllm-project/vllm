@@ -3,9 +3,11 @@ from typing import Optional
 
 import torch
 
+from vllm import SamplingParams
 from vllm.config import (CacheConfig, DeviceConfig, KVTransferConfig,
                          ModelConfig, SchedulerConfig, VllmConfig)
-from vllm.sampling_params import KVTransferParams, SamplingParams
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+    NixlKVTransferParams)
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec)
@@ -121,27 +123,26 @@ def create_request(
 
     if do_remote_decode:
         assert not do_remote_prefill
-        kv_transfer_params = KVTransferParams(do_remote_decode=True)
+        kv_transfer_params = NixlKVTransferParams(do_remote_prefill=False,
+                                                  do_remote_decode=True)
     elif do_remote_prefill:
-        kv_transfer_params = KVTransferParams(
+        kv_transfer_params = NixlKVTransferParams(
             do_remote_prefill=True,
+            do_remote_decode=False,
             remote_engine_id="remote_engine_id",
-            remote_block_ids=[1, 2, 3],
-        )
+            remote_block_ids=[1, 2, 3])
     else:
         kv_transfer_params = None
 
-    sampling_params = SamplingParams(
-        max_tokens=max_tokens,
-        kv_transfer_params=kv_transfer_params,
-    )
+    max_tokens = 1 if do_remote_decode else max_tokens
+    sampling_params = SamplingParams(max_tokens=max_tokens)
 
     if use_all_1s_for_prompt_tokens:
         prompt_token_ids = [1] * num_tokens
     else:
         prompt_token_ids = [i * request_id for i in range(num_tokens)]
 
-    return Request(
+    req = Request(
         request_id=f"id-{request_id}",
         prompt_token_ids=prompt_token_ids,
         sampling_params=sampling_params,
@@ -151,6 +152,8 @@ def create_request(
         eos_token_id=EOS_TOKEN_ID,
         arrival_time=0,
     )
+    req.kv_transfer_params = kv_transfer_params
+    return req
 
 
 def create_model_runner_output(

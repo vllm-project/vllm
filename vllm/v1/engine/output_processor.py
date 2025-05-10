@@ -3,10 +3,10 @@
 import asyncio
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 from vllm.outputs import CompletionOutput, RequestOutput
-from vllm.sampling_params import KVTransferParams, RequestOutputKind
+from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
@@ -146,7 +146,7 @@ class RequestState:
         new_token_ids: list[int],
         finish_reason: Optional[FinishReason],
         stop_reason: Union[int, str, None],
-        kv_transfer_params: KVTransferParams,
+        kv_transfer_params: Optional[dict[str, Any]] = None,
     ) -> Optional[RequestOutput]:
 
         finished = finish_reason is not None
@@ -176,7 +176,7 @@ class RequestState:
         request_id: str,
         outputs: list[CompletionOutput],
         finished: bool,
-        kv_transfer_params: KVTransferParams,
+        kv_transfer_params: Optional[dict[str, Any]] = None,
     ) -> RequestOutput:
 
         if self.output_kind == RequestOutputKind.DELTA:

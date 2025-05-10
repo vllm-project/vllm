@@ -18,8 +18,7 @@ from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.logger import init_logger
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
-                                  KVTransferParams, RequestOutputKind,
-                                  SamplingParams)
+                                  RequestOutputKind, SamplingParams)
 from vllm.sequence import Logprob
 from vllm.utils import random_uuid, resolve_obj_by_qualname
 
@@ -847,29 +846,9 @@ class CompletionRequest(OpenAIBaseModel):
             " as strings of the form 'token_id:{token_id}' so that tokens "
             "that are not JSON-encodable can be identified."))
 
-    do_remote_decode: bool = Field(
-        default=False,
+    kv_transfer_params: Optional[dict[str, Any]] = Field(
+        default=None,
         description="KVTransfer parameters used for disaggregated serving.")
-
-    do_remote_prefill: bool = Field(
-        default=False,
-        description="KVTransfer parameters used for disaggregated serving.")
-
-    remote_engine_id: Optional[str] = Field(
-        default=None,
-        description="Remote engine id for prefill-decode disaggregation.")
-
-    remote_block_ids: Optional[list[int]] = Field(
-        default=None,
-        description="Remote block ids for prefill-decode disaggregation.")
-
-    remote_host: Optional[str] = Field(
-        default=None,
-        description="Side channel host for connector metadata exchange.")
-
-    remote_port: Optional[int] = Field(
-        default=None,
-        description="Side channel port for connector metadata exchange.")
 
     # doc: end-completion-extra-params
 
@@ -968,14 +947,7 @@ class CompletionRequest(OpenAIBaseModel):
             whitespace_pattern=self.guided_whitespace_pattern,
         )
 
-        kv_transfer_params = KVTransferParams.from_optional(
-            do_remote_decode=self.do_remote_decode,
-            do_remote_prefill=self.do_remote_prefill,
-            remote_engine_id=self.remote_engine_id,
-            remote_block_ids=self.remote_block_ids,
-            remote_host=self.remote_host,
-            remote_port=self.remote_port,
-        )
+
 
         return SamplingParams.from_optional(
             n=self.n,
@@ -1006,7 +978,7 @@ class CompletionRequest(OpenAIBaseModel):
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
-            kv_transfer_params=kv_transfer_params,
+            extra_args={"kv_transfer_params": self.kv_transfer_params}
         )
 
     @model_validator(mode="before")
@@ -1257,18 +1229,8 @@ class CompletionResponse(OpenAIBaseModel):
     model: str
     choices: list[CompletionResponseChoice]
     usage: UsageInfo
-    remote_engine_id: Optional[str] = Field(
-        default=None,
-        description="Remote engine id for prefill-decode disaggregation.")
-    remote_block_ids: Optional[list[int]] = Field(
-        default=None,
-        description="Remote block ids for prefill-decode disaggregation.")
-    remote_host: Optional[str] = Field(
-        default=None,
-        description="Side channel host for connector metadata exchange.")
-    remote_port: Optional[int] = Field(
-        default=None,
-        description="Side channel port for connector metadata exchange.")
+    kv_transfer_params: Optional[dict[str, Any]] = Field(
+        default=None, description="KVTransfer parameters.")
 
 
 class CompletionResponseStreamChoice(OpenAIBaseModel):

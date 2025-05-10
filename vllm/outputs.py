@@ -4,14 +4,14 @@ import time
 from collections.abc import MutableSequence
 from collections.abc import Sequence as GenericSequence
 from dataclasses import dataclass
-from typing import Generic, Optional, Union
+from typing import Any, Generic, Optional, Union
 
 import torch
 from typing_extensions import TypeVar, deprecated
 
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalPlaceholderDict
-from vllm.sampling_params import KVTransferParams, RequestOutputKind
+from vllm.sampling_params import RequestOutputKind
 from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
                            SequenceGroup, SequenceGroupBase, SequenceStatus)
 
@@ -121,7 +121,7 @@ class RequestOutput:
         num_cached_tokens: Optional[int] = None,
         *,
         multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None,
-        kv_transfer_params: Optional[KVTransferParams] = None,
+        kv_transfer_params: Optional[dict[str, Any]] = None,
     ) -> None:
         self.request_id = request_id
         self.prompt = prompt

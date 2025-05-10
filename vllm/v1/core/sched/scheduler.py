@@ -5,16 +5,17 @@ from __future__ import annotations
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
-from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
+                                                          KVConnectorRole,
+                                                          KVTransferParams)
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.sampling_params import KVTransferParams
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
@@ -849,7 +850,7 @@ class Scheduler(SchedulerInterface):
             request.status = finished_status
             self._free_request(request)
 
-    def _free_request(self, request: Request) -> Optional[KVTransferParams]:
+    def _free_request(self, request: Request) -> Optional[dict[str, Any]]:
 
         assert request.is_finished()
 
@@ -917,6 +918,9 @@ class Scheduler(SchedulerInterface):
     ########################################################################
     # P/D Related Methods
     ########################################################################
+
+    def get_kv_connector(self) -> Optional[KVConnectorBase_V1]:
+        return self.connector
 
     def _connector_finished(
             self, request) -> tuple[bool, Optional[KVTransferParams]]:
