@@ -13,7 +13,6 @@ from typing_extensions import deprecated
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 
 logger = init_logger(__name__)
 
@@ -150,7 +149,7 @@ class SamplingParams(
         top_p: Float that controls the cumulative probability of the top tokens
             to consider. Must be in (0, 1]. Set to 1 to consider all tokens.
         top_k: Integer that controls the number of top tokens to consider. Set
-            to -1 to consider all tokens.
+            to 0 (or -1) to consider all tokens.
         min_p: Float that represents the minimum probability for a token to be
             considered, relative to the probability of the most likely token.
             Must be in [0, 1]. Set to 0 to disable this.
@@ -210,7 +209,7 @@ class SamplingParams(
     repetition_penalty: float = 1.0
     temperature: float = 1.0
     top_p: float = 1.0
-    top_k: int = -1
+    top_k: int = 0
     min_p: float = 0.0
     seed: Optional[int] = None
     stop: Optional[Union[str, list[str]]] = None
@@ -257,7 +256,7 @@ class SamplingParams(
         repetition_penalty: Optional[float] = 1.0,
         temperature: Optional[float] = 1.0,
         top_p: Optional[float] = 1.0,
-        top_k: int = -1,
+        top_k: int = 0,
         min_p: float = 0.0,
         seed: Optional[int] = None,
         stop: Optional[Union[str, list[str]]] = None,
@@ -377,7 +376,7 @@ class SamplingParams(
         if self.temperature < _SAMPLING_EPS:
             # Zero temperature means greedy sampling.
             self.top_p = 1.0
-            self.top_k = -1
+            self.top_k = 0
             self.min_p = 0.0
             self._verify_greedy_sampling()
 
@@ -405,8 +404,9 @@ class SamplingParams(
                 f"temperature must be non-negative, got {self.temperature}.")
         if not 0.0 < self.top_p <= 1.0:
             raise ValueError(f"top_p must be in (0, 1], got {self.top_p}.")
-        if self.top_k < -1 or self.top_k == 0:
-            raise ValueError(f"top_k must be -1 (disable), or at least 1, "
+        # quietly accept -1 as disabled, but prefer 0
+        if self.top_k < -1:
+            raise ValueError(f"top_k must be 0 (disable), or at least 1, "
                              f"got {self.top_k}.")
         if not isinstance(self.top_k, int):
             raise TypeError(
@@ -491,13 +491,8 @@ class SamplingParams(
             for add_prefix_space in [False, True]:
                 prefix = " " if add_prefix_space else ""
                 prompt = prefix + bad_word.lstrip()
-
-                if isinstance(tokenizer, MistralTokenizer):
-                    # Mistral tokenizers should not add special tokens
-                    prompt_token_ids = tokenizer.encode(text=prompt)
-                else:
-                    prompt_token_ids = tokenizer.encode(
-                        text=prompt, add_special_tokens=False)
+                prompt_token_ids = tokenizer.encode(text=prompt,
+                                                    add_special_tokens=False)
 
                 # If no space at the beginning
                 # or if prefix space produces a new word token
