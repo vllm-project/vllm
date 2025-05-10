@@ -613,11 +613,28 @@ class DPEngineCoreProc(EngineCoreProc):
         assert 0 <= local_dp_rank <= dp_rank < dp_size
 
         from vllm.platforms import current_platform
-        if current_platform.is_cuda_alike():
-            from vllm.platforms.cuda import device_id_to_physical_device_id
-            tp_size = vllm_config.parallel_config.tensor_parallel_size
-            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
-                str(device_id_to_physical_device_id(i))
+        visible_device_var = current_platform.device_control_env_var
+        
+        def platform_device_id_to_physical_device_id(device_id: int) -> int:
+            if visible_device_var in os.environ:
+                device_ids = os.environ[visible_device_var].split(",")
+                if device_ids == [""]:
+                    msg = ( "Empty <PLATFORM>_VISIBLE_DEVICE var due to"
+                        " set error. If you are using CUDA and ray, please"
+                        " unset the environment variable"
+                        " `CUDA_VISIBLE_DEVICES` inside the worker/actor."
+                        " Check"
+                        " https://github.com/vllm-project/vllm/issues/8402"
+                        " for more information.")
+                    raise RuntimeError(msg)
+                physical_device_id = device_ids[device_id]
+                return int(physical_device_id)
+            else:
+                return device_id
+
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
+        os.environ[visible_device_var] = ",".join(
+                str(platform_device_id_to_physical_device_id(i))
                 for i in range(local_dp_rank * tp_size, (local_dp_rank + 1) *
                                tp_size))
 
