@@ -41,7 +41,8 @@ from vllm.entrypoints.chat_utils import (load_chat_template,
                                          resolve_mistral_chat_template)
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.cli_args import (make_arg_parser,
+from vllm.entrypoints.openai.cli_args import (log_non_default_args,
+                                              make_arg_parser,
                                               validate_parsed_serve_args)
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -389,10 +390,10 @@ def engine_client(request: Request) -> EngineClient:
 
 
 @router.get("/health")
-async def health(raw_request: Request) -> Response:
+async def health(raw_request: Request) -> JSONResponse:
     """Health check."""
     await engine_client(raw_request).check_health()
-    return Response(status_code=200)
+    return JSONResponse(content={}, status_code=200)
 
 
 @router.get("/load")
@@ -414,7 +415,7 @@ async def get_server_load_metrics(request: Request):
 
 
 @router.api_route("/ping", methods=["GET", "POST"])
-async def ping(raw_request: Request) -> Response:
+async def ping(raw_request: Request) -> JSONResponse:
     """Ping check. Endpoint required for SageMaker"""
     return await health(raw_request)
 
@@ -936,10 +937,11 @@ async def init_app_state(
                 chat_template=resolved_chat_template)
         else:
             hf_chat_template = resolve_hf_chat_template(
+                vllm_config.model_config,
                 tokenizer,
                 chat_template=None,
                 tools=None,
-                trust_remote_code=model_config.trust_remote_code)
+            )
 
             if hf_chat_template != resolved_chat_template:
                 logger.warning(
@@ -1040,7 +1042,7 @@ def create_server_socket(addr: tuple[str, int]) -> socket.socket:
 
 async def run_server(args, **uvicorn_kwargs) -> None:
     logger.info("vLLM API server version %s", VLLM_VERSION)
-    logger.info("args: %s", args)
+    log_non_default_args(args)
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)

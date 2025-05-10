@@ -39,6 +39,7 @@ from vllm.v1.sample.tpu.metadata import TPUSupportedSamplingMetadata
 from vllm.v1.sample.tpu.sampler import Sampler as TPUSampler
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from .utils import sanity_check_mm_encoder_outputs
 
@@ -90,7 +91,7 @@ MIN_NUM_SEQS = 8
 # The dummy_run should be comprehensive, ensuring all potential input shapes and
 # branch predictions are included as subgraph inputs to facilitate
 # pre-compilation.
-class TPUModelRunner:
+class TPUModelRunner(LoRAModelRunnerMixin):
 
     def __init__(
         self,
@@ -568,6 +569,17 @@ class TPUModelRunner:
             self.device)
         seq_lens = self.seq_lens_cpu[:self.max_num_reqs].to(self.device)
 
+        if self.lora_config is not None:
+            # We need to respect padding when activating LoRA adapters
+            padded_num_scheduled_tokens_per_req = np.copy(
+                num_scheduled_tokens_per_req
+            )  # Copying to avoid accidental state corruption bugs
+            padded_num_scheduled_tokens_per_req[-1] += \
+                padded_total_num_scheduled_tokens - total_num_scheduled_tokens
+
+            self.set_active_loras(self.input_batch,
+                                  padded_num_scheduled_tokens_per_req)
+
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
             block_tables=block_tables,
@@ -588,7 +600,14 @@ class TPUModelRunner:
         # Padded to avoid recompiling when `num_reqs` varies.
         logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
         logits_indices = logits_indices.to(self.device)
-        return attn_metadata, logits_indices, padded_num_reqs
+
+        layer_names = get_layers_from_vllm_config(self.vllm_config,
+                                                  Attention).keys()
+        per_layer_attn_metadata = {
+            layer_name: attn_metadata
+            for layer_name in layer_names
+        }
+        return per_layer_attn_metadata, logits_indices, padded_num_reqs
 
     def _scatter_placeholders(
         self,
@@ -791,8 +810,18 @@ class TPUModelRunner:
                                             arange)
         selected_token_ids = self.sample_from_logits(logits,
                                                      tpu_sampling_metadata)
+
+        # NOTE (NickLucche) Use the original logits (before any penalties or
+        # temperature scaling) for the top-k logprobs. We can't enforce it due
+        # to recompilations outside torch.compiled code, so just make sure
+        # `sample_from_logits` does not modify the logits in-place.
+        logprobs = self.gather_logprobs(logits, selected_token_ids) \
+            if tpu_sampling_metadata.logprobs else None
+
         # Remove padding on cpu and keep dynamic op outside of xla graph.
         selected_token_ids = selected_token_ids.cpu()[:num_reqs]
+        logprobs_lists = logprobs.tolists() \
+            if tpu_sampling_metadata.logprobs else None
 
         # Update the cache state concurrently. Code above will not block until
         # we use `selected_token_ids`. Add mark_step if post-processing changes
@@ -862,7 +891,7 @@ class TPUModelRunner:
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=valid_sampled_token_ids,
             spec_token_ids=None,
-            logprobs=None,
+            logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
         )
 
@@ -890,6 +919,11 @@ class TPUModelRunner:
                 "get_tensor_model_parallel_rank",
                 return_value=xm_tp_rank):
             model = get_model(vllm_config=self.vllm_config)
+        if self.lora_config is not None:
+            model = self.load_lora_model(model, self.model_config,
+                                         self.scheduler_config,
+                                         self.lora_config, self.device)
+
         # Sync all pending XLA execution during model initialization and weight
         # loading.
         xm.mark_step()
@@ -946,7 +980,17 @@ class TPUModelRunner:
         torch._dynamo.mark_dynamic(position_ids, 0)
         torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
 
-        with set_forward_context(attn_metadata, self.vllm_config, 0):
+        layer_names = get_layers_from_vllm_config(self.vllm_config,
+                                                  Attention).keys()
+        per_layer_attn_metadata = {
+            layer_name: attn_metadata
+            for layer_name in layer_names
+        }
+
+        with self.maybe_dummy_run_with_lora(
+                self.lora_config,
+                np.array([num_tokens], dtype=np.int32)), set_forward_context(
+                    per_layer_attn_metadata, self.vllm_config, 0):
             out = self.model(input_ids=input_ids,
                              positions=position_ids,
                              inputs_embeds=inputs_embeds)
@@ -1121,6 +1165,22 @@ class TPUModelRunner:
         logger.info("Compilation finished in %.2f [secs].", end - start)
         self._update_num_xla_graphs("sample_from_logits")
 
+    def _precompile_gather_logprobs(self) -> None:
+        logger.info("Compiling gather_logprobs with different input shapes.")
+        start = time.perf_counter()
+        for num_reqs in self.num_reqs_paddings:
+            dummy_logits = torch.zeros((num_reqs, self.vocab_size),
+                                       device=self.device,
+                                       dtype=self._hidden_states_dtype)
+            dummy_tokens = torch.zeros((num_reqs, 1),
+                                       dtype=torch.int64).to(self.device)
+            self.gather_logprobs(dummy_logits, dummy_tokens)
+            logger.info("  -- num_seqs: %d", num_reqs)
+        xm.wait_device_ops()
+        end = time.perf_counter()
+        logger.info("Compilation finished in %.2f [secs].", end - start)
+        self._update_num_xla_graphs("gather_logprobs")
+
     def capture_model(self) -> None:
         """
         Precompile all the subgraphs with possible input shapes.
@@ -1131,6 +1191,7 @@ class TPUModelRunner:
         self._precompile_compute_logits()
         self._precompile_structured_decoding()
         self._precompile_sample_from_logits()
+        self._precompile_gather_logprobs()
 
     def profile_run(
         self,
@@ -1254,12 +1315,30 @@ class TPUModelRunner:
     def sample_from_logits(
             self, logits: torch.Tensor,
             sampling_metadata: TPUSupportedSamplingMetadata) -> torch.Tensor:
+        """
+        Sample with xla-friendly function. This function is to be traced 
+        separately from `forward` for lighter compilation overhead.
+        """
         if sampling_metadata.all_greedy:
             out_tokens = torch.argmax(logits, dim=-1, keepdim=True)
         else:
             out_tokens = self.sampler(logits,
                                       sampling_metadata).sampled_token_ids
         return out_tokens
+
+    @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
+    def gather_logprobs(self, logits: torch.Tensor,
+                        sampled_tokens: torch.Tensor) -> LogprobsTensors:
+        """
+        Gather the top_logprobs with corresponding tokens. Use a fixed number
+        of logprobs as an alternative to having multiple pre-compiled graphs.
+        Select the number of logprobs actually demanded by each request on CPU.
+        """
+        logprobs = self.sampler.compute_logprobs(logits)
+        return self.sampler.gather_logprobs(
+            logprobs,
+            self.model_config.max_logprobs,
+            token_ids=sampled_tokens.squeeze(-1))
 
     @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def structured_decode(self, require_struct_decoding: torch.Tensor,
