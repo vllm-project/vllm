@@ -191,7 +191,7 @@ def prepare_moe_fp4_layer_for_marlin(layer: torch.nn.Module) -> None:
                                                     perm=perm,
                                                     size_k=size_k,
                                                     size_n=size_n,
-                                                    num_bits=8)
+                                                    num_bits=4)
             tensor_list.append(marlin_qweight)
 
         weight = torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
@@ -201,11 +201,6 @@ def prepare_moe_fp4_layer_for_marlin(layer: torch.nn.Module) -> None:
 
     # WEIGHT SCALES
     # Permute scales
-    if layer.weight_block_size is None:
-        group_size = -1
-    else:
-        group_size = layer.weight_block_size[1]
-
     for name in ["w13", "w2"]:
         scales = getattr(layer, name + "_weight_scale").to(param_dtype)
         global_scale = getattr(layer, name + "_weight_scale_2").to(param_dtype)
@@ -220,7 +215,7 @@ def prepare_moe_fp4_layer_for_marlin(layer: torch.nn.Module) -> None:
             marlin_scales = marlin_permute_scales(s=scales[i].T,
                                                   size_k=size_k,
                                                   size_n=size_n,
-                                                  group_size=group_size)
+                                                  group_size=16)
             marlin_scales = fp4_marlin_process_scales(marlin_scales)
             tensor_list.append(marlin_scales)
 
