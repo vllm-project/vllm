@@ -22,7 +22,6 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
@@ -47,7 +46,6 @@ class KVConnectorRole(enum.Enum):
     WORKER = 1
 
 
-@dataclass
 class KVConnectorMetadata:
     pass
 
