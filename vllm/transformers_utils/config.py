@@ -662,53 +662,6 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
             f"and if the config file exists.")
     assert isinstance(config_dict, dict)
 
-    # Load standard Hugging Face config.json to get better defaults
-    # if params.json (loaded into config_dict) is missing these specific keys.
-    hf_standard_config_data = get_hf_file_to_dict("config.json", model,
-                                                  revision)
-
-    ultimate_fallback_max_val = 128_000  # Original hardcoded fallback
-
-    # Determine the default for max_position_embeddings
-    default_for_max_pos_embed = ultimate_fallback_max_val
-    if hf_standard_config_data:
-        mpe_from_hf = None
-        text_config_data = hf_standard_config_data.get("text_config")
-        if isinstance(text_config_data, dict):
-            mpe_from_hf = text_config_data.get("max_position_embeddings")
-
-        if mpe_from_hf is None:  # If not in text_config or text_config absent
-            mpe_from_hf = hf_standard_config_data.get(
-                "max_position_embeddings")
-
-        if mpe_from_hf is not None:
-            default_for_max_pos_embed = mpe_from_hf
-
-    # Determine the default for max_seq_len
-    default_for_max_seq_len = ultimate_fallback_max_val
-    if hf_standard_config_data:
-        msl_from_hf = None
-        text_config_data = hf_standard_config_data.get("text_config")
-        if isinstance(text_config_data, dict):
-            msl_from_hf = text_config_data.get("max_seq_len")
-
-        if msl_from_hf is None:  # If not in text_config or text_config absent
-            msl_from_hf = hf_standard_config_data.get("max_seq_len")
-
-        if msl_from_hf is not None:
-            default_for_max_seq_len = msl_from_hf
-        elif default_for_max_pos_embed != ultimate_fallback_max_val:
-            # If max_seq_len is not in standard config,
-            # but max_pos_embed was found there, use it for max_seq_len.
-            default_for_max_seq_len = default_for_max_pos_embed
-
-    # If config_dict (from params.json) has the key, its value is used.
-    # Otherwise, the determined from config.json or 128_000 is used.
-    config_dict["max_seq_len"] = config_dict.get("max_seq_len",
-                                                 default_for_max_seq_len)
-    config_dict["max_position_embeddings"] = config_dict.get(
-        "max_position_embeddings", default_for_max_pos_embed)
-
     config_mapping = {
         "dim": "hidden_size",
         "norm_eps": "rms_norm_eps",
@@ -720,11 +673,12 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
 
     def recurse_elems(elem: Any):
         if isinstance(elem, dict):
-            mapped_dict = {}
+            config_dict = {}
             for key, value in elem.items():
-                mapped_key = config_mapping.get(key, key)
-                mapped_dict[mapped_key] = recurse_elems(value)
-            return mapped_dict
+                key = config_mapping.get(key, key)
+                config_dict[key] = recurse_elems(value)
+
+            return config_dict
         else:
             return elem
 
@@ -732,6 +686,54 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
     config_dict["hidden_act"] = config_dict.get("activation", "silu")
     config_dict["tie_word_embeddings"] = config_dict.get(
         "tie_embeddings", False)
+    # Check if max_position_embeddings is in params.json
+    mpe_from_params = config_dict.get("max_position_embeddings")
+    final_mpe_to_set = mpe_from_params
+
+    if final_mpe_to_set is None:
+        # Not found in params.json, try to get from standard HF AutoConfig
+        hf_config_for_defaults = None
+        try:
+            trust_remote_code_val = kwargs.get("trust_remote_code", False)
+            token_val = kwargs.get("token")  # Passed from get_config
+
+            hf_config_for_defaults = AutoConfig.from_pretrained(
+                model,
+                revision=revision,
+                trust_remote_code=trust_remote_code_val,
+                token=token_val)
+        except Exception as e:
+            error_message = (
+                "Invalid repository ID or local directory specified:"
+                " '{model}'.\nPlease verify the following requirements:\n"
+                "1. Provide a valid Hugging Face repository ID.\n"
+                "2. Specify a local directory that contains a recognized "
+                "configuration file.\n").format(model=model)
+
+            raise ValueError(error_message) from e
+
+        if hf_config_for_defaults:
+            # Try to get from text_config first, then top-level
+            mpe_from_hf_config = None
+            text_config_obj = getattr(hf_config_for_defaults, "text_config",
+                                      None)
+            if text_config_obj and hasattr(text_config_obj,
+                                           "max_position_embeddings"):
+                mpe_from_hf_config = getattr(text_config_obj,
+                                             "max_position_embeddings", None)
+
+            if mpe_from_hf_config is None and hasattr(
+                    hf_config_for_defaults, "max_position_embeddings"):
+                mpe_from_hf_config = getattr(hf_config_for_defaults,
+                                             "max_position_embeddings", None)
+
+            if mpe_from_hf_config is not None:
+                final_mpe_to_set = mpe_from_hf_config
+
+        if final_mpe_to_set is None:  # Still not found, use ultimate fallback
+            final_mpe_to_set = 128_000
+
+    config_dict["max_position_embeddings"] = final_mpe_to_set
 
     if config_dict.get("quantization") is not None:
         quantization = config_dict.get("quantization", {})
@@ -747,6 +749,7 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
         else:
             raise ValueError(
                 f"Found unknown quantization='{quantization}' in config")
+
         config_dict["quantization_config"] = quantization_config
 
     config_type: Literal["text",
@@ -760,7 +763,7 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
 
     if config_type == "multimodal":
         multimodal_config = config_dict.pop("vision_encoder")
-        quantization_config_val = config_dict.get("quantization_config")
+        quantization_config = config_dict.get("quantization_config", {})
 
         config_dict = {
             "text_config": config_dict,
@@ -768,20 +771,19 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
         }
         config_dict["architectures"] = ["PixtralForConditionalGeneration"]
         config_dict["model_type"] = "pixtral"
-        if quantization_config_val:
-            config_dict["quantization_config"] = quantization_config_val
+        if quantization_config:
+            config_dict["quantization_config"] = quantization_config
 
     config_dict.update(kwargs)
 
     config_dict = recurse_elems(config_dict)
 
+    # transform to HF config format
     if config_type == "multimodal":
-        text_c = config_dict.get("text_config", {})
-        vision_c = config_dict.get("vision_config", {})
         config_dict["text_config"] = PretrainedConfig(
-            **(text_c if isinstance(text_c, dict) else {}))
+            **config_dict["text_config"])
         config_dict["vision_config"] = PretrainedConfig(
-            **(vision_c if isinstance(vision_c, dict) else {}))
+            **config_dict["vision_config"])
 
     return PretrainedConfig(**config_dict)
 
