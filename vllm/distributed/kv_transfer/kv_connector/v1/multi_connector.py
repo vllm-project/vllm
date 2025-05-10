@@ -87,10 +87,12 @@ class MultiConnector(KVConnectorBase_V1):
         for c in self._connectors:
             c.wait_for_save()
 
-    def get_finished(self) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    def get_finished(
+        self, finished_req_ids: set[str]
+    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         finished_recving, finished_sending = set(), set()
         for c in self._connectors:
-            recving, sending = c.get_finished()
+            recving, sending = c.get_finished(finished_req_ids)
             if not recving and not sending:
                 continue
             # Aggregate finished recving request ids.
