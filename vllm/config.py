@@ -3413,8 +3413,6 @@ class KVTransferConfig(BaseModel):
     kv_connector: Optional[str] = None
 
     # Engine ID for the KV transfers.
-    # Note(tms): sticking this here so the engine_id is consistent between
-    # scheduler-side and worker-side of the KVConnector
     engine_id: str = str(uuid.uuid4())
 
     # The device used by kv connector to buffer the KV cache.
