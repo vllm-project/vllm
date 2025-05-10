@@ -118,8 +118,8 @@ def main():
             acceptance_counts[step] += count
 
     print("-" * 50)
-    print(f"mean acceptance length: \
-        {sum(acceptance_counts) / acceptance_counts[0]:.2f}")
+    print(f"mean acceptance length (including bonus tokens): \
+        {1 + (sum(acceptance_counts) / acceptance_counts[0]):.2f}")
     print("-" * 50)
 
     # print acceptance at each token position

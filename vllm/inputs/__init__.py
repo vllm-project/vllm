@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from .data import (DecoderOnlyInputs, EncoderDecoderInputs,
+from .data import (DecoderOnlyInputs, EmbedsInputs, EncoderDecoderInputs,
                    ExplicitEncoderDecoderPrompt, ProcessorInputs, PromptType,
                    SingletonInputs, SingletonPrompt, TextPrompt, TokenInputs,
-                   TokensPrompt, build_explicit_enc_dec_prompt,
+                   TokensPrompt, build_explicit_enc_dec_prompt, embeds_inputs,
                    to_enc_dec_tuple_list, token_inputs, zip_enc_dec_prompts)
 from .registry import (DummyData, InputContext, InputProcessingContext,
                        InputRegistry)
 
 INPUT_REGISTRY = InputRegistry()
 """
-The global :class:`~InputRegistry` which is used by :class:`~vllm.LLMEngine`
+The global {class}`~InputRegistry` which is used by {class}`~vllm.LLMEngine`
 to dispatch data processing according to the target model.
 """
 
@@ -21,7 +21,9 @@ __all__ = [
     "SingletonPrompt",
     "ExplicitEncoderDecoderPrompt",
     "TokenInputs",
+    "EmbedsInputs",
     "token_inputs",
+    "embeds_inputs",
     "DecoderOnlyInputs",
     "EncoderDecoderInputs",
     "ProcessorInputs",
