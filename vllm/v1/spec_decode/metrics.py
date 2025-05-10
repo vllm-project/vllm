@@ -120,38 +120,45 @@ class SpecDecodingProm:
       vllm:spec_decode_num_drafts[$interval]
     """
 
-    def __init__(self, speculative_config: Optional[SpeculativeConfig],
-                 labelnames: list[str], labelvalues: list[str]):
+    _counter_cls = prometheus_client.Counter
+
+    def __init__(
+        self,
+        speculative_config: Optional[SpeculativeConfig],
+        labelnames: list[str],
+        labelvalues: list[str],
+    ):
         self.spec_decoding_enabled = speculative_config is not None
         if not self.spec_decoding_enabled:
             return
 
-        self.counter_spec_decode_num_drafts = \
-            prometheus_client.Counter(
-                name="vllm:spec_decode_num_drafts_total",
-                documentation="Number of spec decoding drafts.",
-                labelnames=labelnames).labels(*labelvalues)
-        self.counter_spec_decode_num_draft_tokens = \
-            prometheus_client.Counter(
-                name="vllm:spec_decode_num_draft_tokens_total",
-                documentation="Number of draft tokens.",
-                labelnames=labelnames).labels(*labelvalues)
-        self.counter_spec_decode_num_accepted_tokens = \
-            prometheus_client.Counter(
-                name="vllm:spec_decode_num_accepted_tokens_total",
-                documentation="Number of accepted tokens.",
-                labelnames=labelnames).labels(*labelvalues)
+        self.counter_spec_decode_num_drafts = self._counter_cls(
+            name="vllm:spec_decode_num_drafts_total",
+            documentation="Number of spec decoding drafts.",
+            labelnames=labelnames,
+        ).labels(*labelvalues)
+        self.counter_spec_decode_num_draft_tokens = self._counter_cls(
+            name="vllm:spec_decode_num_draft_tokens_total",
+            documentation="Number of draft tokens.",
+            labelnames=labelnames,
+        ).labels(*labelvalues)
+        self.counter_spec_decode_num_accepted_tokens = self._counter_cls(
+            name="vllm:spec_decode_num_accepted_tokens_total",
+            documentation="Number of accepted tokens.",
+            labelnames=labelnames,
+        ).labels(*labelvalues)
 
         assert speculative_config is not None
         num_spec_tokens = (speculative_config.num_speculative_tokens
                            if self.spec_decoding_enabled else 0)
         pos_labelnames = labelnames + ["position"]
-        base_counter = prometheus_client.Counter(
+        base_counter = self._counter_cls(
             name="vllm:spec_decode_num_accepted_tokens_per_pos",
             documentation="Accepted tokens per draft position.",
-            labelnames=pos_labelnames)
-        self.counter_spec_decode_num_accepted_tokens_per_pos: \
-            list[prometheus_client.Counter] = []
+            labelnames=pos_labelnames,
+        )
+        self.counter_spec_decode_num_accepted_tokens_per_pos: list[
+            prometheus_client.Counter] = []
         for pos in range(num_spec_tokens):
             pos_labelvalues = labelvalues + [str(pos)]
             self.counter_spec_decode_num_accepted_tokens_per_pos.append(
