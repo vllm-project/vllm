@@ -20,7 +20,8 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                cached_tokenizer_from_config,
                                                encode_tokens)
 
-from ....multimodal.utils import random_audio, random_image, random_video
+from ....multimodal.utils import (random_audio, random_image,
+                                  random_timeseries, random_video)
 from ...registry import HF_EXAMPLE_MODELS
 
 
@@ -75,6 +76,7 @@ def _test_processing_correctness(
         "image": Image.new("RGB", size=(128, 128)),
         "video": np.zeros((4, 128, 128, 3), dtype=np.uint8),
         "audio": (np.zeros((512, )), 16000),
+        "timeseries": np.zeros(256),
     }
     input_factory = {
         "image":
@@ -88,6 +90,8 @@ def _test_processing_correctness(
                 max_wh=256),
         "audio":
         partial(random_audio, rng, min_len=512, max_len=1024, sr=16000),
+        "timeseries":
+        partial(random_timeseries, rng, min_len=10, max_len=100),
     }
 
     for batch_idx in range(num_batches):
@@ -240,6 +244,7 @@ def _test_processing_correctness_one(
     "CohereForAI/aya-vision-8b",
     "Salesforce/blip2-opt-2.7b",
     "facebook/chameleon-7b",
+    "bytedance-research/ChatTS-14B",
     "deepseek-ai/deepseek-vl2-tiny",
     "microsoft/Florence-2-base",
     "adept/fuyu-8b",

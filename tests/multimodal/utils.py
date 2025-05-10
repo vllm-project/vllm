@@ -31,3 +31,12 @@ def random_audio(
 ):
     audio_len = rng.randint(min_len, max_len)
     return rng.rand(audio_len), sr
+
+
+def random_timeseries(
+    rng: np.random.RandomState,
+    min_len: int,
+    max_len: int,
+):
+    length = rng.randint(min_len, max_len)
+    return rng.rand(length)
