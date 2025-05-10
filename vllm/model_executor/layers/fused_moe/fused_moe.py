@@ -1100,9 +1100,6 @@ def torch_vllm_outplace_fused_experts(**kwargs) -> torch.Tensor:
 
 
 def dispatch_fused_experts_func(inplace: bool) -> Callable[..., torch.Tensor]:
-    if is_rocm_aiter_moe_enabled():
-        from .rocm_aiter_fused_moe import rocm_aiter_fused_experts
-        return rocm_aiter_fused_experts
     if inplace:
         return torch_vllm_inplace_fused_experts
     return torch_vllm_outplace_fused_experts
@@ -1130,7 +1127,8 @@ def fused_experts(hidden_states: torch.Tensor,
                   a1_scale: Optional[torch.Tensor] = None,
                   a2_scale: Optional[torch.Tensor] = None,
                   block_shape: Optional[List[int]] = None,
-                  allow_deep_gemm: bool = False) -> torch.Tensor:
+                  allow_deep_gemm: bool = False,
+                  use_ck_moe_2stages: bool = False) -> torch.Tensor:
     if (allow_deep_gemm and use_fp8_w8a8
             and _valid_deep_gemm(hidden_states, w1, w2, expert_map)):
         assert apply_router_weight_on_input is False

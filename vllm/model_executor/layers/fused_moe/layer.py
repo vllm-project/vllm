@@ -27,6 +27,10 @@ if current_platform.is_cuda_alike():
     from .fused_moe import fused_experts
 else:
     fused_experts = None  # type: ignore
+if current_platform.is_rocm():
+    from .rocm_aiter_fused_moe import rocm_aiter_fused_experts
+else:
+    rocm_aiter_fused_experts = None  # type: ignore
 if current_platform.is_tpu():
     # the iterative moe implementation is used until the moe_pallas is fixed
     from .moe_torch_iterative import fused_moe as fused_moe_pallas
@@ -119,10 +123,17 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         # Lazy import to avoid importing triton.
         from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
             is_rocm_aiter_moe_enabled, shuffle_weights)
-        if is_rocm_aiter_moe_enabled():
+
+        self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
+        self.rocm_aiter_2stage_moe_enabled = envs.VLLM_ROCM_USE_AITER_2STAGE_MOE
+
+        if self.rocm_aiter_moe_enabled:
             # reshaping weights is required for aiter moe kernel.
-            shuffled_w13, shuffled_w2 = shuffle_weights(
-                layer.w13_weight.data, layer.w2_weight.data)
+            layout = (32, 32) if self.rocm_aiter_2stage_moe_enabled else (16,
+                                                                          16)
+            shuffled_w13, shuffled_w2 = shuffle_weights(layer.w13_weight.data,
+                                                        layer.w2_weight.data,
+                                                        layout=layout)
 
             layer.w13_weight.data = shuffled_w13
             layer.w2_weight.data = shuffled_w2
@@ -202,6 +213,17 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
+
+        if self.rocm_aiter_moe_enabled:
+            return rocm_aiter_fused_experts(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=activation,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                use_ck_moe_2stages=self.rocm_aiter_2stage_moe_enabled)
 
         return fused_experts(
             hidden_states=x,
