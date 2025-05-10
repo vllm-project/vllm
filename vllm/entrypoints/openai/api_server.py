@@ -17,10 +17,13 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
+from json import JSONDecodeError
 from typing import Annotated, Optional, Union
 
+import prometheus_client
 import uvloop
-from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Request
+from fastapi import (APIRouter, Depends, FastAPI, Form, HTTPException, Request,
+                     status)
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -297,13 +300,16 @@ async def validate_json_request(raw_request: Request):
     content_type = raw_request.headers.get("content-type", "").lower()
     media_type = content_type.split(";", maxsplit=1)[0]
     if media_type != "application/json":
-        raise HTTPException(
-            status_code=HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
-            detail="Unsupported Media Type: Only 'application/json' is allowed"
-        )
+        raise RequestValidationError(errors=[
+            "Unsupported Media Type: Only 'application/json' is allowed"
+        ])
 
 
 router = APIRouter()
+
+
+class PrometheusResponse(Response):
+    media_type = prometheus_client.CONTENT_TYPE_LATEST
 
 
 def mount_metrics(app: FastAPI):
@@ -334,7 +340,7 @@ def mount_metrics(app: FastAPI):
             "/server_info",
         ],
         registry=registry,
-    ).add().instrument(app).expose(app)
+    ).add().instrument(app).expose(app, response_class=PrometheusResponse)
 
     # Add prometheus asgi middleware to route /metrics requests
     metrics_route = Mount("/metrics", make_asgi_app(registry=registry))
@@ -389,7 +395,7 @@ def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
 
 
-@router.get("/health")
+@router.get("/health", response_class=Response)
 async def health(raw_request: Request) -> Response:
     """Health check."""
     await engine_client(raw_request).check_health()
@@ -414,13 +420,26 @@ async def get_server_load_metrics(request: Request):
         content={'server_load': request.app.state.server_load_metrics})
 
 
-@router.api_route("/ping", methods=["GET", "POST"])
+@router.get("/ping", response_class=Response)
+@router.post("/ping", response_class=Response)
 async def ping(raw_request: Request) -> Response:
     """Ping check. Endpoint required for SageMaker"""
     return await health(raw_request)
 
 
-@router.post("/tokenize", dependencies=[Depends(validate_json_request)])
+@router.post("/tokenize",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 status.HTTP_400_BAD_REQUEST: {
+                     "model": ErrorResponse
+                 },
+                 status.HTTP_404_NOT_FOUND: {
+                     "model": ErrorResponse
+                 },
+                 status.HTTP_500_INTERNAL_SERVER_ERROR: {
+                     "model": ErrorResponse
+                 },
+             })
 @with_cancellation
 async def tokenize(request: TokenizeRequest, raw_request: Request):
     handler = tokenization(raw_request)
@@ -435,12 +454,34 @@ async def tokenize(request: TokenizeRequest, raw_request: Request):
     assert_never(generator)
 
 
-@router.post("/detokenize", dependencies=[Depends(validate_json_request)])
+@router.post("/detokenize",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 status.HTTP_400_BAD_REQUEST: {
+                     "model": ErrorResponse
+                 },
+                 status.HTTP_404_NOT_FOUND: {
+                     "model": ErrorResponse
+                 },
+                 status.HTTP_500_INTERNAL_SERVER_ERROR: {
+                     "model": ErrorResponse
+                 },
+             })
 @with_cancellation
 async def detokenize(request: DetokenizeRequest, raw_request: Request):
     handler = tokenization(raw_request)
 
-    generator = await handler.create_detokenize(request, raw_request)
+    try:
+        generator = await handler.create_detokenize(request, raw_request)
+    except OverflowError as e:
+        return ErrorResponse(message=str(e),
+                             type=HTTPStatus.BAD_REQUEST.phrase,
+                             code=HTTPStatus.BAD_REQUEST.value)
+    except Exception as e:
+        return ErrorResponse(message=str(e),
+                             type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
+                             code=HTTPStatus.INTERNAL_SERVER_ERROR.value)
+
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
@@ -465,7 +506,23 @@ async def show_version():
 
 
 @router.post("/v1/chat/completions",
-             dependencies=[Depends(validate_json_request)])
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 status.HTTP_200_OK: {
+                     "content": {
+                         "text/event-stream": {}
+                     }
+                 },
+                 status.HTTP_400_BAD_REQUEST: {
+                     "model": ErrorResponse
+                 },
+                 status.HTTP_404_NOT_FOUND: {
+                     "model": ErrorResponse
+                 },
+                 status.HTTP_500_INTERNAL_SERVER_ERROR: {
+                     "model": ErrorResponse
+                 }
+             })
 @with_cancellation
 @load_aware_call
 async def create_chat_completion(request: ChatCompletionRequest,
@@ -487,7 +544,24 @@ async def create_chat_completion(request: ChatCompletionRequest,
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
-@router.post("/v1/completions", dependencies=[Depends(validate_json_request)])
+@router.post("/v1/completions",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 status.HTTP_200_OK: {
+                     "content": {
+                         "text/event-stream": {}
+                     }
+                 },
+                 status.HTTP_400_BAD_REQUEST: {
+                     "model": ErrorResponse
+                 },
+                 status.HTTP_404_NOT_FOUND: {
+                     "model": ErrorResponse
+                 },
+                 status.HTTP_500_INTERNAL_SERVER_ERROR: {
+                     "model": ErrorResponse
+                 },
+             })
 @with_cancellation
 @load_aware_call
 async def create_completion(request: CompletionRequest, raw_request: Request):
@@ -496,7 +570,17 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         return base(raw_request).create_error_response(
             message="The model does not support Completions API")
 
-    generator = await handler.create_completion(request, raw_request)
+    try:
+        generator = await handler.create_completion(request, raw_request)
+    except OverflowError as e:
+        return ErrorResponse(message=str(e),
+                             type=HTTPStatus.BAD_REQUEST.phrase,
+                             code=HTTPStatus.BAD_REQUEST.value)
+    except Exception as e:
+        return ErrorResponse(message=str(e),
+                             type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
+                             code=HTTPStatus.INTERNAL_SERVER_ERROR.value)
+
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
@@ -506,7 +590,16 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
-@router.post("/v1/embeddings", dependencies=[Depends(validate_json_request)])
+@router.post("/v1/embeddings",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 status.HTTP_400_BAD_REQUEST: {
+                     "model": ErrorResponse
+                 },
+                 status.HTTP_500_INTERNAL_SERVER_ERROR: {
+                     "model": ErrorResponse
+                 },
+             })
 @with_cancellation
 @load_aware_call
 async def create_embedding(request: EmbeddingRequest, raw_request: Request):
@@ -553,7 +646,16 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
     assert_never(generator)
 
 
-@router.post("/pooling", dependencies=[Depends(validate_json_request)])
+@router.post("/pooling",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 status.HTTP_400_BAD_REQUEST: {
+                     "model": ErrorResponse
+                 },
+                 status.HTTP_500_INTERNAL_SERVER_ERROR: {
+                     "model": ErrorResponse
+                 },
+             })
 @with_cancellation
 @load_aware_call
 async def create_pooling(request: PoolingRequest, raw_request: Request):
@@ -572,7 +674,16 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
     assert_never(generator)
 
 
-@router.post("/score", dependencies=[Depends(validate_json_request)])
+@router.post("/score",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 status.HTTP_400_BAD_REQUEST: {
+                     "model": ErrorResponse
+                 },
+                 status.HTTP_500_INTERNAL_SERVER_ERROR: {
+                     "model": ErrorResponse
+                 },
+             })
 @with_cancellation
 @load_aware_call
 async def create_score(request: ScoreRequest, raw_request: Request):
@@ -591,7 +702,16 @@ async def create_score(request: ScoreRequest, raw_request: Request):
     assert_never(generator)
 
 
-@router.post("/v1/score", dependencies=[Depends(validate_json_request)])
+@router.post("/v1/score",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 status.HTTP_400_BAD_REQUEST: {
+                     "model": ErrorResponse
+                 },
+                 status.HTTP_500_INTERNAL_SERVER_ERROR: {
+                     "model": ErrorResponse
+                 },
+             })
 @with_cancellation
 @load_aware_call
 async def create_score_v1(request: ScoreRequest, raw_request: Request):
@@ -602,12 +722,26 @@ async def create_score_v1(request: ScoreRequest, raw_request: Request):
     return await create_score(request, raw_request)
 
 
-@router.post("/v1/audio/transcriptions")
+@router.post("/v1/audio/transcriptions",
+             responses={
+                 status.HTTP_200_OK: {
+                     "content": {
+                         "text/event-stream": {}
+                     }
+                 },
+                 status.HTTP_400_BAD_REQUEST: {
+                     "model": ErrorResponse
+                 },
+                 status.HTTP_500_INTERNAL_SERVER_ERROR: {
+                     "model": ErrorResponse
+                 },
+             })
 @with_cancellation
 @load_aware_call
-async def create_transcriptions(request: Annotated[TranscriptionRequest,
-                                                   Form()],
-                                raw_request: Request):
+async def create_transcriptions(
+    request: Annotated[TranscriptionRequest, Form()],
+    raw_request: Request,
+):
     handler = transcription(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
@@ -627,7 +761,16 @@ async def create_transcriptions(request: Annotated[TranscriptionRequest,
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
-@router.post("/rerank", dependencies=[Depends(validate_json_request)])
+@router.post("/rerank",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 status.HTTP_400_BAD_REQUEST: {
+                     "model": ErrorResponse
+                 },
+                 status.HTTP_500_INTERNAL_SERVER_ERROR: {
+                     "model": ErrorResponse
+                 },
+             })
 @with_cancellation
 @load_aware_call
 async def do_rerank(request: RerankRequest, raw_request: Request):
@@ -645,7 +788,16 @@ async def do_rerank(request: RerankRequest, raw_request: Request):
     assert_never(generator)
 
 
-@router.post("/v1/rerank", dependencies=[Depends(validate_json_request)])
+@router.post("/v1/rerank",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 status.HTTP_400_BAD_REQUEST: {
+                     "model": ErrorResponse
+                 },
+                 status.HTTP_500_INTERNAL_SERVER_ERROR: {
+                     "model": ErrorResponse
+                 },
+             })
 @with_cancellation
 async def do_rerank_v1(request: RerankRequest, raw_request: Request):
     logger.warning_once(
@@ -656,7 +808,16 @@ async def do_rerank_v1(request: RerankRequest, raw_request: Request):
     return await do_rerank(request, raw_request)
 
 
-@router.post("/v2/rerank", dependencies=[Depends(validate_json_request)])
+@router.post("/v2/rerank",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 status.HTTP_400_BAD_REQUEST: {
+                     "model": ErrorResponse
+                 },
+                 status.HTTP_500_INTERNAL_SERVER_ERROR: {
+                     "model": ErrorResponse
+                 },
+             })
 @with_cancellation
 async def do_rerank_v2(request: RerankRequest, raw_request: Request):
     return await do_rerank(request, raw_request)
@@ -736,12 +897,30 @@ if envs.VLLM_SERVER_DEV_MODE:
         return JSONResponse(content={"is_sleeping": is_sleeping})
 
 
-@router.post("/invocations", dependencies=[Depends(validate_json_request)])
+@router.post("/invocations",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 status.HTTP_400_BAD_REQUEST: {
+                     "model": ErrorResponse
+                 },
+                 status.HTTP_415_UNSUPPORTED_MEDIA_TYPE: {
+                     "model": ErrorResponse
+                 },
+                 status.HTTP_500_INTERNAL_SERVER_ERROR: {
+                     "model": ErrorResponse
+                 },
+             })
 async def invocations(raw_request: Request):
     """
     For SageMaker, routes requests to other handlers based on model `task`.
     """
-    body = await raw_request.json()
+    try:
+        body = await raw_request.json()
+    except JSONDecodeError as e:
+        return ErrorResponse(message=f"JSON decode error: {e}",
+                             type=HTTPStatus.BAD_REQUEST.phrase,
+                             code=HTTPStatus.BAD_REQUEST.value)
+
     task = raw_request.app.state.task
 
     if task not in TASK_HANDLERS:
@@ -833,8 +1012,17 @@ def build_app(args: Namespace) -> FastAPI:
     )
 
     @app.exception_handler(RequestValidationError)
-    async def validation_exception_handler(_, exc):
-        err = ErrorResponse(message=str(exc),
+    async def validation_exception_handler(_: Request,
+                                           exc: RequestValidationError):
+        exc_str = str(exc)
+        errors_str = str(exc.errors())
+
+        if exc.errors() and errors_str and errors_str != exc_str:
+            message = f"{exc_str} {errors_str}"
+        else:
+            message = exc_str
+
+        err = ErrorResponse(message=message,
                             type="BadRequestError",
                             code=HTTPStatus.BAD_REQUEST)
         return JSONResponse(err.model_dump(),

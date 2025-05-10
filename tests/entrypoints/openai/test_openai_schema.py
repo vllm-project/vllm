@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+
 import pytest
 import schemathesis
-from schemathesis import GenerationConfig
+from schemathesis.generation import GenerationConfig
 
 from ...utils import RemoteOpenAIServer
 
@@ -33,7 +34,7 @@ def server():
 @pytest.fixture(scope="module")
 def get_schema(server):
     # avoid generating null (\x00) bytes in strings during test case generation
-    return schemathesis.openapi.from_uri(
+    return schemathesis.specs.openapi.loaders.from_uri(
         f"{server.url_root}/openapi.json",
         generation_config=GenerationConfig(allow_x00=False),
     )
@@ -45,5 +46,5 @@ schema = schemathesis.from_pytest_fixture("get_schema")
 @schema.parametrize()
 @schema.override(headers={"Content-Type": "application/json"})
 async def test_openapi_stateless(case):
-    #No need to verify SSL certificate for localhost
-    await case.call_and_validate(verify=False)
+    # No need to verify SSL certificate for localhost
+    case.call_and_validate(verify=False)
