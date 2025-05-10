@@ -18,7 +18,7 @@
 {{ bos_token }}
 {{ ns.system_prompt }}
 {%- if tools %}
-    {{"\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>" }}
+    {{"\n\n# Tools\n\nYou may call one or more functions to assist with the user query." }}
     {%- for tool in tools %}
         {{- "\n" }}
         {{- tool | tojson }}
