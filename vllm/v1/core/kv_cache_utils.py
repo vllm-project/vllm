@@ -559,8 +559,8 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
 
 def merge_layer_specs(layer_specs: list[KVCacheSpec]) -> KVCacheSpec:
     """
-     Merge a list of KVCacheSpec objects into a single KVCacheSpec object.
-     """
+    Merge a list of KVCacheSpec objects into a single KVCacheSpec object.
+    """
     assert all(layer_spec.type_id == layer_specs[0].type_id
                for layer_spec in layer_specs[1:]), (
                    "All layers in the same KV cache group must share the same "
