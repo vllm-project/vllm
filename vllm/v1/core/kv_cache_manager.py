@@ -10,7 +10,8 @@ from vllm.utils import sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
                                          hash_request_tokens)
-from vllm.v1.core.specialized_manager import get_manager_for_kv_cache_spec
+from vllm.v1.core.single_type_kv_cache_manager import (
+    get_manager_for_kv_cache_spec)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
