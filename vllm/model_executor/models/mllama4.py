@@ -513,16 +513,53 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo]
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        tokenizer = self.info.get_tokenizer()
-
         if mm_data is None:
+            tokenizer = self.info.get_tokenizer()
             return tokenizer(prompt, add_special_tokens=False)  # exclude bos
+
         processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
         )
 
+        return self._postprocess_hf(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            processed_outputs=processed_outputs,
+        )
+
+    async def _call_hf_processor_async(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        if mm_data is None:
+            tokenizer = self.info.get_tokenizer()
+            return tokenizer(prompt, add_special_tokens=False)  # exclude bos
+
+        processed_outputs = await super()._call_hf_processor_async(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+        )
+
+        return self._postprocess_hf(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            processed_outputs=processed_outputs,
+        )
+
+    def _postprocess_hf(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        processed_outputs: BatchFeature,
+    ) -> BatchFeature:
         processor = self.info.get_hf_processor(**mm_kwargs)
         image_processor = processor.image_processor
         vision_config = self.info.get_hf_config().vision_config

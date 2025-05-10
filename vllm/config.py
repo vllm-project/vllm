@@ -223,6 +223,13 @@ def is_init_field(cls: ConfigType, name: str) -> bool:
 TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 
+ParallelProcessorBackend = Literal["uni", "mp", "mt"]
+"""
+- `uni`: The multi-modal processor is run in the main process and thread.
+- `mp`: The multi-modal processor is run in parallel processes.
+- `mt`: The multi-modal processor is run in parallel threads.
+"""
+
 
 @config
 @dataclass
@@ -368,6 +375,9 @@ class ModelConfig:
     disable_mm_preprocessor_cache: bool = False
     """If `True`, disable caching of the multi-modal preprocessor/mapper (not
     recommended)."""
+    parallel_processor_backend: ParallelProcessorBackend = "uni"
+    """EXPERIMENTAL: Configures running the multi-modal processor in parallel.
+    """
     override_neuron_config: dict[str, Any] = field(default_factory=dict)
     """Initialize non-default neuron config or override default neuron config
     that are specific to Neuron devices, this argument will be used to
@@ -620,7 +630,9 @@ class ModelConfig:
                 limit_per_prompt=self.limit_mm_per_prompt,
                 mm_processor_kwargs=self.mm_processor_kwargs,
                 disable_mm_preprocessor_cache=self.
-                disable_mm_preprocessor_cache)
+                disable_mm_preprocessor_cache,
+                parallel_processor_backend=self.parallel_processor_backend,
+            )
 
         if self.limit_mm_per_prompt:
             raise ValueError("`limit_mm_per_prompt` is only supported for "
@@ -2873,6 +2885,23 @@ class MultiModalConfig:
     disable_mm_preprocessor_cache: bool = False
     """
     If `True`, disable caching of the processed multi-modal inputs.
+    """
+
+    parallel_processor_backend: ParallelProcessorBackend = "uni"
+    """
+    EXPERIMENTAL: Configures running the multi-modal processor in parallel.
+
+    Our own testing has shown that in general:
+
+    - "mp" mode degrades throughput for the vast majority of models except for
+    Idefics3 (SmolVLM v1).
+    - "mt" mode improves throughput only if the image processor doesn't already
+    has built-in parallelism (most notably via NumPy).
+    - For offline inference, you should use async engine (which enables multiple
+    inputs to be processed concurrently) to take advantage of parallelism.
+
+    Nevertheless, you should run the benchmarks under <gh-dir:benchmarks> to
+    determine the parallelism mode to use for your particular model and setup.
     """
 
     def compute_hash(self) -> str:

@@ -510,6 +510,33 @@ class H2OVLMultiModalProcessor(InternVLMultiModalProcessor[H2OVLProcessingInfo]
             return_mm_hashes=return_mm_hashes,
         )
 
+    async def _cached_apply_hf_processor_async(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        *,
+        return_mm_hashes: bool,
+    ) -> tuple[list[int], MultiModalKwargs, Optional[MultiModalHashes], bool]:
+        # The processor logic is different for len(images) <= 1 vs > 1
+        # Since the processing cache assumes that the processor output is
+        # invariant of how many images are passed per prompt, we only
+        # perform caching for the most common case
+        if mm_data_items.get_count("image", strict=False) > 1:
+            return await self._apply_hf_processor_async(
+                prompt=prompt,
+                mm_data_items=mm_data_items,
+                hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+                return_mm_hashes=return_mm_hashes,
+            )
+
+        return await super()._cached_apply_hf_processor_async(
+            prompt=prompt,
+            mm_data_items=mm_data_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            return_mm_hashes=return_mm_hashes,
+        )
+
 
 @MULTIMODAL_REGISTRY.register_processor(
     H2OVLMultiModalProcessor,

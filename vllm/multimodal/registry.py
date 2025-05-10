@@ -1,17 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 from collections.abc import Mapping
+from concurrent.futures import (Executor, ProcessPoolExecutor,
+                                ThreadPoolExecutor)
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import TYPE_CHECKING, Generic, Optional, Protocol, TypeVar
 
 import torch.nn as nn
-from typing_extensions import deprecated
+from typing_extensions import assert_never, deprecated
 
 from vllm.envs import VLLM_MM_INPUT_CACHE_GIB
 from vllm.inputs import InputProcessingContext
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import (AnyTokenizer,
                                                cached_tokenizer_from_config)
-from vllm.utils import ClassRegistry
+from vllm.utils import ClassRegistry, get_mp_context
 
 from .processing import (BaseMultiModalProcessor, BaseProcessingInfo,
                          ProcessingCache)
@@ -19,7 +22,7 @@ from .profiling import (BaseDummyInputsBuilder, DummyDecoderData,
                         DummyEncoderData, MultiModalProfiler)
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig
+    from vllm.config import ModelConfig, ParallelProcessorBackend
 
 logger = init_logger(__name__)
 
@@ -75,6 +78,23 @@ class _ProcessorFactories(Generic[_I]):
         info = self.info(ctx)
         dummy_inputs_builder = self.dummy_inputs(info)
         return self.processor(info, dummy_inputs_builder, cache=cache)
+
+
+@lru_cache(maxsize=1)
+def _get_executor(
+    parallel_processor_backend: "ParallelProcessorBackend",
+) -> Optional[Executor]:
+    if parallel_processor_backend == "uni":
+        logger.info("Disabled parallel processing of multi-modal data.")
+        return None
+    if parallel_processor_backend == "mp":
+        logger.info("Enabled multiprocessing for processing multi-modal data.")
+        return ProcessPoolExecutor(mp_context=get_mp_context())
+    if parallel_processor_backend == "mt":
+        logger.info("Enabled multithreading for processing multi-modal data.")
+        return ThreadPoolExecutor()
+
+    assert_never(parallel_processor_backend)
 
 
 class MultiModalRegistry:
@@ -261,16 +281,21 @@ class MultiModalRegistry:
         if not model_config.is_multimodal_model:
             raise ValueError(f"{model_config.model} is not a multimodal model")
 
+        mm_config = model_config.get_multimodal_config()
+
         if tokenizer is None:
             tokenizer = cached_tokenizer_from_config(model_config)
         if disable_cache is None:
-            mm_config = model_config.get_multimodal_config()
             disable_cache = mm_config.disable_mm_preprocessor_cache
 
         model_cls = self._get_model_cls(model_config)
         factories = self._processor_factories[model_cls]
 
-        ctx = InputProcessingContext(model_config, tokenizer)
+        ctx = InputProcessingContext(
+            model_config,
+            tokenizer=tokenizer,
+            executor=_get_executor(mm_config.parallel_processor_backend),
+        )
         cache = None if disable_cache else self._processing_cache
 
         return factories.build_processor(ctx, cache=cache)

@@ -176,6 +176,45 @@ class Ovis2MultiModalProcessor(BaseMultiModalProcessor[Ovis2ProcessingInfo]):
             mm_kwargs=mm_kwargs,
         )
 
+        return self._postprocess_hf(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            processed_outputs=processed_outputs,
+        )
+
+    async def _call_hf_processor_async(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        if not mm_data:
+            #    # Avoid warning from HF logger for text-only input
+            prompt_ids = self.info.get_tokenizer().encode(prompt)
+            # prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids) nope
+            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+
+        processed_outputs = await super()._call_hf_processor_async(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+        )
+
+        return self._postprocess_hf(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            processed_outputs=processed_outputs,
+        )
+
+    def _postprocess_hf(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        processed_outputs: BatchFeature,
+    ) -> BatchFeature:
         hf_processor = self.info.get_hf_processor()
         image_indicators = [
             hf_processor.construct_image_indicators(grid)
