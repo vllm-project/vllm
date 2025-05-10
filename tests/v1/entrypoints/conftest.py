@@ -73,7 +73,9 @@ def sample_json_schema():
                         }
                     },
                     "required": ["company", "duration", "position"]
-                }
+                },
+                "minItems": 0,
+                "maxItems": 3
             }
         },
         "required":
