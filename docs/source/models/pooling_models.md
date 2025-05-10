@@ -140,6 +140,7 @@ Our [OpenAI-Compatible Server](#openai-compatible-server) provides endpoints tha
 
 - [Pooling API](#pooling-api) is similar to `LLM.encode`, being applicable to all types of pooling models.
 - [Embeddings API](#embeddings-api) is similar to `LLM.embed`, accepting both text and [multi-modal inputs](#multimodal-inputs) for embedding models.
+- [Classification API](#classification-api) is similar to `LLM.classify` and is applicable to sequence classification models.
 - [Score API](#score-api) is similar to `LLM.score` for cross-encoder models.
 
 ## Matryoshka Embeddings

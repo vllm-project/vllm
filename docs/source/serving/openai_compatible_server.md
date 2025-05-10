@@ -61,6 +61,8 @@ In addition, we have the following custom APIs:
   - Applicable to any model with a tokenizer.
 - [Pooling API](#pooling-api) (`/pooling`)
   - Applicable to all [pooling models](../models/pooling_models.md).
+- [Classification API](#classification-api) (`/classify`)
+  - Only applicable to [classification models](../models/pooling_models.md) (`--task classify`).
 - [Score API](#score-api) (`/score`)
   - Applicable to embedding models and [cross-encoder models](../models/pooling_models.md) (`--task score`).
 - [Re-rank API](#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
@@ -442,6 +444,130 @@ Our Pooling API encodes input prompts using a [pooling model](../models/pooling_
 The input format is the same as [Embeddings API](#embeddings-api), but the output data can contain an arbitrary nested list, not just a 1-D list of floats.
 
 Code example: <gh-file:examples/online_serving/openai_pooling_client.py>
+
+(classification-api)=
+
+### Classification API
+
+Our Classification API directly supports Hugging Face sequence-classification models such as [ai21labs/Jamba-tiny-reward-dev](https://huggingface.co/ai21labs/Jamba-tiny-reward-dev) and [jason9693/Qwen2.5-1.5B-apeach](https://huggingface.co/jason9693/Qwen2.5-1.5B-apeach).
+
+We automatically wrap any other transformer via `as_classification_model()`, which pools on the last token, attaches a `RowParallelLinear` head, and applies a softmax to produce per-class probabilities.
+
+Code example: <gh-file:examples/online_serving/openai_classification_client.py>
+
+#### Example Requests
+
+You can classify multiple texts by passing an array of strings:
+
+Request:
+
+```bash
+curl -v "http://127.0.0.1:8000/classify" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "jason9693/Qwen2.5-1.5B-apeach",
+    "input": [
+      "Loved the new café—coffee was great.",
+      "This update broke everything. Frustrating."
+    ]
+  }'
+```
+
+Response:
+
+```bash
+{
+  "id": "classify-7c87cac407b749a6935d8c7ce2a8fba2",
+  "object": "list",
+  "created": 1745383065,
+  "model": "jason9693/Qwen2.5-1.5B-apeach",
+  "data": [
+    {
+      "index": 0,
+      "label": "Default",
+      "probs": [
+        0.565970778465271,
+        0.4340292513370514
+      ],
+      "num_classes": 2
+    },
+    {
+      "index": 1,
+      "label": "Spoiled",
+      "probs": [
+        0.26448777318000793,
+        0.7355121970176697
+      ],
+      "num_classes": 2
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 20,
+    "total_tokens": 20,
+    "completion_tokens": 0,
+    "prompt_tokens_details": null
+  }
+}
+```
+
+You can also pass a string directly to the `input` field:
+
+Request:
+
+```bash
+curl -v "http://127.0.0.1:8000/classify" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "jason9693/Qwen2.5-1.5B-apeach",
+    "input": "Loved the new café—coffee was great."
+  }'
+```
+
+Response:
+
+```bash
+{
+  "id": "classify-9bf17f2847b046c7b2d5495f4b4f9682",
+  "object": "list",
+  "created": 1745383213,
+  "model": "jason9693/Qwen2.5-1.5B-apeach",
+  "data": [
+    {
+      "index": 0,
+      "label": "Default",
+      "probs": [
+        0.565970778465271,
+        0.4340292513370514
+      ],
+      "num_classes": 2
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 10,
+    "total_tokens": 10,
+    "completion_tokens": 0,
+    "prompt_tokens_details": null
+  }
+}
+```
+
+#### Extra parameters
+
+The following [pooling parameters](#pooling-params) are supported.
+
+:::{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:language: python
+:start-after: begin-classification-pooling-params
+:end-before: end-classification-pooling-params
+:::
+
+The following extra parameters are supported:
+
+:::{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:language: python
+:start-after: begin-classification-extra-params
+:end-before: end-classification-extra-params
+:::
 
 (score-api)=
 
