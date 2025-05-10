@@ -259,8 +259,11 @@ class NixlConnectorScheduler:
     def update_state_after_alloc(self, request: "Request",
                                  blocks: "KVCacheBlocks",
                                  num_external_tokens: int):
-        if (request.kv_transfer_params is not None
-                and request.kv_transfer_params.do_remote_prefill):
+        if request.kv_transfer_params is None:
+            return
+
+        assert isinstance(request.kv_transfer_params, NixlKVTransferParams)
+        if request.kv_transfer_params.do_remote_prefill:
             # Get unhashed blocks to pull from remote.
             self._reqs_need_recv[request.request_id] = (
                 request, blocks.get_unhashed_block_ids())
@@ -291,23 +294,24 @@ class NixlConnectorScheduler:
     def request_finished(
         self,
         request: "Request",
-        blocks: "KVCacheBlocks",
+        block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         """
         Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
         """
 
-        if (request.kv_transfer_params is None
-                or (not request.kv_transfer_params.do_remote_decode)
+        if request.kv_transfer_params is None:
+            return False, None
+        assert isinstance(request.kv_transfer_params, NixlKVTransferParams)
+
+        if ((not request.kv_transfer_params.do_remote_decode)
                 or (request.status != RequestStatus.FINISHED_LENGTH_CAPPED)):
             return False, None
 
         # Get computed blocks.
-        all_block_ids = blocks.get_block_ids()
-        last_block_full = request.num_computed_tokens % self.block_size == 0
-        computed_block_ids = (all_block_ids
-                              if last_block_full else all_block_ids[:-1])
+        all_full = request.num_computed_tokens % self.block_size == 0
+        computed_block_ids = (block_ids if all_full else block_ids[:-1])
 
         # If prompt < block_size, then there will be no KV xfer so free blocks
         # immediately.

@@ -123,7 +123,7 @@ class KVCacheManager:
 
         # Request has already has its blocks, do not look up in block table.
         # This can happen in P/D if blocks are injected by the scheduler.
-        if self.req_to_blocks.get(request.request_id) is not None:
+        if request.request_id in self.single_type_manager.req_to_blocks:
             return KVCacheBlocks.create_empty(), request.num_computed_tokens
 
         # Prefix caching is disabled or
@@ -269,22 +269,17 @@ class KVCacheManager:
         new_blocks = self.single_type_manager.allocate_new_blocks(
             request.request_id, num_tokens_need_slot)
 
-        if not self.enable_caching:
+        # P/D: delay caching blocks if we have to recv from
+        # remote. Update state for locally cached blocks.
+        if not self.enable_caching or delay_cache_blocks:
             return KVCacheBlocks(new_blocks)
 
-        if delay_cache_blocks:
-            # P/D: delay caching blocks if we have to recv from
-            # remote. Update state for locally cached blocks.
-            assert request.request_id not in self.num_cached_block
-            self.num_cached_block[request.request_id] = len(
-                new_computed_block_list)
-        else:
-            # Speculated tokens might be rejected in the future, so we does
-            # not cache any speculated tokens. We only cache blocks with
-            # generated (accepted) tokens.
-            self.single_type_manager.cache_blocks(
-              request, self.req_to_block_hashes[request.request_id],
-              num_computed_tokens + num_new_tokens - len(request.spec_token_ids))
+        # Speculated tokens might be rejected in the future, so we does
+        # not cache any speculated tokens. We only cache blocks with
+        # generated (accepted) tokens.
+        self.single_type_manager.cache_blocks(
+            request, self.req_to_block_hashes[request.request_id],
+            num_computed_tokens + num_new_tokens - len(request.spec_token_ids))
 
         return KVCacheBlocks(new_blocks)
 
@@ -371,3 +366,16 @@ class KVCacheManager:
             A list of KV cache events.
         """
         return self.block_pool.take_events()
+
+    def get_block_ids(self, request_id: str) -> list[int]:
+        """Get the block ids of a request."""
+        assert request_id in self.single_type_manager.req_to_blocks
+        return [
+            block.block_id
+            for block in self.single_type_manager.req_to_blocks[request_id]
+        ]
+
+    def get_num_blocks(self, request_id: str):
+        """Get the number of blocks."""
+        assert request_id in self.single_type_manager.req_to_blocks
+        return len(self.single_type_manager.req_to_blocks[request_id])

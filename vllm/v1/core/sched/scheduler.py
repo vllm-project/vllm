@@ -18,7 +18,7 @@ from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
-from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
+from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
@@ -435,10 +435,8 @@ class Scheduler(SchedulerInterface):
 
                 if self.lora_config and request.lora_request:
                     scheduled_loras.add(request.lora_request.lora_int_id)
-                req_to_new_block_ids[request.request_id] = [
-                    block.block_id for block in
-                    self.kv_cache_manager.req_to_blocks[request.request_id]
-                ]
+                req_to_new_block_ids[request.request_id] = (
+                    self.kv_cache_manager.get_block_ids(request.request_id))
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
@@ -923,13 +921,12 @@ class Scheduler(SchedulerInterface):
         return self.connector
 
     def _connector_finished(
-            self, request) -> tuple[bool, Optional[KVTransferParams]]:
+            self, request: Request) -> tuple[bool, Optional[KVTransferParams]]:
         """Invoke the KV connector request_finished() method if applicable."""
         if self.connector is None:
             return False, None
-        request_blocks = KVCacheBlocks(
-            self.kv_cache_manager.req_to_blocks[request.request_id])
-        return self.connector.request_finished(request, request_blocks)
+        block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
+        return self.connector.request_finished(request, block_ids)
 
     def _update_waiting_for_remote_kv(self, request: Request) -> bool:
         """
@@ -947,15 +944,15 @@ class Scheduler(SchedulerInterface):
             return False
 
         # Now that the blocks are ready, actually cache them.
-        blocks = self.kv_cache_manager.req_to_blocks[request.request_id]
-        num_computed_tokens = len(blocks) * self.block_size
+        block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
+        num_computed_tokens = len(block_ids) * self.block_size
         if num_computed_tokens == request.num_tokens:
             num_computed_tokens -= 1
-        self.kv_cache_manager.cache_blocks(
+        self.kv_cache_manager.single_type_manager.cache_blocks(
             request,
-            num_tokens=0,
-            num_computed_tokens=num_computed_tokens,
-            new_computed_block_list=[])
+            self.kv_cache_manager.req_to_block_hashes[request.request_id],
+            num_computed_tokens,
+        )
 
         # Update the request state for scheduling.
         request.num_computed_tokens = num_computed_tokens

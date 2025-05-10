@@ -53,7 +53,8 @@ def test_basic_lifecycle():
     assert len(scheduler.waiting) == 0
 
     # ... but blocks should not be freed.
-    blocks = scheduler.kv_cache_manager.req_to_blocks[request_id]
+    blocks = scheduler.kv_cache_manager.single_type_manager.req_to_blocks[
+        request_id]
     for block in blocks:
         assert block.ref_cnt == 1
 
