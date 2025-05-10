@@ -350,6 +350,7 @@ class Scheduler(SchedulerInterface):
                         request)
 
                 # Get externally-cached tokens if using a KVConnector.
+                breakpoint()
                 num_external_tokens, load_kv_async = (
                     (0, False) if self.connector is None else
                     self.connector.get_num_new_matched_tokens(
