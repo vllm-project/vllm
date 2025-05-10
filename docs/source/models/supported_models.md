@@ -168,6 +168,21 @@ If vLLM successfully returns text (for generative models) or hidden states (for 
 Otherwise, please refer to [Adding a New Model](#new-model) for instructions on how to implement your model in vLLM.
 Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project/vllm/issues/new/choose) to request vLLM support.
 
+#### List the downloaded models
+
+You can list the models downloaded to your local cache using the [huggingface-cli](https://huggingface.co/docs/huggingface_hub/guides/cli):
+
+```console
+# List cached models
+huggingface-cli scan-cache
+
+# Show detailed (verbose) output
+huggingface-cli scan-cache -v
+
+# Specify a custom cache directory
+huggingface-cli scan-cache --dir ~/.cache/huggingface/hub
+```
+
 #### Using a proxy
 
 Here are some tips for loading/downloading models from Hugging Face using a proxy:
