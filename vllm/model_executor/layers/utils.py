@@ -6,6 +6,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm import envs
+from vllm._aiter_ops import aiter_ops
 from vllm.platforms import current_platform
 
 
@@ -93,7 +94,11 @@ def rocm_unquantized_gemm(x: torch.Tensor,
     return torch.nn.functional.linear(x, weight, bias)
 
 
-def dispatch_unquantized_gemm() -> Callable[..., torch.Tensor]:
+def dispatch_unquantized_gemm(
+) -> Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
     if current_platform.is_rocm():
-        return rocm_unquantized_gemm
+        if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR:
+            return aiter_ops.rocm_aiter_tuned_gemm
+        else:
+            return rocm_unquantized_gemm
     return torch.nn.functional.linear
