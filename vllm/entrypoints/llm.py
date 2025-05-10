@@ -600,7 +600,6 @@ class LLM:
             output = self.generate(prompts_batch,
                                    sampling_params=beam_search_params,
                                    use_tqdm=False)
-
             for (start, end), instance in zip(instance_start_and_end,
                                               instances):
                 instance_new_beams = []
