@@ -94,9 +94,9 @@ class KVConnectorBase_V1(ABC):
 
     def bind_connector_metadata(
             self, connector_metadata: KVConnectorMetadata) -> None:
-        """Set the connector metadata which came from the scheduler.
+        """Set the connector metadata from the scheduler.
 
-        This function should be called by the model runner every time
+        This function should be called by the model runner every time 
         before the model execution. The metadata will be used for runtime
         KV cache loading and saving.
 
@@ -108,7 +108,7 @@ class KVConnectorBase_V1(ABC):
     def clear_connector_metadata(self) -> None:
         """Clear the connector metadata.
 
-        This function should be called by the model runner every time
+        This function should be called by the model runner every time 
         after the model execution.
         """
         self._connector_metadata = KVConnectorMetadata()
