@@ -473,9 +473,16 @@ __global__ void Marlin(
       if (mul_topk_weights) {
   #pragma unroll
         for (int i = 0; i < 4; i++) {
-          sh_block_topk_weights[tid4 * 4 + i] =
-              Dtype::num2num2(Dtype::float2num(
-                  topk_weights_ptr[sh_block_sorted_ids[tid4 * 4 + i]]));
+          if constexpr (w_type == vllm::kFE2M1f) {
+            sh_block_topk_weights[tid4 * 4 + i] = __hmul2(
+                global_scale,
+                Dtype::num2num2(Dtype::float2num(
+                    topk_weights_ptr[sh_block_sorted_ids[tid4 * 4 + i]])));
+          } else {
+            sh_block_topk_weights[tid4 * 4 + i] =
+                Dtype::num2num2(Dtype::float2num(
+                    topk_weights_ptr[sh_block_sorted_ids[tid4 * 4 + i]]));
+          }
         }
       }
     }
@@ -1600,7 +1607,9 @@ __global__ void Marlin(
       }
 
       if constexpr (w_type == vllm::kFE2M1f) {
-        res = __hmul2(res, global_scale);
+        if (!mul_topk_weights) {
+          res = __hmul2(res, global_scale);
+        }
       }
 
       if constexpr (m_block_size_8) {

@@ -19,7 +19,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     apply_fp4_marlin_linear, is_fp4_marlin_supported,
-    prepare_fp4_layer_for_marlin)
+    prepare_moe_fp4_layer_for_marlin, prepare_fp4_layer_for_marlin)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -460,6 +460,16 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
     def __init__(self, quant_config: ModelOptNvFp4Config):
         self.quant_config = quant_config
+        self.cutlass_nvfp4_supported = cutlass_fp4_supported()
+        self.use_marlin = False
+
+        if not self.cutlass_nvfp4_supported:
+            if is_fp4_marlin_supported():
+                self.use_marlin = True
+            else:
+                raise ValueError("Current platform does not support NVFP4"
+                                 " quantization. Please use Blackwell and"
+                                 " above.")
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -620,7 +630,15 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
         layer.w2_blockscale_swizzled = Parameter(w2_blockscale_swizzled,
                                                  requires_grad=False)
-        return
+
+        if self.use_marlin:
+            prepare_moe_fp4_layer_for_marlin(layer)
+            del layer.g13_alphas
+            del layer.g2_alphas
+            del layer.w13_input_scale_quant
+            del layer.w2_input_scale_quant
+            del layer.w13_blockscale_swizzled
+            del layer.w2_blockscale_swizzled
 
     def apply(
         self,
