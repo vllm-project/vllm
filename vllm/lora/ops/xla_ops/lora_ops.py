@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
+import torch.nn.functional as F
 
 # Required to register the custom ops
 import vllm.lora.ops.xla_ops.pallas  # noqa # pylint: disable=unused-import
@@ -27,28 +28,25 @@ def bgmv_expand(inputs: torch.Tensor,
             tensor.
     """
 
-    outputs = torch.ops.xla.bgmv(inputs, lora_b_weights, lora_indices_tensor)
-    n_tokens = outputs.size(0)
+    outputs = torch.ops.xla.bgmv_expand(inputs, lora_b_weights.transpose(2, 3),
+                                        lora_indices_tensor)
 
     limit = output_tensor.shape[0]
     if outputs.shape[0] == 1 and output_tensor.shape[0] != 1:
         limit = 1
 
-    outputs = torch.cat(
-        (outputs,
-         torch.zeros((n_tokens, output_tensor.shape[1] - outputs.shape[1]),
-                     device=outputs.device)),
-        dim=1)
+    if output_tensor.shape[1] > outputs.shape[1]:
+        outputs = F.pad(outputs,
+                        (0, output_tensor.shape[1] - outputs.shape[1], 0, 0))
 
     if add_inputs:
-        return output_tensor + outputs[:limit, :]
+        return output_tensor + outputs[:limit, :output_tensor.shape[1]]
     else:
-        return outputs[:limit, :]
+        return outputs[:limit, :output_tensor.shape[1]]
 
 
 def bgmv_shrink(inputs: torch.Tensor,
                 lora_b_weights: torch.Tensor,
-                output_tensor: torch.Tensor,
                 lora_indices_tensor: torch.Tensor,
                 scaling: float = 1.0):
     """
@@ -62,8 +60,8 @@ def bgmv_shrink(inputs: torch.Tensor,
         scaling (float, optional): Scalar multiplier applied to the output.
     """
 
-    return scaling * torch.ops.xla.bgmv(inputs, lora_b_weights,
-                                        lora_indices_tensor)
+    return scaling * torch.ops.xla.bgmv_shrink(inputs, lora_b_weights,
+                                               lora_indices_tensor)
 
 
 def bgmv_expand_slice(inputs: torch.Tensor,
@@ -88,17 +86,11 @@ def bgmv_expand_slice(inputs: torch.Tensor,
         add_inputs (bool): Whether or not to add the input tensor to the output 
             tensor.
     """
-    outputs = torch.ops.xla.bgmv(inputs, lora_b_weights, lora_indices_tensor)
-    n_tokens = outputs.size(0)
+    outputs = torch.ops.xla.bgmv_expand(inputs, lora_b_weights.transpose(2, 3),
+                                        lora_indices_tensor)
 
-    outputs = torch.cat((
-        torch.zeros((n_tokens, slice_offset), device=outputs.device),
-        outputs,
-        torch.zeros(
-            (n_tokens, output_tensor.shape[1] - (slice_offset + slice_size)),
-            device=outputs.device),
-    ),
-                        dim=1)
+    outputs = F.pad(outputs, (slice_offset, output_tensor.shape[1] -
+                              (slice_offset + slice_size), 0, 0))
 
     if add_inputs:
         return output_tensor + outputs

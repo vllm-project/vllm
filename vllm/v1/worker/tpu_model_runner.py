@@ -20,6 +20,8 @@ from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
+from vllm.lora.ops.xla_ops import LORA_RANK_BLOCK_SIZE
+from vllm.lora.request import LoRARequest
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargs,
@@ -235,6 +237,12 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             pin_memory=self.pin_memory)
         self.structured_decode_arange = torch.arange(
             0, 32, device="cpu", pin_memory=self.pin_memory)
+
+        if self.lora_config is not None:
+            # This makes us pad at initialisation time so we can avoid padding
+            # at runtime, which introduces long stalls
+            self.lora_config.max_lora_rank = _get_padded_lora_rank(
+                self.lora_config.max_lora_rank, self.lora_config.max_loras)
 
         # Get maximum number of mm items per modality (batch size).
         self.max_num_mm_items_by_modality = dict()
@@ -600,6 +608,17 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # Padded to avoid recompiling when `num_reqs` varies.
         logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
         logits_indices = logits_indices.to(self.device)
+
+        if self.lora_config is not None:
+            # We need to respect padding when activating LoRA adapters
+            padded_num_scheduled_tokens_per_req = np.copy(
+                num_scheduled_tokens_per_req
+            )  # Copying to avoid accidental state corruption bugs
+            padded_num_scheduled_tokens_per_req[-1] += \
+                padded_total_num_scheduled_tokens - total_num_scheduled_tokens
+
+            self.set_active_loras(self.input_batch,
+                                  padded_num_scheduled_tokens_per_req)
 
         layer_names = get_layers_from_vllm_config(self.vllm_config,
                                                   Attention).keys()
@@ -996,6 +1015,13 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                              inputs_embeds=inputs_embeds)
         self._hidden_states_dtype = out.dtype
 
+    def _set_active_loras(self, prompt_lora_mapping, token_lora_mapping,
+                          lora_requests) -> None:
+        xm.mark_step()  # Captures input updates
+        super()._set_active_loras(prompt_lora_mapping, token_lora_mapping,
+                                  lora_requests)
+        xm.mark_step()  # Captures metadata updates
+
     def _precompile_mm_encoder(self) -> None:
         # Pre-compile MM encoder for all supported data modalities.
         hf_config = self.vllm_config.model_config.hf_config
@@ -1158,7 +1184,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                         generate_params_if_all_greedy,
                     ))
                 sampling_metadata.all_greedy = all_greedy
-                self.sample_from_logits(dummy_logits, sampling_metadata)
+                with self.maybe_dummy_run_with_lora(
+                        self.lora_config, np.array([num_reqs],
+                                                   dtype=np.int32)):
+                    self.sample_from_logits(dummy_logits, sampling_metadata)
             logger.info("  -- num_seqs: %d", num_reqs)
         xm.wait_device_ops()
         end = time.perf_counter()
@@ -1435,6 +1464,43 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         return MultiModalKwargs.as_kwargs(batched_dummy_mm_inputs,
                                           device=self.device)
 
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        success = super().add_lora(lora_request)
+        if not success:
+            return False
+
+        # Only compile when we see a new LoRA adapter
+        logger.info("Compiling LoRA adapter %s", lora_request.path)
+        start = time.perf_counter()
+        xm.mark_step()
+
+        for n in range(self.lora_config.max_loras):
+            logger.info("  --lora_index %d", n)
+            # Create n dummy LoRAs as padding
+            lora_requests: set[LoRARequest] = {
+                LoRARequest(lora_name=f"warmup_{lora_id}",
+                            lora_int_id=lora_id,
+                            lora_path="/not/a/real/path")
+                for lora_id in range(1, n + 1)
+            }
+            with self.lora_manager.dummy_lora_cache():
+                # Add the dummy LoRAs here so _set_active_loras doesn't try to
+                # load from disk.
+                for lr in lora_requests:
+                    self.lora_manager.add_dummy_lora(
+                        lr, rank=self.LORA_WARMUP_RANK)
+
+            lora_requests.add(lora_request)
+
+            self.lora_manager._apply_adapters(lora_requests)
+            self.lora_manager.remove_all_adapters()
+
+        xm.wait_device_ops()
+        end = time.perf_counter()
+        logger.info("Compilation finished in in %.2f [secs].", end - start)
+
+        return True
+
 
 def _get_req_paddings(min_req_size: int, max_req_size: int) -> list[int]:
     logger.info("Preparing request paddings:")
@@ -1458,11 +1524,11 @@ def _get_token_paddings(min_token_size: int, max_token_size: int,
                         padding_gap: int) -> list[int]:
     """Generate a list of padding size, starting from min_token_size, 
     ending with a number that can cover max_token_size
-    
+
     If padding_gap == 0 then:
         increase 2X each time (exponential)
     else:
-        first increase the size to twice, 
+        first increase the size to twice,
         then increase the padding size by padding_gap.
     """
     # assert min_token_size is power of 2
@@ -1499,3 +1565,13 @@ def _get_padded_token_len(paddings: list[int], x: int) -> int:
     index = bisect.bisect_left(paddings, x)
     assert index < len(paddings)
     return paddings[index]
+
+
+def _get_padded_lora_rank(max_lora_rank: int, max_num_loras: int) -> int:
+    max_num_loras += 1
+
+    # If we have enough LoRAs to use laning without padding
+    if max_lora_rank * max_num_loras >= LORA_RANK_BLOCK_SIZE:
+        return max_lora_rank
+
+    return 1 << (LORA_RANK_BLOCK_SIZE // max_num_loras).bit_length()
