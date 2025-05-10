@@ -3954,7 +3954,9 @@ class VllmConfig:
     simplifies passing around the distinct configurations in the codebase.
     """
 
-    model_config: ModelConfig = field(default_factory=ModelConfig)
+    # TODO: use default_factory once default constructing ModelConfig doesn't
+    # try to download a model
+    model_config: ModelConfig = None  # type: ignore
     """Model configuration."""
     cache_config: CacheConfig = field(default_factory=CacheConfig)
     """Cache configuration."""
