@@ -17,6 +17,9 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
+    apply_fp4_marlin_linear, is_fp4_marlin_supported,
+    prepare_fp4_layer_for_marlin, prepare_moe_fp4_layer_for_marlin)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -24,6 +27,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.model_executor.parameter import (ModelWeightParameter,
                                            PerTensorScaleParameter)
 from vllm.platforms import current_platform
+from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
 
@@ -196,7 +200,7 @@ class ModelOptNvFp4Config(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 100
+        return 80
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
@@ -278,9 +282,15 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
     def __init__(self, quant_config: ModelOptNvFp4Config):
         self.quant_config = quant_config
         self.cutlass_nvfp4_supported = cutlass_fp4_supported()
+        self.use_marlin = False
+
         if not self.cutlass_nvfp4_supported:
-            raise ValueError("Current platform does not support NVFP4"
-                             " quantization. Please use Blackwell and above.")
+            if is_fp4_marlin_supported():
+                self.use_marlin = True
+            else:
+                raise ValueError("Current platform does not support NVFP4"
+                                 " quantization. Please use Blackwell and"
+                                 " above.")
 
     def create_weights(
         self,
@@ -392,12 +402,29 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         layer.weight_scale_swizzled = Parameter(swizzled_weight_scale,
                                                 requires_grad=False)
 
+        if self.use_marlin:
+            prepare_fp4_layer_for_marlin(layer)
+            del layer.alpha
+            del layer.input_scale
+            del layer.weight_scale_swizzled
+
     def apply(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if self.use_marlin:
+            return apply_fp4_marlin_linear(
+                input=x,
+                weight=layer.weight,
+                weight_scale=layer.weight_scale,
+                weight_scale_2=layer.weight_scale_2,
+                workspace=layer.workspace,
+                size_n=layer.output_size_per_partition,
+                size_k=layer.input_size_per_partition,
+                bias=bias)
+
         output_dtype = x.dtype
 
         # for input only the contracting dimension has a constraint.
@@ -434,6 +461,16 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
     def __init__(self, quant_config: ModelOptNvFp4Config):
         self.quant_config = quant_config
+        self.cutlass_nvfp4_supported = cutlass_fp4_supported()
+        self.use_marlin = False
+
+        if not self.cutlass_nvfp4_supported:
+            if is_fp4_marlin_supported():
+                self.use_marlin = True
+            else:
+                raise ValueError("Current platform does not support NVFP4"
+                                 " quantization. Please use Blackwell and"
+                                 " above.")
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -442,6 +479,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             raise ValueError("NVFP4 quantization was selected, "
                              " dynamic quantization is not supported.")
 
+        layer.num_experts = num_experts
+        layer.params_dtype = params_dtype
         layer.quant_config = self.quant_config
         weight_dtype = torch.uint8
         weight_scale_dtype = torch.float8_e4m3fn
@@ -594,7 +633,15 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
         layer.w2_blockscale_swizzled = Parameter(w2_blockscale_swizzled,
                                                  requires_grad=False)
-        return
+
+        if self.use_marlin:
+            prepare_moe_fp4_layer_for_marlin(layer)
+            del layer.g1_alphas
+            del layer.g2_alphas
+            del layer.w13_input_scale_quant
+            del layer.w2_input_scale_quant
+            del layer.w13_blockscale_swizzled
+            del layer.w2_blockscale_swizzled
 
     def apply(
         self,
@@ -614,6 +661,35 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
     ):
+        if self.use_marlin:
+            topk_weights, topk_ids = FusedMoE.select_experts(
+                hidden_states=x,
+                router_logits=router_logits,
+                use_grouped_topk=use_grouped_topk,
+                top_k=top_k,
+                renormalize=renormalize,
+                topk_group=topk_group,
+                num_expert_group=num_expert_group,
+                custom_routing_function=custom_routing_function,
+                scoring_func=scoring_func,
+                e_score_correction_bias=e_score_correction_bias,
+            )
+
+            return torch.ops.vllm.fused_marlin_moe(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                layer.w13_weight_scale,
+                layer.w2_weight_scale,
+                router_logits,
+                topk_weights,
+                topk_ids,
+                global_scale1=layer.w13_weight_scale_2,
+                global_scale2=layer.w2_weight_scale_2,
+                quant_type_id=scalar_types.float4_e2m1f.id,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map)
+
         assert activation == "silu", "Only SiLU activation is supported."
         assert not apply_router_weight_on_input, (
             "Router weight on input is not "
