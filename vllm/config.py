@@ -260,7 +260,8 @@ class ModelConfig:
     - "float" is shorthand for FP32 precision.\n
     - "float32" for FP32 precision."""
     seed: Optional[int] = None
-    """Random seed for reproducibility."""
+    """Random seed for reproducibility. Initialized to None in V0, but
+    initialized to 0 in V1."""
     hf_config_path: Optional[str] = None
     """Name or path of the Hugging Face config to use. If unspecified, model
     name or path will be used."""
@@ -440,6 +441,18 @@ class ModelConfig:
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __post_init__(self) -> None:
+        # Set the default seed to 0 in V1.
+        # NOTE(woosuk): In V0, we set the default seed to None because the
+        # driver worker shares the same process as the user process, and thus
+        # setting a seed affects the user process as well.
+        # In V1, we use separate processes for workers (unless
+        # VLLM_ENABLE_V1_MULTIPROCESSING=0), so setting a seed here
+        # doesn't affect the user process. However, without a consistent seed,
+        # different tensor parallel workers would sample different tokens,
+        # leading to inconsistent results.
+        if self.seed is None and envs.VLLM_USE_V1:
+            self.seed = 0
+
         self.model = maybe_model_redirect(self.model)
         # The tokenizer is consistent with the model by default.
         if self.tokenizer is None:
