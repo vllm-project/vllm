@@ -131,8 +131,10 @@ def create_request(
         kv_transfer_params = NixlKVTransferParams(
             do_remote_prefill=True,
             do_remote_decode=False,
-            remote_engine_id="remote_engine_id",
-            remote_block_ids=[1, 2, 3])
+            remote_engine_id="my-engine-id",
+            remote_block_ids=[1, 2, 3],
+            remote_host="my-host",
+            remote_port=1234)
     else:
         kv_transfer_params = None
 
