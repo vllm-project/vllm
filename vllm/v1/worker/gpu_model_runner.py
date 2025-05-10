@@ -1399,7 +1399,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @staticmethod
     def get_finished_kv_transfers(
-        scheduler_output: SchedulerOutput,
+        scheduler_output: "SchedulerOutput",
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         if has_kv_transfer_group():
             return get_kv_transfer_group().get_finished(
