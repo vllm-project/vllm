@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 from shutil import which
 
+import psutil
 import torch
 from packaging.version import Version, parse
 from setuptools import Extension, setup
@@ -109,6 +110,10 @@ class cmake_build_ext(build_ext):
                 num_jobs = len(os.sched_getaffinity(0))
             except AttributeError:
                 num_jobs = os.cpu_count()
+            physical_ram_gb = psutil.virtual_memory().total / (1024**3)
+            # Set the number of jobs such that each job gets about 8GB of RAM
+            # to better avoid OOM during compilation.
+            num_jobs = min(num_jobs, int(max(physical_ram_gb // 8, 1)))
 
         nvcc_threads = None
         if _is_cuda() and get_nvcc_cuda_version() >= Version("11.2"):
