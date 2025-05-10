@@ -835,12 +835,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                inplace=True,
                 activation=activation,
                 use_fp8_w8a8=True,
-                global_num_experts=global_num_experts,
                 apply_router_weight_on_input=apply_router_weight_on_input,
-                expert_map=expert_map,
                 w1_scale=(layer.w13_weight_scale_inv
                           if self.block_quant else layer.w13_weight_scale),
                 w2_scale=(layer.w2_weight_scale_inv

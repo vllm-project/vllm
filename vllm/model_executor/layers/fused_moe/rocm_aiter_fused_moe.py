@@ -316,20 +316,12 @@ def rocm_aiter_fused_experts(
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    inplace: bool = False,
     activation: str = "silu",
     apply_router_weight_on_input: bool = False,
     use_fp8_w8a8: bool = False,
-    use_int8_w8a8: bool = False,
-    use_int8_w8a16: bool = False,
-    use_int4_w4a16: bool = False,
     per_channel_quant: bool = False,
-    global_num_experts: int = -1,
-    expert_map: Optional[torch.Tensor] = None,
     w1_scale: Optional[torch.Tensor] = None,
     w2_scale: Optional[torch.Tensor] = None,
-    w1_zp: Optional[torch.Tensor] = None,
-    w2_zp: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     block_shape: Optional[List[int]] = None,
@@ -357,8 +349,8 @@ def rocm_aiter_fused_experts(
         a1, a1_scale = per_token_group_quant_fp8(hidden_states, block_shape[1])
 
         return torch.ops.vllm.rocm_aiter_fmoe_fp8_blockscale_g1u1(
-            topk_ids, topk_weights, hidden_states.dtype, expert_map, a1, w1,
-            w2, w1_scale, w2_scale, a1_scale, block_shape, None)
+            topk_ids, topk_weights, hidden_states.dtype, None, a1, w1, w2,
+            w1_scale, w2_scale, a1_scale, block_shape, None)
 
     # w8a8 per-channel quantization
     elif per_channel_quant and apply_router_weight_on_input and use_fp8_w8a8:
