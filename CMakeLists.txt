@@ -23,11 +23,6 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/utils.cmake)
 # Suppress potential warnings about unused manually-specified variables
 set(ignoreMe "${VLLM_PYTHON_PATH}")
 
-#
-# Supported python versions.  These versions will be searched in order, the
-# first match will be selected.  These should be kept in sync with setup.py.
-#
-set(PYTHON_SUPPORTED_VERSIONS "3.9" "3.10" "3.11" "3.12")
 
 # Supported NVIDIA architectures.
 set(CUDA_SUPPORTED_ARCHS "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0;10.0;10.1;12.0")
@@ -49,16 +44,16 @@ set(TORCH_SUPPORTED_VERSION_CUDA "2.7.0")
 set(TORCH_SUPPORTED_VERSION_ROCM "2.7.0")
 
 #
-# Try to find python package with an executable that exactly matches
-# `VLLM_PYTHON_EXECUTABLE` and is one of the supported versions.
+# Set Python find strategy and support versions
 #
-if (VLLM_PYTHON_EXECUTABLE)
-  find_python_from_executable(${VLLM_PYTHON_EXECUTABLE} "${PYTHON_SUPPORTED_VERSIONS}")
-else()
-  message(FATAL_ERROR
-    "Please set VLLM_PYTHON_EXECUTABLE to the path of the desired python version"
-    " before running cmake configure.")
-endif()
+set(Python_FIND_VIRTUALENV FIRST)
+set(Python_Supported_Versions "3.9" "3.10" "3.11" "3.12")
+
+#
+# Find Python + components, check if it's within the versions we support
+#
+find_package(Python COMPONENTS Interpreter Development.Module Development.SABIModule REQUIRED)
+check_python_version(${Python_Supported_Versions})
 
 #
 # Update cmake's `CMAKE_PREFIX_PATH` with torch location.
