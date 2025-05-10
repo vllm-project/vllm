@@ -854,7 +854,7 @@ class Scheduler(SchedulerInterface):
 
         assert request.is_finished()
 
-        delay_free_blocks, kv_txfer_params = self._connector_finished(request)
+        delay_free_blocks, kv_xfer_params = self._connector_finished(request)
         self.encoder_cache_manager.free(request)
         self._cached_reqs_data.pop(request.request_id, None)
         self.finished_req_ids.add(request.request_id)
@@ -862,7 +862,7 @@ class Scheduler(SchedulerInterface):
         if not delay_free_blocks:
             self._free_blocks(request)
 
-        return kv_txfer_params
+        return kv_xfer_params
 
     def _free_blocks(self, request: Request):
         assert request.is_finished()
