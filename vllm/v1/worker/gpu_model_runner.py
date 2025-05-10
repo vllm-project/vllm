@@ -1170,7 +1170,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             self.maybe_wait_for_kv_save()
             finished_sending, finished_recving = (
-                self.get_finished_kv_transfers())
+                self.get_finished_kv_transfers(scheduler_output))
 
         if self.use_aux_hidden_state_outputs:
             hidden_states, aux_hidden_states = model_output
@@ -1366,7 +1366,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         with set_forward_context(None, self.vllm_config):
             self.maybe_setup_kv_connector(scheduler_output)
             finished_sending, finished_recving = (
-                self.get_finished_kv_transfers())
+                self.get_finished_kv_transfers(scheduler_output))
 
         if not finished_sending and not finished_recving:
             return EMPTY_MODEL_RUNNER_OUTPUT
@@ -1399,9 +1399,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @staticmethod
     def get_finished_kv_transfers(
+        scheduler_output: SchedulerOutput,
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         if has_kv_transfer_group():
-            return get_kv_transfer_group().get_finished()
+            return get_kv_transfer_group().get_finished(
+                scheduler_output.finished_req_ids)
         return None, None
 
     def generate_draft_token_ids(

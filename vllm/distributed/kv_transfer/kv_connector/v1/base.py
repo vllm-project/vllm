@@ -195,8 +195,18 @@ class KVConnectorBase_V1(ABC):
         """
         pass
 
-    def get_finished(self) -> tuple[Optional[set[str]], Optional[set[str]]]:
-        """Get the finished recving and sending requests."""
+    def get_finished(
+        self, finished_req_ids: set[str]
+    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+        """
+        Notifies worker-side connector ids of requests that have
+        finished generating tokens.
+
+        Returns:
+            ids of requests that have finished asynchronous (recving, sending).
+            The finished saves/sends req ids must belong to a set provided in a
+            call to this method (this call or a prior one).
+        """
         return None, None
 
     # ==============================
