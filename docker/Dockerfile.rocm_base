@@ -1,5 +1,5 @@
-ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:6.3.1-complete
-ARG HIPBLASLT_BRANCH="db8e93b4"
+ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:6.3.4-complete
+ARG HIPBLASLT_BRANCH="4d40e36"
 ARG HIPBLAS_COMMON_BRANCH="7c1566b"
 ARG LEGACY_HIPBLASLT_OPTION=
 ARG RCCL_BRANCH="648a58d"
@@ -149,6 +149,8 @@ RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
     pip install /install/*.whl
 RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
     pip install /install/*.whl
+
+RUN ln -sf $(ls ${ROCM_PATH}/lib/libamdhip64.so) /usr/lib/libamdhip64.so
 
 ARG BASE_IMAGE
 ARG HIPBLAS_COMMON_BRANCH
