@@ -60,7 +60,8 @@ class KVTransferParams:
 
     @staticmethod
     def from_raw_dict(
-            raw_dict: dict[str, Any]) -> Optional["KVTransferParams"]:
+            raw_dict: Optional[dict[str,
+                                    Any]]) -> Optional["KVTransferParams"]:
         return None
 
 
@@ -259,7 +260,7 @@ class KVConnectorBase_V1(ABC):
         self,
         request: "Request",
         block_ids: list[int],
-    ) -> tuple[bool, Optional[KVTransferParams]]:
+    ) -> tuple[bool, Optional[dict[str, Any]]]:
         """
         Called when a request has finished, before its blocks are freed.
 

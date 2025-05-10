@@ -65,7 +65,12 @@ class NixlKVTransferParams(KVTransferParams):
 
     @staticmethod
     def from_raw_dict(
-            raw_dict: dict[str, Any]) -> Optional["NixlKVTransferParams"]:
+        raw_dict: Optional[dict[str,
+                                Any]]) -> Optional["NixlKVTransferParams"]:
+
+        # If no raw transfer params passed, return None.
+        if raw_dict is None:
+            return None
 
         # Validate the request is formatted properly.
         if (("do_remote_prefill" not in raw_dict)
@@ -136,9 +141,10 @@ class NixlConnectorMetadata(KVConnectorMetadata):
 
 
 class NixlConnector(KVConnectorBase_V1):
-    _KVTransferParams = NixlKVTransferParams
+    _KVTransferParams: type[NixlKVTransferParams] = NixlKVTransferParams
 
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
+        assert vllm_config.kv_transfer_config is not None
         self.engine_id = vllm_config.kv_transfer_config.engine_id
 
         if role == KVConnectorRole.SCHEDULER:
@@ -177,10 +183,10 @@ class NixlConnector(KVConnectorBase_V1):
     def request_finished(
         self,
         request: "Request",
-        blocks: "KVCacheBlocks",
-    ) -> tuple[bool, Optional[NixlKVTransferParams]]:
+        block_ids: list[int],
+    ) -> tuple[bool, Optional[dict[str, Any]]]:
         assert self.connector_scheduler is not None
-        return self.connector_scheduler.request_finished(request, blocks)
+        return self.connector_scheduler.request_finished(request, block_ids)
 
     ############################################################
     # Worker Side Methods
@@ -284,7 +290,7 @@ class NixlConnectorScheduler:
 
         # Loop through scheduled reqs and convert to ReqMeta.
         for req_id, (req, block_ids) in self._reqs_need_recv.items():
-            assert req.kv_transfer_params is not None
+            assert isinstance(req.kv_transfer_params, NixlKVTransferParams)
             meta.add_new_req(
                 request_id=req_id,
                 local_block_ids=block_ids,
@@ -318,15 +324,14 @@ class NixlConnectorScheduler:
         all_full = request.num_computed_tokens % self.block_size == 0
         computed_block_ids = (block_ids if all_full else block_ids[:-1])
 
-        # If prompt < block_size, then there will be no KV xfer so free blocks
-        # immediately.
+        # If prompt < block_size, no xfer so free blocks immediately.
         delay_free_blocks = len(computed_block_ids) > 0
 
         return delay_free_blocks, NixlKVTransferParams(
             do_remote_prefill=True,
             do_remote_decode=False,
             remote_block_ids=computed_block_ids,
-            remote_engine_id=self.vllm_config.kv_transfer_config.engine_id,
+            remote_engine_id=self.engine_id,
             remote_host=envs.VLLM_NIXL_SIDE_CHANNEL_HOST,
             remote_port=envs.VLLM_NIXL_SIDE_CHANNEL_PORT,
         ).__dict__
