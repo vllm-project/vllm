@@ -68,7 +68,8 @@ class Scheduler(SchedulerInterface):
         self.kv_events_config = vllm_config.kv_events_config
         self.log_stats = log_stats
         self.structured_output_manager = structured_output_manager
-        self.enable_dynasor_abort=True
+        self.enable_dynasor_abort = self.scheduler_config.early_exit_reasoning_model
+
         self.tokenizer = get_tokenizer(self.vllm_config.model_config.tokenizer)
         self.probe_answers={}
         self.requests_to_abort=[]
@@ -718,7 +719,7 @@ class Scheduler(SchedulerInterface):
         self.running = deque(sorted(self.running, key=lambda r: 0 if "probe" in r.request_id else 1))
        
         for request in self.running:
-            if enable_early_exit_reasoning_model:
+            if self.enable_dynasor_abort:
                 if len(request.output_token_ids)%120==0 and "probe" not in request.request_id:
                         self._create_and_add_new_request(request,len(request.output_token_ids))
             req_id = request.request_id
