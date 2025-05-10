@@ -121,6 +121,11 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         kv_transfer_params: NixlKVTransferParams,
     ):
         assert request_id not in self.requests
+        assert kv_transfer_params.remote_block_ids is not None
+        assert kv_transfer_params.remote_engine_id is not None
+        assert kv_transfer_params.remote_host is not None
+        assert kv_transfer_params.remote_port is not None
+
         self.requests[request_id] = ReqMeta(
             local_block_ids=local_block_ids,
             remote_block_ids=kv_transfer_params.remote_block_ids,
