@@ -105,3 +105,8 @@ KVConnectorFactory.register_connector(
     "LMCacheConnectorV1",
     "vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector",
     "LMCacheConnectorV1")
+
+KVConnectorFactory.register_connector(
+    "GenericKVConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.generic_kv_connector",
+    "GenericKVConnector")
