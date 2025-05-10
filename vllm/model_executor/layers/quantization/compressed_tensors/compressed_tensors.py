@@ -220,7 +220,7 @@ class CompressedTensorsConfig(QuantizationConfig):
     def _is_fp4a16_nvfp4(self, weight_quant: BaseModel,
                          input_quant: BaseModel):
 
-        assert weight_quant is not None and input_quant is None
+        is_weight_only = weight_quant is not None and input_quant is None
         is_group_quant = (
             weight_quant.strategy == QuantizationStrategy.GROUP.value)
         is_symmetric = weight_quant.symmetric
@@ -229,7 +229,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         is_float_type = weight_quant.type == QuantizationType.FLOAT
         is_4_bits = weight_quant.num_bits == 4
 
-        return (is_group_quant and is_float_type and is_4_bits
+        return (is_weight_only and is_group_quant and is_float_type and is_4_bits
                 and is_group_size_16 and is_symmetric)
 
     def _is_static_tensor_w8a8(self, weight_quant: BaseModel,

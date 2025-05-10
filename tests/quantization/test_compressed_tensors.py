@@ -652,7 +652,7 @@ def test_compressed_tensors_2of4_sparse_compressed(vllm_runner, args_2of4):
 
 def test_compressed_tensors_nvfp4a16(vllm_runner):
     model = "nm-testing/TinyLlama-1.1B-Chat-v1.0-FP4"
-    with vllm_runner(model) as llm:
+    with vllm_runner(model, enforce_eager=True) as llm:
 
         def check_model(model):
             layer = model.model.layers[0]
