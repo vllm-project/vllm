@@ -433,6 +433,7 @@ class P2pNcclPipe:
             self.nccl.ncclSend(buffer_type(tensor.data_ptr()), tensor.numel(),
                                ncclDataTypeEnum.from_torch(tensor.dtype), dst,
                                comm, cudaStream_t(stream.cuda_stream))
+        stream.synchronize()
 
     def _recv(self, comm, tensor: torch.Tensor, src: int, stream=None):
         assert tensor.device == self.device, (
@@ -445,6 +446,7 @@ class P2pNcclPipe:
             self.nccl.ncclRecv(buffer_type(tensor.data_ptr()), tensor.numel(),
                                ncclDataTypeEnum.from_torch(tensor.dtype), src,
                                comm, cudaStream_t(stream.cuda_stream))
+        stream.synchronize()
 
     def close(self) -> None:
         self._listener_thread.join()
