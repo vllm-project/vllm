@@ -14,6 +14,6 @@ Or you can create a new Python environment using [uv](https://docs.astral.sh/uv/
 
 ```console
 # (Recommended) Create a new uv environment. Use `--seed` to install `pip` and `setuptools` in the environment.
-uv venv vllm --python 3.12 --seed
-source vllm/bin/activate
+uv venv --python 3.12 --seed
+source .venv/bin/activate
 ```
