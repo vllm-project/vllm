@@ -641,6 +641,9 @@ class NomicBertEmbeddingModel(BertEmbeddingModel):
         assert not config.mlp_fc2_bias
         assert not config.qkv_proj_bias
 
+        assert config.rotary_emb_scale_base is None
+        assert not config.rotary_emb_interleaved
+
         config.layer_norm_eps = config.layer_norm_epsilon
         config.position_embedding_type = "rotary"
         config.intermediate_size = config.n_inner
@@ -649,16 +652,20 @@ class NomicBertEmbeddingModel(BertEmbeddingModel):
         config.num_hidden_layers = config.n_layer
 
         head_dim = config.hidden_size // config.num_attention_heads
+        rotary_emb_dim = head_dim * config.rotary_emb_fraction
         rotary_kwargs = {
             "head_size": head_dim,
-            "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
+            "rotary_dim": rotary_emb_dim,
             "max_position": config.max_trained_positions,
-            "base": config.rotary_emb_base,
-            "rope_scaling": {
-                "rope_type": "dynamic",
-                "factor": config.rotary_scaling_factor
-            }
+            "base": getattr(config, "rope_theta", config.rotary_emb_base),
+            "rope_scaling": getattr(config, "rope_scaling", None)
         }
+
+        # we ignore config.rotary_scaling_factor so that for datasets shorter
+        # than max_trained_positions 2048, the results are consistent
+        # with SentenceTransformer.
+        # The context extension uses vllm style rope_theta and rope_scaling.
+        # See #17175
 
         return BertModel(vllm_config=vllm_config,
                          prefix=prefix,
@@ -695,6 +702,7 @@ class GteEmbeddingModel(BertEmbeddingModel):
             "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
             "max_position": config.max_position_embeddings,
             "base": config.rope_theta,
+            "rope_scaling": getattr(config, "rope_scaling", None)
         }
 
         model = BertModel(vllm_config=vllm_config,

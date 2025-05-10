@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+import math
+
 import pytest
 
-from ...utils import EmbedModelInfo, check_embeddings_close
+from tests.models.utils import EmbedModelInfo
 
-EMBEDDING_PROMPTS = [
-    'what is snowflake?', 'Where can I get the best tacos?', 'The Data Cloud!',
-    'Mexico City of Course!'
-]
+from .mteb_utils import MTEB_EMBED_TASKS, VllmMtebEncoder, run_mteb_embed_task
 
 MODELS = [
     EmbedModelInfo("Snowflake/snowflake-arctic-embed-xs",
@@ -45,13 +44,11 @@ MODELS = [
 
 
 @pytest.mark.parametrize("model_info", MODELS)
-@pytest.mark.parametrize("dtype", ["half"])
 def test_models(
     hf_runner,
     vllm_runner,
     example_prompts,
     model_info: EmbedModelInfo,
-    dtype: str,
     monkeypatch,
 ) -> None:
     if not model_info.enable_test:
@@ -59,21 +56,17 @@ def test_models(
         # and we don't need to test each one.
         pytest.skip("Skipping test.")
 
-    example_prompts = example_prompts + EMBEDDING_PROMPTS
-
     vllm_extra_kwargs = {
         "hf_overrides": {
             "is_matryoshka": model_info.is_matryoshka
         }
     }
 
-    with hf_runner(model_info.name, dtype=dtype,
-                   is_sentence_transformer=True) as hf_model:
-        hf_outputs = hf_model.encode(example_prompts)
+    with hf_runner(model_info.name, is_sentence_transformer=True) as hf_model:
+        st_main_score = run_mteb_embed_task(hf_model, MTEB_EMBED_TASKS)
 
     with vllm_runner(model_info.name,
                      task="embed",
-                     dtype=dtype,
                      max_model_len=None,
                      **vllm_extra_kwargs) as vllm_model:
 
@@ -84,12 +77,11 @@ def test_models(
             assert (model_info.architecture
                     in vllm_model.model.llm_engine.model_config.architectures)
 
-        vllm_outputs = vllm_model.encode(example_prompts)
+        vllm_main_score = run_mteb_embed_task(VllmMtebEncoder(vllm_model),
+                                              MTEB_EMBED_TASKS)
 
-    check_embeddings_close(
-        embeddings_0_lst=hf_outputs,
-        embeddings_1_lst=vllm_outputs,
-        name_0="hf",
-        name_1="vllm",
-        tol=1e-2,
-    )
+    print("VLLM main score: ", vllm_main_score)
+    print("SentenceTransformer main score: ", st_main_score)
+    print("Difference: ", st_main_score - vllm_main_score)
+
+    assert math.isclose(st_main_score, vllm_main_score, rel_tol=1e-4)

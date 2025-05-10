@@ -430,6 +430,7 @@ steps:
   - vllm/entrypoints/openai/
   - vllm/model_executor/models/whisper.py
   commands: # LMEval+Transcription WER check
+  - pip install mteb
   - pytest -s entrypoints/openai/correctness/
 
 - label: Encoder Decoder tests # 5min
@@ -475,6 +476,7 @@ steps:
   - vllm/
   - tests/models/language
   commands:
+    - pip install mteb
     # Install causal-conv1d for plamo2 models here, as it is not compatible with pip-compile.
     - pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8'
     - pytest -v -s models/language -m core_model
@@ -608,6 +610,7 @@ steps:
   - TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   # Avoid importing model tests that cause CUDA reinitialization error
   - pytest models/test_transformers.py -v -s -m 'distributed(num_gpus=2)'
+  - pip install mteb # for models/language
   - pytest models/language -v -s -m 'distributed(num_gpus=2)'
   - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)'
   # test sequence parallel
