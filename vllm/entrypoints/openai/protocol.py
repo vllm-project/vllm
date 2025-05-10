@@ -847,6 +847,10 @@ class CompletionRequest(OpenAIBaseModel):
             " as strings of the form 'token_id:{token_id}' so that tokens "
             "that are not JSON-encodable can be identified."))
 
+    kv_transfer_params: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="KVTransfer parameters used for disaggregated serving.")
+
     # doc: end-completion-extra-params
 
     # Default sampling parameters for completion requests
@@ -972,7 +976,9 @@ class CompletionRequest(OpenAIBaseModel):
                 else RequestOutputKind.FINAL_ONLY,
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias,
-            allowed_token_ids=self.allowed_token_ids)
+            allowed_token_ids=self.allowed_token_ids,
+            extra_args=({"kv_transfer_params": self.kv_transfer_params}
+                        if self.kv_transfer_params else None))
 
     @model_validator(mode="before")
     @classmethod
@@ -1222,6 +1228,8 @@ class CompletionResponse(OpenAIBaseModel):
     model: str
     choices: list[CompletionResponseChoice]
     usage: UsageInfo
+    kv_transfer_params: Optional[dict[str, Any]] = Field(
+        default=None, description="KVTransfer parameters.")
 
 
 class CompletionResponseStreamChoice(OpenAIBaseModel):

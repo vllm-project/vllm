@@ -482,7 +482,7 @@ class OpenAIServingCompletion(OpenAIServing):
             model=model_name,
             choices=choices,
             usage=usage,
-        )
+            kv_transfer_params=final_res_batch[0].kv_transfer_params)
 
     def _create_completion_logprobs(
         self,

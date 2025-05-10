@@ -8,6 +8,7 @@ import inspect
 import json
 import re
 import textwrap
+import uuid
 import warnings
 from collections import Counter
 from contextlib import contextmanager
@@ -3438,6 +3439,9 @@ class KVTransferConfig:
     """The KV connector for vLLM to transmit KV caches between vLLM instances.
     """
 
+    engine_id: str = str(uuid.uuid4())
+    """The engine id for KV transfers."""
+
     kv_buffer_device: Optional[str] = "cuda"
     """The device used by kv connector to buffer the KV cache.
     Currently only support 'cuda'."""
@@ -3448,7 +3452,7 @@ class KVTransferConfig:
 
     kv_role: Optional[KVRole] = None
     """Whether this vLLM instance produces, consumes KV cache, or both. Choices
-    are 'kv_producer', 'kv_consumer', and 'both'."""
+    are 'kv_producer', 'kv_consumer', and 'kv_both'."""
 
     kv_rank: Optional[int] = None
     """The rank of this vLLM instance in the KV cache transfer. Typical value:

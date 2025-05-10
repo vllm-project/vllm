@@ -4,7 +4,7 @@ import time
 from collections.abc import MutableSequence
 from collections.abc import Sequence as GenericSequence
 from dataclasses import dataclass
-from typing import Generic, Optional, Union
+from typing import Any, Generic, Optional, Union
 
 import torch
 from typing_extensions import TypeVar, deprecated
@@ -103,6 +103,7 @@ class RequestOutput:
         encoder_prompt_token_ids: The token IDs of the encoder prompt.
                                   None if decoder-only.
         num_cached_tokens: The number of tokens with prefix cache hit.
+        kv_transfer_params: The params for remote K/V transfer.
     """
 
     def __init__(
@@ -120,6 +121,7 @@ class RequestOutput:
         num_cached_tokens: Optional[int] = None,
         *,
         multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None,
+        kv_transfer_params: Optional[dict[str, Any]] = None,
     ) -> None:
         self.request_id = request_id
         self.prompt = prompt
@@ -133,11 +135,13 @@ class RequestOutput:
         self.encoder_prompt = encoder_prompt
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
+        self.kv_transfer_params = kv_transfer_params
 
     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
         """Merge subsequent RequestOutput into this one"""
 
         self.finished |= next_output.finished
+        self.kv_transfer_params = next_output.kv_transfer_params
 
         for next_completion in next_output.outputs:
             for i, completion in enumerate(self.outputs):
