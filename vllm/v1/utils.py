@@ -247,3 +247,16 @@ def report_usage_stats(
             "disable_custom_all_reduce":
             vllm_config.parallel_config.disable_custom_all_reduce,
         })
+
+
+def runtime_to_value_error(func):
+    """Decorator to convert RuntimeError to ValueError."""
+
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except RuntimeError as e:
+            raise ValueError(
+                f"An error occurred in {func.__name__}: {e}") from e
+
+    return wrapper
