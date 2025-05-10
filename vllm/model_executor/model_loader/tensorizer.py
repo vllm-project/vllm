@@ -81,7 +81,9 @@ class TensorizerConfig:
             and re.search(r'%0\dd', self.tensorizer_uri) is not None
         if not self.tensorizer_uri and not self.lora_dir:
             raise ValueError("tensorizer_uri must be provided.")
-        self.tensorizer_dir = os.path.dirname(self.tensorizer_uri)
+        if not self.tensorizer_uri and self.lora_dir:
+            self.tensorizer_uri = f"{self.lora_dir}/adapter_model.tensors"
+            self.tensorizer_dir = os.path.dirname(self.tensorizer_uri)
 
     def _construct_tensorizer_args(self) -> "TensorizerArgs":
         tensorizer_args = {
