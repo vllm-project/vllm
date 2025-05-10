@@ -229,8 +229,8 @@ class CompressedTensorsConfig(QuantizationConfig):
         is_float_type = weight_quant.type == QuantizationType.FLOAT
         is_4_bits = weight_quant.num_bits == 4
 
-        return (is_weight_only and is_group_quant and is_float_type and is_4_bits
-                and is_group_size_16 and is_symmetric)
+        return (is_weight_only and is_group_quant and is_float_type
+                and is_4_bits and is_group_size_16 and is_symmetric)
 
     def _is_static_tensor_w8a8(self, weight_quant: BaseModel,
                                input_quant: BaseModel) -> bool:
