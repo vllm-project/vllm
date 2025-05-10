@@ -641,6 +641,9 @@ class ModelConfig:
     def _init_pooler_config(self) -> Optional["PoolerConfig"]:
 
         if self.runner_type == "pooling":
+            logger.warning("CUDA graph is not supported for pooling yet, "
+                           "fallback to the eager mode.")
+            self.enforce_eager = True
             if isinstance(self.override_pooler_config, dict):
                 self.override_pooler_config = PoolerConfig(
                     **self.override_pooler_config)

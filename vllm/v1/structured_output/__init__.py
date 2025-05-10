@@ -46,6 +46,7 @@ class StructuredOutputManager:
         # NOTE: We only support a single backend. We do NOT support different
         # backends on a per-request basis in V1 (for now, anyway...).
         if self.backend is None:
+            assert request.sampling_params is not None
             backend = request.sampling_params.guided_decoding.backend
             if backend == "xgrammar":
                 from vllm.v1.structured_output.backend_xgrammar import (

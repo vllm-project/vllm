@@ -535,8 +535,10 @@ class Qwen2EmbeddingModel(nn.Module, SupportsLoRA, SupportsPP):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        return self.model(input_ids, positions, intermediate_tensors)
+        return self.model(input_ids, positions, intermediate_tensors,
+                          inputs_embeds)
 
     def pooler(
         self,
