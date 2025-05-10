@@ -288,21 +288,64 @@ def test_mixtral_moe(dtype: torch.dtype, padding: bool, use_rocm_aiter: bool,
                                    atol=mixtral_moe_tol[dtype])
 
 
+def marlin_moe_generate_valid_test_cases():
+    import itertools
+    m_list = [1, 123, 666]
+    n_list = [128, 1024]
+    k_list = [256, 2048]
+    e_list = [4, 12]
+    topk_list = [2, 3]
+    ep_size_list = [1, 4]
+    dtype_list = [torch.half, torch.bfloat16]
+    group_size_list = [-1, 16, 32, 128]
+    act_order_list = [True, False]
+    quant_type_list = [
+        scalar_types.float4_e2m1f,
+        scalar_types.float8_e4m3fn,
+        scalar_types.uint4,
+        scalar_types.uint4b8,
+        scalar_types.uint8b128,
+    ]
+    is_k_full_list = [True, False]
+
+    all_combinations = itertools.product(m_list, n_list, k_list, e_list,
+                                         topk_list, ep_size_list, dtype_list,
+                                         group_size_list, act_order_list,
+                                         quant_type_list, is_k_full_list)
+
+    def is_invalid(m, n, k, e, topk, ep_size, dtype, group_size, act_order,
+                   quant_type, is_k_full):
+
+        if quant_type == scalar_types.float8_e4m3fn and \
+                group_size not in [-1, 128]:
+            return False
+        if quant_type == scalar_types.float4_e2m1f and group_size != 16:
+            return False
+        if quant_type != scalar_types.float4_e2m1f and group_size == 16:
+            return False
+
+        # Filter act_order
+        if act_order:
+            if group_size in (-1, k, n):
+                return False
+            if quant_type not in [scalar_types.uint4b8]:
+                return False
+        elif not is_k_full:
+            return False
+
+        return True
+
+    cases = []
+    for case in all_combinations:
+        if is_invalid(*case):
+            cases.append(case)
+    return cases
+
+
 @pytest.mark.flaky(reruns=2)
-@pytest.mark.parametrize("m", [1, 123, 666])
-@pytest.mark.parametrize("n", [128, 1024])
-@pytest.mark.parametrize("k", [256, 2048])
-@pytest.mark.parametrize("e", [4, 12])
-@pytest.mark.parametrize("topk", [2, 3])
-@pytest.mark.parametrize("ep_size", [1, 4])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("group_size", [-1, 16, 32, 128])
-@pytest.mark.parametrize("act_order", [True, False])
-@pytest.mark.parametrize("quant_type", [
-    scalar_types.uint4, scalar_types.uint8b128, scalar_types.uint4b8,
-    scalar_types.float8_e4m3fn, scalar_types.float4_e2m1f
-])
-@pytest.mark.parametrize("is_k_full", [True, False])
+@pytest.mark.parametrize(("m, n, k, e, topk, ep_size, dtype, group_size,"
+                          "act_order, quant_type, is_k_full"),
+                         marlin_moe_generate_valid_test_cases())
 @pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
 def test_fused_marlin_moe(
     m: int,
