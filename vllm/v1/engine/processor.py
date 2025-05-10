@@ -210,8 +210,6 @@ class Processor:
         self._validate_params(params)
         if priority != 0:
             raise ValueError("V1 does not support priority yet.")
-        if trace_headers is not None:
-            raise ValueError("V1 does not support tracing yet.")
         if prompt_adapter_request is not None:
             raise ValueError("V1 does not support prompt_adapter_request.")
 
@@ -318,6 +316,7 @@ class Processor:
             arrival_time=arrival_time,
             lora_request=lora_request,
             cache_salt=decoder_inputs.get("cache_salt"),
+            trace_headers=trace_headers,
         )
 
     def _validate_model_inputs(self,

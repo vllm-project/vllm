@@ -16,6 +16,10 @@ from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.stats import (IterationStats, LoRARequestStates,
                                    RequestStateStats)
 
+from vllm.config import ObservabilityConfig
+from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
+                          init_tracer)
+
 
 class RequestOutputCollector:
     """
@@ -64,7 +68,6 @@ class RequestOutputCollector:
 
 @dataclass
 class OutputProcessorOutput:
-
     request_outputs: list[RequestOutput]
     reqs_to_abort: list[str]
 
@@ -72,20 +75,20 @@ class OutputProcessorOutput:
 class RequestState:
 
     def __init__(
-        self,
-        request_id: str,
-        parent_req: Optional[ParentRequest],
-        request_index: int,
-        lora_name: Optional[str],
-        output_kind: RequestOutputKind,
-        prompt: Optional[str],
-        prompt_token_ids: list[int],
-        logprobs_processor: LogprobsProcessor,
-        detokenizer: IncrementalDetokenizer,
-        max_tokens_param: Optional[int],
-        arrival_time: float,
-        queue: Optional[RequestOutputCollector],
-        log_stats: bool,
+            self,
+            request_id: str,
+            parent_req: Optional[ParentRequest],
+            request_index: int,
+            lora_name: Optional[str],
+            output_kind: RequestOutputKind,
+            prompt: Optional[str],
+            prompt_token_ids: list[int],
+            logprobs_processor: LogprobsProcessor,
+            detokenizer: IncrementalDetokenizer,
+            max_tokens_param: Optional[int],
+            arrival_time: float,
+            queue: Optional[RequestOutputCollector],
+            log_stats: bool,
     ):
         self.request_id = request_id
         self.parent_req = parent_req
@@ -106,14 +109,14 @@ class RequestState:
 
     @classmethod
     def from_new_request(
-        cls,
-        tokenizer: AnyTokenizer,
-        request: EngineCoreRequest,
-        prompt: Optional[str],
-        parent_req: Optional[ParentRequest],
-        request_index: int,
-        queue: Optional[RequestOutputCollector],
-        log_stats: bool,
+            cls,
+            tokenizer: AnyTokenizer,
+            request: EngineCoreRequest,
+            prompt: Optional[str],
+            parent_req: Optional[ParentRequest],
+            request_index: int,
+            queue: Optional[RequestOutputCollector],
+            log_stats: bool,
     ) -> "RequestState":
         if not request.sampling_params.detokenize:
             tokenizer = None
@@ -142,10 +145,10 @@ class RequestState:
         )
 
     def make_request_output(
-        self,
-        new_token_ids: list[int],
-        finish_reason: Optional[FinishReason],
-        stop_reason: Union[int, str, None],
+            self,
+            new_token_ids: list[int],
+            finish_reason: Optional[FinishReason],
+            stop_reason: Union[int, str, None],
     ) -> Optional[RequestOutput]:
 
         finished = finish_reason is not None
@@ -170,10 +173,10 @@ class RequestState:
         return self._new_request_output(request_id, outputs, finished)
 
     def _new_request_output(
-        self,
-        request_id: str,
-        outputs: list[CompletionOutput],
-        finished: bool,
+            self,
+            request_id: str,
+            outputs: list[CompletionOutput],
+            finished: bool,
     ) -> RequestOutput:
 
         if self.output_kind == RequestOutputKind.DELTA:
@@ -192,10 +195,10 @@ class RequestState:
         )
 
     def _new_completion_output(
-        self,
-        token_ids: list[int],
-        finish_reason: Optional[FinishReason],
-        stop_reason: Union[int, str, None],
+            self,
+            token_ids: list[int],
+            finish_reason: Optional[FinishReason],
+            stop_reason: Union[int, str, None],
     ) -> CompletionOutput:
 
         finished = finish_reason is not None
@@ -225,15 +228,25 @@ class OutputProcessor:
     """Process EngineCoreOutputs into RequestOutputs."""
 
     def __init__(
-        self,
-        tokenizer: TokenizerGroup,
-        log_stats: bool,
+            self,
+            tokenizer: TokenizerGroup,
+            log_stats: bool,
+            observability_config: Optional[ObservabilityConfig] = None
     ):
         self.log_stats = log_stats
         self.tokenizer = tokenizer
         self.request_states: dict[str, RequestState] = {}
         self.parent_requests: dict[str, ParentRequest] = {}
         self.lora_states = LoRARequestStates()
+
+        self.tracer = None
+        if self.observability_config.otlp_traces_endpoint:
+            self.tracer = init_tracer(
+                "vllm.llm_engine",
+                self.observability_config.otlp_traces_endpoint)
+
+    def is_tracing_enabled(self) -> bool:
+        return self.tracer is not None
 
     def get_num_unfinished_requests(self):
         return len(self.request_states)
@@ -249,8 +262,8 @@ class OutputProcessor:
             state.queue.put(e)
 
     def abort_requests(
-        self,
-        request_ids: Iterable[str],
+            self,
+            request_ids: Iterable[str],
     ) -> list[str]:
         request_ids_to_abort = []
         for request_id in request_ids:
@@ -266,12 +279,12 @@ class OutputProcessor:
         return request_ids_to_abort
 
     def add_request(
-        self,
-        request: EngineCoreRequest,
-        prompt: Optional[str],
-        parent_req: Optional[ParentRequest] = None,
-        request_index: int = 0,
-        queue: Optional[RequestOutputCollector] = None,
+            self,
+            request: EngineCoreRequest,
+            prompt: Optional[str],
+            parent_req: Optional[ParentRequest] = None,
+            request_index: int = 0,
+            queue: Optional[RequestOutputCollector] = None,
     ) -> None:
         request_id = request.request_id
         if request_id in self.request_states:
@@ -291,10 +304,10 @@ class OutputProcessor:
             self.parent_requests[parent_req.request_id] = parent_req
 
     def process_outputs(
-        self,
-        engine_core_outputs: list[EngineCoreOutput],
-        engine_core_timestamp: Optional[float] = None,
-        iteration_stats: Optional[IterationStats] = None,
+            self,
+            engine_core_outputs: list[EngineCoreOutput],
+            engine_core_timestamp: Optional[float] = None,
+            iteration_stats: Optional[IterationStats] = None,
     ) -> OutputProcessorOutput:
         """
         Process the EngineCoreOutputs:
@@ -373,13 +386,67 @@ class OutputProcessor:
                 # Track per-request stats
                 self._update_stats_from_finished(req_state, finish_reason,
                                                  iteration_stats)
-
+                self.do_tracing(engine_core_output, req_state, iteration_stats)
         self.lora_states.update_iteration_stats(iteration_stats)
 
         return OutputProcessorOutput(
             request_outputs=request_outputs,
             reqs_to_abort=reqs_to_abort,
         )
+
+    def do_tracing(self, engine_core_output: EngineCoreOutput,
+                   req_state: RequestState,
+                   iteration_stats: Optional[IterationStats]):
+        if engine_core_output.finish_reason is None or iteration_stats is None:
+            return
+        arrival_time_nano_seconds = int(req_state.stats.arrival_time * 1e9)
+
+        trace_context = extract_trace_context(engine_core_output.trace_headers)
+        with tracer.start_as_current_span("llm_request",
+                                          kind=SpanKind.SERVER,
+                                          context=trace_context,
+                                          start_time=arrival_time_nano_seconds) as span:
+            metrics = req_state.stats
+            ttft = metrics.first_token_ts - metrics.arrival_time
+            e2e_time = time.time() - metrics.arrival_time
+            # Queued interval is from first QUEUED event to first SCHEDULED
+            queued_time = metrics.scheduled_ts - metrics.queued_ts
+
+            # Prefill interval is from first SCHEDULED to first NEW_TOKEN
+            # Any preemptions during prefill is included in the interval
+            prefill_time = metrics.first_token_ts - metrics.scheduled_ts
+
+            # Decode interval is from first NEW_TOKEN to last NEW_TOKEN
+            # Any preemptions during decode are included
+            decode_time = metrics.last_token_ts - metrics.first_token_ts
+
+            # Inference interval is from first SCHEDULED to last NEW_TOKEN
+            # Any preemptions during prefill or decode are included
+            inference_time = metrics.last_token_ts - metrics.scheduled_ts
+            span.set_attribute(SpanAttributes.GEN_AI_RESPONSE_MODEL,
+                               self.tokenizer.tokenizer_id)
+            span.set_attribute(SpanAttributes.GEN_AI_REQUEST_ID,
+                               req_state.request_id)
+            span.set_attribute(SpanAttributes.GEN_AI_REQUEST_MAX_TOKENS,
+                               req_state.max_tokens_param)
+            span.set_attribute(SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS,
+                               len(req_state.prompt_token_ids))
+            span.set_attribute(SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS,
+                               metrics.num_generation_tokens)
+            span.set_attribute(SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE,
+                               metrics.queued_ts - metrics.arrival_time)
+            span.set_attribute(SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN,
+                               ttft)
+            span.set_attribute(SpanAttributes.GEN_AI_LATENCY_E2E,
+                               e2e_time)
+            span.set_attribute(SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE,
+                               queued_time)
+            span.set_attribute(SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_PREFILL,
+                               prefill_time)
+            span.set_attribute(SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE,
+                               decode_time)
+            span.set_attribute(SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE,
+                               inference_time)
 
     def _update_stats_from_output(self, req_state: RequestState,
                                   engine_core_output: EngineCoreOutput,

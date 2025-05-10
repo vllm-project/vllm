@@ -3,7 +3,7 @@
 import enum
 import time
 from collections.abc import Sequence
-from typing import Any, Optional, Union
+from typing import Any, Mapping, Optional, Union
 
 import msgspec
 
@@ -64,6 +64,7 @@ class EngineCoreRequest(
     # a wave finished notification is received.
     current_wave: int = 0
 
+    trace_headers: Optional[Mapping[str, str]]
 
 class EngineCoreEventType(enum.IntEnum):
     """The type of engine core request event."""
@@ -105,7 +106,7 @@ class EngineCoreOutput(
     finish_reason: Optional[FinishReason] = None
     stop_reason: Union[int, str, None] = None
     events: Optional[list[EngineCoreEvent]] = None
-
+    trace_headers: Optional[Mapping[str, str]] = None
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None
