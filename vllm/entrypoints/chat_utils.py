@@ -44,6 +44,7 @@ from vllm.transformers_utils.chat_templates import (
 # yapf: enable
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
+from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
@@ -1272,3 +1273,6 @@ def apply_mistral_chat_template(
             "An error occurred in `mistral_common` while applying chat "
             "template")
         raise ValueError from e
+
+def random_tool_call_id() -> str:
+    return f"chatcmpl-tool-{random_uuid()}"
