@@ -216,6 +216,37 @@ def rocm_aiter_topk_softmax_fake(topk_weights: torch.Tensor,
     pass
 
 
+def rocm_aiter_biased_grouped_topk_impl(
+        gating_output: torch.Tensor,
+        correction_bias: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        num_expert_group: int,
+        topk_group: int,
+        need_renorm: bool,
+        routed_scaling_factor: float = 1.0  # mul to topk_weights
+) -> None:
+
+    from aiter import biased_grouped_topk
+
+    biased_grouped_topk(gating_output, correction_bias, topk_weights, topk_ids,
+                        num_expert_group, topk_group, need_renorm,
+                        routed_scaling_factor)
+
+
+def rocm_aiter_biased_grouped_topk_fake(
+        gating_output: torch.Tensor,
+        correction_bias: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        num_expert_group: int,
+        topk_group: int,
+        need_renorm: bool,
+        routed_scaling_factor: float = 1.0  # mul to topk_weights
+) -> None:
+    pass
+
+
 if current_platform.is_rocm():
 
     direct_register_custom_op(
@@ -255,6 +286,14 @@ if current_platform.is_rocm():
         op_func=rocm_aiter_topk_softmax_impl,
         mutates_args=["topk_weights", "topk_indices", "token_expert_indices"],
         fake_impl=rocm_aiter_topk_softmax_fake,
+        dispatch_key=current_platform.dispatch_key,
+    )
+
+    direct_register_custom_op(
+        op_name="rocm_aiter_biased_grouped_topk",
+        op_func=rocm_aiter_biased_grouped_topk_impl,
+        mutates_args=["topk_weights", "topk_ids"],
+        fake_impl=rocm_aiter_biased_grouped_topk_fake,
         dispatch_key=current_platform.dispatch_key,
     )
 
