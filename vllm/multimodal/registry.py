@@ -88,6 +88,12 @@ class MultiModalRegistry:
 
         self._processing_cache = ProcessingCache(VLLM_MM_INPUT_CACHE_GIB)
 
+    def reset_processor_cache(self) -> bool:
+        """Reset the multi-modal processing cache."""
+        self._processing_cache.reset()
+
+        return True  # Success
+
     @deprecated("Legacy input processor/mapper pipeline has been removed. "
                 "Please update your model runner to use "
                 "`seq_group_metadata.multi_modal_data` directly without "
@@ -106,7 +112,7 @@ class MultiModalRegistry:
         if not model_config.is_multimodal_model:
             return {}
 
-        processor = self.create_processor(model_config, disable_cache=True)
+        processor = self.create_processor(model_config, disable_cache=False)
         profiler = MultiModalProfiler(processor)
 
         seq_len = model_config.max_model_len
@@ -190,7 +196,7 @@ class MultiModalRegistry:
         if not model_config.is_multimodal_model:
             return {}
 
-        processor = self.create_processor(model_config, disable_cache=True)
+        processor = self.create_processor(model_config, disable_cache=False)
         profiler = MultiModalProfiler(processor)
         return profiler.get_mm_limits()
 
@@ -286,7 +292,7 @@ class MultiModalRegistry:
 
         The model is identified by ``model_config``.
         """
-        processor = self.create_processor(model_config, disable_cache=True)
+        processor = self.create_processor(model_config, disable_cache=False)
         profiler = MultiModalProfiler(processor)
         dummy_data = profiler.get_decoder_dummy_data(seq_len, mm_counts)
 
@@ -310,7 +316,7 @@ class MultiModalRegistry:
 
         The model is identified by ``model_config``.
         """
-        processor = self.create_processor(model_config, disable_cache=True)
+        processor = self.create_processor(model_config, disable_cache=False)
         profiler = MultiModalProfiler(processor)
         dummy_data = profiler.get_encoder_dummy_data(seq_len, mm_counts)
 
