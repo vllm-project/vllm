@@ -168,7 +168,6 @@ def _lora_shrink(
     NUM_WARPS = 4
     NUM_CTAS = 1
     NUM_STAGES = 2
-    MAX_NREG = None
 
     EVEN_K = K % (BLOCK_K * SPLIT_K) == 0  # type: ignore
 
@@ -213,7 +212,6 @@ def _lora_shrink(
         num_warps=NUM_WARPS,
         num_ctas=NUM_CTAS,
         num_stages=NUM_STAGES,
-        maxnreg=MAX_NREG,
     )
 
     return
