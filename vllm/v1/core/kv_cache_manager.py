@@ -32,9 +32,16 @@ class KVCacheBlocks:
         """Creates a new KVCacheBlocks instance with no blocks."""
         return cls([])
 
-    def get_block_ids(self) -> list[int]:
-        """Converts the KVCacheBlocks instance to a list of block IDs."""
-        return [block.block_id for block in self.blocks]
+    def get_block_ids(self) -> list[list[int]]:
+        """
+        Converts the KVCacheBlocks instance to block_ids.
+        
+        Returns:
+            list[list[int]]: A two-level list where
+            * the outer list corresponds to KV cache groups (only 1 group now)
+            * each inner list contains the block_ids of the blocks in that group
+        """
+        return [[block.block_id for block in self.blocks]]
 
 
 class KVCacheManager:
@@ -297,9 +304,9 @@ class KVCacheManager:
         self,
         request: Request,
         num_running_requests: int,
-    ) -> int:
+    ) -> list[int]:
         """Calculate the number of common prefix blocks shared by all requests
-        in the RUNNING state.
+        in the RUNNING state for each kv cache group.
 
         The function determines this by selecting any request and iterating
         through its blocks.  A block is considered a common prefix block if its
@@ -329,11 +336,14 @@ class KVCacheManager:
                 requests in the current step.
 
         Returns:
-            int: The number of common prefix blocks.
+            list[int]: The number of common prefix blocks for each kv cache 
+            group.
         """
         assert request.status == RequestStatus.RUNNING
-        return self.single_type_manager.get_num_common_prefix_blocks(
-            request.request_id, num_running_requests)
+        return [
+            self.single_type_manager.get_num_common_prefix_blocks(
+                request.request_id, num_running_requests)
+        ]
 
     def free_block_hashes(self, request: Request) -> None:
         """Discard the block hashes for the request.
