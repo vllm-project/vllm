@@ -1994,6 +1994,12 @@ class SchedulerConfig:
     default scheduler. Can be a class directly or the path to a class of form
     "mod.custom_class"."""
 
+    """
+    Early exit reasoning model 
+
+    """
+    early_exit_reasoning_model: bool = None
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -2074,6 +2080,7 @@ class SchedulerConfig:
                 self.max_num_batched_tokens)
 
         self.chunked_prefill_enabled = self.enable_chunked_prefill
+        self.early_exit_reasoning_model = self.enable_early_exit_reasoning_model
         if self.max_num_partial_prefills > 1:
             if self.long_prefill_token_threshold == 0:
                 self.long_prefill_token_threshold = int(self.max_model_len *
@@ -2307,6 +2314,8 @@ class SpeculativeConfig:
     """The parallel configuration for the target model."""
     enable_chunked_prefill: bool = field(default=None,
                                          init=True)  # type: ignore
+    enable_early_exit_reasoning_model: bool = field(default=None,
+                                         init=False)  # type: ignore
     """Whether vLLM is configured to use chunked prefill or not. Used for
     raising an error since it's not yet compatible with speculative decode."""
     disable_log_stats: bool = field(default=None, init=True)  # type: ignore

@@ -28,6 +28,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
+from vllm.sampling_params import SamplingParams
 
 logger = init_logger(__name__)
 import logging
@@ -684,7 +685,7 @@ class Scheduler(SchedulerInterface):
         new_request = Request(
             request_id=new_request_id,
             prompt_token_ids=new_prompt_token_ids,
-            sampling_params=parent_request.sampling_params,
+            sampling_params = SamplingParams(max_tokens= 10),
             arrival_time=time.monotonic(),
             lora_request=parent_request.lora_request,
             multi_modal_inputs=getattr(parent_request, "multi_modal_inputs", []),
@@ -717,8 +718,9 @@ class Scheduler(SchedulerInterface):
         self.running = deque(sorted(self.running, key=lambda r: 0 if "probe" in r.request_id else 1))
        
         for request in self.running:
-            if len(request.output_token_ids) in [5, 15] and "probe" not in request.request_id:
-                    self._create_and_add_new_request(request,len(request.output_token_ids))
+            if enable_early_exit_reasoning_model:
+                if len(request.output_token_ids)%120==0 and "probe" not in request.request_id:
+                        self._create_and_add_new_request(request,len(request.output_token_ids))
             req_id = request.request_id
             num_tokens_scheduled = num_scheduled_tokens.get(req_id, 0)
             if num_tokens_scheduled == 0:
