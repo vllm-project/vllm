@@ -18,7 +18,8 @@ from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
-from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
+from vllm.model_executor.layers.mrope_positions import (
+    mrope_get_input_positions_and_delta, mrope_get_next_input_positions)
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_lora, supports_multimodal
@@ -267,7 +268,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
 
         # For MRotaryEmbedding
         if seq_data.mrope_position_delta is not None:
-            next_pos = MRotaryEmbedding.get_next_input_positions(
+            next_pos = mrope_get_next_input_positions(
                 seq_data.mrope_position_delta,
                 context_len,
                 seq_len,
@@ -388,7 +389,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             token_ids = seq_data.get_token_ids()
 
             mrope_positions, mrope_position_delta = \
-                MRotaryEmbedding.get_input_positions(
+                mrope_get_input_positions_and_delta(
                     token_ids,
                     hf_config=hf_config,
                     image_grid_thw=image_grid_thw,
@@ -398,6 +399,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                     audio_feature_lengths=audio_feature_lengths,
                     use_audio_in_video=use_audio_in_video,
                 )
+            mrope_positions = mrope_positions.tolist()
             seq_data.mrope_position_delta = mrope_position_delta
 
             for i in range(3):
