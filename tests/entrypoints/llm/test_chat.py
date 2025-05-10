@@ -2,6 +2,7 @@
 import weakref
 
 import pytest
+from PIL import Image
 
 from vllm import LLM
 from vllm.distributed import cleanup_dist_env_and_memory
@@ -108,6 +109,29 @@ def test_chat_multi_image(vision_llm, image_urls: list[str]):
                     "url": image_url
                 }
             } for image_url in image_urls),
+            {
+                "type": "text",
+                "text": "What's in this image?"
+            },
+        ],
+    }]
+    outputs = vision_llm.chat(messages)
+    assert len(outputs) >= 0
+
+
+@pytest.mark.parametrize("image_urls",
+                         [[TEST_IMAGE_URLS[0], TEST_IMAGE_URLS[1]]])
+def test_chat_multi_pil_image(vision_llm, image_urls: list[str]):
+    images = [Image.open(image_url) for image_url in image_urls]
+
+    messages = [{
+        "role":
+        "user",
+        "content": [
+            *({
+                "type": "image",
+                "image": image
+            } for image in images),
             {
                 "type": "text",
                 "text": "What's in this image?"
