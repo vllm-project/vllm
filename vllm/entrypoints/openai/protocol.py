@@ -947,8 +947,6 @@ class CompletionRequest(OpenAIBaseModel):
             whitespace_pattern=self.guided_whitespace_pattern,
         )
 
-
-
         return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
