@@ -80,7 +80,13 @@ def plot_heatmap(data, title, filename, fmt=".1f", cmap="viridis"):
         for j in range(len(prompt_lens)):
             val = data[i, j]
             if not np.isnan(val):
-                ax.text(j, i, format(val, fmt), ha="center", va="center", fontsize=6, color="white")
+                ax.text(
+                    j, i, format(val, fmt),
+                    ha="center",
+                    va="center",
+                    fontsize=6,
+                    color="white"
+                )
 
     plt.colorbar(im, ax=ax)
     plt.tight_layout()

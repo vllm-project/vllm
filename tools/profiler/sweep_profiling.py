@@ -7,21 +7,44 @@ from datetime import timedelta
 import os
 import signal
 # Create the argument parser
-parser = argparse.ArgumentParser(description='Run vLLM profiling with different batch sizes')
-parser.add_argument('--model', type=str, default="meta-llama/Llama-3.2-3B",
-                    help='Model name to use for profiling')
-parser.add_argument('--max-tokens', type=int, default=int(1e5),
-                    help='Maximum number of batched tokens for GPU (default: 100000)')
-parser.add_argument('--tensor-parallel-size', type=int, default=1,
-                    help='Tensor parallelism degree (number of GPUs to split model across)')
+parser = argparse.ArgumentParser(
+    description="Run vLLM profiling with different batch sizes"
+)
+parser.add_argument(
+    '--model', type=str, default="meta-llama/Llama-3.2-3B",
+    help='Model name to use for profiling',
+)
+parser.add_argument(
+    '--max-tokens',
+    type=int,
+    default=int(1e5),
+    help='Maximum number of batched tokens for GPU (default: 100000)',
+)
+parser.add_argument(
+    '--tensor-parallel-size',
+    type=int,
+    default=1,
+    help=(
+        'Tensor parallelism degree '
+        '(number of GPUs to split model across)'
+    ),
+)
+
 args = parser.parse_args()
 model_name = args.model
 MAX_NUM_BATCHED_TOKENS_GPU = args.max_tokens
 TENSOR_PARALLEL_SIZE = args.tensor_parallel_size
 batch_sizes = [1, 2, 4, 6, 8, 10, 12, 14, 16, 20, 24, 28, 32]
 start_time = time.time()
-print("Note that --prompt-len and --json are DUMMY flags in this file, the inputs are handled in profiling.py. We will clean this up later.")
-print(f"WARNING: MAX_NUM_BATCHED_TOKENS_GPU is set to {MAX_NUM_BATCHED_TOKENS_GPU}. This may not fit on a smaller GPU!")
+print(
+    "Note that --prompt-len and --json are DUMMY flags in this file, "
+    "the inputs are handled in profiling.py."
+)
+print(
+    f"WARNING: MAX_NUM_BATCHED_TOKENS_GPU is "
+    f"set to {MAX_NUM_BATCHED_TOKENS_GPU}. "
+    f"This may not fit on a smaller GPU!"
+)
 print(f"INFO: The model being used is {model_name}")
 print(f"INFO: Using tensor parallel size of {TENSOR_PARALLEL_SIZE}")
 # Process each batch size
@@ -34,9 +57,9 @@ for batch_size in batch_sizes:
         "python", "profiling.py", 
         "--model", model_name,
         "--batch-size", str(batch_size),
-        "--prompt-len", str(0), # This is a dummy value, prompt lens are handled in the profiling.py file
+        "--prompt-len", str(0), # dummy value, handled in profiling.py
         "--max-num-batched-tokens", str(max_num_batched_tokens),
-        "--json", "DUMMY_ARG.json", # another dummy arg, this is handled inside profiling.py
+        "--json", "DUMMY_ARG.json", # dummy, handled inside profiling.py
         "--load-format", "dummy",
         "--enforce-eager",
         "--tensor-parallel-size", str(TENSOR_PARALLEL_SIZE),
@@ -47,7 +70,8 @@ for batch_size in batch_sizes:
     print(f"\nRunning: {cmd_string}")
     
     try:
-        # Start the process with shell=True since we're using environment variables
+        # Start the process with shell=True 
+        # since we're using environment variables
         process = subprocess.Popen(cmd_string, shell=True)
         return_code = process.wait()
         if return_code == 0:
@@ -61,7 +85,10 @@ for batch_size in batch_sizes:
         error_details = traceback.format_exc()
         print(f"Detailed error traceback:\n{error_details}")
         with open('profiling_errors.log', 'a') as log_file:
-            log_file.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Error with batch_size={batch_size}: {str(e)}\n")
+            log_file.write(
+                f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
+                f"Error with batch_size={batch_size}: {str(e)}\n"
+            )
             log_file.write(f"Traceback:\n{error_details}\n\n")
         print(f"Encountered an exception. Moving to next batch size.")
     finally:
