@@ -88,6 +88,7 @@ _TEXT_GENERATION_MODELS = {
     # transformers's mpt class has lower case
     "MptForCausalLM": ("mpt", "MPTForCausalLM"),
     "MPTForCausalLM": ("mpt", "MPTForCausalLM"),
+    "MiMoForCausalLM": ("mimo", "MiMoForCausalLM"),
     "NemotronForCausalLM": ("nemotron", "NemotronForCausalLM"),
     "OlmoForCausalLM": ("olmo", "OlmoForCausalLM"),
     "Olmo2ForCausalLM": ("olmo2", "Olmo2ForCausalLM"),
@@ -215,6 +216,7 @@ _MULTIMODAL_MODELS = {
 }
 
 _SPECULATIVE_DECODING_MODELS = {
+    "MiMoMTPModel": ("mimo_mtp", "MiMoMTP"),
     "EAGLEModel": ("eagle", "EAGLE"),
     "EagleLlamaForCausalLM": ("llama_eagle", "EagleLlamaForCausalLM"),
     "Eagle3LlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
