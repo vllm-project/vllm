@@ -67,13 +67,17 @@ class SpecDecodingLogging:
             spec_decoding_stats.num_accepted_tokens_per_pos)
 
     def log(self, log_fn=logger.info):
+        if not self.num_drafts:
+            return
         num_drafts = np.sum(self.num_drafts)
         num_draft_tokens = np.sum(self.num_draft_tokens)
         num_accepted_tokens = np.sum(self.num_accepted_tokens)
 
         draft_acceptance_rate = (num_accepted_tokens / num_draft_tokens *
                                  100 if num_draft_tokens > 0 else float("nan"))
-        mean_acceptance_length = (num_accepted_tokens / num_drafts)
+
+        # Conventionally, mean acceptance length includes the bonus token
+        mean_acceptance_length = 1 + (num_accepted_tokens / num_drafts)
 
         pos_matrix = np.array(self.accepted_tokens_per_pos_lists)
         acceptance_rates = np.sum(pos_matrix, axis=0) / num_drafts
@@ -103,10 +107,12 @@ class SpecDecodingProm:
       rate(vllm:spec_decode_num_accepted_tokens_total[$interval]) /
       rate(vllm:spec_decode_num_draft_tokens_total[$interval])
 
-    The mean acceptance length can be calculated using:
+    The mean acceptance length (conventionally including bonus tokens)
+    can be calculated using:
 
+      1 + (
       rate(vllm:spec_decode_num_accepted_tokens_total[$interval]) /
-      rate(vllm:spec_decode_num_drafts[$interval])
+      rate(vllm:spec_decode_num_drafts[$interval]))
 
     A per-position acceptance rate vector can be computed using
 

@@ -17,13 +17,27 @@ from vllm.config import CompilationConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import weak_ref_tensors
 
-from .compiler_interface import EagerAdaptor, InductorAdaptor
+from .compiler_interface import (CompilerInterface, EagerAdaptor,
+                                 InductorAdaptor, InductorStandaloneAdaptor)
 from .counter import compilation_counter
 from .inductor_pass import InductorPass
 from .monitor import end_monitoring_torch_compile
 from .pass_manager import PostGradPassManager
 
 logger = init_logger(__name__)
+
+
+def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
+    if compilation_config.use_inductor:
+        if envs.VLLM_TEST_STANDALONE_COMPILE:
+            logger.info("Using InductorStandaloneAdaptor")
+            return InductorStandaloneAdaptor()
+        else:
+            logger.info("Using InductorAdaptor")
+            return InductorAdaptor()
+    else:
+        logger.info("Using EagerAdaptor")
+        return EagerAdaptor()
 
 
 class CompilerManager:
@@ -41,11 +55,11 @@ class CompilerManager:
     support int as key.
     """
 
-    def __init__(self, use_inductor: bool):
+    def __init__(self, compilation_config: CompilationConfig):
         self.cache: Dict[Tuple[Optional[int], int, str], Any] = dict()
-        cls = InductorAdaptor if use_inductor else EagerAdaptor
-        self.compiler = cls()
         self.is_cache_updated = False
+        self.compilation_config = compilation_config
+        self.compiler = make_compiler(compilation_config)
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         return self.compiler.compute_hash(vllm_config)
@@ -123,8 +137,15 @@ class CompilerManager:
 
         # no compiler cached the graph, or the cache is disabled,
         # we need to compile it
+        if isinstance(self.compiler, InductorAdaptor):
+            # Let compile_fx generate a key for us
+            maybe_key = None
+        else:
+            maybe_key = \
+                f"artifact_shape_{runtime_shape}_subgraph_{graph_index}"
         compiled_graph, handle = self.compiler.compile(
-            graph, example_inputs, additional_inductor_config, runtime_shape)
+            graph, example_inputs, additional_inductor_config, runtime_shape,
+            maybe_key)
 
         assert compiled_graph is not None, "Failed to compile the graph"
 
@@ -336,7 +357,7 @@ class VllmBackend:
         self.compilation_config = vllm_config.compilation_config
 
         self.compiler_manager: CompilerManager = CompilerManager(
-            self.compilation_config.use_inductor)
+            self.compilation_config)
 
         # `torch.compile` is JIT compiled, so we don't need to
         # do anything here

@@ -128,9 +128,7 @@ class LoggingStatLogger(StatLoggerBase):
             scheduler_stats.gpu_cache_usage * 100,
             self.prefix_caching_metrics.hit_rate * 100,
         )
-
-        if scheduler_stats.spec_decoding_stats is not None:
-            self.spec_decoding_logging.log(log_fn=log_fn)
+        self.spec_decoding_logging.log(log_fn=log_fn)
 
     def log_engine_initialized(self):
         logger.info(

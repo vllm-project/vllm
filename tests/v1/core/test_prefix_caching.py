@@ -299,7 +299,8 @@ def test_decode():
         req0.append_output_token_ids(8)
     new_blocks = manager.allocate_slots(req0, 4)
     assert new_blocks is not None and len(new_blocks.blocks) == 0
-    assert manager.req_to_blocks[req0.request_id][-1].block_hash is None
+    assert manager.single_type_manager.req_to_blocks[
+        req0.request_id][-1].block_hash is None
 
     # Append slots with allocating a new block.
     req0.num_computed_tokens = 59
@@ -309,8 +310,10 @@ def test_decode():
         req0.append_output_token_ids(7)
     new_blocks = manager.allocate_slots(req0, 19)
     assert new_blocks is not None and len(new_blocks.blocks) == 1
-    assert manager.req_to_blocks[req0.request_id][-2].block_hash is not None
-    assert manager.req_to_blocks[req0.request_id][-1].block_hash is None
+    assert manager.single_type_manager.req_to_blocks[
+        req0.request_id][-2].block_hash is not None
+    assert manager.single_type_manager.req_to_blocks[
+        req0.request_id][-1].block_hash is None
 
 
 def test_evict():
@@ -689,7 +692,7 @@ def test_prefill_not_enough_free_blocks_with_computed_blocks():
     assert not computed_blocks.blocks
     assert num_computed_tokens == 0
     manager.allocate_slots(req0, 48, computed_blocks)
-    block_part0 = manager.req_to_blocks[req0.request_id]
+    block_part0 = manager.single_type_manager.req_to_blocks[req0.request_id]
 
     # | Common-0 | Common-1 | Common-2 | Req1-3 | Req1-4 | Req1-5 | ... |
     req1 = make_request("1", common_token_ids * 2)
@@ -697,7 +700,7 @@ def test_prefill_not_enough_free_blocks_with_computed_blocks():
     assert computed_blocks.blocks == block_part0
     assert num_computed_tokens == 3 * 16
     manager.allocate_slots(req1, 48, computed_blocks)
-    block_part1 = manager.req_to_blocks[req1.request_id]
+    block_part1 = manager.single_type_manager.req_to_blocks[req1.request_id]
     # | Common-0 | Common-1 | Common-2 | Req1-3 (F) | Req1-4 (F) |
     # | Req1-5(F)| ... |
     manager.free(req1)
