@@ -23,7 +23,7 @@ from ....multimodal.utils import random_audio, random_image, random_video
 from ...registry import HF_EXAMPLE_MODELS
 
 
-def _test_processing_correctness(
+async def _test_processing_correctness(
     model_id: str,
     hit_rate: float,
     num_batches: int,
@@ -74,7 +74,7 @@ def _test_processing_correctness(
     input_to_hit = {
         "image": Image.new("RGB", size=(128, 128)),
         "video": np.zeros((4, 128, 128, 3), dtype=np.uint8),
-        "audio": (np.zeros((512, )), 16000),
+        "audio": (np.zeros((16384, )), 16000),
     }
     input_factory = {
         "image":
@@ -87,7 +87,7 @@ def _test_processing_correctness(
                 min_wh=128,
                 max_wh=256),
         "audio":
-        partial(random_audio, rng, min_len=512, max_len=1024, sr=16000),
+        partial(random_audio, rng, min_len=16384, max_len=32768, sr=16000),
     }
 
     for batch_idx in range(num_batches):
@@ -113,7 +113,7 @@ def _test_processing_correctness(
                     mm_data[k] = mm_data[k][0]
 
         if isinstance(tokenizer, MistralTokenizer):
-            _test_processing_correctness_mistral(
+            await _test_processing_correctness_mistral(
                 model_config,
                 tokenizer,
                 prompt,
@@ -124,7 +124,7 @@ def _test_processing_correctness(
                 ignore_mm_keys=ignore_mm_keys,
             )
         else:
-            _test_processing_correctness_hf(
+            await _test_processing_correctness_hf(
                 model_config,
                 tokenizer,
                 prompt,
@@ -136,7 +136,7 @@ def _test_processing_correctness(
             )
 
 
-def _test_processing_correctness_hf(
+async def _test_processing_correctness_hf(
     model_config: ModelConfig,
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     prompt: str,
@@ -199,8 +199,61 @@ def _test_processing_correctness_hf(
         msg=f"Failed ({batch_idx=}, {prompt=}, {mm_data=})",
     )
 
+    # [Async tests]
+    baseline_result_async = await baseline_processor.apply_async(
+        prompt,
+        mm_data=mm_data,
+        hf_processor_mm_kwargs={},
+    )
 
-def _test_processing_correctness_mistral(
+    _assert_inputs_equal(
+        baseline_result,
+        baseline_result_async,
+        ignore_mm_keys=ignore_mm_keys,
+        msg=f"Failed ({batch_idx=}, {prompt=}, {mm_data=})",
+    )
+
+    cached_result_async = await cached_processor.apply_async(
+        prompt,
+        mm_data=mm_data,
+        hf_processor_mm_kwargs={},
+    )
+
+    _assert_inputs_equal(
+        cached_result,
+        cached_result_async,
+        ignore_mm_keys=ignore_mm_keys,
+        msg=f"Failed ({batch_idx=}, {prompt=}, {mm_data=})",
+    )
+
+    baseline_tokenized_result_async = await baseline_processor.apply_async(
+        token_prompt,
+        mm_data=mm_data,
+        hf_processor_mm_kwargs={},
+    )
+
+    _assert_inputs_equal(
+        baseline_tokenized_result,
+        baseline_tokenized_result_async,
+        ignore_mm_keys=ignore_mm_keys,
+        msg=f"Failed ({batch_idx=}, {prompt=}, {mm_data=})",
+    )
+
+    cached_tokenized_result_async = await cached_processor.apply_async(
+        token_prompt,
+        mm_data=mm_data,
+        hf_processor_mm_kwargs={},
+    )
+
+    _assert_inputs_equal(
+        cached_tokenized_result,
+        cached_tokenized_result_async,
+        ignore_mm_keys=ignore_mm_keys,
+        msg=f"Failed ({batch_idx=}, {prompt=}, {mm_data=})",
+    )
+
+
+async def _test_processing_correctness_mistral(
     model_config: ModelConfig,
     tokenizer: MistralTokenizer,
     prompt: str,
@@ -235,6 +288,7 @@ def _test_processing_correctness_mistral(
         hf_processor_mm_kwargs={},
     )
 
+    # [Async tests]
     _assert_inputs_equal(
         baseline_tokenized_result,
         cached_tokenized_result,
@@ -242,8 +296,35 @@ def _test_processing_correctness_mistral(
         msg=f"Failed ({batch_idx=}, {prompt=}, {mm_data=})",
     )
 
+    baseline_tokenized_result_async = await baseline_processor.apply_async(
+        token_prompt,
+        mm_data=mm_data,
+        hf_processor_mm_kwargs={},
+    )
+
+    _assert_inputs_equal(
+        baseline_tokenized_result,
+        baseline_tokenized_result_async,
+        ignore_mm_keys=ignore_mm_keys,
+        msg=f"Failed ({batch_idx=}, {prompt=}, {mm_data=})",
+    )
+
+    cached_tokenized_result_async = await cached_processor.apply_async(
+        token_prompt,
+        mm_data=mm_data,
+        hf_processor_mm_kwargs={},
+    )
+
+    _assert_inputs_equal(
+        cached_tokenized_result,
+        cached_tokenized_result_async,
+        ignore_mm_keys=ignore_mm_keys,
+        msg=f"Failed ({batch_idx=}, {prompt=}, {mm_data=})",
+    )
+
 
 # yapf: disable
+@pytest.mark.asyncio
 @pytest.mark.parametrize("model_id", [
     "rhymes-ai/Aria",
     "CohereForAI/aya-vision-8b",
@@ -277,6 +358,7 @@ def _test_processing_correctness_mistral(
     "AIDC-AI/Ovis2-1B",
     "google/paligemma-3b-mix-224",
     "google/paligemma2-3b-ft-docci-448",
+    "microsoft/Phi-3.5-vision-instruct",
     "microsoft/Phi-4-multimodal-instruct",
     "mistralai/Pixtral-12B-2409",
     "mistral-community/pixtral-12b",
@@ -293,7 +375,7 @@ def _test_processing_correctness_mistral(
 @pytest.mark.parametrize("num_batches", [32])
 @pytest.mark.parametrize("simplify_rate", [1.0])
 # yapf: enable
-def test_processing_correctness(
+async def test_processing_correctness(
     model_id: str,
     hit_rate: float,
     num_batches: int,
@@ -306,39 +388,12 @@ def test_processing_correctness(
         # attention_mask lets us ignore the difference.
         ignore_mm_keys = {"audio_features"}
 
-    _test_processing_correctness(
+    await _test_processing_correctness(
         model_id,
         hit_rate=hit_rate,
         num_batches=num_batches,
         simplify_rate=simplify_rate,
         ignore_mm_keys=ignore_mm_keys,
-    )
-
-
-# yapf: disable
-@pytest.mark.parametrize("model_id", ["microsoft/Phi-3.5-vision-instruct"])
-@pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
-@pytest.mark.parametrize("num_batches", [32])
-@pytest.mark.parametrize("simplify_rate", [1.0])
-# yapf: enable
-def test_processing_correctness_phi3v(
-    model_id: str,
-    hit_rate: float,
-    num_batches: int,
-    simplify_rate: float,
-):
-    # HACK - this is an attempted workaround for the following bug
-    # https://github.com/huggingface/transformers/issues/34307
-    from transformers import AutoImageProcessor  # noqa: F401
-    from transformers import AutoProcessor  # noqa: F401
-
-    AutoImageProcessor.from_pretrained(model_id, trust_remote_code=True)
-
-    _test_processing_correctness(
-        model_id,
-        hit_rate=hit_rate,
-        num_batches=num_batches,
-        simplify_rate=simplify_rate,
     )
 
 
@@ -352,16 +407,10 @@ def _assert_inputs_equal(
     if ignore_mm_keys is None:
         ignore_mm_keys = set()
 
-    if msg is None:
-        assert "mm_kwargs" in a and "mm_kwargs" in b
-    else:
-        assert "mm_kwargs" in a and "mm_kwargs" in b, msg
+    assert "mm_kwargs" in a and "mm_kwargs" in b, msg
 
     for key in ignore_mm_keys:
         a["mm_kwargs"].pop(key, None)
         b["mm_kwargs"].pop(key, None)
 
-    if msg is None:
-        assert a == b
-    else:
-        assert a == b, msg
+    assert a == b, msg

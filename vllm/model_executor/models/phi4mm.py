@@ -781,25 +781,72 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         if (audio_data := mm_data.get("audios", [])):
             mm_data['audios'] = [(data, sr) for data in audio_data]
 
-        processed_outputs = super()._call_hf_processor(prompt, mm_data,
-                                                       mm_kwargs)
+        processed_outputs = super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+        )
 
-        num_img_tokens = [
-            self.info.get_num_image_tokens(image_width=img_size[0],
-                                           image_height=img_size[1])
-            for img_size in processed_outputs["image_sizes"]
-        ]
-        processed_outputs["num_img_tokens"] = num_img_tokens
+        return self._postprocess_hf(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            processed_outputs=processed_outputs,
+        )
 
-        audio_features = processed_outputs['input_audio_embeds']
-        feature_sizes = [
-            self.info.get_audio_num_frames(len(audio), sr)
-            for audio in audio_data
-        ]
-        processed_outputs['input_audio_embeds'] = [
-            audio_features[idx, :size]
-            for idx, size in enumerate(feature_sizes)
-        ]
+    async def _call_hf_processor_async(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        if not mm_data:
+            prompt_ids = self.info.get_tokenizer().encode(prompt)
+            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
+            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+
+        sr = self.info.get_feature_extractor().sampling_rate
+        if (audio_data := mm_data.get("audios", [])):
+            mm_data['audios'] = [(data, sr) for data in audio_data]
+
+        processed_outputs = await super()._call_hf_processor_async(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+        )
+
+        return self._postprocess_hf(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            processed_outputs=processed_outputs,
+        )
+
+    def _postprocess_hf(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        processed_outputs: BatchFeature,
+    ) -> BatchFeature:
+        if mm_data.get("images", []):
+            num_img_tokens = [
+                self.info.get_num_image_tokens(image_width=img_size[0],
+                                               image_height=img_size[1])
+                for img_size in processed_outputs["image_sizes"]
+            ]
+            processed_outputs["num_img_tokens"] = num_img_tokens
+
+        if (audio_data := mm_data.get("audios", [])):
+            audio_features = processed_outputs['input_audio_embeds']
+            feature_sizes = [
+                self.info.get_audio_num_frames(len(audio), sr)
+                for audio, sr in audio_data
+            ]
+            processed_outputs['input_audio_embeds'] = [
+                audio_features[idx, :size]
+                for idx, size in enumerate(feature_sizes)
+            ]
 
         return processed_outputs
 

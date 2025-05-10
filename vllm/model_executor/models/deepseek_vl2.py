@@ -204,12 +204,58 @@ class DeepseekVL2MultiModalProcessor(
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        if not mm_data:
+            tokenizer = self.info.get_tokenizer()
+            return tokenizer(prompt,
+                             add_special_tokens=True,
+                             return_tensors="pt")
+
+        processed_outputs = self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**mm_kwargs),
+            dict(prompt=prompt, **mm_data),
+            mm_kwargs,
+        )
+
+        return self._postprocess_hf(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            processed_outputs=processed_outputs,
+        )
+
+    async def _call_hf_processor_async(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        if not mm_data:
+            tokenizer = self.info.get_tokenizer()
+            return tokenizer(prompt,
+                             add_special_tokens=True,
+                             return_tensors="pt")
+
+        processed_outputs = await self.info.ctx.call_hf_processor_async(
+            self.info.get_hf_processor(**mm_kwargs),
+            dict(prompt=prompt, **mm_data),
+            mm_kwargs,
+        )
+
+        return self._postprocess_hf(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            processed_outputs=processed_outputs,
+        )
+
+    def _postprocess_hf(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        processed_outputs: BatchFeature,
+    ) -> BatchFeature:
         if mm_data:
-            processed_outputs = self.info.ctx.call_hf_processor(
-                self.info.get_hf_processor(**mm_kwargs),
-                dict(prompt=prompt, **mm_data),
-                mm_kwargs,
-            )
             target_dtype = self.info.ctx.model_config.dtype
             pixel_values = processed_outputs.pop("pixel_values").to(
                 target_dtype)
@@ -220,11 +266,6 @@ class DeepseekVL2MultiModalProcessor(
             ]
             pixel_values = pixel_values.split(patches_per_image)
             processed_outputs["pixel_values"] = pixel_values
-        else:
-            tokenizer = self.info.get_tokenizer()
-            processed_outputs = tokenizer(prompt,
-                                          add_special_tokens=True,
-                                          return_tensors="pt")
 
         return processed_outputs
 
@@ -295,6 +336,33 @@ class DeepseekVL2MultiModalProcessor(
             )
 
         return super()._cached_apply_hf_processor(
+            prompt=prompt,
+            mm_data_items=mm_data_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            return_mm_hashes=return_mm_hashes,
+        )
+
+    async def _cached_apply_hf_processor_async(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        *,
+        return_mm_hashes: bool,
+    ) -> tuple[list[int], MultiModalKwargs, Optional[MultiModalHashes], bool]:
+        # The processor logic is different for len(images) <= 2 vs > 2
+        # Since the processing cache assumes that the processor output is
+        # invariant of how many images are passed per prompt, we only
+        # perform caching for the most common case
+        if mm_data_items.get_count("image", strict=False) > 2:
+            return await self._apply_hf_processor_async(
+                prompt=prompt,
+                mm_data_items=mm_data_items,
+                hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+                return_mm_hashes=return_mm_hashes,
+            )
+
+        return await super()._cached_apply_hf_processor_async(
             prompt=prompt,
             mm_data_items=mm_data_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,

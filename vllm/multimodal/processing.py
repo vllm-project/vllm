@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import asyncio
 import json
 import re
 import sys
@@ -10,11 +11,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from functools import lru_cache
 from typing import (TYPE_CHECKING, Generic, NamedTuple, Optional, Protocol,
-                    TypeVar, Union, cast)
+                    Union, cast)
 
 import torch
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
-from typing_extensions import assert_never
+from typing_extensions import TypeVar, assert_never
 
 from vllm.inputs import InputProcessingContext
 from vllm.jsontree import json_map_leaves, json_reduce_leaves
@@ -1079,7 +1080,7 @@ class BaseProcessingInfo:
         return allowed_limits
 
 
-_I = TypeVar("_I", bound=BaseProcessingInfo)
+_I = TypeVar("_I", bound=BaseProcessingInfo, default=BaseProcessingInfo)
 
 MultiModalHashes = dict[str, list[str]]
 """
@@ -1781,6 +1782,313 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_placeholders=mm_placeholder_ranges,
         )
 
+    # ASYNC METHODS
+    def _validate_async_override(
+        self,
+        *fns_to_check: str,
+        base_cls: Optional[type] = None,
+    ) -> bool:
+        """
+        Gracefully fallback to sync implementation if it is overridden
+        but the async version is not overridden.
+        """
+        if base_cls is None:
+            base_cls = BaseMultiModalProcessor
+
+        for fn in fns_to_check:
+            sync_fn = fn
+            async_fn = fn + "_async"
+
+            has_sync_override = (getattr(type(self), sync_fn)
+                                 != getattr(base_cls, sync_fn))
+            has_async_override = (getattr(type(self), async_fn)
+                                  != getattr(base_cls, async_fn))
+
+            if has_sync_override and not has_async_override:
+                logger.warning_once(
+                    "You have overridden %s.%s but not %s.%s! "
+                    "Falling back to sync implementation.", base_cls.__name__,
+                    sync_fn, base_cls.__name__, async_fn)
+
+                return False
+
+        return True
+
+    async def _call_hf_processor_async(
+        self,
+        prompt: str,
+        # Not to be confused with `mm_data` in `self.apply_async`.
+        # This refers to the data to be passed to HF processor.
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        return await self.info.ctx.call_hf_processor_async(
+            self.info.get_hf_processor(**mm_kwargs),
+            dict(text=prompt, **mm_data),
+            mm_kwargs,
+        )
+
+    async def _apply_hf_processor_text_mm_async(
+        self,
+        prompt_text: str,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[list[int], MultiModalKwargs, bool]:
+        processor_data, passthrough_data = self._get_hf_mm_data(mm_items)
+
+        processed_data = await self._call_hf_processor_async(
+            prompt=prompt_text,
+            mm_data=processor_data,
+            mm_kwargs=hf_processor_mm_kwargs,
+        )
+        processed_data.update(passthrough_data)
+
+        prompt_ids, = processed_data.pop("input_ids").tolist()
+
+        mm_kwargs = MultiModalKwargs.from_hf_inputs(
+            processed_data,
+            self._get_mm_fields_config(processed_data, hf_processor_mm_kwargs),
+        )
+
+        is_update_applied = self._hf_processor_applies_updates(
+            prompt_text=prompt_text,
+            mm_items=mm_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+        )
+
+        return prompt_ids, mm_kwargs, is_update_applied
+
+    async def _apply_hf_processor_text_only_async(
+        self,
+        prompt_text: str,
+    ) -> list[int]:
+        prompt_ids, _, _ = await self._apply_hf_processor_text_mm_async(
+            prompt_text=prompt_text,
+            mm_items=MultiModalDataItems({}),
+            hf_processor_mm_kwargs={},
+        )
+
+        return prompt_ids
+
+    async def _apply_hf_processor_tokens_only_async(
+        self,
+        prompt_tokens: list[int],
+    ) -> list[int]:
+        return self._apply_hf_processor_tokens_only(prompt_tokens)
+
+    async def _apply_hf_processor_mm_only_async(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> MultiModalKwargs:
+        mm_counts = mm_items.get_all_counts()
+
+        _, mm_kwargs, _ = await self._apply_hf_processor_text_mm_async(
+            prompt_text=self.dummy_inputs.get_dummy_text(mm_counts),
+            mm_items=mm_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+        )
+
+        return mm_kwargs
+
+    async def _apply_hf_processor_main_async(
+        self,
+        prompt: Union[str, list[int]],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        *,
+        enable_hf_prompt_update: bool,
+    ) -> tuple[list[int], MultiModalKwargs, bool]:
+        if not self._validate_async_override(
+                "_call_hf_processor",
+                "_apply_hf_processor_text_mm",
+                "_apply_hf_processor_text_only",
+                # No need to check because it calls the sync version by default
+                # "_apply_hf_processor_token_only",
+                "_apply_hf_processor_mm_only",
+        ):
+            return self._apply_hf_processor_main(
+                prompt=prompt,
+                mm_items=mm_items,
+                hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+                enable_hf_prompt_update=enable_hf_prompt_update,
+            )
+
+        if isinstance(prompt, str):
+            if enable_hf_prompt_update:
+                return await self._apply_hf_processor_text_mm_async(
+                    prompt_text=prompt,
+                    mm_items=mm_items,
+                    hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+                )
+
+            prompt_ids_coro = self._apply_hf_processor_text_only_async(prompt)
+        else:
+            prompt_ids_coro = self._apply_hf_processor_tokens_only_async(
+                prompt)
+
+        mm_kwargs_coro = self._apply_hf_processor_mm_only_async(
+            mm_items=mm_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+        )
+
+        prompt_ids, mm_kwargs = await asyncio.gather(prompt_ids_coro,
+                                                     mm_kwargs_coro)
+
+        return prompt_ids, mm_kwargs, False
+
+    async def _apply_hf_processor_async(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        *,
+        return_mm_hashes: bool,
+    ) -> tuple[list[int], MultiModalKwargs, Optional[MultiModalHashes], bool]:
+        if not self._validate_async_override("_apply_hf_processor"):
+            return self._apply_hf_processor(
+                prompt=prompt,
+                mm_data_items=mm_data_items,
+                hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+                return_mm_hashes=return_mm_hashes,
+            )
+
+        (
+            prompt_ids,
+            mm_kwargs,
+            is_update_applied,
+        ) = await self._apply_hf_processor_main_async(
+            prompt=prompt,
+            mm_items=mm_data_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            enable_hf_prompt_update=True,
+        )
+
+        mm_hashes = (self._hash_mm_items(mm_data_items, hf_processor_mm_kwargs)
+                     if return_mm_hashes else None)
+
+        return prompt_ids, mm_kwargs, mm_hashes, is_update_applied
+
+    async def _cached_apply_hf_processor_async(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        *,
+        return_mm_hashes: bool,
+    ) -> tuple[list[int], MultiModalKwargs, Optional[MultiModalHashes], bool]:
+        if not self._validate_async_override("_cached_apply_hf_processor"):
+            return self._cached_apply_hf_processor(
+                prompt=prompt,
+                mm_data_items=mm_data_items,
+                hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+                return_mm_hashes=return_mm_hashes,
+            )
+
+        cache = self.cache
+
+        _, passthrough_data = self._get_hf_mm_data(mm_data_items)
+        if cache is None or passthrough_data:
+            return await self._apply_hf_processor_async(
+                prompt=prompt,
+                mm_data_items=mm_data_items,
+                hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+                return_mm_hashes=return_mm_hashes,
+            )
+
+        (
+            mm_cache_items,
+            mm_missing_data,
+        ) = self._get_cache_missing_items(
+            cache=cache,
+            mm_data_items=mm_data_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+        )
+
+        # NOTE: `prompt` does not correspond to `mm_missing_data_items`,
+        # so we can't apply prompt updates until the new multimodal
+        # items are combined with the cached multimodal items
+        (
+            prompt_ids,
+            mm_missing_kwargs,
+            is_update_applied,
+        ) = await self._apply_hf_processor_main_async(
+            prompt=prompt,
+            mm_items=self._to_mm_items(mm_missing_data),
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            enable_hf_prompt_update=False,
+        )
+
+        mm_cache_items_merged = self._merge_mm_kwargs(
+            cache,
+            mm_cache_items=mm_cache_items,
+            mm_missing_data=mm_missing_data,
+            mm_missing_kwargs=mm_missing_kwargs,
+        )
+
+        mm_kwargs = MultiModalKwargs.from_items([
+            item.value for cache_items in mm_cache_items_merged.values()
+            for item in cache_items
+        ])
+
+        mm_hashes = {
+            modality: [item.key for item in cache_items]
+            for modality, cache_items in mm_cache_items_merged.items()
+        } if return_mm_hashes else None
+
+        return prompt_ids, mm_kwargs, mm_hashes, is_update_applied
+
+    async def apply_async(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data: MultiModalDataDict,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        return_mm_hashes: bool = False,
+    ) -> MultiModalInputs:
+        if not self._validate_async_override("apply"):
+            return self.apply(
+                prompt,
+                mm_data,
+                hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+                return_mm_hashes=return_mm_hashes,
+            )
+
+        mm_items = self._to_mm_items(mm_data)
+
+        (
+            prompt_ids,
+            mm_kwargs,
+            mm_hashes,
+            is_update_applied,
+        ) = await self._cached_apply_hf_processor_async(
+            prompt,
+            mm_items,
+            hf_processor_mm_kwargs,
+            return_mm_hashes=return_mm_hashes,
+        )
+
+        prompt_ids, prompt, mm_placeholders = self._maybe_apply_prompt_updates(
+            mm_items=mm_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            prompt_ids=prompt_ids,
+            mm_kwargs=mm_kwargs,
+            is_update_applied=is_update_applied,
+        )
+
+        mm_placeholder_ranges = {
+            modality: [item.to_range() for item in placeholders]
+            for modality, placeholders in mm_placeholders.items()
+        }
+
+        return MultiModalInputs(
+            type="multimodal",
+            prompt=prompt,
+            prompt_token_ids=prompt_ids,
+            mm_kwargs=mm_kwargs,
+            mm_hashes=mm_hashes,
+            mm_placeholders=mm_placeholder_ranges,
+        )
+
 
 class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
@@ -1850,6 +2158,27 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         """
         encoder_prompt = self.create_encoder_prompt(prompt, mm_data)
         encoder_inputs = super().apply(
+            encoder_prompt,
+            mm_data,
+            hf_processor_mm_kwargs,
+            return_mm_hashes,
+        )
+
+        return self._get_enc_dec_inputs(
+            prompt=prompt,
+            mm_data=mm_data,
+            encoder_inputs=encoder_inputs,
+        )
+
+    async def apply_async(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data: MultiModalDataDict,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        return_mm_hashes: bool = False,
+    ) -> MultiModalEncDecInputs:
+        encoder_prompt = self.create_encoder_prompt(prompt, mm_data)
+        encoder_inputs = await super().apply_async(
             encoder_prompt,
             mm_data,
             hf_processor_mm_kwargs,
