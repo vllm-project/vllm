@@ -126,11 +126,9 @@ class TensorMemoryPool:
             self.free(addr)
             raise MemoryError(f"Failed to create tensor view: {e}")
 
-        event = torch.cuda.Event()
         with torch.cuda.stream(self.store_stream):
             cuda_kernels.store_tensor(tensor, cpu_tensor)
-            event.record()
-        event.wait()
+        self.store_stream.synchronize()
 
         return addr
 
@@ -151,11 +149,9 @@ class TensorMemoryPool:
 
         cuda_tensor = torch.empty(shape, dtype=dtype, device=device)
 
-        event = torch.cuda.Event()
         with torch.cuda.stream(self.load_stream):
             cuda_kernels.load_tensor(cpu_tensor, cuda_tensor)
-            event.record()
-        event.wait()
+        self.load_stream.synchronize()
 
         self.free(addr)
 
