@@ -23,10 +23,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models import SupportsV0Only
 from vllm.model_executor.models.interfaces import SupportsQuant
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.sequence import IntermediateTensors
 
 
-class NomicBertEmbedding(nn.Module):
+class BertWithRopeEmbedding(nn.Module):
 
     def __init__(self, config: PretrainedConfig):
 
@@ -36,6 +37,8 @@ class NomicBertEmbedding(nn.Module):
                                                       config.hidden_size)
         self.token_type_embeddings = VocabParallelEmbedding(
             config.type_vocab_size, config.hidden_size)
+        self.LayerNorm = nn.LayerNorm(config.hidden_size,
+                                      eps=config.layer_norm_eps)
 
     def forward(
         self,
@@ -51,10 +54,11 @@ class NomicBertEmbedding(nn.Module):
 
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
         embeddings = inputs_embeds + token_type_embeddings
+        embeddings = self.LayerNorm(embeddings)
         return embeddings
 
 
-class NomicBertAttention(nn.Module):
+class BertWithRopeAttention(nn.Module):
 
     def __init__(
         self,
@@ -85,14 +89,14 @@ class NomicBertAttention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
 
-        self.Wqkv = QKVParallelLinear(
+        self.qkv_proj = QKVParallelLinear(
             hidden_size=self.hidden_size,
             head_size=self.head_dim,
             total_num_heads=self.total_num_heads,
             total_num_kv_heads=self.total_num_kv_heads,
             bias=bias,
             quant_config=quant_config,
-            prefix=f"{prefix}.Wqkv")
+            prefix=f"{prefix}.qkv_proj")
 
         self.rotary_emb = get_rope(**rotary_kwargs)
 
@@ -116,7 +120,7 @@ class NomicBertAttention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        qkv, _ = self.Wqkv(hidden_states)
+        qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
@@ -124,7 +128,7 @@ class NomicBertAttention(nn.Module):
         return output
 
 
-class NomciBertGatedMLP(nn.Module):
+class BertWithRopeGatedMLP(nn.Module):
 
     def __init__(self,
                  hidden_size: int,
@@ -135,27 +139,27 @@ class NomciBertGatedMLP(nn.Module):
                  prefix: str = ""):
         super().__init__()
         self.act_fn = get_act_and_mul_fn(hidden_act)
-        self.fc1 = MergedColumnParallelLinear(
+        self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size,
             [intermediate_size] * 2,
             bias=bias,
             quant_config=quant_config,
-            prefix=f"{prefix}.fc1",
+            prefix=f"{prefix}.gate_up_proj",
         )
-        self.fc2 = RowParallelLinear(input_size=intermediate_size,
-                                     output_size=hidden_size,
-                                     bias=bias,
-                                     quant_config=quant_config,
-                                     prefix=f"{prefix}.fc2")
+        self.down_proj = RowParallelLinear(input_size=intermediate_size,
+                                           output_size=hidden_size,
+                                           bias=bias,
+                                           quant_config=quant_config,
+                                           prefix=f"{prefix}.down_proj")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        gate_up, _ = self.fc1(hidden_states)
+        gate_up, _ = self.gate_up_proj(hidden_states)
         hidden_states = self.act_fn(gate_up)
-        hidden_states, _ = self.fc2(hidden_states)
+        hidden_states, _ = self.down_proj(hidden_states)
         return hidden_states
 
 
-class NomicBertMLP(nn.Module):
+class BertWithRopeMLP(nn.Module):
 
     def __init__(self,
                  hidden_size: int,
@@ -166,21 +170,21 @@ class NomicBertMLP(nn.Module):
                  prefix: str = ""):
         super().__init__()
         self.act_fn = get_act_fn(hidden_act)
-        self.fc1 = ColumnParallelLinear(input_size=hidden_size,
-                                        output_size=intermediate_size,
-                                        bias=bias,
-                                        quant_config=quant_config,
-                                        prefix=f"{prefix}.dense")
-        self.fc2 = RowParallelLinear(input_size=intermediate_size,
-                                     output_size=hidden_size,
-                                     bias=bias,
-                                     quant_config=quant_config,
-                                     prefix=f"{prefix}.fc2")
+        self.up_proj = ColumnParallelLinear(input_size=hidden_size,
+                                            output_size=intermediate_size,
+                                            bias=bias,
+                                            quant_config=quant_config,
+                                            prefix=f"{prefix}.up_proj")
+        self.down_proj = RowParallelLinear(input_size=intermediate_size,
+                                           output_size=hidden_size,
+                                           bias=bias,
+                                           quant_config=quant_config,
+                                           prefix=f"{prefix}.down_proj")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        gate_up, _ = self.fc1(hidden_states)
-        hidden_states = self.act_fn(gate_up)
-        hidden_states, _ = self.fc2(hidden_states)
+        hidden_states, _ = self.up_proj(hidden_states)
+        hidden_states = self.act_fn(hidden_states)
+        hidden_states, _ = self.down_proj(hidden_states)
         return hidden_states
 
 
@@ -294,7 +298,7 @@ class NomicMoELayer(nn.Module):
         return out
 
 
-class NomicBertBlock(nn.Module):
+class BertWithRopeBlock(nn.Module):
 
     def __init__(self,
                  config: PretrainedConfig,
@@ -305,7 +309,7 @@ class NomicBertBlock(nn.Module):
                  rotary_kwargs: Optional[dict] = None,
                  prefix: str = ""):
         super().__init__()
-        self.attn = NomicBertAttention(
+        self.attn = BertWithRopeAttention(
             hidden_size=config.hidden_size,
             num_attention_heads=config.num_attention_heads,
             cache_config=cache_config,
@@ -317,8 +321,8 @@ class NomicBertBlock(nn.Module):
         if moe:
             self.mlp = NomicMoELayer(config=config, )
         else:
-            if config.hidden_act in ["glu", "silu", "geglu"]:
-                self.mlp = NomciBertGatedMLP(
+            if config.hidden_act in ["silu", "gelu_and_mul"]:
+                self.mlp = BertWithRopeGatedMLP(
                     hidden_size=config.hidden_size,
                     intermediate_size=config.intermediate_size,
                     hidden_act=config.hidden_act,
@@ -326,7 +330,7 @@ class NomicBertBlock(nn.Module):
                     quant_config=quant_config,
                     prefix=f"{prefix}.mlp")
             else:
-                self.mlp = NomicBertMLP(
+                self.mlp = BertWithRopeMLP(
                     hidden_size=config.hidden_size,
                     intermediate_size=config.intermediate_size,
                     hidden_act=config.hidden_act,
@@ -334,21 +338,21 @@ class NomicBertBlock(nn.Module):
                     quant_config=quant_config,
                     prefix=f"{prefix}.mlp")
 
-        self.norm1 = nn.LayerNorm(config.hidden_size,
-                                  eps=config.layer_norm_eps)
-        self.norm2 = nn.LayerNorm(config.hidden_size,
-                                  eps=config.layer_norm_eps)
+        self.attn_ln = nn.LayerNorm(config.hidden_size,
+                                    eps=config.layer_norm_eps)
+        self.mlp_ln = nn.LayerNorm(config.hidden_size,
+                                   eps=config.layer_norm_eps)
 
     def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor):
         attn_output = self.attn(positions, hidden_states)
-        hidden_states = self.norm1(hidden_states + attn_output)
+        hidden_states = self.attn_ln(hidden_states + attn_output)
         mlp_out = self.mlp(hidden_states)
-        hidden_states = self.norm2(hidden_states + mlp_out)
+        hidden_states = self.mlp_ln(hidden_states + mlp_out)
         return hidden_states
 
 
 @support_torch_compile
-class NomicBertEncoder(nn.Module):
+class BertWithRopeEncoder(nn.Module):
 
     def __init__(self,
                  vllm_config: VllmConfig,
@@ -361,13 +365,13 @@ class NomicBertEncoder(nn.Module):
         quant_config = vllm_config.quant_config
         every_n = getattr(config, "moe_every_n_layers", 0)
         self.layers = nn.ModuleList([
-            NomicBertBlock(config=config,
-                           cache_config=cache_config,
-                           quant_config=quant_config,
-                           bias=bias,
-                           moe=every_n > 0 and (layer_idx % every_n == 1),
-                           rotary_kwargs=rotary_kwargs,
-                           prefix=f"{prefix}.layer.{layer_idx}")
+            BertWithRopeBlock(config=config,
+                              cache_config=cache_config,
+                              quant_config=quant_config,
+                              bias=bias,
+                              moe=every_n > 0 and (layer_idx % every_n == 1),
+                              rotary_kwargs=rotary_kwargs,
+                              prefix=f"{prefix}.layer.{layer_idx}")
             for layer_idx in range(config.num_hidden_layers)
         ])
 
@@ -381,30 +385,26 @@ class NomicBertEncoder(nn.Module):
         return hidden_states
 
 
-class NomicBertModel(nn.Module, SupportsQuant):
+class BertWithRope(nn.Module, SupportsV0Only, SupportsQuant):
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
 
-    def __init__(self,
-                 *,
-                 vllm_config: VllmConfig,
-                 prefix: str = "",
-                 bias: bool = True,
-                 rotary_kwargs: Optional[dict] = None):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        self.config = self.config_verify(vllm_config)
+        self.embeddings = BertWithRopeEmbedding(self.config)
+        self.encoder = BertWithRopeEncoder(
+            vllm_config=vllm_config,
+            bias=getattr(self.config, "bias", True),
+            rotary_kwargs=self.config.rotary_kwargs,
+            prefix=f"{prefix}.encoder")
 
-        config = vllm_config.model_config.hf_config
-        self.embeddings = NomicBertEmbedding(config)
-        self.emb_ln = nn.LayerNorm(config.hidden_size,
-                                   eps=config.layer_norm_eps)
-
-        self.encoder = NomicBertEncoder(vllm_config=vllm_config,
-                                        bias=bias,
-                                        rotary_kwargs=rotary_kwargs,
-                                        prefix=f"{prefix}.encoder")
+    def config_verify(self, vllm_config):
+        raise NotImplementedError
 
     def forward(
         self,
-        input_ids: torch.Tensor,
-        position_ids: torch.Tensor,
+        input_ids: Optional[torch.Tensor],
+        positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         token_type_ids: Optional[torch.Tensor] = None,
@@ -414,20 +414,26 @@ class NomicBertModel(nn.Module, SupportsQuant):
         else:
             hidden_states = self.embeddings(input_ids=input_ids,
                                             token_type_ids=token_type_ids)
-        hidden_states = self.emb_ln(hidden_states)
-        return self.encoder(position_ids, hidden_states)
+        return self.encoder(positions, hidden_states)
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("fc1", "fc11", 1),
-            ("fc1", "fc12", 0),
-        ]
+        weights = self.hf_to_vllm_mapper.apply(weights)
+
+        if self.config.hidden_act in ["silu", "gelu_and_mul"]:
+            stacked_params_mapping = [
+                # (param_name, shard_name, shard_id)
+                ("gate_up_proj", "gate_proj", 0),
+                ("gate_up_proj", "up_proj", 1),
+            ]
+        else:
+            stacked_params_mapping = []
 
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
+            if "pooler" in name:
+                continue
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -451,28 +457,20 @@ class NomicBertModel(nn.Module, SupportsQuant):
         return loaded_params
 
 
-class NomicBertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant):
+class NomicBertModel(BertWithRope):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={
+            "emb_ln": "embeddings.LayerNorm",
+            "attn.Wqkv": "attn.qkv_proj",
+            "norm1": "attn_ln",
+            "mlp.fc1.": "mlp.up_proj.",
+            "mlp.fc11": "mlp.up_proj",
+            "mlp.fc12": "mlp.gate_proj",
+            "mlp.fc2": "mlp.down_proj",
+            "norm2": "mlp_ln",
+        })
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
-        self.config = vllm_config.model_config.hf_config
-        self.model = self._build_model(vllm_config=vllm_config, prefix=prefix)
-
-    def forward(
-        self,
-        input_ids: Optional[torch.Tensor],
-        positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        return self.model(input_ids=input_ids,
-                          position_ids=positions,
-                          inputs_embeds=inputs_embeds,
-                          intermediate_tensors=intermediate_tensors)
-
-    def _build_model(self,
-                     vllm_config: VllmConfig,
-                     prefix: str = "") -> NomicBertModel:
+    def config_verify(self, vllm_config):
         config = vllm_config.model_config.hf_config
 
         assert config.__class__.__name__ == "NomicBertConfig"
@@ -485,6 +483,8 @@ class NomicBertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant):
 
         assert (config.mlp_fc1_bias == config.mlp_fc2_bias ==
                 config.qkv_proj_bias)
+        config.bias = config.qkv_proj_bias
+
         assert config.rotary_emb_scale_base is None
         assert not config.rotary_emb_interleaved
 
@@ -495,7 +495,7 @@ class NomicBertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant):
 
         head_dim = config.hidden_size // config.num_attention_heads
         rotary_emb_dim = head_dim * config.rotary_emb_fraction
-        rotary_kwargs = {
+        config.rotary_kwargs = {
             "head_size": head_dim,
             "rotary_dim": rotary_emb_dim,
             "max_position": config.max_trained_positions,
@@ -509,11 +509,144 @@ class NomicBertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant):
         # The context extension uses vllm style rope_theta and rope_scaling.
         # See #17785
 
-        return NomicBertModel(vllm_config=vllm_config,
-                              prefix=prefix,
-                              bias=config.qkv_proj_bias,
-                              rotary_kwargs=rotary_kwargs)
+        return config
+
+
+class GteModel(BertWithRope):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={
+            "layer": 'layers',
+            "attention.qkv_proj": "attn.qkv_proj",
+            "attention.o_proj": "attn.out_proj",
+        })
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+
+        # GteModel only gate_up_proj does not have bias.
+        # Hack method learned from vllm/model_executor/models/glm.py
+        for layer in self.encoder.layers:
+            layer.mlp.gate_up_proj.bias = None
+            layer.mlp.gate_up_proj.skip_bias_add = True
+
+    def config_verify(self, vllm_config):
+        config = vllm_config.model_config.hf_config
+
+        assert config.__class__.__name__ == "GteConfig"
+        assert config.position_embedding_type == "rope"
+        assert config.hidden_act == "gelu"
+
+        config.position_embedding_type = "rotary"
+        config.hidden_act = "gelu_and_mul"
+
+        head_dim = config.hidden_size // config.num_attention_heads
+        config.rotary_kwargs = {
+            "head_size": head_dim,
+            "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
+            "max_position": config.max_position_embeddings,
+            "base": config.rope_theta,
+            "rope_scaling": getattr(config, "rope_scaling", None)
+        }
+        return config
+
+    def split_up_gate_proj(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        n = "mlp.up_gate_proj"
+        for name, weight in weights:
+            if n in name:
+                up, gate = weight.chunk(2, dim=0)
+                yield name.replace(n, "mlp.up_proj"), up
+                yield name.replace(n, "mlp.gate_proj"), gate
+            else:
+                yield name, weight
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
-        return self.model.load_weights(weights)
+        weights = self.split_up_gate_proj(weights)
+        return super().load_weights(weights)
+
+
+class JinaRobertaModel(BertWithRope):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={
+            "emb_ln": "embeddings.LayerNorm",
+            "mixer.Wqkv": "attn.qkv_proj",
+            "mixer.out_proj": "attn.out_proj",
+            "norm1": "attn_ln",
+            "mlp.fc1.": "mlp.up_proj.",
+            "mlp.fc2": "mlp.down_proj",
+            "norm2": "mlp_ln",
+        })
+
+    def config_verify(self, vllm_config):
+        config = vllm_config.model_config.hf_config
+        head_dim = config.hidden_size // config.num_attention_heads
+        config.rotary_kwargs = {
+            "head_size": head_dim,
+            "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
+            "max_position": config.max_position_embeddings,
+            "base": getattr(config, "rope_theta", config.rotary_emb_base),
+            "rope_scaling": getattr(config, "rope_scaling", None)
+        }
+        return config
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        position_ids: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        token_type_ids: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        return super().forward(input_ids=input_ids,
+                               positions=position_ids,
+                               intermediate_tensors=intermediate_tensors,
+                               inputs_embeds=inputs_embeds,
+                               token_type_ids=token_type_ids)
+
+    @torch.inference_mode()
+    def jina_merge_lora_weights(self, weights: Iterable[Tuple[str,
+                                                              torch.Tensor]]):
+        # use for jina-embeddings-v3
+        # Merge Lora weights into a single weight tensor.
+        # This is a temporary solution until we have a better way to handle
+
+        scaling = self.config.lora_alpha / self.config.lora_rank
+
+        weights = {name: weight for name, weight in weights}
+
+        o = ".original"
+        a = ".0.lora_A"
+        b = ".0.lora_B"
+
+        # text-matching
+        i = -1
+
+        for name in list(weights.keys()):
+            if o in name:
+                dtype = weights[name].dtype
+                shape = weights[name].shape
+                weight_name = name[:-len(o)]
+
+                if "embeddings" in weight_name:
+                    B = weights[weight_name + a][i].cuda().float()
+                    A = weights[weight_name + b][i].cuda().float()
+                else:
+                    B = weights[weight_name + b][i].cuda().float()
+                    A = weights[weight_name + a][i].cuda().float()
+
+                weight = (weights[weight_name + o].cuda() +
+                          torch.matmul(B, A).view(shape) * scaling)
+                weight = weight.cpu().to(dtype)
+
+                weights[weight_name.replace(".parametrizations", "")] = weight
+
+                del weights[weight_name + o], weights[weight_name +
+                                                      a], weights[weight_name +
+                                                                  b]
+
+        return [(name, weight) for name, weight in weights.items()]
+
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
+        weights = self.jina_merge_lora_weights(weights)
+        return super().load_weights(weights)
