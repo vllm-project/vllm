@@ -98,47 +98,19 @@ deserialization in this example script, although `--tensorizer-uri` and
 
 Tensorizer can also be used to save and load LoRA adapters. A LoRA adapter
 can be serialized directly with the path to the LoRA adapter on HF Hub and
-a TensorizerConfig object:
+a TensorizerConfig object. In this script, passing a HF id to a LoRA adapter
+will serialize the LoRA adapter artifacts to `--serialized-directory`.
 
-    save_dir = "some/path" # Where the adapter artifacts will be saved
-    
-    tensorizer_config = TensorizerConfig(lora_dir=save_dir)
-    lora_path = "yard1/llama-2-7b-sql-lora-test"
-    
-    tensorize_lora_adapter(lora_path, tensorizer_config)
+You can then use the LoRA adapter with `vllm serve`, for instance, by ensuring 
+the LoRA artifacts are in your model artifacts directory and specifying 
+`--enable-lora`. For instance:
 
-
-Then, the adapter can be deserialized with Tensorizer when calling
-`.generate()`, providing your `TensorizerConfig` in the `LoRARequest`, where
-it will look for your LoRA artifacts.
-        
-        dir = "some/path" # Directory with LoRA artifacts
-        tensorizer_config = TensorizerConfig(lora_dir=dir)
-
-        llm = LLM(model=my_model_ref,
-                  load_format="tensorizer",
-                  model_loader_extra_config=tensorizer_config,
-                  enable_lora=True
-        )
-        
-        sampling_params = SamplingParams(
-            temperature=0,
-            max_tokens=256,
-            stop=["[/assistant]"]
-        )
-
-        prompts = [
-            "[user] Write a SQL query to answer the question based on ..."
-        ]
-
-        llm.generate(
-        prompts,
-        sampling_params,
-        lora_request=LoRARequest("sql-lora",
-                                 1,
-                                 lora_path,
-                                 tensorizer_config = tensorizer_config)
-        )
+```
+vllm serve <model_path> \
+    --load-format tensorizer \
+    --model-loader-extra-config '{"tensorizer_uri": "<model_path>.tensors"}' \
+    --enable-lora
+```
 """
 
 

@@ -82,6 +82,7 @@ async def client(server):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_single_completion(client: openai.AsyncOpenAI, model_name: str):
+    _cleanup()
     completion = await client.completions.create(model=model_name,
                                                  prompt="Hello, my name is",
                                                  max_tokens=5,
