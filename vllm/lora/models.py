@@ -197,6 +197,7 @@ class LoRAModel(AdapterModel):
         embedding_modules: Optional[Dict[str, str]] = None,
         embedding_padding_modules: Optional[List[str]] = None,
         weights_mapper: Optional[WeightsMapper] = None,
+        tensorizer_config: Optional["TensorizerConfig"] = None
     ) -> "LoRAModel":
         """Create a LoRAModel from a local checkpoint.
         
@@ -221,7 +222,16 @@ class LoRAModel(AdapterModel):
                                                     "new_embeddings.bin")
 
         unexpected_modules: List[Union[list[str], str]]
-        if os.path.isfile(lora_tensor_path):
+        if tensorizer_config:
+            from tensorizer import TensorDeserializer
+            lora_tensor_path = os.path.join(tensorizer_config.tensorizer_dir,
+                                            "adapter_model.tensors")
+            tensorizer_args = tensorizer_config._construct_tensorizer_args()
+            tensors = TensorDeserializer(lora_tensor_path,
+                                         dtype=tensorizer_config.dtype,
+                                         **tensorizer_args.deserializer_params)
+
+        elif os.path.isfile(lora_tensor_path):
             tensors: Dict[str, torch.Tensor] = {}
             # Find unexpected modules.
             # Use safetensor key as a source of truth to find expected modules.
