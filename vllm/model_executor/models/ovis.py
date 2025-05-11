@@ -69,11 +69,10 @@ IMAGE_PAD_TOKEN_ID_MAP = {
 
 def st_argmax(y_soft: torch.Tensor, dim: int):  # straight-through softmax
     index = y_soft.argmax(dim, keepdim=True)
-    y_hard = torch.zeros_like(
-        y_soft, memory_format=torch.legacy_contiguous_format).scatter_(
-            dim, index, 1.0)
-    ret = y_hard - y_soft + y_soft
-    return ret
+    return torch.zeros_like(
+        y_soft,
+        memory_format=torch.legacy_contiguous_format,
+    ).scatter_(dim, index, 1.0)
 
 
 class VisualTokenizer(torch.nn.Module):
