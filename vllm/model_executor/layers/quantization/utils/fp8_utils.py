@@ -44,9 +44,13 @@ def is_shape_supported_by_cutlass(weight: torch.Tensor, block_size: List[int],
     return weight.shape[0] % 128 == 0 and weight.shape[1] % 128 == 0
 
 
-def cutlass_scaled_mm(A: torch.Tensor, B: torch.Tensor, As: torch.Tensor,
-                      Bs: torch.Tensor, output_dtype: torch.dtype,
-                      **kwargs) -> torch.Tensor:
+def cutlass_scaled_mm(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
     return ops.cutlass_scaled_mm(A,
                                  B.T,
                                  out_dtype=output_dtype,
@@ -143,13 +147,12 @@ def apply_w8a8_block_fp8_linear(
         q_input, x_scale = per_token_group_quant_fp8(
             input_2d, block_size[1], column_major_scales=use_cutlass)
 
-        output = w8a8_blockscale_func(use_cutlass, use_aiter_and_is_supported)(
-            A=q_input,
-            B=weight,
-            As=x_scale,
-            Bs=weight_scale,
-            block_size=block_size,
-            output_dtype=input.dtype)
+        output = w8a8_blockscale_func(A=q_input,
+                                      B=weight,
+                                      As=x_scale,
+                                      Bs=weight_scale,
+                                      block_size=block_size,
+                                      output_dtype=input.dtype)
         if should_pad:
             output = output[:rows, :]
 
@@ -157,13 +160,12 @@ def apply_w8a8_block_fp8_linear(
         q_input, x_scale = per_token_group_quant_fp8(
             input_2d, block_size[1], column_major_scales=use_cutlass)
 
-        output = w8a8_blockscale_func(use_cutlass, use_aiter_and_is_supported)(
-            A=q_input,
-            B=weight,
-            As=x_scale,
-            Bs=weight_scale,
-            block_size=block_size,
-            output_dtype=input.dtype)
+        output = w8a8_blockscale_func(A=q_input,
+                                      B=weight,
+                                      As=x_scale,
+                                      Bs=weight_scale,
+                                      block_size=block_size,
+                                      output_dtype=input.dtype)
 
     if bias is not None:
         output = output + bias
