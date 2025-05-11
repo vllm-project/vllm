@@ -298,12 +298,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
                                  block_ids=new_req.block_ids,
                                  block_size=self._block_size)
                 total_need_load += 1
-            else:
-                if self.is_producer:
-                    meta.add_request(request_id=new_req.req_id,
-                                     token_ids=new_req.prompt_token_ids,
-                                     block_ids=new_req.block_ids,
-                                     block_size=self._block_size)
 
         for cached_req in scheduler_output.scheduled_cached_reqs:
             # NOTE(rob): here we rely on the resumed requests being
