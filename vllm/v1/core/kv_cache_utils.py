@@ -580,7 +580,7 @@ def create_kv_cache_group_specs(
         layer_specs = [
             kv_cache_spec[layer_name] for layer_name in layer_names_one_group
         ]
-        merged_layer_spec = layer_specs[0].__class__.merge(layer_specs)
+        merged_layer_spec = layer_specs[0].merge(layer_specs)
         kv_cache_groups.append(
             KVCacheGroupSpec(layer_names_one_group, merged_layer_spec))
     return kv_cache_groups
