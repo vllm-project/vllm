@@ -368,6 +368,9 @@ class EngineArgs:
         bool] = SchedulerConfig.enable_chunked_prefill
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
 
+    disable_hybrid_allocator: bool = (
+        SchedulerConfig.disable_hybrid_kv_cache_manager)
+
     guided_decoding_backend: GuidedDecodingBackend = DecodingConfig.backend
     guided_decoding_disable_fallback: bool = DecodingConfig.disable_fallback
     guided_decoding_disable_any_whitespace: bool = \
