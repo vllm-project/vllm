@@ -10,6 +10,9 @@ if [ ! -d "$WORKSPACE" ]; then
     mkdir -p $WORKSPACE
 fi
 
+# install dependencies if not installed
+pip3 install cmake torch ninja
+
 # build gdrcopy, required by nvshmem
 pushd $WORKSPACE
 wget https://github.com/NVIDIA/gdrcopy/archive/refs/tags/v2.4.4.tar.gz

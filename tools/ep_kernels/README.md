@@ -1,9 +1,9 @@
 Large-scale cluster-level expert parallel, as described in the [DeepSeek-V3 Technical Report](http://arxiv.org/abs/2412.19437), is an efficient way to deploy sparse MoE models with many experts. However, such deployment requires many components beyond a normal Python package, including system package support and system driver support. It is impossible to bundle all these components into a Python package.
 
 Here we break down the requirements in 3 steps:
-1. Build and install the Python libraries, including necessary dependencies like NVSHMEM. This step does not require any privileged access. Any user can do this. For single node deployment, this is all you need since the communication usually happens via NVLink. During runtime, you should add nvshmem path into `LD_LIBRARY_PATH` environment variable so that the Python libraries can find the shared library.
+1. Build and install the Python libraries (both [pplx-kernels](https://github.com/ppl-ai/pplx-kernels) and [DeepEP](https://github.com/deepseek-ai/DeepEP)), including necessary dependencies like NVSHMEM. This step does not require any privileged access. Any user can do this.
 2. Build and install the system libraries (GDR Copy). This step requires root access. You can do it inside a Docker container so that they can be shipped as a single image.
-3. Build and install the system drivers (GDR Copy, and necessary modifications to NVIDIA driver). This step requires root access, and must be done on the host machine.
+3. Build and install the system drivers (GDR Copy, and necessary modifications to NVIDIA driver to enable IBGDA). This step requires root access, and must be done on the host machine.
 
 2 and 3 are necessary for multi-node deployment.
 
