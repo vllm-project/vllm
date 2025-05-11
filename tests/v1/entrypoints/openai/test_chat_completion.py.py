@@ -6,16 +6,14 @@ import pytest_asyncio
 
 from tests.utils import RemoteOpenAIServer
 
-# any model with a chat template should work here
-MODEL_NAME = "facebook/opt-125m"
+# any model with a chat template defined in tokenizer_config should work here
+MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
 
 
 @pytest.fixture(scope="module")
 def default_server_args():
     return [
         # use half precision for speed and memory savings in CI environment
-        "--dtype",
-        "bfloat16",
         "--max-model-len",
         "2048",
         "--max-num-seqs",
@@ -26,14 +24,8 @@ def default_server_args():
 
 @pytest.fixture(
     scope="module",
-    params=[
-        ["--no-enable-prefix-caching"],
-        ["--no-enable-prefix-caching", "--disable-frontend-multiprocessing"],
-    ],
 )
 def server(default_server_args, request):
-    if request.param:
-        default_server_args.extend(request.param)
     with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
         yield remote_server
 
@@ -101,7 +93,7 @@ async def test_invalid_regex(client: openai.AsyncOpenAI, model_name: str):
               "alan.turing@enigma.com\n")
 
     with pytest.raises((openai.BadRequestError, openai.APIError)):
-        client.chat.completions.create(
+        await client.chat.completions.create(
             model=model_name,
             messages=[{
                 "role": "user",
@@ -137,7 +129,7 @@ async def test_invalid_grammar(client: openai.AsyncOpenAI, model_name: str):
     prompt = ("Generate an SQL query to show the 'username' and 'email'"
               "from the 'users' table.")
     with pytest.raises((openai.BadRequestError, openai.APIError)):
-        client.chat.completions.create(
+        await client.chat.completions.create(
             model=model_name,
             messages=[{
                 "role": "user",
