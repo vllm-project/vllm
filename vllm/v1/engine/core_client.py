@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import contextlib
+import json
 import queue
 import uuid
 import weakref
 from abc import ABC, abstractmethod
+from collections import deque
 from collections.abc import Awaitable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass, field
@@ -312,6 +315,7 @@ class BackgroundResources:
     def __call__(self):
         """Clean up background resources."""
 
+        self.engine_dead = True
         for core_engine in self.core_engines:
             core_engine.close()
 
@@ -359,6 +363,7 @@ class MPClient(EngineCoreClient):
         executor_class: type[Executor],
         log_stats: bool,
     ):
+        self.vllm_config = vllm_config
         # Serialization setup.
         self.encoder = MsgpackEncoder()
         self.decoder = MsgpackDecoder(EngineCoreOutputs)
@@ -395,6 +400,12 @@ class MPClient(EngineCoreClient):
             self._wait_for_engine_startup()
 
             self.utility_results: dict[int, AnyFuture] = {}
+
+            # Request objects which may contain pytorch-allocated tensors
+            # that we need to keep references to until zmq is done with the
+            # underlying data.
+            self.pending_messages = deque[tuple[zmq.MessageTracker, Any]]()
+
             success = True
         finally:
             if not success:
@@ -421,14 +432,20 @@ class MPClient(EngineCoreClient):
                 raise RuntimeError("Engine core initialization failed. "
                                    "See root cause above.")
 
-            eng_id_bytes, msg = sync_input_socket.recv_multipart()
+            eng_id_bytes, data = sync_input_socket.recv_multipart()
             eng_id = int.from_bytes(eng_id_bytes, byteorder="little")
             if eng_id not in identities:
                 raise RuntimeError(f"Unexpected or duplicate engine: {eng_id}")
-            if msg != b'READY':
-                raise RuntimeError(f"Engine {eng_id} failed: {msg.decode()}")
+            message_dict = json.loads(data.decode('utf-8'))
+            if message_dict['type'] != 'READY':
+                raise RuntimeError(f"Engine {eng_id} failed: {data.decode()}")
             logger.info("Core engine process %d ready.", eng_id)
             identities.discard(eng_id)
+            # Setup KV cache config with initialization state from
+            # engine core process. Sum values from all engines in DP case.
+            num_gpu_blocks = self.vllm_config.cache_config.num_gpu_blocks or 0
+            num_gpu_blocks += message_dict['num_gpu_blocks']
+            self.vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
 
     def _init_core_engines(
         self,
@@ -438,10 +455,10 @@ class MPClient(EngineCoreClient):
     ) -> None:
 
         # Default case - single core engine.
-        dp_rank = vllm_config.parallel_config.data_parallel_rank
-        local_dp_rank = vllm_config.parallel_config.data_parallel_rank_local
         core_engine = new_core_engine(
-            dp_rank, local_dp_rank if local_dp_rank is not None else dp_rank)
+            vllm_config.parallel_config.data_parallel_rank,
+            vllm_config.parallel_config.data_parallel_rank_local,
+        )
         core_engines.append(core_engine)
         self.core_engine = core_engine
 
@@ -457,6 +474,14 @@ class MPClient(EngineCoreClient):
     def ensure_alive(self):
         if self.resources.engine_dead:
             raise EngineDeadError()
+
+    def add_pending_message(self, tracker: zmq.MessageTracker, msg: Any):
+        if not tracker.done:
+            self.pending_messages.appendleft((tracker, msg))
+
+    def free_pending_messages(self):
+        while self.pending_messages and self.pending_messages[-1][0].done:
+            self.pending_messages.pop()
 
 
 def _process_utility_output(output: UtilityOutput,
@@ -543,10 +568,18 @@ class SyncMPClient(MPClient):
 
     def _send_input(self, request_type: EngineCoreRequestType, request: Any):
         self.ensure_alive()
+        self.free_pending_messages()
         # (Identity, RequestType, SerializedRequest)
         msg = (self.core_engine.identity, request_type.value,
                *self.encoder.encode(request))
-        self.input_socket.send_multipart(msg, copy=False)
+
+        if len(msg) <= 3:
+            # No auxiliary buffers => no tensor backing buffers in request.
+            self.input_socket.send_multipart(msg, copy=False)
+            return
+
+        tracker = self.input_socket.send_multipart(msg, copy=False, track=True)
+        self.add_pending_message(tracker, request)
 
     def call_utility(self, method: str, *args) -> Any:
         call_id = uuid.uuid1().int >> 64
@@ -558,13 +591,10 @@ class SyncMPClient(MPClient):
         return future.result()
 
     def add_request(self, request: EngineCoreRequest) -> None:
-        # NOTE: text prompt is not needed in the core engine as it has been
-        # tokenized.
-        request.prompt = None
         self._send_input(EngineCoreRequestType.ADD, request)
 
     def abort_requests(self, request_ids: list[str]) -> None:
-        if len(request_ids) > 0:
+        if request_ids and not self.resources.engine_dead:
             self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
     def profile(self, is_start: bool = True) -> None:
@@ -697,19 +727,38 @@ class AsyncMPClient(MPClient):
     def _send_input(self,
                     request_type: EngineCoreRequestType,
                     request: Any,
-                    engine: Optional[CoreEngine] = None) -> Awaitable[None]:
+                    engine: Optional[CoreEngine] = None) -> Awaitable[Any]:
         self.ensure_alive()
         if engine is None:
             engine = self.core_engine
 
         message = (request_type.value, *self.encoder.encode(request))
-        return self._send_input_message(message, engine)
+        return self._send_input_message(message, engine, request)
 
-    def _send_input_message(self, message: tuple[bytestr, ...],
-                            engine: CoreEngine) -> Awaitable[None]:
+    def _send_input_message(self, message: tuple[bytestr,
+                                                 ...], engine: CoreEngine,
+                            objects: Any) -> Awaitable[Any]:
+        """
+        objects is a reference to retain until zmq is finished with the
+        buffers, in case they were extracted from tensors in the request.
+        """
         self.ensure_alive()
-        message = (engine.identity, ) + message
-        return self.input_socket.send_multipart(message, copy=False)
+        self.free_pending_messages()
+
+        msg = (engine.identity, ) + message
+        if not objects or len(msg) <= 3:
+            # No auxiliary buffers => no tensor backing buffers in request.
+            return self.input_socket.send_multipart(msg, copy=False)
+
+        future: asyncio.Future[zmq.MessageTracker]
+        future = self.input_socket.send_multipart(msg, copy=False, track=True)
+
+        def add_pending(f: asyncio.Future[zmq.MessageTracker]):
+            with contextlib.suppress(BaseException):
+                self.add_pending_message(f.result(), objects)
+
+        future.add_done_callback(add_pending)
+        return future
 
     async def call_utility_async(self, method: str, *args) -> Any:
         return await self._call_utility_async(method,
@@ -723,19 +772,16 @@ class AsyncMPClient(MPClient):
         self.utility_results[call_id] = future
         message = (EngineCoreRequestType.UTILITY.value, *self.encoder.encode(
             (call_id, method, args)))
-        await self._send_input_message(message, engine)
+        await self._send_input_message(message, engine, args)
         self._ensure_output_queue_task()
         return await future
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
-        # NOTE: text prompt is not needed in the core engine as it has been
-        # tokenized.
-        request.prompt = None
         await self._send_input(EngineCoreRequestType.ADD, request)
         self._ensure_output_queue_task()
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
-        if len(request_ids) > 0:
+        if request_ids and not self.resources.engine_dead:
             await self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
     async def profile_async(self, is_start: bool = True) -> None:
@@ -792,14 +838,11 @@ class DPAsyncMPClient(AsyncMPClient):
     def __init__(self, vllm_config: VllmConfig, executor_class: type[Executor],
                  log_stats: bool):
 
-        self.num_engines_running = 0
+        self.current_wave = 0
+        self.engines_running = False
         self.reqs_in_flight: dict[str, CoreEngine] = {}
 
         super().__init__(vllm_config, executor_class, log_stats)
-
-        # Control message used for triggering dp idle mode loop.
-        self.start_dp_msg = (EngineCoreRequestType.START_DP.value,
-                             *self.encoder.encode(None))
 
         assert len(self.core_engines) > 1
 
@@ -826,26 +869,23 @@ class DPAsyncMPClient(AsyncMPClient):
         ]))[0]
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
-        # NOTE: text prompt is not needed in the core engine as it has been
-        # tokenized.
-        request.prompt = None
-
-        msg = (EngineCoreRequestType.ADD.value, *self.encoder.encode(request))
+        request.current_wave = self.current_wave
 
         chosen_engine = self.get_core_engine_for_request()
         self.reqs_in_flight[request.request_id] = chosen_engine
         chosen_engine.num_reqs_in_flight += 1
-        if self.num_engines_running >= len(self.core_engines):
-            await self._send_input_message(msg, chosen_engine)
-        else:
+
+        to_await = self._send_input(EngineCoreRequestType.ADD, request,
+                                    chosen_engine)
+        if not self.engines_running:
             # Send request to chosen engine and dp start loop
             # control message to all other engines.
-            self.num_engines_running += len(self.core_engines)
-            await asyncio.gather(*[
-                self._send_input_message(
-                    msg if engine is chosen_engine else self.start_dp_msg,
-                    engine) for engine in self.core_engines
-            ])
+            self.engines_running = True
+            to_await = asyncio.gather(
+                to_await,  # type: ignore[assignment]
+                *self._start_wave_coros(exclude_index=chosen_engine.index))
+
+        await to_await
 
         self._ensure_output_queue_task()
 
@@ -860,21 +900,31 @@ class DPAsyncMPClient(AsyncMPClient):
                 if engine := self.reqs_in_flight.pop(req_id, None):
                     engine.num_reqs_in_flight -= 1
 
-        if outputs.engine_paused:
-            assert self.num_engines_running >= 1
-            self.num_engines_running -= 1
-            if not self.num_engines_running and self.reqs_in_flight:
-                # If there are requests in flight here, they must have
-                # been sent after the engines paused. We must make
-                # sure to start the other engines:
-                self.num_engines_running = len(self.core_engines)
-                coros = [
-                    self._send_input_message(self.start_dp_msg, engine)
-                    for engine in self.core_engines
-                    if not engine.num_reqs_in_flight
-                ]
-                if coros:
-                    await asyncio.gather(*coros)
+        if outputs.wave_complete is not None:
+            # Current wave is complete, move to next wave number
+            # and mark engines as paused.
+            if self.current_wave <= outputs.wave_complete:
+                self.current_wave = outputs.wave_complete + 1
+                self.engines_running = False
+
+        elif outputs.start_wave is not None and (
+                outputs.start_wave > self.current_wave or
+            (outputs.start_wave == self.current_wave
+             and not self.engines_running)):
+            # Engine received request for a non-current wave so we must ensure
+            # that other engines progress to the next wave.
+            self.current_wave = outputs.start_wave
+            self.engines_running = True
+            await asyncio.gather(*self._start_wave_coros(
+                exclude_index=outputs.engine_index))
+
+    def _start_wave_coros(self, exclude_index: int) -> list[Awaitable[None]]:
+        logger.debug("Sending start DP wave %d.", self.current_wave)
+        return [
+            self._send_input(EngineCoreRequestType.START_DP_WAVE,
+                             self.current_wave, engine)
+            for engine in self.core_engines if engine.index != exclude_index
+        ]
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
         if not request_ids:
@@ -895,5 +945,6 @@ class DPAsyncMPClient(AsyncMPClient):
 
     async def _abort_requests(self, request_ids: list[str],
                               engine: CoreEngine) -> None:
-        await self._send_input(EngineCoreRequestType.ABORT, request_ids,
-                               engine)
+        if not self.resources.engine_dead:
+            await self._send_input(EngineCoreRequestType.ABORT, request_ids,
+                                   engine)

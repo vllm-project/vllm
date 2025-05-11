@@ -16,7 +16,7 @@ ENV LANG=C.UTF-8 \
 RUN microdnf install -y \
     which procps findutils tar vim git gcc gcc-gfortran g++ make patch zlib-devel \
     libjpeg-turbo-devel libtiff-devel libpng-devel libwebp-devel freetype-devel harfbuzz-devel \
-    openssl-devel openblas openblas-devel autoconf automake libtool cmake && \
+    openssl-devel openblas openblas-devel autoconf automake libtool cmake numpy && \
     microdnf clean all
 
 # Python Installation
@@ -123,6 +123,7 @@ ENV UV_LINK_MODE=copy
 ENV CARGO_HOME=/root/.cargo
 ENV RUSTUP_HOME=/root/.rustup
 ENV PATH="$CARGO_HOME/bin:$RUSTUP_HOME/bin:$PATH"
+ENV GRPC_PYTHON_BUILD_SYSTEM_OPENSSL=1
 
 COPY . /workspace/vllm
 WORKDIR /workspace/vllm

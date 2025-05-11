@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from collections.abc import Iterable, Mapping, Sequence
-from functools import cached_property
 from typing import Literal, Optional, Set, Tuple, TypedDict, Union
 
 import torch
@@ -12,7 +11,6 @@ from transformers import (BatchFeature, Blip2Config, Blip2QFormerConfig,
 from vllm.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
@@ -62,6 +60,7 @@ class Blip2QFormerMultiHeadAttention(nn.Module):
         quant_config: Optional[QuantizationConfig],
         cache_config: Optional[CacheConfig],
         is_cross_attention: bool = False,
+        prefix: str = "",
     ) -> None:
         super().__init__()
 
@@ -141,7 +140,7 @@ class Blip2QFormerMultiHeadAttention(nn.Module):
 
 class Blip2QFormerSelfOutput(nn.Module):
 
-    def __init__(self, config: Blip2QFormerConfig) -> None:
+    def __init__(self, config: Blip2QFormerConfig, prefix: str = "") -> None:
         super().__init__()
 
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
@@ -169,6 +168,7 @@ class Blip2QFormerAttention(nn.Module):
         quant_config: Optional[QuantizationConfig],
         cache_config: Optional[CacheConfig],
         is_cross_attention: bool = False,
+        prefix: str = "",
     ) -> None:
         super().__init__()
 
@@ -177,9 +177,10 @@ class Blip2QFormerAttention(nn.Module):
             quant_config=quant_config,
             cache_config=cache_config,
             is_cross_attention=is_cross_attention,
+            prefix=f"{prefix}.attention",
         )
 
-        self.output = Blip2QFormerSelfOutput(config)
+        self.output = Blip2QFormerSelfOutput(config, prefix=f"{prefix}.output")
 
     def forward(
         self,
@@ -197,7 +198,7 @@ class Blip2QFormerAttention(nn.Module):
 
 class Blip2QFormerIntermediate(nn.Module):
 
-    def __init__(self, config: Blip2QFormerConfig) -> None:
+    def __init__(self, config: Blip2QFormerConfig, prefix: str = "") -> None:
         super().__init__()
 
         self.dense = nn.Linear(config.hidden_size, config.intermediate_size)
@@ -211,7 +212,7 @@ class Blip2QFormerIntermediate(nn.Module):
 
 class Blip2QFormerOutput(nn.Module):
 
-    def __init__(self, config: Blip2QFormerConfig) -> None:
+    def __init__(self, config: Blip2QFormerConfig, prefix: str = "") -> None:
         super().__init__()
 
         self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
@@ -239,6 +240,7 @@ class Blip2QFormerLayer(nn.Module):
         quant_config: Optional[QuantizationConfig],
         cache_config: Optional[CacheConfig],
         layer_idx: int,
+        prefix: str = "",
     ) -> None:
         super().__init__()
 
@@ -246,7 +248,8 @@ class Blip2QFormerLayer(nn.Module):
         self.seq_len_dim = 1
         self.attention = Blip2QFormerAttention(config,
                                                quant_config=quant_config,
-                                               cache_config=cache_config)
+                                               cache_config=cache_config,
+                                               prefix=f"{prefix}.attention")
 
         self.layer_idx = layer_idx
 
@@ -255,13 +258,16 @@ class Blip2QFormerLayer(nn.Module):
                 config,
                 quant_config=quant_config,
                 cache_config=cache_config,
-                is_cross_attention=True)
+                is_cross_attention=True,
+                prefix=f"{prefix}.crossattention")
             self.has_cross_attention = True
         else:
             self.has_cross_attention = False
 
-        self.intermediate_query = Blip2QFormerIntermediate(config)
-        self.output_query = Blip2QFormerOutput(config)
+        self.intermediate_query = Blip2QFormerIntermediate(
+            config, prefix=f"{prefix}.intermediate_query")
+        self.output_query = Blip2QFormerOutput(config,
+                                               prefix=f"{prefix}.output_query")
 
     def forward(
         self,
@@ -327,6 +333,7 @@ class Blip2QFormerEncoder(nn.Module):
         *,
         quant_config: Optional[QuantizationConfig],
         cache_config: Optional[CacheConfig],
+        prefix: str = "",
     ) -> None:
         super().__init__()
 
@@ -336,7 +343,8 @@ class Blip2QFormerEncoder(nn.Module):
             Blip2QFormerLayer(config,
                               quant_config=quant_config,
                               cache_config=cache_config,
-                              layer_idx=layer_idx)
+                              layer_idx=layer_idx,
+                              prefix=f"{prefix}.layer.{layer_idx}")
             for layer_idx in range(config.num_hidden_layers)
         ])
 
@@ -367,6 +375,7 @@ class Blip2QFormerModel(nn.Module):
         *,
         quant_config: Optional[QuantizationConfig],
         cache_config: Optional[CacheConfig],
+        prefix: str = "",
     ) -> None:
         super().__init__()
 
@@ -378,7 +387,8 @@ class Blip2QFormerModel(nn.Module):
 
         self.encoder = Blip2QFormerEncoder(config,
                                            quant_config=quant_config,
-                                           cache_config=cache_config)
+                                           cache_config=cache_config,
+                                           prefix=f"{prefix}.encoder")
 
     def forward(
         self,
@@ -513,7 +523,8 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
 
         self.qformer = Blip2QFormerModel(config.qformer_config,
                                          cache_config=cache_config,
-                                         quant_config=quant_config)
+                                         quant_config=quant_config,
+                                         prefix=f"{prefix}.qformer")
 
         self.language_projection = nn.Linear(
             config.qformer_config.hidden_size,
@@ -529,13 +540,6 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
-
-    @cached_property
-    def sampler(self):
-        if hasattr(self.language_model, "sampler"):
-            return self.language_model.sampler
-
-        return get_sampler()
 
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
         h = w = self.config.vision_config.image_size
@@ -649,7 +653,7 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
-    ) -> Union[SamplerOutput, IntermediateTensors]:
+    ) -> IntermediateTensors:
         """Run forward pass for BLIP-2.
 
         One key thing to understand is the `input_ids` already accounts for the
@@ -677,8 +681,9 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
                 batch.
             pixel_values: The pixels in each input image.
         
-        See also:
-            :class:`Blip2ImageInputs`
+        :::{seealso}
+        {class}`Blip2ImageInputs`
+        :::
         """
 
         if intermediate_tensors is not None:
@@ -706,13 +711,6 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
     ) -> Optional[torch.Tensor]:
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:

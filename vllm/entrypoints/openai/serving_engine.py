@@ -173,7 +173,7 @@ class OpenAIServing:
         request: AnyRequest,
         tokenizer: AnyTokenizer,
         prompt: str,
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]],
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]],
         add_special_tokens: bool,
     ) -> TextTokensPrompt:
         if (self.model_config.encoder_config is not None
@@ -271,11 +271,11 @@ class OpenAIServing:
         request: AnyRequest,
         tokenizer: AnyTokenizer,
         prompt_input: Union[str, list[int]],
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
         add_special_tokens: bool = True,
     ) -> TextTokensPrompt:
         """
-        A simpler implementation of :meth:`_tokenize_prompt_input_or_inputs`
+        A simpler implementation of {meth}`_tokenize_prompt_input_or_inputs`
         that assumes single input.
         """
         return next(
@@ -292,11 +292,11 @@ class OpenAIServing:
         request: AnyRequest,
         tokenizer: AnyTokenizer,
         prompt_inputs: Iterable[Union[str, list[int]]],
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
         add_special_tokens: bool = True,
     ) -> Iterator[TextTokensPrompt]:
         """
-        A simpler implementation of :meth:`_tokenize_prompt_input_or_inputs`
+        A simpler implementation of {meth}`_tokenize_prompt_input_or_inputs`
         that assumes multiple inputs.
         """
         for text in prompt_inputs:
@@ -321,7 +321,7 @@ class OpenAIServing:
         request: AnyRequest,
         tokenizer: AnyTokenizer,
         input_or_inputs: Union[str, list[str], list[int], list[list[int]]],
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
         add_special_tokens: bool = True,
     ) -> list[TextTokensPrompt]:
         """
@@ -356,7 +356,7 @@ class OpenAIServing:
         request: CompletionLikeRequest,
         tokenizer: AnyTokenizer,
         input_or_inputs: Union[str, list[str], list[int], list[list[int]]],
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
         add_special_tokens: bool = True,
     ) -> tuple[list[TextTokensPrompt], list[TokensPrompt]]:
         request_prompts = await self._tokenize_prompt_input_or_inputs_async(
@@ -394,11 +394,11 @@ class OpenAIServing:
         model_config = self.model_config
 
         resolved_content_format = resolve_chat_template_content_format(
+            model_config,
             chat_template,
             tool_dicts,
             chat_template_content_format,
             tokenizer,
-            trust_remote_code=model_config.trust_remote_code,
         )
         conversation, mm_data_future = parse_chat_messages_futures(
             messages,
@@ -425,8 +425,8 @@ class OpenAIServing:
             )
         else:
             request_prompt = apply_hf_chat_template(
+                model_config,
                 tokenizer,
-                trust_remote_code=model_config.trust_remote_code,
                 conversation=conversation,
                 **_chat_template_kwargs,
             )
@@ -469,6 +469,9 @@ class OpenAIServing:
             engine_prompt["multi_modal_data"] = mm_data
         if request.mm_processor_kwargs is not None:
             engine_prompt["mm_processor_kwargs"] = request.mm_processor_kwargs
+
+        if hasattr(request, "cache_salt") and request.cache_salt is not None:
+            engine_prompt["cache_salt"] = request.cache_salt
 
         return conversation, [request_prompt], [engine_prompt]
 
