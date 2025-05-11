@@ -659,6 +659,9 @@ class NomicBertEmbeddingModel(BertEmbeddingModel):
                 "factor": config.rotary_scaling_factor
             }
         }
+        # if use set rope_scaling, need to update
+        if config.rope_scaling is not None:
+            rotary_kwargs["rope_scaling"] = config.rope_scaling
 
         return BertModel(vllm_config=vllm_config,
                          prefix=prefix,
