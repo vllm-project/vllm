@@ -25,6 +25,8 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
                      quant_type_id: int,
                      global_num_experts: int = -1,
                      expert_map: Optional[torch.Tensor] = None,
+                     global_scale1: Optional[torch.Tensor] = None,
+                     global_scale2: Optional[torch.Tensor] = None,
                      g_idx1: Optional[torch.Tensor] = None,
                      g_idx2: Optional[torch.Tensor] = None,
                      sort_indices1: Optional[torch.Tensor] = None,
@@ -64,11 +66,13 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
     quant_type = ScalarType.from_id(quant_type_id)
     assert quant_type in [
         scalar_types.uint4, scalar_types.uint8b128, scalar_types.uint4b8,
-        scalar_types.float8_e4m3fn
+        scalar_types.float8_e4m3fn, scalar_types.float4_e2m1f
     ]
 
-    int4_scalar_types = [scalar_types.uint4, scalar_types.uint4b8]
-    num_bits = 4 if quant_type in int4_scalar_types else 8
+    bit4_scalar_types = [
+        scalar_types.uint4, scalar_types.uint4b8, scalar_types.float4_e2m1f
+    ]
+    num_bits = 4 if quant_type in bit4_scalar_types else 8
 
     # Check constraints.
     assert hidden_states.shape[0] == gating_output.shape[
@@ -133,6 +137,7 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
         intermediate_cache1,
         w1,
         w1_scale,
+        global_scale1,
         w1_zeros,
         g_idx1,
         sort_indices1,
@@ -165,6 +170,7 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
         intermediate_cache3,
         w2,
         w2_scale,
+        global_scale2,
         w2_zeros,
         g_idx2,
         sort_indices2,
@@ -202,6 +208,8 @@ def fused_marlin_moe_fake(hidden_states: torch.Tensor,
                           topk_ids: torch.Tensor,
                           quant_type_id: int,
                           global_num_experts: int = -1,
+                          global_scale1: Optional[torch.Tensor] = None,
+                          global_scale2: Optional[torch.Tensor] = None,
                           expert_map: Optional[torch.Tensor] = None,
                           g_idx1: Optional[torch.Tensor] = None,
                           g_idx2: Optional[torch.Tensor] = None,
