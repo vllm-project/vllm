@@ -273,7 +273,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # For models with multiple KV cache groups, the groups should agree on
         # the same order of requests. We ensure this by only allowing the first
-        # group to reorder the batch.
+        # group to reorder the batch and asserting that all other groups do not
+        # reorder the batch.
         for i in range(1, len(self.kv_cache_config.kv_cache_groups)):
             assert not self.attn_metadata_builders[i].reorder_batch(
                 self.input_batch, scheduler_output)
