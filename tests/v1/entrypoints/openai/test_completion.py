@@ -640,7 +640,7 @@ async def test_invalid_regex(client: openai.AsyncOpenAI, model_name: str):
               "alan.turing@enigma.com\n")
 
     with pytest.raises((openai.BadRequestError, openai.APIError)):
-        client.completions.create(
+        await client.completions.create(
             model=model_name,
             prompt=prompt,
             extra_body={
@@ -673,7 +673,7 @@ async def test_invalid_grammar(client: openai.AsyncOpenAI, model_name: str):
     prompt = ("Generate an SQL query to show the 'username' and 'email'"
               "from the 'users' table.")
     with pytest.raises((openai.BadRequestError, openai.APIError)):
-        client.completions.create(
+        await client.completions.create(
             model=model_name,
             prompt=prompt,
             extra_body={"guided_grammar": invalid_simplified_sql_grammar},
