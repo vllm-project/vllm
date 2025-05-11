@@ -544,7 +544,7 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
                                                    available_memory)
         estimated_msg = ""
         if estimated_max_len > 0:
-            estimated_msg = " Based on the available memory,"
+            estimated_msg = " Based on the available memory," \
             f" the estimated maximum model length is {estimated_max_len}."
 
         raise ValueError(
