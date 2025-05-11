@@ -515,7 +515,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                               "internvl_chat", "ovis2", "skywork_chat",
                               "NVLM_D", "h2ovl_chat", "idefics3", "smolvlm"):
                 return "<image>"
-            if model_type in ("mllama", "llama4"):
+            if model_type in ("mllama", "llama4", "phi4_multimodal"):
                 return "<|image|>"
             if model_type in ("qwen2_vl", "qwen2_5_vl"):
                 return "<|vision_start|><|image_pad|><|vision_end|>"
@@ -532,7 +532,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
 
             raise TypeError(f"Unknown {modality} model type: {model_type}")
         elif modality == "audio":
-            if model_type in ("ultravox", "granite_speech"):
+            if model_type in ("granite_speech", "phi4_multimodal", "ultravox"):
                 return "<|audio|>"
             if model_type == "phi4mm":
                 return f"<|audio_{current_count}|>"

@@ -1,20 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-import re
 from collections.abc import Sequence
 from typing import Optional
 
 import librosa
 import pytest
 from huggingface_hub import snapshot_download
-from transformers import AutoTokenizer
 
 from vllm.assets.image import ImageAsset
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.image import rescale_image_size
 from vllm.platforms import current_platform
-from vllm.sequence import SampleLogprobs
 
 from ....conftest import (IMAGE_ASSETS, HfRunner, PromptAudioInput,
                           PromptImageInput, VllmRunner)
@@ -23,11 +20,11 @@ from ...utils import check_logprobs_close
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "stop_sign":
-    "<|user|>\n<|image_1|>\nWhat's the content of the image?<|end|>\n<|assistant|>\n",  # noqa: E501
+    "<|user|>\n<|image|>\nWhat's the content of the image?<|end|>\n<|assistant|>\n",  # noqa: E501
     "cherry_blossom":
-    "<|user|>\n<|image_1|>\nPlease infer the season with reason in details.<|end|>\n<|assistant|>\n",  # noqa: E501
+    "<|user|>\n<|image|>\nPlease infer the season with reason in details.<|end|>\n<|assistant|>\n",  # noqa: E501
 })
-HF_MULTIIMAGE_IMAGE_PROMPT = "<|user|>\n<|image_1|>\n<|image_2|>\nDescribe these images.<|end|>\n<|assistant|>\n"  # noqa: E501
+HF_MULTIIMAGE_IMAGE_PROMPT = "<|user|>\n<|image|>\n<|image|>\nDescribe these images.<|end|>\n<|assistant|>\n"  # noqa: E501
 
 model_path = snapshot_download("microsoft/Phi-4-multimodal-instruct",
                                revision="refs/pr/70")
@@ -37,27 +34,6 @@ vision_lora_path = os.path.join(model_path, "vision-lora")
 speech_question = os.path.join(model_path, "examples",
                                "what_is_shown_in_this_image.wav")
 models = [model_path]
-
-
-def vllm_to_hf_output(vllm_output: tuple[list[int], str,
-                                         Optional[SampleLogprobs]],
-                      model: str):
-    """Sanitize vllm output to be comparable with hf output."""
-    _, output_str, out_logprobs = vllm_output
-
-    output_str_without_image = re.sub(r"(<\|image_\d+\|>)+", "", output_str)
-    assert output_str_without_image[0] == " "
-    output_str_without_image = output_str_without_image[1:]
-
-    hf_output_str = output_str_without_image + "<|end|><|endoftext|>"
-
-    tokenizer = AutoTokenizer.from_pretrained(model)
-    hf_output_ids = tokenizer.encode(output_str_without_image)
-    assert hf_output_ids[0] == 1
-    hf_output_ids = hf_output_ids[1:]
-
-    return hf_output_ids, hf_output_str, out_logprobs
-
 
 target_dtype = "half"
 
@@ -126,35 +102,15 @@ def run_test(
     hf_model_kwargs = {"_attn_implementation": "sdpa"}
     with hf_runner(model, dtype=dtype,
                    model_kwargs=hf_model_kwargs) as hf_model:
-
         hf_processor = hf_model.processor
         eos_token_id = hf_processor.tokenizer.eos_token_id
-
-        def patch_hf_processor(*args,
-                               text="",
-                               images=None,
-                               audio=None,
-                               sampling_rate=None,
-                               **kwargs):
-            audios = None
-            if audio is not None and sampling_rate is not None:
-                audios = [(audio, sampling_rate)]
-            return hf_processor(*args,
-                                text=text,
-                                images=images,
-                                audios=audios,
-                                **kwargs)
-
-        hf_model.processor = patch_hf_processor
-
         hf_outputs_per_case = [
             hf_model.generate_greedy_logprobs_limit(prompts,
                                                     max_tokens,
                                                     num_logprobs=num_logprobs,
                                                     images=images,
                                                     audios=audios,
-                                                    eos_token_id=eos_token_id,
-                                                    num_logits_to_keep=0)
+                                                    eos_token_id=eos_token_id)
             for prompts, images, audios in inputs
         ]
 
@@ -268,12 +224,12 @@ def test_vision_speech_models(hf_runner, vllm_runner, model, dtype: str,
                               num_logprobs: int) -> None:
 
     # use the example speech question so that the model outputs are reasonable
-    audio = librosa.load(speech_question, sr=None)
+    audio = librosa.load(speech_question, sr=16000)
     image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
 
     inputs_vision_speech = [
         (
-            ["<|user|><|image_1|><|audio_1|><|end|><|assistant|>"],
+            ["<|user|><|image|><|audio|><|end|><|assistant|>"],
             [image],
             [audio],
         ),
