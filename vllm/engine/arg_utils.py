@@ -1205,7 +1205,9 @@ class EngineArgs:
                 and not envs.is_set("VLLM_ATTENTION_BACKEND")
             ) or envs.VLLM_ATTENTION_BACKEND == "FLASH_ATTN_VLLM_V1"
             supported = False
-            if fp8_attention and will_use_fa:
+            if current_platform.is_rocm():
+                supported = True
+            elif fp8_attention and will_use_fa:
                 from vllm.attention.utils.fa_utils import (
                     flash_attn_supports_fp8)
                 supported = flash_attn_supports_fp8()
