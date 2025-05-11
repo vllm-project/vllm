@@ -2,9 +2,10 @@
 
 import copy
 from dataclasses import dataclass
-from typing import Optional, Self
+from typing import Optional
 
 import torch
+from typing_extensions import Self
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
