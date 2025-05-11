@@ -4,7 +4,6 @@ import argparse
 
 from vllm.collect_env import main as collect_env_main
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.utils import FlexibleArgumentParser
 
 
@@ -28,7 +27,7 @@ class CollectEnvSubcommand(CLISubcommand):
             help="Start collecting environment information.",
             description="Start collecting environment information.",
             usage="vllm collect-env")
-        return make_arg_parser(serve_parser)
+        return serve_parser
 
 
 def cmd_init() -> list[CLISubcommand]:
