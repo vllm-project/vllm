@@ -22,10 +22,8 @@ def default_server_args():
     ]
 
 
-@pytest.fixture(
-    scope="module",
-)
-def server(default_server_args, request):
+@pytest.fixture(scope="module")
+def server(default_server_args):
     with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
         yield remote_server
 
