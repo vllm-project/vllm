@@ -46,6 +46,12 @@ def rocm_aiter_rms_norm(x: torch.Tensor, weight: torch.Tensor,
                         variance_epsilon: float) -> torch.Tensor:
 
     import aiter as rocm_aiter
+    if x.dim() > 2:
+        x_original_shape = x.shape
+        x = x.reshape(-1, x_original_shape[-1])
+        x = rocm_aiter.rms_norm(x, weight, variance_epsilon)
+        return x.reshape(x_original_shape)
+
     return rocm_aiter.rms_norm(x, weight, variance_epsilon)
 
 
@@ -55,16 +61,17 @@ def rocm_aiter_fused_add_rms_norm(
 
     import aiter as rocm_aiter
 
-    # Assuming the correct signature for rmsnorm2d_fwd_with_add
+    residual_out = torch.empty_like(residual)
+    output = torch.empty_like(x)
     rocm_aiter.rmsnorm2d_fwd_with_add(
-        x,  # output
+        output,  # output
         x,  # input
         residual,  # residual input
-        residual,  # residual output
+        residual_out,  # residual output
         weight,
         variance_epsilon,
     )
-    return x, residual
+    return output, residual_out
 
 
 def dispatch_cuda_rmsnorm_func(add_residual: bool):
