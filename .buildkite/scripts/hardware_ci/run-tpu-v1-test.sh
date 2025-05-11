@@ -29,7 +29,7 @@ docker run --privileged --net host --shm-size=16G -it \
         pytest -s -v /workspace/vllm/tests/tpu/test_perf.py; \
         echo TEST_0_EXIT_CODE: \$?; \
     } & \
-    && { \
+    { \
         echo TEST_1: Running test_compilation.py; \
         pytest -s -v /workspace/vllm/tests/tpu/test_compilation.py; \
         echo TEST_1_EXIT_CODE: \$?; \
@@ -59,32 +59,32 @@ docker run --privileged --net host --shm-size=16G -it \
         pytest -s -v /workspace/vllm/tests/tpu/worker/test_tpu_model_runner.py; \
         echo TEST_6_EXIT_CODE: \$?; \
     } & \
-    && { \
+    { \
         echo TEST_7: Running test_sampler.py; \
         pytest -s -v /workspace/vllm/tests/v1/tpu/test_sampler.py; \
         echo TEST_7_EXIT_CODE: \$?; \
     } & \
-    && { \
+    { \
         echo TEST_8: Running test_topk_topp_sampler.py; \
         pytest -s -v /workspace/vllm/tests/v1/tpu/test_topk_topp_sampler.py; \
         echo TEST_8_EXIT_CODE: \$?; \
     } & \
-    && { \
+    { \
         echo TEST_9: Running test_multimodal.py; \
         pytest -s -v /workspace/vllm/tests/v1/tpu/test_multimodal.py; \
         echo TEST_9_EXIT_CODE: \$?; \
     } & \
-    && { \
+    { \
         echo TEST_10: Running test_pallas.py; \
         pytest -s -v /workspace/vllm/tests/v1/tpu/test_pallas.py; \
         echo TEST_10_EXIT_CODE: \$?; \
     } & \
-    && { \
+    { \
         echo TEST_11: Running test_struct_output_generate.py; \
         pytest -s -v /workspace/vllm/tests/v1/entrypoints/llm/test_struct_output_generate.py; \
         echo TEST_11_EXIT_CODE: \$?; \
     } & \
-    && { \
+    { \
         echo TEST_12: Running test_moe_pallas.py; \
         pytest -s -v /workspace/vllm/tests/tpu/test_moe_pallas.py; \
         echo TEST_12_EXIT_CODE: \$?; \
