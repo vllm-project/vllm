@@ -60,7 +60,7 @@ which takes priority over both the model's and Sentence Transformers's defaults.
 ## Offline Inference
 
 The {class}`~vllm.LLM` class provides various methods for offline inference.
-See [Engine Arguments](#engine-args) for a list of options when initializing the model.
+See <project:#configuration> for a list of options when initializing the model.
 
 ### `LLM.encode`
 
@@ -140,6 +140,7 @@ Our [OpenAI-Compatible Server](#openai-compatible-server) provides endpoints tha
 
 - [Pooling API](#pooling-api) is similar to `LLM.encode`, being applicable to all types of pooling models.
 - [Embeddings API](#embeddings-api) is similar to `LLM.embed`, accepting both text and [multi-modal inputs](#multimodal-inputs) for embedding models.
+- [Classification API](#classification-api) is similar to `LLM.classify` and is applicable to sequence classification models.
 - [Score API](#score-api) is similar to `LLM.score` for cross-encoder models.
 
 ## Matryoshka Embeddings

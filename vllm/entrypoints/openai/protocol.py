@@ -5,11 +5,11 @@
 import json
 import re
 import time
-from argparse import Namespace
+from http import HTTPStatus
 from typing import Annotated, Any, ClassVar, Literal, Optional, Union
 
 import torch
-from fastapi import UploadFile
+from fastapi import HTTPException, UploadFile
 from pydantic import (BaseModel, ConfigDict, Field, TypeAdapter,
                       ValidationInfo, field_validator, model_validator)
 from typing_extensions import TypeAlias
@@ -25,23 +25,7 @@ from vllm.utils import random_uuid, resolve_obj_by_qualname
 
 logger = init_logger(__name__)
 
-# torch is mocked during docs generation,
-# so we have to provide the values as literals
-_MOCK_LONG_INFO = Namespace(min=-9223372036854775808, max=9223372036854775807)
-_LONG_INFO: Union["torch.iinfo", Namespace]
-
-try:
-    from sphinx.ext.autodoc.mock import _MockModule
-
-    if isinstance(torch, _MockModule):
-        _LONG_INFO = _MOCK_LONG_INFO
-    else:
-        _LONG_INFO = torch.iinfo(torch.long)
-except ModuleNotFoundError:
-    _LONG_INFO = torch.iinfo(torch.long)
-
-assert _LONG_INFO.min == _MOCK_LONG_INFO.min
-assert _LONG_INFO.max == _MOCK_LONG_INFO.max
+_LONG_INFO = torch.iinfo(torch.long)
 
 
 class OpenAIBaseModel(BaseModel):
@@ -426,7 +410,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         "repetition_penalty": 1.0,
         "temperature": 1.0,
         "top_p": 1.0,
-        "top_k": -1,
+        "top_k": 0,
         "min_p": 0.0,
     }
 
@@ -870,7 +854,7 @@ class CompletionRequest(OpenAIBaseModel):
         "repetition_penalty": 1.0,
         "temperature": 1.0,
         "top_p": 1.0,
-        "top_k": -1,
+        "top_k": 0,
         "min_p": 0.0,
     }
 
@@ -1308,6 +1292,47 @@ class ScoreResponse(OpenAIBaseModel):
     usage: UsageInfo
 
 
+class ClassificationRequest(OpenAIBaseModel):
+    model: Optional[str] = None
+    input: Union[list[str], str]
+    truncate_prompt_tokens: Optional[int] = None
+    user: Optional[str] = None
+
+    # doc: begin-classification-pooling-params
+    additional_data: Optional[Any] = None
+    # doc: end-classification-pooling-params
+
+    # doc: begin-classification-extra-params
+    priority: int = Field(
+        default=0,
+        description=(
+            "The priority of the request (lower means earlier handling; "
+            "default: 0). Any priority other than 0 will raise an error "
+            "if the served model does not use priority scheduling."),
+    )
+
+    # doc: end-classification-extra-params
+
+    def to_pooling_params(self):
+        return PoolingParams(additional_data=self.additional_data)
+
+
+class ClassificationData(OpenAIBaseModel):
+    index: int
+    label: Optional[str]
+    probs: list[float]
+    num_classes: int
+
+
+class ClassificationResponse(OpenAIBaseModel):
+    id: str = Field(default_factory=lambda: f"classify-{random_uuid()}")
+    object: str = "list"
+    created: int = Field(default_factory=lambda: int(time.time()))
+    model: str
+    data: list[ClassificationData]
+    usage: UsageInfo
+
+
 class FunctionCall(OpenAIBaseModel):
     name: str
     arguments: str
@@ -1696,7 +1721,7 @@ class TranscriptionRequest(OpenAIBaseModel):
         "repetition_penalty": 1.0,
         "temperature": 1.0,
         "top_p": 1.0,
-        "top_k": -1,
+        "top_k": 0,
         "min_p": 0.0,
     }
 
@@ -1744,7 +1769,13 @@ class TranscriptionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def validate_stream_options(cls, data):
+    def validate_transcription_request(cls, data):
+        if isinstance(data.get("file"), str):
+            raise HTTPException(
+                status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+                detail="Expected 'file' to be a file-like object, not 'str'.",
+            )
+
         stream_opts = ["stream_include_usage", "stream_continuous_usage_stats"]
         stream = data.get("stream", False)
         if any(bool(data.get(so, False)) for so in stream_opts) and not stream:

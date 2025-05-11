@@ -5,7 +5,6 @@ numba == 0.60.0; python_version == '3.9' # v0.61 doesn't support Python 3.9. Req
 numba == 0.61.2; python_version > '3.9'
 
 # Dependencies for AMD GPUs
-awscli
 boto3
 botocore
 datasets

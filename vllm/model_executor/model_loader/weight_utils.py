@@ -162,23 +162,15 @@ def get_quant_config(model_config: ModelConfig,
                                   None)
     if hf_quant_config is not None:
         return quant_cls.from_config(hf_quant_config)
-    # In case of bitsandbytes/QLoRA, get quant config from the adapter model.
+    # Inflight BNB quantization
     if model_config.quantization == "bitsandbytes":
-        if (not load_config.model_loader_extra_config
-                or "qlora_adapter_name_or_path"
-                not in load_config.model_loader_extra_config):
-            return quant_cls.from_config({"adapter_name_or_path": ""})
-        model_name_or_path = load_config.model_loader_extra_config[
-            "qlora_adapter_name_or_path"]
-
-    else:
-        model_name_or_path = model_config.model
-    is_local = os.path.isdir(model_name_or_path)
+        return quant_cls.from_config({})
+    is_local = os.path.isdir(model_config.model)
     if not is_local:
         # Download the config files.
-        with get_lock(model_name_or_path, load_config.download_dir):
+        with get_lock(model_config.model, load_config.download_dir):
             hf_folder = snapshot_download(
-                model_name_or_path,
+                model_config.model,
                 revision=model_config.revision,
                 allow_patterns="*.json",
                 cache_dir=load_config.download_dir,
@@ -186,7 +178,7 @@ def get_quant_config(model_config: ModelConfig,
                 tqdm_class=DisabledTqdm,
             )
     else:
-        hf_folder = model_name_or_path
+        hf_folder = model_config.model
 
     possible_config_filenames = quant_cls.get_config_filenames()
 
@@ -213,7 +205,7 @@ def get_quant_config(model_config: ModelConfig,
         config = json.load(f)
 
         if model_config.quantization == "bitsandbytes":
-            config["adapter_name_or_path"] = model_name_or_path
+            config["adapter_name_or_path"] = model_config.model
         elif model_config.quantization == "modelopt":
             if config["producer"]["name"] == "modelopt":
                 return quant_cls.from_config(config)
@@ -502,6 +494,7 @@ def fastsafetensors_weights_iterator(
 def pt_weights_iterator(
     hf_weights_files: List[str],
     use_tqdm_on_load: bool,
+    pt_load_map_location: Union[str, dict[str, str]] = "cpu",
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model bin/pt files."""
     for bin_file in tqdm(
@@ -510,7 +503,9 @@ def pt_weights_iterator(
             disable=not enable_tqdm(use_tqdm_on_load),
             bar_format=_BAR_FORMAT,
     ):
-        state = torch.load(bin_file, map_location="cpu", weights_only=True)
+        state = torch.load(bin_file,
+                           map_location=pt_load_map_location,
+                           weights_only=True)
         yield from state.items()
         del state
 

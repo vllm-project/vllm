@@ -515,12 +515,11 @@ class MPClient(EngineCoreClient):
             elif status == "READY" and (engine.state
                                         == CoreEngineState.CONNECTED):
                 # Setup KV cache config with initialization state from
-                # engine core process.
-
-                # TODO we'll receive one of these per engine in DP case.
-                # How should we aggregate?
-                self.vllm_config.cache_config.num_gpu_blocks = msg[
-                    "num_gpu_blocks"]
+                # engine core process. Sum values from all engines in DP case.
+                cache_config = self.vllm_config.cache_config
+                num_gpu_blocks = cache_config.num_gpu_blocks or 0
+                num_gpu_blocks += msg['num_gpu_blocks']
+                cache_config.num_gpu_blocks = num_gpu_blocks
 
                 start_pending[0 if local else 1] -= 1
                 engine.state = CoreEngineState.READY

@@ -4,7 +4,8 @@ types / modalities.
 """
 from pathlib import PosixPath
 
-from .....conftest import HfRunner, VllmRunner, _ImageAssets, _VideoAssets
+from .....conftest import (HfRunner, ImageTestAssets, VideoTestAssets,
+                           VllmRunner)
 from . import builders, core
 from .types import ExpandableVLMTestArgs, VLMTestInfo
 
@@ -14,7 +15,7 @@ def run_single_image_test(*, tmp_path: PosixPath, model_test_info: VLMTestInfo,
                           test_case: ExpandableVLMTestArgs,
                           hf_runner: type[HfRunner],
                           vllm_runner: type[VllmRunner],
-                          image_assets: _ImageAssets):
+                          image_assets: ImageTestAssets):
     assert test_case.size_wrapper is not None
     inputs = builders.build_single_image_inputs_from_test_info(
         model_test_info, image_assets, test_case.size_wrapper, tmp_path)
@@ -37,7 +38,7 @@ def run_multi_image_test(*, tmp_path: PosixPath, model_test_info: VLMTestInfo,
                          test_case: ExpandableVLMTestArgs,
                          hf_runner: type[HfRunner],
                          vllm_runner: type[VllmRunner],
-                         image_assets: _ImageAssets):
+                         image_assets: ImageTestAssets):
     assert test_case.size_wrapper is not None
     inputs = builders.build_multi_image_inputs_from_test_info(
         model_test_info, image_assets, test_case.size_wrapper, tmp_path)
@@ -60,7 +61,7 @@ def run_embedding_test(*, model_test_info: VLMTestInfo,
                        test_case: ExpandableVLMTestArgs,
                        hf_runner: type[HfRunner],
                        vllm_runner: type[VllmRunner],
-                       image_assets: _ImageAssets):
+                       image_assets: ImageTestAssets):
     assert test_case.size_wrapper is not None
     inputs, vllm_embeddings = builders.build_embedding_inputs_from_test_info(
         model_test_info, image_assets, test_case.size_wrapper)
@@ -86,7 +87,7 @@ def run_video_test(
     test_case: ExpandableVLMTestArgs,
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
-    video_assets: _VideoAssets,
+    video_assets: VideoTestAssets,
 ):
     assert test_case.size_wrapper is not None
     assert test_case.num_video_frames is not None
