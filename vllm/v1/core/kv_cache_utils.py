@@ -557,28 +557,6 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
             f"`max_model_len` when initializing the engine.")
 
 
-def merge_layer_specs(layer_specs: list[KVCacheSpec]) -> KVCacheSpec:
-    """
-     Merge a list of KVCacheSpec objects into a single KVCacheSpec object.
-     """
-    assert all(layer_spec.type_id == layer_specs[0].type_id
-               for layer_spec in layer_specs[1:]), (
-                   "All layers in the same KV cache group must share the same "
-                   "KVCacheSpec.")
-    layer_spec = layer_specs[0]
-    if isinstance(layer_spec, FullAttentionSpec):
-        for spec in layer_specs[1:]:
-            assert isinstance(spec, FullAttentionSpec)
-            if spec.sliding_window is not None:
-                if layer_spec.sliding_window is None:
-                    layer_spec.sliding_window = spec.sliding_window
-                else:
-                    assert layer_spec.sliding_window == spec.sliding_window, (
-                        "All sliding window layers in the same KV cache group "
-                        "must have the same window size.")
-    return layer_spec
-
-
 def create_kv_cache_group_specs(
         kv_cache_spec: dict[str, KVCacheSpec],
         grouped_layer_names: list[list[str]]) -> list[KVCacheGroupSpec]:
@@ -599,11 +577,12 @@ def create_kv_cache_group_specs(
      """
     kv_cache_groups = []
     for layer_names_one_group in grouped_layer_names:
-        layer_spec = merge_layer_specs([
+        layer_specs = [
             kv_cache_spec[layer_name] for layer_name in layer_names_one_group
-        ])
+        ]
+        merged_layer_spec = layer_specs[0].__class__.merge(layer_specs)
         kv_cache_groups.append(
-            KVCacheGroupSpec(layer_names_one_group, layer_spec))
+            KVCacheGroupSpec(layer_names_one_group, merged_layer_spec))
     return kv_cache_groups
 
 
