@@ -5,6 +5,7 @@ import argparse
 import dataclasses
 import json
 import re
+import sys
 import threading
 import warnings
 from dataclasses import MISSING, dataclass, fields, is_dataclass
@@ -440,7 +441,8 @@ class EngineArgs:
             title="ModelConfig",
             description=ModelConfig.__doc__,
         )
-        model_group.add_argument("--model", **model_kwargs["model"])
+        if 'serve' not in sys.argv[1:] and '--help' not in sys.argv[1:]:
+            model_group.add_argument("--model", **model_kwargs["model"])
         model_group.add_argument("--task", **model_kwargs["task"])
         model_group.add_argument("--tokenizer", **model_kwargs["tokenizer"])
         model_group.add_argument("--tokenizer-mode",
