@@ -1,0 +1,11 @@
+# bash .buildkite/lm-eval-harness/run-lm-eval-gsm-vllm-baseline.sh -m RedHatAI/Llama-3.2-1B-Instruct-FP8 -b "auto" -l 1319 -f 5 -t 1
+model_name: "RedHatAI/Llama-3.2-1B-Instruct-FP8"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.335
+  - name: "exact_match,flexible-extract"
+    value: 0.323
+limit: 1319
+num_fewshot: 5
