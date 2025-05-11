@@ -11,7 +11,6 @@ from torch.func import functional_call
 from transformers import PretrainedConfig
 
 import vllm.envs as envs
-from vllm.attention.layer import NOT_USE_SLIDING_WINDOW
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -713,18 +712,3 @@ def fast_topk(values, topk, dim):
     else:
         # Use topk for efficiency with larger k values
         return torch.topk(values, topk, dim=dim)
-
-
-def resolve_sliding_window(
-    sliding_window: Optional[int],
-    layer_idx: Optional[int],
-    max_window_layers: Optional[int],
-) -> Optional[int]:
-
-    if sliding_window is None:
-        return NOT_USE_SLIDING_WINDOW
-
-    if max_window_layers is None or layer_idx >= max_window_layers:
-        return sliding_window
-
-    return NOT_USE_SLIDING_WINDOW

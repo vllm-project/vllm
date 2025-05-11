@@ -30,6 +30,7 @@ from torch import nn
 from transformers import Qwen2Config
 
 from vllm.attention import Attention, AttentionType
+from vllm.attention.layer import NOT_USE_SLIDING_WINDOW
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -55,9 +56,24 @@ from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
                     extract_layer_index, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
-                    maybe_prefix, resolve_sliding_window)
+                    maybe_prefix)
 
 logger = init_logger(__name__)
+
+
+def resolve_sliding_window(
+    sliding_window: Optional[int],
+    layer_idx: Optional[int],
+    max_window_layers: Optional[int],
+) -> Optional[int]:
+
+    if sliding_window is None:
+        return NOT_USE_SLIDING_WINDOW
+
+    if max_window_layers is None or layer_idx >= max_window_layers:
+        return sliding_window
+
+    return NOT_USE_SLIDING_WINDOW
 
 
 class Qwen2MLP(nn.Module):
