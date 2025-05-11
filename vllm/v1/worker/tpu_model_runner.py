@@ -18,10 +18,10 @@ from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import VllmConfig
-from vllm.distributed.tpu_distributed_utils import shard_model
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.model_loader.tpu import TPUModelLoader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.multimodal.utils import group_mm_inputs_by_modality
@@ -846,17 +846,16 @@ class TPUModelRunner:
                 "vllm.model_executor.layers.vocab_parallel_embedding."
                 "get_tensor_model_parallel_rank",
                 return_value=xm_tp_rank):
-            model = get_model(vllm_config=self.vllm_config)
+            if self.use_spmd:
+                tpu_loader = TPUModelLoader(
+                    load_config=self.vllm_config.load_config)
+                model = tpu_loader.load_model(self.vllm_config, self.mesh)
+            else:
+                model = get_model(vllm_config=self.vllm_config)
         # Sync all pending XLA execution during model initialization and weight
         # loading.
         xm.mark_step()
         xm.wait_device_ops()
-
-        if self.use_spmd:
-            model = model.to('xla')
-            shard_model(model, self.mesh)
-            # torch compile after model sharding are done
-            model.model = torch.compile(model.model, backend="openxla")
 
         self.model = model
         self.sampler = TPUSampler()

@@ -23,9 +23,6 @@ class XlaQKVParallelLinear(nn.Module):
                  mesh: Optional["xs.Mesh"] = None):
         super().__init__()
         assert isinstance(qkv_linear, QKVParallelLinear)
-        # assert qkv_linear.bias is None, "Bias is not supported for QKVLinear"
-        # assert qkv_linear.return_bias is False, \
-        #     "Return bias is not supported for QKVLinear"
         self.skip_bias_add = qkv_linear.skip_bias_add
         self.return_bias = qkv_linear.return_bias
         assert qkv_linear.tp_size == 1, "TP > 1 is only supported under SPMD."
@@ -52,7 +49,7 @@ class XlaQKVParallelLinear(nn.Module):
         q_proj_size, k_proj_size, _ = qkv_linear.output_sizes
         # The weight of qkv linear is a concatenation of q, k, and v weights
         # along the output dimension.
-        qkv_weight = qkv_linear.weight.data
+        qkv_weight = qkv_linear.weight.data.cpu()
         q_weight = Parameter(qkv_weight[:q_proj_size], requires_grad=False)
         k_weight = Parameter(qkv_weight[q_proj_size:q_proj_size + k_proj_size],
                              requires_grad=False)
@@ -128,10 +125,15 @@ def wrap_qkv_parallel_linear(layer: torch.nn.Module, mesh) -> torch.nn.Module:
 
 
 MODULE_TYPE_TO_WRAPPING_FUNC = OrderedDict([
-    (QKVParallelLinear, wrap_qkv_parallel_linear),
-    (ColumnParallelLinear, wrap_column_parallel_linear),
-    (RowParallelLinear, wrap_row_parallel_linear),
+    ("QKVParallelLinear", wrap_qkv_parallel_linear),
+    ("ColumnParallelLinear", wrap_column_parallel_linear),
+    ("RowParallelLinear", wrap_row_parallel_linear),
 ])
+
+
+def get_fqn(module):
+    # Get the fully qualified name of the module
+    return module.__class__.__qualname__
 
 
 def shard_model(model: torch.nn.Module, mesh: "xs.Mesh") -> None:
@@ -146,7 +148,7 @@ def shard_model(model: torch.nn.Module, mesh: "xs.Mesh") -> None:
 
     def _process_module(module, name=None, parent=None):
         for module_type, wrapping_func in MODULE_TYPE_TO_WRAPPING_FUNC.items():
-            if isinstance(module, module_type):
+            if get_fqn(module) == module_type:
                 wrapped_module = wrapping_func(module, mesh)
 
                 assert parent is not None and name is not None, (

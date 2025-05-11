@@ -61,7 +61,6 @@ def _get_spmd_mesh():
 @pytest.mark.parametrize("device", ['cpu', 'xla'])
 @torch.no_grad()
 def test_xla_qkv_linear(bias, mesh, device):
-
     qkv_linear = QKVParallelLinear(
         hidden_size=4096,
         head_size=128,
