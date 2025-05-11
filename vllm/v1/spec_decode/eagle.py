@@ -1,15 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 import torch
 import torch.nn as nn
-import triton
-import triton.language as tl
 
-from vllm.config import CompilationLevel, VllmConfig, set_current_vllm_config
+from vllm.attention.layer import Attention
+from vllm.config import (CompilationLevel, VllmConfig,
+                         get_layers_from_vllm_config, set_current_vllm_config)
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.loader import get_model_loader
+from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.models import ModelRegistry
+from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
 
@@ -26,25 +28,25 @@ class EagleProposer:
         device: torch.device,
     ):
         self.vllm_config = vllm_config
-        self.method = self.vllm_config.speculative_config.method
-        self.num_speculative_tokens = (
-            vllm_config.speculative_config.num_speculative_tokens)
-        self.max_model_len = vllm_config.model_config.max_model_len
-        self.block_size = vllm_config.cache_config.block_size
+        self.speculative_config = vllm_config.speculative_config
+        self.draft_model_config = self.speculative_config.draft_model_config
+        self.method = self.speculative_config.method
 
         self.dtype = vllm_config.model_config.dtype
+        self.max_model_len = vllm_config.model_config.max_model_len
+        self.block_size = vllm_config.cache_config.block_size
+        self.num_speculative_tokens = (
+            self.speculative_config.num_speculative_tokens)
+        self.max_num_tokens = (
+            vllm_config.scheduler_config.max_num_batched_tokens)
+        # We need to get the hidden size from the draft model config because
+        # the draft model's hidden size can be different from the target model's
+        # hidden size (e.g., Llama 3.3 70B).
+        self.hidden_size = self.draft_model_config.get_hidden_size()
 
-        self.max_num_tokens = vllm_config.scheduler_config \
-            .max_num_batched_tokens
-
-        self.hidden_size = vllm_config.model_config.get_hidden_size()
-
-        # TODO: make eagle3 compatible with cudagraph
-        self.use_cuda_graph = self.method != 'eagle3' and \
-            (self.vllm_config.compilation_config.level
-             == CompilationLevel.PIECEWISE and
-             not self.vllm_config.model_config.enforce_eager)
-
+        self.use_cuda_graph = (self.vllm_config.compilation_config.level
+                               == CompilationLevel.PIECEWISE and
+                               not self.vllm_config.model_config.enforce_eager)
         self.cudagraph_batch_sizes = list(
             reversed(
                 self.vllm_config.compilation_config.cudagraph_capture_sizes))
@@ -56,7 +58,6 @@ class EagleProposer:
         self.positions = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int64,
                                      device=device)
-
         self.hidden_states = torch.zeros(
             (self.max_num_tokens, self.hidden_size),
             dtype=self.dtype,
@@ -89,6 +90,12 @@ class EagleProposer:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
         last_token_indices = cu_num_tokens[1:] - 1
+
+        if self.method == "eagle3":
+            assert isinstance(self.model, Eagle3LlamaForCausalLM)
+            target_hidden_states = self.model.combine_hidden_states(
+                target_hidden_states)
+            assert target_hidden_states.shape[-1] == self.hidden_size
 
         # Shift the input ids by one token.
         # E.g., [a1, b1, b2, c1, c2, c3] -> [b1, b2, c1, c2, c3, c3]
@@ -125,13 +132,7 @@ class EagleProposer:
             num_input_tokens = num_tokens
         # copy inputs to buffer for cudagraph
         self.positions[:num_tokens] = target_positions
-
-        if self.method == 'eagle':
-            self.hidden_states[:num_tokens] = target_hidden_states
-            hidden_states = self.hidden_states
-        else:
-            # TODO: make eagle3 compatible with cuda graph
-            hidden_states = target_hidden_states
+        self.hidden_states[:num_tokens] = target_hidden_states
 
         with set_forward_context(attn_metadata,
                                  self.vllm_config,
@@ -139,7 +140,7 @@ class EagleProposer:
             last_hidden_states, hidden_states = self.model(
                 input_ids=self.input_ids[:num_input_tokens],
                 positions=self.positions[:num_input_tokens],
-                hidden_states=hidden_states[:num_input_tokens],
+                hidden_states=self.hidden_states[:num_input_tokens],
             )
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
@@ -208,11 +209,7 @@ class EagleProposer:
             # copy inputs to buffer for cudagraph
             self.input_ids[:batch_size] = input_ids
             self.positions[:batch_size] = clamped_positions
-
-            if self.method == 'eagle':
-                # TODO: make eagle3 compatible with cudagraph.
-                self.hidden_states[:batch_size] = hidden_states
-                hidden_states = self.hidden_states
+            self.hidden_states[:batch_size] = hidden_states
 
             # Run the model.
             with set_forward_context(attn_metadata,
@@ -221,7 +218,7 @@ class EagleProposer:
                 last_hidden_states, hidden_states = self.model(
                     input_ids=self.input_ids[:input_batch_size],
                     positions=self.positions[:input_batch_size],
-                    hidden_states=hidden_states[:input_batch_size],
+                    hidden_states=self.hidden_states[:input_batch_size],
                 )
             hidden_states = hidden_states[:batch_size]
             logits = self.model.compute_logits(last_hidden_states[:batch_size],
@@ -280,6 +277,8 @@ class EagleProposer:
         loader = get_model_loader(self.vllm_config.load_config)
         target_layer_num = self.vllm_config.model_config.get_num_layers(
             self.vllm_config.parallel_config)
+        target_attn_layer_names = set(
+            get_layers_from_vllm_config(self.vllm_config, Attention).keys())
 
         draft_model_config = \
             self.vllm_config.speculative_config.draft_model_config
@@ -296,6 +295,11 @@ class EagleProposer:
                 vllm_config=self.vllm_config,
                 start_layer_id=target_layer_num).to(target_device)
 
+        draft_attn_layer_names = (
+            get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
+            target_attn_layer_names)
+        assert len(draft_attn_layer_names) == 1
+        self.attn_layer_name = next(iter(draft_attn_layer_names))
         loaded_weights = self.model.load_weights(
             loader.get_all_weights(draft_model_config, self.model))
         if self.vllm_config.speculative_config.method == "eagle3":
@@ -314,12 +318,11 @@ class EagleProposer:
     ) -> None:
         with set_forward_context(None, self.vllm_config,
                                  num_tokens=num_tokens):
-            if self.method == 'eagle':
-                self.model(
-                    input_ids=self.input_ids[:num_tokens],
-                    positions=self.positions[:num_tokens],
-                    hidden_states=self.hidden_states[:num_tokens],
-                )
+            self.model(
+                input_ids=self.input_ids[:num_tokens],
+                positions=self.positions[:num_tokens],
+                hidden_states=self.hidden_states[:num_tokens],
+            )
 
 
 # NOTE(woosuk): Currently, the below code is not used and we always use argmax

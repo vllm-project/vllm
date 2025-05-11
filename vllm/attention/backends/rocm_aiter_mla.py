@@ -148,13 +148,11 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         block_tables = inter_data.block_tables
 
         for (seq_id, token_len, seq_len, curr_seq_len, query_len, context_len,
-             curr_sliding_window_block, input_positions) in zip(
+             curr_sliding_window_block) in zip(
                  inter_data.seq_ids, [len(t) for t in inter_data.input_tokens],
                  inter_data.orig_seq_lens, inter_data.seq_lens,
                  inter_data.query_lens, inter_data.context_lens,
-                 inter_data.curr_sliding_window_blocks,
-                 inter_data.input_positions):
-            self.input_positions.extend(input_positions)
+                 inter_data.curr_sliding_window_blocks):
             self.context_lens.append(context_len)
             if is_prompt:
                 self.num_prefills += 1
@@ -409,4 +407,4 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                              attn_metadata.paged_kv_indices,
                              attn_metadata.paged_kv_last_page_lens)
 
-        return self._v_up_proj_and_o_proj(o)
+        return self._v_up_proj(o)
