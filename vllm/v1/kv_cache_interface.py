@@ -84,12 +84,16 @@ class AttentionSpec(KVCacheSpec):
 
 @dataclass
 class FullAttentionSpec(AttentionSpec):
-    # Some layers may be regarded as full attention layers in KV cache manager (
-    # blocks are allocated for all tokens), while computed as sliding window
-    # attention in model runner. In this case, we use FullAttentionSpec and
-    # record the sliding window size. Default to None for not using sliding
-    # window attention.
     sliding_window: Optional[int] = None
+    """
+    When hybrid allocator is disabled and the model contains both full 
+    attention layers and sliding window attention layers, sliding 
+    window attention are regarded as full attention in KV cache manager 
+    (blocks are allocated for all tokens), while computed as sliding window 
+    attention in model runner.
+    In this case, we use FullAttentionSpec and record the sliding window size.
+    Default to None for not using sliding window attention.
+    """
 
     @property
     def type_id(self) -> str:
