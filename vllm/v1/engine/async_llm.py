@@ -131,11 +131,6 @@ class AsyncLLM(EngineClient):
         except RuntimeError:
             pass
 
-        # Don't keep the dummy data in memory
-        self.processor.mm_registry.reset_processor_cache()
-        self.processor.mm_input_cache_client.reset()
-        self.engine_core.reset_mm_cache()
-
     @classmethod
     def from_vllm_config(
         cls,
@@ -481,9 +476,10 @@ class AsyncLLM(EngineClient):
     async def stop_profile(self) -> None:
         await self.engine_core.profile_async(False)
 
-    # NOTE: This is intentionally not async because it is called in __init__
-    def reset_mm_cache(self) -> None:
-        self.engine_core.reset_mm_cache()
+    async def reset_mm_cache(self) -> None:
+        self.processor.mm_registry.reset_processor_cache()
+        self.processor.mm_input_cache_client.reset()
+        await self.engine_core.reset_mm_cache_async()
 
     async def reset_prefix_cache(self,
                                  device: Optional[Device] = None) -> None:

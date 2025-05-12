@@ -146,6 +146,9 @@ class EngineCoreClient(ABC):
     async def profile_async(self, is_start: bool = True) -> None:
         raise NotImplementedError
 
+    async def reset_mm_cache_async(self) -> None:
+        raise NotImplementedError
+
     async def reset_prefix_cache_async(self) -> None:
         raise NotImplementedError
 
@@ -795,6 +798,9 @@ class AsyncMPClient(MPClient):
 
     async def profile_async(self, is_start: bool = True) -> None:
         await self.call_utility_async("profile", is_start)
+
+    async def reset_mm_cache_async(self) -> None:
+        await self.call_utility_async("reset_mm_cache")
 
     async def reset_prefix_cache_async(self) -> None:
         await self.call_utility_async("reset_prefix_cache")
