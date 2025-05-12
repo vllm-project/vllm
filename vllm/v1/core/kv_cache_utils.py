@@ -3,7 +3,6 @@
 import os
 from collections import defaultdict, deque
 from collections.abc import Sequence
-from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, NamedTuple, Optional
 
@@ -115,8 +114,6 @@ class KVCacheBlock:
     """KV-cache block metadata."""
     # Block ID, ranging from 0 to num_gpu_blocks - 1.
     block_id: int
-    # Reference count.
-    ref_cnt: int = 0
     # The hash of the block composed of (block hash, tuple of token IDs).
     # It is only available when the block is full.
     _block_hash: Optional[BlockHashType] = None
@@ -127,12 +124,6 @@ class KVCacheBlock:
     next_free_block: Optional["KVCacheBlock"] = None
 
     manager_id: int = -1
-
-    def incr_ref(self):
-        self.ref_cnt += 1
-
-    def decr_ref(self):
-        self.ref_cnt -= 1
 
     @property
     def block_hash(self) -> Optional[BlockHashType]:
@@ -157,7 +148,6 @@ class KVCacheBlock:
         next_block_id = self.next_free_block.block_id \
             if self.next_free_block else None
         return (f"KVCacheBlock(block_id={self.block_id}, "
-                f"ref_cnt={self.ref_cnt}, "
                 f"_block_hash={self._block_hash}, "
                 f"prev_free_block={prev_block_id}, "
                 f"next_free_block={next_block_id})")
@@ -856,40 +846,43 @@ def unify_kv_cache_configs(kv_cache_configs: list[KVCacheConfig]):
     return kv_cache_configs
 
 
-@contextmanager
-def remove_last_block_hash_for_divisible_prompt_length(
-        block_hashes: dict[int, list[BlockHashType]], num_tokens: int):
-    """
-    Remove the last block hash for the case where the prompt length is divisible
-    by the block size and all blocks are cached.
-    """
-    last_block_hashs: dict[int, BlockHashType] = {}
-    for block_size in block_hashes:
-        if len(block_hashes[block_size]) * block_size == num_tokens:
-            last_block_hashs[block_size] = block_hashes[block_size].pop()
-    yield
-    for block_size, block_hash in last_block_hashs.items():
-        block_hashes[block_size].append(block_hash)
-
-
 # KVCacheBlocks for the same block of all kv cache groups with the same kv cache
 # spec (and belongs to the same manager)
 # TODO: more notes
-# TODO: optimize the creation of GroupedKVCacheBlock
+# TODO: optimize the creation of KVCacheBlockBundle
 @dataclass
-class GroupedKVCacheBlock:
+class KVCacheBlockBundle:
     blocks: tuple[KVCacheBlock, ...]
     block_hash: Optional[BlockHashType] = None
-    master_block_id: int = -1
+    # Reference count.
     ref_cnt: int = 0
+
+    def incr_ref(self):
+        self.ref_cnt += 1
+
+    def decr_ref(self):
+        self.ref_cnt -= 1
+
+    @property
+    def master_block_id(self):
+        return self.blocks[0].block_id
 
     @staticmethod
     def from_kv_cache_blocks(blocks: tuple[KVCacheBlock, ...]):
-        return GroupedKVCacheBlock(blocks=blocks,
-                                   block_hash=blocks[0].block_hash,
-                                   master_block_id=blocks[0].block_id)
+        return KVCacheBlockBundle(blocks=blocks,
+                                  block_hash=blocks[0].block_hash)
 
     def reset_hash(self):
         for block in self.blocks:
             block.reset_hash()
         self.block_hash = None
+
+    def block_hash_is_none(self):
+        return self.block_hash is None and all(block.block_hash is None
+                                               for block in self.blocks)
+
+    def init_block_hash(self, block_hash: BlockHashType, manager_id: int):
+        self.block_hash = block_hash
+        for b in self.blocks:
+            b.block_hash = block_hash
+            b.manager_id = manager_id

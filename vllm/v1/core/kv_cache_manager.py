@@ -9,7 +9,7 @@ from vllm.logger import init_logger
 from vllm.utils import sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import KVCacheCoordinator
-from vllm.v1.core.kv_cache_utils import (BlockHashType, GroupedKVCacheBlock,
+from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlockBundle,
                                          hash_request_tokens)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
@@ -20,7 +20,7 @@ logger = init_logger(__name__)
 
 @dataclass
 class KVCacheBlocks:
-    blocks: list[list[GroupedKVCacheBlock]]
+    blocks: list[list[KVCacheBlockBundle]]
     group_to_manager: list[tuple[int, int]]
 
     def __add__(self, other: "KVCacheBlocks") -> "KVCacheBlocks":
@@ -232,7 +232,7 @@ class KVCacheManager:
             new_computed_block_list = new_computed_blocks.blocks
         else:
             new_computed_block_list = [
-                [] for _ in range(self.coordinator.num_single_type_manager)
+                [] for _ in self.coordinator.single_type_managers
             ]
 
         # Free the blocks that are skipped during the attention computation
