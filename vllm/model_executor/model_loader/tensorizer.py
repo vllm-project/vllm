@@ -62,7 +62,7 @@ logger = init_logger(__name__)
 
 @dataclass
 class TensorizerConfig:
-    tensorizer_uri: Optional[str] = None
+    tensorizer_uri: str | None = None
     vllm_tensorized: Optional[bool] = False
     verify_hash: Optional[bool] = False
     num_readers: Optional[int] = None
@@ -84,6 +84,8 @@ class TensorizerConfig:
             raise ValueError("tensorizer_uri must be provided.")
         if not self.tensorizer_uri and self.lora_dir:
             self.tensorizer_uri = f"{self.lora_dir}/adapter_model.tensors"
+        assert self.tensorizer_uri is not None, ("tensorizer_uri must be "
+                                                 "provided.")
         self.tensorizer_dir = os.path.dirname(self.tensorizer_uri)
         self.lora_dir = self.tensorizer_dir
 
