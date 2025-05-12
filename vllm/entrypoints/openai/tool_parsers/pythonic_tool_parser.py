@@ -62,7 +62,8 @@ class PythonicToolParser(ToolParser):
         Extract the tool calls from a complete model response.
         """
 
-        # replace <|python_start|> and <|python_end|> with empty string for Llama4 models, as Llama 4 model sometime will output those tokens
+        # remove <|python_start|> and <|python_end|>
+	# as Llama 4 model sometime will output those tokens
         if model_output.startswith("<|python_start|>"):
             model_output = model_output[len("<|python_start|>"):]
             model_output = model_output.replace("<|python_end|>", "")
