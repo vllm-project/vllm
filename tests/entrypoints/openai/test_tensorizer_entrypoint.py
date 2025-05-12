@@ -85,7 +85,9 @@ async def client(server):
         yield async_client
 
 
-@pytest.mark.skipif(USING_V1)
+@pytest.mark.skipif(USING_V1,
+                    reason="Tensorizer serialization is not yet "
+                    "supported with V1.")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_single_completion(client: openai.AsyncOpenAI, model_name: str):
@@ -105,7 +107,9 @@ async def test_single_completion(client: openai.AsyncOpenAI, model_name: str):
         completion_tokens=5, prompt_tokens=6, total_tokens=11)
 
 
-@pytest.mark.skipif(USING_V1)
+@pytest.mark.skipif(USING_V1,
+                    reason="Tensorizer serialization is not yet "
+                    "supported with V1.")
 def test_confirm_deserialize_and_serve(model_uri, tmp_dir,
                                        tensorize_model_and_lora):
     tc = TensorizerConfig(tensorizer_uri=model_uri, lora_dir=tmp_dir)
