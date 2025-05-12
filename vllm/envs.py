@@ -111,6 +111,7 @@ if TYPE_CHECKING:
     VLLM_USE_DEEP_GEMM: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
+    VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
 
 
 def get_default_cache_root():
@@ -261,6 +262,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE":
     lambda: bool(
         os.environ.get("VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE", "1") != "0"),
+
+    # Internal flag to enable/disable Inductor standalone compile
+    "VLLM_TEST_STANDALONE_COMPILE":
+    lambda: os.environ.get("VLLM_TEST_STANDALONE_COMPILE", "0") != "0",
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
@@ -736,6 +741,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # limit will actually be zero-copy decoded.
     "VLLM_MSGPACK_ZERO_COPY_THRESHOLD":
     lambda: int(os.getenv("VLLM_MSGPACK_ZERO_COPY_THRESHOLD", "256")),
+
+    # If set, allow insecure serialization using pickle.
+    # This is useful for environments where it is deemed safe to use the
+    # insecure method and it is needed for some reason.
+    "VLLM_ALLOW_INSECURE_SERIALIZATION":
+    lambda: bool(int(os.getenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "0"))),
 }
 
 # end-env-vars-definition
@@ -798,6 +809,7 @@ def compute_hash() -> str:
         "VLLM_USE_TRITON_AWQ",
         "VLLM_DP_RANK",
         "VLLM_DP_SIZE",
+        "VLLM_TEST_STANDALONE_COMPILE",
     ]
     for key in environment_variables_to_hash:
         if key in environment_variables:

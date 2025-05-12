@@ -29,7 +29,14 @@
 
 {%- set user_messages = loop_messages | selectattr("role", "equalto", "user") | list %}
 
-{%- for message in loop_messages | rejectattr("role", "equalto", "tool") | rejectattr("role", "equalto", "tool_results") | selectattr("tool_calls", "undefined") %}
+{%- set filtered_messages = [] %}
+{%- for message in loop_messages %}
+    {%- if message["role"] not in ["tool", "tool_results"] and not message.get("tool_calls") %}
+        {%- set filtered_messages = filtered_messages + [message] %}
+    {%- endif %}
+{%- endfor %}
+
+{%- for message in filtered_messages %}
     {%- if (message["role"] == "user") != (loop.index0 % 2 == 0) %}
         {{- raise_exception("After the optional system message, conversation roles must alternate user/assistant/user/assistant/...") }}
     {%- endif %}
