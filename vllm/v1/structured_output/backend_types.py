@@ -5,7 +5,7 @@ from __future__ import annotations
 import enum
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import torch
@@ -114,7 +114,7 @@ class StructuredOutputBackend(ABC):
     def filter_logits(self, input_batch: InputBatch, device: torch.device,
                       scheduler_output: SchedulerOutput, logits: torch.Tensor,
                       sample_hidden_states: torch.Tensor) -> None:
-        pass
+        return
 
     @abstractmethod
     def destroy(self):
@@ -122,6 +122,6 @@ class StructuredOutputBackend(ABC):
         Backend-specific cleanup.
         """
 
-    def precompile(self, num_reqs_paddings: List[int], vocab_size: int,
+    def precompile(self, num_reqs_paddings: list[int], vocab_size: int,
                    device: torch.device, hidden_states_dtype: torch.dtype):
-        pass
+        return
