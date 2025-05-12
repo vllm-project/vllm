@@ -242,6 +242,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                          is_available_online=False,
                                          trust_remote_code=True),
     "Zamba2ForCausalLM": _HfExamplesInfo("Zyphra/Zamba2-7B-instruct"),
+    "MiMoForCausalLM": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL",
+                                        trust_remote_code=True),
     # [Encoder-decoder]
     "BartModel": _HfExamplesInfo("facebook/bart-base"),
     "BartForConditionalGeneration": _HfExamplesInfo("facebook/bart-large-cnn"),
@@ -403,6 +405,9 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
                                             trust_remote_code=True,
                                             speculative_model="yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
                                             tokenizer="meta-llama/Llama-3.1-8B-Instruct"),
+    "MiMoMTPModel": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL",
+                                    trust_remote_code=True,
+                                    speculative_model="XiaomiMiMo/MiMo-7B-RL")
 }
 
 _TRANSFORMERS_MODELS = {
