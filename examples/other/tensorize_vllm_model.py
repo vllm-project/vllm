@@ -6,11 +6,13 @@ import json
 import os
 import uuid
 
-from vllm import LLM
+from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.model_loader.tensorizer import (TensorizerArgs,
                                                          TensorizerConfig,
-                                                         tensorize_vllm_model)
+                                                         tensorize_vllm_model,
+                                                        tensorize_lora_adapter)
+from vllm.lora.request import LoRARequest
 from vllm.utils import FlexibleArgumentParser
 
 # yapf conflicts with isort for this docstring
@@ -224,7 +226,7 @@ def deserialize():
             sampling_params,
             lora_request=LoRARequest("sql-lora",
                                      1,
-                                     lora_path,
+                                     args.lora_path,
                                      tensorizer_config = tensorizer_config)
             )
         )
@@ -288,9 +290,9 @@ if __name__ == '__main__':
             encryption_keyfile=keyfile,
             **credentials)
 
-        if lora_path:
+        if args.lora_path:
             tensorizer_config.lora_dir = tensorizer_config.tensorizer_dir
-            tensorize_lora_adapter(lora_path, tensorizer_config)
+            tensorize_lora_adapter(args.lora_path, tensorizer_config)
 
         tensorize_vllm_model(engine_args, tensorizer_config)
 

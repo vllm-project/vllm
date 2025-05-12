@@ -6,10 +6,13 @@ import json
 import math
 import os
 from dataclasses import MISSING, dataclass, field, fields
-from typing import Literal, Optional, Union
+from typing import Literal, Optional, Union, TYPE_CHECKING
 
 from vllm.config import LoRAConfig
 from vllm.logger import init_logger
+
+if TYPE_CHECKING:
+    from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 
 logger = init_logger(__name__)
 
@@ -106,7 +109,8 @@ class PEFTHelper:
                 config = json.load(f)
 
             logger.info(
-                f"Successfully deserialized LoRA config from {tensorizer_config.lora_dir}"
+                "Successfully deserialized LoRA config from %s",
+                tensorizer_config.lora_dir
             )
 
         else:
