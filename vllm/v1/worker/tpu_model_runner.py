@@ -45,6 +45,7 @@ from .utils import sanity_check_mm_encoder_outputs
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.structured_output import StructuredOutputManager
 
 logger = init_logger(__name__)
 
@@ -93,11 +94,8 @@ MIN_NUM_SEQS = 8
 # pre-compilation.
 class TPUModelRunner(LoRAModelRunnerMixin):
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        device: torch.device,
-    ):
+    def __init__(self, vllm_config: VllmConfig, device: torch.device,
+                 structured_output_manager: "StructuredOutputManager"):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -109,6 +107,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
         self.device_config = vllm_config.device_config
+        self.structured_output_manager = structured_output_manager
 
         model_config = self.model_config
         cache_config = self.cache_config
