@@ -79,21 +79,9 @@ def test_xla_qkv_linear(bias, mesh, device):
 
     qkv_linear = qkv_linear.to(device)
     xla_qkv_linear = xla_qkv_linear.to(device)
-
-    # Create an input tensor
     input_tensor = torch.rand(10, 4096, dtype=torch.bfloat16) / 10
     input_tensor = input_tensor.to(device)
 
-    # Forward pass
     output = qkv_linear(input_tensor)
-
     xla_output = xla_qkv_linear(input_tensor)
-
-    print(f"check any result is nan {torch.any(torch.isnan(output.cpu()))}")
-    print(
-        f"check any result is nan {torch.any(torch.isnan(xla_output.cpu()))}")
-    print(f"output.cpu(): {output.cpu()}")
-    print(f"xla_output.cpu(): {xla_output.cpu()}")
-
-    print(torch.max(torch.abs(output.cpu() - xla_output.cpu())))
     assert torch.allclose(output.cpu(), xla_output.cpu())

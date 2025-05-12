@@ -28,8 +28,8 @@ def _setup_environment(model):
             local_rank=0,
             distributed_init_method=f"file://{temp_file}",
             backend="gloo")
-        # Under single worker mode, full model is init and then partitioned by
-        # GSPMD.
+        # Under single worker mode, full model is init first and then
+        # partitioned using GSPMD.
         ensure_model_parallel_initialized(1, 1)
     return vllm_config
 
@@ -55,8 +55,8 @@ def _check_model_is_loaded(model: nn.Module):
 
     for module in model.modules():
         if get_fqn(module) == 'QKVParallelLinear':
-            assert False, "QKVParallelLinear should be replaced by \
-                           XlaQKVParallelLinear under SPMD mode."
+            raise AssertionError("QKVParallelLinear should be replaced by \
+                           XlaQKVParallelLinear under SPMD mode.")
 
 
 MESH = None
@@ -79,9 +79,9 @@ def _get_spmd_mesh():
     "meta-llama/Llama-3.1-70B-Instruct",
 ])
 def test_tpu_model_loader(model):
-    # Skip the test if there are less than 8 chips
-    # TODO: query using torch xla chip spec API, the query API is not working
-    # with SPMD now. This test is running under SPMD mode.
+    # Skip the 70B test if there are less than 8 chips
+    # TODO: Query using torch xla API, the query API is not working
+    # with SPMD now. However, This test is running under SPMD mode.
     if '70B' in model and xr.global_runtime_device_count() < 8:
         pytest.skip(
             "Skipping 70B model if the TPU VM has less than 8 chips to \
