@@ -190,10 +190,11 @@ class RocmPlatform(Platform):
         selected_backend = (_Backend.ROCM_FLASH if selected_backend
                             == _Backend.FLASH_ATTN else selected_backend)
         if envs.VLLM_USE_V1:
-            if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA:
+            if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA \
+                and on_mi250_mi300():
                 logger.info("Using Flash Attention backend on V1 engine.")
                 return ("vllm.v1.attention.backends."
-                        "flash_attn.FlashAttentionBackend")
+                        "rocm_aiter_fa.AiterFlashAttentionBackend")
             else:
                 logger.info("Using Triton Attention backend on V1 engine.")
                 return ("vllm.v1.attention.backends."
