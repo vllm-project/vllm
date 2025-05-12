@@ -44,6 +44,6 @@ schema = schemathesis.from_pytest_fixture("get_schema")
 
 @schema.parametrize()
 @schema.override(headers={"Content-Type": "application/json"})
-async def test_openapi_stateless(case):
+def test_openapi_stateless(case: schemathesis.Case):
     #No need to verify SSL certificate for localhost
-    await case.call_and_validate(verify=False)
+    case.call_and_validate(verify=False)

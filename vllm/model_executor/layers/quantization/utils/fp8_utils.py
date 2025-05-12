@@ -7,8 +7,6 @@ import os
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
-import triton
-import triton.language as tl
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
@@ -17,6 +15,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED)
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.utils import direct_register_custom_op
 
 logger = init_logger(__name__)
@@ -58,6 +57,16 @@ def apply_w8a8_block_fp8_linear(
                 or br not in (1, weight.shape[0])):
             shape_supported_by_cutlass = False
     if cutlass_block_fp8_supported and shape_supported_by_cutlass:
+        rows, cols = input_2d.shape
+        # Blackwell GPUs (SM100) require row dimensions to be multiple of 4 for
+        # optimal tensor core usage. Can be removed when targeting platforms
+        # without this constraint.
+        should_pad = current_platform.has_device_capability(
+            100) and rows % 4 != 0
+        if should_pad:
+            input_2d = torch.nn.functional.pad(input_2d,
+                                               (0, 0, 0, 4 - (rows % 4)),
+                                               value=0).contiguous()
         q_input, x_scale = per_token_group_quant_fp8(input_2d,
                                                      block_size[1],
                                                      column_major_scales=True)
@@ -66,6 +75,8 @@ def apply_w8a8_block_fp8_linear(
                                        out_dtype=input.dtype,
                                        scale_a=x_scale,
                                        scale_b=weight_scale.T)
+        if should_pad:
+            output = output[:rows, :]
     else:
         q_input, x_scale = per_token_group_quant_fp8(input_2d,
                                                      block_size[1],
