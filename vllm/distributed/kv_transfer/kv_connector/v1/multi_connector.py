@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import copy
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 
@@ -15,7 +15,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
-    from vllm.sampling_params import KVTransferParams
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
 
@@ -151,7 +150,7 @@ class MultiConnector(KVConnectorBase_V1):
         self,
         request: "Request",
         blocks: "KVCacheBlocks",
-    ) -> tuple[bool, Optional["KVTransferParams"]]:
+    ) -> tuple[bool, Optional[dict[str, Any]]]:
         async_saves = 0
         kv_txfer_params = None
         for c in self._connectors:
@@ -160,8 +159,10 @@ class MultiConnector(KVConnectorBase_V1):
                 async_saves += 1
             if txfer_params is not None:
                 if kv_txfer_params is not None:
+                    #TODO we can probably change this to merge the dicts here,
+                    # checking for key clashes.
                     raise RuntimeError(
-                        "Only one connector can produce KVTransferParams")
+                        "Only one connector can produce KV transfer params")
                 kv_txfer_params = txfer_params
         if async_saves > 1:
             self._extra_async_saves[request.request_id] = async_saves - 1
