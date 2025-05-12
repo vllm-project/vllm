@@ -2,7 +2,7 @@ First, install recommended compiler. We recommend to use `gcc/g++ >= 12.3.0` as 
 
 ```console
 sudo apt-get update  -y
-sudo apt-get install -y gcc-12 g++-12 libnuma-dev
+sudo apt-get install -y gcc-12 g++-12 libnuma-dev python3-dev
 sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12
 ```
 
@@ -25,4 +25,10 @@ Finally, build and install vLLM CPU backend:
 
 ```console
 VLLM_TARGET_DEVICE=cpu python setup.py install
+```
+
+If you want to develop vllm, install it in editable mode instead.
+
+```console
+VLLM_TARGET_DEVICE=cpu python setup.py develop
 ```

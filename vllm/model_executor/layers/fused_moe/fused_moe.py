@@ -6,8 +6,6 @@ import os
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
-import triton
-import triton.language as tl
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -21,11 +19,10 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_group_quant_int8, per_token_quant_int8)
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.utils import direct_register_custom_op
 
-from .rocm_aiter_fused_moe import (is_rocm_aiter_moe_enabled,
-                                   rocm_aiter_fused_experts,
-                                   rocm_aiter_topk_softmax)
+from .rocm_aiter_fused_moe import is_rocm_aiter_moe_enabled
 
 logger = init_logger(__name__)
 
@@ -750,13 +747,15 @@ def get_default_config(
     if dtype == "fp8_w8a8" and block_shape is not None:
         # Block-wise quant: BLOCK_SIZE_N must be divisible by block_shape[0]
         # BLOCK_SIZE_K must be divisible by block_shape[1]
+        # num_stages=3 can cause triton.runtime.errors.OutOfResources
+        # on ROCm, set it to 2 instead.
         config = {
             "BLOCK_SIZE_M": 64,
             "BLOCK_SIZE_N": block_shape[0],
             "BLOCK_SIZE_K": block_shape[1],
             "GROUP_SIZE_M": 32,
             "num_warps": 4,
-            "num_stages": 3,
+            "num_stages": 3 if not current_platform.is_rocm() else 2,
         }
     elif dtype in ["int4_w4a16", "int8_w8a16"] and block_shape is not None:
         # moe wna16 kernels
@@ -846,6 +845,7 @@ def vllm_topk_softmax(topk_weights: torch.Tensor, topk_indices: torch.Tensor,
 
 def dispatch_topk_func() -> Callable[..., tuple[torch.Tensor, ...]]:
     if is_rocm_aiter_moe_enabled():
+        from .rocm_aiter_fused_moe import rocm_aiter_topk_softmax
         return rocm_aiter_topk_softmax
     return vllm_topk_softmax
 
@@ -855,7 +855,7 @@ def fused_topk(
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     assert hidden_states.shape[0] == gating_output.shape[0], (
         "Number of tokens mismatch")
 
@@ -869,20 +869,19 @@ def fused_topk(
                            topk,
                            dtype=torch.int32,
                            device=hidden_states.device)
-    token_expert_indicies = torch.empty(M,
-                                        topk,
-                                        dtype=torch.int32,
-                                        device=hidden_states.device)
+    token_expert_indices = torch.empty(M,
+                                       topk,
+                                       dtype=torch.int32,
+                                       device=hidden_states.device)
 
     gating_output_float = gating_output.float()  # TODO(woosuk): Optimize this.
 
     topk_func = dispatch_topk_func()
     topk_weights, topk_ids = topk_func(topk_weights, topk_ids,
-                                       token_expert_indicies,
+                                       token_expert_indices,
                                        gating_output_float, renormalize)
 
-    del token_expert_indicies  # Not used. Will be used in the future.
-    return topk_weights, topk_ids
+    return topk_weights, topk_ids, token_expert_indices
 
 
 # This is used by the Deepseek-V2 and Deepseek-V3 model
@@ -1102,6 +1101,7 @@ def torch_vllm_outplace_fused_experts(**kwargs) -> torch.Tensor:
 
 def dispatch_fused_experts_func(inplace: bool) -> Callable[..., torch.Tensor]:
     if is_rocm_aiter_moe_enabled():
+        from .rocm_aiter_fused_moe import rocm_aiter_fused_experts
         return rocm_aiter_fused_experts
     if inplace:
         return torch_vllm_inplace_fused_experts
@@ -1510,8 +1510,8 @@ def fused_moe(
                                               topk, renormalize,
                                               num_expert_group, topk_group)
     elif custom_routing_function is None:
-        topk_weights, topk_ids = fused_topk(hidden_states, gating_output, topk,
-                                            renormalize)
+        topk_weights, topk_ids, token_expert_indices = fused_topk(
+            hidden_states, gating_output, topk, renormalize)
     else:
         topk_weights, topk_ids = custom_routing_function(
             hidden_states, gating_output, topk, renormalize)

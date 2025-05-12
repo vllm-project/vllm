@@ -5,7 +5,12 @@
 set -ex
 
 # Setup cleanup
-remove_docker_container() { podman rm -f cpu-test-ubi9-ppc || true; podman system prune -f; }
+remove_docker_container() {
+  if [[ -n "$container_id" ]]; then
+      podman rm -f "$container_id" || true
+  fi
+  podman system prune -f
+}
 trap remove_docker_container EXIT
 remove_docker_container
 
@@ -13,17 +18,17 @@ remove_docker_container
 podman build -t cpu-test-ubi9-ppc -f docker/Dockerfile.ppc64le .
 
 # Run the image
-podman run -itd --entrypoint /bin/bash -v /tmp/:/root/.cache/huggingface --privileged=true --network host -e HF_TOKEN --name cpu-test-ubi9-ppc cpu-test-ubi9-ppc
+container_id=$(podman run -itd --entrypoint /bin/bash -v /tmp/:/root/.cache/huggingface --privileged=true --network host -e HF_TOKEN cpu-test-ubi9-ppc)
 
 function cpu_tests() {
 
   # offline inference
-  podman exec cpu-test-ubi9-ppc bash -c "
+  podman exec -it "$container_id" bash -c "
     set -e
     python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m"
 
   # Run basic model test
-  podman exec cpu-test-ubi9-ppc bash -c "
+  podman exec -it "$container_id" bash -c "
     set -e
     pip install pytest pytest-asyncio einops peft Pillow soundfile transformers_stream_generator matplotlib
     pip install sentence-transformers datamodel_code_generator
@@ -33,6 +38,8 @@ function cpu_tests() {
 }
 
 # All of CPU tests are expected to be finished less than 40 mins.
+
+export container_id
 export -f cpu_tests
 timeout 40m bash -c cpu_tests
 

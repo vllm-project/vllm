@@ -134,26 +134,32 @@ class RequestOutput:
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
 
-    def add(self, next_output: "RequestOutput") -> None:
+    def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
         """Merge subsequent RequestOutput into this one"""
 
         self.finished |= next_output.finished
 
         for next_completion in next_output.outputs:
-            for completion in self.outputs:
+            for i, completion in enumerate(self.outputs):
                 if completion.index == next_completion.index:
-                    # Merge outputs with same index
-                    completion.text += next_completion.text
-                    if not isinstance(completion.token_ids, MutableSequence):
-                        completion.token_ids = list(completion.token_ids)
-                    completion.token_ids.extend(next_completion.token_ids)
-                    if next_completion.logprobs:
-                        assert completion.logprobs is not None
-                        completion.logprobs.extend(next_completion.logprobs)
-                    completion.cumulative_logprob = (
-                        next_completion.cumulative_logprob)
-                    completion.finish_reason = next_completion.finish_reason
-                    completion.stop_reason = next_completion.stop_reason
+                    if aggregate:
+                        # Merge outputs with same index
+                        completion.text += next_completion.text
+                        if not isinstance(completion.token_ids,
+                                          MutableSequence):
+                            completion.token_ids = list(completion.token_ids)
+                        completion.token_ids.extend(next_completion.token_ids)
+                        if next_completion.logprobs:
+                            assert completion.logprobs is not None
+                            completion.logprobs.extend(
+                                next_completion.logprobs)
+                        completion.cumulative_logprob = (
+                            next_completion.cumulative_logprob)
+                        completion.finish_reason = next_completion.finish_reason
+                        completion.stop_reason = next_completion.stop_reason
+                    else:
+                        # Replace the output with the new one
+                        self.outputs[i] = next_completion
                     break
             else:
                 self.outputs.append(next_completion)
@@ -173,6 +179,13 @@ class RequestOutput:
                 group.finish_seq(seq_group)
             if assembled_seq_group is None:
                 return None
+
+            # clear finished seq in seq_id_to_seq_group
+            if len(group.to_be_finished) == 0:
+                for sub_request_id in list(group.seq_id_to_index.keys()):
+                    if sub_request_id in seq_id_to_seq_group:
+                        del seq_id_to_seq_group[sub_request_id]
+
             return cls.from_seq_group(assembled_seq_group, use_cache,
                                       seq_id_to_seq_group)
 

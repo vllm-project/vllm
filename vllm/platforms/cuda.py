@@ -21,9 +21,6 @@ from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
-else:
-    ModelConfig = None
-    VllmConfig = None
 
 logger = init_logger(__name__)
 
@@ -76,6 +73,19 @@ class CudaPlatformBase(Platform):
     ray_device_key: str = "GPU"
     device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
 
+    @property
+    def supported_dtypes(self) -> List[torch.dtype]:
+        if self.has_device_capability(80):
+            # Ampere and Hopper or later NVIDIA GPUs.
+            return [torch.bfloat16, torch.float16, torch.float32]
+        elif (not self.has_device_capability(80)
+              ) and self.has_device_capability(60):
+            # Pascal, Volta and Turing NVIDIA GPUs, BF16 is not supported
+            return [torch.float16, torch.float32]
+        # Kepler and Maxwell NVIDIA GPUs, only FP32 is supported,
+        # though vLLM doesn't support these GPUs.
+        return [torch.float32]
+
     @classmethod
     def get_device_capability(cls,
                               device_id: int = 0
@@ -109,7 +119,7 @@ class CudaPlatformBase(Platform):
         pass
 
     @classmethod
-    def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+    def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
         compilation_config = vllm_config.compilation_config
@@ -213,6 +223,9 @@ class CudaPlatformBase(Platform):
                         return ("vllm.attention.backends."
                                 "flashmla.FlashMLABackend")
         if use_v1:
+            if selected_backend == _Backend.FLASHINFER:
+                logger.info_once("Using FlashInfer backend on V1 engine.")
+                return "vllm.v1.attention.backends.flashinfer.FlashInferBackend"
             if selected_backend == _Backend.TRITON_ATTN_VLLM_V1:
                 logger.info_once("Using Triton backend on V1 engine.")
                 return ("vllm.v1.attention.backends."
@@ -305,7 +318,7 @@ class CudaPlatformBase(Platform):
         return cls.has_device_capability(89)
 
     @classmethod
-    def supports_v1(cls, model_config: ModelConfig) -> bool:
+    def supports_v1(cls, model_config: "ModelConfig") -> bool:
         return True
 
     @classmethod
@@ -454,10 +467,4 @@ finally:
 
 CudaPlatform = NvmlCudaPlatform if nvml_available else NonNvmlCudaPlatform
 
-try:
-    from sphinx.ext.autodoc.mock import _MockModule
-
-    if not isinstance(pynvml, _MockModule):
-        CudaPlatform.log_warnings()
-except ModuleNotFoundError:
-    CudaPlatform.log_warnings()
+CudaPlatform.log_warnings()

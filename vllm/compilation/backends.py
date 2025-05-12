@@ -17,13 +17,27 @@ from vllm.config import CompilationConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import weak_ref_tensors
 
-from .compiler_interface import EagerAdaptor, InductorAdaptor
+from .compiler_interface import (CompilerInterface, EagerAdaptor,
+                                 InductorAdaptor, InductorStandaloneAdaptor)
 from .counter import compilation_counter
 from .inductor_pass import InductorPass
 from .monitor import end_monitoring_torch_compile
 from .pass_manager import PostGradPassManager
 
 logger = init_logger(__name__)
+
+
+def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
+    if compilation_config.use_inductor:
+        if envs.VLLM_TEST_STANDALONE_COMPILE:
+            logger.info("Using InductorStandaloneAdaptor")
+            return InductorStandaloneAdaptor()
+        else:
+            logger.info("Using InductorAdaptor")
+            return InductorAdaptor()
+    else:
+        logger.info("Using EagerAdaptor")
+        return EagerAdaptor()
 
 
 class CompilerManager:
@@ -41,10 +55,11 @@ class CompilerManager:
     support int as key.
     """
 
-    def __init__(self, use_inductor: bool):
+    def __init__(self, compilation_config: CompilationConfig):
         self.cache: Dict[Tuple[Optional[int], int, str], Any] = dict()
-        cls = InductorAdaptor if use_inductor else EagerAdaptor
-        self.compiler = cls()
+        self.is_cache_updated = False
+        self.compilation_config = compilation_config
+        self.compiler = make_compiler(compilation_config)
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         return self.compiler.compute_hash(vllm_config)
@@ -66,11 +81,11 @@ class CompilerManager:
                                        disable_cache=disable_cache)
 
     def save_to_file(self):
-        if self.disable_cache:
+        if self.disable_cache or not self.is_cache_updated:
             return
+        printer = pprint.PrettyPrinter(indent=4)
+        data = printer.pformat(self.cache)
         with open(self.cache_file_path, "w") as f:
-            printer = pprint.PrettyPrinter(indent=4)
-            data = printer.pformat(self.cache)
             f.write(data)
 
     def load(self,
@@ -110,16 +125,27 @@ class CompilerManager:
         compiled_graph = self.load(graph, example_inputs, graph_index,
                                    runtime_shape)
         if compiled_graph is not None:
-            if graph_index == 0:
-                # adds some info logging for the first graph
-                logger.info("Directly load the compiled graph for shape %s "
-                            "from the cache", str(runtime_shape))  # noqa
+            if graph_index == num_graphs - 1:
+                # after loading the last graph for this shape, record the time.
+                # there can be multiple graphs due to piecewise compilation.
+                now = time.time()
+                elapsed = now - compilation_start_time
+                logger.info(
+                    "Directly load the compiled graph(s) for shape %s "
+                    "from the cache, took %.3f s", str(runtime_shape), elapsed)
             return compiled_graph
 
         # no compiler cached the graph, or the cache is disabled,
         # we need to compile it
+        if isinstance(self.compiler, InductorAdaptor):
+            # Let compile_fx generate a key for us
+            maybe_key = None
+        else:
+            maybe_key = \
+                f"artifact_shape_{runtime_shape}_subgraph_{graph_index}"
         compiled_graph, handle = self.compiler.compile(
-            graph, example_inputs, additional_inductor_config, runtime_shape)
+            graph, example_inputs, additional_inductor_config, runtime_shape,
+            maybe_key)
 
         assert compiled_graph is not None, "Failed to compile the graph"
 
@@ -127,6 +153,7 @@ class CompilerManager:
         if handle is not None:
             self.cache[(runtime_shape, graph_index,
                         self.compiler.name)] = handle
+            self.is_cache_updated = True
             if graph_index == 0:
                 # adds some info logging for the first graph
                 logger.info("Cache the graph of shape %s for later use",
@@ -235,6 +262,8 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
         self.graph_pool = graph_pool
         self.vllm_config = vllm_config
         self.vllm_backend = vllm_backend
+        # When True, it annoyingly dumps the torch.fx.Graph on errors.
+        self.extra_traceback = False
 
     def run(self, *args):
         fake_args = [
@@ -328,14 +357,14 @@ class VllmBackend:
         self.compilation_config = vllm_config.compilation_config
 
         self.compiler_manager: CompilerManager = CompilerManager(
-            self.compilation_config.use_inductor)
+            self.compilation_config)
 
         # `torch.compile` is JIT compiled, so we don't need to
         # do anything here
 
     def configure_post_pass(self):
         config = self.compilation_config
-        self.post_grad_pass_manager.configure(config.pass_config)
+        self.post_grad_pass_manager.configure(self.vllm_config)
 
         # Post-grad custom passes are run using the post_grad_custom_post_pass
         # hook. If a pass for that hook exists, add it to the pass manager.
@@ -343,8 +372,12 @@ class VllmBackend:
         PASS_KEY = "post_grad_custom_post_pass"
         if PASS_KEY in inductor_config:
             # Config should automatically wrap all inductor passes
-            assert isinstance(inductor_config[PASS_KEY], InductorPass)
-            self.post_grad_pass_manager.add(inductor_config[PASS_KEY])
+            if isinstance(inductor_config[PASS_KEY], PostGradPassManager):
+                assert (inductor_config[PASS_KEY].uuid() ==
+                        self.post_grad_pass_manager.uuid())
+            else:
+                assert isinstance(inductor_config[PASS_KEY], InductorPass)
+                self.post_grad_pass_manager.add(inductor_config[PASS_KEY])
         inductor_config[PASS_KEY] = self.post_grad_pass_manager
 
     def __call__(self, graph: fx.GraphModule, example_inputs) -> Callable:
@@ -378,6 +411,10 @@ class VllmBackend:
             hash_content = []
             for filepath in forward_code_files:
                 hash_content.append(filepath)
+                if filepath == "<string>":
+                    # This means the function was dynamically generated, with
+                    # e.g. exec(). We can't actually check these.
+                    continue
                 with open(filepath) as f:
                     hash_content.append(f.read())
             import hashlib
@@ -400,8 +437,13 @@ class VllmBackend:
             )
             self.compilation_config.cache_dir = cache_dir
 
-        cache_dir = self.compilation_config.cache_dir
+        if compilation_counter.num_graphs_seen > 0:
+            cache_dir = self.compilation_config.cache_dir + \
+                f'-{compilation_counter.num_graphs_seen}'
+        else:
+            cache_dir = self.compilation_config.cache_dir
         os.makedirs(cache_dir, exist_ok=True)
+        self.compilation_config.cache_dir = cache_dir
         rank = vllm_config.parallel_config.rank
         dp_rank = vllm_config.parallel_config.data_parallel_rank
         local_cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}")

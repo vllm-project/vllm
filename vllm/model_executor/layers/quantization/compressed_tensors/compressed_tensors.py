@@ -16,15 +16,17 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
     CompressedTensorsMoEMethod)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     W4A16SPARSE24_SUPPORTED_BITS, WNA16_SUPPORTED_BITS, CompressedTensors24,
-    CompressedTensorsScheme, CompressedTensorsW4A16Sparse24,
-    CompressedTensorsW8A8Fp8, CompressedTensorsW8A8Int8,
-    CompressedTensorsW8A16Fp8, CompressedTensorsWNA16)
+    CompressedTensorsScheme, CompressedTensorsW4A16Fp4,
+    CompressedTensorsW4A16Sparse24, CompressedTensorsW8A8Fp8,
+    CompressedTensorsW8A8Int8, CompressedTensorsW8A16Fp8,
+    CompressedTensorsWNA16)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target, is_activation_quantization_format,
     should_ignore_layer)
@@ -71,8 +73,8 @@ class CompressedTensorsConfig(QuantizationConfig):
     def get_min_capability(cls) -> int:
         return 70
 
-    def get_name(self) -> str:
-        return "compressed_tensors"
+    def get_name(self) -> QuantizationMethods:
+        return "compressed-tensors"
 
     def get_quant_method(
         self,
@@ -215,6 +217,21 @@ class CompressedTensorsConfig(QuantizationConfig):
         else:
             return False
 
+    def _is_fp4a16_nvfp4(self, weight_quant: BaseModel,
+                         input_quant: BaseModel):
+
+        is_weight_only = weight_quant is not None and input_quant is None
+        is_group_quant = (
+            weight_quant.strategy == QuantizationStrategy.GROUP.value)
+        is_symmetric = weight_quant.symmetric
+
+        is_group_size_16 = weight_quant.group_size == 16
+        is_float_type = weight_quant.type == QuantizationType.FLOAT
+        is_4_bits = weight_quant.num_bits == 4
+
+        return (is_weight_only and is_group_quant and is_float_type
+                and is_4_bits and is_group_size_16 and is_symmetric)
+
     def _is_static_tensor_w8a8(self, weight_quant: BaseModel,
                                input_quant: BaseModel) -> bool:
         is_8_bits = weight_quant.num_bits == input_quant.num_bits == 8
@@ -314,6 +331,9 @@ class CompressedTensorsConfig(QuantizationConfig):
             input_quant: BaseModel) -> "CompressedTensorsScheme":
 
         # Detect If Mixed Precision
+        if self._is_fp4a16_nvfp4(weight_quant, input_quant):
+            return CompressedTensorsW4A16Fp4()
+
         if self._is_wNa16_group_channel(weight_quant, input_quant):
             if (self.quant_format == CompressionFormat.marlin_24.value
                     and weight_quant.num_bits in W4A16SPARSE24_SUPPORTED_BITS):
@@ -384,7 +404,7 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         Detect whether a layer_name is found in any target and
         use the quantization scheme corresponding to the matched target
-        to select the CompressedTensorsScheme used for infernece.
+        to select the CompressedTensorsScheme used for inference.
         """
 
         # Find the "target" in the compressed-tensors config

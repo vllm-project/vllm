@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Optional, Tuple, Union, cast
 
 import torch
+from tpu_info import device
 
 import vllm.envs as envs
 from vllm.inputs import ProcessorInputs, PromptType
@@ -12,9 +13,10 @@ from vllm.sampling_params import SamplingParams, SamplingType
 from .interface import Platform, PlatformEnum, _Backend
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config import BlockSize, ModelConfig, VllmConfig
     from vllm.pooling_params import PoolingParams
 else:
+    BlockSize = None
     ModelConfig = None
     VllmConfig = None
     PoolingParams = None
@@ -29,10 +31,9 @@ class TpuPlatform(Platform):
     dispatch_key: str = "XLA"
     ray_device_key: str = "TPU"
     device_control_env_var: str = "TPU_VISIBLE_CHIPS"
+    simple_compile_backend: str = "openxla"
 
-    supported_quantization: list[str] = [
-        "tpu_int8", "compressed-tensors", "compressed_tensors"
-    ]
+    supported_quantization: list[str] = ["tpu_int8", "compressed-tensors"]
 
     additional_env_vars: list[str] = [
         "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS"
@@ -56,7 +57,8 @@ class TpuPlatform(Platform):
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
-        return "tpu"
+        chip_type, _ = device.get_local_chips()
+        return f"TPU {chip_type.name}"
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
@@ -67,6 +69,22 @@ class TpuPlatform(Platform):
         return not envs.VLLM_USE_V1
 
     @classmethod
+    def get_punica_wrapper(cls) -> str:
+        return "vllm.lora.punica_wrapper.punica_tpu.PunicaWrapperTPU"
+
+    @classmethod
+    def get_infinity_values(cls, dtype: torch.dtype) -> Tuple[float, float]:
+        return torch.finfo(dtype).min, torch.finfo(dtype).max
+
+    @classmethod
+    def can_update_inplace(cls):
+        return False
+
+    @classmethod
+    def get_lora_vocab_padding_size(cls) -> int:
+        return 1
+
+    @classmethod
     def inference_mode(cls):
         return torch.no_grad()
 
@@ -75,9 +93,9 @@ class TpuPlatform(Platform):
         from vllm.config import CompilationLevel
 
         cache_config = vllm_config.cache_config
+        # For v0, the default block size is 16.
         if cache_config and cache_config.block_size is None:
-            cache_config.block_size = 16
-
+            cache_config.block_size = cast(BlockSize, 16)
         compilation_config = vllm_config.compilation_config
 
         # TPU only supports DYNAMO_ONCE compilation level
@@ -96,6 +114,22 @@ class TpuPlatform(Platform):
                 "The TPU backend currently does not support %s. "
                 "Using bfloat16 instead.", vllm_config.model_config.dtype)
             vllm_config.model_config.dtype = torch.bfloat16
+
+        if envs.VLLM_USE_V1:
+            from vllm.v1.attention.backends.pallas import (
+                PallasAttentionBackend)
+            cache_config.block_size = PallasAttentionBackend.get_page_size(
+                vllm_config)  # type: ignore[assignment]
+            min_page_size = PallasAttentionBackend.get_min_page_size(
+                vllm_config)
+            if min_page_size > cache_config.block_size:
+                logger.warning(
+                    "Increase the page size from %s to %s to make sure there's"
+                    "no SMEM OOM",
+                    cache_config.block_size,
+                    min_page_size,
+                )
+                cache_config.block_size = min_page_size  # type: ignore[assignment]
 
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
@@ -154,9 +188,9 @@ class TpuPlatform(Platform):
     ) -> None:
         """Raises if this request is unsupported on this platform"""
         if isinstance(params, SamplingParams):
-            if params.guided_decoding is not None:
+            if params.guided_decoding is not None and not envs.VLLM_USE_V1:
                 raise ValueError("Structured output is not supported on "
-                                 f"{cls.device_name}.")
+                                 f"{cls.device_name} V0.")
             if params.sampling_type == SamplingType.RANDOM_SEED:
                 raise ValueError(
                     "Torch XLA does not support per-request seed.")

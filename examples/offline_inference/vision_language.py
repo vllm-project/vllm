@@ -45,7 +45,7 @@ def run_aria(questions: list[str], modality: str) -> ModelRequestData:
         max_model_len=4096,
         max_num_seqs=2,
         dtype="bfloat16",
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
     )
 
     prompts = [(f"<|im_start|>user\n<fim_prefix><|img|><fim_suffix>{question}"
@@ -71,7 +71,7 @@ def run_aya_vision(questions: list[str], modality: str) -> ModelRequestData:
         max_model_len=2048,
         max_num_seqs=2,
         mm_processor_kwargs={"crop_to_patches": True},
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
     )
     prompts = [
         f"<|START_OF_TURN_TOKEN|><|USER_TOKEN|><image>{question}<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
@@ -92,7 +92,7 @@ def run_blip2(questions: list[str], modality: str) -> ModelRequestData:
     prompts = [f"Question: {question} Answer:" for question in questions]
     engine_args = EngineArgs(
         model="Salesforce/blip2-opt-6.7b",
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
     )
 
     return ModelRequestData(
@@ -110,7 +110,7 @@ def run_chameleon(questions: list[str], modality: str) -> ModelRequestData:
         model="facebook/chameleon-7b",
         max_model_len=4096,
         max_num_seqs=2,
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
     )
 
     return ModelRequestData(
@@ -130,7 +130,7 @@ def run_deepseek_vl2(questions: list[str], modality: str) -> ModelRequestData:
         max_model_len=4096,
         max_num_seqs=2,
         hf_overrides={"architectures": ["DeepseekVLV2ForCausalLM"]},
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
     )
 
     prompts = [
@@ -155,7 +155,7 @@ def run_florence2(questions: list[str], modality: str) -> ModelRequestData:
         max_num_seqs=2,
         trust_remote_code=True,
         dtype="bfloat16",
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
     )
 
     prompts = ["<MORE_DETAILED_CAPTION>" for _ in questions]
@@ -175,7 +175,7 @@ def run_fuyu(questions: list[str], modality: str) -> ModelRequestData:
         model="adept/fuyu-8b",
         max_model_len=2048,
         max_num_seqs=2,
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
     )
 
     return ModelRequestData(
@@ -194,7 +194,7 @@ def run_gemma3(questions: list[str], modality: str) -> ModelRequestData:
         max_model_len=2048,
         max_num_seqs=2,
         mm_processor_kwargs={"do_pan_and_scan": True},
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
     )
 
     prompts = [("<bos><start_of_turn>user\n"
@@ -219,7 +219,7 @@ def run_glm4v(questions: list[str], modality: str) -> ModelRequestData:
         trust_remote_code=True,
         enforce_eager=True,
         hf_overrides={"architectures": ["GLM4VForCausalLM"]},
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
     )
 
     prompts = [
@@ -246,7 +246,7 @@ def run_h2ovl(questions: list[str], modality: str) -> ModelRequestData:
         model=model_name,
         trust_remote_code=True,
         max_model_len=8192,
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model_name,
@@ -287,7 +287,7 @@ def run_idefics3(questions: list[str], modality: str) -> ModelRequestData:
                 "longest_edge": 3 * 364
             },
         },
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
     )
     prompts = [(
         f"<|begin_of_text|>User:<image>{question}<end_of_utterance>\nAssistant:"
@@ -314,7 +314,7 @@ def run_smolvlm(questions: list[str], modality: str) -> ModelRequestData:
                 "longest_edge": 384
             },
         },
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
     )
     prompts = [
         (f"<|im_start|>User:<image>{question}<end_of_utterance>\nAssistant:")
@@ -337,7 +337,7 @@ def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
         model=model_name,
         trust_remote_code=True,
         max_model_len=4096,
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model_name,
@@ -378,7 +378,7 @@ def run_kimi_vl(questions: list[str], modality: str) -> ModelRequestData:
         model="moonshotai/Kimi-VL-A3B-Instruct",
         trust_remote_code=True,
         max_model_len=4096,
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
     )
 
     return ModelRequestData(
@@ -398,7 +398,7 @@ def run_llava(questions: list[str], modality: str) -> ModelRequestData:
     engine_args = EngineArgs(
         model="llava-hf/llava-1.5-7b-hf",
         max_model_len=4096,
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
     )
 
     return ModelRequestData(
@@ -415,7 +415,7 @@ def run_llava_next(questions: list[str], modality: str) -> ModelRequestData:
     engine_args = EngineArgs(
         model="llava-hf/llava-v1.6-mistral-7b-hf",
         max_model_len=8192,
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
     )
 
     return ModelRequestData(
@@ -437,7 +437,7 @@ def run_llava_next_video(questions: list[str],
         model="llava-hf/LLaVA-NeXT-Video-7B-hf",
         max_model_len=8192,
         max_num_seqs=2,
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
     )
 
     return ModelRequestData(
@@ -465,7 +465,7 @@ def run_llava_onevision(questions: list[str],
     engine_args = EngineArgs(
         model="llava-hf/llava-onevision-qwen2-7b-ov-hf",
         max_model_len=16384,
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
     )
 
     return ModelRequestData(
@@ -488,7 +488,7 @@ def run_mantis(questions: list[str], modality: str) -> ModelRequestData:
         model="TIGER-Lab/Mantis-8B-siglip-llama3",
         max_model_len=4096,
         hf_overrides={"architectures": ["MantisForConditionalGeneration"]},
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
     )
     stop_token_ids = [128009]
 
@@ -529,7 +529,7 @@ def run_minicpmv_base(questions: list[str], modality: str, model_name):
         max_model_len=4096,
         max_num_seqs=2,
         trust_remote_code=True,
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
     )
     # NOTE The stop_token_ids are different for various versions of MiniCPM-V
     # 2.0
@@ -584,7 +584,7 @@ def run_mistral3(questions: list[str], modality: str) -> ModelRequestData:
         max_model_len=8192,
         max_num_seqs=2,
         tensor_parallel_size=2,
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
     )
 
     prompts = [f"<s>[INST]{question}\n[IMG][/INST]" for question in questions]
@@ -610,7 +610,7 @@ def run_mllama(questions: list[str], modality: str) -> ModelRequestData:
         model=model_name,
         max_model_len=8192,
         max_num_seqs=2,
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -645,7 +645,7 @@ def run_llama4(questions: list[str], modality: str) -> ModelRequestData:
         max_num_seqs=4,
         tensor_parallel_size=8,
         gpu_memory_utilization=0.4,
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -680,7 +680,7 @@ def run_molmo(questions: list[str], modality: str) -> ModelRequestData:
         model=model_name,
         trust_remote_code=True,
         dtype="bfloat16",
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
     )
 
     prompts = [
@@ -706,7 +706,7 @@ def run_nvlm_d(questions: list[str], modality: str) -> ModelRequestData:
         trust_remote_code=True,
         max_model_len=4096,
         tensor_parallel_size=4,
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model_name,
@@ -725,6 +725,34 @@ def run_nvlm_d(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Ovis2
+def run_ovis2(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "AIDC-AI/Ovis2-1B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=2,
+        trust_remote_code=True,
+        dtype="half",
+        hf_overrides={"architectures": ["Ovis2ForConditionalGeneration"]},
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    placeholder = "<image>\n"
+    prompts = [("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+                f"<|im_start|>user\n{placeholder}"
+                f"{question}<|im_end|>\n"
+                "<|im_start|>assistant\n") for question in questions]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # PaliGemma
 def run_paligemma(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -733,7 +761,7 @@ def run_paligemma(questions: list[str], modality: str) -> ModelRequestData:
     prompts = ["caption en" for _ in questions]
     engine_args = EngineArgs(
         model="google/paligemma-3b-mix-224",
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
     )
 
     return ModelRequestData(
@@ -750,7 +778,7 @@ def run_paligemma2(questions: list[str], modality: str) -> ModelRequestData:
     prompts = ["caption en" for _ in questions]
     engine_args = EngineArgs(
         model="google/paligemma2-3b-ft-docci-448",
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
     )
 
     return ModelRequestData(
@@ -787,7 +815,7 @@ def run_phi3v(questions: list[str], modality: str) -> ModelRequestData:
         max_num_seqs=2,
         # Note - mm_processor_kwargs can also be passed to generate/chat calls
         mm_processor_kwargs={"num_crops": 16},
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
     )
 
     return ModelRequestData(
@@ -814,11 +842,14 @@ def run_phi4mm(questions: list[str], modality: str) -> ModelRequestData:
     engine_args = EngineArgs(
         model=model_path,
         trust_remote_code=True,
-        max_model_len=4096,
+        max_model_len=5120,
         max_num_seqs=2,
+        max_num_batched_tokens=12800,
         enable_lora=True,
         max_lora_rank=320,
-        limit_mm_per_prompt={"image": 1},
+        # Note - mm_processor_kwargs can also be passed to generate/chat calls
+        mm_processor_kwargs={"dynamic_hd": 16},
+        limit_mm_per_prompt={modality: 1},
     )
 
     return ModelRequestData(
@@ -839,7 +870,7 @@ def run_pixtral_hf(questions: list[str], modality: str) -> ModelRequestData:
         model=model_name,
         max_model_len=6144,
         max_num_seqs=2,
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
     )
 
     prompts = [f"<s>[INST]{question}\n[IMG][/INST]" for question in questions]
@@ -860,7 +891,7 @@ def run_qwen_vl(questions: list[str], modality: str) -> ModelRequestData:
         max_model_len=1024,
         max_num_seqs=2,
         hf_overrides={"architectures": ["QwenVLForConditionalGeneration"]},
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
     )
 
     prompts = [f"{question}Picture 1: <img></img>\n" for question in questions]
@@ -885,7 +916,7 @@ def run_qwen2_vl(questions: list[str], modality: str) -> ModelRequestData:
             "min_pixels": 28 * 28,
             "max_pixels": 1280 * 28 * 28,
         },
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
     )
 
     if modality == "image":
@@ -920,7 +951,7 @@ def run_qwen2_5_vl(questions: list[str], modality: str) -> ModelRequestData:
             "max_pixels": 1280 * 28 * 28,
             "fps": 1,
         },
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
     )
 
     if modality == "image":
@@ -941,6 +972,42 @@ def run_qwen2_5_vl(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Qwen2.5-Omni
+def run_qwen2_5_omni(questions: list[str], modality: str):
+    model_name = "Qwen/Qwen2.5-Omni-7B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=5,
+        mm_processor_kwargs={
+            "min_pixels": 28 * 28,
+            "max_pixels": 1280 * 28 * 28,
+            "fps": [1],
+        },
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    if modality == "image":
+        placeholder = "<|IMAGE|>"
+    elif modality == "video":
+        placeholder = "<|VIDEO|>"
+
+    default_system = (
+        "You are Qwen, a virtual human developed by the Qwen Team, Alibaba "
+        "Group, capable of perceiving auditory and visual inputs, as well as "
+        "generating text and speech.")
+
+    prompts = [(f"<|im_start|>system\n{default_system}<|im_end|>\n"
+                f"<|im_start|>user\n<|vision_bos|>{placeholder}<|vision_eos|>"
+                f"{question}<|im_end|>\n"
+                "<|im_start|>assistant\n") for question in questions]
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # SkyworkR1V
 def run_skyworkr1v(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -951,7 +1018,7 @@ def run_skyworkr1v(questions: list[str], modality: str) -> ModelRequestData:
         model=model_name,
         trust_remote_code=True,
         max_model_len=4096,
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model_name,
@@ -1002,6 +1069,7 @@ model_example_map = {
     "llama4": run_llama4,
     "molmo": run_molmo,
     "NVLM_D": run_nvlm_d,
+    "ovis2": run_ovis2,
     "paligemma": run_paligemma,
     "paligemma2": run_paligemma2,
     "phi3_v": run_phi3v,
@@ -1010,6 +1078,7 @@ model_example_map = {
     "qwen_vl": run_qwen_vl,
     "qwen2_vl": run_qwen2_vl,
     "qwen2_5_vl": run_qwen2_5_vl,
+    "qwen2_5_omni": run_qwen2_5_omni,
     "skywork_chat": run_skyworkr1v,
     "smolvlm": run_smolvlm,
 }
@@ -1040,7 +1109,7 @@ def get_multi_modal_input(args):
 
     if args.modality == "video":
         # Input video and question
-        video = VideoAsset(name="sample_demo_1.mp4",
+        video = VideoAsset(name="baby_reading",
                            num_frames=args.num_frames).np_ndarrays
         vid_questions = ["Why is this video funny?"]
 

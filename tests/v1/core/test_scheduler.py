@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from vllm.config import (CacheConfig, KVTransferConfig, ModelConfig,
-                         SchedulerConfig, VllmConfig)
+                         SchedulerConfig, SpeculativeConfig, VllmConfig)
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -30,6 +30,8 @@ def create_scheduler(
     use_kv_connector: bool = False,
     num_blocks: int = 10000,
     block_size: int = 16,
+    max_model_len: Optional[int] = None,
+    num_speculative_tokens: Optional[int] = None,
 ) -> Scheduler:
     '''Create scheduler under test.
 
@@ -42,14 +44,17 @@ def create_scheduler(
                              (None)
 
     Returns:
-      :class:`Scheduler` instance
+      {class}`Scheduler` instance
     '''
+    if max_model_len is None:
+        max_model_len = max_num_batched_tokens
     scheduler_config = SchedulerConfig(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
-        max_model_len=max_num_batched_tokens,
+        max_model_len=max_model_len,
         long_prefill_token_threshold=long_prefill_token_threshold,
         disable_chunked_mm_input=disable_chunked_mm_input,
+        enable_chunked_prefill=True,
     )
     model_config = ModelConfig(
         model=model,
@@ -77,11 +82,17 @@ def create_scheduler(
         kv_connector_extra_config={"shared_storage_path": "local_storage"},
     ) if use_kv_connector else None
 
+    speculative_config: Optional[SpeculativeConfig] = None
+    if num_speculative_tokens is not None:
+        speculative_config = SpeculativeConfig(
+            model="ngram", num_speculative_tokens=num_speculative_tokens)
+
     vllm_config = VllmConfig(
         scheduler_config=scheduler_config,
         model_config=model_config,
         cache_config=cache_config,
         kv_transfer_config=kv_transfer_config,
+        speculative_config=speculative_config,
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,  # A large number of blocks to hold all requests
@@ -121,7 +132,6 @@ def create_requests(num_requests: int,
             mm_inputs = None
         request = Request(
             request_id=f"{i}",
-            prompt=None,
             prompt_token_ids=[i] * num_tokens,
             sampling_params=sampling_params,
             multi_modal_inputs=mm_inputs,
@@ -296,6 +306,7 @@ def test_no_mm_input_chunking():
         model="llava-hf/llava-1.5-7b-hf",
         max_num_batched_tokens=1024,
         disable_chunked_mm_input=True,
+        max_model_len=2048,
     )
     mm_positions = [[PlaceholderRange(offset=400, length=800)]]
     requests = create_requests(num_requests=1,
@@ -424,7 +435,7 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
 
 def test_stop_via_update_from_output():
     """Test stopping behavior through update_from_output"""
-    scheduler = create_scheduler()
+    scheduler = create_scheduler(num_speculative_tokens=1)
 
     # Test case 1: Stop on EOS token
     requests = create_requests(num_requests=2, max_tokens=10)
@@ -432,7 +443,6 @@ def test_stop_via_update_from_output():
         req.num_computed_tokens = req.num_tokens
         scheduler.requests[req.request_id] = req
         scheduler.running.append(req)
-        scheduler.scheduled_req_ids.add(req.request_id)
 
     scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
                                        scheduled_cached_reqs=[],
@@ -476,7 +486,7 @@ def test_stop_via_update_from_output():
     assert list(requests[1].output_token_ids) == [10, 11]
 
     # Test case 2: Stop on custom stop token
-    scheduler = create_scheduler()
+    scheduler = create_scheduler(num_speculative_tokens=2)
     requests = create_requests(num_requests=2,
                                max_tokens=10,
                                stop_token_ids=[42, 43])
@@ -484,7 +494,6 @@ def test_stop_via_update_from_output():
         req.num_computed_tokens = req.num_tokens
         scheduler.requests[req.request_id] = req
         scheduler.running.append(req)
-        scheduler.scheduled_req_ids.add(req.request_id)
 
     scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
                                        scheduled_cached_reqs=[],
@@ -528,13 +537,12 @@ def test_stop_via_update_from_output():
     assert list(requests[1].output_token_ids) == [13, 14]
 
     # Test case 3: Stop on max tokens
-    scheduler = create_scheduler()
+    scheduler = create_scheduler(num_speculative_tokens=2)
     requests = create_requests(num_requests=2, max_tokens=2)
     for req in requests:
         req.num_computed_tokens = req.num_tokens
         scheduler.requests[req.request_id] = req
         scheduler.running.append(req)
-        scheduler.scheduled_req_ids.add(req.request_id)
 
     scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
                                        scheduled_cached_reqs=[],
@@ -578,13 +586,12 @@ def test_stop_via_update_from_output():
     assert list(requests[1].output_token_ids) == [13]
 
     # Test case 4: Ignore EOS flag
-    scheduler = create_scheduler()
+    scheduler = create_scheduler(num_speculative_tokens=2)
     requests = create_requests(num_requests=1, max_tokens=10)
     requests[0].sampling_params.ignore_eos = True
     requests[0].num_computed_tokens = requests[0].num_tokens
     scheduler.requests[requests[0].request_id] = requests[0]
     scheduler.running.append(requests[0])
-    scheduler.scheduled_req_ids.add(requests[0].request_id)
 
     scheduler_output = SchedulerOutput(
         scheduled_new_reqs=[],
@@ -681,13 +688,14 @@ def test_schedule_concurrent_batches(enable_prefix_caching: Optional[bool],
 @pytest.mark.parametrize(
     "spec_tokens,output_tokens,expected",
     [
-        ([[1, 2, 3]], [[1, 2, 3, 4]], (3, 3)),  # perfect match
-        ([[1, 2, 3]], [[1, 5]], (3, 1)),  # early mismatch
-        ([[1, 2], [3]], [[1, 2, 5], [3, 4]], (3, 3)),  # multiple sequences
-        ([[1]], [[1, 2]], (1, 1)),  # single token sequence
-        ([[]], [[5]], (0, 0)),  # empty sequence
+        ([[1, 2, 3]], [[1, 2, 3, 4]], (1, 3, 3, [1, 1, 1])),  # perfect match
+        ([[1, 2, 3]], [[1, 5]], (1, 3, 1, [1, 0, 0])),  # early mismatch
+        ([[1, 2], [3]], [[1, 2, 5], [3, 4]],
+         (2, 3, 3, [2, 1])),  # multiple sequences
+        ([[1]], [[1, 2]], (1, 1, 1, [1])),  # single token sequence
+        ([[]], [[5]], (0, 0, 0, [0])),  # empty sequence
         ([[1, 2, 3], [4, 5, 6]], [[1, 2, 7], [4, 8]],
-         (6, 3)),  # multiple mismatches
+         (2, 6, 3, [2, 1, 0])),  # multiple mismatches
     ])
 def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
     """Test scheduling behavior with speculative decoding.
@@ -696,7 +704,8 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
     1. Speculated tokens get scheduled correctly
     2. Spec decoding stats properly count number of draft and accepted tokens
     """
-    scheduler = create_scheduler()
+    num_spec_tokens = max(1, max(len(t) for t in spec_tokens))
+    scheduler = create_scheduler(num_speculative_tokens=num_spec_tokens)
     requests = create_requests(num_requests=len(spec_tokens), num_tokens=1)
     req_ids = []
     req_to_index = {}
@@ -769,8 +778,10 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
     else:
         assert scheduler_stats.spec_decoding_stats is not None
         stats = scheduler_stats.spec_decoding_stats
-        assert stats.num_draft_tokens == expected[0]
-        assert stats.num_accepted_tokens == expected[1]
+        assert stats.num_drafts == expected[0]
+        assert stats.num_draft_tokens == expected[1]
+        assert stats.num_accepted_tokens == expected[2]
+        assert stats.num_accepted_tokens_per_pos == expected[3]
 
 
 def _assert_right_scheduler_output(
@@ -799,20 +810,18 @@ def _assert_right_kv_cache_manager(
     """Check whether KVCacheManager is correct after allocate."""
 
     # Make sure the request stats are right.
-    EXPECTED_ACTUAL_BLOCKS = num_tokens // block_size
-    EXPECTED_TOTAL_BLOCKS = (EXPECTED_ACTUAL_BLOCKS +
-                             scheduler.kv_cache_manager.num_preallocate_blocks)
+    EXPECTED_TOTAL_BLOCKS = num_tokens // block_size
     for req_id in req_ids:
-        blocks = scheduler.kv_cache_manager.req_to_blocks[req_id]
+        blocks = (scheduler.kv_cache_manager.single_type_manager.
+                  req_to_blocks[req_id])
         hashes = scheduler.kv_cache_manager.req_to_block_hashes[req_id]
-        assert (scheduler.kv_cache_manager.num_cached_block[req_id] ==
-                EXPECTED_ACTUAL_BLOCKS)
+        assert (scheduler.kv_cache_manager.single_type_manager.
+                num_cached_block[req_id] == EXPECTED_TOTAL_BLOCKS)
         assert len(blocks) == EXPECTED_TOTAL_BLOCKS
-        assert len(hashes) == EXPECTED_ACTUAL_BLOCKS
+        assert len(hashes) == EXPECTED_TOTAL_BLOCKS
 
     # Make sure we actually touched all the blocks.
-    BLOCKS_PER_REQ = (num_tokens / block_size +
-                      scheduler.kv_cache_manager.num_preallocate_blocks)
+    BLOCKS_PER_REQ = num_tokens / block_size
     assert (scheduler.kv_cache_manager.block_pool.get_num_free_blocks() ==
             num_total_blocks - num_requests * BLOCKS_PER_REQ)
 
@@ -1047,7 +1056,6 @@ def test_kv_connector_handles_preemption():
         block_size=BLOCK_SIZE,
         num_blocks=NUM_BLOCKS,
     )
-    scheduler.kv_cache_manager.num_preallocate_blocks = 0
 
     NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE
     scheduler.connector.get_num_new_matched_tokens = Mock(name="method")
@@ -1158,3 +1166,82 @@ def test_kv_connector_handles_preemption():
     # All memory should be freed since nothing is running.
     assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() \
         == NUM_BLOCKS - 1
+
+
+def make_output(scheduler: Scheduler):
+    return ModelRunnerOutput(
+        req_ids=[req.request_id for req in scheduler.running],
+        req_id_to_index={
+            req.request_id: i
+            for i, req in enumerate(scheduler.running)
+        },
+        sampled_token_ids=[[1000]] * len(scheduler.running),
+        spec_token_ids=None,
+        logprobs=None,
+        prompt_logprobs_dict={},
+    )
+
+
+def assert_scheduler_empty(scheduler: Scheduler):
+    """Confirm the scheduler is "empty" - i.e. no leaks."""
+    # Scheduler Metadata.
+    assert len(scheduler.requests) == 0
+    assert len(scheduler.waiting) == 0
+    assert len(scheduler.running) == 0
+    assert len(scheduler.finished_req_ids) == 0
+    assert len(scheduler._cached_reqs_data) == 0
+
+    # EncoderCacheManager.
+    assert len(scheduler.encoder_cache_manager.freed) == 0
+    assert len(scheduler.encoder_cache_manager.cached) == 0
+
+    # KVCache Manager.
+    assert len(
+        scheduler.kv_cache_manager.single_type_manager.req_to_blocks) == 0
+    assert len(scheduler.kv_cache_manager.req_to_block_hashes) == 0
+    assert len(
+        scheduler.kv_cache_manager.single_type_manager.num_cached_block) == 0
+    num_free_blocks = (
+        scheduler.kv_cache_manager.block_pool.free_block_queue.num_free_blocks)
+    assert num_free_blocks == (
+        scheduler.kv_cache_manager.block_pool.num_gpu_blocks - 1)
+
+    # NOTE(rob): just the ref count on blocks will be 0. The hash
+    # value, etc will remain since we lazily evict for prefix cache.
+    for block in scheduler.kv_cache_manager.block_pool.blocks:
+        assert block.ref_cnt == 0
+        # assert block._block_hash is None
+    # assert (
+    #     len(scheduler.kv_cache_manager.block_pool.cached_block_hash_to_block
+    #           ) == 0)
+
+
+def test_memory_leak():
+    """Test that we do not have a memory leak."""
+
+    scheduler = create_scheduler(enable_prefix_caching=True)
+
+    NUM_REQUESTS = 5
+    NUM_TOKENS = 10
+    MAX_TOKENS = 10
+    requests = create_requests(num_requests=NUM_REQUESTS,
+                               num_tokens=NUM_TOKENS,
+                               max_tokens=MAX_TOKENS)
+
+    # Add each request.
+    for request in requests:
+        scheduler.add_request(request)
+        scheduler_output = scheduler.schedule()
+        model_runner_output = make_output(scheduler)
+        scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    # Iterate until done.
+    while True:
+        scheduler_output = scheduler.schedule()
+        if len(scheduler.running) == 0:
+            break
+        model_runner_output = make_output(scheduler)
+        scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    # Confirm no memory leak.
+    assert_scheduler_empty(scheduler)

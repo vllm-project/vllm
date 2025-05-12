@@ -14,12 +14,15 @@ import zmq
 from msgspec import msgpack
 
 from vllm import envs
+from vllm.logger import init_logger
 from vllm.multimodal.inputs import (BaseMultiModalField,
                                     MultiModalBatchedField,
                                     MultiModalFieldConfig, MultiModalFieldElem,
                                     MultiModalFlatField, MultiModalKwargs,
                                     MultiModalKwargsItem,
                                     MultiModalSharedField, NestedTensors)
+
+logger = init_logger(__name__)
 
 CUSTOM_TYPE_PICKLE = 1
 CUSTOM_TYPE_CLOUDPICKLE = 2
@@ -35,6 +38,11 @@ MMF_CLASS_TO_FACTORY: dict[type[BaseMultiModalField], str] = {
 }
 
 bytestr = Union[bytes, bytearray, memoryview, zmq.Frame]
+
+
+def _log_insecure_serialization_warning():
+    logger.warning_once("Allowing insecure serialization using pickle due to "
+                        "VLLM_ALLOW_INSECURE_SERIALIZATION=1")
 
 
 class MsgpackEncoder:
@@ -56,6 +64,8 @@ class MsgpackEncoder:
         # pass custom data to the hook otherwise.
         self.aux_buffers: Optional[list[bytestr]] = None
         self.size_threshold = size_threshold
+        if envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
+            _log_insecure_serialization_warning()
 
     def encode(self, obj: Any) -> Sequence[bytestr]:
         try:
@@ -80,11 +90,17 @@ class MsgpackEncoder:
 
     def enc_hook(self, obj: Any) -> Any:
         if isinstance(obj, torch.Tensor):
-            return self._encode_ndarray(obj.numpy())
+            return self._encode_tensor(obj)
 
         # Fall back to pickle for object or void kind ndarrays.
         if isinstance(obj, np.ndarray) and obj.dtype.kind not in ('O', 'V'):
             return self._encode_ndarray(obj)
+
+        if isinstance(obj, slice):
+            # We are assuming only int-based values will be used here.
+            return tuple(
+                int(v) if v is not None else None
+                for v in (obj.start, obj.stop, obj.step))
 
         if isinstance(obj, MultiModalKwargs):
             mm: MultiModalKwargs = obj
@@ -104,6 +120,11 @@ class MsgpackEncoder:
             } for elem in item.values()]
                     for itemlist in mm._items_by_modality.values()
                     for item in itemlist]
+
+        if not envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
+            raise TypeError(f"Object of type {type(obj)} is not serializable"
+                            "Set VLLM_ALLOW_INSECURE_SERIALIZATION=1 to allow "
+                            "fallback to pickle-based serialization.")
 
         if isinstance(obj, FunctionType):
             # `pickle` is generally faster than cloudpickle, but can have
@@ -133,9 +154,27 @@ class MsgpackEncoder:
         # backing buffers that we've stashed in `aux_buffers`.
         return obj.dtype.str, obj.shape, data
 
+    def _encode_tensor(
+        self, obj: torch.Tensor
+    ) -> tuple[str, tuple[int, ...], Union[int, memoryview]]:
+        assert self.aux_buffers is not None
+        # this creates a copy of the tensor if it's not already contiguous
+        obj = obj.contiguous()
+        #  view the tensor as a 1D array of bytes
+        arr = obj.view((obj.numel(), )).view(torch.uint8).numpy()
+        if obj.nbytes < self.size_threshold:
+            # Smaller tensors are encoded inline, just like ndarrays.
+            data = msgpack.Ext(CUSTOM_TYPE_RAW_VIEW, arr.data)
+        else:
+            # Otherwise encode index of backing buffer to avoid copy.
+            data = len(self.aux_buffers)
+            self.aux_buffers.append(arr.data)
+        dtype = str(obj.dtype)[6:]  # remove 'torch.' prefix
+        return dtype, obj.shape, data
+
     def _encode_nested_tensors(self, nt: NestedTensors) -> Any:
         if isinstance(nt, torch.Tensor):
-            return self._encode_ndarray(nt.numpy())
+            return self._encode_tensor(nt)
         if isinstance(nt, (int, float)):
             # Although it violates NestedTensors type, MultiModalKwargs
             # values are sometimes floats.
@@ -167,6 +206,8 @@ class MsgpackDecoder:
                                        ext_hook=self.ext_hook,
                                        dec_hook=self.dec_hook)
         self.aux_buffers: Sequence[bytestr] = ()
+        if envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
+            _log_insecure_serialization_warning()
 
     def decode(self, bufs: Union[bytestr, Sequence[bytestr]]) -> Any:
         if isinstance(bufs, (bytes, bytearray, memoryview, zmq.Frame)):
@@ -186,7 +227,9 @@ class MsgpackDecoder:
             if issubclass(t, np.ndarray):
                 return self._decode_ndarray(obj)
             if issubclass(t, torch.Tensor):
-                return torch.from_numpy(self._decode_ndarray(obj))
+                return self._decode_tensor(obj)
+            if t is slice:
+                return slice(*obj)
             if issubclass(t, MultiModalKwargs):
                 if isinstance(obj, list):
                     return MultiModalKwargs.from_items(
@@ -199,11 +242,24 @@ class MsgpackDecoder:
 
     def _decode_ndarray(self, arr: Any) -> np.ndarray:
         dtype, shape, data = arr
-        # Copy from inline representation, otherwise Torch is unhappy since
-        # the returned memory is non-writeable.
+        # zero-copy decode. We assume the ndarray will not be kept around,
+        # as it now locks the whole received message buffer in memory.
+        buffer = self.aux_buffers[data] if isinstance(data, int) else data
+        return np.ndarray(buffer=buffer, dtype=np.dtype(dtype), shape=shape)
+
+    def _decode_tensor(self, arr: Any) -> torch.Tensor:
+        dtype, shape, data = arr
+        # Copy from inline representation, to decouple the memory storage
+        # of the message from the original buffer. And also make Torch
+        # not complain about a readonly memoryview.
         buffer = self.aux_buffers[data] if isinstance(data, int) \
             else bytearray(data)
-        return np.ndarray(buffer=buffer, dtype=np.dtype(dtype), shape=shape)
+        # Create numpy wrapper around the bytes
+        arr = np.ndarray(buffer=buffer, dtype=np.uint8, shape=(len(buffer), ))
+        torch_dtype = getattr(torch, dtype)
+        assert isinstance(torch_dtype, torch.dtype)
+        # Convert back to proper shape & type
+        return torch.from_numpy(arr).view(torch_dtype).view(shape)
 
     def _decode_mm_items(self, obj: list) -> list[MultiModalKwargsItem]:
         decoded_items = []
@@ -215,6 +271,12 @@ class MsgpackDecoder:
                 factory_meth_name, *field_args = v["field"]
                 factory_meth = getattr(MultiModalFieldConfig,
                                        factory_meth_name)
+
+                # Special case: decode the union "slices" field of
+                # MultiModalFlatField
+                if factory_meth_name == "flat":
+                    field_args[0] = self._decode_nested_slices(field_args[0])
+
                 v["field"] = factory_meth(None, *field_args).field
                 elems.append(MultiModalFieldElem(**v))
             decoded_items.append(MultiModalKwargsItem.from_elems(elems))
@@ -228,16 +290,24 @@ class MsgpackDecoder:
         if not isinstance(obj, list):
             raise TypeError(f"Unexpected NestedTensors contents: {type(obj)}")
         if obj and isinstance(obj[0], str):
-            return torch.from_numpy(self._decode_ndarray(obj))
+            return self._decode_tensor(obj)
         return [self._decode_nested_tensors(x) for x in obj]
+
+    def _decode_nested_slices(self, obj: Any) -> Any:
+        assert isinstance(obj, (list, tuple))
+        if obj and not isinstance(obj[0], (list, tuple)):
+            return slice(*obj)
+        return [self._decode_nested_slices(x) for x in obj]
 
     def ext_hook(self, code: int, data: memoryview) -> Any:
         if code == CUSTOM_TYPE_RAW_VIEW:
             return data
-        if code == CUSTOM_TYPE_PICKLE:
-            return pickle.loads(data)
-        if code == CUSTOM_TYPE_CLOUDPICKLE:
-            return cloudpickle.loads(data)
+
+        if envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
+            if code == CUSTOM_TYPE_PICKLE:
+                return pickle.loads(data)
+            if code == CUSTOM_TYPE_CLOUDPICKLE:
+                return cloudpickle.loads(data)
 
         raise NotImplementedError(
             f"Extension type code {code} is not supported")

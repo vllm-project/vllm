@@ -2,14 +2,14 @@
 -r common.txt
 
 --extra-index-url https://download.pytorch.org/whl/rocm6.2.4
-torch==2.6.0
-torchvision==0.21.0
-torchaudio==2.6.0
+torch==2.7.0
+torchvision==0.22.0
+torchaudio==2.7.0
 
 triton==3.2
 cmake>=3.26,<4
-packaging
-setuptools>=61
+packaging>=24.2
+setuptools>=77.0.3,<80.0.0
 setuptools-scm>=8
 wheel
 jinja2>=3.1.6
