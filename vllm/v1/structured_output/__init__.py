@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -59,6 +59,31 @@ class StructuredOutputManager:
                 reasoning_backend)
             self.reasoner = reasoner_cls(tokenizer=self.tokenizer)
 
+    def init_backend(self, backend: str) -> None:
+        """
+        Initialize the backend for structured output processing.
+        This method is called when the engine starts up and is responsible
+        for setting up the backend for structured output requests.
+        """
+        if self.backend is not None:
+            return
+        if backend == "auto":
+            if self.vllm_config.decoding_config != "auto":
+                backend = self.vllm_config.decoding_config
+            else:
+                backend = "xgrammar"  # default to xgrammar
+
+        if backend == "xgrammar":
+            from vllm.v1.structured_output.backend_xgrammar import (
+                XgrammarBackend)
+
+            self.backend = XgrammarBackend(self.vllm_config)
+        elif backend == "guidance":
+            self.backend = GuidanceBackend(self.vllm_config)
+        else:
+            raise ValueError(
+                f"Unsupported structured output backend: {backend}")
+
     def grammar_init(self, request: Request) -> None:
         if request.structured_output_request is None:
             return
@@ -111,10 +136,16 @@ class StructuredOutputManager:
     def accept_tokens(self, request: Request, req_id: str,
                       tokens: list[int]) -> bool:
         """
+        Validates whether the provided tokens are acceptable based on the grammar
+        defined in the structured output request.
         Called in v1.core.sched.Scheduler.update_from_output after tokens have been accepted
-        Accepts a list of tokens and advances the FSM.
-        Returns True if the FSM was advanced successfully.
-        Returns False if the FSM failed to advance.
+        Args:
+            request (Request): The request object containing the structured output
+                request and its associated grammar.
+            req_id (str): The unique identifier for the request.
+            tokens (list[int]): A list of integer tokens to be validated.
+        Returns:
+            bool: True if the FSM was advanced successfully. False if the FSM failed to advance.
         """
         assert request.structured_output_request is not None and request.structured_output_request.grammar is not None
         return request.structured_output_request.grammar.accept_tokens(
@@ -129,7 +160,18 @@ class StructuredOutputManager:
         sample_hidden_states: torch.Tensor,
     ) -> None:
         """
-        Called in v1.worker.GPUModelRunner.execute_model immediately after the model forward pass"""
+        Filters the logits produced by the model's forward pass.
+        Called in v1.worker.GPUModelRunner.execute_model immediately after the model forward pass
+
+        Args:
+            input_batch (InputBatch): The batch of input data being processed.
+            device (torch.device): The device on which the computation is performed.
+            scheduler_output (SchedulerOutput): The output from the scheduler
+            containing additional information for processing.
+            logits (torch.Tensor): The raw logits output from the model's forward pass.
+            sample_hidden_states (torch.Tensor): The hidden states of the samples
+            from the model's forward pass.
+        """
         assert self.backend is not None
         self.backend.filter_logits(input_batch, device, scheduler_output,
                                    logits, sample_hidden_states)
@@ -241,3 +283,20 @@ class StructuredOutputManager:
     def clear_backend(self) -> None:
         if self.backend is not None:
             self.backend.destroy()
+
+    def precompile(self, num_reqs_paddings: List[int], vocab_size: int,
+                   device: torch.device, hidden_states_dtype: torch.dtype):
+        """
+        Allow backend precompilation for the device
+            - Currently only used in the TPU model runner
+
+        Args:
+            num_reqs_paddings (List[int]): A list of padding sizes for the 
+                number of requests.
+            vocab_size (int): The size of the vocabulary.
+            device (torch.device): The device on which the model is running.
+            hidden_states_dtype (torch.dtype): The data type of the hidden states.
+        """
+        assert self.backend is not None
+        self.backend.precompile(num_reqs_paddings, vocab_size, device,
+                                hidden_states_dtype)
