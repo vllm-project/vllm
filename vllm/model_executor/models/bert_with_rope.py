@@ -577,7 +577,8 @@ class GteNewModel(BertWithRope):
             else:
                 yield name, weight
 
-    def ignore_unnecessary_layers(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def ignore_unnecessary_layers(self,
+                                  weights: Iterable[Tuple[str, torch.Tensor]]):
         for name, weight in weights:
             if name.startswith("classifier"):
                 continue
