@@ -1890,19 +1890,19 @@ class SchedulerConfig:
     runner_type: RunnerType = "generate"
     """The runner type to launch for the model."""
 
-    max_num_batched_tokens: int = None  # type: ignore
+    max_num_batched_tokens: SkipValidation[int] = None  # type: ignore
     """Maximum number of tokens to be processed in a single iteration.
 
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
-    max_num_seqs: int = None  # type: ignore
+    max_num_seqs: SkipValidation[int] = None  # type: ignore
     """Maximum number of sequences to be processed in a single iteration.
 
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
-    max_model_len: int = None  # type: ignore
+    max_model_len: SkipValidation[int] = None  # type: ignore
     """Maximum length of a sequence (including prompt and generated text). This
     is primarily set in `ModelConfig` and that value should be manually
     duplicated here."""
@@ -1941,7 +1941,7 @@ class SchedulerConfig:
     """Apply a delay (of delay factor multiplied by previous
     prompt latency) before scheduling next prompt."""
 
-    enable_chunked_prefill: bool = None  # type: ignore
+    enable_chunked_prefill: SkipValidation[bool] = None  # type: ignore
     """If True, prefill requests can be chunked based
     on the remaining max_num_batched_tokens."""
 
@@ -2235,8 +2235,7 @@ class SpeculativeConfig:
     """Configuration for speculative decoding."""
 
     # General speculative decoding control
-    num_speculative_tokens: int = field(default=None,
-                                        init=True)  # type: ignore
+    num_speculative_tokens: SkipValidation[int] = None  # type: ignore
     """The number of speculative tokens, if provided. It will default to the
     number in the draft model config if present, otherwise, it is required."""
     model: Optional[str] = None
@@ -2312,26 +2311,23 @@ class SpeculativeConfig:
     """Specifies the tree structure for speculative token generation. 
     """
     # required configuration params passed from engine
-    target_model_config: ModelConfig = field(default=None,
-                                             init=True)  # type: ignore
+    target_model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """The configuration of the target model."""
-    target_parallel_config: ParallelConfig = field(default=None,
-                                                   init=True)  # type: ignore
+    target_parallel_config: SkipValidation[
+        ParallelConfig] = None  # type: ignore
     """The parallel configuration for the target model."""
-    enable_chunked_prefill: bool = field(default=None,
-                                         init=True)  # type: ignore
+    enable_chunked_prefill: SkipValidation[bool] = None  # type: ignore
     """Whether vLLM is configured to use chunked prefill or not. Used for
     raising an error since it's not yet compatible with speculative decode."""
-    disable_log_stats: bool = field(default=None, init=True)  # type: ignore
+    disable_log_stats: SkipValidation[bool] = None  # type: ignore
     """Whether to disable the periodic printing of stage times in speculative
     decoding."""
 
     # params generated in the post-init stage
-    draft_model_config: ModelConfig = field(default=None,
-                                            init=True)  # type: ignore
+    draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """The configuration of the draft model initialized internal."""
-    draft_parallel_config: ParallelConfig = field(default=None,
-                                                  init=True)  # type: ignore
+    draft_parallel_config: SkipValidation[
+        ParallelConfig] = None  # type: ignore
     """The parallel configuration for the draft model initialized internal."""
 
     def compute_hash(self) -> str:
