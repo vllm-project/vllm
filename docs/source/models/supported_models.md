@@ -170,7 +170,7 @@ Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project
 
 #### Download a model
 
-Use the Hugging Face CLI to [download a model](https://huggingface.co/docs/huggingface_hub/guides/cli#huggingface-cli-download) or specific files from a model repository:
+If you prefer, you can use the Hugging Face CLI to [download a model](https://huggingface.co/docs/huggingface_hub/guides/cli#huggingface-cli-download) or specific files from a model repository:
 
 ```console
 # Download a model
