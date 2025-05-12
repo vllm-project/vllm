@@ -21,8 +21,6 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.platforms import _Backend, current_platform
 from vllm.utils import direct_register_custom_op
 
-NOT_USE_SLIDING_WINDOW = -1
-
 
 class Attention(nn.Module):
     """Attention layer.
@@ -58,20 +56,9 @@ class Attention(nn.Module):
         `self.kv_cache`.
         """
         super().__init__()
-
-        # Determine the attention sliding window size:
-        # Priority: per-layer setting > model-level setting > None
         if per_layer_sliding_window is not None:
             # per-layer sliding window
-
-            if per_layer_sliding_window == NOT_USE_SLIDING_WINDOW:
-                sliding_window = None
-            else:
-                assert per_layer_sliding_window > 0, (
-                    f"per_layer_sliding_window must be positive or "
-                    f"{NOT_USE_SLIDING_WINDOW} (to force disable)")
-                sliding_window = per_layer_sliding_window
-
+            sliding_window = per_layer_sliding_window
         elif cache_config is not None:
             # model-level sliding window
             sliding_window = cache_config.sliding_window
