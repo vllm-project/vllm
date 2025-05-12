@@ -5,6 +5,7 @@ from collections.abc import Sequence
 import mteb
 import numpy as np
 import pytest
+import torch
 
 from tests.models.utils import EmbedModelInfo
 
@@ -77,16 +78,22 @@ def run_mteb_embed_task_st(model_name, tasks):
     return run_mteb_embed_task(model, tasks)
 
 
-def mteb_test_embed_models(hf_runner, vllm_runner, model_info: EmbedModelInfo):
+def mteb_test_embed_models(hf_runner,
+                           vllm_runner,
+                           model_info: EmbedModelInfo,
+                           vllm_extra_kwargs=None):
     if not model_info.enable_test:
         # A model family has many models with the same architecture,
         # and we don't need to test each one.
         pytest.skip("Skipping test.")
 
+    vllm_extra_kwargs = vllm_extra_kwargs or {}
+
     with vllm_runner(model_info.name,
                      task="embed",
                      max_model_len=None,
-                     dtype=model_info.dtype) as vllm_model:
+                     dtype=model_info.dtype,
+                     **vllm_extra_kwargs) as vllm_model:
 
         if model_info.architecture:
             assert (model_info.architecture
@@ -98,6 +105,8 @@ def mteb_test_embed_models(hf_runner, vllm_runner, model_info: EmbedModelInfo):
         model_dtype = getattr(
             vllm_model.model.llm_engine.model_config.hf_config, "torch_dtype",
             vllm_dtype)
+
+    torch.set_default_dtype(model_dtype)
 
     with hf_runner(model_info.name,
                    is_sentence_transformer=True,

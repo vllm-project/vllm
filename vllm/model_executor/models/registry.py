@@ -136,6 +136,8 @@ _EMBEDDING_MODELS = {
         if arch == "LlamaForCausalLM"
     },
     "MistralModel": ("llama", "LlamaForCausalLM"),
+    "ModernBertModel": ("modernbert", "ModernBertModel"),
+    "NewModel": ("bert_with_rope", "GteNewModel"),
     "NomicBertModel": ("bert_with_rope", "NomicBertModel"),
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
     "Qwen2Model": ("qwen2", "Qwen2EmbeddingModel"),
