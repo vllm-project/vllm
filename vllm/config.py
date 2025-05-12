@@ -243,7 +243,7 @@ class ModelConfig:
     task, even if the same model can be used for multiple tasks. When the model
     only supports one task, "auto" can be used to select it; otherwise, you
     must specify explicitly which task to use."""
-    tokenizer: Optional[str] = None
+    tokenizer: str = ""
     """Name or path of the Hugging Face tokenizer to use. If unspecified, model
     name or path will be used."""
     tokenizer_mode: TokenizerMode = "auto"
@@ -447,8 +447,6 @@ class ModelConfig:
     def __post_init__(self) -> None:
         self.model = maybe_model_redirect(self.model)
         # The tokenizer is consistent with the model by default.
-        if self.tokenizer is None:
-            self.tokenizer = self.model
         if self.tokenizer_revision is None:
             self.tokenizer_revision = self.revision
         self.tokenizer = maybe_model_redirect(self.tokenizer)
@@ -585,6 +583,13 @@ class ModelConfig:
         self._verify_quantization()
         self._verify_cuda_graph()
         self._verify_bnb_config()
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_model_config_before(cls, data):
+        if not data.get("tokenizer"):
+            data["tokenizer"] = data["model"]
+        return data
 
     @model_validator(mode="after")
     def validate(self: "ModelConfig") -> "ModelConfig":
