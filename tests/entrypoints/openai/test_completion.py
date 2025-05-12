@@ -431,17 +431,18 @@ async def test_completion_streaming(client: openai.AsyncOpenAI,
         temperature=0.0,
         stream=True,
         extra_body={"prompt_embeds": [encoded_embeds, encoded_embeds2]})
-    chunks = [[], []]
+    chunks_stream_embeds: list[list[str]] = [[], []]
     finish_reason_count = 0
     async for chunk in stream:
-        chunks[chunk.choices[0].index].append(chunk.choices[0].text)
+        chunks_stream_embeds[chunk.choices[0].index].append(
+            chunk.choices[0].text)
         if chunk.choices[0].finish_reason is not None:
             finish_reason_count += 1
     assert finish_reason_count == 2
     assert chunk.choices[0].finish_reason == "length"
     assert chunk.choices[0].text
-    assert len(chunks[0]) > 0
-    assert len(chunks[1]) > 0
+    assert len(chunks_stream_embeds[0]) > 0
+    assert len(chunks_stream_embeds[1]) > 0
 
 
 @pytest.mark.asyncio

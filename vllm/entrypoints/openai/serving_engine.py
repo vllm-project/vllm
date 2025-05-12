@@ -351,33 +351,31 @@ class OpenAIServing:
         , each input can be a string or array of tokens. Note that each request
         can pass one or more inputs.
         """
+        # We want to always ignore text prompts if prompt embeds are available
+        if (isinstance(request, CompletionRequest)
+                and request.prompt_embeds is not None):
+            return self._load_prompt_embeds(request.prompt_embeds,
+                                            truncate_prompt_tokens)
 
-        if input_or_inputs is not None:
-            # Although our type checking is based on mypy,
-            # VSCode Pyright extension should still work properly
-            # "is False" is required for Pyright to perform type narrowing
-            # See: https://github.com/microsoft/pyright/issues/7672
-            return [
-                self._normalize_prompt_text_to_input(
-                    request,
-                    tokenizer,
-                    prompt=prompt_input["content"],
-                    truncate_prompt_tokens=truncate_prompt_tokens,
-                    add_special_tokens=add_special_tokens)
-                if prompt_input["is_tokens"] is False else
-                self._normalize_prompt_tokens_to_input(
-                    request,
-                    tokenizer,
-                    prompt_ids=prompt_input["content"],
-                    truncate_prompt_tokens=truncate_prompt_tokens)
-                for prompt_input in parse_and_batch_prompt(input_or_inputs)
-            ]
-        if not isinstance(request, CompletionRequest):
-            raise ValueError(
-                "Using prompt embeddings with any request other than a"
-                " CompletionRequest is not supported.")
-        return self._load_prompt_embeds(request.prompt_embeds,
-                                        truncate_prompt_tokens)
+        # Although our type checking is based on mypy,
+        # VSCode Pyright extension should still work properly
+        # "is False" is required for Pyright to perform type narrowing
+        # See: https://github.com/microsoft/pyright/issues/7672
+        return [
+            self._normalize_prompt_text_to_input(
+                request,
+                tokenizer,
+                prompt=prompt_input["content"],
+                truncate_prompt_tokens=truncate_prompt_tokens,
+                add_special_tokens=add_special_tokens)
+            if prompt_input["is_tokens"] is False else
+            self._normalize_prompt_tokens_to_input(
+                request,
+                tokenizer,
+                prompt_ids=prompt_input["content"],
+                truncate_prompt_tokens=truncate_prompt_tokens)
+            for prompt_input in parse_and_batch_prompt(input_or_inputs)
+        ]
 
     @overload
     async def _preprocess_completion(
@@ -416,7 +414,6 @@ class OpenAIServing:
             raise ValueError(
                 "Prompt embeds with non-completion requests is not"
                 " currently supported.")
-
         request_prompts = await self._tokenize_prompt_input_or_inputs_async(
             request,
             tokenizer,

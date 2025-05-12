@@ -112,7 +112,7 @@ class OpenAIServingCompletion(OpenAIServing):
             request_prompts, engine_prompts = await self._preprocess_completion(
                 request,
                 tokenizer,
-                request.prompt,
+                request.prompt or None,
                 truncate_prompt_tokens=request.truncate_prompt_tokens,
                 add_special_tokens=request.add_special_tokens,
             )
