@@ -703,7 +703,8 @@ class RayDistributedExecutor(DistributedExecutorBase):
         current_job_id = ray.get_runtime_context().get_job_id()
 
         workers = self.workers[:]
-        if not self.use_ray_spmd_worker:
+        if (not self.use_ray_spmd_worker
+                and self.driver_dummy_worker is not None):
             workers.append(self.driver_dummy_worker)
 
         dead_actors = []

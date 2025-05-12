@@ -403,7 +403,7 @@ async def health(raw_request: Request) -> JSONResponse:
     try:
         await engine_client(raw_request).check_health()
     except Exception as e:
-        logger.error(f"Health check failed: {e}")
+        logger.error("Health check failed: %s", str(e))
         return JSONResponse(content={'status': 'unhealthy'}, status_code=500)
     return JSONResponse(content={'status': 'healthy'}, status_code=200)
 
