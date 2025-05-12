@@ -15,7 +15,8 @@ from pydantic import (BaseModel, ConfigDict, Field, TypeAdapter,
 from typing_extensions import TypeAlias
 
 from vllm import envs
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
+                                         random_tool_call_id)
 from vllm.logger import init_logger
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
@@ -1339,7 +1340,7 @@ class FunctionCall(OpenAIBaseModel):
 
 
 class ToolCall(OpenAIBaseModel):
-    id: str = Field(default_factory=lambda: f"chatcmpl-tool-{random_uuid()}")
+    id: str = Field(default_factory=random_tool_call_id)
     type: Literal["function"] = "function"
     function: FunctionCall
 
@@ -1351,8 +1352,8 @@ class DeltaFunctionCall(BaseModel):
 
 # a tool call delta where everything is optional
 class DeltaToolCall(OpenAIBaseModel):
-    id: str = Field(default_factory=lambda: f"chatcmpl-tool-{random_uuid()}")
-    type: Literal["function"] = "function"
+    id: Optional[str] = None
+    type: Optional[Literal["function"]] = None
     index: int
     function: Optional[DeltaFunctionCall] = None
 
