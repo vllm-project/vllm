@@ -276,9 +276,11 @@ class NixlConnectorScheduler:
 
         assert isinstance(request.kv_transfer_params, NixlKVTransferParams)
         if request.kv_transfer_params.do_remote_prefill:
-            # Get unhashed blocks to pull from remote.
-            self._reqs_need_recv[request.request_id] = (
-                request, blocks.get_unhashed_block_ids())
+            # NOTE(rob): if prompt < block_size, no remote blocks.
+            if request.kv_transfer_params.remote_block_ids:
+                # Get unhashed blocks to pull from remote.
+                self._reqs_need_recv[request.request_id] = (
+                    request, blocks.get_unhashed_block_ids())
 
             # Only trigger 1 KV transfer per request.
             request.kv_transfer_params.do_remote_prefill = False
@@ -727,7 +729,7 @@ class NixlConnectorWorker:
                                          notif_msg=request_id.encode("utf-8"))
             return
 
-        # Partial prefix cache hit: just read uncomputed blocks blocks.
+        # Partial prefix cache hit: just read uncomputed blocks.
         num_remote_blocks = len(remote_block_ids)
         assert num_local_blocks <= num_remote_blocks
         if num_local_blocks < num_remote_blocks:
