@@ -24,8 +24,8 @@ from vllm.v1.worker.block_table import BlockTable
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.worker.gpu_input_batch import InputBatch
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+    from vllm.v1.worker.interfaces import BaseInputBatch
 
 if current_platform.is_cuda():
     from vllm.vllm_flash_attn import (flash_attn_varlen_func,
@@ -318,7 +318,7 @@ class FlashAttentionMetadataBuilder:
         # populated on first build() call.
         self.aot_sliding_window: Optional[tuple[int, int]] = None
 
-    def reorder_batch(self, input_batch: "InputBatch",
+    def reorder_batch(self, input_batch: "BaseInputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
         return False
 

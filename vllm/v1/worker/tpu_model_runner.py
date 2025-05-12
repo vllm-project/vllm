@@ -348,19 +348,15 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         req_ids_to_add: list[str] = []
         # Add new requests to the cached states.
         for new_req_data in scheduler_output.scheduled_new_reqs:
-            assert new_req_data.sampling_params is not None,\
-                "Pooling is not supported in TPU yet"
             req_id = new_req_data.req_id
             sampling_params = new_req_data.sampling_params
 
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
-                token_type_ids=new_req_data.token_type_ids,
                 mm_inputs=new_req_data.mm_inputs,
                 mm_positions=new_req_data.mm_positions,
                 sampling_params=sampling_params,
-                pooling_params=None,
                 generator=None,
                 block_ids=new_req_data.block_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
@@ -431,11 +427,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             format. Layers that do not need KV cache are not included.
         """
 
-        forward_ctx = self.vllm_config.compilation_config.static_forward_context
+        layers = get_layers_from_vllm_config(self.vllm_config, Attention)
         block_size = self.vllm_config.cache_config.block_size
         kv_cache_spec: dict[str, KVCacheSpec] = {}
-        for layer_name, attn_module in forward_ctx.items():
-            assert isinstance(attn_module, Attention)
+        for layer_name, attn_module in layers.items():
             if attn_module.attn_type == AttentionType.DECODER:
                 if attn_module.sliding_window is not None:
                     kv_cache_spec[layer_name] = SlidingWindowSpec(
@@ -898,8 +893,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             spec_token_ids=None,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
-            pooler_output=[],
-        )
+            pooler_output=[])
 
         # Check there are no new graphs compiled - all the graphs should be
         # captured and compiled during warm up.

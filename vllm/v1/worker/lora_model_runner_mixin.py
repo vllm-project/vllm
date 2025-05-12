@@ -4,8 +4,10 @@ Define LoRA functionality mixin for model runners.
 """
 
 from contextlib import contextmanager
+from typing import Optional
 
 import numpy as np
+import torch
 import torch.nn as nn
 
 from vllm.config import LoRAConfig, ModelConfig, SchedulerConfig
@@ -14,7 +16,7 @@ from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora, supports_multimodal
-from vllm.v1.worker.gpu_input_batch import InputBatch
+from vllm.v1.worker.interfaces import BaseInputBatch
 
 logger = init_logger(__name__)
 
@@ -26,7 +28,8 @@ class LoRAModelRunnerMixin:
 
     def load_lora_model(self, model: nn.Module, model_config: ModelConfig,
                         scheduler_config: SchedulerConfig,
-                        lora_config: LoRAConfig, device: str) -> nn.Module:
+                        lora_config: LoRAConfig,
+                        device: torch.device) -> nn.Module:
 
         if not supports_lora(model):
             raise ValueError(
@@ -67,7 +70,7 @@ class LoRAModelRunnerMixin:
                                    is_prefill=True)
         self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
 
-    def set_active_loras(self, input_batch: InputBatch,
+    def set_active_loras(self, input_batch: BaseInputBatch,
                          num_scheduled_tokens: np.ndarray) -> None:
 
         prompt_lora_mapping: tuple[int, ...]  # of size input_batch.num_reqs
@@ -80,7 +83,7 @@ class LoRAModelRunnerMixin:
                                       lora_requests)
 
     @contextmanager
-    def maybe_dummy_run_with_lora(self, lora_config: LoRAConfig,
+    def maybe_dummy_run_with_lora(self, lora_config: Optional[LoRAConfig],
                                   num_scheduled_tokens: np.ndarray):
         if lora_config is None:
             yield

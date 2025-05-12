@@ -24,8 +24,8 @@ from vllm.v1.worker.block_table import BlockTable
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.worker.gpu_input_batch import InputBatch
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+    from vllm.v1.worker.interfaces import BaseInputBatch
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
 
@@ -219,7 +219,7 @@ class FlashInferMetadataBuilder:
         self.kv_cache_spec = kv_cache_spec
         self.block_table = block_table
 
-    def reorder_batch(self, input_batch: InputBatch,
+    def reorder_batch(self, input_batch: BaseInputBatch,
                       scheduler_output: SchedulerOutput) -> bool:
         # We now want to reorder the batch so that the "decode" requests are and
         # the front and the "prefill" requests are at the using the least amount
