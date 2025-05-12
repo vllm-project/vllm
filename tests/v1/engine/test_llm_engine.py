@@ -6,7 +6,7 @@ from typing import Optional
 import pytest
 
 from vllm import LLM, SamplingParams
-from vllm.v1.metrics.reader import Counter, Gauge, Histogram, Metric
+from vllm.v1.metrics.reader import Counter, Gauge, Histogram, Metric, Vector
 
 MODEL = "facebook/opt-125m"
 DTYPE = "half"
@@ -102,8 +102,17 @@ def test_parallel_sampling(vllm_model, example_prompts) -> None:
 
 def test_engine_metrics(vllm_runner, monkeypatch, example_prompts):
     max_tokens = 100
+    # Use spec decoding to test num_accepted_tokens_per_pos
+    speculative_config = {
+        "method": "ngram",
+        "prompt_lookup_max": 5,
+        "prompt_lookup_min": 3,
+        "num_speculative_tokens": 5,
+    }
+    monkeypatch.setenv("VLLM_USE_V1", "1")
     with vllm_runner(
             MODEL,
+            speculative_config=speculative_config,
             disable_log_stats=False,
     ) as vllm_model:
         model: LLM = vllm_model.model
@@ -147,3 +156,9 @@ def test_engine_metrics(vllm_runner, monkeypatch, example_prompts):
         assert request_generation_tokens[0].buckets["+Inf"] == n_prompts
         assert request_generation_tokens[0].count == n_prompts
         assert request_generation_tokens[0].sum == total_tokens
+
+        num_accepted_tokens_per_pos = find_metric(
+            "vllm:spec_decode_num_accepted_tokens_per_pos")
+        assert len(num_accepted_tokens_per_pos) == 1
+        assert isinstance(num_accepted_tokens_per_pos[0], Vector)
+        assert len(num_accepted_tokens_per_pos[0].values) == 5
