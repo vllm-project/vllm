@@ -3,8 +3,8 @@
 from typing import Optional, Type
 
 import torch
-import triton
-import triton.language as tl
+
+from vllm.triton_utils import tl, triton
 
 
 def is_weak_contiguous(x: torch.Tensor):

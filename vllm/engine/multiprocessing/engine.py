@@ -284,7 +284,7 @@ class MQLLMEngine:
         except Exception as e:
             self._set_errored(e)
             self._send_unhealthy(e)
-            raise e
+            raise e from None
 
     def _handle_process_request(self, request: RPCProcessRequest):
         """Handle RPCProcessRequest by adding it to the LLMEngine."""
@@ -447,4 +447,4 @@ def run_mp_engine(vllm_config: VllmConfig, usage_context: UsageContext,
     except BaseException as e:
         logger.exception(e)
         engine_alive.value = False
-        raise e
+        raise e from None

@@ -4,17 +4,13 @@ import time
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import torch
 import torch.distributed as dist
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer import (get_kv_transfer_group,
-                                          has_kv_transfer_group,
-                                          is_v1_kv_transfer_group)
-from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -38,8 +34,13 @@ class DPMetadata:
 class ForwardContext:
     # copy from vllm_config.compilation_config.static_forward_context
     no_compile_layers: dict[str, Any]
-    # TODO: extend to support per-layer dynamic forward context
-    attn_metadata: "AttentionMetadata"  # set dynamically for each forward pass
+    """
+    Type AttentionMetadata for v0, 
+    Type Dict[str, AttentionMetadata] for v1, map from layer_name of each 
+    attention layer to its attention metadata
+    set dynamically for each forward pass
+    """
+    attn_metadata: Union["AttentionMetadata", dict[str, "AttentionMetadata"]]
     # TODO: remove after making all virtual_engines share the same kv cache
     virtual_engine: int  # set dynamically for each forward pass
     # set dynamically for each forward pass
@@ -101,16 +102,6 @@ def set_forward_context(attn_metadata: Any,
         attn_metadata=attn_metadata,
         dp_metadata=dp_metadata)
 
-    # KVConnector: trigger (possibly async) load before forward.
-    # Each attn layer will block until the reading is complete.
-    trigger_kv_transfer = (attn_metadata is not None
-                           and has_kv_transfer_group()
-                           and is_v1_kv_transfer_group())
-    if trigger_kv_transfer:
-        kv_connector = get_kv_transfer_group()
-        assert isinstance(kv_connector, KVConnectorBase_V1)
-        kv_connector.start_load_kv(_forward_context)
-
     try:
         yield
     finally:
@@ -146,12 +137,5 @@ def set_forward_context(attn_metadata: Any,
                     logger.info(("Batchsize forward time stats "
                                  "(batchsize, count, median_time(ms)): %s"),
                                 forward_stats)
-
-        # KVConnector: each attn layer triggers (possibly async) save.
-        # Ensure all those operations complete before forward() is done.
-        if trigger_kv_transfer:
-            kv_connector = get_kv_transfer_group()
-            assert isinstance(kv_connector, KVConnectorBase_V1)
-            kv_connector.wait_for_save()
 
         _forward_context = prev_context
