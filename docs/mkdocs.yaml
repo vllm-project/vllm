@@ -1,0 +1,69 @@
+site_name: vLLM
+site_url: https://docs.vllm.ai
+repo_url: https://github.com/vllm-project/vllm
+theme:
+  name: material
+  logo: assets/logos/vllm-logo-only-light.ico
+  favicon: assets/logos/vllm-logo-only-light.ico
+  palette:
+    # Palette toggle for light mode
+    - scheme: default
+      toggle:
+        icon: material/brightness-7 
+        name: Switch to dark mode
+    # Palette toggle for dark mode
+    - scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - content.tabs.link
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.sections
+    - navigation.indexes
+    - navigation.prune
+    - toc.follow
+    - navigation.top
+    - content.code.copy
+
+plugins:
+  - search
+  - autorefs
+  - awesome-nav
+  # - gen-files:
+  #     scripts:
+  #     - gen_ref_pages.py
+  # - mkdocstrings
+markdown_extensions:
+  - attr_list
+  - md_in_html
+  - admonition
+  - pymdownx.details
+  # For content tabs
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+      alternate_style: true
+  # For code highlighting
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  # TODO: explain why we need this
+  - toc:
+      permalink: true
+extra_javascript:
+  - _static/custom.js
+# extra:
+#   consent:
+#     title: Cookie consent
+#     description: >- 
+#       We use cookies to recognize your repeated visits and preferences, as well
+#       as to measure the effectiveness of our documentation and whether users
+#       find what they're searching for. With your consent, you're helping us to
+#       make our documentation better.
