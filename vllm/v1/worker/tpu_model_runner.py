@@ -191,7 +191,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
         self.block_table_cpu = torch.zeros(
             (self.max_num_reqs, self.max_num_blocks_per_req),
-            dtype=self.input_batch.block_table[0].get_cpu_tensor().dtype,
+            dtype=torch.int32,
             device="cpu")
 
         self.query_start_loc_cpu = torch.zeros(self.max_num_tokens + 1,
@@ -1264,6 +1264,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             vocab_size=self.model_config.get_vocab_size(),
             kv_cache_config=kv_cache_config,
         )
+        assert self.block_table_cpu.dtype == self.input_batch.block_table[
+            0].get_cpu_tensor().dtype
 
         kv_caches: dict[str, torch.Tensor] = {}
 
