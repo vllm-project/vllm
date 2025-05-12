@@ -687,7 +687,7 @@ def _construct_prepare_finalize(
     rank = moe.ep_rank
 
     if moe.use_pplx_kernels:
-        logger.debug("using pplx dispatch")
+        logger.debug("using PplxPrepareAndFinalize")
 
         all_to_all = get_all_to_all(
             max_num_tokens=max_num_tokens,

@@ -151,14 +151,6 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return workspace3
 
 
-def modular_deep_gemm_fused_moe_fp8() -> mk.FusedMoEModularKernel:
-    return mk.FusedMoEModularKernel(
-        StandardPrepareAndFinalize(quant_dtype=torch.float8_e4m3fn,
-                                   block_shape=deep_gemm_block_shape()),
-        DeepGemmExperts(),
-    )
-
-
 def deep_gemm_moe_fp8(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -212,7 +204,11 @@ def deep_gemm_moe_fp8(
     Returns:
     - torch.Tensor: The bfloat16 output tensor after applying the MoE layer.
     """
-    fn = modular_deep_gemm_fused_moe_fp8()
+    fn = mk.FusedMoEModularKernel(
+        StandardPrepareAndFinalize(quant_dtype=torch.float8_e4m3fn,
+                                   block_shape=deep_gemm_block_shape()),
+        DeepGemmExperts(),
+    )
     return fn(
         hidden_states,
         w1,

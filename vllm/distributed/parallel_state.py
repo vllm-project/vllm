@@ -979,6 +979,7 @@ def pplx_finalize():
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
+    enable_expert_parallel: bool = False,
     backend: Optional[str] = None,
 ) -> None:
     """
@@ -1081,12 +1082,14 @@ def initialize_model_parallel(
         _DP.rank_in_group, _PP.rank_in_group, _TP.rank_in_group,
         _EP.rank_in_group)
 
-    pplx_init(rank, world_size)
+    if enable_expert_parallel:
+        pplx_init(rank, world_size)
 
 
 def ensure_model_parallel_initialized(
     tensor_model_parallel_size: int,
     pipeline_model_parallel_size: int,
+    enable_expert_parallel: bool = False,
     backend: Optional[str] = None,
 ) -> None:
     """Helper to initialize model parallel groups if they are not initialized,
@@ -1097,7 +1100,8 @@ def ensure_model_parallel_initialized(
         get_world_group().device_group)
     if not model_parallel_is_initialized():
         initialize_model_parallel(tensor_model_parallel_size,
-                                  pipeline_model_parallel_size, backend)
+                                  pipeline_model_parallel_size,
+                                  enable_expert_parallel, backend)
         return
 
     assert (

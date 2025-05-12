@@ -381,11 +381,6 @@ def invoke_moe_batched_triton_kernel(
         BLOCK_K=BLOCK_K)
 
 
-def rank_chunk(num, r, w):
-    rem = num % w
-    return (num // w) + (1 if r < rem else 0)
-
-
 class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     """
     A reference prepare/finalize class that reorganizes the tokens into
@@ -475,12 +470,12 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         last_expert = first_expert + num_local_experts
 
         for expert_id in range(first_expert, last_expert):
-            topkws = topk_ids == expert_id
-            topks = torch.any(topkws, dim=1).flatten()
+            matching_tokens = topk_ids == expert_id
+            topks = torch.any(matching_tokens, dim=1).flatten()
             rows = torch.count_nonzero(topks)
             rhs = fused_expert_output[expert_id - first_expert, :rows, :]
             if not apply_router_weight_on_input:
-                rhs.mul_(topk_weights[topkws].view(rhs.size(0), 1))
+                rhs.mul_(topk_weights[matching_tokens].view(rhs.size(0), 1))
             output[topks] = output[topks] + rhs
 
 

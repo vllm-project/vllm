@@ -175,29 +175,6 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         return c3
 
 
-def modular_cutlass_moe_fp8(
-    per_act_token: bool,
-    ab_strides1: torch.Tensor,
-    c_strides1: torch.Tensor,
-    ab_strides2: torch.Tensor,
-    c_strides2: torch.Tensor,
-    out_dtype: torch.dtype = torch.half,
-) -> mk.FusedMoEModularKernel:
-    return mk.FusedMoEModularKernel(
-        StandardPrepareAndFinalize(
-            per_channel_quant=per_act_token,
-            quant_dtype=torch.float8_e4m3fn,
-        ),
-        CutlassExpertsFp8(
-            ab_strides1,
-            c_strides1,
-            ab_strides2,
-            c_strides2,
-            out_dtype,
-        ),
-    )
-
-
 #TODO make the grouped gemm kernel consistent with scaled gemm kernel
 def cutlass_moe_fp8(
     a: torch.Tensor,
@@ -263,13 +240,18 @@ def cutlass_moe_fp8(
     per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
         a2_scale.numel() != 1 if a2_scale is not None else False)
 
-    fn = modular_cutlass_moe_fp8(
-        per_act_token,
-        ab_strides1,
-        c_strides1,
-        ab_strides2,
-        c_strides2,
-        out_dtype,
+    fn = mk.FusedMoEModularKernel(
+        StandardPrepareAndFinalize(
+            per_channel_quant=per_act_token,
+            quant_dtype=torch.float8_e4m3fn,
+        ),
+        CutlassExpertsFp8(
+            ab_strides1,
+            c_strides1,
+            ab_strides2,
+            c_strides2,
+            out_dtype,
+        ),
     )
 
     return fn(

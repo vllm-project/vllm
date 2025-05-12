@@ -979,7 +979,7 @@ def get_config_dtype_str(
     return None
 
 
-# TODO: use scalar_type instead of bools?
+# TODO (bnell): use scalar_type instead of bools?
 def get_config_qtype(
     use_fp8_w8a8: bool,
     use_int8_w8a8: bool,
@@ -1585,6 +1585,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         assert hidden_states.is_contiguous(
         ), "Hidden_states must be contiguous"
+        assert hidden_states.dim() == 2
         assert w1.stride(-1) == 1, "Stride of last dimension must be 1"
         assert w2.stride(-1) == 1, "Stride of last dimension must be 1"
         assert hidden_states.dtype in [
@@ -1632,30 +1633,9 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         intermediate_cache3 = _resize_cache(workspace13,
                                             (num_tokens, top_k_num, K))
 
-        if hidden_states.dim() == 2:  #block_m is None:
-            sorted_token_ids, expert_ids, num_tokens_post_padded = (
-                moe_align_block_size(topk_ids, config['BLOCK_SIZE_M'],
-                                     global_num_experts, expert_map))
-        else:
-            max_num_tokens = hidden_states.size(1)
-            sorted_token_ids = torch.arange(0,
-                                            hidden_states.size(0) *
-                                            max_num_tokens,
-                                            device=hidden_states.device,
-                                            dtype=torch.int)
-            sorted_token_ids = sorted_token_ids.flatten()
-            expert_ids = torch.arange(0,
-                                      global_num_experts,
-                                      device=hidden_states.device,
-                                      dtype=torch.int)
-            expert_ids = torch.repeat_interleave(expert_ids,
-                                                 max_num_tokens,
-                                                 dim=0)
-            num_tokens_post_padded = torch.zeros(1,
-                                                 device=hidden_states.device,
-                                                 dtype=torch.int32)
-            num_tokens_post_padded.fill_(max_num_tokens)
-            hidden_states = hidden_states.view(-1, hidden_states.size(-1))
+        sorted_token_ids, expert_ids, num_tokens_post_padded = (
+            moe_align_block_size(topk_ids, config['BLOCK_SIZE_M'],
+                                 global_num_experts, expert_map))
 
         invoke_fused_moe_kernel(hidden_states,
                                 w1,
