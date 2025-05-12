@@ -1199,13 +1199,14 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
+        # Will we use FA (used by multiple checks)?
+        will_use_fa = (current_platform.is_cuda()
+                       and not envs.is_set("VLLM_ATTENTION_BACKEND")
+                       ) or envs.VLLM_ATTENTION_BACKEND == "FLASH_ATTN_VLLM_V1"
+
         # No Fp8 KV cache so far.
         if self.kv_cache_dtype != "auto":
             fp8_attention = self.kv_cache_dtype.startswith("fp8")
-            will_use_fa = (
-                current_platform.is_cuda()
-                and not envs.is_set("VLLM_ATTENTION_BACKEND")
-            ) or envs.VLLM_ATTENTION_BACKEND == "FLASH_ATTN_VLLM_V1"
             supported = False
             if current_platform.is_rocm():
                 supported = True
@@ -1230,9 +1231,9 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
-        # Only Fp16 and Bf16 dtypes since we only support FA.
-        V1_SUPPORTED_DTYPES = [torch.bfloat16, torch.float16]
-        if model_config.dtype not in V1_SUPPORTED_DTYPES:
+        # FA only support Fp16 and Bf16 dtypes
+        V1_FA_SUPPORTED_DTYPES = [torch.bfloat16, torch.float16]
+        if (model_config.dtype not in V1_FA_SUPPORTED_DTYPES and will_use_fa):
             _raise_or_fallback(feature_name=f"--dtype {model_config.dtype}",
                                recommend_to_remove=False)
             return False

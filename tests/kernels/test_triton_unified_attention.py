@@ -12,7 +12,7 @@ NUM_HEADS = [(4, 4), (8, 2), (16, 2)]
 HEAD_SIZES = [128, 256]
 BLOCK_SIZES = [16, 32]
 
-DTYPES = [torch.float16, torch.bfloat16]
+DTYPES = [torch.float16, torch.bfloat16, torch.float32]
 QDTYPES = [None, torch.float8_e4m3fn]
 # one value large enough to test overflow in index calculation.
 # one value small enough to test the schema op check
