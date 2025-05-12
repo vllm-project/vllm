@@ -21,7 +21,6 @@ from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
 
 import torch
 from pydantic import ConfigDict, SkipValidation, TypeAdapter, model_validator
-from pydantic.dataclasses import dataclass
 from torch.distributed import ProcessGroup, ReduceOp
 from transformers import PretrainedConfig
 from typing_extensions import deprecated, runtime_checkable
@@ -49,6 +48,7 @@ from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
+    from pydantic.dataclasses import dataclass
     from ray.util.placement_group import PlacementGroup
 
     from vllm.executor.executor_base import ExecutorBase
@@ -58,6 +58,13 @@ if TYPE_CHECKING:
 
     ConfigType = type[DataclassInstance]
 else:
+
+    def dataclass(*args, **kwargs):
+        """A non-Pydantic dataclass for docs builds."""
+        kwargs.pop("config", None)
+        from dataclasses import dataclass as _dataclass
+        return _dataclass(*args, **kwargs)
+
     PlacementGroup = Any
     ExecutorBase = Any
     QuantizationConfig = Any
@@ -3813,8 +3820,11 @@ class CompilationConfig:
             "pass_config",
             "traced_files",
         }
-        return TypeAdapter(CompilationConfig).dump_json(
-            self, exclude=exclude, exclude_unset=True).decode()
+        # The cast to string is necessary because Pydantic is mocked in docs
+        # builds and sphinx-argparse doesn't know the return type of decode()
+        return str(
+            TypeAdapter(CompilationConfig).dump_json(
+                self, exclude=exclude, exclude_unset=True).decode())
 
     __str__ = __repr__
 

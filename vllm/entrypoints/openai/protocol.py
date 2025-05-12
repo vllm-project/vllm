@@ -176,10 +176,12 @@ class ChatCompletionNamedToolChoiceParam(OpenAIBaseModel):
 
 # extra="forbid" is a workaround to have kwargs as a field,
 # see https://github.com/pydantic/pydantic/issues/3125
-class LogitsProcessorConstructor(BaseModel, extra="forbid"):
+class LogitsProcessorConstructor(BaseModel):
     qualname: str
     args: Optional[list[Any]] = None
     kwargs: Optional[dict[str, Any]] = None
+
+    model_config = ConfigDict(extra="forbid")
 
 
 LogitsProcessors = list[Union[str, LogitsProcessorConstructor]]
