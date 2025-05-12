@@ -474,10 +474,9 @@ class NTKScalingRotaryEmbedding(RotaryEmbedding):
         super().__init__(head_size, rotary_dim, max_position_embeddings, base,
                          is_neox_style, dtype)
 
-    def _compute_cos_sin_cache(self) -> torch.Tensor:
-        max_len = self.max_position_embeddings * self.scaling_factor
+    def _compute_inv_freq(self, base: Union[int, float]) -> torch.Tensor:
         base = self.base * (self.scaling_factor if self.mixed_b is None else 1)
-        inv_freq = self._compute_inv_freq(base)
+        inv_freq = super()._compute_inv_freq(base)
 
         if self.mixed_b is None:
             inv_freq = inv_freq / self.scaling_factor**(2 / self.rotary_dim)
@@ -488,13 +487,7 @@ class NTKScalingRotaryEmbedding(RotaryEmbedding):
                 1, self.rotary_dim // 2 + 1).float()**self.mixed_b).exp()
             inv_freq = inv_freq / lambda_1_m
 
-        t = torch.arange(max_len, dtype=torch.float)
-
-        freqs = torch.einsum("i,j -> ij", t, inv_freq)
-        cos = freqs.cos()
-        sin = freqs.sin()
-        cache = torch.cat((cos, sin), dim=-1)
-        return cache
+        return inv_freq
 
 
 class DynamicNTKScalingRotaryEmbedding(RotaryEmbedding):

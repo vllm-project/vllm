@@ -261,7 +261,7 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "MistralModel": _HfExamplesInfo("intfloat/e5-mistral-7b-instruct"),
     "ModernBertModel": _HfExamplesInfo("Alibaba-NLP/gte-modernbert-base",
                                 trust_remote_code=True),
-    "NewModel": _HfExamplesInfo("Alibaba-NLP/gte-base-en-v1.5",
+    "GteNewModel": _HfExamplesInfo("Alibaba-NLP/gte-base-en-v1.5",
                                 trust_remote_code=True),
     "NomicBertModel": _HfExamplesInfo("Snowflake/snowflake-arctic-embed-m-long",  # noqa: E501
                                                trust_remote_code=True),

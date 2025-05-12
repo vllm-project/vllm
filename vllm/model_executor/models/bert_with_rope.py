@@ -570,9 +570,6 @@ class GteNewModel(BertWithRope):
     def split_up_gate_proj(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         n = "mlp.up_gate_proj"
         for name, weight in weights:
-            if name.startswith("classifier"):
-                continue
-
             if n in name:
                 up, gate = weight.chunk(2, dim=0)
                 yield name.replace(n, "mlp.up_proj"), up
@@ -580,8 +577,15 @@ class GteNewModel(BertWithRope):
             else:
                 yield name, weight
 
+    def ignore_unnecessary_layers(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        for name, weight in weights:
+            if name.startswith("classifier"):
+                continue
+            yield name, weight
+
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
+        weights = self.ignore_unnecessary_layers(weights)
         weights = self.split_up_gate_proj(weights)
         return super().load_weights(weights)
 

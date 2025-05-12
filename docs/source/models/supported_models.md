@@ -640,6 +640,16 @@ Specified using `--task embed`.
   * `Snowflake/snowflake-arctic-embed-m-v2.0`.
   *
   * ︎
+- * `ModernBertModel`
+  * ModernBertModel
+  * `Alibaba-NLP/gte-modernbert-base`, etc.
+  * ︎
+  * ︎
+- * `GteNewModel`
+  * GTE NewModel
+  * `Alibaba-NLP/gte-multilingual-base` (see note), etc.
+  * ︎
+  * ︎
 - * `NomicBertModel`
   * NomicBertModel
   * `nomic-ai/nomic-embed-text-v1`, `nomic-ai/nomic-embed-text-v2-moe`, `Snowflake/snowflake-arctic-embed-m-long`, etc.
@@ -682,6 +692,10 @@ See [relevant issue on HF Transformers](https://github.com/huggingface/transform
 
 :::{note}
 `jinaai/jina-embeddings-v3` supports multiple tasks through lora, while vllm temporarily only supports text-matching tasks by merging lora weights.
+:::
+
+:::{note}
+The name `NewModel` is too generic, you should set `--hf-overrides '{"architectures": ["GteNewModel"]}'` specify the use of the GteNewModel architecture.
 :::
 
 If your model is not in the above list, we will try to automatically convert the model using

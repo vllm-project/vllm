@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+from typing import Any
 
 import pytest
 
@@ -32,13 +33,13 @@ MODELS = [
                    enable_test=False),
     ########### NewModel
     EmbedModelInfo("Alibaba-NLP/gte-multilingual-base",
-                   architecture="NewModel",
+                   architecture="GteNewModel",
                    enable_test=True),
     EmbedModelInfo("Alibaba-NLP/gte-base-en-v1.5",
-                   architecture="NewModel",
+                   architecture="GteNewModel",
                    enable_test=True),
     EmbedModelInfo("Alibaba-NLP/gte-large-en-v1.5",
-                   architecture="NewModel",
+                   architecture="GteNewModel",
                    enable_test=True),
     ########### Qwen2ForCausalLM
     EmbedModelInfo("Alibaba-NLP/gte-Qwen2-1.5B-instruct",
@@ -59,9 +60,12 @@ def test_models_mteb(hf_runner, vllm_runner,
                      model_info: EmbedModelInfo) -> None:
     from .mteb_utils import mteb_test_embed_models
 
-    vllm_extra_kwargs = {}
+    vllm_extra_kwargs: dict[str, Any] = {}
     if model_info.name == "Alibaba-NLP/gte-Qwen2-1.5B-instruct":
         vllm_extra_kwargs["hf_overrides"] = {"is_causal": True}
+
+    if model_info.architecture == "GteNewModel":
+        vllm_extra_kwargs["hf_overrides"] = {"architectures": ["GteNewModel"]}
 
     mteb_test_embed_models(hf_runner, vllm_runner, model_info,
                            vllm_extra_kwargs)
@@ -75,9 +79,12 @@ def test_models_correctness(hf_runner, vllm_runner, model_info: EmbedModelInfo,
 
     example_prompts = [str(s).strip() for s in example_prompts]
 
-    vllm_extra_kwargs = {}
+    vllm_extra_kwargs: dict[str, Any] = {}
     if model_info.name == "Alibaba-NLP/gte-Qwen2-1.5B-instruct":
         vllm_extra_kwargs["hf_overrides"] = {"is_causal": True}
+
+    if model_info.architecture == "GteNewModel":
+        vllm_extra_kwargs["hf_overrides"] = {"architectures": ["GteNewModel"]}
 
     with vllm_runner(model_info.name,
                      task="embed",
