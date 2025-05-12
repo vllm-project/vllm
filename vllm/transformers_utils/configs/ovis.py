@@ -123,6 +123,19 @@ class Aimv2VisualTokenizerConfig(BaseVisualTokenizerConfig):
             self.backbone_kwargs['num_hidden_layers'] = self.depths[0]
 
 
+class SiglipVisualTokenizerConfig(BaseVisualTokenizerConfig):
+    model_type = "siglip_visual_tokenizer"
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        if self.drop_cls_token:
+            self.drop_cls_token = False
+        if self.depths:
+            assert len(self.depths) == 1
+            self.backbone_kwargs['num_hidden_layers'] = self.depths[0]
+
+
+AutoConfig.register("siglip_visual_tokenizer", SiglipVisualTokenizerConfig)
 AutoConfig.register("aimv2_visual_tokenizer", Aimv2VisualTokenizerConfig)
 
 

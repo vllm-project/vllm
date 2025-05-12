@@ -725,8 +725,8 @@ def run_nvlm_d(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
-# Ovis2
-def run_ovis2(questions: list[str], modality: str) -> ModelRequestData:
+# Ovis
+def run_ovis(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
 
     model_name = "AIDC-AI/Ovis2-1B"
@@ -737,15 +737,18 @@ def run_ovis2(questions: list[str], modality: str) -> ModelRequestData:
         max_num_seqs=2,
         trust_remote_code=True,
         dtype="half",
-        hf_overrides={"architectures": ["Ovis2ForConditionalGeneration"]},
         limit_mm_per_prompt={modality: 1},
     )
 
-    placeholder = "<image>\n"
-    prompts = [("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-                f"<|im_start|>user\n{placeholder}"
-                f"{question}<|im_end|>\n"
-                "<|im_start|>assistant\n") for question in questions]
+    tokenizer = AutoTokenizer.from_pretrained(model_name,
+                                              trust_remote_code=True)
+    messages = [[{
+        'role': 'user',
+        'content': f"<image>\n{question}"
+    }] for question in questions]
+    prompts = tokenizer.apply_chat_template(messages,
+                                            tokenize=False,
+                                            add_generation_prompt=True)
 
     return ModelRequestData(
         engine_args=engine_args,
@@ -1069,7 +1072,7 @@ model_example_map = {
     "llama4": run_llama4,
     "molmo": run_molmo,
     "NVLM_D": run_nvlm_d,
-    "ovis2": run_ovis2,
+    "ovis": run_ovis,
     "paligemma": run_paligemma,
     "paligemma2": run_paligemma2,
     "phi3_v": run_phi3v,
