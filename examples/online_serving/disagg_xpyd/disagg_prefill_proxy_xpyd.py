@@ -11,6 +11,7 @@ import msgpack
 import zmq
 from quart import Quart, make_response, request
 
+count = 0
 prefill_instances: dict[str, str] = {}  # http_address: zmq_address
 decode_instances: dict[str, str] = {}  # http_address: zmq_address
 
@@ -102,21 +103,27 @@ async def handle_request():
         # change max_tokens = 1 to let it only do prefill
         prefill_request['max_tokens'] = 1
 
+        global count
         global prefill_instances
         global prefill_cv
         with prefill_cv:
-            prefill_addr, prefill_zmq_addr = random.choice(
-                list(prefill_instances.items()))
-            print("handle_request, prefill_addr: %s, zmq_addr: %s",
-                  prefill_addr, prefill_zmq_addr)
+            # prefill_addr, prefill_zmq_addr = random.choice(
+            #     list(prefill_instances.items()))
+            prefill_list = list(prefill_instances.items())
+            prefill_addr, prefill_zmq_addr = prefill_list[count % len(prefill_list)]
 
         global decode_instances
         global decode_cv
         with decode_cv:
-            decode_addr, decode_zmq_addr = random.choice(
-                list(decode_instances.items()))
-            print("handle_request, decode_addr: %s, zmq_addr: %s", decode_addr,
-                  decode_zmq_addr)
+            # decode_addr, decode_zmq_addr = random.choice(
+            #     list(decode_instances.items()))
+            decode_list = list(decode_instances.items())
+            decode_addr, decode_zmq_addr = decode_list[count % len(decode_list)]
+
+        print(f"handle_request count: {count}, [HTTP:{prefill_addr}, "
+              f"ZMQ:{prefill_zmq_addr}] 👉 [HTTP:{decode_addr}, "
+              f"ZMQ:{decode_zmq_addr}]")
+        count += 1
 
         request_id = (
             f"___prefill_addr_{prefill_zmq_addr}___decode_addr_{decode_zmq_addr}_{random_uuid()}"
