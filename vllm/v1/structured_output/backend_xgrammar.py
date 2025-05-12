@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -27,8 +26,6 @@ else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
 logger = init_logger(__name__)
-
-VLLM_XGRAMMAR_COMPILER_THREADS_ENV_VAR = "VLLM_XGRAMMAR_COMPILER_THREADS"
 
 
 class XgrammarBackend(StructuredOutputBackend):
@@ -90,36 +87,10 @@ class XgrammarBackend(StructuredOutputBackend):
             )
         self.compiler = xgr.GrammarCompiler(
             tokenizer_info,
-            max_threads=self._get_grammar_compiler_threads(),
+            max_threads=vllm.envs.VLLM_XGRAMMAR_COMPILER_THREADS,
             cache_enabled=True,
             cache_limit_bytes=vllm.envs.VLLM_XGRAMMAR_CACHE_MB * 1024 * 1024,
         )
-
-    def _get_grammar_compiler_threads(self) -> int:
-        """Get the number of threads to use for the grammar compiler. If the
-        environment variable VLLM_XGRAMMAR_COMPILER_THREADS is set, it will
-        be used as the number of threads. Otherwise, half of the total thread
-        count is chosen here to avoid occupying all CPU resources. 32 is an
-        estimate of the effective number of compilation threads needed for
-        common schemas, and using more threads may not provide additional
-        benefits.
-
-        Returns:
-            int: The number of threads to use for the grammar compiler.
-        """
-        # check environment variable
-        env_threads = os.environ.get(VLLM_XGRAMMAR_COMPILER_THREADS_ENV_VAR)
-        if env_threads is not None:
-            try:
-                env_threads_int = int(env_threads)
-                if env_threads_int > 0:
-                    return env_threads_int
-            except ValueError:
-                pass
-        num_cpus = os.cpu_count()
-        if num_cpus is None:
-            return 8
-        return min(num_cpus // 2, 32)
 
     def compile_grammar(self, request_type: StructuredOutputOptions,
                         grammar_spec: str) -> StructuredOutputGrammar:

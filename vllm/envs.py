@@ -114,6 +114,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5557
+    VLLM_XGRAMMAR_COMPILER_THREADS: int = 8
 
 
 def get_default_cache_root():
@@ -757,6 +758,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Port used for NIXL handshake between remote agents.
     "VLLM_NIXL_SIDE_CHANNEL_PORT":
     lambda: int(os.getenv("VLLM_NIXL_SIDE_CHANNEL_PORT", "5557")),
+
+    # Number of threads to use for the XGrammar grammar compiler.
+    # If not set, defaults to None and the backend will auto-detect.
+    "VLLM_XGRAMMAR_COMPILER_THREADS":
+    lambda: int(os.getenv("VLLM_XGRAMMAR_COMPILER_THREADS", "8")),
 }
 
 # end-env-vars-definition
