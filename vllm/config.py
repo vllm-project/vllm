@@ -3469,6 +3469,9 @@ class KVTransferConfig:
     kv_port: int = 14579
     """The KV connector port, used to build distributed connection."""
 
+    kv_connector_external_registration_args: Optional[dict[str, Any]] = None
+    """Extra args for external kv connector registration."""
+
     kv_connector_extra_config: dict[str, Any] = field(default_factory=dict)
     """any extra config that the connector may need."""
 

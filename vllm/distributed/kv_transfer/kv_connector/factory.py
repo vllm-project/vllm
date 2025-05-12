@@ -59,6 +59,10 @@ class KVConnectorFactory:
                              f"but found {envs.VLLM_USE_V1=}")
 
         connector_name = config.kv_transfer_config.kv_connector
+        if (config.kv_transfer_config.kv_connector_external_registration_args
+                is not None and connector_name not in cls._registry):
+            cls.register_connector(**config.kv_transfer_config.
+                                   kv_connector_external_registration_args)
         connector_cls = cls._registry[connector_name]()
         assert issubclass(connector_cls, KVConnectorBase_V1)
         logger.info("Creating v1 connector with name: %s", connector_name)
