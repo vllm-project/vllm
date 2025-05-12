@@ -62,7 +62,7 @@ logger = init_logger(__name__)
 
 @dataclass
 class TensorizerConfig:
-    tensorizer_uri: str | None = None
+    tensorizer_uri: Union[str, None] = None
     vllm_tensorized: Optional[bool] = False
     verify_hash: Optional[bool] = False
     num_readers: Optional[int] = None
