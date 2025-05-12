@@ -238,9 +238,10 @@ class OutputProcessor:
         self.request_states: dict[str, RequestState] = {}
         self.parent_requests: dict[str, ParentRequest] = {}
         self.lora_states = LoRARequestStates()
+        self.observability_config = observability_config
 
         self.tracer = None
-        if self.observability_config.otlp_traces_endpoint:
+        if self.observability_config is not None and self.observability_config.otlp_traces_endpoint:
             self.tracer = init_tracer(
                 "vllm.llm_engine",
                 self.observability_config.otlp_traces_endpoint)

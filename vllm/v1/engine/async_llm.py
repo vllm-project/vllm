@@ -108,7 +108,8 @@ class AsyncLLM(EngineClient):
 
         # OutputProcessor (converts EngineCoreOutputs --> RequestOutput).
         self.output_processor = OutputProcessor(self.tokenizer,
-                                                log_stats=self.log_stats)
+                                                log_stats=self.log_stats,
+                                                observability_config=vllm_config.observability_config)
 
         # EngineCore (starts the engine in background process).
         core_client_class = AsyncMPClient if (
