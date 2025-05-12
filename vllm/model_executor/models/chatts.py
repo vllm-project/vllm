@@ -15,15 +15,15 @@
 # limitations under the License.
 # Reference: vLLM (https://github.com/vllm-project/vllm)
 """Inference-only Qwen2-ChatTS model compatible with HuggingFace weights."""
-from functools import cached_property
-from typing import Iterable, Mapping, Optional, Set, Tuple, Union
+from collections.abc import Iterable, Mapping
+from typing import Optional, Union
 
+import numpy as np
 import torch
 import torch.nn as nn
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
 
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.models.interfaces import (SupportsLoRA,
                                                    SupportsMultiModal,
                                                    SupportsPP)
@@ -38,7 +38,8 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, MultiModalDataDict,
                                         MultiModalDataItems,
                                         MultiModalFieldConfig,
-                                        MultiModalKwargs, PromptReplacement)
+                                        MultiModalKwargs, PromptReplacement,
+                                        PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
@@ -112,8 +113,8 @@ def get_patch_cnt(x: torch.Tensor, ts_config: PretrainedConfig):
     mask = x[:, :, -1]
     valid_lengths = mask.sum(1).long()  # Shape: (batch_size)
 
-    patch_cnt = (valid_lengths + ts_config['patch_size'] -
-                 1) // ts_config['patch_size']
+    patch_cnt = (valid_lengths + int(ts_config['patch_size']) - 1) // int(
+        ts_config['patch_size'])
     return patch_cnt
 
 
@@ -207,15 +208,38 @@ class Qwen2TSMultiModalProcessor(BaseMultiModalProcessor[Qwen2TSProcessingInfo]
         if 'timeseries' not in out_mm_kwargs:
             return []
 
-        patch_cnt = get_patch_cnt(out_mm_kwargs["timeseries"], hf_config.ts)
+        # ChatTS processor returns a list of tuples
+        # (ts_tokens, encoded_ts_arrays)
+        ts_tokens, encoded_ts_arrays = zip(*out_mm_kwargs["timeseries"])
+
+        # patch_cnt = get_patch_cnt(concatenated_ts, hf_config.ts)
+        patch_size = hf_config.ts['patch_size']
+        # encoded_ts_arrays: list[torch.Tensor]
+        # encoded_ts_arrays[i].shape: (num_rows, num_elements*2, num_features)
+        # num_elements*2 is used because each element is a pair of (value, mask)
+        patch_cnt = [
+            (encoded_ts_arrays[i].shape[1] // 2 + patch_size - 1) // patch_size
+            for i in range(len(encoded_ts_arrays))
+        ]
 
         def get_replacement_qwen2_ts(item_idx: int):
-            return [placeholder] * patch_cnt[item_idx]
+            # Use the pre-tokenized replacements
+            tokens = ts_tokens[item_idx].copy()
+            # Extend the tokens with placeholders to match the patch_cnt
+            num_placeholders = sum(1 for t in tokens if t == placeholder)
+            if num_placeholders < patch_cnt[item_idx]:
+                tokens.extend([placeholder] *
+                              (patch_cnt[item_idx] - num_placeholders))
+            # return tokens
+            return PromptUpdateDetails.select_token_id(
+                tokens,
+                embed_token_id=placeholder,
+            )
 
         return [
             PromptReplacement(
                 modality="timeseries",
-                target=[placeholder],
+                target=[placeholder, placeholder + 1],
                 replacement=get_replacement_qwen2_ts,
             )
         ]
@@ -267,29 +291,39 @@ class Qwen2TSForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
-    @cached_property
-    def sampler(self):
-        if hasattr(self.language_model, "sampler"):
-            return self.language_model.sampler
-
-        return get_sampler()
-
-    def _validate_and_reshape_mm_tensor(self, mm_input: object,
-                                        name: str) -> torch.Tensor:
-        if not isinstance(mm_input, (torch.Tensor, list)):
-            raise ValueError(f"Incorrect type of {name}. "
-                             f"Got type: {type(mm_input)}")
-        if isinstance(mm_input, torch.Tensor):
-            return torch.concat(list(mm_input))
-        else:
-            return torch.concat(mm_input)
-
     def _parse_and_validate_ts_input(self, **kwargs: object) -> torch.Tensor:
-        input_features = kwargs.pop('timeseries', None)
-        if input_features is None:
+        timeseries = kwargs.pop('timeseries', None)
+        if timeseries is None:
             return None
-        input_features = self._validate_and_reshape_mm_tensor(
-            input_features, 'timeseries')
+
+        # ChatTS processor returns a list of tuples
+        # (ts_tokens, encoded_ts_arrays)
+        encoded_ts_arrays = [ts[0][1] for ts in timeseries]
+        # ts_tokens, encoded_ts_arrays = zip(*timeseries)
+
+        device = encoded_ts_arrays[0].device
+
+        max_length = max(ts.shape[1] for ts in encoded_ts_arrays)
+        total_rows = sum(ts.shape[0] for ts in encoded_ts_arrays)
+        feature_dim = encoded_ts_arrays[0].shape[2] if encoded_ts_arrays else 0
+
+        # Pre-allocate the tensor with the right size
+        concatenated_ts = torch.zeros((total_rows, max_length, feature_dim),
+                                      dtype=torch.float16,
+                                      device=device)
+
+        # Copy each array to the right position
+        row_offset = 0
+        for ts in encoded_ts_arrays:
+            ts_tensor = torch.tensor(ts, dtype=torch.float16,
+                                     device=device) if isinstance(
+                                         ts, np.ndarray) else ts
+            concatenated_ts[row_offset:row_offset +
+                            ts.shape[0], :ts.shape[1], :] = ts_tensor
+            row_offset += ts.shape[0]
+
+        input_features = concatenated_ts
+
         if not isinstance(input_features, (torch.Tensor, list)):
             raise ValueError("Incorrect type of ts input features. "
                              f"Got type: {type(input_features)}")
@@ -310,6 +344,13 @@ class Qwen2TSForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
                     end_idx = start_idx + count
                     features_list.append(ts_features[start_idx:end_idx])
                     start_idx = end_idx
+                else:
+                    # Add empty tensor for consistency when count is 0
+                    # This ensures consistent behavior with prefix caching
+                    features_list.append(
+                        torch.zeros((0, ts_features.size(1)),
+                                    device=ts_features.device,
+                                    dtype=ts_features.dtype))
             ts_features = features_list
 
         return ts_features
@@ -359,15 +400,8 @@ class Qwen2TSForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        return self.language_model.sample(logits, sampling_metadata)
-
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
 
         autoloaded_weights = loader.load_weights(weights,
