@@ -40,7 +40,6 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -128,11 +127,13 @@ class LlamaAttention(nn.Module):
             assert tp_size % self.total_num_kv_heads == 0
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
         # MistralConfig has an optional head_dim introduced by Mistral-Nemo
-        self.head_dim = getattr(config, "head_dim",
-                                self.hidden_size // self.total_num_heads)
+        head_dim = getattr(config, "head_dim", None)
+        if head_dim is None:
+            head_dim = self.hidden_size // self.total_num_heads
+        self.head_dim = head_dim
         # Phi models introduced a partial_rotary_factor parameter in the config
-        partial_rotary_factor = getattr(config, "partial_rotary_factor", 1)
-        self.rotary_dim = int(partial_rotary_factor * self.head_dim)
+        self.partial_rotary_factor = getattr(config, "partial_rotary_factor",
+                                             1)
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
@@ -164,11 +165,12 @@ class LlamaAttention(nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.rotary_dim,
+            rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
             base=rope_theta,
             rope_scaling=rope_scaling,
             is_neox_style=is_neox_style,
+            partial_rotary_factor=self.partial_rotary_factor,
         )
 
         if hasattr(config, "interleaved_sliding_window"):
@@ -331,6 +333,8 @@ class LlamaModel(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
+        self.aux_hidden_state_layers: tuple[int] = tuple()
+
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
@@ -344,7 +348,8 @@ class LlamaModel(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> Union[torch.Tensor, IntermediateTensors, tuple[torch.Tensor,
+                                                        list[torch.Tensor]]]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -356,7 +361,11 @@ class LlamaModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in self.layers[self.start_layer:self.end_layer]:
+        aux_hidden_states = []
+        for idx, layer in enumerate(
+                self.layers[self.start_layer:self.end_layer]):
+            if idx in self.aux_hidden_state_layers:
+                aux_hidden_states.append(hidden_states + residual)
             hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
@@ -366,6 +375,9 @@ class LlamaModel(nn.Module):
             })
 
         hidden_states, _ = self.norm(hidden_states, residual)
+
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
     def load_weights(self, weights: Iterable[Tuple[str,
@@ -515,10 +527,15 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         else:
             self.lm_head = PPMissingLayer()
 
-        self.sampler = get_sampler()
-
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int]) -> None:
+        self.model.aux_hidden_state_layers = layers
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int]:
+        num_layers = len(self.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
 
     def _init_model(self,
                     vllm_config: VllmConfig,
@@ -550,11 +567,6 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
-
-    def sample(self, logits: torch.Tensor,
-               sampling_metadata: SamplingMetadata) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:

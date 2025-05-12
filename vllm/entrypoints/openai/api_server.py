@@ -41,12 +41,15 @@ from vllm.entrypoints.chat_utils import (load_chat_template,
                                          resolve_mistral_chat_template)
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.cli_args import (make_arg_parser,
+from vllm.entrypoints.openai.cli_args import (log_non_default_args,
+                                              make_arg_parser,
                                               validate_parsed_serve_args)
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ChatCompletionResponse,
+                                              ClassificationRequest,
+                                              ClassificationResponse,
                                               CompletionRequest,
                                               CompletionResponse,
                                               DetokenizeRequest,
@@ -70,6 +73,8 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               UnloadLoRAAdapterRequest)
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
+from vllm.entrypoints.openai.serving_classification import (
+    ServingClassification)
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
@@ -310,9 +315,11 @@ def mount_metrics(app: FastAPI):
     # We need to set PROMETHEUS_MULTIPROC_DIR environment variable
     # before prometheus_client is imported.
     # See https://prometheus.github.io/client_python/multiprocess/
-    from prometheus_client import (CollectorRegistry, make_asgi_app,
+    from prometheus_client import (REGISTRY, CollectorRegistry, make_asgi_app,
                                    multiprocess)
     from prometheus_fastapi_instrumentator import Instrumentator
+
+    registry = REGISTRY
 
     prometheus_multiproc_dir_path = os.getenv("PROMETHEUS_MULTIPROC_DIR", None)
     if prometheus_multiproc_dir_path is not None:
@@ -320,23 +327,21 @@ def mount_metrics(app: FastAPI):
                      prometheus_multiproc_dir_path)
         registry = CollectorRegistry()
         multiprocess.MultiProcessCollector(registry)
-        Instrumentator(
-            excluded_handlers=[
-                "/metrics",
-                "/health",
-                "/load",
-                "/ping",
-                "/version",
-                "/server_info",
-            ],
-            registry=registry,
-        ).add().instrument(app).expose(app)
 
-        # Add prometheus asgi middleware to route /metrics requests
-        metrics_route = Mount("/metrics", make_asgi_app(registry=registry))
-    else:
-        # Add prometheus asgi middleware to route /metrics requests
-        metrics_route = Mount("/metrics", make_asgi_app())
+    Instrumentator(
+        excluded_handlers=[
+            "/metrics",
+            "/health",
+            "/load",
+            "/ping",
+            "/version",
+            "/server_info",
+        ],
+        registry=registry,
+    ).add().instrument(app).expose(app)
+
+    # Add prometheus asgi middleware to route /metrics requests
+    metrics_route = Mount("/metrics", make_asgi_app(registry=registry))
 
     # Workaround for 307 Redirect for /metrics
     metrics_route.path_regex = re.compile("^/metrics(?P<path>.*)$")
@@ -372,6 +377,10 @@ def score(request: Request) -> Optional[ServingScores]:
     return request.app.state.openai_serving_scores
 
 
+def classify(request: Request) -> Optional[ServingClassification]:
+    return request.app.state.openai_serving_classification
+
+
 def rerank(request: Request) -> Optional[ServingScores]:
     return request.app.state.openai_serving_scores
 
@@ -389,10 +398,10 @@ def engine_client(request: Request) -> EngineClient:
 
 
 @router.get("/health")
-async def health(raw_request: Request) -> Response:
+async def health(raw_request: Request) -> JSONResponse:
     """Health check."""
     await engine_client(raw_request).check_health()
-    return Response(status_code=200)
+    return JSONResponse(content={}, status_code=200)
 
 
 @router.get("/load")
@@ -404,6 +413,7 @@ async def get_server_load_metrics(request: Request):
     # - /v1/audio/transcriptions
     # - /v1/embeddings
     # - /pooling
+    # - /classify
     # - /score
     # - /v1/score
     # - /rerank
@@ -414,7 +424,7 @@ async def get_server_load_metrics(request: Request):
 
 
 @router.api_route("/ping", methods=["GET", "POST"])
-async def ping(raw_request: Request) -> Response:
+async def ping(raw_request: Request) -> JSONResponse:
     """Ping check. Endpoint required for SageMaker"""
     return await health(raw_request)
 
@@ -566,6 +576,27 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
     elif isinstance(generator, PoolingResponse):
+        return JSONResponse(content=generator.model_dump())
+
+    assert_never(generator)
+
+
+@router.post("/classify", dependencies=[Depends(validate_json_request)])
+@with_cancellation
+@load_aware_call
+async def create_classify(request: ClassificationRequest,
+                          raw_request: Request):
+    handler = classify(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Classification API")
+
+    generator = await handler.create_classify(request, raw_request)
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.code)
+
+    elif isinstance(generator, ClassificationResponse):
         return JSONResponse(content=generator.model_dump())
 
     assert_never(generator)
@@ -936,10 +967,11 @@ async def init_app_state(
                 chat_template=resolved_chat_template)
         else:
             hf_chat_template = resolve_hf_chat_template(
+                vllm_config.model_config,
                 tokenizer,
                 chat_template=None,
                 tools=None,
-                trust_remote_code=model_config.trust_remote_code)
+            )
 
             if hf_chat_template != resolved_chat_template:
                 logger.warning(
@@ -967,7 +999,6 @@ async def init_app_state(
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
         enable_auto_tools=args.enable_auto_tool_choice,
         tool_parser=args.tool_call_parser,
-        enable_reasoning=args.enable_reasoning,
         reasoning_parser=args.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
     ) if model_config.runner_type == "generate" else None
@@ -1000,6 +1031,12 @@ async def init_app_state(
         state.openai_serving_models,
         request_logger=request_logger) if model_config.task in (
             "score", "embed", "pooling") else None
+    state.openai_serving_classification = ServingClassification(
+        engine_client,
+        model_config,
+        state.openai_serving_models,
+        request_logger=request_logger,
+    ) if model_config.task == "classify" else None
     state.jinaai_serving_reranking = ServingScores(
         engine_client,
         model_config,
@@ -1041,7 +1078,7 @@ def create_server_socket(addr: tuple[str, int]) -> socket.socket:
 
 async def run_server(args, **uvicorn_kwargs) -> None:
     logger.info("vLLM API server version %s", VLLM_VERSION)
-    logger.info("args: %s", args)
+    log_non_default_args(args)
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
@@ -1053,7 +1090,7 @@ async def run_server(args, **uvicorn_kwargs) -> None:
                        f"(chose from {{ {','.join(valid_tool_parses)} }})")
 
     valid_reasoning_parses = ReasoningParserManager.reasoning_parsers.keys()
-    if args.enable_reasoning \
+    if args.reasoning_parser \
         and args.reasoning_parser not in valid_reasoning_parses:
         raise KeyError(
             f"invalid reasoning parser: {args.reasoning_parser} "

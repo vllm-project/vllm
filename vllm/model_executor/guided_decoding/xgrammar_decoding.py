@@ -175,8 +175,7 @@ class GrammarConfig:
             else:
                 json_str = guided_params.json
 
-            any_whitespace = 'disable-any-whitespace' not in \
-                    guided_params.backend_options()
+            any_whitespace = not guided_params.disable_any_whitespace
 
             # Check and log if model with xgrammar and whitespace have history
             # of runaway generation of whitespaces.
@@ -191,11 +190,10 @@ class GrammarConfig:
                 model_with_warn = 'Qwen'
 
             if model_with_warn is not None and any_whitespace:
-                msg = (f"{model_with_warn} "
-                       f"model detected, consider set "
-                       f"`guided_backend=xgrammar:disable-any-whitespace` "
-                       f"to prevent runaway generation of whitespaces.")
-                logger.info_once(msg)
+                logger.info_once(
+                    "%s model detected, consider setting `disable_any_whitespace` to prevent runaway generation of whitespaces.",  # noqa: E501
+                    model_with_warn,
+                )
             # Validate the schema and raise ValueError here if it is invalid.
             # This is to avoid exceptions in model execution, which will crash
             # the engine worker process.
@@ -348,7 +346,7 @@ class XGrammarLogitsProcessor:
                  scores: torch.Tensor) -> torch.Tensor:
 
         # Skip the structured logits processing if reasoning is not finished.
-        # reasoner is not None only when `--enable-reasoning` is set.
+        # reasoner is not None only when `--reasoning-parser` is set.
         if self.reasoner is not None and \
         not self.reasoner.is_reasoning_end(
                 input_ids):

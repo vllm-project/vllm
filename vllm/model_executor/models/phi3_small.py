@@ -17,7 +17,6 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -26,7 +25,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP
-from .utils import (is_pp_missing_parameter,
+from .utils import (AutoWeightsLoader, WeightsMapper, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
@@ -353,9 +352,28 @@ class Phi3SmallModel(nn.Module):
         hidden_states = self.final_layernorm(hidden_states)
         return hidden_states
 
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
+        params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
+        for name, loaded_weight in weights:
+            if name.endswith(".bias") and name not in params_dict:
+                continue
+            if is_pp_missing_parameter(name, self):
+                continue
+            param = params_dict[name]
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
+            weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
+
 
 class Phi3SmallForCausalLM(nn.Module, SupportsPP):
     _tied_weights_keys = ["lm_head.weight"]
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_suffix={"rotary_emb.inv_freq": None})
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -377,7 +395,6 @@ class Phi3SmallForCausalLM(nn.Module, SupportsPP):
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
@@ -418,6 +435,7 @@ class Phi3SmallForCausalLM(nn.Module, SupportsPP):
                                        sampling_metadata)
         if self.dummy_token_indices is not None and logits is not None:
             logits.index_fill_(-1, self.dummy_token_indices, -torch.inf)
+        logits = logits / self.mup_width_multiplier
         return logits
 
     def forward(
@@ -436,33 +454,10 @@ class Phi3SmallForCausalLM(nn.Module, SupportsPP):
         output_hidden_states = output_hidden_states
         return output_hidden_states
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-
-        next_tokens = self.sampler(logits / self.mup_width_multiplier,
-                                   sampling_metadata)
-        return next_tokens
-
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
-
-        params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
-        for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
-            if name.endswith(".bias") and name not in params_dict:
-                continue
-            if is_pp_missing_parameter(name, self):
-                continue
-            if "lm_head.weight" in name and self.config.tie_word_embeddings:
-                continue
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head.weight"]
+                           if self.config.tie_word_embeddings else None))
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

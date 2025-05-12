@@ -8,7 +8,7 @@ from typing import Optional, Union
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
+from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
@@ -37,12 +37,9 @@ class RequestOutputCollector:
             self.output = output
             self.ready.set()
         elif isinstance(self.output, RequestOutput):
-            if self.aggregate:
-                # Coalesce the outputs in delta case.
-                self.output.add(output)
-            else:
-                # Just replace latest in non-delta case.
-                self.output = output
+            # This ensures that request outputs with different request indexes
+            # (if n > 1) do not override each other.
+            self.output.add(output, aggregate=self.aggregate)
 
     async def get(self) -> RequestOutput:
         """Get operation blocks on put event."""
@@ -112,6 +109,7 @@ class RequestState:
         cls,
         tokenizer: AnyTokenizer,
         request: EngineCoreRequest,
+        prompt: Optional[str],
         parent_req: Optional[ParentRequest],
         request_index: int,
         queue: Optional[RequestOutputCollector],
@@ -126,7 +124,7 @@ class RequestState:
             lora_name=(request.lora_request.name
                        if request.lora_request is not None else None),
             output_kind=request.sampling_params.output_kind,
-            prompt=request.prompt,
+            prompt=prompt,
             prompt_token_ids=request.prompt_token_ids,
             logprobs_processor=LogprobsProcessor.from_new_request(
                 tokenizer=tokenizer,
@@ -228,7 +226,7 @@ class OutputProcessor:
 
     def __init__(
         self,
-        tokenizer: BaseTokenizerGroup,
+        tokenizer: TokenizerGroup,
         log_stats: bool,
     ):
         self.log_stats = log_stats
@@ -270,6 +268,7 @@ class OutputProcessor:
     def add_request(
         self,
         request: EngineCoreRequest,
+        prompt: Optional[str],
         parent_req: Optional[ParentRequest] = None,
         request_index: int = 0,
         queue: Optional[RequestOutputCollector] = None,
@@ -281,6 +280,7 @@ class OutputProcessor:
         req_state = RequestState.from_new_request(
             tokenizer=self.tokenizer.get_lora_tokenizer(request.lora_request),
             request=request,
+            prompt=prompt,
             parent_req=parent_req,
             request_index=request_index,
             queue=queue,
@@ -308,7 +308,7 @@ class OutputProcessor:
             * If there is no queue (for usage with LLMEngine), 
               return a list of RequestOutput objects.
 
-        ****************** NOTE FOR DEVELOPERS ******************
+        NOTE FOR DEVELOPERS
 
         vLLM V1 minimizes the number of python loops over the full
         batch to ensure system overheads are minimized. This is the 
@@ -316,8 +316,6 @@ class OutputProcessor:
 
         If you need to touch every element of the batch, do it from
         within the loop below.
-        
-        **********************************************************
         """
 
         request_outputs: list[RequestOutput] = []

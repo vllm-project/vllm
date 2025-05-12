@@ -34,7 +34,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -43,7 +42,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP
-from .utils import (is_pp_missing_parameter,
+from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
@@ -188,6 +187,7 @@ class GPTJModel(nn.Module):
         quant_config = vllm_config.quant_config
 
         self.config = config
+        self.quant_config = quant_config
         self.embed_dim = config.n_embd
         self.wte = VocabParallelEmbedding(
             config.vocab_size,
@@ -227,61 +227,6 @@ class GPTJModel(nn.Module):
             return IntermediateTensors({"hidden_states": hidden_states})
         hidden_states = self.ln_f(hidden_states)
         return hidden_states
-
-
-class GPTJForCausalLM(nn.Module, SupportsPP):
-
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
-        config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
-        self.config = config
-        self.quant_config = quant_config
-        assert not config.tie_word_embeddings
-        self.transformer = GPTJModel(vllm_config=vllm_config,
-                                     prefix=maybe_prefix(
-                                         prefix, "transformer"))
-        self.lm_head = ParallelLMHead(
-            config.vocab_size,
-            config.n_embd,
-            bias=True,
-            quant_config=quant_config,
-        )
-        self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = get_sampler()
-        self.make_empty_intermediate_tensors = (
-            self.transformer.make_empty_intermediate_tensors)
-
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.transformer.get_input_embeddings(input_ids)
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.transformer(input_ids, positions,
-                                         intermediate_tensors, inputs_embeds)
-        return hidden_states
-
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata, self.lm_head.bias)
-        return logits
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
@@ -339,3 +284,54 @@ class GPTJForCausalLM(nn.Module, SupportsPP):
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
+
+
+class GPTJForCausalLM(nn.Module, SupportsPP):
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        self.config = config
+        self.quant_config = quant_config
+        assert not config.tie_word_embeddings
+        self.transformer = GPTJModel(vllm_config=vllm_config,
+                                     prefix=maybe_prefix(
+                                         prefix, "transformer"))
+        self.lm_head = ParallelLMHead(
+            config.vocab_size,
+            config.n_embd,
+            bias=True,
+            quant_config=quant_config,
+        )
+        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.make_empty_intermediate_tensors = (
+            self.transformer.make_empty_intermediate_tensors)
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.transformer.get_input_embeddings(input_ids)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        hidden_states = self.transformer(input_ids, positions,
+                                         intermediate_tensors, inputs_embeds)
+        return hidden_states
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
+        logits = self.logits_processor(self.lm_head, hidden_states,
+                                       sampling_metadata, self.lm_head.bias)
+        return logits
+
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights)

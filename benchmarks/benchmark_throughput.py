@@ -146,9 +146,10 @@ async def run_vllm_async(
 
     async with build_async_engine_client_from_engine_args(
             engine_args, disable_frontend_multiprocessing) as llm:
+        model_config = await llm.get_model_config()
         assert all(
-            llm.model_config.max_model_len >= (request.prompt_len +
-                                               request.expected_output_len)
+            model_config.max_model_len >= (request.prompt_len +
+                                           request.expected_output_len)
             for request in requests), (
                 "Please ensure that max_model_len is greater than the sum of"
                 " prompt_len and expected_output_len for all requests.")
@@ -523,6 +524,13 @@ def validate_args(args):
         raise ValueError(
             "Tokenizer must be the same as the model for MII backend.")
 
+    # --data-parallel is not supported currently.
+    # https://github.com/vllm-project/vllm/issues/16222
+    if args.data_parallel_size > 1:
+        raise ValueError(
+            "Data parallel is not supported in offline benchmark, \
+            please use benchmark serving instead")
+
 
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(description="Benchmark the throughput.")
@@ -592,7 +600,7 @@ if __name__ == "__main__":
         "--lora-path",
         type=str,
         default=None,
-        help="Path to the lora adapters to use. This can be an absolute path, "
+        help="Path to the LoRA adapters to use. This can be an absolute path, "
         "a relative path, or a Hugging Face model identifier.")
     parser.add_argument(
         "--prefix-len",

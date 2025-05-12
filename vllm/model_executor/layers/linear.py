@@ -6,7 +6,6 @@ from typing import Any, Literal, Optional, Union
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.nn.parameter import Parameter, UninitializedParameter
 
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
@@ -17,6 +16,7 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 # yapf: disable
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            BlockQuantScaleParameter,
@@ -31,6 +31,8 @@ logger = init_logger(__name__)
 
 WEIGHT_LOADER_V2_SUPPORTED = [
     "CompressedTensorsLinearMethod",
+    "BitBLASLinearMethod",
+    "GPTQBitBLASLinearMethod",
     "AWQMarlinLinearMethod",
     "AWQLinearMethod",
     "GPTQMarlinLinearMethod",
@@ -48,6 +50,15 @@ WEIGHT_LOADER_V2_SUPPORTED = [
     "QuarkLinearMethod",
     "ModelOptNvFp4LinearMethod",
 ]
+
+
+def adjust_bitblas_shard(param, shard_size, shard_offset):
+    bitblas_tile_size = getattr(param, "bitblas_tile_size", None)
+    if bitblas_tile_size is not None:
+        return (shard_size // bitblas_tile_size,
+                shard_offset // bitblas_tile_size)
+
+    return shard_size, shard_offset
 
 
 def adjust_marlin_shard(param, shard_size, shard_offset):
@@ -188,7 +199,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-        return F.linear(x, layer.weight, bias)
+        return dispatch_unquantized_gemm()(x, layer.weight, bias)
 
 
 class LinearBase(torch.nn.Module):
@@ -615,6 +626,9 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     shard_size, shard_offset = adjust_marlin_shard(
                         param, shard_size, shard_offset)
 
+                shard_size, shard_offset = adjust_bitblas_shard(
+                    param, shard_size, shard_offset)
+
                 if use_bitsandbytes_4bit:
                     index = list(itertools.accumulate([0] + self.output_sizes))
                     orig_offsets = {
@@ -646,6 +660,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 # Special case for Marlin.
                 shard_size, shard_offset = adjust_marlin_shard(
                     param, shard_size, shard_offset)
+            shard_size, shard_offset = adjust_bitblas_shard(
+                param, shard_size, shard_offset)
 
             use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit",
                                             False)
@@ -912,6 +928,15 @@ class QKVParallelLinear(ColumnParallelLinear):
 
         shard_offset = self._get_shard_offset_mapping(loaded_shard_id)
         shard_size = self._get_shard_size_mapping(loaded_shard_id)
+
+        # Note(simon): This is needed for Qwen3's fp8 quantization.
+        if isinstance(param, BlockQuantScaleParameter):
+            assert self.quant_method is not None
+            assert hasattr(self.quant_method, "quant_config")
+            weight_block_size = self.quant_method.quant_config.weight_block_size
+            block_n, _ = weight_block_size[0], weight_block_size[1]
+            shard_offset = (shard_offset + block_n - 1) // block_n
+            shard_size = (shard_size + block_n - 1) // block_n
 
         param.load_qkv_weight(loaded_weight=loaded_weight,
                               num_heads=self.num_kv_head_replicas,

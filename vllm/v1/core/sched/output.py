@@ -9,6 +9,8 @@ if TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
 
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+        KVConnectorMetadata)
     from vllm.lora.request import LoRARequest
     from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
     from vllm.sampling_params import SamplingParams
@@ -20,7 +22,6 @@ class NewRequestData:
 
     req_id: str
     prompt_token_ids: list[int]
-    prompt: Optional[str]
     mm_inputs: list[MultiModalKwargs]
     mm_hashes: list[str]
     mm_positions: list[PlaceholderRange]
@@ -38,7 +39,6 @@ class NewRequestData:
         return cls(
             req_id=request.request_id,
             prompt_token_ids=request.prompt_token_ids,
-            prompt=request.prompt,
             mm_inputs=request.mm_inputs,
             mm_hashes=request.mm_hashes,
             mm_positions=request.mm_positions,
@@ -47,6 +47,33 @@ class NewRequestData:
             num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
         )
+
+    def __repr__(self):
+        return (f"NewRequestData("
+                f"req_id={self.req_id},"
+                f"prompt_token_ids={self.prompt_token_ids},"
+                f"mm_inputs={self.mm_inputs},"
+                f"mm_hashes={self.mm_hashes},"
+                f"mm_positions={self.mm_positions},"
+                f"sampling_params={self.sampling_params},"
+                f"block_ids={self.block_ids},"
+                f"num_computed_tokens={self.num_computed_tokens},"
+                f"lora_request={self.lora_request}"
+                ")")
+
+    # Version of __repr__ with the prompt data obfuscated
+    def anon_repr(self):
+        return (f"NewRequestData("
+                f"req_id={self.req_id},"
+                f"prompt_token_ids_len={len(self.prompt_token_ids)},"
+                f"mm_inputs={self.mm_inputs},"
+                f"mm_hashes={self.mm_hashes},"
+                f"mm_positions={self.mm_positions},"
+                f"sampling_params={self.sampling_params},"
+                f"block_ids={self.block_ids},"
+                f"num_computed_tokens={self.num_computed_tokens},"
+                f"lora_request={self.lora_request}"
+                ")")
 
 
 @dataclass
@@ -121,3 +148,6 @@ class SchedulerOutput:
     structured_output_request_ids: dict[str, int]
     # the bitmask for the whole batch
     grammar_bitmask: Optional[npt.NDArray[np.int32]]
+
+    # KV Cache Connector metadata.
+    kv_connector_metadata: Optional[KVConnectorMetadata] = None
