@@ -51,7 +51,9 @@ def test_edge_cases():
     # (2) Check that we can handle a full prefix cache
     # hit on the D worker but not on the P worker.
     # (2a): prime the D worker.
-    completion = decode_client.completions.create(model=MODEL, prompt=PROMPT)
+    completion = decode_client.completions.create(model=MODEL,
+                                                  prompt=PROMPT,
+                                                  temperature=0)
     decode_response = completion.choices[0].text
     # (2b): send via the P/D setup
     completion = proxy_client.completions.create(model=MODEL,
