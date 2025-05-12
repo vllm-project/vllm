@@ -48,7 +48,8 @@ class TPUWorker:
         self.lora_config = vllm_config.lora_config
         self.load_config = vllm_config.load_config
         self.parallel_config = vllm_config.parallel_config
-        if self.parallel_config.single_worker:
+        self.use_spmd = envs.VLLM_USE_SINGLE_WORKER
+        if self.use_spmd:
             self.parallel_config.tensor_parallel_size = 1
             self.parallel_config.pipeline_parallel_size = 1
             self.parallel_config.world_size = 1
@@ -106,10 +107,11 @@ class TPUWorker:
         torch.set_default_dtype(self.model_config.dtype)
 
         # Initialize the distributed environment.
-        init_tpu_worker_distributed_environment(self.parallel_config,
-                                                self.rank,
-                                                self.distributed_init_method,
-                                                self.local_rank)
+        self._init_tpu_worker_distributed_environment(
+            self.parallel_config,
+            self.rank,
+            self.distributed_init_method,
+            self.local_rank)
 
         # Device initialization should happen after initializing
         # the distributed runtime.
@@ -188,11 +190,20 @@ class TPUWorker:
         # Get the maximum amount of memory used by the model weights and
         # intermediate activations.
         # Doesn't work with SPMD
-        # m = xm.get_memory_info(None)
-        # total_memory_size = m["bytes_limit"]
-        # current_mem = m["bytes_used"]
-        total_memory_size = 1024 * 1024 * 1024 * 30  # assume 30 GB
-        current_mem = 1024 * 1024 * 1024 * 20  # assume 20 GB
+        if self.use_spmd:
+            # This is a workaround for the TPU SPMD mode. The get_memory_info
+            # API doesn't work with SPMD mode in PyTorch/XLA.
+            # TODO: use xm.get_memory_info for SPMD once it's supported in
+            # PyTorch/XLA.
+            import tpu_info
+            chip_type, _ = tpu_info.device.get_local_chips()
+            device_usage = tpu_info.metrics.get_chip_usage(chip_type)
+            total_memory_size = device_usage[0].total_memory
+            current_mem = device_usage[0].memory_usage
+        else:
+            m = xm.get_memory_info(self.device)
+            total_memory_size = m["bytes_limit"]
+            current_mem = m["bytes_used"]
         # Ideally we would use profiled = m["peak_bytes_used"] to
         # get weights + activations. But there is memory used during
         # compilation / weight loading that impacts the peak and
@@ -255,26 +266,26 @@ class TPUWorker:
         return
 
 
-def init_tpu_worker_distributed_environment(
-    parallel_config: ParallelConfig,
-    rank: int,
-    distributed_init_method: Optional[str] = None,
-    local_rank: int = -1,
-) -> None:
-    """Initialize the distributed environment."""
-    use_spmd = parallel_config.single_worker
-    if use_spmd:
-        xr.use_spmd()
-    # NOTE(woosuk): This is just to initialize the TP group and broadcast
-    # the input objects on CPU. The all-reduce and all-gather ops on TPU
-    # are invoked by `xm.all_reduce` and `xm.all_gather` which use their
-    # own context.
-    init_distributed_environment(
-        world_size=parallel_config.world_size,
-        rank=rank,
-        local_rank=local_rank,
-        distributed_init_method=distributed_init_method,
-        backend="gloo",
-    )
-    ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
-                                      parallel_config.pipeline_parallel_size)
+    def _init_tpu_worker_distributed_environment(
+        self,
+        parallel_config: ParallelConfig,
+        rank: int,
+        distributed_init_method: Optional[str] = None,
+        local_rank: int = -1,
+    ) -> None:
+        """Initialize the distributed environment."""
+        if self.use_spmd:
+            xr.use_spmd()
+        # NOTE(woosuk): This is just to initialize the TP group and broadcast
+        # the input objects on CPU. The all-reduce and all-gather ops on TPU
+        # are invoked by `xm.all_reduce` and `xm.all_gather` which use their
+        # own context.
+        init_distributed_environment(
+            world_size=parallel_config.world_size,
+            rank=rank,
+            local_rank=local_rank,
+            distributed_init_method=distributed_init_method,
+            backend="gloo",
+        )
+        ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
+                                        parallel_config.pipeline_parallel_size)
