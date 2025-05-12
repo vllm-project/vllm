@@ -260,7 +260,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> bool:
         """
         Update the order of requests in the batch based on the attention
-        backend's needs. For example, some attention backends (namely MLA) may 
+        backend's needs. For example, some attention backends (namely MLA) may
         want to separate requests based on if the attention computation will be
         compute-bound or memory-bound.
 
@@ -1274,7 +1274,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             next_token_ids = torch.tensor(next_token_ids,
                                           dtype=torch.int32,
                                           device=self.device)
-            eagle_attn_metadata = attn_metadata[self.drafter.attn_layer_name]
+            # At this moment, we assume all eagle layers belong to the same KV
+            # cache group, thus using the same attention metadata.
+            eagle_attn_metadata = attn_metadata[
+                self.drafter.attn_layer_names[0]]
 
             if spec_decode_metadata is None:
                 # input_ids can be None for multimodal models.
@@ -1887,10 +1890,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.initialize_attn_backend(kv_cache_config)
 
         kv_caches: dict[str, torch.Tensor] = {}
+        kv_cache_group_ids: dict[str, int] = {}
 
-        for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+        for id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
             kv_cache_spec = kv_cache_group.kv_cache_spec
             for layer_name in kv_cache_group.layer_names:
+                kv_cache_group_ids[layer_name] = id
                 tensor_config = kv_cache_config.tensors[layer_name]
                 assert tensor_config.size % kv_cache_spec.page_size_bytes == 0
                 num_blocks = tensor_config.size // kv_cache_spec.page_size_bytes
@@ -1914,6 +1919,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     # TODO: add new branches when introducing more types of
                     # KV cache specs.
                     raise ValueError("Unknown KV cache spec type.")
+
+        if self.speculative_config and self.speculative_config.use_eagle():
+            assert isinstance(self.drafter, EagleProposer)
+            assert len(
+                set([
+                    kv_cache_group_ids[layer_name]
+                    for layer_name in self.drafter.attn_layer_names
+                ])) == 1, "For multi-layer eagle draft model, "
+            "all layers should belong to the same kv cache group"
 
         bind_kv_cache(
             kv_caches,

@@ -126,6 +126,11 @@ class EagleProposer:
             prefix_kv_lens=None,
             suffix_kv_lens=None,
         )
+        # At this moment, we assume all eagle layers belong to the same KV
+        # cache group, thus using the same attention metadata.
+        per_layer_attn_metadata = {}
+        for layer_name in self.attn_layer_names:
+            per_layer_attn_metadata[layer_name] = attn_metadata
         if self.use_cuda_graph and \
             num_tokens <= self.cudagraph_batch_sizes[-1]:
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
@@ -135,7 +140,7 @@ class EagleProposer:
         self.positions[:num_tokens] = target_positions
         self.hidden_states[:num_tokens] = target_hidden_states
 
-        with set_forward_context(attn_metadata,
+        with set_forward_context(per_layer_attn_metadata,
                                  self.vllm_config,
                                  num_tokens=num_input_tokens):
             last_hidden_states, hidden_states = self.model(
@@ -213,7 +218,7 @@ class EagleProposer:
             self.hidden_states[:batch_size] = hidden_states
 
             # Run the model.
-            with set_forward_context(attn_metadata,
+            with set_forward_context(per_layer_attn_metadata,
                                      self.vllm_config,
                                      num_tokens=input_batch_size):
                 last_hidden_states, hidden_states = self.model(
@@ -303,8 +308,8 @@ class EagleProposer:
         draft_attn_layer_names = (
             get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
             target_attn_layer_names)
-        assert len(draft_attn_layer_names) == 1
-        self.attn_layer_name = next(iter(draft_attn_layer_names))
+
+        self.attn_layer_names = list(draft_attn_layer_names)
         loaded_weights = self.model.load_weights(
             loader.get_all_weights(draft_model_config, self.model))
 
