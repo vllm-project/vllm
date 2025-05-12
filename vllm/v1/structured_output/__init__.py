@@ -300,3 +300,73 @@ class StructuredOutputManager:
         assert self.backend is not None
         self.backend.precompile(num_reqs_paddings, vocab_size, device,
                                 hidden_states_dtype)
+
+    @staticmethod
+    def validate_request(params: SamplingParams,
+                         vllm_config: VllmConfig) -> None:
+        """
+        Validate the request for structured output.
+        This method checks the request for any errors or inconsistencies
+        If one backend fails validation, we try the next one.
+        The SamplingParams object is modified to set the backend and
+        backend_was_auto attributes based on the validation results.
+        This needs to be a static method as it is called from the request Processor which runs in a different process
+
+        Args:
+            params (SamplingParams): The sampling parameters for the request.
+
+        Raises:
+            ValueError: If the request contains an invalid backend or if the
+                request-level backend selection is not supported.
+        """
+        if not params.guided_decoding or not vllm_config.decoding_config:
+            return
+
+        engine_level_backend = vllm_config.decoding_config.backend
+        if params.guided_decoding.backend:
+            # Request-level backend selection is not supported in V1.
+            # The values may differ if `params` is reused and was set
+            # to a specific backend based on `auto` behavior in a previous
+            # request. We remember that it was set as a result of `auto`
+            # using the `_auto` option set on the backend in the params.
+            if (params.guided_decoding.backend != engine_level_backend
+                    and not (engine_level_backend == "auto"
+                             and params.guided_decoding.backend_was_auto)):
+                raise ValueError(
+                    "Request-level structured output backend selection is no "
+                    "longer supported. The request specified "
+                    f"'{params.guided_decoding.backend}', but vLLM was "
+                    f"initialised with '{engine_level_backend}'. This error "
+                    "can be resolved by removing backend selection from the "
+                    "request.")
+        else:
+            params.guided_decoding.backend = engine_level_backend
+
+        # Request content validation
+        if engine_level_backend.startswith("xgrammar"):
+            # xgrammar with no fallback
+            validate_xgrammar_grammar(params)
+        elif engine_level_backend.startswith("guidance"):
+            # TODO: ideally we would have the LLTokenizer here as Lark syntax
+            # allows <|special_token|> and similar, see
+            # https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md#special-tokens
+            # Without tokenizer these are disallowed in grammars.
+            validate_guidance_grammar(params, tokenizer=None)
+        else:
+            # NOTE: engine_level_backend must be "auto" here, because we have
+            # checked supported_backends above.
+            # "auto" is an opt-in to opinionated behavior where we try to
+            # choose a backend based on request contents. This is not the
+            # default as it is less predictable and subject to change
+            # between releases as feature support changes.
+            try:
+                validate_xgrammar_grammar(params)
+                params.guided_decoding.backend = "xgrammar"
+            except ValueError:
+                # The request either failed validation
+                # or includes some jsonschema feature(s) that
+                # are not supported in xgrammar. Fall back to guidance.
+                validate_guidance_grammar(params, tokenizer=None)
+                params.guided_decoding.backend = "guidance"
+            # Remember that this backend was set automatically
+            params.guided_decoding.backend_was_auto = True
