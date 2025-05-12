@@ -1,7 +1,6 @@
 #set -x
 BASH_DIR=$(dirname "${BASH_SOURCE[0]}")
 source "$BASH_DIR"/pd_bucket.sh
-
 source ./pd_xpyd/pd_env.sh
 
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
@@ -16,12 +15,12 @@ export VLLM_GRAPH_PROMPT_RATIO=0
 export VLLM_DELAYED_SAMPLING="true"
 
 # params
-model_len=16384
-max_num_batched_tokens=16384
-max_num_seqs=16
-input_min=800
-input_max=16384
-output_max=16384
+model_len=32768
+max_num_batched_tokens=32768
+max_num_seqs=32
+input_min=128
+input_max=32768
+output_max=32768
 
 unset VLLM_PROMPT_BS_BUCKET_MIN VLLM_PROMPT_BS_BUCKET_STEP VLLM_PROMPT_BS_BUCKET_MAX
 unset VLLM_PROMPT_SEQ_BUCKET_MIN VLLM_PROMPT_SEQ_BUCKET_STEP VLLM_PROMPT_SEQ_BUCKET_MAX

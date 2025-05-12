@@ -47,7 +47,7 @@ export VLLM_HPU_LOG_STEP_GRAPH_COMPILATION=true
 export GRAPH_VISUALIZATION=1
 export PT_HPU_METRICS_GC_DETAILS=1
 
-export VLLM_SKIP_WARMUP=False
+export VLLM_SKIP_WARMUP=True
 #export PT_HPU_RECIPE_CACHE_CONFIG=./_prefill_cache,false,16384
 
 python3 -m vllm.entrypoints.openai.api_server --model $model_path --port 8100 --max-model-len $model_len --gpu-memory-utilization $VLLM_GPU_MEMORY_UTILIZATION -tp 8  --max-num-seqs $max_num_seqs --trust-remote-code --disable-async-output-proc --kv-cache-dtype fp8_inc --disable-log-requests --max-num-batched-tokens $max_num_batched_tokens --use-padding-aware-scheduling --use-v2-block-manager --distributed_executor_backend ray --kv-transfer-config '{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_producer"}'

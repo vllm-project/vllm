@@ -1,4 +1,4 @@
-curl http://127.0.0.1:8868/v1/completions \
+curl http://10.239.129.9:8868/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "/mnt/disk2/hf_models/DeepSeek-R1-BF16-w8afp8-static-no-ste-G2/",
