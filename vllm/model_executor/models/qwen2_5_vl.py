@@ -705,11 +705,11 @@ class Qwen2_5_VisionTransformer(nn.Module):
 
         cu_seqlens = cu_seqlens.to(device=self.device, non_blocking=True)
         cu_window_seqlens = cu_window_seqlens.to(device=self.device,
-                                               non_blocking=True)
+                                                 non_blocking=True)
         rotary_pos_emb = rotary_pos_emb.to(device=self.device,
-                                         non_blocking=True)
+                                           non_blocking=True)
         window_index = window_index.to(device=hidden_states.device,
-                                     non_blocking=True)
+                                       non_blocking=True)
 
         hidden_states = hidden_states.reshape(
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
