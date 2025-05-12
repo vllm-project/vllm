@@ -68,6 +68,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_RPC_TIMEOUT: int = 10000  # ms
     VLLM_PLUGINS: Optional[list[str]] = None
+    VLLM_LORA_RESOLVER_CACHE_DIR: Optional[str] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
@@ -502,6 +503,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_PLUGINS":
     lambda: None if "VLLM_PLUGINS" not in os.environ else os.environ[
         "VLLM_PLUGINS"].split(","),
+
+    # a local directory to look in for unrecognized LoRA adapters.
+    # only works if plugins are enabled and
+    # VLLM_ALLOW_RUNTIME_LORA_UPDATING is enabled.
+    "VLLM_LORA_RESOLVER_CACHE_DIR":
+    lambda: os.getenv("VLLM_LORA_RESOLVER_CACHE_DIR", None),
 
     # Enables torch profiler if set. Path to the directory where torch profiler
     # traces are saved. Note that it must be an absolute path.
