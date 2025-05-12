@@ -157,7 +157,7 @@ class Worker(WorkerBase):
         # Initialize the distributed environment.
         init_worker_distributed_environment(self.vllm_config, self.rank,
                                             self.distributed_init_method,
-                                            self.local_rank)
+                                            self.local_rank, backend)
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
