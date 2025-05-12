@@ -497,7 +497,7 @@ class OpenAIServing:
                       (EmbeddingChatRequest, EmbeddingCompletionRequest,
                        ScoreRequest, RerankRequest, ClassificationRequest)):
 
-            if (token_num > self.max_model_len):
+            if token_num > self.max_model_len:
                 operations: dict[type[AnyRequest], str] = {
                     ScoreRequest: "score",
                     ClassificationRequest: "classification"
