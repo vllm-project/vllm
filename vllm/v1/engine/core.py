@@ -121,9 +121,6 @@ class EngineCore:
             self.batch_queue = queue.Queue(self.batch_queue_size)
         self.vllm_config = vllm_config
 
-        # Don't keep the dummy data in memory
-        self.reset_mm_cache()
-
     def _initialize_kv_caches(
             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
         start = time.time()

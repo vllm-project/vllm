@@ -101,6 +101,9 @@ class LLMEngine:
             # for v0 compatibility
             self.model_executor = self.engine_core.engine_core.model_executor  # type: ignore
 
+        # Don't keep the dummy data in memory
+        self.reset_mm_cache()
+
     @classmethod
     def from_vllm_config(
         cls,

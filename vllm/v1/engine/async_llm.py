@@ -131,6 +131,11 @@ class AsyncLLM(EngineClient):
         except RuntimeError:
             pass
 
+        # Don't keep the dummy data in memory
+        self.processor.mm_registry.reset_processor_cache()
+        self.processor.mm_input_cache_client.reset()
+        self.engine_core.reset_mm_cache()
+
     @classmethod
     def from_vllm_config(
         cls,
