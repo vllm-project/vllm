@@ -357,6 +357,7 @@ def test_serialize_and_deserialize_lora(tmp_path):
 
     model_ref = "meta-llama/Llama-2-7b-hf"
     lora_path = "yard1/llama-2-7b-sql-lora-test"
+
     model_uri = tmp_path / (model_ref + ".tensors")
     tensorizer_config = TensorizerConfig(tensorizer_uri=str(model_uri))
     tensorizer_config.lora_dir = tensorizer_config.tensorizer_dir
@@ -367,6 +368,9 @@ def test_serialize_and_deserialize_lora(tmp_path):
 
     gc.collect()
     torch.cuda.empty_cache()
+
+    tensorizer_config = TensorizerConfig(str(model_uri))
+
 
     loaded_vllm_model = LLM(model="meta-llama/Llama-2-7b-hf",
                             load_format="tensorizer",
