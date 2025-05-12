@@ -46,8 +46,8 @@ class BitmaskStructuredOutputBackend(StructuredOutputBackend):
         self.vllm_config = vllm_config
         # Reuse our bitmask - this will also be assigned to batches
         self._grammar_bitmask: Optional[torch.Tensor] = None
-        self.tpu_vocab_size: int | None = None
-        self.max_num_reqs: int | None = None
+        self.tpu_vocab_size: Optional[int] = None
+        self.max_num_reqs: Optional[int] = None
 
     @staticmethod
     def apply_grammar_bitmask(
