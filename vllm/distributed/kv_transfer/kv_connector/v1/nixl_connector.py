@@ -276,12 +276,16 @@ class NixlConnectorScheduler:
 
         assert isinstance(request.kv_transfer_params, NixlKVTransferParams)
         if request.kv_transfer_params.do_remote_prefill:
-            # NOTE(rob): if prompt < block_size, no remote blocks.
+            # NOTE(rob): if prompt < block_size, no remote blocks
+            # since the remote only sends fully computed blocks, so
+            # skip recving for this request. num_external_tokens
+            # should be 0 if there are no remote blocks.
             if request.kv_transfer_params.remote_block_ids:
                 # Get unhashed blocks to pull from remote.
                 self._reqs_need_recv[request.request_id] = (
                     request, blocks.get_unhashed_block_ids())
-
+            else:
+                assert num_external_tokens == 0
             # Only trigger 1 KV transfer per request.
             request.kv_transfer_params.do_remote_prefill = False
 
