@@ -95,6 +95,16 @@ docker run --privileged --net host --shm-size=16G -it \
     #     pytest -s -v /workspace/vllm/tests/tpu/lora/; \
     #     echo TEST_13_EXIT_CODE: \$?; \
     # } & \
+    && { \
+        echo TEST_14: Running test_tpu_qkv_linear.py; \
+        pytest -s -v tests/v1/tpu/test_tpu_qkv_linear.py; \
+        echo TEST_14_EXIT_CODE: \$?; \
+    } & \
+    && { \
+        echo TEST_15: Running test_spmd_model_weight_loading.py; \
+        pytest -s -v tests/v1/tpu/test_spmd_model_weight_loading.py; \
+        echo TEST_15_EXIT_CODE: \$?; \
+    } & \
     wait \
     && echo 'All tests have attempted to run. Check logs for individual test statuses and exit codes.' \
 "
