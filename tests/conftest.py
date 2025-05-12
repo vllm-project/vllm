@@ -112,11 +112,11 @@ class AudioTestAssets(list[AudioAsset]):
 
 
 IMAGE_ASSETS = ImageTestAssets()
-"""Singleton instance of :class:`ImageTestAssets`."""
+"""Singleton instance of {class}`ImageTestAssets`."""
 VIDEO_ASSETS = VideoTestAssets()
-"""Singleton instance of :class:`VideoTestAssets`."""
+"""Singleton instance of {class}`VideoTestAssets`."""
 AUDIO_ASSETS = AudioTestAssets()
-"""Singleton instance of :class:`AudioTestAssets`."""
+"""Singleton instance of {class}`AudioTestAssets`."""
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -355,10 +355,16 @@ class HfRunner:
                 **model_kwargs,
             )
 
+            # in case some unquantized custom models are not in same dtype
+            if (getattr(model, "quantization_method", None) is None
+                    and any(p.dtype != self.dtype
+                            for p in model.parameters())):
+                model = model.to(dtype=self.dtype)
+
             if (getattr(model, "quantization_method", None) != "bitsandbytes"
                     and len({p.device
                              for p in model.parameters()}) < 2):
-                model = model.to(self.device)
+                model = model.to(device=self.device)
 
             self.model = model
 
@@ -724,7 +730,7 @@ def hf_runner():
 class VllmRunner:
     """
     The default value of some arguments have been modified from
-    :class:`~vllm.LLM` as follows:
+    {class}`~vllm.LLM` as follows:
 
     - `trust_remote_code`: Set to `True` instead of `False` for convenience.
     - `seed`: Set to `0` instead of `None` for test reproducibility.
