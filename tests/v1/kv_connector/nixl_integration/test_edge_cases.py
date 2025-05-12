@@ -38,7 +38,8 @@ def test_edge_cases():
     # (1) Check that we can handle a very short prompt,
     # less than the length of the block size.
     completion = proxy_client.completions.create(model=MODEL,
-                                                 prompt=SHORT_PROMPT)
+                                                 prompt=SHORT_PROMPT,
+                                                 temperature=0)
     proxy_response = completion.choices[0].text
     completion = prefill_client.completions.create(model=MODEL,
                                                    prompt=SHORT_PROMPT,
