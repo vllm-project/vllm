@@ -106,11 +106,10 @@ class InputBatch(BaseInputBatch):
                                              dtype=np.int32)
         self.lora_id_to_request_ids: dict[int, set[str]] = {}
         self.lora_id_to_lora_request: dict[int, LoRARequest] = {}
+        self.pooling_params: dict[str, PoolingParams] = {}
 
         # This is updated each time the batch constituents change.
         self.pooling_metadata = self._make_pooling_metadata()
-
-        self.pooling_params: dict[str, PoolingParams] = {}
 
     @property
     def token_type_ids_cpu(self) -> np.ndarray:
@@ -304,7 +303,10 @@ class InputBatch(BaseInputBatch):
             pooling_params=pooling_params,
         )
 
-    def _make_prompt_token_ids_tensor(self) -> torch.Tensor:
+    def _make_prompt_token_ids_tensor(self) -> Optional[torch.Tensor]:
+        if self.num_reqs == 0:
+            return None
+
         max_prompt_len = self.num_prompt_tokens[:self.num_reqs].max()
         prompt_token_ids_cpu_tensor = torch.empty(
             (self.num_reqs, max_prompt_len),

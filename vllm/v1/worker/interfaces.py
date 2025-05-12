@@ -8,8 +8,8 @@ from vllm.lora.request import LoRARequest
 
 class BaseInputBatch(ABC):
 
-    @abstractmethod
     @property
+    @abstractmethod
     def req_ids(self) -> list[str]:
         raise NotImplementedError
 
@@ -23,7 +23,7 @@ class BaseInputBatch(ABC):
     ) -> tuple[tuple[int, ...], tuple[int, ...], set[LoRARequest]]:
         raise NotImplementedError
 
-    @abstractmethod
     @property
+    @abstractmethod
     def num_reqs(self) -> int:
         raise NotImplementedError

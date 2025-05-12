@@ -84,9 +84,11 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
         # type is corrected in ModelConfig.__post_init__
         self.dtype = cast(torch.dtype, self.model_config.dtype)
         if cache_config.cache_dtype == "auto":
-            self.kv_cache_dtype = str(self.dtype).split('.')[-1]
+            self.kv_cache_dtype = self.dtype
         else:
-            self.kv_cache_dtype = cache_config.cache_dtype
+            self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
+                cache_config.cache_dtype]
+        self.kv_cache_dtype_str = str(self.kv_cache_dtype).split('.')[-1]
 
         # NOTE(woosuk): sliding_window is None for models with interleaved
         # attention. Use interleaved_sliding_window instead.
@@ -117,7 +119,7 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
         self.attn_backend = get_attn_backend(
             self.head_size,
             self.dtype,
-            self.kv_cache_dtype,
+            self.kv_cache_dtype_str,
             self.block_size,
             self.model_config.is_attention_free,
             use_mla=self.model_config.use_mla,
@@ -1319,13 +1321,12 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
             # encoder only can also benefit from KV cache for prefix caching
             if attn_module.attn_type in (AttentionType.DECODER,
                                          AttentionType.ENCODER_ONLY):
-                kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[self.kv_cache_dtype]
                 if attn_module.sliding_window is not None:
                     kv_cache_spec[layer_name] = SlidingWindowSpec(
                         block_size=block_size,
                         num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
-                        dtype=kv_cache_dtype,
+                        dtype=self.kv_cache_dtype,
                         sliding_window=attn_module.sliding_window,
                         use_mla=use_mla)
                 else:
@@ -1333,7 +1334,7 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
                         block_size=block_size,
                         num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
-                        dtype=kv_cache_dtype,
+                        dtype=self.kv_cache_dtype,
                         use_mla=use_mla)
             elif attn_module.attn_type == AttentionType.ENCODER:
                 # encoder attention does not need KV cache.
