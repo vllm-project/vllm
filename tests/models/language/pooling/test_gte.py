@@ -74,6 +74,8 @@ def test_models_correctness(hf_runner, vllm_runner,
     if not model_info.enable_test:
         pytest.skip("Skipping test.")
 
+    example_prompts = [str(s).strip() for s in example_prompts]
+
     vllm_extra_kwargs = {}
     if model_info.name == "Alibaba-NLP/gte-Qwen2-1.5B-instruct":
         vllm_extra_kwargs["hf_overrides"] = {"is_causal": True}
