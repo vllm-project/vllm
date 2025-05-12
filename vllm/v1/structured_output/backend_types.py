@@ -5,7 +5,7 @@ from __future__ import annotations
 import enum
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, List
 
 if TYPE_CHECKING:
     import torch
@@ -121,3 +121,7 @@ class StructuredOutputBackend(ABC):
         """
         Backend-specific cleanup.
         """
+
+    def precompile(self, num_reqs_paddings: List[int], vocab_size: int,
+                   device: torch.device, hidden_states_dtype: torch.dtype):
+        pass
