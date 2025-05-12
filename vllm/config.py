@@ -24,7 +24,7 @@ from pydantic import ConfigDict, SkipValidation, TypeAdapter, model_validator
 from pydantic.dataclasses import dataclass
 from torch.distributed import ProcessGroup, ReduceOp
 from transformers import PretrainedConfig
-from typing_extensions import deprecated
+from typing_extensions import deprecated, runtime_checkable
 
 import vllm.envs as envs
 from vllm import version
@@ -99,6 +99,7 @@ HfOverrides = Union[dict[str, Any], Callable[[PretrainedConfig],
                                              PretrainedConfig]]
 
 
+@runtime_checkable
 class SupportsHash(Protocol):
 
     def compute_hash(self) -> str:
@@ -3951,7 +3952,7 @@ class CompilationConfig:
 
 
 @config
-@dataclass
+@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
 class VllmConfig:
     """Dataclass which contains all vllm-related configuration. This
     simplifies passing around the distinct configurations in the codebase.
