@@ -14,7 +14,9 @@ aiohttp==3.10.11
     #   fsspec
     #   lm-eval
 aiosignal==1.3.1
-    # via aiohttp
+    # via
+    #   aiohttp
+    #   ray
 annotated-types==0.7.0
     # via pydantic
 anyio==4.6.2.post1
@@ -83,7 +85,7 @@ contourpy==1.3.0
     # via matplotlib
 cramjam==2.9.0
     # via fastparquet
-cupy-cuda12x==13.4.1
+cupy-cuda12x==13.3.0
     # via ray
 cycler==0.12.1
     # via matplotlib
@@ -148,6 +150,7 @@ frozenlist==1.5.0
     # via
     #   aiohttp
     #   aiosignal
+    #   ray
 fsspec==2024.9.0
     # via
     #   datasets
@@ -539,7 +542,7 @@ pyyaml==6.0.2
     #   vocos
 rapidfuzz==3.12.1
     # via jiwer
-ray==2.46.0
+ray==2.43.0
     # via -r requirements/test.in
 redis==5.2.0
     # via tensorizer
