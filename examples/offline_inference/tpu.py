@@ -1,6 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import sys
+
 from vllm import LLM, SamplingParams
+
+# Using absolute path to import from tpu_commons in home directory
+# Change to yours
+sys.path.append('/home/lsiyuan')
 
 prompts = [
     "A robot may not injure a human being",
@@ -20,10 +26,13 @@ sampling_params = SamplingParams(temperature=0, top_p=1.0, n=N, max_tokens=16)
 def main():
     # Set `enforce_eager=True` to avoid ahead-of-time compilation.
     # In real workloads, `enforace_eager` should be `False`.
-    llm = LLM(model="Qwen/Qwen2-1.5B-Instruct",
-              max_num_batched_tokens=64,
-              max_num_seqs=4,
-              max_model_len=128)
+    llm = LLM(
+        model="Qwen/Qwen2-1.5B-Instruct",
+        max_num_batched_tokens=64,
+        max_num_seqs=4,
+        max_model_len=128,
+        enforce_eager=True,
+    )
     outputs = llm.generate(prompts, sampling_params)
     print("-" * 50)
     for output, answer in zip(outputs, answers):
