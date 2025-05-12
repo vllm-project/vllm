@@ -36,7 +36,8 @@ MODELS = [
 
 @pytest.mark.flaky(reruns=3)
 @pytest.mark.skipif(not is_quant_method_supported("gptq_marlin")
-                    or current_platform.is_rocm(),
+                    or current_platform.is_rocm()
+                    or not current_platform.is_cuda(),
                     reason="gptq_marlin is not supported on this GPU type.")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half", "bfloat16"])
