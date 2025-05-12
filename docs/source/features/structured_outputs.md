@@ -273,3 +273,22 @@ print(outputs[0].outputs[0].text)
 ```
 
 Full example: <gh-file:examples/offline_inference/structured_outputs.py>
+
+## Performance Tuning: XGrammar Compiler Threads
+
+When using the xgrammar backend for structured outputs, the number of threads
+used by the grammar compiler can affect the time to first token, especially for
+complex schemas.
+
+You can control the thread pool size for the xgrammar grammar compiler using the
+environment variable `VLLM_XGRAMMAR_COMPILER_THREADS`. By default, this is set
+to `8`. Increasing this value may help reduce first token latency in some
+environments, particularly when compiling large or complex schemas. For example:
+
+```bash
+export VLLM_XGRAMMAR_COMPILER_THREADS=16
+```
+
+Set this variable before starting vLLM. Note that increasing the thread count
+may increase CPU usage during grammar compilation, and may not always improve
+performance.
