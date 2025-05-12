@@ -20,15 +20,9 @@ sampling_params = SamplingParams(temperature=0, top_p=1.0, n=N, max_tokens=16)
 def main():
     # Set `enforce_eager=True` to avoid ahead-of-time compilation.
     # In real workloads, `enforace_eager` should be `False`.
-    llm = LLM(
-        # model="Qwen/Qwen2-1.5B-Instruct",
-        model="meta-llama/Llama-3.1-8B-Instruct",
-        max_num_batched_tokens=64,
-        max_num_seqs=4,
-        gpu_memory_utilization=0.95,
-        max_model_len=512,
-        tensor_parallel_size=8,
-        enforce_eager=False)
+    llm = LLM(model="Qwen/Qwen2-1.5B-Instruct",
+              max_num_batched_tokens=64,
+              max_num_seqs=4)
     outputs = llm.generate(prompts, sampling_params)
     print("-" * 50)
     for output, answer in zip(outputs, answers):
