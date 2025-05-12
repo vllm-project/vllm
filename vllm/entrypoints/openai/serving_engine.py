@@ -136,9 +136,9 @@ class RequestProcessingMixin(BaseModel):
     """
     request_prompts: Optional[Sequence[RequestPrompt]] = \
                             Field(default_factory=list)
-    engine_prompts: Optional[\
-            list[EngineTokensPrompt] | list[EngineEmbedsPrompt]] = \
-            Field(default_factory=list)
+    engine_prompts: Optional[Union[list[EngineTokensPrompt],
+                                   list[EngineEmbedsPrompt]]] = Field(
+                                       default_factory=list)
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
