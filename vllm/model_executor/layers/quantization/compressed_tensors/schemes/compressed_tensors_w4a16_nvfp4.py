@@ -70,9 +70,10 @@ class CompressedTensorsW4A16Fp4(CompressedTensorsScheme):
         layer.weight = Parameter(layer.weight_packed.data, requires_grad=False)
         del layer.weight_packed
         # Rename weight_global_scale to weight_scale_2 that marlin expects
-        layer.weight_scale_2 = Parameter(layer.weight_global_scale.max().to(
-            torch.float32),
-                                         requires_grad=False)
+        # Note: ct stores the inverse of what is expected by the marlin kernel
+        layer.weight_scale_2 = Parameter(
+            1 / layer.weight_global_scale.max().to(torch.float32),
+            requires_grad=False)
         del layer.weight_global_scale
 
         prepare_fp4_layer_for_marlin(layer)
