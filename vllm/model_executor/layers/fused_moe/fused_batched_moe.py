@@ -333,7 +333,7 @@ def invoke_moe_batched_triton_kernel(
     BLOCK_M = config['BLOCK_SIZE_M']
     BLOCK_N = config['BLOCK_SIZE_N']
     BLOCK_K = config['BLOCK_SIZE_K']
-    assert max_num_tokens % BLOCK_M == 0
+    assert (torch.compiler.is_compiling() or max_num_tokens % BLOCK_M == 0)
 
     grid = (expert_num_tokens.size(0), triton.cdiv(max_num_tokens, BLOCK_M) *
             triton.cdiv(B.size(1), BLOCK_N))
@@ -559,13 +559,15 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         N = w1.size(1) // 2
 
         # Not cudagraph friendly
-        assert (torch.cuda.is_current_stream_capturing()
+        assert (torch.compiler.is_compiling()
+                or torch.cuda.is_current_stream_capturing()
                 or torch.all(expert_num_tokens <= max_num_tokens * num_dp)), (
                     f"{expert_num_tokens} <= {max_num_tokens * num_dp}")
 
         for expert in range(num_local_experts):
-            # Indexing expert_num_tokens doesn't work w/cudagraphs
-            if torch.cuda.is_current_stream_capturing():
+            # Indexing expert_num_tokens doesn't work w/cudagraphs or inductor
+            if (torch.compiler.is_compiling()
+                    or torch.cuda.is_current_stream_capturing()):
                 num = max_num_tokens * num_dp
             else:
                 num = int(expert_num_tokens[expert].item())

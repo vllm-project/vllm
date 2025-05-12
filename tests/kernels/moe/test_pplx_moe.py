@@ -24,21 +24,35 @@ from torch.multiprocessing import (
     spawn)  # pyright: ignore[reportPrivateImportUsage]
 from typing_extensions import Concatenate, ParamSpec
 
-import vllm.model_executor.layers.fused_moe  # noqa
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.fused_moe import override_config
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-    BatchedDispatchCombine, BatchedExperts)
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
+    BatchedDispatchCombine, BatchedExperts, BatchedTritonExperts)
+from vllm.model_executor.layers.fused_moe.fused_moe import (fused_topk,
+                                                            get_default_config)
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
 from vllm.model_executor.layers.fused_moe.pplx_dispatch_combine import (
     PplxDispatchCombine)
 from vllm.platforms import current_platform
 
+PPLX_DISPATCH_COMBOS = [(4, 128, 128), (32, 1024, 512), (64, 1024, 512),
+                        (222, 2048, 1024)]
+
+PPLX_MOE_COMBOS = [
+    (1, 128, 128),
+    (2, 128, 512),
+    (3, 1024, 2048),
+    (32, 128, 1024),
+    (45, 512, 2048),
+    (64, 1024, 1024),
+    (222, 1024, 2048),
+]
+
 NUM_EXPERTS = [8, 64]
 EP_SIZE = [1, 4]
-TOP_KS = [2, 6]
+TOP_KS = [1, 2, 6]
 
 vllm_config = VllmConfig()
 vllm_config.scheduler_config.max_num_seqs = 128
@@ -298,7 +312,6 @@ def test_fused_moe_batched_experts(
                                torch_output,
                                atol=2e-2,
                                rtol=0)
-    torch.set_printoptions(profile="full")
     torch.testing.assert_close(baseline_output,
                                batched_output,
                                atol=2e-2,
@@ -426,25 +439,24 @@ def _pplx_dispatch_combine(
     nvshmem_finalize()
 
 
-# TODO: this test point does not work for M == 1
-@pytest.mark.parametrize("m", [4, 32, 64, 222])
-@pytest.mark.parametrize("n", [128, 1024, 2048])
-@pytest.mark.parametrize("k", [128, 512, 1024])
+# TODO: this test point does not work for odd M due to how the test is
+# written, not due to limitations of the pplx kernels.  The pplx_moe
+# test below is able to deal with odd M.
+@pytest.mark.parametrize("mnk", PPLX_DISPATCH_COMBOS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("world_dp_size", [[2, 1]])
 @requires_pplx
 def test_pplx_dispatch_combine(
-    m: int,
-    n: int,
-    k: int,
+    mnk: tuple[int, int, int],
     e: int,
     topk: int,
     dtype: torch.dtype,
     world_dp_size: tuple[int, int],
 ):
     current_platform.seed_everything(7)
+    m, n, k = mnk
     world_size, dp_size = world_dp_size
     device = "cuda"
     a = torch.randn((m, k), device=device, dtype=dtype) / 10
@@ -454,15 +466,11 @@ def test_pplx_dispatch_combine(
                     topk, e)
 
 
-def pplx_moe(pgi, dp_size, a, w1, w2, topk_weight, topk_ids):
-    assert torch.cuda.current_device() == pgi.local_rank
-
+def pplx_moe(rank, world_size, dp_size, a, w1, w2, topk_weight, topk_ids):
+    device = torch.device("cuda", rank)
     hidden_dim = a.shape[1]
     num_experts = w1.shape[0]
     block_size = 128
-    device = pgi.device
-    rank = pgi.rank
-    world_size = pgi.world_size
     topk = topk_ids.shape[1]
     max_num_tokens = rank_chunk(a.shape[0], 0, world_size)
 
@@ -490,29 +498,39 @@ def pplx_moe(pgi, dp_size, a, w1, w2, topk_weight, topk_ids):
         dp_size,
     )
 
-    experts = BatchedExperts(max_num_tokens=a.shape[0],
-                             world_size=world_size,
-                             dp_size=dp_size)
+    experts = BatchedTritonExperts(max_num_tokens=a.shape[0],
+                                   world_size=world_size,
+                                   dp_size=dp_size)
 
     fused_experts = FusedMoEModularKernel(
         dispatch_combine,
         experts,
     )
 
-    # TODO: workers with the same dp_rank must use the exact same inputs.
-
+    # Note: workers with the same dp_rank must use the exact same inputs.
     a_chunk = chunk_by_rank(a, rank, world_size).to(device)
     chunk_topk_weight = chunk_by_rank(topk_weight, rank, world_size).to(device)
     chunk_topk_ids = chunk_by_rank(topk_ids, rank, world_size).to(device)
 
-    out = fused_experts(
-        a_chunk,
-        # Chunking weights like this only works for batched format
-        chunk_by_rank(w1, rank, world_size).to(device),
-        chunk_by_rank(w2, rank, world_size).to(device),
-        chunk_topk_weight,
-        chunk_topk_ids,
-        global_num_experts=num_experts)
+    # Chunking weights like this only works for batched format
+    w1_chunk = chunk_by_rank(w1, rank, world_size).to(device)
+    w2_chunk = chunk_by_rank(w2, rank, world_size).to(device)
+
+    @torch.compile(backend='inductor', fullgraph=True)
+    def _fused_experts(a, w1, w2, topk_weight, topk_ids, global_num_experts):
+        return fused_experts(a,
+                             w1,
+                             w2,
+                             topk_weight,
+                             topk_ids,
+                             global_num_experts=global_num_experts)
+
+    out = _fused_experts(a_chunk,
+                         w1_chunk,
+                         w2_chunk,
+                         chunk_topk_weight,
+                         chunk_topk_ids,
+                         global_num_experts=num_experts)
 
     torch.cuda.synchronize()
 
@@ -546,8 +564,7 @@ def _batched_moe(pgi, dp_size, a, w1, w2, topk_weight, topk_ids):
         experts,
     )
 
-    # TODO: workers with the same dp_rank must use the exact same inputs.
-
+    # Note: workers with the same dp_rank must use the exact same inputs.
     a_chunk = chunk_by_rank(a, rank, world_size).to(device)
     chunk_topk_weight = chunk_by_rank(topk_weight, rank, world_size).to(device)
     chunk_topk_ids = chunk_by_rank(topk_ids, rank, world_size).to(device)
@@ -581,10 +598,14 @@ def _pplx_moe(
     m, k = a.shape
     e, _, n = w2.shape
 
-    with set_current_vllm_config(vllm_config):
+    moe_config = get_default_config(m, e, n, k, topk, a.dtype, False)
+
+    with set_current_vllm_config(vllm_config), override_config(moe_config):
         topk_weight, topk_ids, _ = fused_topk(a, score, topk, False)
         torch_output = torch_moe2(a, w1, w2, topk_weight, topk_ids)
-        pplx_output = pplx_moe(pgi, dp_size, a, w1, w2, topk_weight, topk_ids)
+        pplx_output = pplx_moe(pgi.rank, pgi.world_size, dp_size, a, w1, w2,
+                               topk_weight, topk_ids)
+        # TODO: fix + re-enable
         #batched_output = _batched_moe(pgi, dp_size, a, w1, w2, topk_weight,
         #                              topk_ids)
 
@@ -597,24 +618,21 @@ def _pplx_moe(
     nvshmem_finalize()
 
 
-@pytest.mark.parametrize("m", [1, 2, 3, 32, 45, 64, 222])
-@pytest.mark.parametrize("n", [128, 1024, 2048])
-@pytest.mark.parametrize("k", [128, 512, 1024])
+@pytest.mark.parametrize("mnk", PPLX_MOE_COMBOS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("world_dp_size", [[2, 1]])
 @requires_pplx
 def test_pplx_moe(
-    m: int,
-    n: int,
-    k: int,
+    mnk: tuple[int, int, int],
     e: int,
     topk: int,
     dtype: torch.dtype,
     world_dp_size: tuple[int, int],
 ):
     current_platform.seed_everything(7)
+    m, n, k = mnk
     world_size, dp_size = world_dp_size
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10

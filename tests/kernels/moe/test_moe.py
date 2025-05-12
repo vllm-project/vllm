@@ -122,7 +122,6 @@ def test_fused_moe(
 def test_fused_moe_wn16(m: int, n: int, k: int, e: int, topk: int,
                         ep_size: int, dtype: torch.dtype, group_size: int,
                         has_zp: bool, weight_bits: int):
-    #print(m, n, k, e, topk, dtype, group_size, has_zp, weight_bits)
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
     w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10

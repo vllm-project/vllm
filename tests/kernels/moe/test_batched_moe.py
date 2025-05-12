@@ -31,10 +31,10 @@ class BatchedMMTensors:
         A = torch.randn(
             (config.num_experts, config.max_tokens_per_expert, config.K),
             device="cuda",
-            dtype=config.dtype) / 50.0
+            dtype=config.dtype)
         B = torch.randn((config.num_experts, config.N, config.K),
                         device="cuda",
-                        dtype=config.dtype) / 50.0
+                        dtype=config.dtype)
         C = torch.zeros(
             (config.num_experts, config.max_tokens_per_expert, config.N),
             device="cuda",

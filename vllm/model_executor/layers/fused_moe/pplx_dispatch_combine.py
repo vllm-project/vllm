@@ -103,7 +103,7 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
 
         # This argument is optional, defaults to indices.size(0)
         # There's not much point setting this unless it is != indices.size(0)
-        bound_m = None
+        bound_m: Optional[torch.Tensor] = None
 
         self.a2a.dispatch(
             out_expert_num_tokens=expert_num_tokens,
@@ -128,9 +128,10 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         num_tokens = output.size(0)  # M
         # This argument is optional
         # There's not much point setting this unless it is != topk_ids.size(0)
-        bound_m = None
+        bound_m: Optional[torch.Tensor] = None
 
-        assert topk_ids.size(0) == num_tokens
+        assert topk_ids.size(0) == num_tokens, (
+            f"{topk_ids.size(0)} == {num_tokens}")
         assert output.size(0) <= self.max_num_tokens, (
             f"{output.size(0)} <= {self.max_num_tokens}")
         assert output.size(1) == fused_expert_output.size(-1)

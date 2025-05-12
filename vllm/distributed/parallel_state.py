@@ -949,17 +949,19 @@ def pplx_init(rank, world_size):
                                           nvshmem_get_unique_id, nvshmem_init)
         try:
             global PPLX_DID_INIT
-            logger.info("PPLX_INIT rank=%d world=%d", rank, world_size)
+            logger.debug(
+                "Initialize NVSHMEM for PPLX kernels: rank=%d, "
+                "world size=%d", rank, world_size)
             uid = nvshmem_get_unique_id(
             ) if rank == 0 else nvshmem_alloc_empty_unique_id()
             uid_gpu = uid.cuda()
             get_world_group().broadcast(uid_gpu, src=0)
-            logger.debug("PPLX_INIT UID = %s", uid_gpu)
             uid = uid_gpu.to(device='cpu')
+            logger.debug("PPLX NVSHMEM UID = %s", uid)
             nvshmem_init(uid, rank, world_size)
             PPLX_DID_INIT = True
         except Exception as ex:
-            logger.error("Failed to initialize nvshmem for pplx: %s", ex)
+            logger.error("Failed to initialize NVSHMEM for PPLX: %s", ex)
 
 
 @run_once
@@ -967,7 +969,7 @@ def pplx_finalize():
     global PPLX_DID_INIT
     if PPLX_DID_INIT:
         from pplx_kernels.nvshmem import nvshmem_finalize
-        logger.info("PPLX finalize")
+        logger.debug("PPLX NVSHMEM finalize")
         from vllm.model_executor.layers.fused_moe.layer import (
             _all_to_all_cache)
         _all_to_all_cache.destroy()
