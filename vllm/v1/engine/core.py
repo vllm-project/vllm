@@ -19,6 +19,7 @@ from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.executor.multiproc_worker_utils import _add_prefix
 from vllm.logger import init_logger
+from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
@@ -56,6 +57,7 @@ class EngineCore:
                  executor_fail_callback: Optional[Callable] = None):
         assert vllm_config.model_config.runner_type != "pooling"
 
+        self.vllm_config = vllm_config
         logger.info("Initializing a V1 LLM engine (v%s) with config: %s",
                     VLLM_VERSION, vllm_config)
 
@@ -180,6 +182,15 @@ class EngineCore:
             # Start grammar compilation asynchronously
             self.structured_output_manager.grammar_init(req)
 
+        if req.raw_kv_transfer_params is not None:
+            if (kv_connector := self.scheduler.get_kv_connector()):
+                # Parse raw KV transfer params via connector.
+                kv_connector.set_kv_transfer_params(req)
+            else:
+                logger.warning(
+                    "Got KVTransferParams, but no KVConnector found. "
+                    "Disabling KVTransfer for this request.")
+
         self.scheduler.add_request(req)
 
     def abort_requests(self, request_ids: list[str]):
@@ -190,6 +201,16 @@ class EngineCore:
         # (i.e. client-aborted vs stop criteria met).
         self.scheduler.finish_requests(request_ids,
                                        RequestStatus.FINISHED_ABORTED)
+
+    def execute_model(self, scheduler_output: SchedulerOutput):
+        try:
+            return self.model_executor.execute_model(scheduler_output)
+        except BaseException as err:
+            # NOTE: This method is exception-free
+            dump_engine_exception(self.vllm_config, scheduler_output,
+                                  self.scheduler.make_stats())
+            # Re-raise exception
+            raise err
 
     def step(self) -> EngineCoreOutputs:
         """Schedule, execute, and make output."""
@@ -202,9 +223,9 @@ class EngineCore:
                 scheduler_stats=self.scheduler.make_stats(),
             )
         scheduler_output = self.scheduler.schedule()
-        output = self.model_executor.execute_model(scheduler_output)
+        model_output = self.execute_model(scheduler_output)
         engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, output)  # type: ignore
+            scheduler_output, model_output)  # type: ignore
 
         return engine_core_outputs
 
@@ -601,13 +622,12 @@ class DPEngineCoreProc(EngineCoreProc):
         assert 0 <= local_dp_rank <= dp_rank < dp_size
 
         from vllm.platforms import current_platform
-        if current_platform.is_cuda_alike():
-            from vllm.platforms.cuda import device_id_to_physical_device_id
-            tp_size = vllm_config.parallel_config.tensor_parallel_size
-            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
-                str(device_id_to_physical_device_id(i))
-                for i in range(local_dp_rank * tp_size, (local_dp_rank + 1) *
-                               tp_size))
+        device_control_env_var = current_platform.device_control_env_var
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
+        os.environ[device_control_env_var] = ",".join(
+            str(current_platform.device_id_to_physical_device_id(i))
+            for i in range(local_dp_rank * tp_size, (local_dp_rank + 1) *
+                           tp_size))
 
         self.local_dp_rank = local_dp_rank
         self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()

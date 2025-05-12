@@ -95,15 +95,7 @@ def with_amdsmi_context(fn):
     return wrapper
 
 
-def device_id_to_physical_device_id(device_id: int) -> int:
-    if "CUDA_VISIBLE_DEVICES" in os.environ:
-        device_ids = os.environ["CUDA_VISIBLE_DEVICES"].split(",")
-        physical_device_id = device_ids[device_id]
-        return int(physical_device_id)
-    else:
-        return device_id
-
-
+@cache
 def on_mi250_mi300() -> bool:
     GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
     return any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942"])
@@ -167,10 +159,15 @@ class RocmPlatform(Platform):
                     raise ValueError(
                         f" The selected backend, {selected_backend.name},"
                         f"does not support block size {block_size}.")
-            elif selected_backend == _Backend.ROCM_AITER_MLA:
+            elif selected_backend == _Backend.ROCM_AITER_MLA \
+                or selected_backend == _Backend.ROCM_AITER_MLA_VLLM_V1:
                 if block_size == 1:
-                    logger.info("Using AITER MLA backend.")
-                    return "vllm.attention.backends.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
+                    if use_v1:
+                        logger.info("Using AITER MLA backend on V1 engine.")
+                        return "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
+                    else:
+                        logger.info("Using AITER MLA backend")
+                        return "vllm.attention.backends.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
                 else:
                     raise ValueError(
                         f" The selected backend, {selected_backend.name},"
@@ -232,7 +229,7 @@ class RocmPlatform(Platform):
     @with_amdsmi_context
     @lru_cache(maxsize=8)
     def get_device_name(cls, device_id: int = 0) -> str:
-        physical_device_id = device_id_to_physical_device_id(device_id)
+        physical_device_id = cls.device_id_to_physical_device_id(device_id)
         handle = amdsmi_get_processor_handles()[physical_device_id]
         asic_info = amdsmi_get_gpu_asic_info(handle)
         device_name: str = asic_info["device_id"]
@@ -326,6 +323,11 @@ class RocmPlatform(Platform):
     @classmethod
     def get_device_communicator_cls(cls) -> str:
         return "vllm.distributed.device_communicators.cuda_communicator.CudaCommunicator"  # noqa
+
+    @classmethod
+    def supports_mx(cls) -> bool:
+        gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
+        return any(gfx in gcn_arch for gfx in ["gfx95"])
 
     @classmethod
     def supports_fp8(cls) -> bool:
