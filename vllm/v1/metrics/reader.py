@@ -99,8 +99,6 @@ def get_metrics_snapshot() -> list[Metric]:
                 # accepted tokens using a Counter labeled with 'position'.
                 # We convert these into a vector of integer values.
                 #
-                assert metric.name == \
-                    "vllm:spec_decode_num_accepted_tokens_per_pos"
                 values: list[int] = [0] * len(samples)
                 for s in samples:
                     values[int(s.labels["position"])] = int(s.value)
