@@ -170,6 +170,11 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 kv_cache = self.p2p_nccl_pipe.recv_tensor(request.request_id +
                                                           "-" + layer_name)
 
+                if kv_cache is None:
+                    logger.warning("🚧src_kv_cache is None, %s",
+                                   request.request_id)
+                    continue
+
                 inject_kv_into_layer(kv_cache_layer, kv_cache,
                                      request.slot_mapping)
 
@@ -298,6 +303,12 @@ class P2pNcclConnector(KVConnectorBase_V1):
                                  block_ids=new_req.block_ids,
                                  block_size=self._block_size)
                 total_need_load += 1
+            else:
+                if self.is_producer:
+                    meta.add_request(request_id=new_req.req_id,
+                                     token_ids=new_req.prompt_token_ids,
+                                     block_ids=new_req.block_ids,
+                                     block_size=self._block_size)
 
         for cached_req in scheduler_output.scheduled_cached_reqs:
             # NOTE(rob): here we rely on the resumed requests being

@@ -429,11 +429,18 @@ class P2pNcclPipe:
         if stream is None:
             stream = current_stream()
 
+        start_time = time.time()
         with torch.cuda.stream(stream):
             self.nccl.ncclSend(buffer_type(tensor.data_ptr()), tensor.numel(),
                                ncclDataTypeEnum.from_torch(tensor.dtype), dst,
                                comm, cudaStream_t(stream.cuda_stream))
         stream.synchronize()
+
+        duration = time.time() - start_time
+        logger.info(
+            "🕐Nccl Send Tensor, shape:%s, duration:%.3fms, size:%.3fGB, "
+            "rank:%d", tensor.shape, duration * 1000,
+            tensor.element_size() * tensor.numel() / 1024 ** 3, dst)
 
     def _recv(self, comm, tensor: torch.Tensor, src: int, stream=None):
         assert tensor.device == self.device, (
@@ -442,11 +449,17 @@ class P2pNcclPipe:
         if stream is None:
             stream = current_stream()
 
+        start_time = time.time()
         with torch.cuda.stream(stream):
             self.nccl.ncclRecv(buffer_type(tensor.data_ptr()), tensor.numel(),
                                ncclDataTypeEnum.from_torch(tensor.dtype), src,
                                comm, cudaStream_t(stream.cuda_stream))
         stream.synchronize()
+        duration = time.time() - start_time
+        logger.info(
+            "🕐Nccl Recv Tensor, shape:%s, duration:%.3fms, size:%.3fGB, "
+            "rank:%d", tensor.shape, duration * 1000,
+            tensor.element_size() * tensor.numel() / 1024 ** 3, src)
 
     def close(self) -> None:
         self._listener_thread.join()
