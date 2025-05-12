@@ -206,3 +206,12 @@ shellcheck*/
 
 # Ingore moe/marlin_moe gen code
 csrc/moe/marlin_moe_wna16/kernel_*
+
+docs/docs/**/*.md
+docs/docs/**/*.png
+docs/docs/**/*.js
+docs/docs/**/*.css
+docs/docs/**/*.html
+docs/docs/**/*.jpg
+docs/docs/**/*.ico
+docs/docs/**/*.py
