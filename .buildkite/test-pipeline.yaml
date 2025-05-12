@@ -628,7 +628,7 @@ steps:
   - vllm/plugins/
   - tests/plugins/
   commands:
-  # begin platform plugin tests, all the code in-between runs on dummy platform
+  # begin platform plugin and general plugin tests, all the code in-between runs on dummy platform
   - pip install -e ./plugins/vllm_add_dummy_platform
   - pytest -v -s plugins_tests/test_platform_plugins.py
   - pip uninstall vllm_add_dummy_platform -y
@@ -639,6 +639,7 @@ steps:
   - pytest -v -s distributed/test_distributed_oot.py
   - pytest -v -s entrypoints/openai/test_oot_registration.py # it needs a clean process
   - pytest -v -s models/test_oot_registration.py # it needs a clean process
+  - pytest -v -s plugins/lora_resolvers # unit tests for in-tree lora resolver plugins
 
 - label: Multi-step Tests (4 GPUs) # 36min
   mirror_hardwares: [amdexperimental]
