@@ -1276,10 +1276,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             cache size of each layer
         """
 
-        logger.info("before init kv cache, clear pending ops")
-        xm.mark_step()
-        xm.wait_device_ops()
-        logger.info("start init kv cache")
+        # logger.info("before init kv cache, clear pending ops")
+        # xm.mark_step()
+        # xm.wait_device_ops()
+        # logger.info("start init kv cache")
 
         if len(kv_cache_config.kv_cache_groups) > 1:
             raise NotImplementedError(
@@ -1290,6 +1290,14 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             kv_cache_spec = kv_cache_group.kv_cache_spec
+            if self.use_spmd:
+                num_kv_heads = kv_cache_spec.num_kv_heads
+                # For now we assume all axes are used for TP.
+                tp_size = self.mesh.size()
+                # TODO: Handle kv cache duplication under SPMD mode.
+                assert num_kv_heads // tp_size > 0, (
+                    f"num_kv_heads {num_kv_heads} must be divisible by "
+                    f"tp_size {tp_size} under SPMD mode")
             for layer_name in kv_cache_group.layer_names:
                 tensor_config = kv_cache_config.tensors[layer_name]
                 assert tensor_config.size % kv_cache_spec.page_size_bytes == 0
@@ -1307,12 +1315,11 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 else:
                     raise NotImplementedError
 
-        xm.mark_step()
-        xm.wait_device_ops()
         bind_kv_cache(
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
             self.kv_caches)
+
         if self.use_spmd:
             # Shard KV Cache
             for cache in self.kv_caches:
