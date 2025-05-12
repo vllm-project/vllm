@@ -13,6 +13,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -92,7 +93,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         self,
         request: "Request",
         num_computed_tokens: int,
-    ) -> int:
+    ) -> tuple[int, bool]:
         """
         Get number of new tokens that can be loaded from the
         external KV cache beyond the num_computed_tokens.
@@ -107,9 +108,10 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             external KV cache beyond what is already computed.
         """
         return self._lmcache_engine.get_num_new_matched_tokens(
-            request, num_computed_tokens)
+            request, num_computed_tokens), False
 
     def update_state_after_alloc(self, request: "Request",
+                                 blocks: "KVCacheBlocks",
                                  num_external_tokens: int):
         """
         Update KVConnector state after block allocation.
