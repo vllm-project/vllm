@@ -4176,25 +4176,22 @@ class VllmConfig:
                                                        self.device_config)
             self.model_config.verify_with_parallel_config(self.parallel_config)
 
-        if self.cache_config is not None:
-            self.cache_config.verify_with_parallel_config(self.parallel_config)
+        self.cache_config.verify_with_parallel_config(self.parallel_config)
 
-        if self.lora_config:
+        if self.lora_config is not None:
             self.lora_config.verify_with_cache_config(self.cache_config)
             self.lora_config.verify_with_model_config(self.model_config)
             self.lora_config.verify_lora_support()
-        if self.prompt_adapter_config:
+        if self.prompt_adapter_config is not None:
             self.prompt_adapter_config.verify_with_model_config(
                 self.model_config)
 
-        if self.quant_config is None and \
-            self.model_config is not None and self.load_config is not None:
+        if self.quant_config is None and self.model_config is not None:
             self.quant_config = VllmConfig._get_quantization_config(
                 self.model_config, self.load_config)
 
         from vllm.platforms import current_platform
-        if self.scheduler_config is not None and \
-            self.model_config is not None and \
+        if self.model_config is not None and \
             self.scheduler_config.chunked_prefill_enabled and \
             self.model_config.dtype == torch.float32 and \
             current_platform.get_device_capability() == (7, 5):
@@ -4203,8 +4200,6 @@ class VllmConfig:
                 "To workaround this limitation, vLLM will set 'ieee' input "
                 "precision for chunked prefill triton kernels.")
 
-        if self.compilation_config is None:
-            self.compilation_config = CompilationConfig()
         if self.compilation_config.pass_config.enable_sequence_parallelism:
             self.compilation_config.custom_ops.append("+rms_norm")
         if envs.VLLM_USE_V1 and self.model_config is not None and \
@@ -4224,11 +4219,8 @@ class VllmConfig:
             self.compilation_config.level = CompilationLevel.PIECEWISE
             self.compilation_config.set_splitting_ops_for_v1()
 
-        if self.parallel_config is not None and \
-            self.parallel_config.tensor_parallel_size > 1 and \
+        if self.parallel_config.tensor_parallel_size > 1 and \
             self.parallel_config.pipeline_parallel_size > 1 and \
-            self.compilation_config is not None and \
-                self.compilation_config.pass_config is not None and \
             self.compilation_config.pass_config.enable_sequence_parallelism:
             logger.warning_once(
                 "Sequence parallelism is not supported with pipeline "
@@ -4238,8 +4230,7 @@ class VllmConfig:
 
         self._set_cudagraph_sizes()
 
-        if self.cache_config is not None and \
-            self.cache_config.cpu_offload_gb > 0 and \
+        if self.cache_config.cpu_offload_gb > 0 and \
             self.compilation_config.level != CompilationLevel.NO_COMPILATION \
                 and not envs.VLLM_USE_V1:
             logger.warning(
@@ -4262,7 +4253,7 @@ class VllmConfig:
                 "cascade attention. Disabling cascade attention.")
             self.model_config.disable_cascade_attn = True
 
-        if self.model_config and self.model_config.use_mla and \
+        if self.model_config is not None and self.model_config.use_mla and \
             not (current_platform.is_cuda() or current_platform.is_rocm()):
             logger.info(
                 "MLA is enabled on a non-GPU platform; forcing chunked "
@@ -4273,16 +4264,16 @@ class VllmConfig:
                 self.scheduler_config.max_model_len,
                 _DEFAULT_MAX_NUM_BATCHED_TOKENS)
 
-            if self.cache_config is not None:
-                self.cache_config.enable_prefix_caching = False
+            self.cache_config.enable_prefix_caching = False
 
-        if (self.kv_events_config
+        if (self.kv_events_config is not None
                 and self.kv_events_config.enable_kv_cache_events
                 and not self.cache_config.enable_prefix_caching):
             logger.warning(
                 "KV cache events are on, but prefix caching is not enabled."
                 "Use --enable-prefix-caching to enable.")
-        if (self.kv_events_config and self.kv_events_config.publisher != "null"
+        if (self.kv_events_config is not None
+                and self.kv_events_config.publisher != "null"
                 and not self.kv_events_config.enable_kv_cache_events):
             logger.warning("KV cache events are disabled,"
                            "but the scheduler is configured to publish them."
