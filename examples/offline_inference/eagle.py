@@ -109,7 +109,7 @@ def main():
     try:
         metrics = llm.get_metrics()
     except AssertionError:
-        # Presumably V0 engine, metrics not supported
+        print("Metrics are not supported in the V0 engine.")
         return
 
     num_drafts = num_accepted = 0
