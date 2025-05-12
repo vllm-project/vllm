@@ -1401,10 +1401,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             input_positions=input_positions,
         )
         multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
-        for t in multi_modal_kwargs:
-            if torch.is_tensor(multi_modal_kwargs[t]):
-                multi_modal_kwargs[t] = multi_modal_kwargs[t].to(
-                    self.device, non_blocking=True)
+        multi_modal_kwargs = MultiModalKwargs.as_kwargs(multi_modal_kwargs,
+                                                        device=self.device)
 
         return PreparePromptMetadata(input_tokens=input_tokens_tensor,
                                      input_positions=input_positions,
@@ -2727,6 +2725,38 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                 lora_mask, lora_logits_mask = self.create_lora_mask(
                     input_tokens, model_input.lora_ids,
                     attn_metadata.is_prompt)
+            if model_input.multi_modal_kwargs is not None \
+                and 'embed_is_patch' in model_input.multi_modal_kwargs:
+
+                def fix_embed_is_patch(embed_is_patch):
+                    if isinstance(embed_is_patch, torch.Tensor):
+                        if embed_is_patch.dim() == 3:
+                            result = []
+                            if embed_is_patch.size(1) > 1:
+                                embed_is_patch = embed_is_patch.transpose(0, 1)
+                            for i in range(embed_is_patch.size(0)):
+                                result.append(embed_is_patch[i])
+                            return result
+                        elif embed_is_patch.dim() == 2:
+                            result = []
+                            result.append(embed_is_patch)
+                            return result
+                    elif isinstance(embed_is_patch, (list, tuple)):
+                        # Apply only once per item, avoid repeated recursion
+                        result = []
+                        for item in embed_is_patch:
+                            fixed = fix_embed_is_patch(item)
+                            if isinstance(fixed, list):
+                                result.extend(fixed)
+                            else:
+                                result.append(fixed)
+                        return result
+                    else:
+                        return None
+
+                model_input.multi_modal_kwargs[
+                    'embed_is_patch'] = fix_embed_is_patch(
+                        model_input.multi_modal_kwargs['embed_is_patch'])
             execute_model_kwargs = {
                 "input_ids": input_tokens,
                 "positions": input_positions,

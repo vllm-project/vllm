@@ -15,6 +15,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MultiModalPlaceholderMap, NestedTensors
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (get_cuda_view_from_cpu_tensor, is_pin_memory_available,
                         is_uva_available)
@@ -388,6 +389,12 @@ def _merge_multimodal_embeddings(
     Note:
         This updates ``inputs_embeds`` in place.
     """
+    # skip check for HPU, the number of tokens is a cpu fallback during HPU lazy
+    if current_platform.is_hpu():
+        flattened = _flatten_embeddings(multimodal_embeddings)
+        inputs_embeds[is_multimodal] = flattened
+        return inputs_embeds
+
     num_expected_tokens = is_multimodal.sum().item()
     assert isinstance(num_expected_tokens, int)
 

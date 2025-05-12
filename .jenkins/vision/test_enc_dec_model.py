@@ -25,6 +25,8 @@ def launch_enc_dec_model(config, question):
     dtype = config.get('dtype', 'bfloat16')
     max_num_seqs = config.get('max_num_seqs', 128)
     max_model_len = config.get('max_model_len', 4096)
+    enforce_eager = config.get('enforce_eager', False)
+    enable_expert_parallel = config.get('enable_expert_parallel', False)
     tensor_parallel_size = TP_SIZE
     num_scheduler_steps = config.get('num_scheduler_steps', 1)
     llm = LLM(
@@ -34,6 +36,8 @@ def launch_enc_dec_model(config, question):
         num_scheduler_steps=num_scheduler_steps,
         max_model_len=max_model_len,
         max_num_seqs=max_num_seqs,
+        enable_expert_parallel=enable_expert_parallel,
+        enforce_eager=enforce_eager,
     )
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     messages = [{
@@ -60,6 +64,12 @@ def get_input():
         "image": image,
         "question": img_question,
     }
+
+
+def encode_image(image_path):
+    import base64
+    with open(image_path, "rb") as image_file:
+        return base64.b64encode(image_file.read()).decode("utf-8")
 
 
 def get_current_gaudi_platform():
@@ -101,6 +111,41 @@ def test_enc_dec_model(record_xml_attribute, record_property):
                                          stop_token_ids=None)
 
         num_prompts = config.get('num_prompts', 1)
+        model_name = os.path.basename(config.get('model_name'))
+        if 'Llama-4' in model_name:
+            image_path = "data/cherry_blossom.jpg"
+            base64_image = encode_image(image_path)
+            messages = [
+                {
+                    "role":
+                    "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "what is in the image?",
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}"
+                            }
+                        },
+                    ],
+                },
+            ]
+            outputs = llm.chat(messages, sampling_params=sampling_params)
+
+            # Print the outputs.
+            for output in outputs:
+                prompt = output.prompt
+                generated_text = output.outputs[0].text
+                print("-----------------------------------")
+                print(
+                    f"Prompt: {prompt!r}\nGenerated text:\n {generated_text}\n"
+                )
+
+            return
+
         inputs = [{
             "prompt": prompt,
             "multi_modal_data": {
@@ -114,7 +159,7 @@ def test_enc_dec_model(record_xml_attribute, record_property):
             generated_text = o.outputs[0].text
             assert generated_text, "Generated text is empty"
             print(generated_text)
-        os._exit(0)
+        return
 
     except Exception as exc:
         atexit.register(fail_on_exit)

@@ -139,6 +139,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 )
             else:
                 raise NotImplementedError("CPU MOE only supports x86 arch.")
+        if current_platform.is_hpu():
+            for expert_id in range(layer.local_num_experts):
+                layer.moe_op.w13_list[expert_id].set_weight(
+                    layer.w13_weight.data[expert_id])
+                layer.moe_op.w2_list[expert_id].set_weight(
+                    layer.w2_weight.data[expert_id])
 
     def apply(
         self,
@@ -270,6 +276,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         activation: str = "silu",
         **kwargs,
     ):
+        input_shape = x.shape
+        x = x.view(-1, x.shape[-1])
         if use_grouped_topk or custom_routing_function is not None:
             topk_weights, topk_ids = FusedMoE.select_experts(
                 hidden_states=x,
@@ -288,7 +296,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             topk_weights, topk_ids = torch.topk(topk_weights, top_k, dim=-1)
             topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
             topk_weights = topk_weights.to(x.dtype)
-
         topk_ids = topk_ids.view(*x.shape[:-1], -1)
         topk_weights = topk_weights.view(*x.shape[:-1], -1)
         return layer.moe_op(
@@ -296,8 +303,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             topk_ids.to(torch.int64),
             topk_weights.to(x.dtype),
             permuted_weights=True,
-            activation="silu",
-        )
+            activation=activation,
+        ).view(*input_shape)
 
     def forward_tpu(
         self,
@@ -626,7 +633,6 @@ class FusedMoE(torch.nn.Module):
                   tp_rank: int,
                   expert_id: Optional[int] = None):
 
-        orig_exp_data = expert_data.view(expert_data.size())
         # Index the loaded weight for tp sharding.
         # gate_up_proj: "MergedColumnParallel", so tp sharding on output_dim
         shard_size = expert_data.shape[shard_dim] // 2
@@ -641,9 +647,6 @@ class FusedMoE(torch.nn.Module):
             assert shard_id == "w3"
             expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
         expert_data.copy_(loaded_weight)
-
-        if is_hpu and isinstance(self.quant_method, UnquantizedFusedMoEMethod):
-            self.moe_op.w13_list[expert_id].set_weight(orig_exp_data)
 
     def _load_w2(self,
                  expert_data: torch.Tensor,
@@ -663,8 +666,6 @@ class FusedMoE(torch.nn.Module):
                                                  shard_size)
         # w2, down_proj: Load into only logical weight of w2.
         expert_data.copy_(loaded_weight)
-        if is_hpu and isinstance(self.quant_method, UnquantizedFusedMoEMethod):
-            self.moe_op.w2_list[expert_id].set_weight(expert_data)
 
     def _load_single_value(self, param: torch.nn.Parameter,
                            loaded_weight: torch.Tensor, expert_id: int):

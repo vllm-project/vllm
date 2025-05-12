@@ -202,6 +202,12 @@ stages:
           cd .jenkins/vision &&
           PT_HPU_LAZY_MODE=1 
           bash run-tests.sh -c configs/models-mss.txt -t 2
+      - name: multimodal_llama4_scout_g3_tp2_ep
+        flavor: g3.s
+        command: >-
+          cd .jenkins/vision &&
+          PT_HPU_LAZY_MODE=1
+          bash run-tests.sh -c configs/models-llama4-scout.txt -t 2
   - name: tests_int4_quantization
     steps:
       - name: test_awq

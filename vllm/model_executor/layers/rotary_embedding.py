@@ -108,7 +108,8 @@ class RotaryEmbedding(CustomOp):
         self.dtype = dtype
 
         cache = self._compute_cos_sin_cache()
-        cache = cache.to(dtype)
+        if dtype != 'auto':
+            cache = cache.to(dtype)
         self.cos_sin_cache: torch.Tensor
         self.register_buffer("cos_sin_cache", cache, persistent=False)
 
@@ -256,11 +257,11 @@ class RotaryEmbedding(CustomOp):
 
         # Prepare cos-sin caches for long-context + LoRA with offsets for every
         # forward, since the offset information wasn't available previously
+        if not hasattr(self, "sin") or self.recompute_cos_sin:
+            self.prepare_cos_sin(positions, offsets, recompute_cos_sin=True)
         if hasattr(self, "scaling_factors") or hasattr(
                 self, "scaling_factor") or self.sin is None:
             self.prepare_cos_sin(positions, offsets)
-        if self.recompute_cos_sin:
-            self.prepare_cos_sin(positions, offsets, recompute_cos_sin=True)
         num_tokens = positions.shape[0] * positions.shape[1]
         # HPU RoPE kernel requires hidden dimension for cos and sin to be equal
         # to query hidden dimension, so the original tensors need to be
@@ -995,11 +996,18 @@ class Llama4VisionRotaryEmbedding(RotaryEmbedding):
         freqs = torch.cat([freqs_x, freqs_y],
                           dim=-1).float().contiguous()[..., ::2]
         freqs = freqs.masked_fill(img_idx.reshape(-1, 1, 1) < 0, 0)
+        if current_platform.is_hpu():
+            # Compute cosine and sine for each angle.
+            cos_vals = torch.cos(freqs)
+            sin_vals = torch.sin(freqs)
+
+            cache = torch.concat([cos_vals, sin_vals], dim=-1)
+            return cache
         cache = torch.view_as_complex(
             torch.stack([torch.cos(freqs), torch.sin(freqs)], dim=-1))
         return cache
 
-    def forward(
+    def forward_cuda(  # type: ignore[override]
         self,
         query: torch.Tensor,
         key: torch.Tensor,
@@ -1016,6 +1024,56 @@ class Llama4VisionRotaryEmbedding(RotaryEmbedding):
         freqs_ci = self.cos_sin_cache.view(*broadcast_shape)
         query_out = torch.view_as_real(query_ * freqs_ci).flatten(3)
         key_out = torch.view_as_real(key_ * freqs_ci).flatten(3)
+        return query_out.type_as(query), key_out.type_as(key)
+
+    def forward_hpu(  # type: ignore[override]
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # Ensure the cache is on the right device.
+        self.cos_sin_cache = self.cos_sin_cache.to(query.device)
+        cos_cache, sin_cache = self.cos_sin_cache.chunk(2, dim=-1)
+        # shape: [577, 1, 44]
+
+        query_2d = query.float().reshape(*query.shape[:-1], -1, 2)
+        key_2d = key.float().reshape(*key.shape[:-1], -1, 2)
+        # e.g., [17, 577, 8, 44, 2]
+
+        # Reshape cos_cache and sin_cache to broadcast properly.
+        # We want them to have shape [1, 577, 1, 44] to match the
+        # query dimensions (except for the last two dims).
+        cos_cache = cos_cache.view(1, cos_cache.shape[0], 1,
+                                   cos_cache.shape[-1])
+        sin_cache = sin_cache.view(1, sin_cache.shape[0], 1,
+                                   sin_cache.shape[-1])
+        # e.g., [1, 577, 1, 44]
+
+        # Separate the real and imaginary parts.
+        q_real, q_imag = query_2d.unbind(-1)  # each: [17, 577, 8, 44]
+        k_real, k_imag = key_2d.unbind(-1)  # each: [17, 577, 8, 44]
+
+        # Manually apply the complex multiplication (rotation) using
+        # the trigonometric identities.
+        # For a complex multiplication: (a+ib)*(c+id) = (ac - bd) + i(ad + bc)
+        q_rotated_real = q_real * cos_cache - q_imag * sin_cache
+        q_rotated_imag = q_real * sin_cache + q_imag * cos_cache
+
+        k_rotated_real = k_real * cos_cache - k_imag * sin_cache
+        k_rotated_imag = k_real * sin_cache + k_imag * cos_cache
+
+        # Re-stack the rotated components into a last dimension of size 2.
+        q_rotated = torch.stack([q_rotated_real, q_rotated_imag],
+                                dim=-1)  # shape: [17, 577, 8, 44, 2]
+        k_rotated = torch.stack([k_rotated_real, k_rotated_imag],
+                                dim=-1)  # shape: [17, 577, 8, 44, 2]
+
+        # Flatten the last two dimensions to match the original output shape.
+        # Flatten back to the desired shape
+        # (e.g., collapse the last two dimensions).
+        query_out = q_rotated.flatten(3)
+        key_out = k_rotated.flatten(3)
+
         return query_out.type_as(query), key_out.type_as(key)
 
 

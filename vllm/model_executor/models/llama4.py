@@ -35,6 +35,7 @@ from vllm.model_executor.layers.linear import (QKVParallelLinear,
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.platforms import current_platform
 
 from .llama import LlamaForCausalLM, LlamaMLP, LlamaModel
 from .utils import (AutoWeightsLoader, extract_layer_index, fast_topk,
@@ -215,9 +216,10 @@ class Llama4Attention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        if current_platform.is_hpu():
+            B = hidden_states.shape[0]
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-
         if self.rotary_emb is not None:
             q, k = self.rotary_emb(positions, q, k)
         if self.qk_norm is not None:
@@ -237,6 +239,9 @@ class Llama4Attention(nn.Module):
         if self.attn_temperature_tuning and self.nope:
             attn_scale = self._get_attn_scale(positions)
             q = (q * attn_scale).to(q.dtype)
+        if current_platform.is_hpu():
+            q = q.view(B, -1, self.q_size)
+            k = k.view(B, -1, self.kv_size)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
@@ -258,7 +263,6 @@ class Llama4DecoderLayer(nn.Module):
         rope_theta = config.rope_theta
         rope_scaling = config.rope_scaling
         max_position_embeddings = config.max_position_embeddings
-
         self.self_attn = Llama4Attention(
             config=config,
             hidden_size=self.hidden_size,
