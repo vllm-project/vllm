@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import enum
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
+from vllm.distributed.kv_transfer.kv_connector.v1 import KVTransferParams
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
@@ -47,6 +48,13 @@ class Request:
             self.status = RequestStatus.WAITING_FOR_FSM
         self.events: list[EngineCoreEvent] = []
         self.stop_reason: Union[int, str, None] = None
+
+        # P/D: KV transfer parameters (raw and parsed).
+        self.raw_kv_transfer_params: Optional[dict[str, Any]] = None
+        # Each connector parses the raw dictionary and sets this
+        # attr the first time that the request is processed.
+        self.kv_transfer_params: Optional[KVTransferParams] = None
+
         if pooling_params is not None:
             self.max_tokens = 1
         elif sampling_params is not None:
@@ -54,6 +62,10 @@ class Request:
             self.max_tokens = sampling_params.max_tokens
             if sampling_params.guided_decoding is not None:
                 self.status = RequestStatus.WAITING_FOR_FSM
+
+            if sampling_params.extra_args is not None:
+                self.raw_kv_transfer_params = sampling_params.extra_args.get(
+                    "kv_transfer_params", None)
         else:
             raise ValueError(
                 "sampling_params and pooling_params can't both be set")
@@ -167,6 +179,7 @@ class RequestStatus(enum.IntEnum):
     """Status of a request."""
     WAITING = enum.auto()
     WAITING_FOR_FSM = enum.auto()
+    WAITING_FOR_REMOTE_KVS = enum.auto()
     RUNNING = enum.auto()
     PREEMPTED = enum.auto()
     # Note: anything after PREEMPTED will be considered

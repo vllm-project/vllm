@@ -100,15 +100,19 @@ class ModelRunnerOutput:
     # [prompt_len]
     prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]]
 
-    pooler_output: list[torch.Tensor]
+    # [req_ids]
+    finished_sending: Optional[set[str]] = None
+    finished_recving: Optional[set[str]] = None
+
+    pooler_output: list[torch.Tensor] = []
 
 
-EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
-    req_ids=[],
-    req_id_to_index={},
-    sampled_token_ids=[],
-    spec_token_ids=None,
-    logprobs=None,
-    prompt_logprobs_dict={},
-    pooler_output=[],
-)
+EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
+                                              req_id_to_index={},
+                                              sampled_token_ids=[],
+                                              spec_token_ids=None,
+                                              logprobs=None,
+                                              prompt_logprobs_dict={},
+                                              finished_sending=None,
+                                              finished_recving=None,
+                                              pooler_output=[])
