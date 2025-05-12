@@ -100,7 +100,8 @@ class WorkerLoRAManager(AbstractWorkerManager):
             lora_path = get_adapter_absolute_path(lora_request.lora_path)
 
             peft_helper = PEFTHelper.from_local_dir(
-                lora_path, self.max_position_embeddings, lora_request.tensorizer_config)
+                lora_path, self.max_position_embeddings,
+                lora_request.tensorizer_config)
 
             # Validates the LoRA configuration against requirements before
             # loading weights, throwing an exception if validation fails.

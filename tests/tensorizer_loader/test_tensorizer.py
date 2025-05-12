@@ -13,20 +13,15 @@ import pytest
 import torch
 from huggingface_hub import snapshot_download
 
-from vllm import SamplingParams, LLM
+from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.lora.request import LoRARequest
 # yapf conflicts with isort for this docstring
 # yapf: disable
 from vllm.model_executor.model_loader.tensorizer import (
-    TensorizerConfig,
-    TensorSerializer,
-    is_vllm_tensorized,
-    load_with_tensorizer,
-    open_stream,
-    serialize_vllm_model,
-    tensorize_vllm_model, tensorize_lora_adapter,
-)
+    TensorizerConfig, TensorSerializer, is_vllm_tensorized,
+    load_with_tensorizer, open_stream, serialize_vllm_model,
+    tensorize_lora_adapter, tensorize_vllm_model)
 # yapf: enable
 from vllm.utils import PlaceholderModule, import_from_path
 
@@ -370,7 +365,6 @@ def test_serialize_and_deserialize_lora(tmp_path):
     torch.cuda.empty_cache()
 
     tensorizer_config = TensorizerConfig(str(model_uri))
-
 
     loaded_vllm_model = LLM(model="meta-llama/Llama-2-7b-hf",
                             load_format="tensorizer",
