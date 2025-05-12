@@ -472,12 +472,14 @@ steps:
 
 - label: Language Models Test (Standard)
   mirror_hardwares: [amdexperimental]
+  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/language
   commands:
     # Install causal-conv1d for plamo2 models here, as it is not compatible with pip-compile.
     - pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8'
+    - pip freeze | grep -E 'torch'
     - pytest -v -s models/language -m core_model
 
 - label: Language Models Test (Extended)
@@ -493,11 +495,13 @@ steps:
 
 - label: Multi-Modal Models Test (Standard)
   mirror_hardwares: [amdexperimental]
+  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+    - pip freeze | grep -E 'torch'
     - pytest -v -s models/multimodal/processing
     - pytest -v -s --ignore models/multimodal/generation/test_whisper.py models/multimodal -m core_model
     - cd .. && pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
