@@ -159,7 +159,7 @@ class EagleProposer:
         self.positions[:num_tokens] = target_positions
         self.hidden_states[:num_tokens] = target_hidden_states
 
-        with set_forward_context(attn_metadata,
+        with set_forward_context(per_layer_attn_metadata,
                                  self.vllm_config,
                                  num_tokens=num_input_tokens):
             ret_hidden_states = self.model(
@@ -245,7 +245,7 @@ class EagleProposer:
             self.hidden_states[:batch_size] = hidden_states
 
             # Run the model.
-            with set_forward_context(attn_metadata,
+            with set_forward_context(per_layer_attn_metadata,
                                      self.vllm_config,
                                      num_tokens=input_batch_size):
                 last_hidden_states, hidden_states = self.model(
@@ -318,8 +318,8 @@ class EagleProposer:
         draft_attn_layer_names = (
             get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
             target_attn_layer_names)
-        assert len(draft_attn_layer_names) == 1
-        self.attn_layer_name = next(iter(draft_attn_layer_names))
+
+        self.attn_layer_names = list(draft_attn_layer_names)
 
         # share embed_tokens with the target model if needed
         if get_pp_group().world_size == 1:
