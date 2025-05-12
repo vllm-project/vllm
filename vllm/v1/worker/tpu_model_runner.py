@@ -619,7 +619,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # Indices at which we sample (positions of last token in the sequence).
         # Padded to avoid recompiling when `num_reqs` varies.
         logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
-        logger.info(f"check logits_indices in prepare inputs {logits_indices}")
         logits_indices = logits_indices.to(self.device)
 
         layer_names = get_layers_from_vllm_config(self.vllm_config,
@@ -818,11 +817,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 positions=self.position_ids,
                 inputs_embeds=inputs_embeds,
             )
-        logger.info(f"check hidden states {hidden_states}")
         hidden_states = self.select_hidden_states(hidden_states,
                                                   logits_indices)
-        logger.info(f"check logits_indices {logits_indices}")
-        logger.info(f"check selected hidden states {hidden_states}")
         logits = self.compute_logits(hidden_states)
         tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
             from_input_batch(self.input_batch, padded_num_reqs, self.device)
@@ -834,7 +830,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                                             arange)
         selected_token_ids = self.sample_from_logits_func(
             logits, tpu_sampling_metadata)
-        logger.info(f"check selected_token_ids {selected_token_ids}")
         # NOTE (NickLucche) Use the original logits (before any penalties or
         # temperature scaling) for the top-k logprobs. We can't enforce it due
         # to recompilations outside torch.compiled code, so just make sure
@@ -1301,7 +1296,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                     if self.use_spmd:
                         num_kv_heads = kv_cache_spec.num_kv_heads
                         assert self.original_parallel_config is not None
-                        tp_size = self.original_parallel_config.tensor_parallel_size
+                        tp_size = \
+                            self.original_parallel_config.tensor_parallel_size
                         # TODO: Handle kv cache duplication under SPMD mode.
                         assert num_kv_heads // tp_size > 0, (
                             f"num_kv_heads {num_kv_heads} must be divisible by "
