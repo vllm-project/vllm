@@ -221,7 +221,7 @@ class Processor:
             raise ValueError("V1 does not support prompt_adapter_request.")
 
         if arrival_time is None:
-            arrival_time = time.time()
+            arrival_time = time.monotonic()
 
         # Process inputs, which includes:
         # 1. Tokenize text prompt, with LoRA request if one exists.
