@@ -385,7 +385,11 @@ def rank_chunk(num, r, w):
 
 
 class BatchedDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
-
+    """
+    A reference dispatch/combine class that reorganizes the tokens into
+    expert batched format, i.e. E x max_num_tokens x K.  This is the format
+    that the PPLX dispatch/combine kernels use.
+    """
     def __init__(self, max_num_tokens: Optional[int], world_size: int,
                  dp_size: int, rank: int):
         super().__init__()
@@ -478,7 +482,11 @@ class BatchedDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
 
 
 class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
-
+    """
+    A reference MoE expert class that operates on expert batched format,
+    i.e. E x max_num_tokens x K.  This is the format that the pplx
+    dispatch/combine kernels use.
+    """
     def __init__(
         self,
         world_size: int,
@@ -580,7 +588,11 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
 
 class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
-
+    """
+    A Triton based MoE expert class that operates on expert batched format,
+    i.e. E x max_num_tokens x K.  This is the format that the pplx
+    dispatch/combine kernels use.
+    """
     def __init__(
         self,
         max_num_tokens: Optional[int] = None,
