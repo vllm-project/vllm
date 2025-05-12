@@ -14,8 +14,8 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+
 # need to import once to ensure the ops are registered
-import vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe
 # Check if aiter package is installed
 aiter_available = importlib.util.find_spec("aiter") is not None
 
@@ -44,36 +44,37 @@ def test_rocm_aiter_biased_grouped_topk_torch_compile_compatibility():
     renormalize = True
     scale_factor = 1.0
 
-    gating_output = torch.randn((token, expert), dtype=torch.bfloat16, device="cuda")
-    e_score_correction_bias = torch.randn((expert,), dtype=torch.bfloat16, device="cuda")
+    gating_output = torch.randn((token, expert),
+                                dtype=torch.bfloat16,
+                                device="cuda")
+    e_score_correction_bias = torch.randn((expert, ),
+                                          dtype=torch.bfloat16,
+                                          device="cuda")
 
     device = gating_output.device
     topk_ids = torch.empty((token, topk), dtype=torch.int32, device=device)
-    topk_weights = torch.empty((token, topk), dtype=torch.float32, device=device)
+    topk_weights = torch.empty((token, topk),
+                               dtype=torch.float32,
+                               device=device)
 
     # Define a function that uses the op
-    def biased_grouped_topk_fn(gating_output, e_score_correction_bias, topk_weights, topk_ids):
+    def biased_grouped_topk_fn(gating_output, e_score_correction_bias,
+                               topk_weights, topk_ids):
         return torch.ops.vllm.rocm_aiter_biased_grouped_topk(
-            gating_output,
-            e_score_correction_bias,
-            topk_weights,
-            topk_ids,
-            num_expert_group,
-            topk_group,
-            renormalize,
-            scale_factor
-        )
+            gating_output, e_score_correction_bias, topk_weights, topk_ids,
+            num_expert_group, topk_group, renormalize, scale_factor)
 
     # Verify the op's fake implementation
-    torch.library.opcheck(torch.ops.vllm.rocm_aiter_biased_grouped_topk,
-                          (gating_output, e_score_correction_bias, topk_weights, topk_ids),
-                          kwargs={
-                                "num_expert_group": num_expert_group,
-                                "topk_group": topk_group,
-                                "need_renorm": renormalize,
-                                "routed_scaling_factor": scale_factor
-                            },
-                          test_utils=("test_faketensor"))
+    torch.library.opcheck(
+        torch.ops.vllm.rocm_aiter_biased_grouped_topk,
+        (gating_output, e_score_correction_bias, topk_weights, topk_ids),
+        kwargs={
+            "num_expert_group": num_expert_group,
+            "topk_group": topk_group,
+            "need_renorm": renormalize,
+            "routed_scaling_factor": scale_factor
+        },
+        test_utils=("test_faketensor"))
 
     # Compile the function with appropriate settings
     compiled_fn = torch.compile(biased_grouped_topk_fn,
@@ -82,24 +83,38 @@ def test_rocm_aiter_biased_grouped_topk_torch_compile_compatibility():
                                 mode="reduce-overhead",
                                 dynamic=False)
 
-    # Create new output tensors for each run to avoid in-place modification issues
-    topk_weights_original = torch.empty((token, topk), dtype=torch.float32, device=device)
-    topk_ids_original = torch.empty((token, topk), dtype=torch.int32, device=device)
+    topk_weights_original = torch.empty((token, topk),
+                                        dtype=torch.float32,
+                                        device=device)
+    topk_ids_original = torch.empty((token, topk),
+                                    dtype=torch.int32,
+                                    device=device)
 
-    topk_weights_compiled = torch.empty((token, topk), dtype=torch.float32, device=device)
-    topk_ids_compiled = torch.empty((token, topk), dtype=torch.int32, device=device)
+    topk_weights_compiled = torch.empty((token, topk),
+                                        dtype=torch.float32,
+                                        device=device)
+    topk_ids_compiled = torch.empty((token, topk),
+                                    dtype=torch.int32,
+                                    device=device)
 
     # Run both compiled (V1 graph mode) and uncompiled versions (V1 eager mode)
-    biased_grouped_topk_fn(gating_output, e_score_correction_bias, topk_weights_original, topk_ids_original)
-    compiled_fn(gating_output, e_score_correction_bias, topk_weights_compiled, topk_ids_compiled)
+    biased_grouped_topk_fn(gating_output, e_score_correction_bias,
+                           topk_weights_original, topk_ids_original)
+    compiled_fn(gating_output, e_score_correction_bias, topk_weights_compiled,
+                topk_ids_compiled)
 
     # Sort the results for comparison since the order might not be deterministic
     topk_ids_original, indices_original = torch.sort(topk_ids_original)
-    topk_weights_original = torch.gather(topk_weights_original, 1, indices_original)
+    topk_weights_original = torch.gather(topk_weights_original, 1,
+                                         indices_original)
 
     topk_ids_compiled, indices_compiled = torch.sort(topk_ids_compiled)
-    topk_weights_compiled = torch.gather(topk_weights_compiled, 1, indices_compiled)
+    topk_weights_compiled = torch.gather(topk_weights_compiled, 1,
+                                         indices_compiled)
 
     # Verify results match
-    assert torch.allclose(topk_weights_original, topk_weights_compiled, rtol=1e-2, atol=1e-2)
+    assert torch.allclose(topk_weights_original,
+                          topk_weights_compiled,
+                          rtol=1e-2,
+                          atol=1e-2)
     assert torch.allclose(topk_ids_original, topk_ids_compiled)
