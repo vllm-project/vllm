@@ -49,6 +49,12 @@ if is_rocm_aiter_rmsnorm_enabled():
                                  variance_epsilon: float) -> torch.Tensor:
 
         import aiter as rocm_aiter
+        if x.dim() > 2:
+            x_original_shape = x.shape
+            x = x.reshape(-1, x_original_shape[-1])
+            x = rocm_aiter.rms_norm(x, weight, variance_epsilon)
+            return x.reshape(x_original_shape)
+
         return rocm_aiter.rms_norm(x, weight, variance_epsilon)
 
     def rocm_aiter_rms_norm_fake(input: torch.Tensor, weight: torch.Tensor,
@@ -68,29 +74,26 @@ if is_rocm_aiter_rmsnorm_enabled():
         rocm_aiter_rms_norm = rocm_aiter_rms_norm_impl
 
     def rocm_aiter_fused_add_rms_norm_impl(
-            input: torch.Tensor, residual_in: torch.Tensor,
-            weight: torch.Tensor,
+            x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
             variance_epsilon: float) -> Tuple[torch.Tensor, torch.Tensor]:
 
         import aiter as rocm_aiter
-        residual_out = torch.empty_like(residual_in)
-        output = torch.empty_like(input)
+        residual_out = torch.empty_like(residual)
+        output = torch.empty_like(x)
         rocm_aiter.rmsnorm2d_fwd_with_add(
             output,  # output
-            input,  # input
-            residual_in,  # residual input
+            x,  # input
+            residual,  # residual input
             residual_out,  # residual output
             weight,
             variance_epsilon,
         )
-
         return output, residual_out
 
     def rocm_aiter_fused_add_rms_norm_fake(
-            input: torch.Tensor, residual_in: torch.Tensor,
-            weight: torch.Tensor,
+            x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
             variance_epsilon: float) -> Tuple[torch.Tensor, torch.Tensor]:
-        return input.clone(), residual_in.clone()
+        return x.clone(), residual.clone()
 
     try:
         direct_register_custom_op(
