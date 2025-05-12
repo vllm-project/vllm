@@ -336,6 +336,12 @@ class OpenAIServing:
                     lora_request=ctx.lora_request,
                     prompt_adapter_request=ctx.prompt_adapter_request)
 
+                # Mypy has an existing bug related to inferring the variance of
+                # TypedDicts with `builtins.enumerate`:
+                # https://github.com/python/mypy/issues/8586#issuecomment-2867698435
+                engine_prompt = cast(
+                    Union[EngineTokensPrompt, EngineEmbedsPrompt],
+                    engine_prompt)
                 generator = self.engine_client.encode(
                     engine_prompt,
                     pooling_params,
