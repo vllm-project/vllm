@@ -71,4 +71,4 @@ def test_edge_cases():
                                                    temperature=0)
     prefill_response = completion.choices[0].text
     print(f"PARTIAL CACHE HIT: {proxy_response=}")
-    assert proxy_response == decode_response
+    assert proxy_response == prefill_response
