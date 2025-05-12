@@ -77,7 +77,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # can be useful for both `dev` and `test`
 # explicitly set the list to avoid issues with torch 2.2
 # see https://github.com/pytorch/pytorch/pull/123243
-ARG torch_cuda_arch_list='7.0 7.5 8.0 8.6 8.9 9.0+PTX'
+ARG torch_cuda_arch_list='7.0 7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 # Override the arch list for flash-attn to reduce the binary size
 ARG vllm_fa_cmake_gpu_arches='80-real;90-real'
@@ -149,7 +149,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 # Check the size of the wheel if RUN_WHEEL_CHECK is true
 COPY .buildkite/check-wheel-size.py check-wheel-size.py
 # sync the default value with .buildkite/check-wheel-size.py
-ARG VLLM_MAX_SIZE_MB=400
+ARG VLLM_MAX_SIZE_MB=500
 ENV VLLM_MAX_SIZE_MB=$VLLM_MAX_SIZE_MB
 ARG RUN_WHEEL_CHECK=true
 RUN if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
@@ -196,7 +196,7 @@ RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
     && apt-get update -y \
-    && apt-get install -y ccache software-properties-common git curl wget sudo vim python3-pip \
+    && apt-get install -y ccache software-properties-common git curl wget sudo vim \
     && apt-get install -y ffmpeg libsm6 libxext6 libgl1 \
     && for i in 1 2 3; do \
         add-apt-repository -y ppa:deadsnakes/ppa && break || \
@@ -243,7 +243,7 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 # If we need to build FlashInfer wheel before its release:
 # $ export FLASHINFER_ENABLE_AOT=1
 # $ # Note we remove 7.0 from the arch list compared to the list below, since FlashInfer only supports sm75+
-# $ export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.6 8.9 9.0+PTX'
+# $ export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX'
 # $ git clone https://github.com/flashinfer-ai/flashinfer.git --recursive
 # $ cd flashinfer
 # $ git checkout 524304395bd1d8cd7d07db083859523fcaa246a4
@@ -256,7 +256,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 . /etc/environment && \
 if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
     # TESTING: install FlashInfer from source to test 2.7.0 final RC
-    FLASHINFER_ENABLE_AOT=1 TORCH_CUDA_ARCH_LIST='7.5 8.0 8.6 8.9 9.0+PTX' \
+    FLASHINFER_ENABLE_AOT=1 TORCH_CUDA_ARCH_LIST='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX' \
     uv pip install --system --no-build-isolation "git+https://github.com/flashinfer-ai/flashinfer@v0.2.2.post1" ; \
 fi
 COPY examples examples
