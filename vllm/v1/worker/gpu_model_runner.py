@@ -1191,7 +1191,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             == "external_launcher" and len(get_pp_group().ranks) > 0:
             model_output_broadcast_data = get_pp_group().broadcast_tensor_dict(
                 model_output_broadcast_data, src=last_rank_in_group)
-            assert model_output_broadcast_data is not None
+        assert model_output_broadcast_data is not None
         logits = model_output_broadcast_data["logits"]
 
         # Apply structured output bitmasks if present
