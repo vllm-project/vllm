@@ -1059,6 +1059,13 @@ Specified using `--task generate`.
   * ✅︎
   *
   * ✅︎
+- * `Phi4MultimodalForCausalLM`
+  * Phi-4-multimodal
+  * T + I<sup>+</sup> / T + A<sup>+</sup> / I<sup>+</sup> + A<sup>+</sup>
+  * `microsoft/Phi-4-multimodal-instruct-hf`, etc.
+  * ✅︎
+  *
+  * ✅︎
 - * `PixtralForConditionalGeneration`
   * Pixtral
   * T + I<sup>+</sup>
