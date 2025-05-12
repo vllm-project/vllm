@@ -110,7 +110,6 @@ class RequestProcessingMixin(BaseModel):
     Mixin for request processing, 
     handling prompt preparation and engine input.
     """
-    # Pydantic base models handle mutable defaults correctly
     request_prompts: Optional[Sequence[RequestPrompt]] = []
     engine_prompts: Optional[list[TokensPrompt]] = []
 
