@@ -335,7 +335,9 @@ class Scheduler(SchedulerInterface):
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
             # Sort waiting queue to prioritize probes
-            self.waiting = deque(sorted(self.waiting, key=lambda r: 0 if "probe" in r.request_id else 1))
+            # self.waiting = deque(sorted(self.waiting, key=lambda r: 0 if "probe" in r.request_id else 1))
+            self.waiting = deque(sorted(self.waiting,key=lambda r: (0 if "probe" in r.request_id else 1, getattr(r, "priority", 0))))
+
 
             while self.waiting and token_budget > 0:
                 if len(self.running) == self.max_num_running_reqs:
@@ -716,7 +718,9 @@ class Scheduler(SchedulerInterface):
         # NOTE(woosuk): As len(self.running) can be up to 1K or more, the below
         # loop can be a performance bottleneck. We should do our best to avoid
         # expensive operations inside the loop.
-        self.running = deque(sorted(self.running, key=lambda r: 0 if "probe" in r.request_id else 1))
+        # self.running = deque(sorted(self.running, key=lambda r: 0 if "probe" in r.request_id else 1))
+        self.running = deque(sorted(self.running, key=lambda r: (0 if "probe" in r.request_id else 1, getattr(r, "priority", 0))))
+
        
         for request in self.running:
             if self.enable_dynasor_abort:

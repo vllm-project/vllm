@@ -5,12 +5,17 @@ from vllm import LLM, SamplingParams
 
 # ---- Extract boxed answer ----
 import re
-def extract_final_answer(text: str):
-    match = re.search(r"([^\s{}\\]+)}\s*\\\]", text)
+from typing import Optional
+def extract_final_answer(text: str) -> Optional[str]:
+    match = re.search(r"\\boxed\{(.*?)\}", text)
     if match:
         return match.group(1).strip()
     return None
-
+def extract_gsm8k_answer(text: str) -> Optional[str]:
+    match = re.search(r"####\s*([^\n]+)", text)
+    if match:
+        return match.group(1).strip()
+    return None
 
 NUM_QUESTIONS = 15
 sampling_params = SamplingParams(
@@ -20,28 +25,16 @@ sampling_params = SamplingParams(
 )
 
 scheduler_settings = [
-    {"policy": 0, "speculative": None, "early_exit": False},
-    {"policy": 0, "speculative": None, "early_exit": True},
-    {"policy": 1, "speculative": None, "early_exit": False},
-    {"policy": 1, "speculative": None, "early_exit": True},
-    {"policy": 0, "speculative": {
-        "num_speculative_tokens": 5  
-    }, "early_exit": False},
-    {"policy": 0, "speculative": {
-        "num_speculative_tokens": 5  
-    }, "early_exit": True},
-    {"policy": 1, "speculative": {
-        "num_speculative_tokens": 5  
-    }, "early_exit": False},
-    {"policy": 1, "speculative": {
-        "num_speculative_tokens": 5  
-    }, "early_exit": True},
+    {"speculative": None, "early_exit": False},
+    {"speculative": None, "early_exit": True},
+    {"speculative": {"num_speculative_tokens": 5}, "early_exit": False},
+    {"speculative": {"num_speculative_tokens": 5}, "early_exit": True},
 ]
 
 # ---- Load dataset ----
 ds = load_dataset("openai/gsm8k", "main", split="test")
 sample_ds = ds.select(range(NUM_QUESTIONS))
-questions_df = pd.DataFrame({"qid": list(range(NUM_QUESTIONS)), "question": sample_ds["question"]})
+questions_df = pd.DataFrame({"qid": list(range(NUM_QUESTIONS)), "question": sample_ds["question"], "answer": sample_ds["answer"]})
 
 # ---- Run experiments ----
 all_results = []
@@ -54,7 +47,6 @@ for setting in scheduler_settings:
             enable_prefix_caching=True,
             trust_remote_code=True,
             max_model_len=2048,
-            scheduling_policy =setting['policy'],
             speculative_config=setting["speculative"],
             enable_early_exit_reasoning_model=setting["early_exit"],
         )
@@ -76,8 +68,9 @@ Answer:"""
 
             all_results.append({
                 "qid": row.qid,
-                "scheduler_policy": setting["policy"],
-                "speculative": setting["speculative"],
+                "question": row.question,
+                "answer": extract_gsm8k_answer(row.answer),
+                "speculative_config": setting["speculative"],
                 "early_exit": setting["early_exit"],
                 "duration": duration,
                 "num_input_tokens": len(outputs[0].prompt_token_ids),
@@ -90,26 +83,3 @@ Answer:"""
 results_df = pd.DataFrame(all_results)
 results_df.to_csv("gsm8k_scheduler_eval.csv", index=False)
 print("Saved results to gsm8k_scheduler_eval.csv")
-
-# ---- Plotting ----
-import matplotlib.pyplot as plt
-import seaborn as sns
-
-plt.figure(figsize=(10, 6))
-sns.boxplot(data=results_df, x="scheduler_policy", y="num_decoded_tokens", hue="early_exit")
-plt.title("Decoded Token Count by Scheduler Policy (Early Exit vs Not)")
-plt.ylabel("# of Decoded Tokens")
-plt.xlabel("Scheduler Policy")
-plt.grid(True)
-plt.tight_layout()
-plt.savefig("token_count_boxplot.png")
-print("Saved chart to token_count_boxplot.png")
-
-plt.figure(figsize=(10, 6))
-sns.histplot(data=results_df[results_df.early_exit == True],
-             x="boxed_answer", hue="scheduler_policy", multiple="stack", shrink=0.8)
-plt.title("Final Boxed Answers Distribution (Early Exit Only)")
-plt.xticks(rotation=45)
-plt.tight_layout()
-plt.savefig("boxed_answer_histogram.png")
-print("Saved chart to boxed_answer_histogram.png")
