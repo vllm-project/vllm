@@ -99,35 +99,34 @@ class XlaQKVParallelLinear(nn.Module):
         return qkv_proj, output_bias
 
 
-def wrap_column_parallel_linear(layer: torch.nn.Module,
-                                mesh) -> torch.nn.Module:
+def partition_column_parallel_linear(layer: torch.nn.Module,
+                                     mesh: xs.Mesh) -> torch.nn.Module:
     assert isinstance(layer, ColumnParallelLinear)
     xs.mark_sharding(layer.weight, mesh, ('x', None))
-    logger.info(f"Applied column-parallel sharding to {layer}")
+    logger.debug(f"Applied column-parallel sharding to {layer}")
     return layer
 
 
-def wrap_row_parallel_linear(layer: torch.nn.Module, mesh) -> torch.nn.Module:
-    assert isinstance(
-        layer,
-        RowParallelLinear)  # Fixed: was checking for ColumnParallelLinear
+def partition_row_parallel_linear(layer: torch.nn.Module,
+                                  mesh: xs.Mesh) -> torch.nn.Module:
+    assert isinstance(layer, RowParallelLinear)
     xs.mark_sharding(layer.weight, mesh, (None, 'x'))
-    logger.info(f"Applied row-parallel sharding to {layer}")
+    logger.debug(f"Applied row-parallel sharding to {layer}")
     return layer
 
 
-def wrap_qkv_parallel_linear(layer: torch.nn.Module, mesh) -> torch.nn.Module:
-    # TODO: Should use FQN to check class type.
+def partition_qkv_parallel_linear(layer: torch.nn.Module,
+                                  mesh: xs.Mesh) -> torch.nn.Module:
     assert isinstance(layer, QKVParallelLinear)
     xla_layer = XlaQKVParallelLinear(layer, mesh)
-    logger.info(f"Applied qkv parallel sharding to {layer}")
+    logger.debug(f"Applied qkv parallel sharding to {layer}")
     return xla_layer
 
 
 MODULE_TYPE_TO_WRAPPING_FUNC = OrderedDict([
-    ("QKVParallelLinear", wrap_qkv_parallel_linear),
-    ("ColumnParallelLinear", wrap_column_parallel_linear),
-    ("RowParallelLinear", wrap_row_parallel_linear),
+    ("QKVParallelLinear", partition_qkv_parallel_linear),
+    ("ColumnParallelLinear", partition_column_parallel_linear),
+    ("RowParallelLinear", partition_row_parallel_linear),
 ])
 
 
@@ -142,7 +141,7 @@ def shard_model(model: torch.nn.Module, mesh: "xs.Mesh") -> None:
     the MODULE_TYPE_TO_WRAPPING_FUNC mapping.
     
     Args:
-        model: The PyTorch model to process
+        model: torch.nn.Module to process
         mesh: An XLA SPMD mesh object used for sharding
     """
 
@@ -158,7 +157,7 @@ def shard_model(model: torch.nn.Module, mesh: "xs.Mesh") -> None:
                         # Wrapped module and module are different py object.
                         # The original module should be replaced by the
                         # wrapped_module.
-                        logger.info(f"replace {module} with {wrapped_module}")
+                        logger.debug(f"replace {module} with {wrapped_module}")
                         setattr(parent, name, wrapped_module)
 
                 module = wrapped_module

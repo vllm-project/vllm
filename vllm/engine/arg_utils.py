@@ -286,7 +286,6 @@ class EngineArgs:
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     max_parallel_loading_workers: Optional[
         int] = ParallelConfig.max_parallel_loading_workers
-    single_worker: bool = ParallelConfig.single_worker
     block_size: Optional[BlockSize] = CacheConfig.block_size
     enable_prefix_caching: Optional[bool] = CacheConfig.enable_prefix_caching
     prefix_caching_hash_algo: PrefixCachingHashAlgo = \
@@ -609,8 +608,6 @@ class EngineArgs:
         parallel_group.add_argument(
             "--disable-custom-all-reduce",
             **parallel_kwargs["disable_custom_all_reduce"])
-        parallel_group.add_argument('--single-worker', '-sw',
-                                    **parallel_kwargs["single_worker"])
         parallel_group.add_argument("--worker-cls",
                                     **parallel_kwargs["worker_cls"])
         parallel_group.add_argument("--worker-extension-cls",
@@ -1023,7 +1020,6 @@ class EngineArgs:
             distributed_executor_backend=self.distributed_executor_backend,
             worker_cls=self.worker_cls,
             worker_extension_cls=self.worker_extension_cls,
-            single_worker=self.single_worker,
         )
 
         speculative_config = self.create_speculative_config(

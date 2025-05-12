@@ -48,8 +48,7 @@ def _make_synced_weight_loader(original_weight_loader):
 
     def _synced_weight_loader(param, *args, **kwargs):
         original_weight_loader(param, *args, **kwargs)
-        # print(f"check param device and dtype {param.device}, {param.dtype}")
-        # not working for cpu tensor
+        # torch._sync doesn't support, is not needed for CPU tensors.
         if param.device != torch.device("cpu"):
             torch._sync(param)
 

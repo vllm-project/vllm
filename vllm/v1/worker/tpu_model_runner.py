@@ -18,7 +18,7 @@ import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import ParallelConfig, VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
@@ -99,6 +99,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self,
         vllm_config: VllmConfig,
         device: torch.device,
+        original_parallel_config: Optional[ParallelConfig] = None,
     ):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -106,6 +107,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self.lora_config = vllm_config.lora_config
         self.load_config = vllm_config.load_config
         self.parallel_config = vllm_config.parallel_config
+        self.original_parallel_config = original_parallel_config
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
@@ -120,7 +122,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self.check_recompilation = envs.VLLM_XLA_CHECK_RECOMPILATION
 
         # SPMD Related
-        self.use_spmd = parallel_config.single_worker
+        self.use_spmd = envs.VLLM_XLA_USE_SPMD
         if self.use_spmd:
             num_devices = xr.global_runtime_device_count()
             mesh_shape = (num_devices, 1)
@@ -935,7 +937,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             if self.use_spmd:
                 tpu_loader = TPUModelLoader(
                     load_config=self.vllm_config.load_config)
-                model = tpu_loader.load_model(self.vllm_config, self.mesh)
+                model = tpu_loader.load_model(self.mesh,
+                                              vllm_config=self.vllm_config)
             else:
                 model = get_model(vllm_config=self.vllm_config)
         if self.lora_config is not None:
@@ -1075,8 +1078,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
     def _precompile_backbone(self) -> None:
         logger.info("Compiling the model with different input shapes.")
         start = time.perf_counter()
-        xm.mark_step()
-        xm.wait_device_ops()
         for num_tokens in self.num_tokens_paddings:
             logger.info("  -- num_tokens: %d", num_tokens)
             self._dummy_run(num_tokens)
@@ -1275,12 +1276,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
-
-        # logger.info("before init kv cache, clear pending ops")
-        # xm.mark_step()
-        # xm.wait_device_ops()
-        # logger.info("start init kv cache")
-
         if len(kv_cache_config.kv_cache_groups) > 1:
             raise NotImplementedError(
                 "Hybrid models with more than one KV cache type are not "
@@ -1290,19 +1285,19 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             kv_cache_spec = kv_cache_group.kv_cache_spec
-            if self.use_spmd:
-                num_kv_heads = kv_cache_spec.num_kv_heads
-                # For now we assume all axes are used for TP.
-                tp_size = self.mesh.size()
-                # TODO: Handle kv cache duplication under SPMD mode.
-                assert num_kv_heads // tp_size > 0, (
-                    f"num_kv_heads {num_kv_heads} must be divisible by "
-                    f"tp_size {tp_size} under SPMD mode")
             for layer_name in kv_cache_group.layer_names:
                 tensor_config = kv_cache_config.tensors[layer_name]
                 assert tensor_config.size % kv_cache_spec.page_size_bytes == 0
                 num_blocks = tensor_config.size // kv_cache_spec.page_size_bytes
                 if isinstance(kv_cache_spec, AttentionSpec):
+                    if self.use_spmd:
+                        num_kv_heads = kv_cache_spec.num_kv_heads
+                        assert self.original_parallel_config is not None
+                        tp_size = self.original_parallel_config.tensor_parallel_size
+                        # TODO: Handle kv cache duplication under SPMD mode.
+                        assert num_kv_heads // tp_size > 0, (
+                            f"num_kv_heads {num_kv_heads} must be divisible by "
+                            f"tp_size {tp_size} under SPMD mode")
                     kv_cache_shape = PallasAttentionBackend.get_kv_cache_shape(
                         num_blocks, kv_cache_spec.block_size,
                         kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
@@ -1325,11 +1320,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             for cache in self.kv_caches:
                 xs.mark_sharding(cache, self.mesh, (None, 'x', None, None))
 
-        logger.info(
-            f"check kv cache len {len(self.kv_caches)}, shape {self.kv_caches[0].shape}"
-        )
-        logger.info("end init kv cache")
-
     def reset_dynamo_cache(self):
         if self.is_multimodal_model:
             compiled_model = self.model.get_language_model().model
@@ -1340,8 +1330,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             torch._dynamo.eval_frame.remove_from_cache(
                 compiled_model.original_code_object)
             compiled_model.compiled_codes.clear()
-        else:
-            logger.info("Do not need to clear dynamo cache.")
 
     @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def select_hidden_states(self, hidden_states, indices_do_sample):

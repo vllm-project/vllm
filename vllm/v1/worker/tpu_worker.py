@@ -38,9 +38,6 @@ class TPUWorker:
         distributed_init_method: str,
         is_driver_worker: bool = False,
     ):
-        import traceback
-        logger.info("TPUWorker init")
-        logger.info("TPUWorker init stack trace: %s", traceback.print_stack())
         self.is_driver_worker = is_driver_worker
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -48,8 +45,12 @@ class TPUWorker:
         self.lora_config = vllm_config.lora_config
         self.load_config = vllm_config.load_config
         self.parallel_config = vllm_config.parallel_config
-        self.use_spmd = envs.VLLM_USE_SINGLE_WORKER
+        self.use_spmd = envs.VLLM_XLA_USE_SPMD
+        self.original_parallel_config = None
         if self.use_spmd:
+            # Under SPMD mode, distributed env is initialized as if there is
+            # only one worker/device.
+            self.original_parallel_config = self.parallel_config
             self.parallel_config.tensor_parallel_size = 1
             self.parallel_config.pipeline_parallel_size = 1
             self.parallel_config.world_size = 1
@@ -108,9 +109,7 @@ class TPUWorker:
 
         # Initialize the distributed environment.
         self._init_tpu_worker_distributed_environment(
-            self.parallel_config,
-            self.rank,
-            self.distributed_init_method,
+            self.parallel_config, self.rank, self.distributed_init_method,
             self.local_rank)
 
         # Device initialization should happen after initializing
@@ -145,7 +144,9 @@ class TPUWorker:
             xr.initialize_cache(per_rank_path, readonly=False)
 
         # Init ModelRunner here, so that we have access to self.device.
-        self.model_runner = TPUModelRunner(self.vllm_config, self.device)
+        self.model_runner = \
+            TPUModelRunner(self.vllm_config, self.device,
+                           self.original_parallel_config)
 
         if rank == 0:
             # If usage stat is enabled, collect relevant info.
@@ -176,7 +177,6 @@ class TPUWorker:
         self.model_runner.profile_run(self.model_runner.max_num_tokens)
 
         # Synchronize before measuring the memory usage.
-        xm.mark_step()
         xm.wait_device_ops()
 
         # During the profiling run, the model runs without KV cache. After
@@ -189,7 +189,6 @@ class TPUWorker:
 
         # Get the maximum amount of memory used by the model weights and
         # intermediate activations.
-        # Doesn't work with SPMD
         if self.use_spmd:
             # This is a workaround for the TPU SPMD mode. The get_memory_info
             # API doesn't work with SPMD mode in PyTorch/XLA.
@@ -216,7 +215,6 @@ class TPUWorker:
                                  self.cache_config.gpu_memory_utilization)
         tpu_kv_cache_bytes = max(usable_memory_size - profiled, 0)
 
-        logger.info("after profiling run")
         return int(tpu_kv_cache_bytes)
 
     def execute_model(
@@ -265,7 +263,6 @@ class TPUWorker:
         # worker will always be healthy as long as it's running.
         return
 
-
     def _init_tpu_worker_distributed_environment(
         self,
         parallel_config: ParallelConfig,
@@ -287,5 +284,6 @@ class TPUWorker:
             distributed_init_method=distributed_init_method,
             backend="gloo",
         )
-        ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
-                                        parallel_config.pipeline_parallel_size)
+        ensure_model_parallel_initialized(
+            parallel_config.tensor_parallel_size,
+            parallel_config.pipeline_parallel_size)

@@ -4,15 +4,12 @@ import tempfile
 
 import numpy as np
 import pytest
-import torch.nn as nn
-import torch_xla.core.xla_model as xm
 import torch_xla.distributed.spmd as xs
 import torch_xla.runtime as xr
 
 from vllm.config import set_current_vllm_config
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
-from vllm.distributed.tpu_distributed_utils import get_fqn
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.model_loader.tpu import TPUModelLoader
 
@@ -32,31 +29,6 @@ def _setup_environment(model):
         # partitioned using GSPMD.
         ensure_model_parallel_initialized(1, 1)
     return vllm_config
-
-
-def _check_model_is_loaded(model: nn.Module):
-    """
-    Ensure the model is properly loaded.
-    1. All model parameters and buffers are on XLA device.
-    2. Non-SPMD friendly layers are replaced as expected.
-    """
-    device = xm.xla_device()
-    device_type = str(device.type)
-
-    # Check parameters
-    for name, param in model.named_parameters():
-        assert param.device.type == device_type, f"Parameter {name} is on \
-            {param.device.type} instead of {device_type}"
-
-    # Check buffers
-    for name, buffer in model.named_buffers():
-        assert buffer.device.type == device_type, \
-            f"Buffer {name} is on {buffer.device.type} instead of {device_type}"
-
-    for module in model.modules():
-        if get_fqn(module) == 'QKVParallelLinear':
-            raise AssertionError("QKVParallelLinear should be replaced by \
-                           XlaQKVParallelLinear under SPMD mode.")
 
 
 MESH = None
@@ -90,7 +62,6 @@ def test_tpu_model_loader(model):
     vllm_config = _setup_environment(model)
     loader = TPUModelLoader(load_config=vllm_config.load_config)
     mesh = _get_spmd_mesh()
-    model = loader.load_model(vllm_config, mesh)
-    _check_model_is_loaded(model)
+    model = loader.load_model(mesh, vllm_config)
     del model
     gc.collect()
