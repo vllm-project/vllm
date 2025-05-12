@@ -622,13 +622,12 @@ class DPEngineCoreProc(EngineCoreProc):
         assert 0 <= local_dp_rank <= dp_rank < dp_size
 
         from vllm.platforms import current_platform
-        if current_platform.is_cuda_alike():
-            from vllm.platforms.cuda import device_id_to_physical_device_id
-            tp_size = vllm_config.parallel_config.tensor_parallel_size
-            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
-                str(device_id_to_physical_device_id(i))
-                for i in range(local_dp_rank * tp_size, (local_dp_rank + 1) *
-                               tp_size))
+        device_control_env_var = current_platform.device_control_env_var
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
+        os.environ[device_control_env_var] = ",".join(
+            str(current_platform.device_id_to_physical_device_id(i))
+            for i in range(local_dp_rank * tp_size, (local_dp_rank + 1) *
+                           tp_size))
 
         self.local_dp_rank = local_dp_rank
         self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
