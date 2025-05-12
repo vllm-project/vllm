@@ -164,6 +164,60 @@ class CoreEngineProcManager:
         }
 
 
+class CoreEngineActorManager(CoreEngineProcManager):
+    def __init__(
+        self,
+        target_fn: Callable,
+        local_engine_count: int,
+        start_index: int,
+        local_start_index: int,
+        vllm_config: VllmConfig,
+        on_head_node: bool,
+        input_address: str,
+        executor_class: type[Executor],
+        log_stats: bool,
+    ):
+        self.local_engine_actors = []
+        self.remote_engine_actors = []
+
+        # NOTE(rui): the key difference here for Ray is that we start
+        # not only local engines, but also remote engines.
+        # FIXME(rui):
+        # 1) use correct parameters to start the actors
+        # 2) use proper placement strategy (pick local node and remote nodes)
+
+        import ray
+        from vllm.v1.engine.core import EngineCoreActor
+        for index in range(local_engine_count):
+            local_index = local_start_index + index
+            global_index = start_index + index
+            self.local_engine_actors.append(
+                ray.remote(EngineCoreActor).remote(
+                    #name=f"EngineCore_{global_index}",
+                    vllm_config=vllm_config,
+                    executor_class=executor_class,
+                    log_stats=log_stats,
+                    input_address=input_address,
+                    on_head_node=True,
+                    engine_index=global_index,
+                    dp_rank=global_index,
+                    local_dp_rank=local_index)
+            )
+        dp_size = vllm_config.parallel_config.data_parallel_size
+        for index in range(dp_size - local_engine_count):
+            self.remote_engine_actors.append(
+                ray.remote(EngineCoreActor).remote(
+                    vllm_config=vllm_config,
+                    executor_class=executor_class,
+                    log_stats=log_stats,
+                    input_address=input_address,
+                    on_head_node=False,
+                    engine_index=global_index,
+                    dp_rank=global_index,
+                    local_dp_rank=local_index)
+                )
+        
+
 # Note(rob): shutdown function cannot be a bound method,
 # else the gc cannot collect the objedecoupct.
 def shutdown(procs: list[Process], input_address: str):

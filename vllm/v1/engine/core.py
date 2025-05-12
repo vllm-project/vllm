@@ -792,3 +792,149 @@ class DPEngineCoreProc(EngineCoreProc):
 
         return ParallelConfig.has_unfinished_dp(self.dp_group,
                                                 local_unfinished)
+
+class EngineCoreActor(DPEngineCoreProc):
+    """Actor for running EngineCore."""
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        on_head_node: bool,
+        input_address: str,
+        executor_class: type[Executor],
+        log_stats: bool,
+        engine_index: int = 0,
+        dp_rank: int = 0,
+        local_dp_rank: int = 0,
+    ):
+        if on_head_node:
+            logger.info("EngineCoreActor on head node")
+        else:
+            logger.info("EngineCoreActor on worker node")
+
+        # Signal handler used for graceful termination.
+        # SystemExit exception is only raised once to allow this and worker
+        # processes to terminate without error
+        shutdown_requested = False
+
+        # Ensure we can serialize transformer config after spawning
+        maybe_register_config_serialize_by_value()
+
+        # FIXME(rui): adapt for Ray
+        # def signal_handler(signum, frame):
+        #     nonlocal shutdown_requested
+        #     if not shutdown_requested:
+        #         shutdown_requested = True
+        #         raise SystemExit()
+
+        # # Either SIGTERM or SIGINT will terminate the engine_core
+        # signal.signal(signal.SIGTERM, signal_handler)
+        # signal.signal(signal.SIGINT, signal_handler
+
+        parallel_config: ParallelConfig = vllm_config.parallel_config
+        assert parallel_config.data_parallel_size > 1 or dp_rank > 0
+        # Set data parallel rank for this engine process.
+        parallel_config.data_parallel_rank = dp_rank
+        parallel_config.data_parallel_rank_local = local_dp_rank
+
+        input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
+
+        executor_fail_callback = lambda: input_queue.put_nowait(
+            (EngineCoreRequestType.EXECUTOR_FAILED, b''))
+
+        # Create input socket.
+        input_ctx = zmq.Context()
+        identity = engine_index.to_bytes(length=2, byteorder="little")
+        input_socket = make_zmq_socket(input_ctx,
+                                       input_address,
+                                       zmq.DEALER,
+                                       identity=identity,
+                                       bind=False)
+        try:
+            # Register engine with front-end.
+            output_address = self.startup_handshake(
+                input_socket, on_head_node, vllm_config.parallel_config)
+
+            # Update config which may have changed from the handshake.
+            vllm_config.__post_init__()
+
+            # Set up data parallel environment.
+            self._init_data_parallel(vllm_config)
+
+            # Initialize engine core and model.
+            super().__init__(vllm_config, executor_class, log_stats,
+                             executor_fail_callback)
+
+            self.step_fn = (self.step if self.batch_queue is None else
+                            self.step_with_batch_queue)
+            self.engines_running = False
+
+            # Send ready message.
+            num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks
+            input_socket.send(
+                msgspec.msgpack.encode({
+                    "status": "READY",
+                    "local": on_head_node,
+                    "num_gpu_blocks": num_gpu_blocks,
+                }))
+
+            # Background Threads and Queues for IO. These enable us to
+            # overlap ZMQ socket IO with GPU since they release the GIL,
+            # and to overlap some serialization/deserialization with the
+            # model forward pass.
+            # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
+            self.input_queue = input_queue
+            self.output_queue = queue.Queue[Union[EngineCoreOutputs, bytes]]()
+            # FIXME(rui): use Ray-specific approach to start these "threads"
+            # threading.Thread(target=self.process_input_socket,
+            #                  args=(input_socket, ),
+            #                  daemon=True).start()
+            # input_socket = None
+            # self.output_thread = threading.Thread(
+            #     target=self.process_output_socket,
+            #     args=(output_address, engine_index),
+            #     daemon=True)
+            # self.output_thread.start()
+        finally:
+            if input_socket is not None:
+                input_socket.close(linger=0)
+
+        try:
+            self.run_busy_loop()
+        except SystemExit:
+            logger.debug("EngineCore exiting.")
+            raise
+        except Exception as e:
+            logger.exception("EngineCore encountered a fatal error.")
+            raise
+        finally:
+            self.shutdown()
+
+    def _init_data_parallel(self, vllm_config: VllmConfig):
+
+        # Configure GPUs and stateless process group for data parallel.
+        dp_rank = vllm_config.parallel_config.data_parallel_rank
+        dp_size = vllm_config.parallel_config.data_parallel_size
+        local_dp_rank = vllm_config.parallel_config.data_parallel_rank_local
+        logger.info(f"dp_rank: {dp_rank}, dp_size: {dp_size}, local_dp_rank: {local_dp_rank}")
+
+        assert dp_size > 1
+        assert 0 <= local_dp_rank <= dp_rank < dp_size
+
+        key = 'CUDA_VISIBLE_DEVICES'
+        if key in os.environ:
+            del os.environ[key]
+
+        from vllm.platforms import current_platform
+        device_control_env_var = current_platform.device_control_env_var
+        world_size = vllm_config.parallel_config.world_size
+        os.environ[device_control_env_var] = ",".join(
+            str(current_platform.device_id_to_physical_device_id(i))
+            for i in range(local_dp_rank * world_size, (local_dp_rank + 1) *
+                           world_size))
+        
+        logger.info("Before stateless_init_dp_group()")
+        self.local_dp_rank = local_dp_rank
+        self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
+        logger.info("After stateless_init_dp_group()")
+        self.current_wave = 0

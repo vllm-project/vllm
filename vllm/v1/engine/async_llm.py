@@ -25,7 +25,7 @@ from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Device, cdiv
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.core_client import AsyncMPClient, DPAsyncMPClient
+from vllm.v1.engine.core_client import AsyncMPClient, DPAsyncMPClient, RayClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.engine.output_processor import (OutputProcessor,
                                              RequestOutputCollector)
