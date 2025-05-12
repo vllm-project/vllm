@@ -791,11 +791,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             del layer.w13_input_scale
             del layer.w2_input_scale
 
-    def set_dispatch_combine(
+    def set_prepare_finalize(
         self,
         dp_size: int,
         world_size: int,
-        dispatch_combine: mk.FusedMoEQuantizeDispatchCombine,
+        prepare_finalize: mk.FusedMoEPrepareAndFinalize,
     ) -> bool:
         from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
             TritonOrDeepGemmExperts)
@@ -810,7 +810,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         )
 
         self.fused_experts = mk.FusedMoEModularKernel(
-            dispatch_combine,
+            prepare_finalize,
             experts,
         )
 

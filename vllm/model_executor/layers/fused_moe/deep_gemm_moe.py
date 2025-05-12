@@ -7,10 +7,10 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.dispatch_combine import (
-    StandardDispatchCombine)
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     _moe_permute)
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    StandardPrepareAndFinalize)
 from vllm.model_executor.layers.fused_moe.utils import (_fp8_quantize,
                                                         _resize_cache)
 from vllm.utils import round_up
@@ -153,8 +153,8 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
 def modular_deep_gemm_fused_moe_fp8() -> mk.FusedMoEModularKernel:
     return mk.FusedMoEModularKernel(
-        StandardDispatchCombine(quant_dtype=torch.float8_e4m3fn,
-                                block_shape=deep_gemm_block_shape()),
+        StandardPrepareAndFinalize(quant_dtype=torch.float8_e4m3fn,
+                                   block_shape=deep_gemm_block_shape()),
         DeepGemmExperts(),
     )
 

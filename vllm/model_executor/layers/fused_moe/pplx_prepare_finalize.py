@@ -12,7 +12,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 # Note use: layer.get_all_to_all() to get an AllToAll instance
 # The max_num_tokens, world_size and dp_size must be the same
 # as the ones used to create the AllToAll.
-class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
+class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def __init__(self,
                  a2a: pplx.AllToAll,
@@ -32,7 +32,7 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         self.dp_size = dp_size
         self.quant_dtype = quant_dtype
 
-    def dispatch(
+    def prepare(
         self,
         a1: torch.Tensor,
         a1_scale: Optional[torch.Tensor],
@@ -117,7 +117,7 @@ class PplxDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
 
         return expert_x, expert_x_scale, expert_num_tokens
 
-    def combine(
+    def finalize(
         self,
         output: torch.Tensor,
         fused_expert_output: torch.Tensor,

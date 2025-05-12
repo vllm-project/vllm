@@ -333,7 +333,9 @@ def invoke_moe_batched_triton_kernel(
     BLOCK_M = config['BLOCK_SIZE_M']
     BLOCK_N = config['BLOCK_SIZE_N']
     BLOCK_K = config['BLOCK_SIZE_K']
-    assert (torch.compiler.is_compiling() or max_num_tokens % BLOCK_M == 0)
+    assert (torch.compiler.is_compiling()
+            or torch.cuda.is_current_stream_capturing()
+            or max_num_tokens % BLOCK_M == 0)
 
     grid = (expert_num_tokens.size(0), triton.cdiv(max_num_tokens, BLOCK_M) *
             triton.cdiv(B.size(1), BLOCK_N))
@@ -384,9 +386,9 @@ def rank_chunk(num, r, w):
     return (num // w) + (1 if r < rem else 0)
 
 
-class BatchedDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
+class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     """
-    A reference dispatch/combine class that reorganizes the tokens into
+    A reference prepare/finalize class that reorganizes the tokens into
     expert batched format, i.e. E x max_num_tokens x K.  This is the format
     that the PPLX dispatch/combine kernels use.
     """
@@ -399,7 +401,7 @@ class BatchedDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         self.rank = rank
         self.max_num_tokens = max_num_tokens
 
-    def dispatch(
+    def prepare(
         self,
         a1: torch.Tensor,
         a1_scale: Optional[torch.Tensor],
@@ -454,7 +456,7 @@ class BatchedDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
 
         return b_a1, a1_scale, tokens_per_expert
 
-    def combine(
+    def finalize(
         self,
         output: torch.Tensor,
         fused_expert_output: torch.Tensor,

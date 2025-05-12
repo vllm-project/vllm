@@ -19,19 +19,19 @@ import torch
 # MoE kernel implementations.
 #
 # The following main classes are defined:
-# * FusedMoEQuantizeDispatchCombine - an abstract base class for quantization,
-#   dispatching and combing. The dispatch method takes care of any needed
-#   quantization and the combine method applies weights and does the final
-#   reduction of the output.
+# * FusedMoEPrepareAndFinalize - an abstract base class for preparation of MoE
+#   inputs (e.g. quantization, distribution) and finalization of Moe outputs.
+#   The prepare method must take care of any needed quantization and the
+#   finalize method must apply weights and do the final reduction of the output.
 # * FusedMoEPermuteExpertsUnpermute - an abstract base class for the main fused
 #   MoE operation. One important feature to note is that this class does not
 #   apply topk weights or reduce the final output.
 # * FusedMoEModularKernel - an interface class that combines a
-#   FusedMoEQuantizeDispatchCombine and a FusedMoEPermuteExpertsUnpermute to
+#   FusedMoEPrepareAndFinalize and a FusedMoEPermuteExpertsUnpermute to
 #   provide the standard fused MoE kernel interface.
 #
-# [Quantize-Dispatch] and [Combine] functionality are bundled into a single
-# class `FusedMoEQuantizeDispatchCombine` since they could use collective
+# [Quantize-Prepare] and [Finalize] functionality are bundled into a single
+# class `FusedMoEPrepareAndFinalize` since they could use collective
 # communication mechanisms that need to be consistent.
 #
 
@@ -76,14 +76,14 @@ def _moe_problem_size(
     return E, M, N, K, topk
 
 
-class FusedMoEQuantizeDispatchCombine(ABC):
+class FusedMoEPrepareAndFinalize(ABC):
     """
-    An abstract base class for the [Quantize-Dispatch] and [Combine] steps
+    An abstract base class for the [Quantize-Prepare] and [Finalize] steps
     described above.
     """
 
     @abstractmethod
-    def dispatch(
+    def prepare(
         self,
         a1: torch.Tensor,
         a1_scale: Optional[torch.Tensor],
@@ -116,7 +116,7 @@ class FusedMoEQuantizeDispatchCombine(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def combine(
+    def finalize(
         self,
         output: torch.Tensor,
         fused_expert_output: torch.Tensor,
@@ -240,7 +240,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
 
 class FusedMoEModularKernel(torch.nn.Module):
     """
-    This class combines a FusedMoEQuantizeDispatchCombine instance and
+    This class combines a FusedMoEPrepareAndFinalize instance and
     a FusedMoEPermuteExpertsUnpermute to provide an interface that
     is compatible with the `fused_experts` function in fused_moe.py.
 
@@ -253,11 +253,11 @@ class FusedMoEModularKernel(torch.nn.Module):
 
     def __init__(
         self,
-        dispatch_combine: FusedMoEQuantizeDispatchCombine,
+        prepare_finalize: FusedMoEPrepareAndFinalize,
         fused_experts: FusedMoEPermuteExpertsUnpermute,
     ):
         super().__init__()
-        self.dispatch_combine = dispatch_combine
+        self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
 
     def forward(
@@ -335,7 +335,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                                  device=a1.device,
                                  dtype=workspace_dtype)
 
-        a1q, a1q_scale, expert_num_tokens = self.dispatch_combine.dispatch(
+        a1q, a1q_scale, expert_num_tokens = self.prepare_finalize.prepare(
             a1, a1_scale, a2_scale, topk_weights, topk_ids, global_num_experts,
             expert_map, apply_router_weight_on_input)
 
@@ -358,7 +358,7 @@ class FusedMoEModularKernel(torch.nn.Module):
             expert_num_tokens=expert_num_tokens,
         )
 
-        self.dispatch_combine.combine(output, fused_out, topk_weights,
-                                      topk_ids, apply_router_weight_on_input)
+        self.prepare_finalize.finalize(output, fused_out, topk_weights,
+                                       topk_ids, apply_router_weight_on_input)
 
         return output

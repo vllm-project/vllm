@@ -10,7 +10,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
 
 
-class StandardDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
+class StandardPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def __init__(
         self,
@@ -23,7 +23,7 @@ class StandardDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
         self.block_shape = block_shape
         self.quant_dtype = quant_dtype
 
-    def dispatch(
+    def prepare(
         self,
         a1: torch.Tensor,
         a1_scale: Optional[torch.Tensor],
@@ -48,7 +48,7 @@ class StandardDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
 
         return a1q, a1q_scale, None
 
-    def combine(
+    def finalize(
         self,
         output: torch.Tensor,
         fused_expert_output: torch.Tensor,

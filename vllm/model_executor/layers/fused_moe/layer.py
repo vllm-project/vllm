@@ -33,13 +33,14 @@ from vllm.utils import direct_register_custom_op
 has_pplx = importlib.util.find_spec("pplx_kernels") is not None
 
 if current_platform.is_cuda_alike():
-    from .fused_batched_moe import BatchedDispatchCombine, BatchedTritonExperts
+    from .fused_batched_moe import (BatchedPrepareAndFinalize,
+                                    BatchedTritonExperts)
     from .fused_moe import TritonExperts, fused_experts
     from .modular_kernel import (FusedMoEModularKernel,
                                  FusedMoEPermuteExpertsUnpermute,
-                                 FusedMoEQuantizeDispatchCombine)
+                                 FusedMoEPrepareAndFinalize)
     if has_pplx:
-        from .pplx_dispatch_combine import PplxDispatchCombine
+        from .pplx_prepare_finalize import PplxPrepareAndFinalize
 else:
     fused_experts = None  # type: ignore
 if is_rocm_aiter_moe_enabled():
@@ -241,11 +242,11 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                        params_dtype: torch.dtype, **extra_weight_attrs):
         raise NotImplementedError
 
-    def set_dispatch_combine(
+    def set_prepare_finalize(
         self,
         dp_size: int,
         world_size: int,
-        dispatch_combine: FusedMoEQuantizeDispatchCombine,
+        prepare_finalize: FusedMoEPrepareAndFinalize,
     ) -> bool:
         return False
 
@@ -424,11 +425,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input)
 
-    def set_dispatch_combine(
+    def set_prepare_finalize(
         self,
         dp_size: int,
         world_size: int,
-        dispatch_combine: FusedMoEQuantizeDispatchCombine,
+        prepare_finalize: FusedMoEPrepareAndFinalize,
     ) -> bool:
         assert self.fused_experts == fused_experts
 
@@ -436,8 +437,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
         self.using_pplx = False
 
-        if isinstance(dispatch_combine,
-                      (BatchedDispatchCombine, PplxDispatchCombine)):
+        if isinstance(prepare_finalize,
+                      (BatchedPrepareAndFinalize, PplxPrepareAndFinalize)):
             logger.debug("BatchedTritonExperts %s", self.moe)
             experts = BatchedTritonExperts(
                 max_num_tokens=MOE_DP_CHUNK_SIZE,
@@ -449,7 +450,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 use_int4_w4a16=False,
                 block_shape=None,
             )
-            self.using_pplx = isinstance(dispatch_combine, PplxDispatchCombine)
+            self.using_pplx = isinstance(prepare_finalize,
+                                         PplxPrepareAndFinalize)
         else:
             logger.debug("TritonExperts %s", self.moe)
             experts = TritonExperts(
@@ -462,7 +464,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             )
 
         self.fused_experts = FusedMoEModularKernel(
-            dispatch_combine,
+            prepare_finalize,
             experts,
         )
 
@@ -676,9 +678,9 @@ def determine_expert_map(
     return (local_num_experts, expert_map)
 
 
-def _construct_dispatch_combine(
+def _construct_prepare_finalize(
     moe: MoEConfig, quant_config: Optional[QuantizationConfig]
-) -> Optional[FusedMoEQuantizeDispatchCombine]:
+) -> Optional[FusedMoEPrepareAndFinalize]:
     max_num_tokens = MOE_DP_CHUNK_SIZE
     world_size = moe.ep_size
     dp_size = moe.ep_size // moe.dp_size  # dp_size actually means TP.
@@ -703,7 +705,7 @@ def _construct_dispatch_combine(
                                     ((moe.hidden_dim + moe.block_size - 1) //
                                      moe.block_size * torch.float32.itemsize)))
 
-        return PplxDispatchCombine(
+        return PplxPrepareAndFinalize(
             all_to_all,
             max_num_tokens=max_num_tokens,
             world_size=world_size,
@@ -843,13 +845,13 @@ class FusedMoE(torch.nn.Module):
         assert quant_method is not None
         self.quant_method = quant_method
 
-        dispatch_combine = _construct_dispatch_combine(moe, quant_config)
+        prepare_finalize = _construct_prepare_finalize(moe, quant_config)
 
-        if dispatch_combine is not None:
+        if prepare_finalize is not None:
             world_size = moe.ep_size
             dp_size = int(moe.ep_size // moe.dp_size)
-            success = self.quant_method.set_dispatch_combine(
-                dp_size, world_size, dispatch_combine)
+            success = self.quant_method.set_prepare_finalize(
+                dp_size, world_size, prepare_finalize)
             if not success:
                 logger.warning("DP+EP not supported for %s.",
                                type(self.quant_method))
