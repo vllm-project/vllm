@@ -286,6 +286,7 @@ class EngineArgs:
     data_parallel_size_local: Optional[int] = None
     data_parallel_address: Optional[str] = None
     data_parallel_rpc_port: Optional[int] = None
+    data_parallel_backend: str = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     max_parallel_loading_workers: Optional[
         int] = ParallelConfig.max_parallel_loading_workers
@@ -614,6 +615,11 @@ class EngineArgs:
                                     type=int,
                                     help='Port for data parallel RPC '
                                     'communication.')
+        parallel_group.add_argument('--data-parallel-backend',
+                                    '-dpb',
+                                    type=str,
+                                    help='Backend for data parallel, either '
+                                    '"mp" or "ray".')
         parallel_group.add_argument(
             "--enable-expert-parallel",
             **parallel_kwargs["enable_expert_parallel"])
@@ -1054,6 +1060,8 @@ class EngineArgs:
             self.data_parallel_rpc_port
             is not None) else ParallelConfig.data_parallel_rpc_port
 
+        data_parallel_backend = self.data_parallel_backend
+
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
@@ -1061,6 +1069,7 @@ class EngineArgs:
             data_parallel_size_local=data_parallel_size_local,
             data_parallel_master_ip=data_parallel_address,
             data_parallel_rpc_port=data_parallel_rpc_port,
+            data_parallel_backend=data_parallel_backend,
             enable_expert_parallel=self.enable_expert_parallel,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
