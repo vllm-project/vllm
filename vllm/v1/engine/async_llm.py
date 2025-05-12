@@ -481,6 +481,10 @@ class AsyncLLM(EngineClient):
     async def stop_profile(self) -> None:
         await self.engine_core.profile_async(False)
 
+    # NOTE: This is intentionally not async because it is called in __init__
+    def reset_mm_cache(self) -> None:
+        self.engine_core.reset_mm_cache()
+
     async def reset_prefix_cache(self,
                                  device: Optional[Device] = None) -> None:
         if device == Device.CPU:
