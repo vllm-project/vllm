@@ -15,9 +15,11 @@ from vllm.utils import STR_BACKEND_ENV_VAR
 
 from ....utils import RemoteOpenAIServer
 
-# TODO(@Darklight): failing the CI due to env variable mismatch. Setting
-# the XFORMERS does not seem to be working in the CI environment properly.
-pytestmark = pytest.mark.skipif(True, reason="Failing in CI.")
+# TODO(@darklight): Remove this skip once the CI is fixed.
+pytest.skip(reason=("Failing in the CI due to env variable mismatch. "
+                    "Setting the XFORMERS does not seem to be working "
+                    "in the CI environment properly."),
+            allow_module_level=True)
 
 # GritLM embedding implementation is only supported by XFormers backend.
 pytestmark = pytest.mark.skipif(not importlib.util.find_spec("xformers"),
