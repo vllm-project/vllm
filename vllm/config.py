@@ -8,6 +8,7 @@ import inspect
 import json
 import re
 import textwrap
+import uuid
 import warnings
 from collections import Counter
 from contextlib import contextmanager
@@ -1759,7 +1760,8 @@ class ParallelConfig:
 
         if self.data_parallel_size_local > self.data_parallel_size:
             raise ValueError(
-                "data_parallel_size_local must be <= data_parallel_size")
+                f"data_parallel_size_local ({self.data_parallel_size_local}) "
+                f"must be <= data_parallel_size ({self.data_parallel_size})")
 
         if self.data_parallel_size > 1 or self.data_parallel_size_local == 0:
             # Data parallel was specified in the engine args.
@@ -3434,6 +3436,9 @@ class KVTransferConfig:
     """The KV connector for vLLM to transmit KV caches between vLLM instances.
     """
 
+    engine_id: str = str(uuid.uuid4())
+    """The engine id for KV transfers."""
+
     kv_buffer_device: Optional[str] = "cuda"
     """The device used by kv connector to buffer the KV cache.
     Currently only support 'cuda'."""
@@ -3444,7 +3449,7 @@ class KVTransferConfig:
 
     kv_role: Optional[KVRole] = None
     """Whether this vLLM instance produces, consumes KV cache, or both. Choices
-    are 'kv_producer', 'kv_consumer', and 'both'."""
+    are 'kv_producer', 'kv_consumer', and 'kv_both'."""
 
     kv_rank: Optional[int] = None
     """The rank of this vLLM instance in the KV cache transfer. Typical value:
