@@ -31,15 +31,13 @@ void dispatch_scaled_mm(torch::Tensor& c, torch::Tensor const& a,
     TORCH_CHECK(a_scales.dim() == 2, "a scale must be 2d tensor.");
     TORCH_CHECK(b_scales.dim() == 2, "b scale must be 2d tensor.");
     TORCH_CHECK(
-      a.size(0) == a_scales.size(0) &&
-        cuda_utils::ceil_div(a.size(1), int64_t(128)) == a_scales.size(1),
-      "a_scale_group_shape must be [1, 128]."
-    );
+        a.size(0) == a_scales.size(0) &&
+            cuda_utils::ceil_div(a.size(1), int64_t(128)) == a_scales.size(1),
+        "a_scale_group_shape must be [1, 128].");
     TORCH_CHECK(
-      cuda_utils::ceil_div(b.size(0), int64_t(128)) == b_scales.size(0) &&
-      cuda_utils::ceil_div(b.size(1), int64_t(128)) == b_scales.size(1),
-      "b_scale_group_shape must be [128, 128]."
-    );
+        cuda_utils::ceil_div(b.size(0), int64_t(128)) == b_scales.size(0) &&
+            cuda_utils::ceil_div(b.size(1), int64_t(128)) == b_scales.size(1),
+        "b_scale_group_shape must be [128, 128].");
 
     TORCH_CHECK(!bias, "Bias not yet supported blockwise scaled_mm");
     blockwise_func(c, a, b, a_scales, b_scales);
