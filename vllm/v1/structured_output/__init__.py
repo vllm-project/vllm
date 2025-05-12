@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Optional
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -16,8 +16,6 @@ from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
 from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
 
 if TYPE_CHECKING:
-    import numpy as np
-    import numpy.typing as npt
     import torch
 
     from vllm.reasoning import ReasoningParser
@@ -30,8 +28,10 @@ logger = init_logger(__name__)
 
 class StructuredOutputManager:
     """Engine-level manager for structured output requests.
-    This manager holds a backend property used to initialise and compile grammars
-    Each v1 request will then have the compiled grammar assigned to request.structured_output_request.grammar
+    This manager holds a backend property used to initialise and 
+     compile grammars
+    Each v1 request will then have the compiled grammar assigned to 
+     request.structured_output_request.grammar
     """
 
     def __init__(self, vllm_config: VllmConfig):
@@ -136,18 +136,22 @@ class StructuredOutputManager:
     def accept_tokens(self, request: Request, req_id: str,
                       tokens: list[int]) -> bool:
         """
-        Validates whether the provided tokens are acceptable based on the grammar
-        defined in the structured output request.
-        Called in v1.core.sched.Scheduler.update_from_output after tokens have been accepted
+        Validates whether the provided tokens are acceptable based on 
+        the grammar defined in the structured output request.
+        
+        Called in v1.core.sched.Scheduler.update_from_output after 
+        tokens have been accepted
         Args:
-            request (Request): The request object containing the structured output
-                request and its associated grammar.
+            request (Request): The request object containing the 
+             structured output request and its associated grammar.
             req_id (str): The unique identifier for the request.
             tokens (list[int]): A list of integer tokens to be validated.
         Returns:
-            bool: True if the FSM was advanced successfully. False if the FSM failed to advance.
+            bool: True if the FSM was advanced successfully. 
+            False if the FSM failed to advance.
         """
-        assert request.structured_output_request is not None and request.structured_output_request.grammar is not None
+        assert request.structured_output_request is not None and \
+            request.structured_output_request.grammar is not None
         return request.structured_output_request.grammar.accept_tokens(
             req_id, tokens)
 
@@ -161,16 +165,20 @@ class StructuredOutputManager:
     ) -> None:
         """
         Filters the logits produced by the model's forward pass.
-        Called in v1.worker.GPUModelRunner.execute_model immediately after the model forward pass
+
+        Called in v1.worker.GPUModelRunner.execute_model immediately 
+        after the model forward pass.
 
         Args:
             input_batch (InputBatch): The batch of input data being processed.
-            device (torch.device): The device on which the computation is performed.
+            device (torch.device): The device on which the computation is 
+                performed.
             scheduler_output (SchedulerOutput): The output from the scheduler
-            containing additional information for processing.
-            logits (torch.Tensor): The raw logits output from the model's forward pass.
-            sample_hidden_states (torch.Tensor): The hidden states of the samples
-            from the model's forward pass.
+                containing additional information for processing.
+            logits (torch.Tensor): The raw logits output from the model's 
+                forward pass.
+            sample_hidden_states (torch.Tensor): The hidden states of the
+                samples from the model's forward pass.
         """
         assert self.backend is not None
         self.backend.filter_logits(input_batch, device, scheduler_output,
@@ -284,7 +292,7 @@ class StructuredOutputManager:
         if self.backend is not None:
             self.backend.destroy()
 
-    def precompile(self, num_reqs_paddings: List[int], vocab_size: int,
+    def precompile(self, num_reqs_paddings: list[int], vocab_size: int,
                    device: torch.device, hidden_states_dtype: torch.dtype):
         """
         Allow backend precompilation for the device
@@ -295,7 +303,8 @@ class StructuredOutputManager:
                 number of requests.
             vocab_size (int): The size of the vocabulary.
             device (torch.device): The device on which the model is running.
-            hidden_states_dtype (torch.dtype): The data type of the hidden states.
+                hidden_states_dtype (torch.dtype): The data type of the 
+                hidden states.
         """
         assert self.backend is not None
         self.backend.precompile(num_reqs_paddings, vocab_size, device,
@@ -307,10 +316,14 @@ class StructuredOutputManager:
         """
         Validate the request for structured output.
         This method checks the request for any errors or inconsistencies
+        
         If one backend fails validation, we try the next one.
+
         The SamplingParams object is modified to set the backend and
         backend_was_auto attributes based on the validation results.
-        This needs to be a static method as it is called from the request Processor which runs in a different process
+        
+        This needs to be a static method as it is called from the request 
+        Processor which runs in a different process
 
         Args:
             params (SamplingParams): The sampling parameters for the request.

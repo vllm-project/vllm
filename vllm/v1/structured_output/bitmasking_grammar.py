@@ -2,7 +2,7 @@
 
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Optional, cast
+from typing import TYPE_CHECKING, Optional, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -128,7 +128,8 @@ class BitmaskStructuredOutputBackend(StructuredOutputBackend):
             )
         else:
             require_struct_decoding, grammar_bitmask_padded, arange = \
-            self.prepare_structured_decoding_input_tpu(logits, scheduler_output, input_batch)
+            self.prepare_structured_decoding_input_tpu(logits,
+                                                scheduler_output, input_batch)
             logits = self.structured_decode_tpu(require_struct_decoding,
                                                 grammar_bitmask_padded, logits,
                                                 arange)
@@ -201,7 +202,8 @@ class BitmaskStructuredOutputBackend(StructuredOutputBackend):
 
         # TPU specific tensors
         if current_platform.is_tpu():
-            assert self.max_num_reqs is not None and self.tpu_vocab_size is not None
+            assert self.max_num_reqs is not None and \
+                self.tpu_vocab_size is not None
             pin_memory = is_pin_memory_available()
             self.require_structured_out_cpu = torch.zeros(
                 (self.max_num_reqs, 1),
@@ -253,8 +255,8 @@ class BitmaskStructuredOutputBackend(StructuredOutputBackend):
         mask_indices: list[int] = []
         assert scheduler_output.structured_output_meta is not None
         for req_id in input_batch.req_ids:
-            mask_index = scheduler_output.structured_output_meta.structured_output_request_ids.get(
-                req_id)
+            mask_index = scheduler_output.structured_output_meta.\
+                structured_output_request_ids.get(req_id)
             if mask_index is None:
                 continue
             batch_index = input_batch.req_id_to_index[req_id]
@@ -297,7 +299,7 @@ class BitmaskStructuredOutputBackend(StructuredOutputBackend):
                 unpacked_bitmask, -float("inf"))
         return logits_cloned
 
-    def precompile(self, num_reqs_paddings: List[int], vocab_size: int,
+    def precompile(self, num_reqs_paddings: list[int], vocab_size: int,
                    device: torch.device, hidden_states_dtype: torch.dtype):
         self.tpu_vocab_size = vocab_size
         if current_platform.is_tpu():
@@ -310,8 +312,8 @@ class BitmaskStructuredOutputBackend(StructuredOutputBackend):
                 dummy_grammar_bitmask = \
                     self.grammar_bitmask_cpu[:num_reqs].to(device)
                 # The first dimension of the above 3 dummy tensors cannot be
-                # mark_dynamic because some operations in structured_decode require
-                # them to be static.
+                # mark_dynamic because some operations in structured_decode
+                # require them to be static.
                 arange = self.structured_decode_arange.to(device)
                 self.structured_decode_tpu(dummy_require_struct_decoding,
                                            dummy_grammar_bitmask, dummy_logits,

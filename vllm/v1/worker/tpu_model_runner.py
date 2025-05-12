@@ -1094,7 +1094,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self.structured_output_manager.init_backend(
             "auto"
         )  # Normally a backend is initialised after a request is made
-        # but we need to precompile the backend here so we initialise the backend here - which will try to use the vllm configs decoding_config
+        # but we need to precompile the backend here so we initialise the
+        # backend here - which will try to use the vllm configs decoding_config
         self.structured_output_manager.precompile(self.num_reqs_paddings,
                                                   self.vocab_size, self.device,
                                                   self._hidden_states_dtype)
