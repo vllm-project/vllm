@@ -20,6 +20,7 @@ from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
                     Protocol, TypeVar, Union, cast, get_args, get_origin)
 
 import torch
+from pydantic import ConfigDict, SkipValidation, TypeAdapter, model_validator
 from pydantic.dataclasses import dataclass
 from torch.distributed import ProcessGroup, ReduceOp
 from transformers import PretrainedConfig
