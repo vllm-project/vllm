@@ -639,6 +639,11 @@ class OpenAIServing:
             return self._load_prompt_embeds(request.prompt_embeds,
                                             truncate_prompt_tokens)
 
+        if input_or_inputs is None:
+            raise ValueError(
+                "Prompt can only be None for a `/v1/completions` request"
+                " with prompt_embeds")
+
         # Although our type checking is based on mypy,
         # VSCode Pyright extension should still work properly
         # "is False" is required for Pyright to perform type narrowing
