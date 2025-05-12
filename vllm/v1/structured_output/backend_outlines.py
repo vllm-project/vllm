@@ -10,11 +10,9 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.config import VllmConfig
 from vllm.model_executor.guided_decoding.outlines_logits_processors import (
     OutlinesVocabulary, get_cache, get_vocabulary)
 from vllm.sampling_params import SamplingParams
-from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import LazyLoader
 from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
                                                      StructuredOutputGrammar,
@@ -34,20 +32,11 @@ else:
     import sre_constants
     import sre_parse
 
-
+@dataclass
 class OutlinesBackend(StructuredOutputBackend):
 
-    def __init__(self, vllm_config: VllmConfig):
-        self.vllm_config = vllm_config
-        self.vocab_size = vllm_config.model_config.get_vocab_size()
-
-        tokenizer_group = init_tokenizer_from_configs(
-            model_config=vllm_config.model_config,
-            scheduler_config=vllm_config.scheduler_config,
-            lora_config=vllm_config.lora_config)  # type: ignore[arg-type]
-
-        tokenizer = tokenizer_group.get_lora_tokenizer(None)
-        self.vocabulary = get_vocabulary(tokenizer)
+    def __post_init__(self):
+        self.vocabulary = get_vocabulary(self.tokenizer)
         self.cache = get_cache()
 
     def _compile_index(self, regex_string: str,
@@ -82,7 +71,7 @@ class OutlinesBackend(StructuredOutputBackend):
                            max_rollback=self.vllm_config.speculative_config.
                            num_speculative_tokens))
 
-    def allocate_token_bitmask(self, max_num_seqs: int):
+    def allocate_token_bitmask(self, max_num_seqs: int) -> torch.Tensor:
         return torch.full(
             (max_num_seqs, (self.vocab_size + 31) // 32),
             -1,
@@ -131,11 +120,12 @@ class OutlinesGrammar(StructuredOutputGrammar):
     def validate_tokens(self, tokens: list[int]) -> list[int]:
         accepted: list[int] = []
         for tok in tokens:
-            if self.guide.accept_tokens(accepted + [tok]):
-                accepted.append(tok)
-            else:
-                return accepted
+            accepted.append(tok)
+            if not self.guide.accepts_tokens(accepted):
+                accepted.pop()
+                break
         return accepted
+            
 
     def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> None:
         mask = bitmask[idx]
