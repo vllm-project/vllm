@@ -376,8 +376,3 @@ class KVCacheManager:
             block.block_id
             for block in self.single_type_manager.req_to_blocks[request_id]
         ]
-
-    def get_num_blocks(self, request_id: str):
-        """Get the number of blocks."""
-        assert request_id in self.single_type_manager.req_to_blocks
-        return len(self.single_type_manager.req_to_blocks[request_id])
