@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # ruff: noqa
-# type: ignore
 import json
 import re
 from collections.abc import Sequence
@@ -48,7 +47,7 @@ class xLAMToolParser(ToolParser):
         self.thinking_tag_pattern = r"</think>([\s\S]*)"
 
         # Define streaming state type to be initialized later
-        self.streaming_state = {
+        self.streaming_state: dict[str, Any] = {
             "current_tool_index": -1,
             "tool_ids": [],
             "sent_tools": [],
@@ -213,7 +212,7 @@ class xLAMToolParser(ToolParser):
 
             # Check for test-specific state setup (current_tools_sent)
             # This handles the case where tests manually set current_tools_sent
-            if (hasattr(self, "current_tools_sent")
+            if (hasattr(self, "current_tools_sent")  # type: ignore
                     and len(self.current_tools_sent) > 0):
                 # If current_tools_sent is set to [False], it means the test wants us to send the name
                 if (len(self.current_tools_sent) == 1
@@ -233,7 +232,7 @@ class xLAMToolParser(ToolParser):
                                 id=tool_id,
                                 function=DeltaFunctionCall(
                                     name=function_name).model_dump(
-                                        exclude_none=True),
+                                        exclude_none=True),  # type: ignore
                             )
                         ])
                         # Update state to reflect that we've sent the name
@@ -309,7 +308,8 @@ class xLAMToolParser(ToolParser):
                             type="function",
                             id=tool_id,
                             function=DeltaFunctionCall(
-                                name=tool_name).model_dump(exclude_none=True),
+                                name=tool_name).model_dump(
+                                    exclude_none=True),  # type: ignore
                         )
                     ])
                     self.streaming_state["sent_tools"][current_idx][
@@ -357,8 +357,9 @@ class xLAMToolParser(ToolParser):
                                     DeltaToolCall(
                                         index=current_idx,
                                         function=DeltaFunctionCall(
-                                            arguments="{}").model_dump(
-                                                exclude_none=True),
+                                            arguments="{}").
+                                        model_dump(
+                                            exclude_none=True),  # type: ignore
                                     )
                                 ])
 
@@ -416,7 +417,7 @@ class xLAMToolParser(ToolParser):
                                 index=current_idx,
                                 function=DeltaFunctionCall(
                                     arguments="{").model_dump(
-                                        exclude_none=True),
+                                        exclude_none=True),  # type: ignore  
                             )
                         ])
                         return delta
@@ -441,7 +442,7 @@ class xLAMToolParser(ToolParser):
                                     index=current_idx,
                                     function=DeltaFunctionCall(
                                         arguments=args_diff).model_dump(
-                                            exclude_none=True),
+                                            exclude_none=True),  # type: ignore
                                 )
                             ])
                             return delta
