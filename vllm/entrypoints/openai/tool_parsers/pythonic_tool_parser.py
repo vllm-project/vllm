@@ -63,7 +63,7 @@ class PythonicToolParser(ToolParser):
         """
 
         # remove <|python_start|> and <|python_end|>
-	# as Llama 4 model sometime will output those tokens
+        # as Llama 4 model sometime will output those tokens
         if model_output.startswith("<|python_start|>"):
             model_output = model_output[len("<|python_start|>"):]
             model_output = model_output.replace("<|python_end|>", "")
