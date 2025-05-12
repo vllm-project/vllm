@@ -131,14 +131,26 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 page_size = dst_kv_cache_layer_shape[1]
                 dst_kv_cache_layer = dst_kv_cache_layer.reshape(
                     num_pages * page_size, -1)
-                dst_kv_cache_layer[slot_mapping, ...] = src_kv_cache
+                num_token = src_kv_cache.shape[0]
+                if len(slot_mapping) == num_token:
+                    dst_kv_cache_layer[slot_mapping, ...] = src_kv_cache
+                else:
+                    dst_kv_cache_layer[slot_mapping[:num_token], ...] = src_kv_cache
+                    logger.warning("🚧src_kv_cache does not match, num_slot:%d, num_token:%d", len(slot_mapping), num_token)
+
                 dst_kv_cache_layer.reshape(dst_kv_cache_layer_shape)
             else:
                 num_pages = dst_kv_cache_layer_shape[1]
                 page_size = dst_kv_cache_layer_shape[2]
                 dst_kv_cache_layer = dst_kv_cache_layer.reshape(
                     2, num_pages * page_size, -1)
-                dst_kv_cache_layer[:, slot_mapping, ...] = src_kv_cache
+                num_token = src_kv_cache.shape[1]
+                if len(slot_mapping) == num_token:
+                    dst_kv_cache_layer[:, slot_mapping, ...] = src_kv_cache
+                else:
+                    dst_kv_cache_layer[:, slot_mapping[:num_token],...] = src_kv_cache
+                    logger.warning("🚧src_kv_cache does not match, num_slot:%d, num_token:%d", len(slot_mapping), num_token)
+
                 dst_kv_cache_layer.reshape(dst_kv_cache_layer_shape)
 
         # Get the metadata
