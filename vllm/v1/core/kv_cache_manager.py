@@ -171,6 +171,7 @@ class KVCacheManager:
         self,
         request: Request,
         num_new_tokens: int,
+        num_new_computed_tokens: int = 0,
         new_computed_blocks: Optional[KVCacheBlocks] = None,
         num_lookahead_tokens: int = 0,
     ) -> Optional[KVCacheBlocks]:
@@ -181,8 +182,10 @@ class KVCacheManager:
             num_new_tokens: The number of tokens to allocate, including external
                 tokens. Note that this does not include tokens that have
                 already been computed locally (i.e. new_computed_blocks).
-            new_computed_blocks: The new computed blocks just hitting the
-                prefix caching.
+            num_new_computed_tokens: The number of new computed tokens just
+                hitting the prefix caching, excluding external tokens.
+            new_computed_blocks: The cached blocks for the above new computed 
+                tokens.
             num_lookahead_tokens: The number of speculative tokens to allocate.
                 This is used by spec decode proposers with kv-cache such 
                 as eagle.
@@ -224,7 +227,7 @@ class KVCacheManager:
         # The number of computed tokens is the number of computed tokens plus
         # the new prefix caching hits
         num_computed_tokens = (request.num_computed_tokens +
-                               len(new_computed_block_list) * self.block_size)
+                               num_new_computed_tokens)
         num_tokens_need_slot = min(
             num_computed_tokens + num_new_tokens + num_lookahead_tokens,
             self.max_model_len)

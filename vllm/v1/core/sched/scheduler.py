@@ -330,18 +330,19 @@ class Scheduler(SchedulerInterface):
                     continue
 
                 # Get already-cached tokens.
-                computed_blocks, num_computed_tokens = \
+                computed_blocks, num_native_computed_tokens = \
                     self.kv_cache_manager.get_computed_blocks(
                         request)
 
                 # Get externally-cached tokens if using a KVConnector.
-                num_external_tokens = (
+                num_external_computed_tokens = (
                     0 if self.connector is None else
                     self.connector.get_num_new_matched_tokens(
-                        request, num_computed_tokens))
+                        request, num_native_computed_tokens))
 
                 # Total computed tokens (local + external).
-                num_computed_tokens += num_external_tokens
+                num_computed_tokens = (num_native_computed_tokens +
+                                       num_external_computed_tokens)
 
                 # Number of tokens to be scheduled.
                 # We use `request.num_tokens` instead of
@@ -370,7 +371,8 @@ class Scheduler(SchedulerInterface):
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
-                    num_new_tokens + num_external_tokens,
+                    num_new_tokens + num_external_computed_tokens,
+                    num_native_computed_tokens,
                     computed_blocks,
                     num_lookahead_tokens=self.num_lookahead_tokens,
                 )
@@ -384,7 +386,7 @@ class Scheduler(SchedulerInterface):
                 if self.connector is not None:
                     self.connector.update_state_after_alloc(
                         request,
-                        num_external_tokens,
+                        num_external_computed_tokens,
                     )
 
                 self.waiting.popleft()
