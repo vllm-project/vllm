@@ -291,6 +291,7 @@ bool is_valid_config(thread_config_t const& th_config, bool m_block_size_8,
   // BIGGROUP: cases for big group size (group_blocks in [-1, 8])
   // FZP: cases for float-zero-point (is_zp_float = true)
   // ACT: cases for act order case (group_blocks == 0)
+  // FP4: cases for nvfp4(e2m1) (group_blocks == 1)
   #define COMMON_GET_IF_M1(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)       \
     _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, -1, NUM_THREADS, false)  \
     _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, 2, NUM_THREADS, false)   \
@@ -337,6 +338,21 @@ bool is_valid_config(thread_config_t const& th_config, bool m_block_size_8,
                                                                           \
     _GET_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, -1, NUM_THREADS, false) \
     _GET_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, 8, NUM_THREADS, false)
+
+  #define FP4_GET_IF_M1(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)        \
+    _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, 1, NUM_THREADS, false) \
+    _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false)
+
+  #define FP4_GET_IF_M234(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)       \
+    _GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false) \
+    _GET_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false) \
+    _GET_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false)
+
+  #define FP4_GET_IF(W_TYPE)            \
+    FP4_GET_IF_M1(W_TYPE, 8, 8, 256)    \
+    FP4_GET_IF_M1(W_TYPE, 8, 4, 128)    \
+    FP4_GET_IF_M234(W_TYPE, 16, 4, 256) \
+    FP4_GET_IF_M234(W_TYPE, 8, 4, 128)
 
   #define BIGGROUP_GET_IF(W_TYPE)            \
     BIGGROUP_GET_IF_M1(W_TYPE, 8, 8, 256)    \
@@ -393,6 +409,8 @@ MarlinFuncPtr get_marlin_kernel(const vllm::ScalarType q_type,
   COMMON_GET_IF(vllm::kU8B128)
 
   BIGGROUP_GET_IF(vllm::kFE4M3fn)
+
+  FP4_GET_IF(vllm::kFE2M1f)
 
   ACT_GET_IF(vllm::kU4B8)
   ACT_GET_IF(vllm::kU8B128)
@@ -465,7 +483,7 @@ exec_config_t determine_exec_config(const vllm::ScalarType& q_type, int prob_m,
 
 template <typename scalar_t>
 void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
-               void* zp, void* g_idx, void* perm, void* a_tmp,
+               void* s2, void* zp, void* g_idx, void* perm, void* a_tmp,
                void* sorted_token_ids, void* expert_ids,
                void* num_tokens_past_padded, void* topk_weights,
                int moe_block_size, int top_k, bool mul_topk_weights, bool is_ep,
@@ -479,14 +497,16 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
   bool m_block_size_8 = moe_block_size == 8;
 
   if (has_zp) {
-    TORCH_CHECK(q_type == vllm::kU4,
-                "q_type must be u4 when has_zp = True. Got = ", q_type.str());
+    TORCH_CHECK(
+        q_type == vllm::kU4 || q_type == vllm::kU8,
+        "q_type must be u4 or u8 when has_zp = True. Got = ", q_type.str());
   } else {
-    TORCH_CHECK(q_type == vllm::kU4B8 || q_type == vllm::kU8B128 ||
-                    q_type == vllm::kFE4M3fn,
-                "q_type must be uint4b8, uint8b128 or fp8e4m3 when has_zp = "
-                "False. Got = ",
-                q_type.str());
+    TORCH_CHECK(
+        q_type == vllm::kU4B8 || q_type == vllm::kU8B128 ||
+            q_type == vllm::kFE4M3fn || q_type == vllm::kFE2M1f,
+        "q_type must be uint4b8, uint8b128, float8_e4m3fn or float4_e2m1f when "
+        "has_zp = False. Got = ",
+        q_type.str());
   }
 
   TORCH_CHECK(prob_m > 0 && prob_n > 0 && prob_k > 0, "Invalid MNK = [", prob_m,
@@ -519,6 +539,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
   int4* C_ptr = (int4*)C;
   int4* C_tmp_ptr = (int4*)C_tmp;
   const int4* s_ptr = (const int4*)s;
+  const uint16_t* s2_ptr = (const uint16_t*)s2;
   const int4* zp_ptr = (const int4*)zp;
   const int* g_idx_ptr = (const int*)g_idx;
   const int* perm_ptr = (const int*)perm;
@@ -627,7 +648,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
   // avoid ">>>" being formatted to "> > >"
   // clang-format off
   kernel<<<blocks, num_threads, max_shared_mem, stream>>>(
-      A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, zp_ptr, g_idx_ptr,
+      A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, s2_ptr, zp_ptr, g_idx_ptr,
       sorted_token_ids_ptr, expert_ids_ptr, num_tokens_past_padded_ptr,
       topk_weights_ptr, top_k, mul_topk_weights, is_ep, num_groups, prob_m,
       prob_n, prob_k, locks, use_atomic_add, use_fp32_reduce, max_shared_mem);
@@ -639,6 +660,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
 torch::Tensor moe_wna16_marlin_gemm(
     torch::Tensor& a, std::optional<torch::Tensor> const& c_or_none,
     torch::Tensor& b_q_weight, torch::Tensor& b_scales,
+    std::optional<torch::Tensor> const& global_scale_or_none,
     std::optional<torch::Tensor> const& b_zeros_or_none,
     std::optional<torch::Tensor> const& g_idx_or_none,
     std::optional<torch::Tensor> const& perm_or_none, torch::Tensor& workspace,
@@ -790,6 +812,17 @@ torch::Tensor moe_wna16_marlin_gemm(
     }
   }
 
+  torch::Tensor global_scale;
+  if (global_scale_or_none.has_value()) {
+    global_scale = global_scale_or_none.value();
+    TORCH_CHECK(b_q_type == vllm::kFE2M1f,
+                "global_scale can only be used for float4_e2m1f.");
+  } else {
+    global_scale = torch::empty({0}, options);
+    TORCH_CHECK(!(b_q_type == vllm::kFE2M1f),
+                "the global_scale parameter must be passed for float4_e2m1f.");
+  }
+
   torch::Tensor b_zeros;
   if (b_zeros_or_none.has_value()) {
     b_zeros = b_zeros_or_none.value();
@@ -802,13 +835,14 @@ torch::Tensor moe_wna16_marlin_gemm(
 
   if (has_zp) {
     TORCH_CHECK(
-        b_q_type == vllm::kU4,
-        "b_q_type must be u4 when has_zp = True. Got = ", b_q_type.str());
+        b_q_type == vllm::kU4 || b_q_type == vllm::kU8,
+        "b_q_type must be u4 or u8 when has_zp = True. Got = ", b_q_type.str());
   } else {
     TORCH_CHECK(b_q_type == vllm::kU4B8 || b_q_type == vllm::kU8B128 ||
-                    b_q_type == vllm::kFE4M3fn,
-                "b_q_type must be uint4b8, uint8b128 or fp8e4m3 when has_zp = "
-                "False. Got = ",
+                    b_q_type == vllm::kFE4M3fn || b_q_type == vllm::kFE2M1f,
+                "b_q_type must be uint4b8, uint8b128, float8_e4m3fn or "
+                "float4_e2m1f when "
+                "has_zp = False. Got = ",
                 b_q_type.str());
   }
 
@@ -854,9 +888,16 @@ torch::Tensor moe_wna16_marlin_gemm(
 
   int dev = a.get_device();
   if (a.scalar_type() == at::ScalarType::Half) {
+    void* scales_ptr;
+    if (b_q_type == vllm::kFE2M1f) {
+      scales_ptr = b_scales.data_ptr<at::Float8_e4m3fn>();
+    } else {
+      scales_ptr = b_scales.data_ptr<at::Half>();
+    }
+
     MARLIN_NAMESPACE_NAME::marlin_mm<half>(
         a.data_ptr<at::Half>(), b_q_weight.data_ptr(), c.data_ptr<at::Half>(),
-        c_tmp.data_ptr<float>(), b_scales.data_ptr<at::Half>(),
+        c_tmp.data_ptr<float>(), scales_ptr, global_scale.data_ptr<at::Half>(),
         b_zeros.data_ptr(), g_idx.data_ptr(), perm.data_ptr(),
         a_tmp.data_ptr<at::Half>(), sorted_token_ids.data_ptr(),
         expert_ids.data_ptr(), num_tokens_past_padded.data_ptr(),
@@ -866,11 +907,18 @@ torch::Tensor moe_wna16_marlin_gemm(
         at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms,
         use_atomic_add, use_fp32_reduce, is_zp_float);
   } else if (a.scalar_type() == at::ScalarType::BFloat16) {
+    void* scales_ptr;
+    if (b_q_type == vllm::kFE2M1f) {
+      scales_ptr = b_scales.data_ptr<at::Float8_e4m3fn>();
+    } else {
+      scales_ptr = b_scales.data_ptr<at::BFloat16>();
+    }
+
     MARLIN_NAMESPACE_NAME::marlin_mm<nv_bfloat16>(
         a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(),
-        c.data_ptr<at::BFloat16>(), c_tmp.data_ptr<float>(),
-        b_scales.data_ptr<at::BFloat16>(), b_zeros.data_ptr(), g_idx.data_ptr(),
-        perm.data_ptr(), a_tmp.data_ptr<at::BFloat16>(),
+        c.data_ptr<at::BFloat16>(), c_tmp.data_ptr<float>(), scales_ptr,
+        global_scale.data_ptr<at::BFloat16>(), b_zeros.data_ptr(),
+        g_idx.data_ptr(), perm.data_ptr(), a_tmp.data_ptr<at::BFloat16>(),
         sorted_token_ids.data_ptr(), expert_ids.data_ptr(),
         num_tokens_past_padded.data_ptr(), topk_weights.data_ptr(),
         moe_block_size, top_k, mul_topk_weights, is_ep, size_m, size_n, size_k,

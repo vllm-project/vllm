@@ -332,9 +332,10 @@ def matryoshka_fy(tensor: torch.Tensor, dimensions: int):
 
 class EmbedModelInfo(NamedTuple):
     name: str
-    is_matryoshka: bool
+    is_matryoshka: bool = False
     matryoshka_dimensions: Optional[list[int]] = None
     architecture: str = ""
+    dtype: str = "auto"
     enable_test: bool = True
 
 

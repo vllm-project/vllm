@@ -7,12 +7,12 @@ IMPORTANT: for mistral, you must use one of the provided mistral tool call
 templates, or your own - the model default doesn't work for tool calls with vLLM
 See the vLLM docs on OpenAI server & tool calling for more details.
 
-vllm serve --model mistralai/Mistral-7B-Instruct-v0.3 \
+vllm serve mistralai/Mistral-7B-Instruct-v0.3 \
             --chat-template examples/tool_chat_template_mistral.jinja \
             --enable-auto-tool-choice --tool-call-parser mistral
 
 OR
-vllm serve --model NousResearch/Hermes-2-Pro-Llama-3-8B \
+vllm serve NousResearch/Hermes-2-Pro-Llama-3-8B \
             --chat-template examples/tool_chat_template_hermes.jinja \
             --enable-auto-tool-choice --tool-call-parser hermes
 """

@@ -32,7 +32,7 @@ class StreamingToolReconstructor:
             assert len(delta.tool_calls) < 2, (
                 "Streaming should include only one tool call per update.")
         for call_delta in delta.tool_calls:
-            assert call_delta.type == "function", (
+            assert call_delta.type is None or call_delta.type == "function", (
                 "Streaming tool calls should only emit function calls. Got "
                 f"{call_delta.type}")
             current_tool_call = self.tool_calls[

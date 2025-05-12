@@ -584,3 +584,97 @@ async def test_echo_logprob_completion(client: openai.AsyncOpenAI,
             assert max(logprobs_arg,
                        1) <= len(top_logprobs) <= logprobs_arg + 1
         assert len(logprobs.tokens) > 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME],
+)
+async def test_invalid_json_schema(client: openai.AsyncOpenAI,
+                                   model_name: str) -> None:
+    invalid_json_schema = {
+        "$defs": {
+            "CarType": {
+                "enum": ["sedan", "SUV", "Truck", "Coupe"],
+                "title": "CarType",
+                "type": "string",
+            }
+        },
+        "properties": {
+            "brand": {
+                "title": "Brand",
+                "type": "string"
+            },
+            "model": {
+                "title": "Model",
+                "type": "string"
+            },
+            "car_type": {
+                "$ref": "#/$defs/CarType"
+            },
+            "foo": "bar",
+        },
+        "required": ["brand", "model", "car_type"],
+        "title": "CarDescription",
+        "type": "object",
+    }
+    prompt = ("Generate a JSON with the brand, model and car_type of"
+              "the most iconic car from the 90's")
+    with pytest.raises((openai.BadRequestError, openai.APIError)):
+        await client.completions.create(
+            model=model_name,
+            prompt=prompt,
+            extra_body={"guided_json": invalid_json_schema},
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME],
+)
+async def test_invalid_regex(client: openai.AsyncOpenAI, model_name: str):
+    prompt = ("Generate an email address for Alan Turing, who works in Enigma."
+              "End in .com and new line. Example result:"
+              "alan.turing@enigma.com\n")
+
+    with pytest.raises((openai.BadRequestError, openai.APIError)):
+        await client.completions.create(
+            model=model_name,
+            prompt=prompt,
+            extra_body={
+                "guided_regex": r"[.*",
+                "stop": ["\n"]
+            },
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME],
+)
+async def test_invalid_grammar(client: openai.AsyncOpenAI, model_name: str):
+    invalid_simplified_sql_grammar = """
+        root ::= select_statementinvalidsyntax
+
+        select_statement ::= "SELECT " column " from " table " where " condition
+
+        column ::= "col_1 " | "col_2 "
+
+        table ::= "table_1 " | "table_2 "
+
+        condition ::= column "= " number
+
+        number ::= "1 " | "2 "
+    """
+
+    prompt = ("Generate an SQL query to show the 'username' and 'email'"
+              "from the 'users' table.")
+    with pytest.raises((openai.BadRequestError, openai.APIError)):
+        await client.completions.create(
+            model=model_name,
+            prompt=prompt,
+            extra_body={"guided_grammar": invalid_simplified_sql_grammar},
+        )

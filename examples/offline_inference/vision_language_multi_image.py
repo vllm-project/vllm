@@ -436,8 +436,8 @@ def load_nvlm_d(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
-# Ovis2
-def load_ovis2(question: str, image_urls: list[str]) -> ModelRequestData:
+# Ovis
+def load_ovis(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "AIDC-AI/Ovis2-1B"
 
     engine_args = EngineArgs(
@@ -447,15 +447,17 @@ def load_ovis2(question: str, image_urls: list[str]) -> ModelRequestData:
         trust_remote_code=True,
         dtype="half",
         limit_mm_per_prompt={"image": len(image_urls)},
-        hf_overrides={"architectures": ["Ovis2ForConditionalGeneration"]},
     )
 
-    placeholder = '\n'.join(
-        [f'Image {i+1}: <image>' for i in range(len(image_urls))]) + '\n'
-    prompt = ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-              f"<|im_start|>user\n{placeholder}"
-              f"{question}<|im_end|>\n"
-              "<|im_start|>assistant\n")
+    placeholders = "\n".join(f"Image-{i}: <image>\n"
+                             for i, _ in enumerate(image_urls, start=1))
+    messages = [{'role': 'user', 'content': f"{placeholders}\n{question}"}]
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name,
+                                              trust_remote_code=True)
+    prompt = tokenizer.apply_chat_template(messages,
+                                           tokenize=False,
+                                           add_generation_prompt=True)
 
     return ModelRequestData(
         engine_args=engine_args,
@@ -713,7 +715,7 @@ model_example_map = {
     "mistral3": load_mistral3,
     "mllama": load_mllama,
     "NVLM_D": load_nvlm_d,
-    "ovis2": load_ovis2,
+    "ovis": load_ovis,
     "phi3_v": load_phi3v,
     "phi4_mm": load_phi4mm,
     "pixtral_hf": load_pixtral_hf,

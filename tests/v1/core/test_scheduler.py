@@ -870,7 +870,7 @@ def test_kv_connector_basic():
     NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE * 2
     scheduler.connector.get_num_new_matched_tokens = Mock(name="method")
     scheduler.connector.get_num_new_matched_tokens.return_value = (
-        NUM_MATCHED_NEW_TOKENS)
+        NUM_MATCHED_NEW_TOKENS, False)
 
     ######################################################
     # FIRST SET OF REQUESTS - External Hit Only
@@ -981,7 +981,7 @@ def test_kv_connector_unable_to_allocate():
     NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE * 2
     scheduler.connector.get_num_new_matched_tokens = Mock(name="method")
     scheduler.connector.get_num_new_matched_tokens.return_value = (
-        NUM_MATCHED_NEW_TOKENS)
+        NUM_MATCHED_NEW_TOKENS, False)
 
     # Create two requests. The second request will not be able to
     # allocate slots because it will not have enough blocks.
@@ -1060,7 +1060,7 @@ def test_kv_connector_handles_preemption():
     NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE
     scheduler.connector.get_num_new_matched_tokens = Mock(name="method")
     scheduler.connector.get_num_new_matched_tokens.return_value = (
-        NUM_MATCHED_NEW_TOKENS)
+        NUM_MATCHED_NEW_TOKENS, False)
 
     # Create two requests.
     # Both can be scheduled at first, but the second request

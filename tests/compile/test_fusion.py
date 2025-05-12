@@ -9,7 +9,8 @@ from vllm.compilation.fusion import (FUSED_OPS, QUANT_OPS, FusedRMSQuantKey,
                                      FusionPass, QuantKey)
 from vllm.compilation.fx_utils import find_auto_fn, find_auto_fn_maybe
 from vllm.compilation.noop_elimination import NoOpEliminationPass
-from vllm.config import CompilationConfig, CompilationLevel, VllmConfig
+from vllm.config import (CompilationConfig, CompilationLevel, PassConfig,
+                         VllmConfig)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_FP8_SUPPORTED, Fp8LinearOp, maybe_create_device_identity)
@@ -78,8 +79,7 @@ def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static,
     vllm_config = VllmConfig(compilation_config=CompilationConfig(
         level=CompilationLevel.PIECEWISE, custom_ops=["+rms_norm"]))
     vllm_config.compilation_config.pass_config = \
-            CompilationConfig.PassConfig(enable_fusion=True,
-                                              enable_noop=True)
+        PassConfig(enable_fusion=True, enable_noop=True)
     with vllm.config.set_current_vllm_config(vllm_config):
         # Reshape pass is needed for the fusion pass to work
         noop_pass = NoOpEliminationPass(vllm_config)
