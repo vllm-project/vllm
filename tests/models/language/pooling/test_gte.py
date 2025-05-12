@@ -68,9 +68,8 @@ def test_models_mteb(hf_runner, vllm_runner,
 
 
 @pytest.mark.parametrize("model_info", MODELS)
-def test_models_correctness(hf_runner, vllm_runner,
-                             model_info: EmbedModelInfo,
-                             example_prompts) -> None:
+def test_models_correctness(hf_runner, vllm_runner, model_info: EmbedModelInfo,
+                            example_prompts) -> None:
     if not model_info.enable_test:
         pytest.skip("Skipping test.")
 
