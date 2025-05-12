@@ -390,6 +390,7 @@ class BatchedDispatchCombine(mk.FusedMoEQuantizeDispatchCombine):
     expert batched format, i.e. E x max_num_tokens x K.  This is the format
     that the PPLX dispatch/combine kernels use.
     """
+
     def __init__(self, max_num_tokens: Optional[int], world_size: int,
                  dp_size: int, rank: int):
         super().__init__()
@@ -487,6 +488,7 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
     i.e. E x max_num_tokens x K.  This is the format that the pplx
     dispatch/combine kernels use.
     """
+
     def __init__(
         self,
         world_size: int,
@@ -593,6 +595,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     i.e. E x max_num_tokens x K.  This is the format that the pplx
     dispatch/combine kernels use.
     """
+
     def __init__(
         self,
         max_num_tokens: Optional[int] = None,
