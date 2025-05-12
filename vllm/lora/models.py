@@ -6,7 +6,7 @@ import os
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Optional, Union, TYPE_CHECKING
 
 import safetensors.torch
 import torch
@@ -34,6 +34,9 @@ from vllm.model_executor.models.interfaces import is_pooling_model
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import PPMissingLayer, WeightsMapper
 from vllm.utils import is_pin_memory_available
+
+if TYPE_CHECKING:
+    from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 
 logger = init_logger(__name__)
 
@@ -220,7 +223,7 @@ class LoRAModel(AdapterModel):
             lora_dir, "new_embeddings.safetensors")
         new_embeddings_bin_file_path = os.path.join(lora_dir,
                                                     "new_embeddings.bin")
-
+        tensors: dict[str, torch.Tensor] = {}
         unexpected_modules: list[Union[list[str], str]]
         if tensorizer_config:
             from tensorizer import TensorDeserializer
@@ -232,7 +235,6 @@ class LoRAModel(AdapterModel):
                                          **tensorizer_args.deserializer_params)
 
         elif os.path.isfile(lora_tensor_path):
-            tensors: dict[str, torch.Tensor] = {}
             # Find unexpected modules.
             # Use safetensor key as a source of truth to find expected modules.
             # in peft if you have target_modules A, B, C and C does not exist
