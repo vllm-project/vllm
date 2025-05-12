@@ -1759,7 +1759,8 @@ class ParallelConfig:
 
         if self.data_parallel_size_local > self.data_parallel_size:
             raise ValueError(
-                "data_parallel_size_local must be <= data_parallel_size")
+                f"data_parallel_size_local ({self.data_parallel_size_local}) "
+                f"must be <= data_parallel_size ({self.data_parallel_size})")
 
         if self.data_parallel_size > 1 or self.data_parallel_size_local == 0:
             # Data parallel was specified in the engine args.
