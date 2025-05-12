@@ -3,6 +3,7 @@
 import gc
 import json
 import tempfile
+import os
 
 import openai
 import pytest
@@ -19,6 +20,11 @@ from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "meta-llama/Llama-2-7b-hf"
 LORA_PATH = "yard1/llama-2-7b-sql-lora-test"
+
+USING_V1 = False
+v1_set = os.getenv("VLLM_USE_V1") or None
+if v1_set is not None and v1_set != "0":
+    USING_V1 = True
 
 
 def _cleanup():
@@ -79,6 +85,7 @@ async def client(server):
         yield async_client
 
 
+@pytest.mark.skipif(USING_V1)
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_single_completion(client: openai.AsyncOpenAI, model_name: str):
@@ -97,7 +104,7 @@ async def test_single_completion(client: openai.AsyncOpenAI, model_name: str):
     assert completion.usage == openai.types.CompletionUsage(
         completion_tokens=5, prompt_tokens=6, total_tokens=11)
 
-
+@pytest.mark.skipif(USING_V1)
 def test_confirm_deserialize_and_serve(model_uri, tmp_dir,
                                        tensorize_model_and_lora):
     tc = TensorizerConfig(tensorizer_uri=model_uri, lora_dir=tmp_dir)
