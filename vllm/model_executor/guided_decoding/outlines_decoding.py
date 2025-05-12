@@ -107,7 +107,7 @@ def _get_logits_processor(
         guide: str, tokenizer: PreTrainedTokenizerBase,
         mode: GuidedDecodingMode, whitespace_pattern: Union[str, None],
         reasoner: Optional[ReasoningParser],
-        vocab_size: int) -> Union[JSONLogitsProcessor, RegexLogitsProcessor]:
+        vocab_size: int,) -> Union[JSONLogitsProcessor, RegexLogitsProcessor]:
     if mode == GuidedDecodingMode.JSON:
         return JSONLogitsProcessor(guide, tokenizer, whitespace_pattern,
                                    reasoner, vocab_size)
