@@ -7,7 +7,6 @@ from unittest.mock import patch
 
 import numpy as np
 import torch
-import torch.distributed
 import torch.nn as nn
 # TPU XLA related
 import torch_xla.core.xla_model as xm
@@ -278,6 +277,15 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 max_num_mm_items = min(max_num_mm_items_encoder_budget,
                                        max_num_mm_items_decoder_budget)
                 self.max_num_mm_items_by_modality[modality] = max_num_mm_items
+
+        if not self.use_spmd:
+            self.sample_from_logits_func = torch.compile(
+                self.sample_from_logits,
+                backend="openxla",
+                fullgraph=True,
+                dynamic=False)
+        else:
+            self.sample_from_logits_func = self.sample_from_logits
 
     def _update_num_xla_graphs(self, case_str):
         check_comp = self.check_recompilation and not self.enforce_eager
@@ -824,8 +832,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             logits = self.structured_decode(require_struct_decoding,
                                             grammar_bitmask_padded, logits,
                                             arange)
-        selected_token_ids = self.sample_from_logits(logits,
-                                                     tpu_sampling_metadata)
+        selected_token_ids = self.sample_from_logits_func(
+            logits, tpu_sampling_metadata)
         logger.info(f"check selected_token_ids {selected_token_ids}")
         # NOTE (NickLucche) Use the original logits (before any penalties or
         # temperature scaling) for the top-k logprobs. We can't enforce it due
@@ -1175,7 +1183,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                         generate_params_if_all_greedy,
                     ))
                 sampling_metadata.all_greedy = all_greedy
-                self.sample_from_logits(dummy_logits, sampling_metadata)
+                self.sample_from_logits_func(dummy_logits, sampling_metadata)
             logger.info("  -- num_seqs: %d", num_reqs)
         xm.wait_device_ops()
         end = time.perf_counter()
@@ -1340,6 +1348,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                        sample_hidden_states: torch.Tensor) -> torch.Tensor:
         return self.model.compute_logits(sample_hidden_states, None)
 
+    # TODO: Under SPMD mode, sample_from_logits has correctness issue.
+    #       Re-enable the torch.compile once the issue is fixed in torchxla.
     # @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def sample_from_logits(
             self, logits: torch.Tensor,
