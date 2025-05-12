@@ -65,6 +65,7 @@ if TYPE_CHECKING:
 
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.structured_output import StructuredOutputManager
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
@@ -73,11 +74,8 @@ logger = init_logger(__name__)
 
 class GPUModelRunner(LoRAModelRunnerMixin):
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        device: torch.device,
-    ):
+    def __init__(self, vllm_config: VllmConfig, device: torch.device,
+                 structured_output_manager: "StructuredOutputManager"):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -88,6 +86,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.speculative_config = vllm_config.speculative_config
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
+        self.structured_output_manager = structured_output_manager
 
         from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
         set_cpu_offload_max_bytes(
@@ -1174,8 +1173,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logits = model_output_broadcast_data["logits"]
 
         if scheduler_output.structured_output_meta is not None:
-            assert scheduler_output.structured_output_manager is not None
-            scheduler_output.structured_output_manager.filter_logits(
+            self.structured_output_manager.filter_logits(
                 self.input_batch, self.device, scheduler_output, logits,
                 sample_hidden_states)
 

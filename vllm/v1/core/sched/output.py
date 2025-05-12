@@ -13,7 +13,6 @@ if TYPE_CHECKING:
     from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
     from vllm.sampling_params import SamplingParams
     from vllm.v1.request import Request
-    from vllm.v1.structured_output import StructuredOutputManager
     from vllm.v1.structured_output.backend_types import (
         StructuredOutputBatchMetaData)
 
@@ -144,9 +143,6 @@ class SchedulerOutput:
     # Used to free the encoder cache.
     free_encoder_input_ids: list[tuple[str, int]]
 
-    # The structured output manager - will be the same for all batches
-    # interfaces with the guiding decoding backend and the rest of vLLM
-    structured_output_manager: Optional[StructuredOutputManager]
     # Meta data for structured output batches
     # By default this holds only the structured_output_request_ids
     # but backends may extend this to hold more data for the batch

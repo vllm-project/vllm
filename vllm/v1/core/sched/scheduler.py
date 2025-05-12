@@ -541,7 +541,6 @@ class Scheduler(SchedulerInterface):
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
-            structured_output_manager=self.structured_output_manager,
             structured_output_meta=structured_output_meta)
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
