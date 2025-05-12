@@ -280,6 +280,7 @@ def _compute_tool_delta(previously_sent_args: str, new_call: ToolCall,
         new_call_args = new_call_args[:-len(withheld_suffix)]
     if not previously_sent_args:
         return DeltaToolCall(id=new_call.id,
+                             type="function",
                              index=index,
                              function=DeltaFunctionCall(
                                  name=new_call.function.name,
@@ -288,5 +289,5 @@ def _compute_tool_delta(previously_sent_args: str, new_call: ToolCall,
 
     arg_diff = new_call_args[len(previously_sent_args):]
     return DeltaToolCall(
-        id="", index=index, function=DeltaFunctionCall(
+        id=None, index=index, function=DeltaFunctionCall(
             arguments=arg_diff)) if arg_diff else None
