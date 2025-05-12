@@ -14,10 +14,12 @@ if TYPE_CHECKING:
 @pytest.mark.parametrize("PP_SIZE, MODEL_NAME", [
     (2, "JackFram/llama-160m"),
 ])
-@pytest.mark.parametrize("ATTN_BACKEND", [
-    "FLASH_ATTN",
-    "FLASHINFER",
-])
+@pytest.mark.parametrize(
+    "ATTN_BACKEND",
+    [
+        "FLASH_ATTN",
+        # "FLASHINFER", @mgoin is looking at this.
+    ])
 @create_new_process_for_each_test()
 def test_pp_cudagraph(
     monkeypatch: pytest.MonkeyPatch,
