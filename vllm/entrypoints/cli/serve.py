@@ -28,9 +28,9 @@ from vllm.v1.engine.core_client import CoreEngineProcManager
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 from vllm.v1.utils import (APIServerProcessManager, CoreEngine,
-                           get_engine_client_zmq_addr,
+                           CoreEngineActorManager, get_engine_client_zmq_addr,
                            wait_for_completion_or_failure,
-                           wait_for_engine_startup)
+                           wait_for_engine_startup, wait_for_ray_engine_actors)
 
 logger = init_logger(__name__)
 
@@ -220,6 +220,34 @@ def run_multi_api_server(args: argparse.Namespace):
         stats_update_address = coordinator.get_stats_publish_address()
         logger.info("Started DP Coordinator process (PID: %d)",
                     coordinator.proc.pid)
+
+    if parallel_config.data_parallel_backend == "ray":
+        logger.info("Starting ray-based data parallel backend")
+
+        engine_actor_manager = CoreEngineActorManager(
+            local_engine_count=local_engine_count,
+            start_index=args.data_parallel_start_rank,
+            local_start_index=0,
+            vllm_config=vllm_config,
+            addresses=addresses,
+            executor_class=Executor.get_class(vllm_config),
+            log_stats=not engine_args.disable_log_stats,
+        )
+        # Start API servers using the manager
+        api_server_manager = APIServerProcessManager(
+            target_server_fn=run_api_server_worker,
+            listen_address=listen_address,
+            sock=sock,
+            args=args,
+            num_servers=num_api_servers,
+            input_addresses=input_addresses,
+            output_addresses=output_addresses,
+            stats_update_address=stats_update_address)
+
+        wait_for_ray_engine_actors(api_server_manager=api_server_manager,
+                                   engine_actor_manager=engine_actor_manager,
+                                   coordinator=coordinator)
+        return
 
     handshake_address = get_engine_client_zmq_addr(
         local_only, host, parallel_config.data_parallel_rpc_port)

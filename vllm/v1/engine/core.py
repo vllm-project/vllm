@@ -866,3 +866,108 @@ class DPEngineCoreProc(EngineCoreProc):
 
         return ParallelConfig.has_unfinished_dp(self.dp_group,
                                                 local_unfinished)
+
+
+class DPEngineCoreActor(DPEngineCoreProc):
+    """
+    Ray Actor for running EngineCore in a data parallel context
+    """
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        on_head_node: bool,
+        addresses,
+        executor_class: type[Executor],
+        log_stats: bool,
+        engine_index: int = 0,
+        dp_rank: int = 0,
+        local_dp_rank: int = 0,
+    ):
+        # TODO(rui): improve shutdown handling
+
+        # Ensure we can serialize transformer config after spawning
+        maybe_register_config_serialize_by_value()
+
+        parallel_config: ParallelConfig = vllm_config.parallel_config
+        assert parallel_config.data_parallel_size > 1 or dp_rank > 0
+        # Set data parallel rank for this engine process.
+        parallel_config.data_parallel_rank = dp_rank
+        parallel_config.data_parallel_rank_local = local_dp_rank
+
+        input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
+
+        executor_fail_callback = lambda: input_queue.put_nowait(
+            (EngineCoreRequestType.EXECUTOR_FAILED, b''))
+
+        input_addresses: list[str] = addresses["input_addresses"]
+        output_addresses: list[str] = addresses["output_addresses"]
+        coord_in_addr: Optional[str] = addresses.get("coord_in_address")
+        coord_out_addr: Optional[str] = addresses.get("coord_out_address")
+        self.client_count = len(output_addresses)
+        self.coordinator = coord_out_addr is not None
+
+        # Ray sets CUDA_VISIBLE_DEVICES to empty string,
+        # we clean this up to be able to properly initialize
+        # data parallel groups.
+        del os.environ['CUDA_VISIBLE_DEVICES']
+        # Set up data parallel environment.
+        self._init_data_parallel(vllm_config)
+
+        # Counts forward-passes of the model so that we can synchronize
+        # finished with DP peers every N steps.
+        self.counter = 0
+        self.current_wave = 0
+
+        # Initialize engine core and model.
+        EngineCore.__init__(self, vllm_config, executor_class, log_stats,
+                            executor_fail_callback)
+
+        self.engine_index = engine_index
+        self.step_fn = (self.step if self.batch_queue is None else
+                        self.step_with_batch_queue)
+        self.engines_running = False
+        self.last_counts = (0, 0)
+
+        # Background Threads and Queues for IO. These enable us to
+        # overlap ZMQ socket IO with GPU since they release the GIL,
+        # and to overlap some serialization/deserialization with the
+        # model forward pass.
+        # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
+        self.input_queue = input_queue
+        self.output_queue = queue.Queue[Union[tuple[int, EngineCoreOutputs],
+                                              bytes]]()
+        identity = engine_index.to_bytes(length=2, byteorder="little")
+        threading.Thread(target=self.process_input_sockets,
+                         args=(input_addresses, coord_in_addr, identity),
+                         daemon=True).start()
+        self.output_thread = threading.Thread(
+            target=self.process_output_sockets,
+            args=(output_addresses, coord_out_addr, engine_index),
+            daemon=True)
+        self.output_thread.start()
+
+    def wait_for_init(self):
+        """
+        Wait until the engine core is initialized.
+
+        This is just an empty method. When ray.get() on this method
+        (or any other method of the actor) returns, it is guaranteed
+        that actor creation (i.e., __init__) is complete.
+        """
+        pass
+
+    def run(self):
+        """
+        Run the engine core busy loop.
+        """
+        try:
+            self.run_busy_loop()
+        except SystemExit:
+            logger.debug("EngineCore exiting.")
+            raise
+        except Exception:
+            logger.exception("EngineCore encountered a fatal error.")
+            raise
+        finally:
+            self.shutdown()
