@@ -1349,9 +1349,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_token_ids=spec_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
+            pooler_output=[],
             finished_sending=finished_sending,
             finished_recving=finished_recving,
-            pooler_output=[],
         )
 
     def kv_connector_no_forward(
