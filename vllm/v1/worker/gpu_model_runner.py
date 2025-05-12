@@ -19,7 +19,8 @@ from vllm.config import (CompilationLevel, VllmConfig,
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
-from vllm.distributed.parallel_state import get_pp_group, graph_capture
+from vllm.distributed.parallel_state import (get_pp_group, get_tp_group,
+                                             graph_capture)
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
@@ -1171,7 +1172,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if not get_pp_group().is_last_rank:
             # For mid-pipeline stages, return the hidden states.
-            if not self.parallel_config.pipeline_parallel_broadcast_output:
+            if self.parallel_config.distributed_executor_backend \
+                != "external_launcher":
                 return hidden_states
             assert isinstance(hidden_states, IntermediateTensors)
             get_pp_group().send_tensor_dict(hidden_states.tensors,

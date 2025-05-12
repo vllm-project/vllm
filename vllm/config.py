@@ -1653,8 +1653,6 @@ class ParallelConfig:
     data_parallel_master_port: int = 29500
     """Port of the data parallel master."""
     enable_expert_parallel: bool = False
-    """Use expert parallelism instead of tensor parallelism for MoE layers."""
-    pipeline_parallel_broadcast_output: bool = False
     """Whether to broadcast pp output to other pp ranks. 
        Enabled when using external launcher such as torchrun"""
     max_parallel_loading_workers: Optional[int] = None
@@ -1783,7 +1781,6 @@ class ParallelConfig:
             import os
             os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
             logger.info("Disabling V1 multiprocessing for external launcher.")
-            self.pipeline_parallel_broadcast_output = True
 
         ray_only_devices: list[str] = []
         from vllm.platforms import current_platform
