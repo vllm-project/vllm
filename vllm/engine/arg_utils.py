@@ -8,12 +8,14 @@ import re
 import sys
 import threading
 import warnings
-from dataclasses import MISSING, dataclass, fields, is_dataclass
+from dataclasses import MISSING, dataclass, fields
 from itertools import permutations
 from typing import (Annotated, Any, Callable, Dict, List, Literal, Optional,
                     Type, TypeVar, Union, cast, get_args, get_origin)
 
 import torch
+from pydantic import TypeAdapter, ValidationError
+from pydantic.dataclasses import is_pydantic_dataclass
 from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
@@ -161,14 +163,15 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
             type_hints.add(field.type)
 
         # If the field is a dataclass, we can use the model_validate_json
-        generator = (th for th in type_hints if is_dataclass(th))
+        generator = (th for th in type_hints if is_pydantic_dataclass(th))
         dataclass_cls = next(generator, None)
 
         # Get the default value of the field
         if field.default is not MISSING:
             default = field.default
         elif field.default_factory is not MISSING:
-            if is_dataclass(field.default_factory) and is_in_doc_build():
+            if (is_pydantic_dataclass(field.default_factory)
+                    and is_in_doc_build()):
                 default = {}
             else:
                 default = field.default_factory()
@@ -185,12 +188,16 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
         # Set other kwargs based on the type hints
         json_tip = "\n\nShould be a valid JSON string."
         if dataclass_cls is not None:
-            dataclass_init = lambda x, f=dataclass_cls: f(**json.loads(x))
-            # Special case for configs with a from_cli method
-            if hasattr(dataclass_cls, "from_cli"):
-                from_cli = dataclass_cls.from_cli
-                dataclass_init = lambda x, f=from_cli: f(x)
-            kwargs[name]["type"] = dataclass_init
+
+            def parse_dataclass(val: str, cls=dataclass_cls) -> Any:
+                try:
+                    if hasattr(cls, "from_cli"):
+                        return cls.from_cli(val)
+                    return TypeAdapter(cls).validate_json(val)
+                except ValidationError as e:
+                    raise argparse.ArgumentTypeError(repr(e)) from e
+
+            kwargs[name]["type"] = parse_dataclass
             kwargs[name]["help"] += json_tip
         elif contains_type(type_hints, bool):
             # Creates --no-<name> and --<name> flags
