@@ -402,13 +402,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "access by 3rd parties, and long enough to be "
             "unpredictable (e.g., 43 characters base64-encoded, corresponding "
             "to 256 bit). Not supported by vLLM engine V0."))
-
-    # doc: end-chat-completion-extra-params
-
     kv_transfer_params: Optional[dict[str, Any]] = Field(
         default=None,
-        description="KVTransfer parameters used for disaggregated serving."
-    )
+        description="KVTransfer parameters used for disaggregated serving.")
+
+    # doc: end-chat-completion-extra-params
 
     # Default sampling parameters for chat completion requests
     _DEFAULT_SAMPLING_PARAMS: dict = {
@@ -1427,8 +1425,7 @@ class ChatCompletionResponse(OpenAIBaseModel):
     usage: UsageInfo
     prompt_logprobs: Optional[list[Optional[dict[int, Logprob]]]] = None
     kv_transfer_params: Optional[dict[str, Any]] = Field(
-            default=None,
-        description="KVTransfer parameters.")
+        default=None, description="KVTransfer parameters.")
 
 
 class DeltaMessage(OpenAIBaseModel):
