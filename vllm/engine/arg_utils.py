@@ -8,7 +8,7 @@ import re
 import sys
 import threading
 import warnings
-from dataclasses import MISSING, dataclass, fields, is_dataclass
+from dataclasses import MISSING, dataclass, field, fields, is_dataclass
 from itertools import permutations
 from typing import (Annotated, Any, Callable, Dict, List, Literal, Optional,
                     Type, TypeVar, Union, cast, get_args, get_origin)
@@ -152,29 +152,29 @@ def is_not_builtin(type_hint: TypeHint) -> bool:
 def get_kwargs(cls: ConfigType) -> dict[str, Any]:
     cls_docs = get_attr_docs(cls)
     kwargs = {}
-    for field in fields(cls):
+    for fld in fields(cls):
         # Get the set of possible types for the field
         type_hints: set[TypeHint] = set()
-        if get_origin(field.type) in {Union, Annotated}:
-            type_hints.update(get_args(field.type))
+        if get_origin(fld.type) in {Union, Annotated}:
+            type_hints.update(get_args(fld.type))
         else:
-            type_hints.add(field.type)
+            type_hints.add(fld.type)
 
         # If the field is a dataclass, we can use the model_validate_json
         generator = (th for th in type_hints if is_dataclass(th))
         dataclass_cls = next(generator, None)
 
         # Get the default value of the field
-        if field.default is not MISSING:
-            default = field.default
-        elif field.default_factory is not MISSING:
-            if is_dataclass(field.default_factory) and is_in_doc_build():
+        if fld.default is not MISSING:
+            default = fld.default
+        elif fld.default_factory is not MISSING:
+            if is_dataclass(fld.default_factory) and is_in_doc_build():
                 default = {}
             else:
-                default = field.default_factory()
+                default = fld.default_factory()
 
         # Get the help text for the field
-        name = field.name
+        name = fld.name
         help = cls_docs[name].strip()
         # Escape % for argparse
         help = help.replace("%", "%%")
@@ -391,7 +391,8 @@ class EngineArgs:
         get_field(ModelConfig, "override_neuron_config")
     override_pooler_config: Optional[Union[dict, PoolerConfig]] = \
         ModelConfig.override_pooler_config
-    compilation_config: Optional[CompilationConfig] = None
+    compilation_config: CompilationConfig = \
+        field(default_factory=CompilationConfig)
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
