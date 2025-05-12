@@ -2,8 +2,8 @@
 
 import gc
 import json
-import tempfile
 import os
+import tempfile
 
 import openai
 import pytest
@@ -103,6 +103,7 @@ async def test_single_completion(client: openai.AsyncOpenAI, model_name: str):
     assert completion.choices[0].finish_reason == "length"
     assert completion.usage == openai.types.CompletionUsage(
         completion_tokens=5, prompt_tokens=6, total_tokens=11)
+
 
 @pytest.mark.skipif(USING_V1)
 def test_confirm_deserialize_and_serve(model_uri, tmp_dir,

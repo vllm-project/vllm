@@ -108,10 +108,8 @@ class PEFTHelper:
                              **tensorizer_args.stream_params) as f:
                 config = json.load(f)
 
-            logger.info(
-                "Successfully deserialized LoRA config from %s",
-                tensorizer_config.lora_dir
-            )
+            logger.info("Successfully deserialized LoRA config from %s",
+                        tensorizer_config.lora_dir)
 
         else:
             with open(lora_config_path) as f:

@@ -3,6 +3,7 @@
 import argparse
 import dataclasses
 import io
+import json
 import os
 import re
 import time
@@ -61,7 +62,7 @@ logger = init_logger(__name__)
 
 @dataclass
 class TensorizerConfig:
-    tensorizer_uri: str = None
+    tensorizer_uri: str | None = None
     vllm_tensorized: Optional[bool] = False
     verify_hash: Optional[bool] = False
     num_readers: Optional[int] = None
@@ -455,7 +456,6 @@ def tensorize_vllm_model(engine_args: EngineArgs,
        Intended to be used separately from running a vLLM server since it
        creates its own Engine instance.
     """
-    import vllm.worker.worker
     engine_config = engine_args.create_engine_config()
     tensorizer_config.verify_with_model_config(engine_config.model_config)
     tensorizer_config.verify_with_parallel_config(
@@ -492,8 +492,8 @@ def tensorize_lora_adapter(lora_path: str,
 
     Serializes the files in the tensorizer_config.lora_dir
     """
-    from huggingface_hub import snapshot_download
     import safetensors
+    from huggingface_hub import snapshot_download
 
     lora_files = snapshot_download(repo_id=lora_path)
 
