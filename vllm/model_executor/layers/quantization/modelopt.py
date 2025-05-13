@@ -613,8 +613,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         layer.w13_input_scale_quant = Parameter(
             (1 / w13_input_scale).to(torch.float32), requires_grad=False)
 
-        layer.w13_weight = Parameter(layer.w13_weight.data, requires_grad=False)
-        
+        layer.w13_weight = Parameter(layer.w13_weight.data,
+                                     requires_grad=False)
+
         # GEMM 2
         layer.g2_alphas = Parameter(
             (layer.w2_input_scale * layer.w2_weight_scale_2).to(torch.float32),
@@ -633,7 +634,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         layer.w2_blockscale_swizzled = Parameter(w2_blockscale_swizzled,
                                                  requires_grad=False)
         layer.w2_weight = Parameter(layer.w2_weight.data, requires_grad=False)
-        
+
         if self.use_marlin:
             prepare_moe_fp4_layer_for_marlin(layer)
             del layer.g1_alphas
