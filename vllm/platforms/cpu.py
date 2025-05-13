@@ -83,10 +83,6 @@ class CpuPlatform(Platform):
         if not model_config.enforce_eager:
             model_config.enforce_eager = True
 
-        if model_config.enable_sleep_mode:
-            logger.warning("sleep mode is not supported on CPU, disable it.")
-            model_config.enable_sleep_mode = False
-
         model_config.disable_cascade_attn = True
 
         cache_config = vllm_config.cache_config
