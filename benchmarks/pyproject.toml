@@ -49,7 +49,6 @@ ignore = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["vllm"]
-known-local-folder = ["benchmarks"]
 
 [tool.ruff.format]
 docstring-code-format = true

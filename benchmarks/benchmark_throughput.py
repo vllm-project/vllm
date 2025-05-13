@@ -12,6 +12,9 @@ from typing import Any, Optional, Union
 
 import torch
 import uvloop
+from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase
+
 from benchmark_dataset import (
     AIMODataset,
     BurstGPTDataset,
@@ -24,9 +27,6 @@ from benchmark_dataset import (
     VisionArenaDataset,
 )
 from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
-from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase
-
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args,

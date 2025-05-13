@@ -11,9 +11,9 @@ from typing import Any, Optional
 
 import numpy as np
 import torch
-from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
 from tqdm import tqdm
 
+from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import PromptType
