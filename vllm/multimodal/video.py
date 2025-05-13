@@ -70,7 +70,7 @@ class VideoLoaderRegistry:
     @staticmethod
     def load(cls_name: str) -> VideoLoader:
         cls = VIDEO_LOADER_REGISTRY.name2class.get(cls_name)
-        assert cls is not None, f"Class {cls_name} not found"
+        assert cls is not None, f"VideoLoader class {cls_name} not found"
         return cls()
 
 
