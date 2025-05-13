@@ -8,6 +8,8 @@ from vllm.attention.backends.utils import CommonAttentionState
 from vllm.attention.ops.ipex_attn import PagedAttention
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.cpu_model_runner import CPUModelRunner
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
@@ -52,8 +54,10 @@ class TorchSDPABackend:
 
 class TorchSDPAMetadataBuilderV1:
 
-    def __init__(self, runner: CPUModelRunner) -> None:
+    def __init__(self, runner: CPUModelRunner, kv_cache_spec: AttentionSpec,
+                 block_table: BlockTable) -> None:
         self.runner = runner
+        self.block_table = block_table
 
         # For reorder
         self.reorder_prompt_req_index_list = np.empty(self.runner.max_num_reqs,
@@ -110,6 +114,7 @@ class TorchSDPAMetadataBuilderV1:
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata):
         runner = self.runner
+        block_table = self.block_table
         seq_lens_np = runner.seq_lens_np[:num_reqs]
         num_prompt_req = self.num_prompt_req
         max_prefill_seq_len = seq_lens_np[:num_prompt_req].max().item(
@@ -121,8 +126,8 @@ class TorchSDPAMetadataBuilderV1:
         num_prefill_tokens = runner.query_start_loc_np[num_prompt_req].item()
         num_decode_tokens = runner.query_start_loc_np[num_reqs].item(
         ) - num_prefill_tokens
-        slot_mapping = runner.slot_mapping_cpu[:num_actual_tokens].long()
-        block_table_tensor = runner.input_batch.block_table.get_device_tensor()
+        slot_mapping = block_table.slot_mapping_cpu[:num_actual_tokens].long()
+        block_table_tensor = block_table.get_device_tensor()
         attn_metadata = TorchSDPAMetadata(
             num_prefills=num_prompt_req,
             num_prefill_tokens=num_prefill_tokens,
