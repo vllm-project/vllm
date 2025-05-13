@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 
@@ -15,7 +15,7 @@ def moe_permute(
     expert_map: Optional[torch.Tensor] = None,
     align_block_size: Optional[int] = None,
     fill_invalid_expert: int = -1
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     This function expands and permutes activation to gather uncontinuous tokens 
       for each expert.
