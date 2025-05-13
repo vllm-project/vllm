@@ -24,7 +24,7 @@ class All2AllBase:
 
         # all2all communication often has separate implementations for
         # intra-node and inter-node communication
-        self.intranode = in_the_same_node_as(self.ep_group, source_rank=0)
+        self.intranode = in_the_same_node_as(cpu_group, source_rank=0)
         self.internode = not self.intranode
 
     def dispatch(self, hidden_states: torch.Tensor,
