@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, TypedDict, Union
+from typing import Optional, TypedDict, Union
 
 from pydantic import BaseModel
 
 
 # These classes are deprecated, see SamplingParams
 class LLMGuidedOptions(TypedDict, total=False):
-    guided_json: Union[Dict, BaseModel, str]
+    guided_json: Union[dict, BaseModel, str]
     guided_regex: str
-    guided_choice: List[str]
+    guided_choice: list[str]
     guided_grammar: str
     guided_decoding_backend: str
     guided_whitespace_pattern: str
@@ -20,9 +20,9 @@ class LLMGuidedOptions(TypedDict, total=False):
 @dataclass
 class GuidedDecodingRequest:
     """One of the fields will be used to retrieve the logit processor."""
-    guided_json: Optional[Union[Dict, BaseModel, str]] = None
+    guided_json: Optional[Union[dict, BaseModel, str]] = None
     guided_regex: Optional[str] = None
-    guided_choice: Optional[List[str]] = None
+    guided_choice: Optional[list[str]] = None
     guided_grammar: Optional[str] = None
     guided_decoding_backend: Optional[str] = None
     guided_whitespace_pattern: Optional[str] = None
