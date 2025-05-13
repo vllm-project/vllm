@@ -81,32 +81,6 @@ class PromptAdapterParserAction(argparse.Action):
         setattr(namespace, self.dest, adapter_list)
 
 
-class ChatTemplateChoiceParserAction(argparse.Action):
-
-    def __call__(self,
-                 parser: argparse.ArgumentParser,
-                 namespace: argparse.Namespace,
-                 values: Optional[str],
-                 option_string: Optional[str] = None,
-                 ):
-        # Accept any string or path as chat template argument while still
-        # validating built-in templates.
-        if values is None:
-            return
-
-        if not isinstance(values, str):
-            raise TypeError("Expected chat template to be a string or path")
-
-        # If the provided value matches one of the built-in template keys, we
-        # eager-validate it to surface errors early. Otherwise we simply accept
-        # the value (validate_chat_template will run later in
-        # validate_parsed_serve_args).
-        if values in CHAT_TEMPLATES:
-            validate_chat_template(values)
-
-        setattr(namespace, self.dest, values)
-
-
 def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
     parser.add_argument("--host",
                         type=optional_type(str),
@@ -162,14 +136,13 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         action=PromptAdapterParserAction,
         help="Prompt adapter configurations in the format name=path. "
         "Multiple adapters can be specified.")
-    parser.add_argument("--chat-template",
-                        type=optional_type(str),
-                        default=None,
-                        choices=list(CHAT_TEMPLATES),
-                        action=ChatTemplateChoiceParserAction,
-                        help="The file path to the chat template, "
-                        "or the template in single-line form "
-                        "for the specified model.")
+    parser.add_argument(
+        "--chat-template",
+        type=optional_type(str),
+        default=None,
+        help=
+        f"Optional file path to the chat template, or the template in single-line form for the specified model. Built-in supported templates: {', '.join(CHAT_TEMPLATES)}",  # noqa: E501
+    )
     parser.add_argument(
         '--chat-template-content-format',
         type=str,
