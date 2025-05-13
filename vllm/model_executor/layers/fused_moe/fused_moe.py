@@ -915,7 +915,7 @@ def grouped_topk(
     e_score_correction_bias: Optional[torch.Tensor] = None,
     num_share_fusion_replicas: int = 0,
     routed_scaling_factor: Optional[float] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     assert hidden_states.shape[0] == gating_output.shape[0], (
         "Number of tokens mismatch")
 
@@ -1451,7 +1451,7 @@ def fused_moe(
     w2_zp: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
-    block_shape: Optional[List[int]] = None,
+    block_shape: Optional[list[int]] = None,
     num_share_fusion_replicas: int = 0,
 ) -> torch.Tensor:
     """
