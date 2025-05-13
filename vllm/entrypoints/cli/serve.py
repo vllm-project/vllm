@@ -5,8 +5,11 @@ import multiprocessing
 import os
 import signal
 import sys
+import time
+import weakref
+from multiprocessing import connection
 from multiprocessing.context import SpawnProcess
-from typing import Any
+from typing import Any, Optional
 
 import uvloop
 import zmq
@@ -30,6 +33,151 @@ from vllm.v1.utils import (CoreEngine, get_engine_client_zmq_addr,
                            wait_for_engine_startup)
 
 logger = init_logger(__name__)
+
+
+class APIServerProcessManager:
+    """Manages a group of API server processes.
+    
+    Handles creation, monitoring, and termination of API server worker 
+    processes.
+    """
+
+    def __init__(
+        self,
+        listen_address: str,
+        sock: Any,
+        args: argparse.Namespace,
+        num_servers: int,
+        input_addresses: list[str],
+        output_addresses: list[str],
+        stats_update_address: Optional[str] = None,
+    ):
+        """Initialize and start API server worker processes.
+        
+        Args:
+            listen_address: Address to listen for client connections
+            sock: Socket for client connections
+            args: Command line arguments
+            num_servers: Number of API server processes to start
+            input_addresses: Input addresses for each API server
+            output_addresses: Output addresses for each API server
+            stats_update_address: Optional stats update address
+        """
+        self.listen_address = listen_address
+        self.sock = sock
+        self.args = args
+
+        # Start API servers
+        spawn_context = multiprocessing.get_context("spawn")
+        self.processes: list[SpawnProcess] = []
+
+        for i, in_addr, out_addr in zip(range(num_servers), input_addresses,
+                                        output_addresses):
+            client_config = {
+                "input_address": in_addr,
+                "output_address": out_addr,
+                "client_index": i
+            }
+            if stats_update_address is not None:
+                client_config["stats_update_address"] = stats_update_address
+
+            proc = spawn_context.Process(target=run_api_server_worker,
+                                         name=f"ApiServer_{i}",
+                                         args=(listen_address, sock, args,
+                                               client_config))
+            self.processes.append(proc)
+            proc.start()
+
+        logger.info("Started %d API server processes", len(self.processes))
+        # Create a finalizer to ensure processes are terminated when this
+        # object is garbage collected
+        self._finalizer = weakref.finalize(self, self._shutdown_all_processes,
+                                           self.processes)
+
+    def wait_for_completion_or_failure(self) -> None:
+        """Wait for all processes to complete or detect if any fail.
+        
+        Raises an exception if any process exits with a non-zero status.
+        """
+        try:
+            # Create a mapping of sentinels to their corresponding processes
+            # for efficient lookup
+            sentinel_to_proc = {proc.sentinel: proc for proc in self.processes}
+            sentinels = list(sentinel_to_proc.keys())
+
+            # Check if any process terminates
+            while sentinels:
+                # Wait for any process to terminate
+                ready_sentinels = connection.wait(sentinels)
+                if not ready_sentinels:
+                    continue
+
+                # Process any terminated processes
+                for sentinel in ready_sentinels:
+                    proc = sentinel_to_proc[sentinel]
+                    sentinels.remove(sentinel)
+
+                    # Check if process exited with error
+                    if proc.exitcode != 0:
+                        logger.error(
+                            "API server process %s (PID: %d) "
+                            "died with exit code %d", proc.name, proc.pid,
+                            proc.exitcode)
+                        raise RuntimeError(
+                            "API server process %s died with exit code %d. "
+                            "All API server processes will be terminated.",
+                            proc.name, proc.exitcode)
+
+            # If we've processed all sentinels, all processes completed
+            # successfully
+            logger.info("All API server processes completed successfully")
+
+        except Exception:
+            # If any exception occurs, terminate all processes before re-raising
+            self.terminate()
+            raise
+
+    def terminate(self) -> None:
+        """Gracefully terminate all API server processes.
+        
+        First tries SIGTERM, then SIGKILL after a timeout.
+        """
+        self._shutdown_all_processes(self.processes)
+
+    @staticmethod
+    def _shutdown_all_processes(processes: list[SpawnProcess]) -> None:
+        """Static method to terminate all processes.
+        
+        This is separate to allow it to be used as a finalizer.
+        
+        Args:
+            processes: List of SpawnProcess objects to terminate
+        """
+        logger.warning("Terminating all API server processes...")
+        for proc in processes:
+            if proc.is_alive():
+                logger.info("Terminating %s (PID: %d)", proc.name, proc.pid)
+                proc.terminate()
+
+        # Wait for graceful termination with timeout
+        termination_timeout = 5.0  # 5 seconds timeout
+        termination_deadline = time.time() + termination_timeout
+
+        # Wait for processes to terminate gracefully
+        while time.time() < termination_deadline:
+            if all(not proc.is_alive() for proc in processes):
+                break
+            time.sleep(0.1)
+
+        # Force kill any processes that didn't terminate gracefully
+        for proc in processes:
+            if proc.is_alive():
+                logger.warning("Force killing %s (PID: %d)", proc.name,
+                               proc.pid)
+                proc.kill()
+                proc.join(1.0)  # Short timeout for killed processes
+
+        logger.info("All API server processes have been terminated")
 
 
 class ServeSubcommand(CLISubcommand):
@@ -223,26 +371,15 @@ def run_multi_api_server(args: argparse.Namespace):
                 start_index=0,
                 local_start_index=0)
 
-        # Start API servers.
-        spawn_context = multiprocessing.get_context("spawn")
-        api_server_workers: list[SpawnProcess] = []
-        for i, in_addr, out_addr in zip(range(num_api_servers),
-                                        input_addresses, output_addresses):
-            client_config = {
-                "input_address": in_addr,
-                "output_address": out_addr,
-                "client_index": i
-            }
-            if stats_update_address is not None:
-                client_config["stats_update_address"] = stats_update_address
-
-            # TODO check signal propagation
-            proc = spawn_context.Process(target=run_api_server_worker,
-                                         name=f"ApiServer_{i}",
-                                         args=(listen_address, sock, args,
-                                               client_config))
-            api_server_workers.append(proc)
-            proc.start()
+        # Start API servers using the manager
+        api_server_manager = APIServerProcessManager(
+            listen_address=listen_address,
+            sock=sock,
+            args=args,
+            num_servers=num_api_servers,
+            input_addresses=input_addresses,
+            output_addresses=output_addresses,
+            stats_update_address=stats_update_address)
 
         # Wait for engine handshakes to complete.
         core_engines = [
@@ -260,9 +397,19 @@ def run_multi_api_server(args: argparse.Namespace):
             coordinator.proc if coordinator else None,
         )
 
-        # TODO handle failures / clean shutdown here
-        for proc in api_server_workers:
-            proc.join()
+        # Wait for API server processes to complete or fail
+        try:
+            api_server_manager.wait_for_completion_or_failure()
+        except KeyboardInterrupt:
+            logger.info(
+                "Received KeyboardInterrupt, shutting down API servers...")
+            api_server_manager.terminate()
+            raise
+        except Exception as e:
+            logger.exception(
+                "Exception occurred while running API servers: %s", str(e))
+            # The manager will have already terminated the processes
+            raise
 
 
 def run_api_server_worker(listen_address,
