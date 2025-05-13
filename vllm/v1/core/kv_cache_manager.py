@@ -146,20 +146,14 @@ class KVCacheManager:
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.requests += 1
 
-        # When prompt length is divisible by the block size and all
-        # blocks are cached, we need to recompute the last token. This
-        # have to be achieved by re-computing an entire block because
-        # allocate_slots() assumes num_computed_tokens is always a
-        # multiple of the block size. To achieve this, set max_cache_hit_length
-        # to prompt_length - 1 in this case.
-        # This limitation can potentially be removed in the future to
-        # slightly improve the performance.
-        max_cache_hit_length = request.num_tokens
-        if max_cache_hit_length % self.block_size == 0:
-            max_cache_hit_length -= 1
+        # NOTE: When all tokens hit the cache, we must recompute the last token to obtain logits.
+        # Thus, set max_cache_hit_length to prompt_length - 1. This can trigger recomputation of an entire block,
+        # rather than just the single last token, because allocate_slots() requires num_computed_tokens to be 
+        # block-size aligned. Removing this limitation could slightly improve performance in the future.
+        max_cache_hit_length = request.num_tokens - 1
 
-        computed_blocks = (self.single_type_manager.find_longest_cache_hit(
-            block_hashes, max_cache_hit_length))
+        computed_blocks = self.single_type_manager.find_longest_cache_hit(
+            block_hashes, max_cache_hit_length)
         # NOTE(woosuk): Since incomplete blocks are not eligible for
         # sharing, `num_computed_tokens` is always a multiple of
         # `block_size`.

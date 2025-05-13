@@ -230,7 +230,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
 
     def find_longest_cache_hit(self, block_hashes: list[BlockHashType],
                                max_length: int) -> list[KVCacheBlock]:
-        computed_blocks = []
+        computed_blocks: list[KVCacheBlock] = []
         max_num_blocks = max_length // self.block_size
         for i in range(max_num_blocks):
             block_hash = block_hashes[i]
