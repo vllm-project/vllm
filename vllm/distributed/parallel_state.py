@@ -762,6 +762,17 @@ class GroupCoordinator:
             self.device_communicator.prepare_communication_buffer_for_model(
                 model)
 
+    def dispatch(
+            self, hidden_states: torch.Tensor,
+            router_logits: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.device_communicator is not None:
+            return self.device_communicator.dispatch(hidden_states,
+                                                     router_logits)
+
+    def combine(self, hidden_states) -> torch.Tensor:
+        if self.device_communicator is not None:
+            return self.device_communicator.combine(hidden_states)
+
 
 _WORLD: Optional[GroupCoordinator] = None
 

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 import torch.distributed as dist
@@ -157,3 +157,19 @@ class DeviceCommunicatorBase:
         This is a no-op in the base class.
         """
         pass
+
+    def dispatch(
+            self, hidden_states: torch.Tensor,
+            router_logits: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Dispatch the hidden states and router logits to the appropriate device.
+        This is a no-op in the base class.
+        """
+        return hidden_states, router_logits
+
+    def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """
+        Combine the hidden states and router logits from the appropriate device.
+        This is a no-op in the base class.
+        """
+        return hidden_states
