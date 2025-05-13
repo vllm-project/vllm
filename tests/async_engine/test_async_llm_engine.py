@@ -41,7 +41,7 @@ class MockEngine:
         self.abort_request_calls = 0
         self.request_id = None
         # Ugly, remove dependency when possible
-        self.parallel_config = ParallelConfig(1, 1, False)
+        self.parallel_config = ParallelConfig()
         self.model_config = MockModelConfig()
 
     async def step_async(self, virtual_engine):

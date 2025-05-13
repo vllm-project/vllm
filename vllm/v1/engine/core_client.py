@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import contextlib
-import json
 import queue
 import uuid
 import weakref
@@ -9,25 +8,27 @@ from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Awaitable, Sequence
 from concurrent.futures import Future
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from enum import Enum, auto
 from threading import Thread
 from typing import Any, Callable, Optional, TypeVar, Union
 
+import msgspec
 import zmq
 import zmq.asyncio
 
-from vllm.config import VllmConfig
+from vllm.config import ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.utils import (get_open_zmq_inproc_path, get_open_zmq_ipc_path,
-                        make_zmq_socket)
+from vllm.utils import (get_open_port, get_open_zmq_inproc_path,
+                        get_open_zmq_ipc_path, get_tcp_uri, make_zmq_socket)
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
-from vllm.v1.utils import BackgroundProcHandle
+from vllm.v1.utils import CoreEngineProcManager
 
 logger = init_logger(__name__)
 
@@ -264,45 +265,22 @@ class InprocClient(EngineCoreClient):
         return self.engine_core.collective_rpc(method, timeout, args, kwargs)
 
 
+class CoreEngineState(Enum):
+    NEW = auto()
+    CONNECTED = auto()
+    READY = auto()
+
+
 class CoreEngine:
     """One per data parallel rank."""
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        executor_class: type[Executor],
-        log_stats: bool,
-        input_path: str,
-        output_path: str,
-        index: int = 0,
-        local_dp_rank: int = 0,
-    ):
+    def __init__(self, index: int = 0, local: bool = True):
+        self.local = local
         self.index = index
         self.identity = index.to_bytes(length=2, byteorder="little")
-        try:
-            # Start EngineCore in background process.
-            self.proc_handle = BackgroundProcHandle(
-                input_path=input_path,
-                output_path=output_path,
-                process_name=f"EngineCore_{index}",
-                target_fn=EngineCoreProc.run_engine_core,
-                process_kwargs={
-                    "vllm_config": vllm_config,
-                    "dp_rank": index,
-                    "local_dp_rank": local_dp_rank,
-                    "executor_class": executor_class,
-                    "log_stats": log_stats,
-                })
 
-            self.num_reqs_in_flight = 0
-        finally:
-            if not hasattr(self, "num_reqs_in_flight"):
-                # Ensure socket is closed if process fails to start.
-                self.close()
-
-    def close(self):
-        if proc_handle := getattr(self, "proc_handle", None):
-            proc_handle.shutdown()
+        self.state = CoreEngineState.NEW
+        self.num_reqs_in_flight = 0
 
 
 @dataclass
@@ -311,7 +289,7 @@ class BackgroundResources:
     circular reference back to the client object."""
 
     ctx: Union[zmq.Context]
-    core_engines: list[CoreEngine] = field(default_factory=list)
+    local_engine_manager: Optional[CoreEngineProcManager] = None
     output_socket: Optional[Union[zmq.Socket, zmq.asyncio.Socket]] = None
     input_socket: Optional[Union[zmq.Socket, zmq.asyncio.Socket]] = None
     output_queue_task: Optional[asyncio.Task] = None
@@ -325,8 +303,8 @@ class BackgroundResources:
         """Clean up background resources."""
 
         self.engine_dead = True
-        for core_engine in self.core_engines:
-            core_engine.close()
+        if self.local_engine_manager is not None:
+            self.local_engine_manager.close()
 
         if self.output_queue_task is not None:
             self.output_queue_task.cancel()
@@ -388,25 +366,56 @@ class MPClient(EngineCoreClient):
         self._finalizer = weakref.finalize(self, self.resources)
         success = False
         try:
-            # Paths and sockets for IPC.
-            self.output_path = get_open_zmq_ipc_path()
-            input_path = get_open_zmq_ipc_path()
-            self.input_socket = make_zmq_socket(self.ctx,
-                                                input_path,
-                                                zmq.ROUTER,
-                                                bind=True)
-            self.resources.input_socket = self.input_socket
+            parallel_config = vllm_config.parallel_config
+            local_engine_count = parallel_config.data_parallel_size_local
+            start_index = parallel_config.data_parallel_rank
+            local_start_index = parallel_config.data_parallel_rank_local
 
-            new_core_engine = lambda index, local_dp_rank=None: CoreEngine(
-                vllm_config, executor_class, log_stats, input_path, self.
-                output_path, index, local_dp_rank)
+            # SPMD mode is where there is an LLM instance per DP rank and
+            # one core engine per LLM, see
+            # examples/offline_inference/data_parallel.py.
+            spmd_mode = local_start_index is not None
+            if spmd_mode:
+                assert local_engine_count == 1
+                self.core_engines = [
+                    CoreEngine(index=local_start_index, local=True)
+                ]
+            else:
+                assert start_index == 0
+                local_start_index = 0
+                self.core_engines = [
+                    CoreEngine(index=i, local=(i < local_engine_count))
+                    for i in range(parallel_config.data_parallel_size)
+                ]
 
-            # Start engine core process(es).
-            self._init_core_engines(vllm_config, new_core_engine,
-                                    self.resources.core_engines)
+            input_address, output_address = self._get_zmq_addresses(
+                parallel_config, spmd_mode)
+
+            # Create input and output sockets.
+            self.input_socket = self.resources.input_socket = make_zmq_socket(
+                self.ctx, input_address, zmq.ROUTER, bind=True)
+
+            self.resources.output_socket = make_zmq_socket(
+                self.ctx, output_address, zmq.constants.PULL)
+            # Start local engines.
+            if local_engine_count:
+                # In server mode, start_index and local_start_index will
+                # both be 0.
+                self.resources.local_engine_manager = CoreEngineProcManager(
+                    EngineCoreProc.run_engine_core,
+                    vllm_config=vllm_config,
+                    executor_class=executor_class,
+                    log_stats=log_stats,
+                    input_address=input_address,
+                    on_head_node=True,
+                    local_engine_count=local_engine_count,
+                    start_index=start_index,
+                    local_start_index=local_start_index)
+
+            self.core_engine = self.core_engines[0]
 
             # Wait for engine core process(es) to start.
-            self._wait_for_engine_startup()
+            self._wait_for_engine_startup(output_address, parallel_config)
 
             self.utility_results: dict[int, AnyFuture] = {}
 
@@ -420,56 +429,116 @@ class MPClient(EngineCoreClient):
             if not success:
                 self._finalizer()
 
-    def _wait_for_engine_startup(self):
+    @staticmethod
+    def _get_zmq_addresses(parallel_config: ParallelConfig,
+                           spmd_mode: bool) -> tuple[str, str]:
+        """Returns (input_address, output_address)."""
+        dp_size = parallel_config.data_parallel_size
+        local_engine_count = parallel_config.data_parallel_size_local
+
+        if local_engine_count == dp_size or spmd_mode:
+            input_address = get_open_zmq_ipc_path()
+            output_address = get_open_zmq_ipc_path()
+        else:
+            host = parallel_config.data_parallel_master_ip
+            input_port = parallel_config.data_parallel_rpc_port
+            output_port = get_open_port()
+            input_address = get_tcp_uri(host, input_port)
+            output_address = get_tcp_uri(host, output_port)
+
+        return input_address, output_address
+
+    def _wait_for_engine_startup(self, output_address: str,
+                                 parallel_config: ParallelConfig):
         # Get a sync handle to the socket which can be sync or async.
         sync_input_socket = zmq.Socket.shadow(self.input_socket)
 
         # Wait for engine core process(es) to send ready messages.
-        identities = set(eng.index for eng in self.resources.core_engines)
+        local_count = parallel_config.data_parallel_size_local
+        remote_count = len(self.core_engines) - local_count
+        # [local, remote] counts
+        conn_pending, start_pending = [local_count, remote_count], [0, 0]
+
         poller = zmq.Poller()
         poller.register(sync_input_socket, zmq.POLLIN)
-        for eng in self.resources.core_engines:
-            poller.register(eng.proc_handle, zmq.POLLIN)
-        while identities:
+        proc_manager = self.resources.local_engine_manager
+        if proc_manager is not None:
+            for sentinel in proc_manager.sentinels():
+                poller.register(sentinel, zmq.POLLIN)
+        while any(conn_pending) or any(start_pending):
             events = poller.poll(STARTUP_POLL_PERIOD_MS)
             if not events:
-                logger.debug("Waiting for %d core engine proc(s) to start: %s",
-                             len(identities), identities)
+                if any(conn_pending):
+                    logger.debug(
+                        "Waiting for %d local, %d remote core engine proc(s) "
+                        "to connect.", *conn_pending)
+                if any(start_pending):
+                    logger.debug(
+                        "Waiting for %d local, %d remote core engine proc(s) "
+                        "to start.", *start_pending)
                 continue
             if len(events) > 1 or events[0][0] != sync_input_socket:
-                # One of the core processes exited.
+                # One of the local core processes exited.
+                finished = proc_manager.finished_procs(
+                ) if proc_manager else {}
                 raise RuntimeError("Engine core initialization failed. "
-                                   "See root cause above.")
+                                   "See root cause above. "
+                                   f"Failed core proc(s): {finished}")
 
-            eng_id_bytes, data = sync_input_socket.recv_multipart()
-            eng_id = int.from_bytes(eng_id_bytes, byteorder="little")
-            if eng_id not in identities:
-                raise RuntimeError(f"Unexpected or duplicate engine: {eng_id}")
-            message_dict = json.loads(data.decode('utf-8'))
-            if message_dict['type'] != 'READY':
-                raise RuntimeError(f"Engine {eng_id} failed: {data.decode()}")
-            logger.info("Core engine process %d ready.", eng_id)
-            identities.discard(eng_id)
-            # Setup KV cache config with initialization state from
-            # engine core process. Sum values from all engines in DP case.
-            num_gpu_blocks = self.vllm_config.cache_config.num_gpu_blocks or 0
-            num_gpu_blocks += message_dict['num_gpu_blocks']
-            self.vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
+            # Receive HELLO and READY messages from the input socket.
+            eng_identity, ready_msg_bytes = sync_input_socket.recv_multipart()
+            eng_index = int.from_bytes(eng_identity, byteorder="little")
+            engine = next(
+                (e for e in self.core_engines if e.identity == eng_identity),
+                None)
+            if engine is None:
+                raise RuntimeError(f"Message from engine with unexpected data "
+                                   f"parallel rank: {eng_index}")
+            msg = msgspec.msgpack.decode(ready_msg_bytes)
+            status, local = msg["status"], msg["local"]
+            if local != engine.local:
+                raise RuntimeError(f"{status} message from "
+                                   f"{'local' if local else 'remote'} "
+                                   f"engine {eng_index}, expected it to be "
+                                   f"{'local' if engine.local else 'remote'}")
 
-    def _init_core_engines(
-        self,
-        vllm_config: VllmConfig,
-        new_core_engine: Callable[[int, Optional[int]], CoreEngine],
-        core_engines: list[CoreEngine],
-    ) -> None:
+            if status == "HELLO" and engine.state == CoreEngineState.NEW:
 
-        # Default case - single core engine.
-        core_engine = new_core_engine(
-            vllm_config.parallel_config.data_parallel_rank,
-            vllm_config.parallel_config.data_parallel_rank_local,
-        )
-        core_engines.append(core_engine)
-        self.core_engine = core_engine
+                # Send init message with DP config info.
+                init_message = self.encoder.encode({
+                    "output_socket_address": output_address,
+                    "parallel_config": {
+                        "data_parallel_master_ip":
+                        parallel_config.data_parallel_master_ip,
+                        "data_parallel_master_port":
+                        parallel_config.data_parallel_master_port,
+                        "data_parallel_size":
+                        parallel_config.data_parallel_size,
+                    },
+                })
+                sync_input_socket.send_multipart((eng_identity, *init_message),
+                                                 copy=False)
+                conn_pending[0 if local else 1] -= 1
+                start_pending[0 if local else 1] += 1
+                engine.state = CoreEngineState.CONNECTED
+            elif status == "READY" and (engine.state
+                                        == CoreEngineState.CONNECTED):
+                # Setup KV cache config with initialization state from
+                # engine core process. Sum values from all engines in DP case.
+                cache_config = self.vllm_config.cache_config
+                num_gpu_blocks = cache_config.num_gpu_blocks or 0
+                num_gpu_blocks += msg['num_gpu_blocks']
+                cache_config.num_gpu_blocks = num_gpu_blocks
+
+                start_pending[0 if local else 1] -= 1
+                engine.state = CoreEngineState.READY
+            else:
+                raise RuntimeError(f"Unexpected {status} message for "
+                                   f"{'local' if local else 'remote'} engine "
+                                   f"{eng_index} in {engine.state} state.")
+
+            logger.debug("%s from %s core engine process %s.", status,
+                         "local" if local else "remote", eng_index)
 
     def shutdown(self):
         # Terminate background resources.
@@ -520,7 +589,8 @@ class SyncMPClient(MPClient):
         # Ensure that the outputs socket processing thread does not have
         # a ref to the client which prevents gc.
         ctx = self.ctx
-        output_path = self.output_path
+        out_socket = self.resources.output_socket
+        assert out_socket is not None
         decoder = self.decoder
         utility_results = self.utility_results
         outputs_queue = self.outputs_queue
@@ -531,7 +601,6 @@ class SyncMPClient(MPClient):
 
         def process_outputs_socket():
             shutdown_socket = ctx.socket(zmq.PAIR)
-            out_socket = make_zmq_socket(ctx, output_path, zmq.constants.PULL)
             try:
                 shutdown_socket.bind(shutdown_path)
                 poller = zmq.Poller()
@@ -565,6 +634,9 @@ class SyncMPClient(MPClient):
                                           name="EngineCoreOutputQueueThread",
                                           daemon=True)
         self.output_queue_thread.start()
+
+        # The thread takes on responsibility for closing the socket.
+        self.resources.output_socket = None
 
     def get_output(self) -> EngineCoreOutputs:
         # If an exception arises in process_outputs_socket task,
@@ -693,10 +765,8 @@ class AsyncMPClient(MPClient):
                                               self.__class__,
                                               "process_engine_outputs", None)
         _self_ref = weakref.ref(self) if output_handler else None
-        output_path = self.output_path
-        output_socket = make_zmq_socket(self.ctx, output_path,
-                                        zmq.constants.PULL)
-        resources.output_socket = output_socket
+        output_socket = resources.output_socket
+        assert output_socket is not None
 
         async def process_outputs_socket():
             try:
@@ -860,21 +930,6 @@ class DPAsyncMPClient(AsyncMPClient):
         super().__init__(vllm_config, executor_class, log_stats)
 
         assert len(self.core_engines) > 1
-
-    def _init_core_engines(
-        self,
-        vllm_config: VllmConfig,
-        new_core_engine: Callable[[int, Optional[int]], CoreEngine],
-        core_engines: list[CoreEngine],
-    ) -> None:
-
-        # Launch a core engine for each data parallel rank.
-        dp_size = vllm_config.parallel_config.data_parallel_size
-        for i in range(dp_size):
-            # Multi-node not yet supported so local_dp_rank == dp_rank.
-            core_engines.append(new_core_engine(i, i))
-
-        self.core_engines = core_engines
 
     async def call_utility_async(self, method: str, *args) -> Any:
         # Only the result from the first engine is returned.
