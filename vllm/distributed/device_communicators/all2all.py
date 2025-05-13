@@ -39,6 +39,12 @@ class All2AllBase:
 
 
 class NaiveAll2All(All2AllBase):
+    """
+    A naive implementation of all2all communication.
+    It uses all-reduce under the hood, which is not
+    efficient at all. The main purpose is for testing and
+    debugging.
+    """
 
     def __init__(self, cpu_group, model):
         super().__init__(cpu_group, model)
