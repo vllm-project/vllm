@@ -475,14 +475,17 @@ def tensorize_vllm_model(engine_args: EngineArgs,
         ) as stream:
             stream.write(encryption_params.key)
 
-    if envs.VLLM_USE_V1:
-        raise RuntimeError("Tensorizer serialization requires "
-                           "the env var VLLM_USE_V1=0 set.")
     engine = LLMEngine.from_engine_args(engine_args)
-    engine.model_executor.collective_rpc(
-        "save_tensorized_model",
-        kwargs=dict(tensorizer_config=tensorizer_config),
-    )
+    if not envs.VLLM_USE_V1:
+        engine.model_executor.collective_rpc(
+            "save_tensorized_model",
+            kwargs=dict(tensorizer_config=tensorizer_config),
+        )
+    else:
+        engine.collective_rpc(
+            "save_tensorized_model",
+            kwargs=dict(tensorizer_config=tensorizer_config),
+        )
 
 
 def tensorize_lora_adapter(lora_path: str,

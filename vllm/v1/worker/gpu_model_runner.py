@@ -1449,6 +1449,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     time_after_load - time_before_load)
         prepare_communication_buffer_for_model(self.model)
 
+    def save_tensorized_model(
+        self,
+        tensorizer_config,
+    ) -> None:
+        from vllm.model_executor.model_loader import TensorizerLoader
+        TensorizerLoader.save_model(
+            self.model,
+            tensorizer_config=tensorizer_config,
+        )
+
     def _get_prompt_logprobs_dict(
         self,
         hidden_states: torch.Tensor,
