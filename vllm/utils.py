@@ -613,6 +613,10 @@ def is_valid_ipv6_address(address: str) -> bool:
 
 
 def get_distributed_init_method(ip: str, port: int) -> str:
+    return get_tcp_uri(ip, port)
+
+
+def get_tcp_uri(ip: str, port: int) -> str:
     # Brackets are not permitted in ipv4 addresses,
     # see https://github.com/python/cpython/issues/103848
     return f"tcp://[{ip}]:{port}" if ":" in ip else f"tcp://{ip}:{port}"
