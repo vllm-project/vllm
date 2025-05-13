@@ -1169,30 +1169,32 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states, aux_hidden_states = model_output
         else:
             hidden_states = model_output
-
+        # Broadcast PP output for external_launcher (torchrun)
+        # to make sure we are synced across pp ranks
+        # TODO: Support overlapping mirco-batches
+        # https://github.com/vllm-project/vllm/issues/18019
+        broadcast_pp_output = \
+            self.parallel_config.distributed_executor_backend \
+            == "external_launcher" and len(get_pp_group().ranks) > 0
         if not get_pp_group().is_last_rank:
             # For mid-pipeline stages, return the hidden states.
-            if self.parallel_config.distributed_executor_backend \
-                != "external_launcher":
+            if not broadcast_pp_output:
                 return hidden_states
             assert isinstance(hidden_states, IntermediateTensors)
             get_pp_group().send_tensor_dict(hidden_states.tensors,
                                             all_gather_group=get_tp_group())
-            model_output_broadcast_data = {}
+            logits = None
         else:
             sample_hidden_states = hidden_states[logits_indices]
             logits = self.model.compute_logits(sample_hidden_states, None)
+        if broadcast_pp_output:
             model_output_broadcast_data = {
-                "logits": logits,
-            }
-        pp_group_ranks = len(get_pp_group().ranks)
-        last_rank_in_group = pp_group_ranks - 1
-        if self.parallel_config.distributed_executor_backend \
-            == "external_launcher" and len(get_pp_group().ranks) > 0:
+                "logits": logits.contiguous(),
+            } if logits is not None else {}
             model_output_broadcast_data = get_pp_group().broadcast_tensor_dict(
-                model_output_broadcast_data, src=last_rank_in_group)
-        assert model_output_broadcast_data is not None
-        logits = model_output_broadcast_data["logits"]
+                model_output_broadcast_data, src=len(get_pp_group().ranks) - 1)
+            assert model_output_broadcast_data is not None
+            logits = model_output_broadcast_data["logits"]
 
         # Apply structured output bitmasks if present
         if scheduler_output.grammar_bitmask is not None:
@@ -1210,6 +1212,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # creates a new tensor with separate storage from the original
             # logits tensor. This means any in-place operations on bonus_logits
             # won't affect the original logits tensor.
+            assert logits is not None
             bonus_logits = logits[spec_decode_metadata.bonus_logits_indices]
             sampler_output = self.sampler(
                 logits=bonus_logits,
