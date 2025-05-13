@@ -9,9 +9,10 @@ import numpy as np
 import numpy.typing as npt
 from PIL import Image
 
+from vllm import envs
+
 from .base import MediaIO
 from .image import ImageMediaIO
-from vllm import envs
 
 
 def resize_video(frames: npt.NDArray, size: tuple[int, int]) -> npt.NDArray:
@@ -59,6 +60,7 @@ class VideoLoaderRegistry:
         self.name2class: dict[str, type] = {}
 
     def register(self, name: str):
+
         def wrap(cls_to_register):
             self.name2class[name] = cls_to_register
             return cls_to_register
@@ -66,9 +68,7 @@ class VideoLoaderRegistry:
         return wrap
 
     @staticmethod
-    def load(
-        cls_name: str
-    ) -> VideoLoader:
+    def load(cls_name: str) -> VideoLoader:
         cls = VIDEO_LOADER_REGISTRY.name2class.get(cls_name)
         assert cls is not None, f"Class {cls_name} not found"
         return cls()

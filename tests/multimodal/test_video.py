@@ -1,8 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
 import numpy as np
 import numpy.typing as npt
 
 from vllm.multimodal.video import VIDEO_LOADER_REGISTRY, VideoLoader
-
 
 NUM_FRAMES = 10
 FAKE_OUTPUT_1 = np.random.rand(NUM_FRAMES, 1280, 720, 3)
@@ -16,7 +16,7 @@ class TestVideoLoader1(VideoLoader):
     def load_bytes(cls, data: bytes, num_frames: int = -1) -> npt.NDArray:
         return FAKE_OUTPUT_1
 
-    
+
 @VIDEO_LOADER_REGISTRY.register("test_video_loader_2")
 class TestVideoLoader2(VideoLoader):
 
