@@ -8,7 +8,8 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
-    QuarkLinearMethod, QuarkW8A8Fp8, QuarkW8A8Int8)
+    QuarkLinearMethod, QuarkW8A8Fp8, QuarkW8A8Int8, QuarkW4A4MXFP4)
+from vllm.model_executor.layers.quantization.quark.quark_moe import QuarkW4A4MXFp4MoEMethod
 from vllm.platforms import current_platform
 
 
@@ -89,3 +90,24 @@ def test_quark_fp8_parity(vllm_runner):
 
     for key in fp8_state_dict:
         assert torch.equal(fp8_state_dict[key], quark_state_dict[key])
+
+
+@pytest.mark.parametrize('tp', [1, 2])
+def test_mxfp4_loading_and_execution(vllm_runner, tp: int):
+    model_path = "fxmarty/qwen_1.5-moe-a2.7b-mxfp4"
+    with vllm_runner(model_path, tensor_parallel_size=tp) as llm:
+
+        def check_model(model):
+            layer = model.model.layers[0]
+
+            qkv_proj = layer.self_attn.qkv_proj
+
+            assert isinstance(qkv_proj.quant_method, QuarkLinearMethod)
+            assert isinstance(qkv_proj.scheme, QuarkW4A4MXFP4)
+
+            assert isinstance(layer.mlp.experts.quant_method, QuarkW4A4MXFp4MoEMethod)
+
+        llm.apply_model(check_model)
+
+        output = llm.generate_greedy("Today I am in the French Alps and", max_tokens=20)
+        assert output
