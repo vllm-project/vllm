@@ -520,7 +520,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable the JITCache for Triton Kernels
     # see triton_utils/jitcache.py
     "VLLM_TRITON_ENABLE_JITCACHE":
-    lambda: bool(int(os.getenv("VLLM_TRITON_ENABLE_JITCACHE"))),
+    lambda: bool(int(os.getenv("VLLM_TRITON_ENABLE_JITCACHE", "0"))),
 
     # If set, vLLM will use Triton implementations of AWQ.
     "VLLM_USE_TRITON_AWQ":
