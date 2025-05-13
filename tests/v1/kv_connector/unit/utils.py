@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 
@@ -122,6 +122,8 @@ def create_request(
 ) -> Request:
     """Make dummy request for testing."""
 
+    kv_transfer_params: Optional[dict[str, Any]] = None
+
     if do_remote_decode:
         assert not do_remote_prefill
         kv_transfer_params = dict(do_remote_prefill=False,
@@ -134,8 +136,6 @@ def create_request(
                                       range(num_remote_blocks)),
                                   remote_host="my-host",
                                   remote_port=1234)
-    else:
-        kv_transfer_params = None
 
     max_tokens = 1 if do_remote_decode else max_tokens
     sampling_params = SamplingParams(max_tokens=max_tokens)
