@@ -146,10 +146,12 @@ class KVCacheManager:
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.requests += 1
 
-        # NOTE: When all tokens hit the cache, we must recompute the last token to obtain logits.
-        # Thus, set max_cache_hit_length to prompt_length - 1. This can trigger recomputation of an entire block,
-        # rather than just the single last token, because allocate_slots() requires num_computed_tokens to be 
-        # block-size aligned. Removing this limitation could slightly improve performance in the future.
+        # NOTE: When all tokens hit the cache, we must recompute the last token
+        # to obtain logits. Thus, set max_cache_hit_length to prompt_length - 1.
+        # This can trigger recomputation of an entire block, rather than just
+        # the single last token, because allocate_slots() requires
+        # num_computed_tokens to be block-size aligned. Removing this limitation
+        # could slightly improve performance in the future.
         max_cache_hit_length = request.num_tokens - 1
 
         computed_blocks = self.single_type_manager.find_longest_cache_hit(
