@@ -38,8 +38,25 @@ This script 1) converts official model weights from `torch.float8_e4m3fn` format
 > 
 >For more details, refer to the `INC WOQ ReQuant` section in the `single_16k_len_inc.sh` script.
 
+
+
+### Configure the Measurement Statistics Results
+
+The environment variable `INC_MEASUREMENT_DUMP_PATH_PREFIX` specifies the root directory where measurement statistics were saved.
+The final path is constructed by joining this root directory with the `dump_stats_path` defined in the quantization JSON file specified by the `QUANT_CONFIG` environment variable.
+
+Example:
+```bash
+INC_MEASUREMENT_DUMP_PATH_PREFIX=/mnt/disk3/vllm-fork
+dump_stats_path (from config): "scripts/nc_workspace_measure_kvache/inc_measure_output"
+Resulting full path: "/mnt/disk3/vllm-fork/scripts/nc_workspace_measure_kvache/inc_measure_output_xx"
+```
+
 > [!CAUTION]
-> Before running the benchmark, make sure to update the `model_path` in the `single_16k_len_inc.sh` script.
+> Before running the benchmark, update the following variables in the single_16k_len_inc.sh script:
+>  - `model_path`
+>  - `QUANT_CONFIG`
+>  - `INC_MEASUREMENT_DUMP_PATH_PREFIX`
 
 ### 3.1 BF16 KV + Per-Channel Quantization
 
