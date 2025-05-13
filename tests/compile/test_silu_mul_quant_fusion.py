@@ -27,8 +27,8 @@ class TestModel(torch.nn.Module):
 
 @pytest.mark.parametrize("num_tokens", [256])
 @pytest.mark.parametrize("hidden_size", [64])
-@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE != "cuda",
-                    reason="Only test on CUDA")
+@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda", "rocm"],
+                    reason="Only test on CUDA and ROCm")
 def test_fusion_silu_and_mul_quant(num_tokens, hidden_size):
     torch.set_default_device("cuda")
     torch.set_default_dtype(torch.float16)
