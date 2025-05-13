@@ -9,6 +9,7 @@ from torch.nn.parameter import Parameter
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
@@ -38,7 +39,7 @@ class FBGEMMFp8Config(QuantizationConfig):
         self.fp8_linear = Fp8LinearOp()
 
     @classmethod
-    def get_name(cls) -> str:
+    def get_name(cls) -> QuantizationMethods:
         return "fbgemm_fp8"
 
     @classmethod
@@ -62,7 +63,9 @@ class FBGEMMFp8Config(QuantizationConfig):
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         if isinstance(layer, LinearBase):
-            if is_layer_skipped(prefix, self.ignore_list):
+            if is_layer_skipped(prefix=prefix,
+                                ignored_layers=self.ignore_list,
+                                fused_mapping=self.packed_modules_mapping):
                 return UnquantizedLinearMethod()
             return FBGEMMFp8LinearMethod(self)
         return None

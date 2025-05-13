@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import enum
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
+from vllm.distributed.kv_transfer.kv_connector.v1 import KVTransferParams
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.utils import is_list_of
@@ -20,7 +21,6 @@ class Request:
     def __init__(
         self,
         request_id: str,
-        prompt: Optional[str],
         prompt_token_ids: list[int],
         multi_modal_inputs: Optional[list[MultiModalKwargs]],
         multi_modal_hashes: Optional[list[str]],
@@ -30,6 +30,7 @@ class Request:
         arrival_time: float,
         lora_request: Optional["LoRARequest"] = None,
         structured_output_request: Optional["StructuredOutputRequest"] = None,
+        cache_salt: Optional[str] = None,
     ) -> None:
         self.request_id = request_id
         self.sampling_params = sampling_params
@@ -46,13 +47,13 @@ class Request:
         assert sampling_params.max_tokens is not None
         self.max_tokens = sampling_params.max_tokens
 
-        self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
         self.num_prompt_tokens = len(self.prompt_token_ids)
         self._output_token_ids: list[int] = []
         self._all_token_ids: list[int] = self.prompt_token_ids.copy()
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
+        self.cache_salt: Optional[str] = cache_salt
 
         # Multi-modal related
         self.mm_positions = multi_modal_placeholders or []
@@ -60,6 +61,15 @@ class Request:
         self.mm_hashes: list[str] = multi_modal_hashes or []
         self.num_encoder_inputs = len(self.mm_inputs)
         self.has_encoder_inputs = self.num_encoder_inputs > 0
+
+        # P/D: KV transfer parameters (raw and parsed).
+        raw_params = (None if sampling_params.extra_args is None
+                      else sampling_params.extra_args.get(
+                          "kv_transfer_params", None))
+        self.raw_kv_transfer_params: Optional[dict[str, Any]] = raw_params
+        # Each connector parses the raw dictionary and sets this
+        # attr the first time that the request is processed.
+        self.kv_transfer_params: Optional[KVTransferParams] = None
 
         # Sanity check
         assert len(self.mm_inputs) == len(self.mm_positions)
@@ -81,7 +91,6 @@ class Request:
 
         return cls(
             request_id=request.request_id,
-            prompt=request.prompt,
             prompt_token_ids=request.prompt_token_ids,
             multi_modal_inputs=request.mm_inputs,
             multi_modal_hashes=request.mm_hashes,
@@ -92,6 +101,7 @@ class Request:
             lora_request=request.lora_request,
             structured_output_request=StructuredOutputRequest(
                 sampling_params=request.sampling_params),
+            cache_salt=request.cache_salt,
         )
 
     def append_output_token_ids(
@@ -150,6 +160,7 @@ class RequestStatus(enum.IntEnum):
     """Status of a request."""
     WAITING = enum.auto()
     WAITING_FOR_FSM = enum.auto()
+    WAITING_FOR_REMOTE_KVS = enum.auto()
     RUNNING = enum.auto()
     PREEMPTED = enum.auto()
     # Note: anything after PREEMPTED will be considered

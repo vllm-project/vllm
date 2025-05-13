@@ -27,7 +27,6 @@ from transformers import (BatchFeature, FuyuConfig, FuyuImageProcessor,
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ColumnParallelLinear
-from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.models.persimmon import PersimmonForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -270,10 +269,6 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
-    @property
-    def sampler(self):
-        return self.language_model.sampler
-
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
 
         h = w = self.config.patch_size
@@ -386,14 +381,6 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         logits = self.language_model.logits_processor(
             self.language_model.lm_head, hidden_states, sampling_metadata)
         return logits
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.language_model.sampler(logits, sampling_metadata)
-        return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:

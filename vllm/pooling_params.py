@@ -35,7 +35,16 @@ class PoolingParams(
                     f'Model "{model_config.served_model_name}" does not '
                     f'support matryoshka representation, '
                     f'changing output dimensions will lead to poor results.')
-            if self.dimensions < 1:
+
+            mds = model_config.matryoshka_dimensions
+            if mds is not None:
+                if self.dimensions not in mds:
+                    raise ValueError(
+                        f'Model "{model_config.served_model_name}" '
+                        f'only supports {str(mds)} matryoshka dimensions, '
+                        f'use other output dimensions will '
+                        f'lead to poor results.')
+            elif self.dimensions < 1:
                 raise ValueError("Dimensions must be greater than 0")
 
     def __repr__(self) -> str:
