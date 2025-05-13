@@ -222,6 +222,10 @@ class CudaPlatformBase(Platform):
         elif selected_backend == _Backend.XFORMERS:
             logger.info("Using XFormers backend.")
             return "vllm.attention.backends.xformers.XFormersBackend"
+        elif selected_backend == _Backend.DUAL_CHUNK_FLASH_ATTN:
+            logger.info("Using DualChunkFlashAttention backend.")
+            return ("vllm.attention.backends.dual_chunk_flash_attn."
+                    "DualChunkFlashAttentionBackend")
         elif selected_backend == _Backend.FLASH_ATTN:
             pass
         elif selected_backend:
