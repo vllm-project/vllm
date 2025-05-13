@@ -609,6 +609,8 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        num_share_fusion_replicas: int = 0,
+        routed_scaling_factor: Optional[float] = None,
     ) -> torch.Tensor:
         assert activation == "silu", "Only SiLU activation is supported."
         if apply_router_weight_on_input:
@@ -626,7 +628,10 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias)
+            e_score_correction_bias=e_score_correction_bias,
+            num_share_fusion_replicas=num_share_fusion_replicas,
+            routed_scaling_factor=routed_scaling_factor,
+        )
 
         return torch.ops.vllm.fused_marlin_moe(
             x,
