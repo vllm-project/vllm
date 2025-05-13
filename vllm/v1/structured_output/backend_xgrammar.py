@@ -215,9 +215,8 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
 
         # Check for array unsupported keywords
         if obj.get("type") == "array" and any(
-                key in obj
-                for key in ("uniqueItems", "contains", "minContains",
-                            "maxContains", "minItems", "maxItems")):
+                key in obj for key in ("uniqueItems", "contains",
+                                       "minContains", "maxContains")):
             return True
 
         # Unsupported keywords for strings
@@ -281,6 +280,12 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
                 raise ValueError("Invalid JSON grammar specification.") from e
         else:
             schema = gd_params.json
+
+        try:
+            xgr.Grammar.from_json_schema(schema)
+        except Exception as err:
+            raise ValueError("Failed to transform json schema into a grammar: "
+                             f"{err}") from err
 
         if has_xgrammar_unsupported_json_features(schema):
             raise ValueError("The provided JSON schema contains features not "

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from functools import cache
-from typing import List, Optional
+from typing import Optional
 
 import torch
 
@@ -97,7 +97,7 @@ def rocm_aiter_fmoe_fp8_blockscale_g1u1_impl(
         w1_scale: torch.Tensor,
         w2_scale: torch.Tensor,
         a1_scale: torch.Tensor,
-        block_shape: List[int],
+        block_shape: list[int],
         smooth_scale: Optional[torch.Tensor] = None) -> torch.Tensor:
     from aiter import fmoe_fp8_blockscale_g1u1
     from aiter.fused_moe_bf16_asm import moe_sorting_ck
@@ -142,7 +142,7 @@ def rocm_aiter_fmoe_fp8_blockscale_g1u1_fake(
         w1_scale: torch.Tensor,
         w2_scale: torch.Tensor,
         a1_scale: torch.Tensor,
-        block_shape: List[int],
+        block_shape: list[int],
         smooth_scale: Optional[torch.Tensor] = None) -> torch.Tensor:
 
     return torch.empty_like(a1, dtype=hidden_states_dtype)
@@ -351,7 +351,7 @@ def rocm_aiter_fused_experts(hidden_states: torch.Tensor,
                              w2_zp: Optional[torch.Tensor] = None,
                              a1_scale: Optional[torch.Tensor] = None,
                              a2_scale: Optional[torch.Tensor] = None,
-                             block_shape: Optional[List[int]] = None,
+                             block_shape: Optional[list[int]] = None,
                              allow_deep_gemm: bool = False) -> torch.Tensor:
 
     from vllm.model_executor.layers.quantization.utils.fp8_utils import (

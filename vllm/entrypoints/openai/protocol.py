@@ -15,7 +15,8 @@ from pydantic import (BaseModel, ConfigDict, Field, TypeAdapter,
 from typing_extensions import TypeAlias
 
 from vllm import envs
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
+                                         random_tool_call_id)
 from vllm.logger import init_logger
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
@@ -402,6 +403,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "access by 3rd parties, and long enough to be "
             "unpredictable (e.g., 43 characters base64-encoded, corresponding "
             "to 256 bit). Not supported by vLLM engine V0."))
+    kv_transfer_params: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="KVTransfer parameters used for disaggregated serving.")
 
     # doc: end-chat-completion-extra-params
 
@@ -539,7 +543,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
             output_kind=RequestOutputKind.DELTA if self.stream \
                 else RequestOutputKind.FINAL_ONLY,
             guided_decoding=guided_decoding,
-            logit_bias=self.logit_bias)
+            logit_bias=self.logit_bias,
+            extra_args=({"kv_transfer_params": self.kv_transfer_params}
+                        if self.kv_transfer_params else None))
 
     def _get_guided_json_from_tool(
             self) -> Optional[Union[str, dict, BaseModel]]:
@@ -847,6 +853,10 @@ class CompletionRequest(OpenAIBaseModel):
             " as strings of the form 'token_id:{token_id}' so that tokens "
             "that are not JSON-encodable can be identified."))
 
+    kv_transfer_params: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="KVTransfer parameters used for disaggregated serving.")
+
     # doc: end-completion-extra-params
 
     # Default sampling parameters for completion requests
@@ -972,7 +982,9 @@ class CompletionRequest(OpenAIBaseModel):
                 else RequestOutputKind.FINAL_ONLY,
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias,
-            allowed_token_ids=self.allowed_token_ids)
+            allowed_token_ids=self.allowed_token_ids,
+            extra_args=({"kv_transfer_params": self.kv_transfer_params}
+                        if self.kv_transfer_params else None))
 
     @model_validator(mode="before")
     @classmethod
@@ -1222,6 +1234,8 @@ class CompletionResponse(OpenAIBaseModel):
     model: str
     choices: list[CompletionResponseChoice]
     usage: UsageInfo
+    kv_transfer_params: Optional[dict[str, Any]] = Field(
+        default=None, description="KVTransfer parameters.")
 
 
 class CompletionResponseStreamChoice(OpenAIBaseModel):
@@ -1292,13 +1306,54 @@ class ScoreResponse(OpenAIBaseModel):
     usage: UsageInfo
 
 
+class ClassificationRequest(OpenAIBaseModel):
+    model: Optional[str] = None
+    input: Union[list[str], str]
+    truncate_prompt_tokens: Optional[int] = None
+    user: Optional[str] = None
+
+    # doc: begin-classification-pooling-params
+    additional_data: Optional[Any] = None
+    # doc: end-classification-pooling-params
+
+    # doc: begin-classification-extra-params
+    priority: int = Field(
+        default=0,
+        description=(
+            "The priority of the request (lower means earlier handling; "
+            "default: 0). Any priority other than 0 will raise an error "
+            "if the served model does not use priority scheduling."),
+    )
+
+    # doc: end-classification-extra-params
+
+    def to_pooling_params(self):
+        return PoolingParams(additional_data=self.additional_data)
+
+
+class ClassificationData(OpenAIBaseModel):
+    index: int
+    label: Optional[str]
+    probs: list[float]
+    num_classes: int
+
+
+class ClassificationResponse(OpenAIBaseModel):
+    id: str = Field(default_factory=lambda: f"classify-{random_uuid()}")
+    object: str = "list"
+    created: int = Field(default_factory=lambda: int(time.time()))
+    model: str
+    data: list[ClassificationData]
+    usage: UsageInfo
+
+
 class FunctionCall(OpenAIBaseModel):
     name: str
     arguments: str
 
 
 class ToolCall(OpenAIBaseModel):
-    id: str = Field(default_factory=lambda: f"chatcmpl-tool-{random_uuid()}")
+    id: str = Field(default_factory=random_tool_call_id)
     type: Literal["function"] = "function"
     function: FunctionCall
 
@@ -1310,8 +1365,8 @@ class DeltaFunctionCall(BaseModel):
 
 # a tool call delta where everything is optional
 class DeltaToolCall(OpenAIBaseModel):
-    id: str = Field(default_factory=lambda: f"chatcmpl-tool-{random_uuid()}")
-    type: Literal["function"] = "function"
+    id: Optional[str] = None
+    type: Optional[Literal["function"]] = None
     index: int
     function: Optional[DeltaFunctionCall] = None
 
@@ -1370,6 +1425,8 @@ class ChatCompletionResponse(OpenAIBaseModel):
     choices: list[ChatCompletionResponseChoice]
     usage: UsageInfo
     prompt_logprobs: Optional[list[Optional[dict[int, Logprob]]]] = None
+    kv_transfer_params: Optional[dict[str, Any]] = Field(
+        default=None, description="KVTransfer parameters.")
 
 
 class DeltaMessage(OpenAIBaseModel):

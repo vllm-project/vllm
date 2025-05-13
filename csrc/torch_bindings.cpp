@@ -77,6 +77,29 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    Tensor suffix_output,"
       "    Tensor suffix_lse) -> ()");
   ops.impl("merge_attn_states", torch::kCUDA, &merge_attn_states);
+
+  ops.def(
+      "convert_vertical_slash_indexes("
+      "   Tensor! block_count, Tensor! block_offset, "
+      "   Tensor! column_count, Tensor! column_index, "
+      "   Tensor q_seqlens, Tensor q_seqlens, "
+      "   Tensor vertical_indexes, Tensor slash_indexes, "
+      "   int context_size, int block_size_M, int block_size_N, "
+      "   bool causal) -> ()");
+  ops.impl("convert_vertical_slash_indexes", torch::kCUDA,
+           &convert_vertical_slash_indexes);
+
+  ops.def(
+      "convert_vertical_slash_indexes_mergehead("
+      "   Tensor! block_count, Tensor! block_offset, "
+      "   Tensor! column_count, Tensor! column_index, "
+      "   Tensor q_seqlens, Tensor q_seqlens, "
+      "   Tensor vertical_indexes, Tensor slash_indexes, "
+      "   Tensor vertical_indices_count, Tensor slash_indices_count, "
+      "   int context_size, int block_size_M, int block_size_N, "
+      "   bool causal) -> ()");
+  ops.impl("convert_vertical_slash_indexes_mergehead", torch::kCUDA,
+           &convert_vertical_slash_indexes_mergehead);
 #endif
 
   // Activation ops
@@ -292,8 +315,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // gptq_marlin Optimized Quantized GEMM for GPTQ.
   ops.def(
       "gptq_marlin_gemm(Tensor a, Tensor? c_or_none, Tensor b_q_weight, "
-      "Tensor b_scales, Tensor? b_zeros_or_none, Tensor? g_idx_or_none, "
-      "Tensor? perm_or_none, Tensor workspace, int b_q_type, "
+      "Tensor b_scales, Tensor? global_scale, Tensor? b_zeros_or_none, Tensor? "
+      "g_idx_or_none, Tensor? perm_or_none, Tensor workspace, int b_q_type, "
       "SymInt size_m, SymInt size_n, SymInt size_k, bool is_k_full, "
       "bool use_atomic_add, bool use_fp32_reduce, bool is_zp_float) -> Tensor",
       {stride_tag});
