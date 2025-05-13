@@ -31,9 +31,10 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionLogProbsContent, ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
-    ChatCompletionStreamResponse, ChatMessage, DeltaFunctionCall, DeltaMessage,
-    DeltaToolCall, ErrorResponse, FunctionCall, FunctionDefinition,
-    PromptTokenUsageInfo, RequestResponseMetadata, ToolCall, UsageInfo)
+    ChatCompletionStreamResponse, ChatMessage, CompletionTokensDetails,
+    DeltaFunctionCall, DeltaMessage, DeltaToolCall, ErrorResponse,
+    FunctionCall, FunctionDefinition, PromptTokenUsageInfo,
+    RequestResponseMetadata, ToolCall, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
                                                     clamp_prompt_logprobs)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
@@ -129,6 +130,7 @@ class OpenAIServingChat(OpenAIServing):
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
+        self.enable_completion_tokens_details = True
         self.default_sampling_params = (
             self.model_config.get_diff_sampling_param())
         if self.default_sampling_params:
@@ -489,7 +491,7 @@ class OpenAIServingChat(OpenAIServing):
                 get_streamable_parser_for_assistant()
                 for _ in range(num_choices)
             ]
-
+        num_reasoning_tokens = 0
         if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
             tool_choice_function_name = request.tool_choice.function.name
         else:
@@ -908,6 +910,31 @@ class OpenAIServingChat(OpenAIServing):
                     #   get the next token without streaming a chunk
                     if delta_message is None:
                         continue
+                    if self.reasoning_parser and reasoning_end_arr[i]:
+                        num_reasoning_tokens + len(output.token_ids)
+                    if self.reasoning_parser and reasoning_end_arr[i]:
+                        num_reasoning_tokens + len(output.token_ids)
+
+                    # Log streaming delta if output logging is enabled
+                    if self.enable_log_outputs and self.request_logger:
+                        delta_content = ""
+                        if delta_message.content:
+                            delta_content = delta_message.content
+                        elif delta_message.tool_calls:
+                            delta_content = "".join(
+                                tc.function.arguments
+                                for tc in delta_message.tool_calls
+                                if tc.function and tc.function.arguments)
+
+                        if delta_content:
+                            self.request_logger.log_outputs(
+                                request_id=request_id,
+                                outputs=delta_content,
+                                output_token_ids=as_list(output.token_ids),
+                                finish_reason=output.finish_reason,
+                                is_streaming=True,
+                                delta=True,
+                            )
 
                     # Log streaming delta if output logging is enabled
                     if self.enable_log_outputs and self.request_logger:
@@ -1035,7 +1062,10 @@ class OpenAIServingChat(OpenAIServing):
                 if self.enable_prompt_tokens_details and num_cached_tokens:
                     final_usage.prompt_tokens_details = PromptTokenUsageInfo(
                         cached_tokens=num_cached_tokens)
-
+                if self.enable_completion_tokens_details and \
+                    num_reasoning_tokens:
+                    final_usage.completion_tokens_details = \
+                        CompletionTokensDetails(reasoning_tokens=num_reasoning_tokens)
                 final_usage_chunk = ChatCompletionStreamResponse(
                     id=request_id,
                     object=chunk_object_type,
@@ -1175,11 +1205,14 @@ class OpenAIServingChat(OpenAIServing):
                         output.text, request=request))
                 if not request.include_reasoning:
                     reasoning_content = None
+                else:
+                    num_reasoning_tokens = reasoning_parser.count_reasoning_tokens(
+                    list(output.token_ids))
             else:
                 reasoning_content = None
                 content = output.text
+                num_reasoning_tokens = 0
 
-            auto_tools_called = False
             # if auto tools are not enabled, and a named tool choice using
             #   outlines is not being used
             if (not self.enable_auto_tools or not self.tool_parser) and \
@@ -1334,7 +1367,9 @@ class OpenAIServingChat(OpenAIServing):
         if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
             usage.prompt_tokens_details = PromptTokenUsageInfo(
                 cached_tokens=final_res.num_cached_tokens)
-
+        if self.enable_prompt_tokens_details and self.reasoning_parser:
+            usage.completion_tokens_details = CompletionTokensDetails(
+                reasoning_tokens=num_reasoning_tokens)
         request_metadata.final_usage_info = usage
 
         response = ChatCompletionResponse(
