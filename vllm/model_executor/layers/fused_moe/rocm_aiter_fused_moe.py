@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from functools import cache
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import torch
 
@@ -307,7 +307,7 @@ def rocm_aiter_biased_group_topk(
     topk_group: int = 0,
     scoring_func: str = "sigmoid",
     e_score_correction_bias: Optional[torch.Tensor] = None
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     assert scoring_func == "sigmoid", (
         "rocm_aiter_biased_group_topk only supports 'sigmoid' scoring_func.")
     assert e_score_correction_bias is not None, (
@@ -443,14 +443,14 @@ def rocm_aiter_topk_softmax(topk_weights: torch.Tensor,
                             topk_indices: torch.Tensor,
                             token_expert_indices: torch.Tensor,
                             gating_output: torch.Tensor,
-                            renormalize: bool) -> Tuple[torch.Tensor, ...]:
+                            renormalize: bool) -> tuple[torch.Tensor, ...]:
     torch.ops.vllm.rocm_aiter_topk_softmax(topk_weights, topk_indices,
                                            token_expert_indices, gating_output,
                                            renormalize)
     return topk_weights, topk_indices
 
 
-def shuffle_weights(*tensors: torch.Tensor) -> Tuple[torch.Tensor, ...]:
+def shuffle_weights(*tensors: torch.Tensor) -> tuple[torch.Tensor, ...]:
     """
     Applies shuffle_weight function from AITER to each 
     input tensor and returns them.
@@ -466,7 +466,7 @@ def shuffle_weights(*tensors: torch.Tensor) -> Tuple[torch.Tensor, ...]:
 
 
 def expand_weights(*tensors: torch.Tensor,
-                   expansion_dims: list[int]) -> Tuple[torch.Tensor, ...]:
+                   expansion_dims: list[int]) -> tuple[torch.Tensor, ...]:
     """
     Expands the dimensions of input tensors.
 
