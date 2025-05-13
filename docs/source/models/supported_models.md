@@ -1062,7 +1062,7 @@ Specified using `--task generate`.
 - * `Phi4MultimodalForCausalLM`
   * Phi-4-multimodal
   * T + I<sup>+</sup> / T + A<sup>+</sup> / I<sup>+</sup> + A<sup>+</sup>
-  * `microsoft/Phi-4-multimodal-instruct-hf`, etc.
+  * `microsoft/Phi-4-multimodal-instruct` (after conversion PR: [refs/pr/70](https://huggingface.co/microsoft/Phi-4-multimodal-instruct/discussions/70)), etc.
   * ✅︎
   *
   * ✅︎

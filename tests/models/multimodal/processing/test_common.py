@@ -24,13 +24,19 @@ from ...registry import HF_EXAMPLE_MODELS
 
 
 def _test_processing_correctness(
-    model_id: str,
+    model_id_or_arch: str,
     hit_rate: float,
     num_batches: int,
     simplify_rate: float,
     ignore_mm_keys: Optional[set[str]] = None,
 ):
-    model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
+    if model_id_or_arch in HF_EXAMPLE_MODELS.get_supported_archs():
+        # Use model architecture to get the default model id
+        model_info = HF_EXAMPLE_MODELS.get_hf_info(model_id_or_arch)
+        model_id = model_info.default
+    else:
+        model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id_or_arch)
+        model_id = model_id_or_arch
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
 
@@ -336,6 +342,26 @@ def test_processing_correctness_phi3v(
 
     _test_processing_correctness(
         model_id,
+        hit_rate=hit_rate,
+        num_batches=num_batches,
+        simplify_rate=simplify_rate,
+    )
+
+
+# FIXME(Isotr0py): Remove this after deprecating the legacy Phi4-MM model
+# See: https://huggingface.co/microsoft/Phi-4-multimodal-instruct/discussions/70
+@pytest.mark.parametrize("model_arch", ["Phi4MultimodalForCausalLM"])
+@pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
+@pytest.mark.parametrize("num_batches", [32])
+@pytest.mark.parametrize("simplify_rate", [1.0])
+def test_processing_correctness_phi4_multimodal(
+    model_arch: str,
+    hit_rate: float,
+    num_batches: int,
+    simplify_rate: float,
+):
+    _test_processing_correctness(
+        model_arch,
         hit_rate=hit_rate,
         num_batches=num_batches,
         simplify_rate=simplify_rate,
