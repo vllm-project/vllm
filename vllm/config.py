@@ -451,8 +451,14 @@ class ModelConfig:
         # doesn't affect the user process. However, without a consistent seed,
         # different tensor parallel workers would sample different tokens,
         # leading to inconsistent results.
-        if self.seed is None and envs.VLLM_USE_V1:
+        if envs.VLLM_USE_V1 and self.seed is None:
             self.seed = 0
+            if not envs.VLLM_ENABLE_V1_MULTIPROCESSING:
+                logger.warning(
+                    "The global random seed is set to %d. Since "
+                    "VLLM_ENABLE_V1_MULTIPROCESSING is set to False, this may "
+                    "affect the random state of the Python process that "
+                    "launched vLLM.", self.seed)
 
         self.model = maybe_model_redirect(self.model)
         # The tokenizer is consistent with the model by default.
