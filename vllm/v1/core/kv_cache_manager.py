@@ -146,21 +146,16 @@ class KVCacheManager:
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.requests += 1
 
-        if len(block_hashes) * self.block_size == request.num_tokens:
-            # When prompt length is divisible by the block size and all
-            # blocks are cached, we need to recompute the last token. This
-            # have to be achieved by re-computing an entire block because
-            # allocate_slots() assumes num_computed_tokens is always a
-            # multiple of the block size. To achieve this, remove the last
-            # block hash from the block_hashes for find_longest_cache_hit
-            # This limitation can potentially be removed in the future to
-            # slightly improve the performance.
-            last_block_hash = block_hashes.pop()
-        else:
-            last_block_hash = None
+        # NOTE: When all tokens hit the cache, we must recompute the last token
+        # to obtain logits. Thus, set max_cache_hit_length to prompt_length - 1.
+        # This can trigger recomputation of an entire block, rather than just
+        # the single last token, because allocate_slots() requires
+        # num_computed_tokens to be block-size aligned. Removing this limitation
+        # could slightly improve performance in the future.
+        max_cache_hit_length = request.num_tokens - 1
 
-        computed_blocks = (
-            self.single_type_manager.find_longest_cache_hit(block_hashes))
+        computed_blocks = self.single_type_manager.find_longest_cache_hit(
+            block_hashes, max_cache_hit_length)
         # NOTE(woosuk): Since incomplete blocks are not eligible for
         # sharing, `num_computed_tokens` is always a multiple of
         # `block_size`.
@@ -170,12 +165,6 @@ class KVCacheManager:
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.queries += request.num_tokens
             self.prefix_cache_stats.hits += num_computed_tokens
-
-        if last_block_hash is not None:
-            # Add back the last block hash if it was removed.
-            # NOTE: Because block_hashes is cached in req_to_block_hashes,
-            # we shouldn't modify it directly.
-            block_hashes.append(last_block_hash)
 
         return KVCacheBlocks(computed_blocks), num_computed_tokens
 

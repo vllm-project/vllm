@@ -187,17 +187,19 @@ class SingleTypeKVCacheManager(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def find_longest_cache_hit(
-            self, block_hashes: list[BlockHashType]) -> list[KVCacheBlock]:
+    def find_longest_cache_hit(self, block_hashes: list[BlockHashType],
+                               max_length: int) -> list[KVCacheBlock]:
         """
-        Get the longest cache hit prefix of the blocks. If no cache hit is 
-        found, return an empty list. if eagle is enabled, drop the last matched 
-        block to force recompute the last block to get the required hidden 
-        states for eagle drafting head. Need to be customized for each attention
-        type.
+        Get the longest cache hit prefix of the blocks that is not longer than 
+        `max_length`. If no cache hit is found, return an empty list. 
+        If eagle is enabled, drop the last matched block to force recompute the 
+        last block to get the required hidden states for eagle drafting head. 
+        Need to be customized for each attention type.
 
         Args:
             block_hashes: The block hashes of the request.
+            max_length: The maximum length of the cache hit prefix.
+
         Returns:
             A list of cached blocks with skipped blocks replaced by null block.
             For example, sliding window manager should return a list like
@@ -226,10 +228,12 @@ class SingleTypeKVCacheManager(ABC):
 
 class FullAttentionManager(SingleTypeKVCacheManager):
 
-    def find_longest_cache_hit(
-            self, block_hashes: list[BlockHashType]) -> list[KVCacheBlock]:
+    def find_longest_cache_hit(self, block_hashes: list[BlockHashType],
+                               max_length: int) -> list[KVCacheBlock]:
         computed_blocks: list[KVCacheBlock] = []
-        for block_hash in block_hashes:
+        max_num_blocks = max_length // self.block_size
+        for i in range(max_num_blocks):
+            block_hash = block_hashes[i]
             # block_hashes is a chain of block hashes. If a block hash is not
             # in the cached_block_hash_to_id, the following block hashes are
             # not computed yet for sure.
@@ -276,19 +280,20 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             self.sliding_window_contiguous_blocks += 1
         self._null_block = block_pool.null_block
 
-    def find_longest_cache_hit(
-            self, block_hashes: list[BlockHashType]) -> list[KVCacheBlock]:
+    def find_longest_cache_hit(self, block_hashes: list[BlockHashType],
+                               max_length: int) -> list[KVCacheBlock]:
         # TODO: reduce i by sliding_window_contiguous_blocks when cache miss, to
-        # optimize the time complexity from O(len(block_hashes)) to
-        # O(len(block_hashes) / sliding_window_contiguous_blocks +
+        # optimize the time complexity from O(max_num_blocks) to
+        # O(max_num_blocks / sliding_window_contiguous_blocks +
         # sliding_window_contiguous_blocks),
         # which is good for low cache hit rate scenarios.
-        computed_blocks = [self._null_block] * len(block_hashes)
+        max_num_blocks = max_length // self.block_size
+        computed_blocks = [self._null_block] * max_num_blocks
         num_contiguous_blocks = 0
 
         match_found = False
         # Search from right to left and early stop when a match is found.
-        for i in range(len(block_hashes) - 1, -1, -1):
+        for i in range(max_num_blocks - 1, -1, -1):
             if cached_block := self.block_pool.get_cached_block(
                     block_hashes[i]):
                 computed_blocks[i] = cached_block
