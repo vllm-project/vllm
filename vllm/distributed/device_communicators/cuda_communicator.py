@@ -155,12 +155,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
     def dispatch(
             self, hidden_states: torch.Tensor,
             router_logits: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        if self.all2all_impl is not None:
-            hidden_states, router_logits = self.all2all_impl.dispatch(
-                hidden_states, router_logits)
-            return hidden_states, router_logits
+        assert self.all2all_impl is not None
+        hidden_states, router_logits = self.all2all_impl.dispatch(
+            hidden_states, router_logits)
+        return hidden_states, router_logits
 
     def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if self.all2all_impl is not None:
-            hidden_states = self.all2all_impl.combine(hidden_states)
-            return hidden_states
+        assert self.all2all_impl is not None
+        hidden_states = self.all2all_impl.combine(hidden_states)
+        return hidden_states
