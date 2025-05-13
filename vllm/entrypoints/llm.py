@@ -767,9 +767,9 @@ class LLM:
                 )
             else:
                 prompt_str = apply_hf_chat_template(
-                    model_config,
-                    tokenizer,
+                    tokenizer=tokenizer,
                     conversation=conversation,
+                    model_config=model_config,
                     **_chat_template_kwargs,
                 )
                 # Special tokens are already included in chat templates so

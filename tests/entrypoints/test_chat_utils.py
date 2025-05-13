@@ -793,10 +793,10 @@ def test_multimodal_image_parsing_matches_hf(model, image_url):
     )
 
     vllm_result = apply_hf_chat_template(
-        model_config,
-        tokenizer,
+        tokenizer=tokenizer,
         conversation=conversation,
         chat_template=None,
+        model_config=model_config,
         tools=None,
         add_generation_prompt=True,
     )

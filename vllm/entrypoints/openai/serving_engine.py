@@ -701,9 +701,9 @@ class OpenAIServing:
             )
         else:
             request_prompt = apply_hf_chat_template(
-                model_config,
-                tokenizer,
+                tokenizer=tokenizer,
                 conversation=conversation,
+                model_config=model_config,
                 **_chat_template_kwargs,
             )
 

@@ -1201,12 +1201,12 @@ def parse_chat_messages_futures(
 
 
 def apply_hf_chat_template(
-    model_config: ModelConfig,
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     conversation: list[ConversationMessage],
     chat_template: Optional[str],
     tools: Optional[list[dict[str, Any]]],
     *,
+    model_config: ModelConfig,
     tokenize: bool = False,  # Different from HF's default
     **kwargs: Any,
 ) -> str:
