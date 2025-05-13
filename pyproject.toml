@@ -53,6 +53,7 @@ include = ["vllm*"]
 
 [tool.yapfignore]
 ignore_patterns = [
+    ".buildkite/**",
     "build/**",
 ]
 
@@ -107,6 +108,7 @@ select = [
     "SIM",
     # isort
     # "I",
+    # flake8-logging-format
     "G",
 ]
 ignore = [
