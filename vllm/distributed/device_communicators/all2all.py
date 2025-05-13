@@ -8,10 +8,12 @@ class All2AllBase:
 
     def __init__(self, cpu_group, model):
         self.cpu_group = cpu_group
-        self.model = model
+
+        # compute some common properties
         from vllm.distributed.parallel_state import (get_dp_group,
                                                      get_ep_group,
-                                                     get_tp_group)
+                                                     get_tp_group,
+                                                     in_the_same_node_as)
 
         # all2all lives in ep group, which is merged from dp and tp group
         self.dp_group = get_dp_group()
@@ -19,6 +21,11 @@ class All2AllBase:
         self.ep_group = get_ep_group()
         self.dp_rank = self.dp_group.rank_in_group
         self.dp_world_size = self.dp_group.world_size
+
+        # all2all communication often has separate implementations for
+        # intra-node and inter-node communication
+        self.intranode = in_the_same_node_as(self.ep_group, source_rank=0)
+        self.internode = not self.intranode
 
     def dispatch(self, hidden_states: torch.Tensor,
                  router_logits: torch.Tensor):
