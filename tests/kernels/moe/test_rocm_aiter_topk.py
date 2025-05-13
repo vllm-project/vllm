@@ -13,6 +13,8 @@ import importlib.util
 import pytest
 import torch
 
+# this import statement is needed to ensure the ops are registered
+import vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe  # noqa: F401
 from vllm.platforms import current_platform
 
 # need to import once to ensure the ops are registered
