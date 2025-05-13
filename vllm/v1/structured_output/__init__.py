@@ -68,8 +68,8 @@ class StructuredOutputManager:
         if self.backend is not None:
             return
         if backend == "auto":
-            if self.vllm_config.decoding_config != "auto":
-                backend = self.vllm_config.decoding_config
+            if self.vllm_config.decoding_config.backend != "auto":
+                backend = self.vllm_config.decoding_config.backend
             else:
                 backend = "xgrammar"  # default to xgrammar
 
@@ -292,8 +292,8 @@ class StructuredOutputManager:
         if self.backend is not None:
             self.backend.destroy()
 
-    def precompile(self, num_reqs_paddings: list[int], vocab_size: int,
-                   device: torch.device, hidden_states_dtype: torch.dtype):
+    def precompile(self, num_reqs_paddings: list[int], device: torch.device,
+                   hidden_states_dtype: torch.dtype):
         """
         Allow backend precompilation for the device
             - Currently only used in the TPU model runner
@@ -307,8 +307,7 @@ class StructuredOutputManager:
                 hidden states.
         """
         assert self.backend is not None
-        self.backend.precompile(num_reqs_paddings, vocab_size, device,
-                                hidden_states_dtype)
+        self.backend.precompile(num_reqs_paddings, device, hidden_states_dtype)
 
     @staticmethod
     def validate_request(params: SamplingParams,
