@@ -36,6 +36,12 @@ class KVCacheBlocks:
         """Converts the KVCacheBlocks instance to a list of block IDs."""
         return [block.block_id for block in self.blocks]
 
+    def get_unhashed_block_ids(self) -> list[int]:
+        """Get block_ids of unhashed blocks from KVCacheBlocks instance."""
+        return [
+            block.block_id for block in self.blocks if block.block_hash is None
+        ]
+
 
 class KVCacheManager:
 
@@ -116,6 +122,12 @@ class KVCacheManager:
                 - The number of computed tokens.
         """
 
+        # Request already has blocks from async load via KVConnector.
+        num_existing_blocks = len(
+            self.single_type_manager.req_to_blocks[request.request_id])
+        if num_existing_blocks > 0:
+            return KVCacheBlocks.create_empty(), request.num_computed_tokens
+
         # Prefix caching is disabled or
         # When the request requires prompt logprobs, we skip prefix caching.
         if (not self.enable_caching
@@ -148,16 +160,16 @@ class KVCacheManager:
 
         computed_blocks = (self.single_type_manager.find_longest_cache_hit(
             block_hashes, max_cache_hit_length))
-
-        if self.log_stats:
-            assert self.prefix_cache_stats is not None
-            self.prefix_cache_stats.queries += len(block_hashes)
-            self.prefix_cache_stats.hits += len(computed_blocks)
-
         # NOTE(woosuk): Since incomplete blocks are not eligible for
         # sharing, `num_computed_tokens` is always a multiple of
         # `block_size`.
         num_computed_tokens = len(computed_blocks) * self.block_size
+
+        if self.log_stats:
+            assert self.prefix_cache_stats is not None
+            self.prefix_cache_stats.queries += request.num_tokens
+            self.prefix_cache_stats.hits += num_computed_tokens
+
         return KVCacheBlocks(computed_blocks), num_computed_tokens
 
     def allocate_slots(
@@ -166,6 +178,7 @@ class KVCacheManager:
         num_new_tokens: int,
         new_computed_blocks: Optional[KVCacheBlocks] = None,
         num_lookahead_tokens: int = 0,
+        delay_cache_blocks: bool = False,
     ) -> Optional[KVCacheBlocks]:
         """Add slots for a request with new tokens to append.
 
@@ -179,6 +192,9 @@ class KVCacheManager:
             num_lookahead_tokens: The number of speculative tokens to allocate.
                 This is used by spec decode proposers with kv-cache such 
                 as eagle.
+            delay_cache_blocks: Whether to skip caching the blocks. This is
+                used by P/D when allocating blocks used in a KV transfer
+                which will complete in a future step.
 
         Blocks layout:
         ```
@@ -248,7 +264,9 @@ class KVCacheManager:
         new_blocks = self.single_type_manager.allocate_new_blocks(
             request.request_id, num_tokens_need_slot)
 
-        if not self.enable_caching:
+        # P/D: delay caching blocks if we have to recv from
+        # remote. Update state for locally cached blocks.
+        if not self.enable_caching or delay_cache_blocks:
             return KVCacheBlocks(new_blocks)
 
         # Speculated tokens might be rejected in the future, so we does
@@ -343,3 +361,11 @@ class KVCacheManager:
             A list of KV cache events.
         """
         return self.block_pool.take_events()
+
+    def get_block_ids(self, request_id: str) -> list[int]:
+        """Get the block ids of a request."""
+        assert request_id in self.single_type_manager.req_to_blocks
+        return [
+            block.block_id
+            for block in self.single_type_manager.req_to_blocks[request_id]
+        ]
