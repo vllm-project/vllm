@@ -170,14 +170,18 @@ class CPUWorker(LocalOrDistributedWorkerBase):
 
             from importlib import util
             libnuma_found = util.find_spec("numa") is not None
-            if libnuma_found:
+            psutil_found = util.find_spec("psutil") is not None
+            if libnuma_found and psutil_found:
                 from numa import info
+                import psutil
+                cpu_count = psutil.cpu_count(logical=False)
                 numa_size = info.get_num_configured_nodes()
+                cpu_count_per_numa = cpu_count // numa_size
                 if world_size > numa_size:
                     logger.info("[ERROR] NO AUTO OMP Bind support because request world size: %d is more than numa_size: %d",
                             world_size, numa_size)
                 else:
-                    rank_to_cpus=str(info.node_to_cpus(rank)[0]) + '-' + str(info.node_to_cpus(rank)[-1])
+                    rank_to_cpus=str(info.node_to_cpus(rank)[0]) + '-' + str(info.node_to_cpus(rank)[cpu_count_per_numa-1])
                     logger.info("omp_cpuids: %s, rank: %d, world_size:%d, tp_size: %d, pp_size: %d",
                         omp_cpuids,rank, world_size, tp_size, pp_size)
                     self.local_omp_cpuid = rank_to_cpus
