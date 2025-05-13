@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, List
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -273,7 +273,7 @@ class GrammarConfig:
         return re.sub(r'(["\\])', r'\\\1', s)
 
     @staticmethod
-    def choice_as_grammar(choice: List[str] | None) -> str:
+    def choice_as_grammar(choice: list[str] | None) -> str:
         if choice is None:
             raise ValueError("Choice is not set")
         escaped_choices = (GrammarConfig.escape_ebnf_string(c) for c in choice)

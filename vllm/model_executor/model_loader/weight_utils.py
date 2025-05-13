@@ -162,23 +162,15 @@ def get_quant_config(model_config: ModelConfig,
                                   None)
     if hf_quant_config is not None:
         return quant_cls.from_config(hf_quant_config)
-    # In case of bitsandbytes/QLoRA, get quant config from the adapter model.
+    # Inflight BNB quantization
     if model_config.quantization == "bitsandbytes":
-        if (not load_config.model_loader_extra_config
-                or "qlora_adapter_name_or_path"
-                not in load_config.model_loader_extra_config):
-            return quant_cls.from_config({"adapter_name_or_path": ""})
-        model_name_or_path = load_config.model_loader_extra_config[
-            "qlora_adapter_name_or_path"]
-
-    else:
-        model_name_or_path = model_config.model
-    is_local = os.path.isdir(model_name_or_path)
+        return quant_cls.from_config({})
+    is_local = os.path.isdir(model_config.model)
     if not is_local:
         # Download the config files.
-        with get_lock(model_name_or_path, load_config.download_dir):
+        with get_lock(model_config.model, load_config.download_dir):
             hf_folder = snapshot_download(
-                model_name_or_path,
+                model_config.model,
                 revision=model_config.revision,
                 allow_patterns="*.json",
                 cache_dir=load_config.download_dir,
@@ -186,7 +178,7 @@ def get_quant_config(model_config: ModelConfig,
                 tqdm_class=DisabledTqdm,
             )
     else:
-        hf_folder = model_name_or_path
+        hf_folder = model_config.model
 
     possible_config_filenames = quant_cls.get_config_filenames()
 
@@ -213,7 +205,7 @@ def get_quant_config(model_config: ModelConfig,
         config = json.load(f)
 
         if model_config.quantization == "bitsandbytes":
-            config["adapter_name_or_path"] = model_name_or_path
+            config["adapter_name_or_path"] = model_config.model
         elif model_config.quantization == "modelopt":
             if config["producer"]["name"] == "modelopt":
                 return quant_cls.from_config(config)
@@ -223,6 +215,39 @@ def get_quant_config(model_config: ModelConfig,
                     f" found for {model_config.quantization} in {f}.")
 
     return quant_cls.from_config(config)
+
+
+def get_sparse_attention_config(
+    model_config: ModelConfig,
+    load_config: LoadConfig,
+    sparse_attention_config_filename: str = "sparse_attention_config.json",
+) -> Dict[str, Any]:
+    model_name_or_path = model_config.model
+    is_local = os.path.isdir(model_name_or_path)
+    if not is_local:
+        # Download the config files.
+        with get_lock(model_name_or_path, load_config.download_dir):
+            hf_folder = snapshot_download(
+                model_name_or_path,
+                revision=model_config.revision,
+                allow_patterns="*.json",
+                cache_dir=load_config.download_dir,
+                local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+                tqdm_class=DisabledTqdm,
+            )
+    else:
+        hf_folder = model_name_or_path
+
+    config_file = os.path.join(hf_folder, sparse_attention_config_filename)
+    if not os.path.exists(config_file):
+        return {}
+
+    # Load the sparse attention config.
+    with open(config_file) as f:
+        config = json.load(f)
+    logger.info("Loaded sparse attention config from %s", config_file)
+
+    return config
 
 
 def download_weights_from_hf(

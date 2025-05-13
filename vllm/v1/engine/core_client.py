@@ -88,6 +88,9 @@ class EngineCoreClient(ABC):
     def profile(self, is_start: bool = True) -> None:
         raise NotImplementedError
 
+    def reset_mm_cache(self) -> None:
+        raise NotImplementedError
+
     def reset_prefix_cache(self) -> None:
         raise NotImplementedError
 
@@ -141,6 +144,9 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def profile_async(self, is_start: bool = True) -> None:
+        raise NotImplementedError
+
+    async def reset_mm_cache_async(self) -> None:
         raise NotImplementedError
 
     async def reset_prefix_cache_async(self) -> None:
@@ -213,6 +219,9 @@ class InprocClient(EngineCoreClient):
 
     def profile(self, is_start: bool = True) -> None:
         self.engine_core.profile(is_start)
+
+    def reset_mm_cache(self) -> None:
+        self.engine_core.reset_mm_cache()
 
     def reset_prefix_cache(self) -> None:
         self.engine_core.reset_prefix_cache()
@@ -442,9 +451,10 @@ class MPClient(EngineCoreClient):
             logger.info("Core engine process %d ready.", eng_id)
             identities.discard(eng_id)
             # Setup KV cache config with initialization state from
-            # engine core process.
-            self.vllm_config.cache_config.num_gpu_blocks = message_dict[
-                'num_gpu_blocks']
+            # engine core process. Sum values from all engines in DP case.
+            num_gpu_blocks = self.vllm_config.cache_config.num_gpu_blocks or 0
+            num_gpu_blocks += message_dict['num_gpu_blocks']
+            self.vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
 
     def _init_core_engines(
         self,
@@ -598,6 +608,9 @@ class SyncMPClient(MPClient):
 
     def profile(self, is_start: bool = True) -> None:
         self.call_utility("profile", is_start)
+
+    def reset_mm_cache(self) -> None:
+        self.call_utility("reset_mm_cache")
 
     def reset_prefix_cache(self) -> None:
         self.call_utility("reset_prefix_cache")
@@ -785,6 +798,9 @@ class AsyncMPClient(MPClient):
 
     async def profile_async(self, is_start: bool = True) -> None:
         await self.call_utility_async("profile", is_start)
+
+    async def reset_mm_cache_async(self) -> None:
+        await self.call_utility_async("reset_mm_cache")
 
     async def reset_prefix_cache_async(self) -> None:
         await self.call_utility_async("reset_prefix_cache")

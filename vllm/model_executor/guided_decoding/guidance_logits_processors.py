@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import copy
 import os
-from typing import Any, List
+from typing import Any
 
 import llguidance
 import llguidance.hf
@@ -78,7 +78,7 @@ class GuidanceLogitsProcessor:
 
     def __call__(
         self,
-        input_ids: List[int],
+        input_ids: list[int],
         scores: torch.Tensor,
     ) -> torch.Tensor:
         # we initialize the guidance model here
