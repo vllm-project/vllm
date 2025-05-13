@@ -24,7 +24,7 @@ import json
 import copy
 import os
 import re
-from typing import Dict, List, Optional, Union
+from typing import Optional, Union
 
 import torch
 from cachetools import LRUCache
