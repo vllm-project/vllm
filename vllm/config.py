@@ -2018,15 +2018,9 @@ class SchedulerConfig:
     def __post_init__(self) -> None:
         if self.max_model_len is None:
             self.max_model_len = 8192
-            logger.warning_once(
-                "max_model_len was is not set. Defaulting to arbitrary value "
-                "of %d.", self.max_model_len)
 
         if self.max_num_seqs is None:
             self.max_num_seqs = 128
-            logger.warning_once(
-                "max_num_seqs was is not set. Defaulting to arbitrary value "
-                "of %d.", self.max_num_seqs)
 
         if self.max_num_batched_tokens is None:
             if self.enable_chunked_prefill:
