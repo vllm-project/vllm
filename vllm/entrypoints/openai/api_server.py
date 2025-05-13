@@ -1080,6 +1080,15 @@ def create_server_socket(addr: tuple[str, int]) -> socket.socket:
     return sock
 
 
+def create_server_unix_socket(addr: str) -> socket.socket:
+    family = socket.AF_UNIX
+
+    sock = socket.socket(family=family, type=socket.SOCK_STREAM)
+    sock.bind(addr)
+
+    return sock
+
+
 async def run_server(args, **uvicorn_kwargs) -> None:
     logger.info("vLLM API server version %s", VLLM_VERSION)
     log_non_default_args(args)
