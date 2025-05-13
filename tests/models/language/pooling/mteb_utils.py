@@ -5,9 +5,9 @@ from collections.abc import Sequence
 import mteb
 import numpy as np
 import pytest
-import torch
 
 from tests.models.utils import EmbedModelInfo
+from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 
 # Most models on the STS12 task (See #17175):
 # - Model implementation and minor changes in tensor dtype
@@ -106,11 +106,9 @@ def mteb_test_embed_models(hf_runner,
             vllm_model.model.llm_engine.model_config.hf_config, "torch_dtype",
             vllm_dtype)
 
-    torch.set_default_dtype(model_dtype)
-
-    with hf_runner(model_info.name,
-                   is_sentence_transformer=True,
-                   dtype=model_dtype) as hf_model:
+    with set_default_torch_dtype(model_dtype) and hf_runner(
+            model_info.name, is_sentence_transformer=True,
+            dtype=model_dtype) as hf_model:
         st_main_score = run_mteb_embed_task(hf_model, MTEB_EMBED_TASKS)
 
     print("VLLM:", vllm_dtype, vllm_main_score)

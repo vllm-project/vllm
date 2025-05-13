@@ -591,7 +591,7 @@ class GteNewModel(BertWithRope):
         return super().load_weights(weights)
 
 
-class GteModel(GteNewModel):
+class SnowflakeGteNewModel(GteNewModel):
     # for Snowflake/snowflake-arctic-embed-m-v2.0
 
     hf_to_vllm_mapper = WeightsMapper(

@@ -636,22 +636,22 @@ Specified using `--task embed`.
   * ✅︎
   * ✅︎
 - * `GteModel`
-  * GteModel
+  * Snowflake names GTE `NewModel` as `GteModel`,  [paper](https://arxiv.org/abs/2412.04506), [hf](https://huggingface.co/Alibaba-NLP/new-impl)
   * `Snowflake/snowflake-arctic-embed-m-v2.0`.
   *
+  * ︎
+- * `GteNewModel`
+  * The 2-gen GTE model is named `NewModel`, [paper](https://arxiv.org/abs/2407.19669), [hf](https://huggingface.co/Alibaba-NLP/new-impl), while vllm names it `GteNewModel`.  (see note)
+  * `Alibaba-NLP/gte-multilingual-base`, etc.
+  * ︎
   * ︎
 - * `ModernBertModel`
   * ModernBertModel
   * `Alibaba-NLP/gte-modernbert-base`, etc.
   * ︎
   * ︎
-- * `GteNewModel`
-  * GTE NewModel
-  * `Alibaba-NLP/gte-multilingual-base` (see note), etc.
-  * ︎
-  * ︎
 - * `NomicBertModel`
-  * NomicBertModel
+  * Nomic names embed-text-v1/v1.5/v2-moe as `NomicBertModel`. 
   * `nomic-ai/nomic-embed-text-v1`, `nomic-ai/nomic-embed-text-v2-moe`, `Snowflake/snowflake-arctic-embed-m-long`, etc.
   * ︎
   * ︎
@@ -695,7 +695,7 @@ See [relevant issue on HF Transformers](https://github.com/huggingface/transform
 :::
 
 :::{note}
-The name `NewModel` is too generic, you should set `--hf-overrides '{"architectures": ["GteNewModel"]}'` specify the use of the GteNewModel architecture.
+The name `NewModel` is too generic, you should set `--hf-overrides '{"architectures": ["GteNewModel"]}'` specify the use of the `GteNewModel` architecture.
 :::
 
 If your model is not in the above list, we will try to automatically convert the model using
