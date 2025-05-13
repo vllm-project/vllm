@@ -833,16 +833,15 @@ class FusedMoE(torch.nn.Module):
 
         # Note: get_quant_method will look at the layer's local_num_experts
         # for heuristic purposes, so it must be initialized first.
-        quant_method: Optional[FusedMoEMethodBase] = None
+        quant_method: Optional[QuantizeMethodBase] = None
 
         if quant_config is None:
             quant_method = UnquantizedFusedMoEMethod(moe)
         else:
-            quant_method = quant_config.get_quant_method(
-                self, prefix)  # type: ignore
-            assert isinstance(quant_method, FusedMoEMethodBase)
+            quant_method = quant_config.get_quant_method(self, prefix)
 
         assert quant_method is not None
+        assert isinstance(quant_method, FusedMoEMethodBase)
         self.quant_method = quant_method
 
         prepare_finalize = _construct_prepare_finalize(moe, quant_config)

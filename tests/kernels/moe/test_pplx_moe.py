@@ -33,8 +33,6 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (fused_topk,
                                                             get_default_config)
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
-from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
-    PplxPrepareAndFinalize)
 from vllm.platforms import current_platform
 
 PPLX_PREPARE_COMBOS = [(4, 128, 128), (32, 1024, 512), (64, 1024, 512),
@@ -350,6 +348,9 @@ def chunk_by_rank(t: torch.Tensor, r: int, w: int) -> torch.Tensor:
 def pplx_prepare_finalize(pgi: ProcessGroupInfo, dp_size: int, a: torch.Tensor,
                           topk_weight: torch.Tensor, topk_ids: torch.Tensor,
                           num_experts: int) -> torch.Tensor:
+    from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
+        PplxPrepareAndFinalize)
+
     assert torch.cuda.current_device() == pgi.local_rank
 
     topk = topk_ids.shape[1]
@@ -499,6 +500,9 @@ def pplx_moe(
     use_compile: bool = True,
     use_cudagraphs: bool = True,
 ) -> torch.Tensor:
+    from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
+        PplxPrepareAndFinalize)
+
     device = torch.device("cuda", rank)
     hidden_dim = a.shape[1]
     num_experts = w1.shape[0]
