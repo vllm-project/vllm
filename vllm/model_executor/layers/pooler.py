@@ -190,7 +190,7 @@ class StepPool(SimplePooler):
     def get_prompt_token_ids(
         self,
         pooling_metadata: PoolingMetadata,
-    ) -> List[torch.Tensor]:
+    ) -> list[torch.Tensor]:
         if isinstance(pooling_metadata, V1PoolingMetadata):
             return [
                 pooling_metadata.prompt_token_ids[i, :num]
