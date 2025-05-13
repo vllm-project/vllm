@@ -1203,8 +1203,7 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
             # Cache the dummy encoder outputs.
             self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
 
-        hidden_states, last_hidden_states, num_reqs = self._dummy_run(
-            self.max_num_tokens)
+        hidden_states, num_reqs = self._dummy_run(self.max_num_tokens)
         if get_pp_group().is_last_rank:
             output = self._dummy_pooler_run(self.max_num_tokens, num_reqs,
                                             hidden_states)
