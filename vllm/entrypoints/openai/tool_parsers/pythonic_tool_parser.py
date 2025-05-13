@@ -105,7 +105,7 @@ class PythonicToolParser(ToolParser):
         request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
 
-        if not current_text.startswith("[") or not current_text.startswith(
+        if not current_text.startswith("[") and not current_text.startswith(
                 "<|python_start|>"):
             return DeltaMessage(content=delta_text)
 
