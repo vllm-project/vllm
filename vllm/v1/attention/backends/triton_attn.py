@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 """Attention layer with PagedAttention and Triton prefix prefill."""
-from dataclasses import dataclass
 from typing import Any, Optional
 
 import torch
@@ -11,129 +10,10 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.ops.triton_unified_attention import unified_attention
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
-from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.v1.worker.block_table import BlockTable
+from vllm.v1.attention.backends.flash_attn import (
+    FlashAttentionMetadata, FlashAttentionMetadataBuilder)
 
 logger = init_logger(__name__)
-
-@dataclass
-class TritonAttentionMetadata:
-    # NOTE(sang): Definition of context_len, query_len, and seq_len.
-    # |---------- N-1 iteration --------|
-    # |---------------- N iteration ---------------------|
-    # |- tokenA -|......................|-- newTokens ---|
-    # |---------- context_len ----------|
-    # |-------------------- seq_len ---------------------|
-    #                                   |-- query_len ---|
-
-    num_actual_tokens: int  # Number of tokens excluding padding.
-    max_query_len: int
-    query_start_loc: torch.Tensor
-    max_seq_len: int
-    seq_lens: torch.Tensor
-    block_table: BlockTable
-    slot_mapping: torch.Tensor
-
-    # For cascade attention.
-    use_cascade: bool
-    common_prefix_len: int
-    cu_prefix_query_lens: Optional[torch.Tensor]
-    prefix_kv_lens: Optional[torch.Tensor]
-    suffix_kv_lens: Optional[torch.Tensor]
-
-    # Optional aot scheduling
-    scheduler_metadata: Optional[torch.Tensor] = None
-    prefix_scheduler_metadata: Optional[torch.Tensor] = None
-
-    # TODO 
-    # # for local attention
-    # @dataclass
-    # class LocalAttentionMetadata:
-    #     local_query_start_loc: torch.Tensor
-    #     local_seqused_k: torch.Tensor
-    #     local_block_table: torch.Tensor
-    #     local_max_query_len: int
-    #     local_max_seq_len: int
-    #     local_scheduler_metadata: Optional[torch.Tensor]
-
-    # local_attn_metadata: Optional[LocalAttentionMetadata] = None
-
-
-class TritonAttentionMetadataBuilder:
-
-    def __init__(self, runner: "GPUModelRunner", kv_cache_spec: AttentionSpec,
-                 block_table: BlockTable):
-        model_config = runner.model_config
-
-        self.runner = runner
-        self.num_heads_q = model_config.get_num_attention_heads(
-            runner.parallel_config)
-        self.num_heads_kv = model_config.get_num_kv_heads(
-            runner.parallel_config)
-        self.headdim = model_config.get_head_size()
-        self.block_size = kv_cache_spec.block_size
-        self.kv_cache_spec = kv_cache_spec
-        self.block_table = block_table
-
-    def reorder_batch(self, input_batch: "InputBatch",
-                      scheduler_output: "SchedulerOutput") -> bool:
-        return False
-
-    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int,
-              common_attn_metadata: CommonAttentionMetadata):
-        max_seq_len = self.runner.seq_lens_np[:num_reqs].max()
-        query_start_loc = common_attn_metadata.query_start_loc
-        seq_lens = common_attn_metadata.seq_lens
-        block_table = self.block_table
-        block_table_tensor = block_table.get_device_tensor()[:num_reqs]
-
-        block_table.slot_mapping[:num_actual_tokens].copy_(
-            block_table.slot_mapping_cpu[:num_actual_tokens],
-            non_blocking=True)
-        # Fill unused with -1. Needed for reshape_and_cache in full cuda graph
-        # mode.
-        block_table.slot_mapping[num_actual_tokens:].fill_(-1)
-
-        slot_mapping = block_table.slot_mapping[:num_actual_tokens]
-
-        def schedule(batch_size, cu_query_lens, max_query_len, seqlens,
-                     max_seq_len, causal):
-            return None
-
-        use_cascade = False
-        cu_prefix_query_lens = None
-        prefix_kv_lens = None
-        suffix_kv_lens = None
-        prefix_scheduler_metadata = None
-        scheduler_metadata = schedule(batch_size=num_reqs,
-                                      cu_query_lens=query_start_loc,
-                                      max_query_len=max_query_len,
-                                      seqlens=seq_lens,
-                                      max_seq_len=max_seq_len,
-                                      causal=True)
-
-        attn_metadata = TritonAttentionMetadata(
-            num_actual_tokens=num_actual_tokens,
-            max_query_len=max_query_len,
-            query_start_loc=query_start_loc,
-            max_seq_len=max_seq_len,
-            seq_lens=seq_lens,
-            block_table=block_table,
-            slot_mapping=slot_mapping,
-            use_cascade=use_cascade,
-            common_prefix_len=common_prefix_len,
-            scheduler_metadata=scheduler_metadata,
-            cu_prefix_query_lens=cu_prefix_query_lens,
-            prefix_kv_lens=prefix_kv_lens,
-            suffix_kv_lens=suffix_kv_lens,
-            prefix_scheduler_metadata=prefix_scheduler_metadata,
-        )
-        return attn_metadata
-
-    def use_cascade_attention(self, *args, **kwargs) -> bool:
-        return False
 
 
 class TritonAttentionBackend(AttentionBackend):
@@ -154,7 +34,7 @@ class TritonAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_metadata_cls() -> type["AttentionMetadata"]:
-        return TritonAttentionMetadata 
+        return FlashAttentionMetadata
 
     @staticmethod
     def get_kv_cache_shape(
@@ -172,8 +52,8 @@ class TritonAttentionBackend(AttentionBackend):
         return False
 
     @staticmethod
-    def get_builder_cls() -> type["TritonAttentionMetadataBuilder"]:
-        return TritonAttentionMetadataBuilder
+    def get_builder_cls() -> type["FlashAttentionMetadataBuilder"]:
+        return FlashAttentionMetadataBuilder
 
 
 class TritonAttentionImpl(AttentionImpl):
@@ -238,7 +118,7 @@ class TritonAttentionImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: TritonAttentionMetadata,
+        attn_metadata: FlashAttentionMetadata,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
@@ -308,13 +188,13 @@ class TritonAttentionImpl(AttentionImpl):
             seqused_k = local_metadata.local_seqused_k
             max_seqlen_q = local_metadata.local_max_query_len
             max_seqlen_k = local_metadata.local_max_seq_len
-            block_table = local_metadata.local_block_table.get_device_tensor()
+            block_table = local_metadata.local_block_table
         else:
             cu_seqlens_q = attn_metadata.query_start_loc
             seqused_k = attn_metadata.seq_lens
             max_seqlen_q = attn_metadata.max_query_len
             max_seqlen_k = attn_metadata.max_seq_len
-            block_table = attn_metadata.block_table.get_device_tensor()
+            block_table = attn_metadata.block_table
 
         descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
 
