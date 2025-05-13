@@ -6,7 +6,6 @@ import io
 import json
 import re
 import shutil
-from collections.abc import Sequence
 from tempfile import TemporaryDirectory
 from typing import Optional
 
@@ -80,7 +79,7 @@ def common_server_args() -> list[str]:
 
 @pytest.fixture(scope="module")
 def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files,
-                        zephyr_pa_files, common_server_args: Sequence[str]):
+                        zephyr_pa_files, common_server_args: list[str]):
     return [
         *common_server_args,
         # lora config
