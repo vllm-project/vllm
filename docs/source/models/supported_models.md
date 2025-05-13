@@ -592,6 +592,11 @@ Specified using `--task generate`.
   * `Zyphra/Zamba2-7B-instruct`, `Zyphra/Zamba2-2.7B-instruct`, `Zyphra/Zamba2-1.2B-instruct`, etc.
   *
   *
+- * `MiMoForCausalLM`
+  * MiMo
+  * `XiaomiMiMo/MiMo-7B-RL`, etc.
+  *
+  *
 :::
 
 :::{note}
@@ -622,7 +627,7 @@ Specified using `--task embed`.
   * [PP](#distributed-serving)
 - * `BertModel`
   * BERT-based
-  * `BAAI/bge-base-en-v1.5`, etc.
+  * `BAAI/bge-base-en-v1.5`, `Snowflake/snowflake-arctic-embed-xs`, etc.
   *
   *
 - * `Gemma2Model`
@@ -635,6 +640,16 @@ Specified using `--task embed`.
   * `parasail-ai/GritLM-7B-vllm`.
   * ✅︎
   * ✅︎
+- * `GteModel`
+  * GteModel
+  * `Snowflake/snowflake-arctic-embed-m-v2.0`.
+  *
+  * ︎
+- * `NomicBertModel`
+  * NomicBertModel
+  * `nomic-ai/nomic-embed-text-v1`, `nomic-ai/nomic-embed-text-v2-moe`, `Snowflake/snowflake-arctic-embed-m-long`, etc.
+  * ︎
+  * ︎
 - * `LlamaModel`, `LlamaForCausalLM`, `MistralModel`, etc.
   * Llama-based
   * `intfloat/e5-mistral-7b-instruct`, etc.
@@ -647,12 +662,12 @@ Specified using `--task embed`.
   * ✅︎
 - * `RobertaModel`, `RobertaForMaskedLM`
   * RoBERTa-based
-  * `sentence-transformers/all-roberta-large-v1`, `sentence-transformers/all-roberta-large-v1`, etc.
+  * `sentence-transformers/all-roberta-large-v1`, etc.
   *
   *
 - * `XLMRobertaModel`
   * XLM-RoBERTa-based
-  * `intfloat/multilingual-e5-large`, `jinaai/jina-reranker-v2-base-multilingual`, etc.
+  * `intfloat/multilingual-e5-large`, `jinaai/jina-reranker-v2-base-multilingual`, `Snowflake/snowflake-arctic-embed-l-v2.0`, `jinaai/jina-embeddings-v3`(see note), etc.
   *
   *
 :::
@@ -668,6 +683,10 @@ you should set `--hf-overrides '{"is_causal": true}'` in vLLM so that the two im
 
 For both the 1.5B and 7B variants, you also need to enable `--trust-remote-code` for the correct tokenizer to be loaded.
 See [relevant issue on HF Transformers](https://github.com/huggingface/transformers/issues/34882).
+:::
+
+:::{note}
+`jinaai/jina-embeddings-v3` supports multiple tasks through lora, while vllm temporarily only supports text-matching tasks by merging lora weights.
 :::
 
 If your model is not in the above list, we will try to automatically convert the model using
@@ -1031,10 +1050,10 @@ Specified using `--task generate`.
   *
   * ✅︎
   * ✅︎
-- * `Ovis2ForConditionalGeneration`<sup>^</sup>
-  * Ovis2
+- * `Ovis`
+  * Ovis2, Ovis1.6
   * T + I<sup>+</sup>
-  * `AIDC-AI/Ovis2-1B`, `AIDC-AI/Ovis2-2B`, etc.
+  * `AIDC-AI/Ovis2-1B`, `AIDC-AI/Ovis1.6-Llama3.2-3B`, etc.
   *
   *
   * ✅︎
