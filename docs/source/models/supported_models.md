@@ -636,7 +636,7 @@ Specified using `--task embed`.
   * ✅︎
   * ✅︎
 - * `GteModel`
-  * Snowflake Arctic-Embed-2.0-M
+  * Arctic-Embed-2.0-M
   * `Snowflake/snowflake-arctic-embed-m-v2.0`.
   *
   * ︎
@@ -646,12 +646,12 @@ Specified using `--task embed`.
   * ︎
   * ︎
 - * `ModernBertModel`
-  * ModernBertModel-based
+  * ModernBERT-based
   * `Alibaba-NLP/gte-modernbert-base`, etc.
   * ︎
   * ︎
 - * `NomicBertModel`
-  * NomicBertModel-based
+  * Nomic BERT
   * `nomic-ai/nomic-embed-text-v1`, `nomic-ai/nomic-embed-text-v2-moe`, `Snowflake/snowflake-arctic-embed-m-long`, etc.
   * ︎
   * ︎
@@ -695,7 +695,7 @@ See [relevant issue on HF Transformers](https://github.com/huggingface/transform
 :::
 
 :::{note}
-The 2-gen GTE model(mGTE-TRM) is named `NewModel`. The name `NewModel` is too generic, you should set `--hf-overrides '{"architectures": ["GteNewModel"]}'` specify the use of the `GteNewModel` architecture.
+The second-generation GTE model (mGTE-TRM) is named `NewModel`. The name `NewModel` is too generic, you should set `--hf-overrides '{"architectures": ["GteNewModel"]}'` to specify the use of the `GteNewModel` architecture.
 :::
 
 If your model is not in the above list, we will try to automatically convert the model using
