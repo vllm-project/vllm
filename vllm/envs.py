@@ -115,6 +115,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5557
+    VLLM_USE_JAX: bool = False
 
 
 def get_default_cache_root():
@@ -764,6 +765,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Port used for NIXL handshake between remote agents.
     "VLLM_NIXL_SIDE_CHANNEL_PORT":
     lambda: int(os.getenv("VLLM_NIXL_SIDE_CHANNEL_PORT", "5557")),
+
+    "VLLM_USE_JAX":
+    lambda: bool(int(os.getenv("VLLM_USE_JAX", "0"))),
 }
 
 # end-env-vars-definition

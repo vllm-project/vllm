@@ -50,6 +50,8 @@ from uuid import uuid4
 
 import cachetools
 import cloudpickle
+import jax
+import jax.numpy as jnp
 import numpy as np
 import numpy.typing as npt
 import psutil
@@ -964,7 +966,12 @@ def async_tensor_h2d(
 
 def get_dtype_size(dtype: torch.dtype) -> int:
     """Get the size of the data type in bytes."""
-    return torch.tensor([], dtype=dtype).element_size()
+    if isinstance(dtype, torch.Tensor):
+        return torch.tensor([], dtype=dtype).element_size()
+    elif isinstance(dtype, jax._src.numpy.scalar_types._ScalarMeta):
+        return jnp.array([], dtype=dtype).itemsize
+    else:
+        raise NotImplementedError()
 
 
 # `collections` helpers

@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING, Any, Optional, TypeVar
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
+
 from .interfaces_base import VllmModelForPooling, is_pooling_model
 
 if TYPE_CHECKING:
@@ -125,6 +127,10 @@ def as_embedding_model(cls: _T) -> _T:
         We assume that no extra layers are added to the original model;
         please implement your own model if this is not the case.
     """
+    if envs.VLLM_USE_JAX:
+        # hack
+        return cls  # Returning jax model as is
+
     # Avoid modifying existing embedding models
     if is_pooling_model(cls):
         return cls
