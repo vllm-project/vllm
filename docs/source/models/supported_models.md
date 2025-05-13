@@ -636,7 +636,7 @@ Specified using `--task embed`.
   * ✅︎
   * ✅︎
 - * `GteModel`
-  * Snowflake names GTE `NewModel` as `GteModel`,  [paper](https://arxiv.org/abs/2412.04506), [hf](https://huggingface.co/Alibaba-NLP/new-impl)
+  * Snowflake names GTE `NewModel` as `GteModel`,  [paper](https://arxiv.org/abs/2412.04506), [hf](https://huggingface.co/Snowflake/snowflake-arctic-embed-m-v2.0)
   * `Snowflake/snowflake-arctic-embed-m-v2.0`.
   *
   * ︎
