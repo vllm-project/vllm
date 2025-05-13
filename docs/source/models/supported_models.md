@@ -641,7 +641,7 @@ Specified using `--task embed`.
   *
   * ︎
 - * `GteNewModel`
-  * mGTE-TRM  (see note)
+  * mGTE-TRM (see note)
   * `Alibaba-NLP/gte-multilingual-base`, etc.
   * ︎
   * ︎
