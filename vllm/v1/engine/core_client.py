@@ -428,6 +428,7 @@ class MPClient(EngineCoreClient):
                     executor_class=executor_class,
                     log_stats=log_stats,
                     input_address=input_address,
+                    output_address=output_address,
                     on_head_node=True,
                 )
                 for _ in range(local_engine_count)
@@ -437,6 +438,9 @@ class MPClient(EngineCoreClient):
                     vllm_config=vllm_config,
                     executor_class=executor_class,
                     log_stats=log_stats,
+                    input_address=input_address,
+                    output_address=output_address,
+                    on_head_node=False,
                 )
                 for _ in range(len(self.core_engines) - local_engine_count)
             ]
@@ -1121,6 +1125,7 @@ class RayClient(AsyncMPClient):
                 executor_class=executor_class,
                 log_stats=log_stats,
                 input_address=input_address,
+                output_address=output_address,
                 on_head_node=True,
                 local_engine_count=local_engine_count,
                 start_index=start_index,
@@ -1129,7 +1134,7 @@ class RayClient(AsyncMPClient):
             self.core_engine = self.core_engines[0]
 
             # Wait for engine core process(es) to start.
-            self._wait_for_engine_startup(output_address, parallel_config)
+            # self._wait_for_engine_startup(output_address, parallel_config)
 
             self.utility_results: dict[int, AnyFuture] = {}
 

@@ -174,6 +174,7 @@ class CoreEngineActorManager(CoreEngineProcManager):
         vllm_config: VllmConfig,
         on_head_node: bool,
         input_address: str,
+        output_address: str,
         executor_class: type[Executor],
         log_stats: bool,
     ):
@@ -198,6 +199,7 @@ class CoreEngineActorManager(CoreEngineProcManager):
                     executor_class=executor_class,
                     log_stats=log_stats,
                     input_address=input_address,
+                    output_address=output_address,
                     on_head_node=True,
                     engine_index=global_index,
                     dp_rank=global_index,
@@ -211,6 +213,7 @@ class CoreEngineActorManager(CoreEngineProcManager):
                     executor_class=executor_class,
                     log_stats=log_stats,
                     input_address=input_address,
+                    output_address=output_address,
                     on_head_node=False,
                     engine_index=global_index,
                     dp_rank=global_index,

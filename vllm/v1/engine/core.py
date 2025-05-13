@@ -801,6 +801,7 @@ class EngineCoreActor(DPEngineCoreProc):
         vllm_config: VllmConfig,
         on_head_node: bool,
         input_address: str,
+        output_address: str,
         executor_class: type[Executor],
         log_stats: bool,
         engine_index: int = 0,
@@ -852,8 +853,8 @@ class EngineCoreActor(DPEngineCoreProc):
                                        bind=False)
         try:
             # Register engine with front-end.
-            output_address = self.startup_handshake(
-                input_socket, on_head_node, vllm_config.parallel_config)
+            # output_address = self.startup_handshake(
+            #     input_socket, on_head_node, vllm_config.parallel_config)
 
             # Update config which may have changed from the handshake.
             vllm_config.__post_init__()
