@@ -692,7 +692,8 @@ class Scheduler(SchedulerInterface):
                 continue
 
             req_index = model_runner_output.req_id_to_index[req_id]
-            generated_token_ids = sampled_token_ids[req_index]
+            generated_token_ids = sampled_token_ids[
+                req_index] if sampled_token_ids else []
 
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id))
@@ -744,6 +745,12 @@ class Scheduler(SchedulerInterface):
                     del new_token_ids[num_new:]  # Trim new tokens if needed.
                     break
 
+            pooler_output = pooler_outputs[
+                req_index] if pooler_outputs else None
+            if pooler_outputs:
+                stopped = check_stop(request, self.max_model_len,
+                                     pooler_output)
+
             # Extract sample logprobs if needed.
             if request.sampling_params \
                 and request.sampling_params.logprobs is not None and logprobs:
@@ -771,7 +778,7 @@ class Scheduler(SchedulerInterface):
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
-            if new_token_ids or kv_transfer_params:
+            if new_token_ids or pooler_outputs or kv_transfer_params:
 
                 # Add EngineCoreOutput for this Request.
                 outputs.append(
@@ -781,7 +788,7 @@ class Scheduler(SchedulerInterface):
                         finish_reason=request.get_finished_reason(),
                         new_logprobs=new_logprobs,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
-                        pooling_output=pooler_outputs[req_index],
+                        pooling_output=pooler_output,
                         stop_reason=request.stop_reason,
                         events=request.take_events(),
                         kv_transfer_params=kv_transfer_params,

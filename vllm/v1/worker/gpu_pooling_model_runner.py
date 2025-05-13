@@ -997,13 +997,10 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
             hidden_states=hidden_states,
             pooling_metadata=self.input_batch.pooling_metadata)
 
-        # any token will do because max tokens is 1
-        sampled_tokens = [[0]] * self.input_batch.num_reqs
-
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
-            sampled_token_ids=sampled_tokens,
+            sampled_token_ids=[],
             spec_token_ids=None,
             logprobs=None,
             prompt_logprobs_dict={},
@@ -1032,7 +1029,7 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
         self,
         num_tokens: int,
         skip_attn: bool = True,
-    ) -> tuple[torch.Tensor, torch.Tensor, int]:
+    ) -> tuple[torch.Tensor, int]:
 
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
@@ -1105,8 +1102,7 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
 
             hidden_states = outputs
 
-        logit_indices = np.cumsum(num_scheduled_tokens) - 1
-        return hidden_states, hidden_states[logit_indices], num_reqs
+        return hidden_states, num_reqs
 
     @torch.inference_mode()
     def _dummy_pooler_run(
