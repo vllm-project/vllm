@@ -1097,7 +1097,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # but we need to precompile the backend here so we initialise the
         # backend here - which will try to use the vllm configs decoding_config
         self.structured_output_manager.precompile(self.num_reqs_paddings,
-                                                  self.vocab_size, self.device,
+                                                  self.device,
                                                   self._hidden_states_dtype)
         xm.wait_device_ops()
         end = time.perf_counter()

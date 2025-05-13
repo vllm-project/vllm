@@ -48,6 +48,8 @@ class BitmaskStructuredOutputBackend(StructuredOutputBackend):
         self._grammar_bitmask: Optional[torch.Tensor] = None
         self.tpu_vocab_size: Optional[int] = None
         self.max_num_reqs: Optional[int] = None
+        if current_platform.is_tpu():
+            self.init_tpu()
 
     @staticmethod
     def apply_grammar_bitmask(
@@ -200,10 +202,29 @@ class BitmaskStructuredOutputBackend(StructuredOutputBackend):
         if cumulative_index < self._grammar_bitmask.shape[0]:
             bitmask_tensor = self._grammar_bitmask[:cumulative_index]
 
+        # After finishing with the xgrammar operations, we convert to
+        # np.ndarray, because that is much more efficient for serialization
+        # and deserialization when sending this to the GPU workers.
+        return bitmask_tensor.numpy()
+
+    def init_batch(
+        self, requests: dict[str, "Request"],
+        structured_output_request_ids: dict[str, int],
+        scheduled_spec_decode_tokens: dict[str, list[int]]
+    ) -> StructuredOutputBatchMetaData:
+        bitmask = self.grammar_bitmask(requests, structured_output_request_ids,
+                                       scheduled_spec_decode_tokens)
+        return BitmaskSOBatchMetaData(structured_output_request_ids, bitmask)
+
+    def init_tpu(self):
         # TPU specific tensors
-        if current_platform.is_tpu():
-            assert self.max_num_reqs is not None and \
-                self.tpu_vocab_size is not None
+        if self.max_num_reqs is None or \
+                self.tpu_vocab_size is None:
+            self.tpu_vocab_size = self.vllm_config.model_config.get_vocab_size(
+            )
+            MIN_NUM_SEQS = 8
+            self.max_num_reqs = max(
+                self.vllm_config.scheduler_config.max_num_seqs, MIN_NUM_SEQS)
             pin_memory = is_pin_memory_available()
             self.require_structured_out_cpu = torch.zeros(
                 (self.max_num_reqs, 1),
@@ -220,25 +241,13 @@ class BitmaskStructuredOutputBackend(StructuredOutputBackend):
                 device="cpu",
                 pin_memory=pin_memory)
 
-        # After finishing with the xgrammar operations, we convert to
-        # np.ndarray, because that is much more efficient for serialization
-        # and deserialization when sending this to the GPU workers.
-        return bitmask_tensor.numpy()
-
-    def init_batch(
-        self, requests: dict[str, "Request"],
-        structured_output_request_ids: dict[str, int],
-        scheduled_spec_decode_tokens: dict[str, list[int]]
-    ) -> StructuredOutputBatchMetaData:
-        bitmask = self.grammar_bitmask(requests, structured_output_request_ids,
-                                       scheduled_spec_decode_tokens)
-        return BitmaskSOBatchMetaData(structured_output_request_ids, bitmask)
-
     def prepare_structured_decoding_input_tpu(
         self, logits: torch.Tensor, scheduler_output: "SchedulerOutput",
         input_batch: InputBatch
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        grammar_bitmask = self._grammar_bitmask
+        meta = cast(BitmaskSOBatchMetaData,
+                    scheduler_output.structured_output_meta)
+        grammar_bitmask = meta.grammar_bitmask
         assert grammar_bitmask is not None
         num_reqs, _ = logits.shape
 
@@ -269,7 +278,6 @@ class BitmaskStructuredOutputBackend(StructuredOutputBackend):
         # the requests that need structured output.
         struct_out_indices = torch.tensor(struct_out_indices, dtype=torch.long)
         self.require_structured_out_cpu[struct_out_indices] = True
-        self.max_num_reqs = input_batch.max_num_reqs
         return self.require_structured_out_cpu[:num_reqs].to(logits.device), \
             self.grammar_bitmask_cpu[:num_reqs].to(logits.device), \
             self.structured_decode_arange.to(logits.device)
@@ -287,8 +295,7 @@ class BitmaskStructuredOutputBackend(StructuredOutputBackend):
     def apply_grammar_bitmask_tpu(self, logits: torch.Tensor,
                                   grammar_bitmask: torch.Tensor,
                                   arange: torch.Tensor):
-        assert (logits.shape[0] == grammar_bitmask.shape[0]
-                ) and self.tpu_vocab_size is not None
+        assert (logits.shape[0] == grammar_bitmask.shape[0])
         logits_cloned = logits.clone()
         for i in range(logits.shape[0]):
             unpacked_bitmask = (torch.bitwise_right_shift(
@@ -299,12 +306,11 @@ class BitmaskStructuredOutputBackend(StructuredOutputBackend):
                 unpacked_bitmask, -float("inf"))
         return logits_cloned
 
-    def precompile(self, num_reqs_paddings: list[int], vocab_size: int,
-                   device: torch.device, hidden_states_dtype: torch.dtype):
-        self.tpu_vocab_size = vocab_size
+    def precompile(self, num_reqs_paddings: list[int], device: torch.device,
+                   hidden_states_dtype: torch.dtype):
         if current_platform.is_tpu():
             for num_reqs in num_reqs_paddings:
-                dummy_logits = torch.zeros((num_reqs, vocab_size),
+                dummy_logits = torch.zeros((num_reqs, self.tpu_vocab_size),
                                            device=device,
                                            dtype=hidden_states_dtype)
                 dummy_require_struct_decoding = \

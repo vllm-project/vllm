@@ -122,6 +122,6 @@ class StructuredOutputBackend(ABC):
         Backend-specific cleanup.
         """
 
-    def precompile(self, num_reqs_paddings: list[int], vocab_size: int,
-                   device: torch.device, hidden_states_dtype: torch.dtype):
+    def precompile(self, num_reqs_paddings: list[int], device: torch.device,
+                   hidden_states_dtype: torch.dtype):
         return
