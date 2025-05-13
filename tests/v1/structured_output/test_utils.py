@@ -57,14 +57,6 @@ def unsupported_array_schemas():
             "type": "array",
             "maxContains": 5
         },
-        {
-            "type": "array",
-            "minItems": 1
-        },
-        {
-            "type": "array",
-            "maxItems": 10
-        },
     ]
 
 
