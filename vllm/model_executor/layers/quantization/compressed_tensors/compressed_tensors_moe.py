@@ -57,9 +57,10 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             "input_activations")
 
         if quant_config._is_wNa16_group_channel(weight_quant, input_quant):
+            # group_size=None means channelwise
+            group_size = weight_quant.group_size or -1
             # Prefer to use the MarlinMoE kernel when it is supported.
-            if not check_moe_marlin_supports_layer(layer,
-                                                   weight_quant.group_size):
+            if not check_moe_marlin_supports_layer(layer, group_size):
                 if (weight_quant.strategy in QuantizationStrategy.GROUP and
                         weight_quant.actorder in (ActivationOrdering.GROUP,
                                                   ActivationOrdering.DYNAMIC)):
