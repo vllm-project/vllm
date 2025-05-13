@@ -9,14 +9,10 @@ from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 from ...models.registry import HF_EXAMPLE_MODELS
-from ...utils import VLLM_PATH
-
-chatml_jinja_path = VLLM_PATH / "examples/template_chatml.jinja"
-assert chatml_jinja_path.exists()
 
 # Define models, templates, and their corresponding expected outputs
-MODEL_TEMPLATE_GENERATON_OUTPUT = [
-    ("facebook/opt-125m", chatml_jinja_path, True, False, """<|im_start|>user
+MODEL_TEMPLATE_GENERATION_OUTPUT = [
+    ("facebook/opt-125m", "template_chatml", True, False, """<|im_start|>user
 Hello<|im_end|>
 <|im_start|>assistant
 Hi there!<|im_end|>
@@ -24,13 +20,13 @@ Hi there!<|im_end|>
 What is the capital of<|im_end|>
 <|im_start|>assistant
 """),
-    ("facebook/opt-125m", chatml_jinja_path, False, False, """<|im_start|>user
+    ("facebook/opt-125m", "template_chatml", False, False, """<|im_start|>user
 Hello<|im_end|>
 <|im_start|>assistant
 Hi there!<|im_end|>
 <|im_start|>user
 What is the capital of"""),
-    ("facebook/opt-125m", chatml_jinja_path, False, True, """<|im_start|>user
+    ("facebook/opt-125m", "template_chatml", False, True, """<|im_start|>user
 Hello<|im_end|>
 <|im_start|>assistant
 Hi there!<|im_end|>
@@ -62,7 +58,7 @@ ASSISTANT_MESSAGE_TO_CONTINUE = {
 
 def test_load_chat_template():
     # Testing chatml template
-    template_content = load_chat_template(chat_template=chatml_jinja_path)
+    template_content = load_chat_template(chat_template="template_chatml")
 
     # Test assertions
     assert template_content is not None
@@ -90,7 +86,7 @@ def test_no_load_chat_template_literallike():
 
 @pytest.mark.parametrize(
     "model,template,add_generation_prompt,continue_final_message,expected_output",
-    MODEL_TEMPLATE_GENERATON_OUTPUT)
+    MODEL_TEMPLATE_GENERATION_OUTPUT)
 def test_get_gen_prompt(model, template, add_generation_prompt,
                         continue_final_message, expected_output):
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
