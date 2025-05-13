@@ -23,7 +23,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
             from vllm.distributed.parallel_state import (
                 _ENABLE_CUSTOM_ALL_REDUCE)
             use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
-        use_pynccl = True
+
+        # ep does not use pynccl
+        use_pynccl = "ep" not in unique_name
 
         self.use_pynccl = use_pynccl
         self.use_custom_allreduce = use_custom_allreduce

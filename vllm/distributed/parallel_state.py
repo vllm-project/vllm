@@ -816,6 +816,14 @@ def get_dp_group() -> GroupCoordinator:
     return _DP
 
 
+_EP: Optional[GroupCoordinator] = None
+
+
+def get_ep_group() -> GroupCoordinator:
+    assert _EP is not None, ("expert parallel group is not initialized")
+    return _EP
+
+
 def get_pp_group() -> GroupCoordinator:
     assert _PP is not None, (
         "pipeline model parallel group is not initialized")
@@ -1001,10 +1009,21 @@ def initialize_model_parallel(
                                     backend,
                                     group_name="dp")
 
+    global _EP
+    assert _EP is None, ("expert parallel group is already initialized")
+    group_ranks = all_ranks.transpose(1, 2).reshape(
+        -1, data_parallel_size * tensor_model_parallel_size).unbind(0)
+    group_ranks = [x.tolist() for x in group_ranks]
+    _EP = init_model_parallel_group(group_ranks,
+                                    get_world_group().local_rank,
+                                    backend,
+                                    group_name="ep")
+
     logger.info(
         "rank %s in world size %s is assigned as "
-        "DP rank %s, PP rank %s, TP rank %s", rank, world_size,
-        _DP.rank_in_group, _PP.rank_in_group, _TP.rank_in_group)
+        "DP rank %s, PP rank %s, TP rank %s, EP rank %s", rank, world_size,
+        _DP.rank_in_group, _PP.rank_in_group, _TP.rank_in_group,
+        _EP.rank_in_group)
 
 
 def ensure_model_parallel_initialized(
@@ -1094,6 +1113,11 @@ def destroy_model_parallel():
     if _DP:
         _DP.destroy()
     _DP = None
+
+    global _EP
+    if _EP:
+        _EP.destroy()
+    _EP = None
 
 
 def destroy_distributed_environment():
