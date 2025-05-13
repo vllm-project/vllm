@@ -96,7 +96,7 @@ def kernel_unified_attention_2d(
 
     # avoid power of 2 issue and pad it
     BLOCK_Q_NUM_QUERY_PER_KV_PADDED: tl.constexpr = triton.next_power_of_2(
-            BLOCK_Q * num_queries_per_kv)
+        BLOCK_Q * num_queries_per_kv)
     offs_m = tl.arange(0, BLOCK_Q_NUM_QUERY_PER_KV_PADDED)
     offs_d = tl.arange(0, HEAD_SIZE_PADDED)
 
