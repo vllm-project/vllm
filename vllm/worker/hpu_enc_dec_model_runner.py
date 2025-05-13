@@ -448,7 +448,10 @@ class HPUEncoderDecoderModelRunner(
             max_mm_tokens,
             self.mm_registry,
             is_encoder_data=True)
-        seq_len = max(seq_len, 1)
+        max_mm_num = max(
+            self.mm_registry.get_mm_limits_per_prompt(
+                self.model_config).values())
+        seq_len = max(seq_len, max_mm_num)
         if is_prompt:
             output_len = 0
             block_tables = None
