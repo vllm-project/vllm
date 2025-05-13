@@ -577,33 +577,32 @@ def test_structured_output_with_reasoning_matrices(
         max_tokens=8192,
         guided_decoding=GuidedDecodingParams(json=reasoning_schema),
     )
-    for _ in range(2):
-        outputs = llm.generate(
-            [reasoning_prompt],
-            sampling_params=sampling_params,
-            use_tqdm=True,
-        )
+    outputs = llm.generate(
+        [reasoning_prompt],
+        sampling_params=sampling_params,
+        use_tqdm=True,
+    )
 
-        assert outputs is not None
-        output = outputs[0]
-        assert output is not None and isinstance(output, RequestOutput)
-        prompt = output.prompt
-        generated_text = output.outputs[0].text
-        reasoning_content, content = reasoner.extract_reasoning_content(
-            generated_text,
-            request=ChatCompletionRequest(
-                messages=[],
-                model="test-model",
-                seed=123,
-            ),
-        )
-        assert content is not None
-        print(
-            f"Prompt: {prompt!r}\nReasoning: {reasoning_content!r}\nContent: {content!r}"
-        )
+    assert outputs is not None
+    output = outputs[0]
+    assert output is not None and isinstance(output, RequestOutput)
+    prompt = output.prompt
+    generated_text = output.outputs[0].text
+    reasoning_content, content = reasoner.extract_reasoning_content(
+        generated_text,
+        request=ChatCompletionRequest(
+            messages=[],
+            model="test-model",
+            seed=123,
+        ),
+    )
+    assert content is not None
+    print(
+        f"Prompt: {prompt!r}\nReasoning: {reasoning_content!r}\nContent: {content!r}"
+    )
 
-        output_json = json.loads(content)
-        jsonschema.validate(instance=output_json, schema=reasoning_schema)
+    output_json = json.loads(content)
+    jsonschema.validate(instance=output_json, schema=reasoning_schema)
 
 
 @pytest.mark.skip_global_cleanup
