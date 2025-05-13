@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import json
+
 import pytest
 import torch
 
@@ -16,7 +18,9 @@ from vllm.distributed.parallel_state import (init_distributed_environment,
 from vllm.platforms import current_platform
 from vllm.utils import update_environment_variables
 
-from ..utils import multi_gpu_test
+from ..models.registry import HF_EXAMPLE_MODELS
+from ..utils import (compare_two_settings, create_new_process_for_each_test,
+                     multi_gpu_test)
 from .backend import TestBackend
 
 prompts = [
@@ -96,9 +100,8 @@ class TestAGMMModel(torch.nn.Module):
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"],
                     reason="Only test on CUDA")
-def test_sequence_parallelism_pass(test_model: str, batch_size: int,
-                                   seq_len: int, hidden_size: int,
-                                   dtype: torch.dtype):
+def test_async_tp_pass_replace(test_model: str, batch_size: int, seq_len: int,
+                               hidden_size: int, dtype: torch.dtype):
     num_processes = 2
 
     def run_torch_spawn(fn, nprocs):
@@ -143,10 +146,10 @@ def async_tp_pass_on_test_model(local_rank: int, world_size: int,
 
     # this is a fake model name to construct the model config
     # in the vllm_config, it's not really used.
-    model = "nm-testing/TinyLlama-1.1B-Chat-v1.0-FP8-e2e"
-    vllm_config.model_config = ModelConfig(model=model,
+    model_name = "nm-testing/TinyLlama-1.1B-Chat-v1.0-FP8-e2e"
+    vllm_config.model_config = ModelConfig(model=model_name,
                                            task="auto",
-                                           tokenizer=model,
+                                           tokenizer=model_name,
                                            tokenizer_mode="auto",
                                            trust_remote_code=True,
                                            dtype=dtype,
@@ -184,3 +187,83 @@ def async_tp_pass_on_test_model(local_rank: int, world_size: int,
     # fused_all_gather_matmul should exist
     for op in model.ops_in_model_after():
         find_specified_fn(post_nodes, op)
+
+
+@create_new_process_for_each_test()
+@pytest.mark.parametrize("model_id", ["meta-llama/Llama-3.2-1B-Instruct"])
+@pytest.mark.parametrize("tp_size", [2])
+@pytest.mark.parametrize("async_tp_enabled", [True])
+@pytest.mark.parametrize("distributed_backend", ["mp"])
+@pytest.mark.parametrize("eager_mode", [False, True])
+def test_async_tp_pass_correctness(
+    model_id: str,
+    tp_size: int,
+    async_tp_enabled: bool,
+    distributed_backend: str,
+    eager_mode: bool,
+    num_gpus_available: int,
+):
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
+    model_info.check_transformers_version(on_fail="skip")
+
+    # trust_remote_code = model_info.trust_remote_code
+    # tokenizer_mode = model_info.tokenizer_mode
+    # hf_overrides = model_info.hf_overrides
+    model_info.check_available_online(on_fail="skip")
+
+    pp_size = 1
+    if num_gpus_available < tp_size:
+        pytest.skip(f"Need at least {tp_size} x {pp_size} GPUs")
+
+    common_args = [
+        # use half precision for speed and memory savings in CI environment
+        "--dtype",
+        "float16",
+        "--max-model-len",
+        "2048",
+        "--max-num-seqs",
+        "8",
+    ]
+    if eager_mode:
+        common_args.append("--enforce-eager")
+
+    compilation_config = {
+        'level': 3,
+        'compile_sizes': [2, 4, 8],
+        'splitting_ops': [],
+        'pass_config': {
+            'enable_async_tp': async_tp_enabled
+        },
+    }
+
+    async_tp_env = tp_env = {
+        "VLLM_USE_V1": "1",
+    }
+
+    aysnc_tp_args = [
+        *common_args,
+        "--tensor-parallel-size",
+        str(tp_size),
+        "--distributed-executor-backend",
+        distributed_backend,
+        "--compilation_config",
+        json.dumps(compilation_config),
+    ]
+
+    tp_args = [
+        *common_args,
+        "--tensor-parallel-size",
+        str(tp_size),
+        "--distributed-executor-backend",
+        "mp",
+    ]
+
+    try:
+        compare_two_settings(model_id,
+                             aysnc_tp_args,
+                             tp_args,
+                             async_tp_env,
+                             tp_env,
+                             method="generate")
+    except Exception:
+        raise
