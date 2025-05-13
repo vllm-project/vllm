@@ -4315,11 +4315,22 @@ class VllmConfig:
                 "cascade attention. Disabling cascade attention.")
             self.model_config.disable_cascade_attn = True
 
+        disable_chunked_prefill_reasons: list[str] = []
+
         if self.model_config and self.model_config.use_mla and \
             not (current_platform.is_cuda() or current_platform.is_rocm()):
-            logger.info(
+            disable_chunked_prefill_reasons.append(
                 "MLA is enabled on a non-GPU platform; forcing chunked "
                 "prefill and prefix caching to be disabled.")
+
+        if self.model_config and self.model_config.pooler_config:
+            disable_chunked_prefill_reasons.append(
+                "Loaded model for pooling; forcing chunked "
+                "prefill and prefix caching to be disabled.")
+
+        if disable_chunked_prefill_reasons:
+            for reason in disable_chunked_prefill_reasons:
+                logger.info(reason)
             self.scheduler_config.enable_chunked_prefill = False
             self.scheduler_config.chunked_prefill_enabled = False
             self.scheduler_config.max_num_batched_tokens = max(
