@@ -255,7 +255,9 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "GteModel": _HfExamplesInfo("Snowflake/snowflake-arctic-embed-m-v2.0",
                                                trust_remote_code=True),
     "GteNewModel": _HfExamplesInfo("Alibaba-NLP/gte-base-en-v1.5",
-                                   trust_remote_code=True),
+                                   trust_remote_code=True,
+                                   hf_overrides={"architectures":
+                                                     ["GteNewModel"]}),
     "InternLM2ForRewardModel": _HfExamplesInfo("internlm/internlm2-1_8b-reward",
                                                trust_remote_code=True),
     "JambaForSequenceClassification": _HfExamplesInfo("ai21labs/Jamba-tiny-reward-dev"),  # noqa: E501
