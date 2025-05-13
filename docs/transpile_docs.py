@@ -1,6 +1,9 @@
-import re
+# SPDX-License-Identifier: Apache-2.0
 import logging
+import re
 from pathlib import Path
+
+from tabulate import tabulate
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -15,7 +18,6 @@ ADMONITIONS = {
     "note", "abstract", "info", "tip", "success", "question", "warning",
     "failure", "danger", "bug", "example", "quote"
 }
-
 
 
 def find_fence_blocks(lines: list[str]) -> list[dict]:
@@ -40,11 +42,15 @@ def find_fence_blocks(lines: list[str]) -> list[dict]:
     return blocks
 
 
-def parse_fence_block(lines: list[str], indent: str) -> tuple[list[str], list[str]]:
+def parse_fence_block(lines: list[str],
+                      indent: str) -> tuple[list[str], list[str]]:
     option_pattern = re.compile(f"^.{{{len(indent)}}}:(.*): (.*)$")
     option_matches = [option_pattern.match(l) for l in lines]
-    content = [b for o, b  in zip(option_matches, lines) if o is None]
-    attrs = [f"{m.group(1)}=\"{m.group(2)}\"" for m in option_matches if m is not None]
+    content = [b for o, b in zip(option_matches, lines) if o is None]
+    attrs = [
+        f"{m.group(1)}=\"{m.group(2)}\"" for m in option_matches
+        if m is not None
+    ]
     return content, attrs
 
 
@@ -78,8 +84,6 @@ handled_blocks = 0
 unhandled_blocks = 0
 
 
-
-
 def transpile_myst_to_md(old_path: Path) -> None:
     """
     Transpile MyST markdown files to standard markdown.
@@ -107,7 +111,6 @@ def transpile_myst_to_md(old_path: Path) -> None:
 
         lines[i] = line
 
-
     # Get all fenced blocks and sort them so we process the inner blocks first
     blocks = find_fence_blocks(lines)
     blocks = sorted(blocks, key=lambda x: len(x["fence"]))
@@ -120,7 +123,7 @@ def transpile_myst_to_md(old_path: Path) -> None:
 
         # Handle toctree
         if block["type"] == "toctree":
-            lines[start] = f"###### Contents\n"
+            lines[start] = "###### Contents\n"
             lines[start + 1:end] = ["" for _ in lines[start + 1:end]]
             lines[end] = ""
             block["handled"] = True
@@ -148,15 +151,42 @@ def transpile_myst_to_md(old_path: Path) -> None:
             lines[start] = f'{indent}<figure markdown="span">\n'
             lines[start] += f"{indent}  ![]({src}){{ {' '.join(attrs)} }}\n"
             if caption:
-                lines[start] += f"{indent}  <figcaption>{caption[0]}</figcaption>\n"
+                lines[
+                    start] += f"{indent}  <figcaption>{caption[0]}</figcaption>\n"
             lines[start + 1:end] = ["" for _ in lines[start + 1:end]]
             lines[end] = f"{indent}</figure>\n"
+            block["handled"] = True
+
+        # Handle list table
+        if block["type"] == "list-table":
+            content, attrs = parse_fence_block(lines[start + 1:end], indent)
+            row = []
+            rows = []
+            for c in content:
+                if not c.strip():
+                    continue
+                if match := re.match(r"^[-*] [-*] (.*)$", c):
+                    if row:
+                        rows.append(row)
+                    row = [match.group(1)]
+                elif match := re.match(r"^  [-*] (.*)$", c):
+                    row.append(match.group(1))
+            table = tabulate(rows[1:], rows[0], tablefmt="github")
+            lines[start] = "\n".join(
+                indent_lines(table.splitlines(),
+                             len(indent) + 2)) + "\n"
+            if block["args"]:
+                lines[
+                    start] += f"{indent}  <figcaption>{block['args']}</figcaption>\n"
+            lines[start + 1:end] = ["" for _ in lines[start + 1:end]]
+            lines[end] = ""
             block["handled"] = True
 
         # Handle literal includes
         if block["type"] == "literalinclude":
             path = (old_path.parent / block["args"]).resolve()
-            lines[start] = f'{indent}``` title="{path.relative_to(ROOT_DIR)}"\n'
+            lines[
+                start] = f'{indent}``` title="{path.relative_to(ROOT_DIR)}"\n'
             lines[start] += f'{indent}--8<-- "{path}"\n'
             # lines[start + 1:end] = ["" for _ in lines[start + 1:end]]
             lines[end] = f"{indent}```\n"
@@ -184,9 +214,8 @@ def transpile_myst_to_md(old_path: Path) -> None:
             lines[end] = ""
             block["handled"] = True
 
-
         if not block["handled"]:
-            logger.warning("Unhandled block: %s",block)
+            logger.warning("Unhandled block: %s", block)
 
     global handled_blocks, unhandled_blocks
     handled_blocks += len([b for b in blocks if b["handled"]])
@@ -210,4 +239,6 @@ if __name__ == "__main__":
                 content = f.read()
             with open(new_path, "wb") as f:
                 f.write(content)
-    logger.info(f"Handled {handled_blocks} blocks, unhandled {unhandled_blocks} blocks")
+    logger.info(
+        f"Handled {handled_blocks} blocks, unhandled {unhandled_blocks} blocks"
+    )
