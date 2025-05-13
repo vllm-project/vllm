@@ -123,6 +123,10 @@ class RPCUProfileRequest(Enum):
     STOP_PROFILE = 2
 
 
+class RPCResetMultiModalCacheRequest(Enum):
+    RESET = 1
+
+
 @dataclass
 class RPCResetPrefixCacheRequest:
     device: Device
@@ -164,6 +168,7 @@ class RPCAdapterLoadedResponse:
 
 RPC_REQUEST_T = Union[RPCProcessRequest, RPCAbortRequest, RPCStartupRequest,
                       RPCUProfileRequest, RPCLoadAdapterRequest,
+                      RPCResetMultiModalCacheRequest,
                       RPCResetPrefixCacheRequest, RPCSleepRequest,
                       RPCWakeUpRequest, RPCIsSleepingRequest]
 

@@ -286,6 +286,15 @@ class EngineCore:
     def profile(self, is_start: bool = True):
         self.model_executor.profile(is_start)
 
+    def reset_mm_cache(self):
+        # NOTE: Since this is mainly for debugging, we don't attempt to
+        # re-sync the internal caches (P0 processor, P0 mirror, P1 mirror)
+        if self.scheduler.get_num_unfinished_requests():
+            logger.warning("Resetting the multi-modal cache when requests are "
+                           "in progress may lead to desynced internal caches.")
+
+        self.mm_input_cache_server.reset()
+
     def reset_prefix_cache(self):
         self.scheduler.reset_prefix_cache()
 

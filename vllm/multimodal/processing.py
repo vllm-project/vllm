@@ -1026,6 +1026,11 @@ class ProcessingCache:
     def put_item(self, item: ProcessingCacheItem) -> None:
         self._cache[item.key] = item.value
 
+    def reset(self) -> bool:
+        self._cache.clear()
+
+        return True
+
 
 class BaseProcessingInfo:
     """Base class to provide the information necessary for data processing."""
