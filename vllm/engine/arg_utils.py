@@ -1278,6 +1278,9 @@ class EngineArgs:
                 from vllm.attention.utils.fa_utils import (
                     flash_attn_supports_fp8)
                 supported = flash_attn_supports_fp8()
+            if current_platform.is_hpu() and self.kv_cache_dtype == "fp8_inc":
+                supported = True
+
             if not supported:
                 _raise_or_fallback(feature_name="--kv-cache-dtype",
                                    recommend_to_remove=False)
