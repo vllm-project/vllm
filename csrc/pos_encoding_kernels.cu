@@ -100,13 +100,18 @@ __global__ void rotary_embedding_kernel(
 
 template <typename scalar_t, bool IS_NEOX>
 __global__ void batched_rotary_embedding_kernel(
-    const int64_t* __restrict__ positions,       // [batch_size, seq_len] or
-                                                 // [num_tokens]
-    scalar_t* __restrict__ query,                // as above
-    scalar_t* __restrict__ key,                  // as above or nullptr
-    const scalar_t* __restrict__ cos_sin_cache,  // [max_position, rot_dim]
-    const int64_t* __restrict__ cos_sin_cache_offsets,  // [batch_size*seq_len]
-                                                        // or [num_tokens]
+    const int64_t* __restrict__ positions,  // [batch_size, seq_len] or
+                                            // [num_tokens]
+    scalar_t* __restrict__ query,           // [batch_size, seq_len, num_heads,
+                                   // head_size] or [num_tokens, num_heads,
+                                   // head_size]
+    scalar_t* __restrict__ key,  // nullptr or
+                                 // [batch_size, seq_len, num_kv_heads,
+                                 // head_size] or [num_tokens, num_kv_heads,
+                                 // head_size]
+    const scalar_t* __restrict__ cos_sin_cache,  // [max_position, 2, rot_dim //
+                                                 // 2]
+    const int64_t* __restrict__ cos_sin_cache_offsets,  // [batch_size, seq_len]
     const int rot_dim, const int64_t query_stride, const int64_t key_stride,
     const int64_t head_stride, const int num_heads, const int num_kv_heads,
     const int head_size) {
@@ -268,7 +273,9 @@ void batched_rotary_embedding(
   int seq_dim_idx = positions_ndim - 1;
   int64_t query_stride = query.stride(seq_dim_idx);
   int64_t key_stride = key.has_value() ? key->stride(seq_dim_idx) : 0;
-  // Determine head stride for last dimension
+  // Determine head stride: for [*, heads, head_size] use stride of last dim;
+  // for flat [*, heads*head_size], heads blocks are contiguous of size
+  // head_size
   int query_ndim = query.dim();
   int64_t head_stride = (query_ndim == positions_ndim + 2)
                             ? query.stride(query_ndim - 1)
