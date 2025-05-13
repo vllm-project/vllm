@@ -48,7 +48,7 @@ def _test_processing_correctness(
         trust_remote_code=model_info.trust_remote_code,
         seed=0,
         dtype="float16",
-        revision=None,
+        revision=model_info.revision,
         hf_overrides=model_info.hf_overrides,
     )
 

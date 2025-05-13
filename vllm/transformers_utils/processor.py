@@ -108,6 +108,7 @@ def cached_processor_from_config(
         model_config.model,
         trust_remote_code=model_config.trust_remote_code,
         processor_cls=processor_cls,  # type: ignore[arg-type]
+        revision=model_config.revision,
         **_merge_mm_kwargs(model_config, **kwargs),
     )
 
