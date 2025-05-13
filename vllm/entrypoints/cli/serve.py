@@ -7,7 +7,7 @@ import signal
 import sys
 import tempfile
 from multiprocessing.context import SpawnProcess
-from typing import Any
+from typing import Any, Optional
 
 import uvloop
 import zmq
@@ -29,6 +29,9 @@ from vllm.v1.engine.core_client import CoreEngineProcManager
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.utils import (CoreEngine, get_engine_client_zmq_addr,
                            wait_for_engine_startup)
+
+# Global variable for Prometheus multiprocessing directory
+prometheus_multiproc_dir: Optional[tempfile.TemporaryDirectory] = None
 
 logger = init_logger(__name__)
 
