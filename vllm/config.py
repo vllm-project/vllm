@@ -620,11 +620,18 @@ class ModelConfig:
             tokenizer: The tokenizer name or path.
 
         """
-        if is_s3(model) or is_s3(tokenizer):
+        if model == tokenizer:
+            s3_model = S3Model()
+            s3_model.pull_files(
+                model, allow_pattern=["*.model", "*.py", "*.json"])
+            self.model_weights = self.model
+            self.model = s3_model.dir
+            self.tokenizer = s3_model.dir
+        else:
             if is_s3(model):
                 s3_model = S3Model()
                 s3_model.pull_files(
-                    model, allow_pattern=["*.model", "*.py", "*.json"])
+                    model, allow_pattern=["*.pt", "*.safetensors", "*.bin"])
                 self.model_weights = self.model
                 self.model = s3_model.dir
 
