@@ -59,6 +59,7 @@ class _Backend(enum.Enum):
     IPEX = enum.auto()
     BLOCK_SPARSE_FLASH_ATTN = enum.auto()
     DUAL_CHUNK_FLASH_ATTN = enum.auto()
+    BOK = enum.auto()
     NO_ATTENTION = enum.auto()
     FLEX_ATTENTION = enum.auto()
 
@@ -299,9 +300,9 @@ class Platform:
             torch.manual_seed(seed)
 
     @classmethod
-    def pre_register_and_update(cls,
-                                parser: Optional[FlexibleArgumentParser] = None
-                                ) -> None:
+    def pre_register_and_update(
+        cls, parser: Optional[FlexibleArgumentParser] = None
+    ) -> None:
         """
         Do some pre-registration or update action for the current platform.
 
@@ -344,11 +345,11 @@ class Platform:
         """
         Verify whether the quantization is supported by the current platform.
         """
-        if cls.supported_quantization and \
-            quant not in cls.supported_quantization:
+        if cls.supported_quantization and quant not in cls.supported_quantization:
             raise ValueError(
                 f"{quant} quantization is currently not supported in "
-                f"{cls.device_name}.")
+                f"{cls.device_name}."
+            )
 
     @classmethod
     def get_cpu_architecture(cls) -> CpuArchEnum:
@@ -373,15 +374,17 @@ class Platform:
         if in_wsl():
             # Pinning memory in WSL is not supported.
             # https://docs.nvidia.com/cuda/wsl-user-guide/index.html#known-limitations-for-linux-cuda-applications
-            logger.warning("Using 'pin_memory=False' as WSL is detected. "
-                           "This may slow down the performance.")
+            logger.warning(
+                "Using 'pin_memory=False' as WSL is detected. "
+                "This may slow down the performance."
+            )
             return False
         return True
 
     @classmethod
-    def get_current_memory_usage(cls,
-                                 device: Optional[torch.types.Device] = None
-                                 ) -> float:
+    def get_current_memory_usage(
+        cls, device: Optional[torch.types.Device] = None
+    ) -> float:
         """
         Return the memory usage in bytes.
         """
@@ -468,9 +471,10 @@ class Platform:
         from vllm.config import get_current_vllm_config
 
         parallel_config = get_current_vllm_config().parallel_config
-        return (envs.VLLM_USE_V1
-                or parallel_config.distributed_executor_backend
-                == "external_launcher")
+        return (
+            envs.VLLM_USE_V1
+            or parallel_config.distributed_executor_backend == "external_launcher"
+        )
 
     @classmethod
     def supports_v1(cls, model_config: ModelConfig) -> bool:
@@ -500,8 +504,11 @@ class Platform:
         if device is not None and hasattr(device, key):
             return getattr(device, key)
         else:
-            logger.warning("Current platform %s does not have '%s'" \
-            " attribute.", self.device_type, key)
+            logger.warning(
+                "Current platform %s does not have '%s'" " attribute.",
+                self.device_type,
+                key,
+            )
             return None
 
     @classmethod

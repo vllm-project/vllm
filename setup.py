@@ -621,6 +621,10 @@ def get_requirements() -> list[str]:
                 continue
             modified_requirements.append(req)
         requirements = modified_requirements
+        # Add direct dependency on BOK project for CUDA builds
+        requirements.append(
+            "bok @ git+ssh://git@gitlab-master.nvidia.com:12051/jdebache/bok.git"
+        )
     elif _is_hip():
         requirements = _read_requirements("rocm.txt")
     elif _is_neuron():
