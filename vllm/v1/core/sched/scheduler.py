@@ -839,9 +839,9 @@ class Scheduler(SchedulerInterface):
 
         for req_id in request_ids:
             request = self.requests.get(req_id)
-            # Request is no longer active.
+            # Request is already finished.
             if request is None:
-                # If req is finished but sending, free it.
+                # If still sending, free the blocks.
                 if req_id in self.sending_kv_req_ids:
                     self.sending_kv_req_ids.remove(req_id)
                     self._free_blocks(req_id)
