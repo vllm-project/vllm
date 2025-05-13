@@ -88,7 +88,8 @@ class FalconH1MLP(nn.Module):
 
     def forward(self, x):
         x, _ = self.gate_up_proj(x)
-        x[:, : self.intermediate_size // self.tp_size] *= self.gate_multiplier #TODO(ilyas): optimize slicing and mul
+        #TODO(ilyas): optimize slicing and mul
+        x[:, : self.intermediate_size // self.tp_size] *= self.gate_multiplier 
         x = self.act_fn(x)
         x, _ = self.down_proj(x)
         x = x * self.down_multiplier
