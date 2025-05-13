@@ -56,7 +56,8 @@ else:
 logger = init_logger(__name__)
 
 # Note: this limit is somewhat arbitrary and might be changed later.
-MOE_DP_CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
+# The size of the activations will be E x MOE_DP_CHUNK_SIZE x hidden_dim.
+MOE_DP_CHUNK_SIZE = 256
 
 
 @dataclass
