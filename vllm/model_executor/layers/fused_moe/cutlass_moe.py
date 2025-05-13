@@ -8,7 +8,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    StandardPrepareAndFinalize)
+    MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.utils import _fp8_perm, _resize_cache
 from vllm.scalar_type import scalar_types
 
@@ -241,7 +241,7 @@ def cutlass_moe_fp8(
         a2_scale.numel() != 1 if a2_scale is not None else False)
 
     fn = mk.FusedMoEModularKernel(
-        StandardPrepareAndFinalize(
+        MoEPrepareAndFinalizeNoEP(
             per_channel_quant=per_act_token,
             quant_dtype=torch.float8_e4m3fn,
         ),

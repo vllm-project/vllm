@@ -10,7 +10,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
 
 
-class StandardPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
+class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
 
     def __init__(
         self,

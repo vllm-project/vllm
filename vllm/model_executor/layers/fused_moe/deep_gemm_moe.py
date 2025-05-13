@@ -10,7 +10,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     _moe_permute)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    StandardPrepareAndFinalize)
+    MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.utils import (_fp8_quantize,
                                                         _resize_cache)
 from vllm.utils import round_up
@@ -205,8 +205,8 @@ def deep_gemm_moe_fp8(
     - torch.Tensor: The bfloat16 output tensor after applying the MoE layer.
     """
     fn = mk.FusedMoEModularKernel(
-        StandardPrepareAndFinalize(quant_dtype=torch.float8_e4m3fn,
-                                   block_shape=deep_gemm_block_shape()),
+        MoEPrepareAndFinalizeNoEP(quant_dtype=torch.float8_e4m3fn,
+                                  block_shape=deep_gemm_block_shape()),
         DeepGemmExperts(),
     )
     return fn(

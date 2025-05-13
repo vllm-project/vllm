@@ -16,7 +16,7 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    StandardPrepareAndFinalize)
+    MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache, moe_kernel_quantize_input)
 from vllm.platforms import current_platform
@@ -1706,7 +1706,7 @@ def modular_triton_fused_moe(
         use_int4_w4a16=use_int4_w4a16,
     )
     return mk.FusedMoEModularKernel(
-        StandardPrepareAndFinalize(
+        MoEPrepareAndFinalizeNoEP(
             quant_dtype=qtype,
             per_channel_quant=per_channel_quant,
             block_shape=block_shape,
