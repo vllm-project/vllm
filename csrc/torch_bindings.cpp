@@ -326,6 +326,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "ggml_mul_mat_a8(Tensor W, Tensor X, int type, SymInt row) -> Tensor");
   ops.impl("ggml_mul_mat_a8", torch::kCUDA, &ggml_mul_mat_a8);
 
+  // mmq kernel for GGML, optimized for Q8_0 on MI50.
+  ops.def(
+    "ggml_mul_mat_a8_q8_0_mi50(Tensor W, Tensor X) -> Tensor");
+  ops.impl("ggml_mul_mat_a8_q8_0_mi50", torch::kCUDA, &ggml_mul_mat_a8_q8_0_mi50);
+
   // moe kernel for GGML.
   ops.def(
       "ggml_moe_a8(Tensor X, Tensor W, "

@@ -163,6 +163,8 @@ torch::Tensor ggml_mul_mat_vec_a8(torch::Tensor W, torch::Tensor X,
 torch::Tensor ggml_mul_mat_a8(torch::Tensor W, torch::Tensor X, int64_t type,
                               int64_t row);
 
+torch::Tensor ggml_mul_mat_a8_q8_0_mi50(torch::Tensor W, torch::Tensor X);
+
 torch::Tensor ggml_moe_a8(torch::Tensor X, torch::Tensor W,
                           torch::Tensor sorted_token_ids,
                           torch::Tensor expert_ids,

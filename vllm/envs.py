@@ -107,6 +107,8 @@ if TYPE_CHECKING:
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_USE_DEEP_GEMM: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 0
+    VLLM_USE_MI50_OPTIM_GGUF_MUL_MAT_KERNEL: bool = False
+    
 
 
 def get_default_cache_root():
@@ -704,6 +706,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # It can be changed with this variable if needed for some reason.
     "VLLM_XGRAMMAR_CACHE_MB":
     lambda: int(os.getenv("VLLM_XGRAMMAR_CACHE_MB", "512")),
+
+    # Whether to use gguf mul_mat_q kernel that optimized for mi50.
+    "VLLM_USE_MI50_OPTIM_GGUF_MUL_MAT_KERNEL":
+    lambda: bool(int(os.getenv("VLLM_USE_MI50_OPTIM_GGUF_MUL_MAT", "0")))
 }
 
 # end-env-vars-definition

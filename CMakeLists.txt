@@ -562,6 +562,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 # if CUDA endif
 endif()
 
+# enable warp shuffle for rocm < 6.3
+list(APPEND VLLM_GPU_FLAGS "-DHIP_ENABLE_WARP_SYNC_BUILTINS")
+
 message(STATUS "Enabling C extension.")
 define_gpu_extension_target(
   _C

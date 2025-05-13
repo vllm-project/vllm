@@ -14,6 +14,9 @@
 #include "mmq.cuh"
 #include "moe.cuh"
 
+#include "mmq_mi50.cuh"
+#include "quantize_q8_0_mi50.cuh"
+
 // Q8 gemv
 template <typename scalar_t>
 static __global__ void quantize_q8_1(const scalar_t* __restrict__ x,
@@ -271,6 +274,59 @@ torch::Tensor ggml_mul_mat_a8(torch::Tensor W,  // quant weight
         break;
     }
   });
+  return Y;
+}
+
+torch::Tensor ggml_mul_mat_a8_q8_0_mi50(torch::Tensor W,  // quant weight, q8_0
+                                        torch::Tensor X   // input, fp16
+) {
+  int ncols = X.sizes()[1];  // TODO: check ncols_x == ncols_w
+  int nrows_x = X.sizes()[0];
+  int nrows_w = W.sizes()[0];
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(X));
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+
+  // quantized X
+  int ncols_x_padded =
+      (ncols + WARP_SIZE_GCN - 1) / WARP_SIZE_GCN * WARP_SIZE_GCN;
+  int block_q8_0_per_row = (ncols + QK8_0 - 1) / QK8_0;
+  constexpr int bytes_pre_block_q8_0 = sizeof(block_q8_0);
+  auto options = torch::TensorOptions().dtype(torch::kInt8).device(W.device());
+  at::Tensor quant_X = torch::empty(
+      {nrows_x, block_q8_0_per_row * bytes_pre_block_q8_0}, options);
+
+  const dim3 gridDim_quant(ncols_x_padded / WARP_SIZE_GCN, nrows_x);
+  const dim3 blockDim_quant(WARP_SIZE_GCN);
+  quantize_q8_0_mi50<<<gridDim_quant, blockDim_quant, 0, stream>>>(
+      (half*)X.data_ptr(), (block_q8_0*)quant_X.data_ptr(), nrows_x, ncols,
+      ncols_x_padded, block_q8_0_per_row);
+
+  // do matmul
+  int& nrows_out = nrows_x;
+  int& ncols_out = nrows_w;
+  options = torch::TensorOptions().dtype(X.dtype()).device(W.device());
+  at::Tensor Y = torch::empty({nrows_out, ncols_out}, options);
+
+  int num_qblocks_per_row = (ncols + QK8_0 - 1) / QK8_0;
+  int num_segment_per_row =
+      (num_qblocks_per_row + QBLOCKS_PER_SEGMENT - 1) / QBLOCKS_PER_SEGMENT;
+
+  int num_invald_qblocks_per_row;
+  if (num_qblocks_per_row % QBLOCKS_PER_SEGMENT == 0)
+    num_invald_qblocks_per_row = 0;
+  else
+    num_invald_qblocks_per_row =
+        QBLOCKS_PER_SEGMENT - (num_qblocks_per_row % QBLOCKS_PER_SEGMENT);
+
+  int num_tiles_col = (ncols_out + TILE_SIZE_COL - 1) / TILE_SIZE_COL;
+  int num_tiles_row = (nrows_out + TILE_SIZE_ROW - 1) / TILE_SIZE_ROW;
+  const dim3 gridDim_mulmat(num_tiles_col, num_tiles_row);
+  const dim3 blockDim_mulmat(WARP_SIZE_GCN, TILE_SIZE_COL, TILE_SIZE_ROW);
+  mul_mat_q8_0_mi50<<<gridDim_mulmat, blockDim_mulmat, 0, stream>>>(
+      (block_q8_0*)W.data_ptr(), (block_q8_0*)quant_X.data_ptr(),
+      (half*)Y.data_ptr(), ncols, nrows_w, nrows_x, num_qblocks_per_row,
+      num_segment_per_row, num_invald_qblocks_per_row);
+
   return Y;
 }
 

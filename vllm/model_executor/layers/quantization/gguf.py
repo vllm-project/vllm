@@ -8,6 +8,7 @@ from gguf import GGMLQuantizationType as WeightType
 from torch.nn.parameter import Parameter, UninitializedParameter
 
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE,
@@ -107,8 +108,10 @@ def _fuse_mul_mat(x: torch.Tensor, qweight: torch.Tensor,
     # there is no need to call any kernel for fp16/bf16
     if qweight_type in UNQUANTIZED_TYPES:
         return x @ qweight.T
+    if envs.VLLM_USE_MI50_OPTIM_GGUF_MUL_MAT_KERNEL:
+        y = ops.ggml_mul_mat_a8_q8_0_mi50(qweight, x)
     # enable MMVQ in contiguous batching with batch_size=1
-    if x.shape[0] == 1 and qweight_type in MMVQ_QUANT_TYPES:
+    elif x.shape[0] == 1 and qweight_type in MMVQ_QUANT_TYPES:
         y = ops.ggml_mul_mat_vec_a8(qweight, x, qweight_type, qweight.shape[0])
     # Use MMQ Kernel if it's available (standard + k-quants)
     elif qweight_type in MMQ_QUANT_TYPES:
