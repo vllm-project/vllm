@@ -651,7 +651,7 @@ Specified using `--task embed`.
   * ︎
   * ︎
 - * `NomicBertModel`
-  * Nomic names embed-text-v1/v1.5/v2-moe as `NomicBertModel`. 
+  * Nomic names embed-text-v1/v1.5/v2-moe as `NomicBertModel`.
   * `nomic-ai/nomic-embed-text-v1`, `nomic-ai/nomic-embed-text-v2-moe`, `Snowflake/snowflake-arctic-embed-m-long`, etc.
   * ︎
   * ︎
