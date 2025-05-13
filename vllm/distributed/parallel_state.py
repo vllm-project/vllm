@@ -1074,7 +1074,7 @@ def prepare_communication_buffer_for_model(model: torch.nn.Module):
     """Prepare the communication buffer for the model.
     Traditional communication libraries like NCCL are almost
     model agnostic. However, emerging new communication libraries like
-    MoE all-to-all (DeepEP) usually allocate the communication buffer
+    MoE all2all (DeepEP) usually allocate the communication buffer
     based on the model shape for optimal performance.
     """
     if _TP is not None:
