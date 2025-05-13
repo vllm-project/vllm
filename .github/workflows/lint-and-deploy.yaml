@@ -2,6 +2,9 @@ name: Lint and Deploy Charts
 
 on: pull_request
 
+permissions:
+  contents: read
+
 jobs:
   lint-and-deploy:
     runs-on: ubuntu-latest
