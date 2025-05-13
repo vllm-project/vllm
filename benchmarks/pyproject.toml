@@ -7,7 +7,7 @@
 
 [tool.isort]
 profile = "black"
-known_local_folder = ["vllm"]
+known_first_party = ["vllm"]
 
 [tool.ruff]
 line-length = 88
