@@ -91,9 +91,6 @@ def test_rotary_embedding(
     query = query[..., :head_size]
     key = key[..., :head_size] if use_key else None
 
-    print(f"query shape: {query.shape}")
-    print(f"query stride: {query.stride()}")
-
     # NOTE(woosuk): The reference implementation should be executed first
     # because the custom kernel is in-place.
     ref_query, ref_key = rope.forward_native(positions, query, key)
