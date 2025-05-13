@@ -1,12 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import sys
-
 from vllm import LLM, SamplingParams
-
-# Using absolute path to import from tpu_commons in home directory
-# Change to yours
-sys.path.append('/home/lsiyuan')
 
 prompts = [
     "A robot may not injure a human being",
