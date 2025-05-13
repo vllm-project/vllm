@@ -153,6 +153,7 @@ STR_TORCH_SDPA_ATTN_VAL: str = "TORCH_SDPA"
 STR_ROCM_FLASH_ATTN_VAL: str = "ROCM_FLASH"
 STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
 STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
+STR_DUAL_CHUNK_FLASH_ATTN_VAL: str = "DUAL_CHUNK_FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
 
 GB_bytes = 1_000_000_000
@@ -1818,6 +1819,14 @@ def get_cuda_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
     """
     assert cpu_tensor.is_pinned(), "CPU tensor must be pinned"
     return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
+
+
+def is_in_doc_build() -> bool:
+    try:
+        from sphinx.ext.autodoc.mock import _MockModule
+        return isinstance(zmq, _MockModule)
+    except ModuleNotFoundError:
+        return False
 
 
 def import_from_path(module_name: str, file_path: Union[str, os.PathLike]):

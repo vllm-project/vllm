@@ -22,6 +22,7 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCIsSleepingResponse,
                                          RPCLoadAdapterRequest,
                                          RPCProcessRequest,
+                                         RPCResetMultiModalCacheRequest,
                                          RPCResetPrefixCacheRequest,
                                          RPCSleepRequest, RPCStartupRequest,
                                          RPCStartupResponse,
@@ -269,6 +270,8 @@ class MQLLMEngine:
                         self.stop_profile()
                 elif isinstance(request, RPCLoadAdapterRequest):
                     self._handle_load_adapter_request(request)
+                elif isinstance(request, RPCResetMultiModalCacheRequest):
+                    self.reset_mm_cache()
                 elif isinstance(request, RPCResetPrefixCacheRequest):
                     self.reset_prefix_cache()
                 elif isinstance(request, RPCSleepRequest):
@@ -284,7 +287,7 @@ class MQLLMEngine:
         except Exception as e:
             self._set_errored(e)
             self._send_unhealthy(e)
-            raise e
+            raise e from None
 
     def _handle_process_request(self, request: RPCProcessRequest):
         """Handle RPCProcessRequest by adding it to the LLMEngine."""
@@ -409,6 +412,9 @@ class MQLLMEngine:
     def stop_profile(self) -> None:
         self.engine.stop_profile()
 
+    def reset_mm_cache(self) -> bool:
+        return self.engine.reset_mm_cache()
+
     def reset_prefix_cache(self) -> bool:
         return self.engine.reset_prefix_cache()
 
@@ -447,4 +453,4 @@ def run_mp_engine(vllm_config: VllmConfig, usage_context: UsageContext,
     except BaseException as e:
         logger.exception(e)
         engine_alive.value = False
-        raise e
+        raise e from None

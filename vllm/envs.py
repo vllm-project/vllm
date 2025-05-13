@@ -68,7 +68,9 @@ if TYPE_CHECKING:
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_RPC_TIMEOUT: int = 10000  # ms
     VLLM_PLUGINS: Optional[list[str]] = None
+    VLLM_LORA_RESOLVER_CACHE_DIR: Optional[str] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
+    VLLM_TRITON_ENABLE_JITCACHE: bool = False
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
@@ -111,7 +113,9 @@ if TYPE_CHECKING:
     VLLM_USE_DEEP_GEMM: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
-    VLLM_TRITON_ENABLE_JITCACHE: bool = False
+    VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
+    VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
+    VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5557
 
 
 def get_default_cache_root():
@@ -262,6 +266,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE":
     lambda: bool(
         os.environ.get("VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE", "1") != "0"),
+
+    # Internal flag to enable/disable Inductor standalone compile
+    "VLLM_TEST_STANDALONE_COMPILE":
+    lambda: os.environ.get("VLLM_TEST_STANDALONE_COMPILE", "0") != "0",
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
@@ -497,11 +505,22 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: None if "VLLM_PLUGINS" not in os.environ else os.environ[
         "VLLM_PLUGINS"].split(","),
 
+    # a local directory to look in for unrecognized LoRA adapters.
+    # only works if plugins are enabled and
+    # VLLM_ALLOW_RUNTIME_LORA_UPDATING is enabled.
+    "VLLM_LORA_RESOLVER_CACHE_DIR":
+    lambda: os.getenv("VLLM_LORA_RESOLVER_CACHE_DIR", None),
+
     # Enables torch profiler if set. Path to the directory where torch profiler
     # traces are saved. Note that it must be an absolute path.
     "VLLM_TORCH_PROFILER_DIR":
     lambda: (None if os.getenv("VLLM_TORCH_PROFILER_DIR", None) is None else os
              .path.expanduser(os.getenv("VLLM_TORCH_PROFILER_DIR", "."))),
+
+    # Enable the JITCache for Triton Kernels
+    # see triton_utils/jitcache.py
+    "VLLM_TRITON_ENABLE_JITCACHE":
+    lambda: bool(int(os.getenv("VLLM_TRITON_ENABLE_JITCACHE",
 
     # If set, vLLM will use Triton implementations of AWQ.
     "VLLM_USE_TRITON_AWQ":
@@ -737,11 +756,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # limit will actually be zero-copy decoded.
     "VLLM_MSGPACK_ZERO_COPY_THRESHOLD":
     lambda: int(os.getenv("VLLM_MSGPACK_ZERO_COPY_THRESHOLD", "256")),
-    
-    # Enable the JITCache for Triton Kernels
-    # see triton_utils/jitcache.py
-    "VLLM_TRITON_ENABLE_JITCACHE":
-    lambda: bool(int(os.getenv("VLLM_TRITON_ENABLE_JITCACHE", "0"))),
+
+    # If set, allow insecure serialization using pickle.
+    # This is useful for environments where it is deemed safe to use the
+    # insecure method and it is needed for some reason.
+    "VLLM_ALLOW_INSECURE_SERIALIZATION":
+    lambda: bool(int(os.getenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "0"))),
+
+    # IP address used for NIXL handshake between remote agents.
+    "VLLM_NIXL_SIDE_CHANNEL_HOST":
+    lambda: os.getenv("VLLM_NIXL_SIDE_CHANNEL_HOST", "localhost"),
+
+    # Port used for NIXL handshake between remote agents.
+    "VLLM_NIXL_SIDE_CHANNEL_PORT":
+    lambda: int(os.getenv("VLLM_NIXL_SIDE_CHANNEL_PORT", "5557")),
 }
 
 # end-env-vars-definition
@@ -804,6 +832,7 @@ def compute_hash() -> str:
         "VLLM_USE_TRITON_AWQ",
         "VLLM_DP_RANK",
         "VLLM_DP_SIZE",
+        "VLLM_TEST_STANDALONE_COMPILE",
     ]
     for key in environment_variables_to_hash:
         if key in environment_variables:
