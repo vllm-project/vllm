@@ -5,7 +5,7 @@ from typing import Optional, Union, cast
 import prometheus_client
 
 from vllm.config import VllmConfig
-from vllm.v1.metrics.loggers import PrometheusMetrics
+from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.spec_decode.metrics import SpecDecodingProm
 
 try:
@@ -23,7 +23,6 @@ class _RayGaugeWrapper:
                  documentation: str = "",
                  labelnames: Optional[list[str]] = None,
                  multiprocess_mode: str = ""):
-        del multiprocess_mode
         labelnames_tuple = tuple(labelnames) if labelnames else None
         self._gauge = ray_metrics.Gauge(name=name,
                                         description=documentation,
@@ -99,13 +98,8 @@ class RaySpecDecodingProm(SpecDecodingProm):
         type[prometheus_client.Counter], _RayCounterWrapper)
 
 
-class RayMetrics(PrometheusMetrics):
-    """
-    RayMetrics is used by RayPrometheusStatLogger to log to Ray metrics.
-    Provides the same metrics as PrometheusMetrics but uses Ray's util.metrics
-    library.
-    """
-
+class RayPrometheusStatLogger(PrometheusStatLogger):
+    """RayPrometheusStatLogger uses Ray metrics instead."""
     _gauge_cls: type[prometheus_client.Gauge] = cast(
         type[prometheus_client.Gauge], _RayGaugeWrapper)
     _counter_cls: type[prometheus_client.Counter] = cast(

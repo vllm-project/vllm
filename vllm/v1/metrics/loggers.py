@@ -13,7 +13,6 @@ from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import PrefixCachingMetrics
 from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
-from vllm.v1.metrics.wrappers import RayMetrics
 from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
 
 logger = init_logger(__name__)
@@ -138,20 +137,15 @@ class LoggingStatLogger(StatLoggerBase):
             self.vllm_config.cache_config.num_gpu_blocks)
 
 
-class PrometheusMetrics:
-    """
-    vLLM uses a multiprocessing-based frontend for the OpenAI server.
-    This means that we need to run prometheus_client in multiprocessing mode
-    See https://prometheus.github.io/client_python/multiprocess/ for more
-    details on limitations.
-    """
-
+class PrometheusStatLogger(StatLoggerBase):
     _gauge_cls = prometheus_client.Gauge
     _counter_cls = prometheus_client.Counter
     _histogram_cls = prometheus_client.Histogram
     _spec_decoding_cls = SpecDecodingProm
 
     def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
+        self.vllm_config = vllm_config
+        self.engine_index = engine_index
         self._unregister_vllm_metrics()
 
         # Use this flag to hide metrics that were deprecated in
@@ -428,23 +422,6 @@ class PrometheusMetrics:
                 ],
             )
 
-    @staticmethod
-    def _unregister_vllm_metrics():
-        # Unregister any existing vLLM collectors (for CI/CD
-        for collector in list(prometheus_client.REGISTRY._collector_to_names):
-            if hasattr(collector, "_name") and "vllm" in collector._name:
-                prometheus_client.REGISTRY.unregister(collector)
-
-
-class PrometheusStatLogger(StatLoggerBase):
-    _metrics_cls = PrometheusMetrics
-
-    def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
-        self.vllm_config = vllm_config
-        self.engine_index = engine_index
-        self.metrics = self._metrics_cls(vllm_config=vllm_config,
-                                         engine_index=engine_index)
-
     def log_engine_initialized(self):
         self.log_metrics_info("cache_config", self.vllm_config.cache_config)
 
@@ -470,88 +447,79 @@ class PrometheusStatLogger(StatLoggerBase):
     def record(self, scheduler_stats: SchedulerStats,
                iteration_stats: Optional[IterationStats]):
         """Log to prometheus."""
-        self.metrics.gauge_scheduler_running.set(
-            scheduler_stats.num_running_reqs)
-        self.metrics.gauge_scheduler_waiting.set(
-            scheduler_stats.num_waiting_reqs)
+        self.gauge_scheduler_running.set(scheduler_stats.num_running_reqs)
+        self.gauge_scheduler_waiting.set(scheduler_stats.num_waiting_reqs)
 
-        self.metrics.gauge_gpu_cache_usage.set(scheduler_stats.gpu_cache_usage)
+        self.gauge_gpu_cache_usage.set(scheduler_stats.gpu_cache_usage)
 
-        self.metrics.counter_gpu_prefix_cache_queries.inc(
+        self.counter_gpu_prefix_cache_queries.inc(
             scheduler_stats.prefix_cache_stats.queries)
-        self.metrics.counter_gpu_prefix_cache_hits.inc(
+        self.counter_gpu_prefix_cache_hits.inc(
             scheduler_stats.prefix_cache_stats.hits)
 
         if scheduler_stats.spec_decoding_stats is not None:
-            self.metrics.spec_decoding_prom.observe(
+            self.spec_decoding_prom.observe(
                 scheduler_stats.spec_decoding_stats)
 
         if iteration_stats is None:
             return
 
-        self.metrics.counter_num_preempted_reqs.inc(
-            iteration_stats.num_preempted_reqs)
-        self.metrics.counter_prompt_tokens.inc(
-            iteration_stats.num_prompt_tokens)
-        self.metrics.counter_generation_tokens.inc(
+        self.counter_num_preempted_reqs.inc(iteration_stats.num_preempted_reqs)
+        self.counter_prompt_tokens.inc(iteration_stats.num_prompt_tokens)
+        self.counter_generation_tokens.inc(
             iteration_stats.num_generation_tokens)
-        self.metrics.histogram_iteration_tokens.observe(
+        self.histogram_iteration_tokens.observe(
             iteration_stats.num_prompt_tokens +
             iteration_stats.num_generation_tokens)
 
         for max_gen_tokens in iteration_stats.max_num_generation_tokens_iter:
-            self.metrics.histogram_max_num_generation_tokens_request.observe(
+            self.histogram_max_num_generation_tokens_request.observe(
                 max_gen_tokens)
         for n_param in iteration_stats.n_params_iter:
-            self.metrics.histogram_n_request.observe(n_param)
+            self.histogram_n_request.observe(n_param)
         for ttft in iteration_stats.time_to_first_tokens_iter:
-            self.metrics.histogram_time_to_first_token.observe(ttft)
+            self.histogram_time_to_first_token.observe(ttft)
         for tpot in iteration_stats.time_per_output_tokens_iter:
-            self.metrics.histogram_time_per_output_token.observe(tpot)
+            self.histogram_time_per_output_token.observe(tpot)
 
         for finished_request in iteration_stats.finished_requests:
-            self.metrics.counter_request_success[
-                finished_request.finish_reason].inc()
-            self.metrics.histogram_e2e_time_request.observe(
+            self.counter_request_success[finished_request.finish_reason].inc()
+            self.histogram_e2e_time_request.observe(
                 finished_request.e2e_latency)
-            self.metrics.histogram_queue_time_request.observe(
+            self.histogram_queue_time_request.observe(
                 finished_request.queued_time)
-            self.metrics.histogram_prefill_time_request.observe(
+            self.histogram_prefill_time_request.observe(
                 finished_request.prefill_time)
-            self.metrics.histogram_inference_time_request.observe(
+            self.histogram_inference_time_request.observe(
                 finished_request.inference_time)
-            self.metrics.histogram_decode_time_request.observe(
+            self.histogram_decode_time_request.observe(
                 finished_request.decode_time)
-            self.metrics.histogram_num_prompt_tokens_request.observe(
+            self.histogram_num_prompt_tokens_request.observe(
                 finished_request.num_prompt_tokens)
-            self.metrics.histogram_num_generation_tokens_request.observe(
+            self.histogram_num_generation_tokens_request.observe(
                 finished_request.num_generation_tokens)
-            self.metrics.histogram_max_tokens_request.observe(
+            self.histogram_max_tokens_request.observe(
                 finished_request.max_tokens_param)
 
-        if self.metrics.gauge_lora_info is not None:
+        if self.gauge_lora_info is not None:
             running_lora_adapters = ",".join(
                 iteration_stats.running_lora_adapters.keys())
             waiting_lora_adapters = ",".join(
                 iteration_stats.waiting_lora_adapters.keys())
             lora_info_labels = {
-                self.metrics.labelname_running_lora_adapters:
-                running_lora_adapters,
-                self.metrics.labelname_waiting_lora_adapters:
-                waiting_lora_adapters,
-                self.metrics.labelname_max_lora: self.metrics.max_lora,
+                self.labelname_running_lora_adapters: running_lora_adapters,
+                self.labelname_waiting_lora_adapters: waiting_lora_adapters,
+                self.labelname_max_lora: self.max_lora,
             }
-            self.metrics.gauge_lora_info.labels(
+            self.gauge_lora_info.labels(
                 **lora_info_labels).set_to_current_time()
 
-
-class RayPrometheusStatLogger(PrometheusStatLogger):
-    """RayPrometheusStatLogger uses Ray metrics instead."""
-
-    _metrics_cls = RayMetrics
-
-    def info(self, type: str, obj: SupportsMetricsInfo) -> None:
-        return None
+    @staticmethod
+    def _unregister_vllm_metrics():
+        # Unregister any existing vLLM collectors (for CI/CD
+        for collector in list(prometheus_client.REGISTRY._collector_to_names):
+            if hasattr(collector, "_name") and "vllm" in collector._name:
+                prometheus_client.REGISTRY.unregister(collector)
 
 
 def build_buckets(mantissa_lst: list[int], max_value: int) -> list[int]:
