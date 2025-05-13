@@ -596,11 +596,11 @@ def test_structured_output_with_reasoning_matrices(
             seed=123,
         ),
     )
-    assert content is not None
     print(
         f"Prompt: {prompt!r}\nReasoning: {reasoning_content!r}\nContent: {content!r}"
     )
 
+    assert content is not None and reasoning_content is not None
     output_json = json.loads(content)
     jsonschema.validate(instance=output_json, schema=reasoning_schema)
 
