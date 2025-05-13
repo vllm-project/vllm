@@ -25,7 +25,7 @@ class NoOpEliminationPass(VllmInductorPass):
 
     Cases handled:
       1. A chain of reshapes is equivalent to the last reshape called on the
-      input of the first reshape.
+      base tensor (input of the first reshape).
       2. A reshape that produces the shape of the input is redundant
       3. A slice that produces the shape of the input is redundant
 
@@ -74,7 +74,7 @@ class NoOpEliminationPass(VllmInductorPass):
         # Remove no-op reshapes/views:
         for node in graph.nodes:
             if is_func(node, torch.ops.aten.reshape.default):
-                # Case 1: rewrite a series of reshapes to just the last one
+                # Case 1: rewrite reshape chains to reshapes on the base tensor
                 input = node.args[0]
                 # If the input is a reshape, rebind to that node
                 if is_func(input, torch.ops.aten.reshape.default):
