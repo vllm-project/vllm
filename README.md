@@ -74,7 +74,7 @@ vLLM is flexible and easy to use with:
 - OpenAI-compatible API server
 - Support NVIDIA GPUs, AMD CPUs and GPUs, Intel CPUs and GPUs, PowerPC CPUs, TPU, and AWS Neuron.
 - Prefix caching support
-- Multi-lora support
+- Multi-LoRA support
 
 vLLM seamlessly supports most popular open-source models on HuggingFace, including:
 - Transformer-like LLMs (e.g., Llama)
