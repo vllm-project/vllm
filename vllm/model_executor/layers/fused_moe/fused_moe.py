@@ -949,14 +949,14 @@ def grouped_topk(
                                     float("-inf"))  # [n, e]
 
     if e_score_correction_bias is not None:
-        topk_ids = torch.topk(tmp_scores, k=topk, dim=-1, sorted=False)[1]
+        topk_ids = torch.topk(tmp_scores, k=topk, dim=-1, sorted=True)[1]
         # Use original unbiased scores for the routing weights
         topk_weights = original_scores.gather(1, topk_ids)
     else:
         topk_weights, topk_ids = torch.topk(tmp_scores,
                                             k=topk,
                                             dim=-1,
-                                            sorted=False)
+                                            sorted=True)
 
     if num_share_fusion_replicas > 0:
         assert routed_scaling_factor is not None, \
@@ -972,7 +972,7 @@ def grouped_topk(
             topk_weights[:, -1] = topk_weights[:, :-1].sum(
                 dim=-1) * 1.0 / routed_scaling_factor
         else:
-            topk_weights[:, -1] = routed_scaling_factor
+            topk_weights[:, -1] = 1.0 / routed_scaling_factor
     if renormalize:
         topk_weights_sum = topk_weights.sum(
             dim=-1, keepdim=True
