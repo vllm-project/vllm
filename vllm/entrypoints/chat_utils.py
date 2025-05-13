@@ -44,6 +44,7 @@ from vllm.transformers_utils.chat_templates import (
 # yapf: enable
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
+from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
@@ -512,7 +513,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                                               hf_config.image_token_index)
 
             if model_type in ("aya_vision", "chameleon", "deepseek_vl_v2",
-                              "internvl_chat", "ovis2", "skywork_chat",
+                              "internvl_chat", "ovis", "skywork_chat",
                               "NVLM_D", "h2ovl_chat", "idefics3", "smolvlm"):
                 return "<image>"
             if model_type in ("mllama", "llama4"):
@@ -1272,3 +1273,6 @@ def apply_mistral_chat_template(
             "An error occurred in `mistral_common` while applying chat "
             "template")
         raise ValueError from e
+
+def random_tool_call_id() -> str:
+    return f"chatcmpl-tool-{random_uuid()}"

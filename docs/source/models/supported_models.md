@@ -1045,10 +1045,10 @@ Specified using `--task generate`.
   *
   * ✅︎
   * ✅︎
-- * `Ovis2ForConditionalGeneration`<sup>^</sup>
-  * Ovis2
+- * `Ovis`
+  * Ovis2, Ovis1.6
   * T + I<sup>+</sup>
-  * `AIDC-AI/Ovis2-1B`, `AIDC-AI/Ovis2-2B`, etc.
+  * `AIDC-AI/Ovis2-1B`, `AIDC-AI/Ovis1.6-Llama3.2-3B`, etc.
   *
   *
   * ✅︎

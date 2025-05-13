@@ -120,6 +120,7 @@ def create_request(
     do_remote_decode: bool = False,
     do_remote_prefill: bool = False,
     use_all_1s_for_prompt_tokens: bool = False,
+    num_remote_blocks: int = 3,
 ) -> Request:
     """Make dummy request for testing."""
 
@@ -132,7 +133,7 @@ def create_request(
             do_remote_prefill=True,
             do_remote_decode=False,
             remote_engine_id="my-engine-id",
-            remote_block_ids=[1, 2, 3],
+            remote_block_ids=list(range(num_remote_blocks)),
             remote_host="my-host",
             remote_port=1234)
     else:
