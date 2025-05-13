@@ -290,7 +290,7 @@ class KVCacheManager:
 
         return KVCacheBlocks(new_blocks)
 
-    def free(self, request: Request) -> None:
+    def free(self, request_id: str) -> None:
         """Free the blocks allocated for the request.
         We free the blocks in reverse order so that he tail blocks are evicted 
         first when caching is enabled.
@@ -298,7 +298,7 @@ class KVCacheManager:
         Args:
             request: The request to free the blocks.
         """
-        self.coordinator.free(request.request_id)
+        self.coordinator.free(request_id)
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
@@ -359,13 +359,13 @@ class KVCacheManager:
         return self.coordinator.get_num_common_prefix_blocks(
             request.request_id, num_running_requests)
 
-    def free_block_hashes(self, request: Request) -> None:
+    def free_block_hashes(self, request_id: str) -> None:
         """Discard the block hashes for the request.
 
         NOTE: Unlike `free`, this method should be called only when the request
         is finished, not when it is preempted.
         """
-        self.req_to_block_hashes.pop(request.request_id, None)
+        self.req_to_block_hashes.pop(request_id, None)
 
     def take_events(self) -> list[KVCacheEvent]:
         """Take the KV cache events from the block pool.
