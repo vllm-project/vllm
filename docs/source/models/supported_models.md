@@ -646,12 +646,12 @@ Specified using `--task embed`.
   * ︎
   * ︎
 - * `ModernBertModel`
-  * ModernBertModel
+  * ModernBertModel-based
   * `Alibaba-NLP/gte-modernbert-base`, etc.
   * ︎
   * ︎
 - * `NomicBertModel`
-  * Nomic names embed-text-v1/v1.5/v2-moe as `NomicBertModel`.
+  * NomicBertModel-based
   * `nomic-ai/nomic-embed-text-v1`, `nomic-ai/nomic-embed-text-v2-moe`, `Snowflake/snowflake-arctic-embed-m-long`, etc.
   * ︎
   * ︎
