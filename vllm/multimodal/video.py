@@ -4,7 +4,7 @@ import base64
 from functools import partial
 from io import BytesIO
 from pathlib import Path
-from typing import Type
+
 import numpy as np
 import numpy.typing as npt
 from PIL import Image
@@ -56,7 +56,7 @@ class VideoLoader:
 class VideoLoaderRegistry:
 
     def __init__(self) -> None:
-        self.name2class: dict[str, Type] = {}
+        self.name2class: dict[str, type] = {}
 
     def register(self, name: str):
         def wrap(cls_to_register):
