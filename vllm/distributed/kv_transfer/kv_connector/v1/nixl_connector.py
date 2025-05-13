@@ -377,6 +377,10 @@ class NixlConnectorWorker:
         self.block_window_per_layer: list[Optional[int]] = []
         self._tp_size = {self.engine_id: self.world_size}
 
+        # With heterogeneous TP, P must wait for all assigned D TP workers to
+        # finish reading before safely freeing the blocks.
+        self.consumer_notification_counts_by_req = defaultdict(int)
+
     @staticmethod
     def _nixl_handshake_listener(metadata: NixlAgentMetadata,
                                  ready_event: threading.Event, rank: int):
@@ -718,10 +722,15 @@ class NixlConnectorWorker:
         """Get req_ids which got a remote xfer message."""
 
         notified_req_ids: set[str] = set()
-        for req_ids in self.nixl_wrapper.get_new_notifs().values():
-            for req_id in req_ids:
-                assert req_id not in notified_req_ids
-                notified_req_ids.add(req_id.decode("utf-8"))
+        for notifs in self.nixl_wrapper.get_new_notifs().values():
+            for notif in notifs:
+                req_id, tp_ratio = notif.decode("utf-8").rsplit(":", 1)
+                self.consumer_notification_counts_by_req[req_id] += 1
+                # Wait all consumers (D) to be done reading before freeing.
+                if self.consumer_notification_counts_by_req[
+                        req_id] == tp_ratio:
+                    notified_req_ids.add(req_id)
+                    del self.consumer_notification_counts_by_req[req_id]
         return notified_req_ids
 
     def _pop_done_transfers(self, transfers: dict[str, list[int]]) -> set[str]:
@@ -796,12 +805,17 @@ class NixlConnectorWorker:
         # saturate IB with heterogeneous TP sizes. We should remove the staging
         # blocks until we are ready.
 
+        # Number of D TP workers that will read from dst P. Propagate tp_ratio
+        # on notification so that dst worker can wait before freeing blocks.
+        tp_ratio = self._tp_size[
+            self.engine_id] // self._tp_size[dst_engine_id]
+        notif_id = f"{request_id}:{tp_ratio}".encode()
+
         # Full prefix cache hit: do not need to read remote blocks,
         # just notify P worker that we have the blocks we need.
         num_local_blocks = len(local_block_ids)
         if num_local_blocks == 0:
-            self.nixl_wrapper.send_notif(dst_engine_id,
-                                         notif_msg=request_id.encode("utf-8"))
+            self.nixl_wrapper.send_notif(dst_engine_id, notif_msg=notif_id)
             return
 
         # Partial prefix cache hit: just read uncomputed blocks.
@@ -818,10 +832,7 @@ class NixlConnectorWorker:
         # workers will issue xfers to parts of the P worker remote kv caches.
 
         # Get side handles.
-        d_workers_per_p_worker = self._tp_size[
-            self.engine_id] // self._tp_size[dst_engine_id]
-        local_xfer_side_handle = self.src_xfer_side_handle[
-            d_workers_per_p_worker]
+        local_xfer_side_handle = self.src_xfer_side_handle[tp_ratio]
         remote_xfer_side_handle = self.dst_xfer_side_handles[dst_engine_id]
 
         # Get descs ids.
@@ -867,7 +878,7 @@ class NixlConnectorWorker:
             local_block_descs_ids,
             remote_xfer_side_handle,
             remote_block_descs_ids,
-            notif_msg=request_id.encode("utf-8"),
+            notif_msg=notif_id,
         )
 
         # Begin async xfer.
