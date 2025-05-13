@@ -72,7 +72,6 @@ exclude = [
 "vllm/version.py" = ["F401"]
 "vllm/_version.py" = ["ALL"]
 # Python 3.8 typing. TODO: Remove these excludes after v1.0.0
-"vllm/adapter_commons/**/*.py" = ["UP006", "UP035"]
 "vllm/attention/**/*.py" = ["UP006", "UP035"]
 "vllm/core/**/*.py" = ["UP006", "UP035"]
 "vllm/device_allocator/**/*.py" = ["UP006", "UP035"]
