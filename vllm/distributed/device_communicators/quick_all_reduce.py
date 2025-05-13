@@ -8,11 +8,12 @@ import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 from vllm import _custom_ops as ops
+from vllm.platforms import current_platform
 
 logger = logging.getLogger(__name__)
 
 try:
-    ops.meta_size()
+    ops.qr_max_size()
     ops_available = True
 except Exception:
     # For CPUs
@@ -22,15 +23,15 @@ except Exception:
 class QuickReduceAlgo(Enum):
     OneShot = 0
     TwoShot = 1
-    TwoShot_FP8 = 2
-    TwoShot_Q8 = 3
-    TwoShot_Q6 = 4
-    TwoShot_Q4 = 5
-    TwoShot_MAX_MIN_Q8 = 6
+    TwoShot_Q8 = 2
+    TwoShot_Q6 = 3
+    TwoShot_Q4 = 4
+    TwoShot_MAX_MIN_Q8 = 5
 
 
 class QuickAllReduce:
-    _SUPPORTED_WORLD_SIZES = [2, 4, 6, 8]
+    _SUPPORTED_WORLD_SIZES = [2, 4, 8]
+    _SUPPORTED_DTYPES = [torch.float16, torch.bfloat16]
 
     def __init__(self,
                  group: ProcessGroup,
@@ -38,20 +39,22 @@ class QuickAllReduce:
                  algo: QuickReduceAlgo = QuickReduceAlgo.TwoShot) -> None:
         self.disabled = True
         if not ops_available:
-            # disable because of missing custom allreduce library
+            # disable because of missing quick reduce library
             # e.g. in a non-cuda environment
+            logger.info("Custom allreduce is disabled because "
+                        "of missing custom allreduce library")
             return
+
         self.max_size = ops.qr_max_size()
         self.group = group
         self.algo = algo
 
         assert dist.get_backend(group) != dist.Backend.NCCL, (
             "QuickReduce should be attached to a non-NCCL group.")
-
         rank = dist.get_rank(group=self.group)
         world_size = dist.get_world_size(group=self.group)
         if world_size == 1:
-            # No need to initialize custom allreduce for single GPU case.
+            # No need to initialize QuickReduce for single GPU case.
             return
 
         if world_size not in QuickAllReduce._SUPPORTED_WORLD_SIZES:
@@ -62,6 +65,9 @@ class QuickAllReduce:
                 world_size, str(QuickAllReduce._SUPPORTED_WORLD_SIZES))
             return
 
+        assert current_platform.is_rocm(), (
+            "QuickReduce is only supported on ROCm platform.")
+
         if isinstance(device, int):
             device = torch.device(f"cuda:{device}")
         elif isinstance(device, str):
@@ -71,9 +77,9 @@ class QuickAllReduce:
         self.device = device
         torch.cuda.set_device(self.device)
 
-        self.disabled = False
         self._ptr = ops.init_custom_qr(rank, world_size)
         self.create_shared_buffer()
+        self.disabled = False
 
     def create_shared_buffer(self):
         """
@@ -87,11 +93,7 @@ class QuickAllReduce:
         ops.qr_open_handles(self._ptr, handles)
 
     def all_reduce(self, inp: torch.Tensor, *, out: torch.Tensor = None):
-        """Performs an out-of-place all reduce.
-        
-        If registered is True, this assumes inp's pointer is already
-        IPC-registered. Otherwise, inp is first copied into a pre-registered
-        buffer.
+        """Performs an out-of-place all reduce.       
         """
         inp_size = inp.numel() * inp.element_size()
         if inp_size >= self.max_size:
@@ -102,13 +104,6 @@ class QuickAllReduce:
 
         ops.qr_all_reduce(self._ptr, inp, out, self.algo.value)
         return out
-
-    def is_enabled(self):
-        return not self.disabled
-
-    @staticmethod
-    def is_available():
-        return ops_available
 
     def close(self):
         if not self.disabled and getattr(self, "_ptr", None):
@@ -122,7 +117,8 @@ class QuickAllReduce:
         if self.disabled:
             return False
         inp_size = inp.numel() * inp.element_size()
-        # custom allreduce requires input byte size to be multiples of 16
+        # QuickReduce requires input byte size to be multiples of 16
         if inp_size % 16 != 0:
             return False
-        return inp.dtype == torch.float16 and inp_size < self.max_size
+        return inp.dtype in QuickAllReduce._SUPPORTED_DTYPES and \
+            inp_size < self.max_size

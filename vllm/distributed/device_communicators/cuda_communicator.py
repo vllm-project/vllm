@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import logging
 import os
 from typing import Optional
 
 import torch
 from torch.distributed import ProcessGroup
+
+from vllm.platforms import current_platform
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -61,11 +64,20 @@ class CudaCommunicator(DeviceCommunicatorBase):
             )
         self.use_quick_allreduce = os.environ.get("VLLM_USE_QUICK_ALLREDUCE",
                                                   "0") == "1"
+        if self.use_quick_allreduce and not current_platform.is_rocm():
+            logger.warning(
+                "Environment variable VLLM_USE_QUICK_ALLREDUCE is set to 1," \
+                " but QuickReduce is only supported on ROCm platform."
+            )
         self.qr_comm: Optional[QuickAllReduce] = None
-        if self.use_quick_allreduce and self.world_size > 1:
+        if self.use_quick_allreduce and self.world_size > 1 and \
+            current_platform.is_rocm():
             # Initialize a custom fast all-reduce implementation.
             qr_comm_algo = os.environ.get("VLLM_QUICK_ALLREDUCE_ALGO",
                                           "TwoShot")
+            assert qr_comm_algo in QuickReduceAlgo.__members__, \
+            "Unknown QuickReduce algorithm: {}".format(
+            qr_comm_algo)
             self.qr_comm_algo = QuickReduceAlgo[qr_comm_algo]
             self.qr_comm = QuickAllReduce(group=self.cpu_group,
                                           device=self.device,
@@ -93,7 +105,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 raise ValueError(f"Unknown all2all backend: {all2all_backend}")
 
     def all_reduce(self, input_):
-        # always try custom allreduce first,
+        # always try quick reduce first, then custom allreduce,
         # and then pynccl.
         qr_comm = self.qr_comm
         if qr_comm is not None and not qr_comm.disabled and \
