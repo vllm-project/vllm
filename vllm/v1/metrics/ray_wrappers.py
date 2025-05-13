@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 import time
-from typing import Optional, Union, cast
+from typing import Optional, Union
 
-import prometheus_client
-
-from vllm.config import VllmConfig
+from vllm.config import SpeculativeConfig, VllmConfig
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.spec_decode.metrics import SpecDecodingProm
 
@@ -20,7 +18,7 @@ class _RayGaugeWrapper:
 
     def __init__(self,
                  name: str,
-                 documentation: str = "",
+                 documentation: Optional[str] = "",
                  labelnames: Optional[list[str]] = None,
                  multiprocess_mode: str = ""):
         labelnames_tuple = tuple(labelnames) if labelnames else None
@@ -46,7 +44,7 @@ class _RayCounterWrapper:
 
     def __init__(self,
                  name: str,
-                 documentation: str = "",
+                 documentation: Optional[str] = "",
                  labelnames: Optional[list[str]] = None):
         labelnames_tuple = tuple(labelnames) if labelnames else None
         self._counter = ray_metrics.Counter(name=name,
@@ -69,7 +67,7 @@ class _RayHistogramWrapper:
 
     def __init__(self,
                  name: str,
-                 documentation: str = "",
+                 documentation: Optional[str] = "",
                  labelnames: Optional[list[str]] = None,
                  buckets: Optional[list[float]] = None):
         labelnames_tuple = tuple(labelnames) if labelnames else None
@@ -94,25 +92,48 @@ class RaySpecDecodingProm(SpecDecodingProm):
     util.metrics library.
     """
 
-    _counter_cls: type[prometheus_client.Counter] = cast(
-        type[prometheus_client.Counter], _RayCounterWrapper)
+    def _create_counter(self, name: str, documentation: Optional[str],
+                        labelnames: list[str]):
+        return _RayCounterWrapper(name=name,
+                                  documentation=documentation,
+                                  labelnames=labelnames)
 
 
 class RayPrometheusStatLogger(PrometheusStatLogger):
     """RayPrometheusStatLogger uses Ray metrics instead."""
-    _gauge_cls: type[prometheus_client.Gauge] = cast(
-        type[prometheus_client.Gauge], _RayGaugeWrapper)
-    _counter_cls: type[prometheus_client.Counter] = cast(
-        type[prometheus_client.Counter], _RayCounterWrapper)
-    _histogram_cls: type[prometheus_client.Histogram] = cast(
-        type[prometheus_client.Histogram], _RayHistogramWrapper)
-    _spec_decoding_cls: type[SpecDecodingProm] = cast(type[SpecDecodingProm],
-                                                      RaySpecDecodingProm)
 
     def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
-        if ray_metrics is None:
-            raise ImportError("RayMetrics requires Ray to be installed.")
         super().__init__(vllm_config, engine_index)
+
+    def _create_gauge(self,
+                      name: str,
+                      documentation: Optional[str],
+                      labelnames: list[str],
+                      multiprocess_mode: str = "all"):
+        return _RayGaugeWrapper(name=name,
+                                documentation=documentation,
+                                labelnames=labelnames,
+                                multiprocess_mode=multiprocess_mode)
+
+    def _create_counter(self, name: str, documentation: Optional[str],
+                        labelnames: list[str]):
+        return _RayCounterWrapper(name=name,
+                                  documentation=documentation,
+                                  labelnames=labelnames)
+
+    def _create_histogram(self, name: str, documentation: Optional[str],
+                          buckets: list[Union[int,
+                                              float]], labelnames: list[str]):
+        return _RayHistogramWrapper(
+            name=name,
+            documentation=documentation,
+            buckets=buckets,
+            labelnames=labelnames,
+        )
+
+    def _create_spec_decoding(self, config: SpeculativeConfig,
+                              labelnames: list[str], labelvalues: list[str]):
+        return RaySpecDecodingProm(config, labelnames, labelvalues)
 
     @staticmethod
     def _unregister_vllm_metrics():

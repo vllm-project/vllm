@@ -8,7 +8,7 @@ from typing import Callable, Optional, Union
 import numpy as np
 import prometheus_client
 
-from vllm.config import SupportsMetricsInfo, VllmConfig
+from vllm.config import SpeculativeConfig, SupportsMetricsInfo, VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import PrefixCachingMetrics
 from vllm.v1.engine import FinishReason
@@ -159,7 +159,7 @@ class PrometheusStatLogger(StatLoggerBase):
 
         max_model_len = vllm_config.model_config.max_model_len
 
-        self.spec_decoding_prom = SpecDecodingProm(
+        self.spec_decoding_prom = self._create_spec_decoding(
             vllm_config.speculative_config, labelnames, labelvalues)
 
         #
@@ -383,6 +383,10 @@ class PrometheusStatLogger(StatLoggerBase):
             buckets=buckets,
             labelnames=labelnames,
         )
+
+    def _create_spec_decoding(self, config: SpeculativeConfig,
+                              labelnames: list[str], labelvalues: list[str]):
+        return SpecDecodingProm(config, labelnames, labelvalues)
 
     def log_metrics_info(self, type: str, config_obj: SupportsMetricsInfo):
         metrics_info = config_obj.metrics_info()

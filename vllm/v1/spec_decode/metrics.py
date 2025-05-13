@@ -120,8 +120,6 @@ class SpecDecodingProm:
       vllm:spec_decode_num_drafts[$interval]
     """
 
-    _counter_cls = prometheus_client.Counter
-
     def __init__(
         self,
         speculative_config: Optional[SpeculativeConfig],
@@ -132,17 +130,17 @@ class SpecDecodingProm:
         if not self.spec_decoding_enabled:
             return
 
-        self.counter_spec_decode_num_drafts = self._counter_cls(
+        self.counter_spec_decode_num_drafts = self._create_counter(
             name="vllm:spec_decode_num_drafts_total",
             documentation="Number of spec decoding drafts.",
             labelnames=labelnames,
         ).labels(*labelvalues)
-        self.counter_spec_decode_num_draft_tokens = self._counter_cls(
+        self.counter_spec_decode_num_draft_tokens = self._create_counter(
             name="vllm:spec_decode_num_draft_tokens_total",
             documentation="Number of draft tokens.",
             labelnames=labelnames,
         ).labels(*labelvalues)
-        self.counter_spec_decode_num_accepted_tokens = self._counter_cls(
+        self.counter_spec_decode_num_accepted_tokens = self._create_counter(
             name="vllm:spec_decode_num_accepted_tokens_total",
             documentation="Number of accepted tokens.",
             labelnames=labelnames,
@@ -152,7 +150,7 @@ class SpecDecodingProm:
         num_spec_tokens = (speculative_config.num_speculative_tokens
                            if self.spec_decoding_enabled else 0)
         pos_labelnames = labelnames + ["position"]
-        base_counter = self._counter_cls(
+        base_counter = self._create_counter(
             name="vllm:spec_decode_num_accepted_tokens_per_pos",
             documentation="Accepted tokens per draft position.",
             labelnames=pos_labelnames,
@@ -175,3 +173,9 @@ class SpecDecodingProm:
         for pos, counter in enumerate(
                 self.counter_spec_decode_num_accepted_tokens_per_pos):
             counter.inc(spec_decoding_stats.num_accepted_tokens_per_pos[pos])
+
+    def _create_counter(self, name: str, documentation: Optional[str],
+                        labelnames: list[str]):
+        return prometheus_client.Counter(name=name,
+                                         documentation=documentation,
+                                         labelnames=labelnames)
