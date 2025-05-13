@@ -80,7 +80,6 @@ exclude = [
 "vllm/engine/**/*.py" = ["UP006", "UP035"]
 "vllm/executor/**/*.py" = ["UP006", "UP035"]
 "vllm/lora/**/*.py" = ["UP006", "UP035"]
-"vllm/model_executor/layers/**/*.py" = ["UP006", "UP035"]
 "vllm/model_executor/model_loader/**/*.py" = ["UP006", "UP035"]
 "vllm/model_executor/models/**/*.py" = ["UP006", "UP035"]
 "vllm/platforms/**/*.py" = ["UP006", "UP035"]

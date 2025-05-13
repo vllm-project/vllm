@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Optional, Union
 
 import torch
 from torch.nn import Module
@@ -53,7 +53,7 @@ class ModelOptFp8Config(QuantizationConfig):
         return "modelopt"
 
     @classmethod
-    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
         return [torch.bfloat16, torch.half]
 
     @classmethod
@@ -61,11 +61,11 @@ class ModelOptFp8Config(QuantizationConfig):
         return 89
 
     @classmethod
-    def get_config_filenames(cls) -> List[str]:
+    def get_config_filenames(cls) -> list[str]:
         return ["hf_quant_config.json"]
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "ModelOptFp8Config":
+    def from_config(cls, config: dict[str, Any]) -> "ModelOptFp8Config":
         quant_config = cls.get_from_keys(config, ["quantization"])
         quant_method = quant_config["quant_algo"]
         if quant_method not in QUANT_ALGOS:
@@ -107,7 +107,7 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         input_size_per_partition: int,
-        output_partition_sizes: List[int],
+        output_partition_sizes: list[int],
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,
@@ -177,7 +177,7 @@ class ModelOptNvFp4Config(QuantizationConfig):
         self,
         is_checkpoint_nvfp4_serialized: bool,
         kv_cache_quant_algo: str,
-        exclude_modules: List[str],
+        exclude_modules: list[str],
         group_size: int = 16,
     ) -> None:
         self.is_checkpoint_nvfp4_serialized = is_checkpoint_nvfp4_serialized
@@ -195,7 +195,7 @@ class ModelOptNvFp4Config(QuantizationConfig):
         return "nvfp4"
 
     @classmethod
-    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
         return [torch.bfloat16, torch.half, torch.float8_e4m3fn]
 
     @classmethod
@@ -203,11 +203,11 @@ class ModelOptNvFp4Config(QuantizationConfig):
         return 80
 
     @classmethod
-    def get_config_filenames(cls) -> List[str]:
+    def get_config_filenames(cls) -> list[str]:
         return ["hf_quant_config.json"]
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "ModelOptNvFp4Config":
+    def from_config(cls, config: dict[str, Any]) -> "ModelOptNvFp4Config":
         quant_config = cls.get_from_keys(config, ["quantization"])
         quant_method = quant_config["quant_algo"]
         if quant_method not in QUANT_ALGOS:
@@ -227,7 +227,7 @@ class ModelOptNvFp4Config(QuantizationConfig):
         return cls(is_checkpoint_nvfp4_serialized, kv_cache_quant_algo,
                    exclude_modules, group_size)
 
-    def is_layer_excluded(self, prefix: str, exclude_modules: List):
+    def is_layer_excluded(self, prefix: str, exclude_modules: list):
         import re
         for pattern in exclude_modules:
             regex_str = pattern.replace('.', r'\.').replace('*', r'.*')
@@ -296,7 +296,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         input_size_per_partition: int,
-        output_partition_sizes: List[int],
+        output_partition_sizes: list[int],
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,

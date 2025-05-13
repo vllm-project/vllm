@@ -2,7 +2,7 @@
 
 import os
 from importlib.util import find_spec
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 from torch.nn import Module
 
@@ -34,7 +34,7 @@ class NeuronQuantConfig(QuantizationConfig):
     def get_name(self) -> QuantizationMethods:
         return "neuron_quant"
 
-    def get_supported_act_dtypes(self) -> List[str]:
+    def get_supported_act_dtypes(self) -> list[str]:
         return SUPPORTED_QUANT_DTYPE_LIST
 
     @classmethod
@@ -43,11 +43,11 @@ class NeuronQuantConfig(QuantizationConfig):
             "This function should not be called with Neuron Backend")
 
     @staticmethod
-    def get_config_filenames() -> List[str]:
+    def get_config_filenames() -> list[str]:
         return []
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "NeuronQuantConfig":
+    def from_config(cls, config: dict[str, Any]) -> "NeuronQuantConfig":
         quantize_method = cls.get_from_keys(config, ["quantize_method"])
         dequant_dtype = cls.get_from_keys(config, ["dequant_dtype"])
         return cls(dequant_dtype=dequant_dtype,

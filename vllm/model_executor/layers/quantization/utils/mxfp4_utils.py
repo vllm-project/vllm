@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Tuple
 
 import torch
 
@@ -9,7 +8,7 @@ OCP_MX_BLOCK_SIZE = 32
 def per_token_group_quant_mxfp4(x: torch.Tensor,
                                 block_k: int,
                                 scale_calculation_mode: str = "even"
-                                ) -> Tuple[torch.Tensor, torch.Tensor]:
+                                ) -> tuple[torch.Tensor, torch.Tensor]:
     try:
         from quark.torch.kernel.hw_emulation.hw_emulation_interface import (
             fake_quantize_fp4_fp6_per_group_with_scale)
