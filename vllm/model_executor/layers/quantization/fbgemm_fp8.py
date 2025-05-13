@@ -63,7 +63,9 @@ class FBGEMMFp8Config(QuantizationConfig):
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         if isinstance(layer, LinearBase):
-            if is_layer_skipped(prefix, self.ignore_list):
+            if is_layer_skipped(prefix=prefix,
+                                ignored_layers=self.ignore_list,
+                                fused_mapping=self.packed_modules_mapping):
                 return UnquantizedLinearMethod()
             return FBGEMMFp8LinearMethod(self)
         return None
