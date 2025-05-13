@@ -51,7 +51,7 @@ from vllm_hpu_extension.bucketing.common import get_bucketing_context
 
 logger = init_logger(__name__)
 
-_TYPE_CACHE = {}
+_TYPE_CACHE: dict[str, dict[str, Any]] = {}
 
 
 def setup_profiler(warmup, active):
@@ -319,9 +319,10 @@ def get_path_to_rope(model: torch.nn.Module):
     return path_to_rope
 
 
-class HpuModelAdapter:
+class HpuModelAdapter(torch.nn.Module):
 
     def __init__(self, model, vllm_config, layer_names):
+        super().__init__()
         self.model = model
         self.prefill_use_fusedsdpa = "fsdpa" in enabled_flags()
         self.recompute_cos_sin = os.getenv('VLLM_COS_SIN_RECOMPUTE',
@@ -330,40 +331,6 @@ class HpuModelAdapter:
         self.block_size = vllm_config.cache_config.block_size
         self.dtype = vllm_config.model_config.dtype
         self.layer_names = layer_names
-
-        enforce_eager = vllm_config.model_config.enforce_eager
-        if not is_fake_hpu() and not htorch.utils.internal.is_lazy(
-        ) and not enforce_eager:
-            if os.getenv('VLLM_REGIONAL_COMPILATION',
-                         'true').lower() == 'true':
-                self.regional_compilation_layers_list = [
-                    RMSNorm, VocabParallelEmbedding
-                ]
-                self._regional_compilation(self.model)
-            else:
-                self.model = torch.compile(self.model,
-                                           backend='hpu_backend',
-                                           dynamic=False)
-
-    def _regional_compilation(self,
-                              module,
-                              parent_module=None,
-                              module_name=None):
-        if isinstance(module, torch.nn.ModuleList):
-            for children_name, children_module in module.named_children():
-                self._compile_region(module, children_name, children_module)
-        elif any(
-                isinstance(module, layer)
-                for layer in self.regional_compilation_layers_list):
-            self._compile_region(parent_module, module_name, module)
-        else:
-            for children_name, children_module in module.named_children():
-                self._regional_compilation(children_module, module,
-                                           children_name)
-
-    def _compile_region(self, model, name, module):
-        module = torch.compile(module, backend='hpu_backend', dynamic=False)
-        setattr(model, name, module)
 
     def _set_attn_bias(self, attn_metadata, batch_size, seq_len, device,
                        dtype):
@@ -429,8 +396,20 @@ class HpuModelAdapter:
             block_groups.masked_fill_(oob_values, batch_size)
             metadata = metadata._replace(block_groups=block_groups)
         block_mapping = block_mapping.to(dtype)
-        metadata = metadata._replace(block_mapping=block_mapping,
-                                     attn_bias=attn_bias)
+
+        # Torch compile dynamo doesn't support calling any named tuple
+        # dynamic methods other than len and get_attr so we need to
+        # mimic behaviour of tuple._replace manually
+        TrimmedAttentionMetadata = _TYPE_CACHE['TrimmedAttentionMetadata'][
+            'object']
+        fields = _TYPE_CACHE['TrimmedAttentionMetadata']['fields']
+        metadata_dict = {
+            field: getattr(metadata, field)
+            for field in fields  # type: ignore
+        }  # type: ignore
+        metadata_dict['attn_bias'] = attn_bias
+        metadata_dict['block_mapping'] = block_mapping
+        metadata = TrimmedAttentionMetadata(**metadata_dict)  # type: ignore
         return metadata
 
     def _set_indices_and_offsets(self, metadata, block_size, is_prompt):
@@ -542,9 +521,11 @@ def subtuple(obj: object,
     else:
         values = {f: to_override.get(f, getattr(obj, f)) for f in fields}
     if typename not in _TYPE_CACHE:
-        _TYPE_CACHE[typename] = collections.namedtuple(typename,
-                                                       ' '.join(fields))
-    return _TYPE_CACHE[typename](**values)
+        _TYPE_CACHE[typename] = {
+            'object': collections.namedtuple(typename, ' '.join(fields)),
+            'fields': fields
+        }
+    return _TYPE_CACHE[typename]['object'](**values)  # type: ignore
 
 
 def trim_attn_metadata(metadata: HPUAttentionMetadataV1) -> object:
@@ -1841,6 +1822,7 @@ class HPUModelRunner:
             hidden_layer_markstep_interval)
         path_to_rope = get_path_to_rope(self.model)
         torch.hpu.synchronize()
+
         with HabanaMemoryProfiler() as m:  # noqa: SIM117
             self.model = _maybe_wrap_in_hpu_graph(self.model,
                                                   vllm_config=self.vllm_config,
@@ -1848,6 +1830,74 @@ class HPUModelRunner:
         self.model_memory_usage = m.consumed_device_memory
         logger.info("Wrapping in HPUGraph took %.4f GB",
                     self.model_memory_usage / float(2**30))
+
+        with HabanaMemoryProfiler() as m:
+            self._maybe_compile(self.model,
+                                vllm_config=self.vllm_config,
+                                layer_names=path_to_rope)
+        self.model_memory_usage = m.consumed_device_memory
+        logger.info("Compilation took %.4f GB",
+                    self.model_memory_usage / float(2**30))
+
+    def _maybe_compile(self, *args, **kwargs):
+        if not is_fake_hpu() and not htorch.utils.internal.is_lazy(
+        ) and not self.vllm_config.model_config.enforce_eager:
+            if os.getenv('VLLM_REGIONAL_COMPILATION',
+                         'true').strip().lower() in ("1", "true"):
+                compiled_methods = ['_set_block_mapping']
+                for method_name in compiled_methods:
+                    method = getattr(self.model, method_name)
+                    self._compile_region(self.model, method_name, method)
+                self.regional_compilation_layers_list = [
+                    RMSNorm, VocabParallelEmbedding
+                ]
+                self._regional_compilation(self.model)
+            else:
+                self.model = self._compile(self.model)
+
+    def _regional_compilation(self,
+                              module,
+                              parent_module=None,
+                              module_name=None):
+        if isinstance(module, torch.nn.ModuleList):
+            for children_name, children_module in module.named_children():
+                self._compile_region(module, children_name, children_module)
+        elif any(
+                isinstance(module, layer)
+                for layer in self.regional_compilation_layers_list):
+            self._compile_region(
+                parent_module,
+                module_name,
+                module,
+            )
+        else:
+            for children_name, children_module in module.named_children():
+                self._regional_compilation(children_module, module,
+                                           children_name)
+
+    def _compile_region(self, model, name, module):
+        module = self._compile(module)
+        setattr(model, name, module)
+
+    def _compile(self, module):
+        if not hasattr(self, '_compile_config'):
+            fullgraph = os.getenv('VLLM_T_COMPILE_FULLGRAPH',
+                                  'false').strip().lower() in ("1", "true")
+            dynamic = os.getenv('VLLM_T_COMPILE_DYNAMIC_SHAPES',
+                                'false').strip().lower() in ("1", "true")
+            self._compile_config = {'fullgraph': fullgraph, 'dynamic': dynamic}
+        fullgraph = self._compile_config['fullgraph']
+        dynamic = self._compile_config['dynamic']
+        if dynamic:
+            return torch.compile(module,
+                                 backend='hpu_backend',
+                                 fullgraph=fullgraph,
+                                 options={"force_static_compile": True})
+        else:
+            return torch.compile(module,
+                                 backend='hpu_backend',
+                                 fullgraph=fullgraph,
+                                 dynamic=False)
 
     def _use_graphs(self, batch_size, seq_len, num_blocks, phase):
         if self.model_config.enforce_eager:
