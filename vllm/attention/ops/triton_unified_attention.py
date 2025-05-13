@@ -94,7 +94,9 @@ def kernel_unified_attention_2d(
     if q_block_local_idx * BLOCK_Q >= cur_batch_query_len:
         return
 
-    offs_m = tl.arange(0, BLOCK_Q * num_queries_per_kv)
+    # avoid power of 2 issue and pad it
+    BLOCK_Q_NUM_QUERY_PER_KV_PADDED: tl.constexpr = triton.next_power_of_2(BLOCK_Q * num_queries_per_kv)
+    offs_m = tl.arange(0, BLOCK_Q_NUM_QUERY_PER_KV_PADDED)
     offs_d = tl.arange(0, HEAD_SIZE_PADDED)
 
     query_pos = q_block_local_idx * BLOCK_Q + offs_m // num_queries_per_kv
@@ -119,11 +121,11 @@ def kernel_unified_attention_2d(
 
     block_table_offset = seq_idx * block_table_stride
 
-    M = tl.full([BLOCK_Q * num_queries_per_kv],
+    M = tl.full([BLOCK_Q_NUM_QUERY_PER_KV_PADDED],
                 float("-inf"),
                 dtype=tl.float32)
-    L = tl.full([BLOCK_Q * num_queries_per_kv], 1.0, dtype=tl.float32)
-    acc = tl.zeros([BLOCK_Q * num_queries_per_kv, HEAD_SIZE_PADDED],
+    L = tl.full([BLOCK_Q_NUM_QUERY_PER_KV_PADDED], 1.0, dtype=tl.float32)
+    acc = tl.zeros([BLOCK_Q_NUM_QUERY_PER_KV_PADDED, HEAD_SIZE_PADDED],
                    dtype=tl.float32)
 
     # sequence len for this particular sequence
@@ -188,7 +190,7 @@ def kernel_unified_attention_2d(
         seq_mask = seq_offset[None, :] < context_len + query_pos[:, None] + 1
 
         # S : (BLOCK_Q * num_queries_per_kv, BLOCK_SIZE,)
-        S = tl.zeros(shape=(BLOCK_Q * num_queries_per_kv, BLOCK_SIZE),
+        S = tl.zeros(shape=(BLOCK_Q_NUM_QUERY_PER_KV_PADDED, BLOCK_SIZE),
                      dtype=tl.float32)
 
         S += scale * tl.dot(Q, K)
