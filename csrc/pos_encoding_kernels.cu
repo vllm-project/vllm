@@ -42,9 +42,10 @@ inline __device__ void apply_rotary_embedding(
                                    // [batch_size, seq_len, num_kv_heads,
                                    // head_size] or [num_tokens, num_kv_heads,
                                    // head_size]
-    const scalar_t* cache_ptr, const int head_size, const int64_t head_stride,
-    const int num_heads, const int num_kv_heads, const int rot_dim,
-    const int token_idx, const int64_t query_stride, const int64_t key_stride) {
+    const scalar_t* cache_ptr, const int head_size, const int num_heads,
+    const int num_kv_heads, const int rot_dim, const int token_idx,
+    const int64_t query_stride, const int64_t key_stride,
+    const int64_t head_stride) {
   const int embed_dim = rot_dim / 2;
   const scalar_t* cos_ptr = cache_ptr;
   const scalar_t* sin_ptr = cache_ptr + embed_dim;
@@ -94,8 +95,8 @@ __global__ void rotary_embedding_kernel(
   const scalar_t* cache_ptr = cos_sin_cache + pos * rot_dim;
 
   apply_rotary_embedding<scalar_t, IS_NEOX>(
-      query, key, cache_ptr, head_size, head_stride, num_heads, num_kv_heads,
-      rot_dim, token_idx, query_stride, key_stride);
+      query, key, cache_ptr, head_size, num_heads, num_kv_heads, rot_dim,
+      token_idx, query_stride, key_stride, head_stride);
 }
 
 template <typename scalar_t, bool IS_NEOX>
@@ -123,8 +124,8 @@ __global__ void batched_rotary_embedding_kernel(
       cos_sin_cache + (cos_sin_cache_offset + pos) * rot_dim;
 
   apply_rotary_embedding<scalar_t, IS_NEOX>(
-      query, key, cache_ptr, head_size, head_stride, num_heads, num_kv_heads,
-      rot_dim, token_idx, query_stride, key_stride);
+      query, key, cache_ptr, head_size, num_heads, num_kv_heads, rot_dim,
+      token_idx, query_stride, key_stride, head_stride);
 }
 
 }  // namespace vllm
@@ -186,9 +187,8 @@ void rotary_embedding(
   // for flat [*, heads*head_size], heads blocks are contiguous of size
   // head_size
   int query_ndim = query.dim();
-  int64_t head_stride = (query_ndim == positions_ndim + 2)
-                            ? query.stride(query_ndim - 1)
-                            : head_size;
+  int64_t head_stride =
+      (query_ndim == positions_ndim + 2) ? query.stride(-2) : head_size;
 
   dim3 grid(num_tokens);
   dim3 block(std::min<int64_t>(num_heads * rot_dim / 2, 512));
@@ -277,9 +277,8 @@ void batched_rotary_embedding(
   // for flat [*, heads*head_size], heads blocks are contiguous of size
   // head_size
   int query_ndim = query.dim();
-  int64_t head_stride = (query_ndim == positions_ndim + 2)
-                            ? query.stride(query_ndim - 1)
-                            : head_size;
+  int64_t head_stride =
+      (query_ndim == positions_ndim + 2) ? query.stride(-2) : head_size;
 
   dim3 grid(num_tokens);
   dim3 block(std::min<int64_t>(num_heads * rot_dim / 2, 512));
