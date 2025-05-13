@@ -124,9 +124,8 @@ class APIServerProcessManager:
                             "died with exit code %d", proc.name, proc.pid,
                             proc.exitcode)
                         raise RuntimeError(
-                            "API server process %s died with exit code %d. "
-                            "All API server processes will be terminated.",
-                            proc.name, proc.exitcode)
+                            f"API server process {proc.name} (PID: {proc.pid}) "
+                            f"died with exit code {proc.exitcode}")
 
             # If we've processed all sentinels, all processes completed
             # successfully
