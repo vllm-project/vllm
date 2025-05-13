@@ -326,6 +326,13 @@ class Worker(WorkerBase):
             max_size=max_size,
         )
 
+    def save_tensorized_model(
+        self,
+        tensorizer_config,
+    ) -> None:
+        self.model_runner.save_tensorized_model(
+            tensorizer_config=tensorizer_config, )
+
 
 def init_worker_distributed_environment(
     vllm_config: VllmConfig,

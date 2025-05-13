@@ -2,7 +2,6 @@
 
 import gc
 import json
-import os
 import tempfile
 
 import openai
@@ -20,11 +19,6 @@ from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "meta-llama/Llama-2-7b-hf"
 LORA_PATH = "yard1/llama-2-7b-sql-lora-test"
-
-USING_V1 = False
-v1_set = os.getenv("VLLM_USE_V1") or None
-if v1_set is not None and v1_set != "0":
-    USING_V1 = True
 
 
 def _cleanup():
@@ -50,15 +44,10 @@ def model_uri(tmp_dir):
 
 @pytest.fixture(scope="module")
 def tensorize_model_and_lora(tmp_dir, model_uri):
-    if USING_V1:
-        pytest.skip("Tensorizer serialization is not yet supported with V1.")
-
     tensorizer_config = TensorizerConfig(tensorizer_uri=model_uri,
                                          lora_dir=tmp_dir)
     args = EngineArgs(model=MODEL_NAME)
 
-    _original = os.getenv("VLLM_USE_V1") or None
-    os.environ["VLLM_USE_V1"] = "0"
     tensorize_lora_adapter(LORA_PATH, tensorizer_config)
     tensorize_vllm_model(args, tensorizer_config)
 
@@ -67,10 +56,6 @@ def tensorize_model_and_lora(tmp_dir, model_uri):
     # when this fixture is used for a test
     _cleanup()
     yield
-    if _original is not None:
-        os.environ["VLLM_USE_V1"] = _original
-    else:
-        del os.environ["VLLM_USE_V1"]
 
 
 @pytest.fixture(scope="module")
@@ -95,9 +80,6 @@ async def client(server):
         yield async_client
 
 
-@pytest.mark.skipif(USING_V1,
-                    reason="Tensorizer serialization is not yet "
-                    "supported with V1.")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_single_completion(client: openai.AsyncOpenAI, model_name: str):
@@ -117,9 +99,6 @@ async def test_single_completion(client: openai.AsyncOpenAI, model_name: str):
         completion_tokens=5, prompt_tokens=6, total_tokens=11)
 
 
-@pytest.mark.skipif(USING_V1,
-                    reason="Tensorizer serialization is not yet "
-                    "supported with V1.")
 def test_confirm_deserialize_and_serve(model_uri, tmp_dir,
                                        tensorize_model_and_lora):
     tc = TensorizerConfig(tensorizer_uri=model_uri, lora_dir=tmp_dir)
