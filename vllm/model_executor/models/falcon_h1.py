@@ -1,59 +1,40 @@
 """Inference-only FalconH1 model."""
-from typing import Iterable, List, Optional, Set, Tuple
+from typing import Iterable, Optional, Set, Tuple
 
 import torch
 from torch import nn
 from transformers import FalconH1Config
 
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.layer import Attention
-from vllm.forward_context import get_forward_context
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (
-    MergedColumnParallelLinear,
-    QKVParallelLinear,
-    RowParallelLinear,
-)
+from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
+                                               QKVParallelLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba2_metadata import (
     Mamba2Metadata, prepare_mamba2_metadata)
 from vllm.model_executor.layers.mamba.mamba_mixer2 import (
-    MambaMixer2,
-    extra_groups_for_head_shards,
-)
+    MambaMixer2, extra_groups_for_head_shards)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
-    ParallelLMHead,
-    VocabParallelEmbedding,
-)
+    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.mamba_cache import (
-    MambaCacheManager,
-    MambaCacheParams,
-)
+from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
+                                                    MambaCacheParams)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import (
-    HasInnerState,
-    IsHybrid,
-    SupportsLoRA,
-    SupportsPP,
-    SupportsV0Only,
-)
-from .utils import (
-    is_pp_missing_parameter,
-    PPMissingLayer,
-    make_empty_intermediate_tensors_factory,
-    make_layers,
-    maybe_prefix,
-)
+from .interfaces import (HasInnerState, IsHybrid, SupportsLoRA, SupportsPP,
+                         SupportsV0Only)
+from .utils import (PPMissingLayer, is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 
 class FalconH1MLP(nn.Module):
@@ -80,16 +61,13 @@ class FalconH1MLP(nn.Module):
         self.intermediate_size = config.intermediate_size
         self.gate_multiplier, self.down_multiplier = config.mlp_multipliers
         if config.hidden_act != "silu":
-            raise ValueError(
-                f"Unsupported activation: {config.hidden_act}. "
-                "Only silu is supported for now."
-            )
+            raise ValueError(f"Unsupported activation: {config.hidden_act}. "
+                             "Only silu is supported for now.")
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
         x, _ = self.gate_up_proj(x)
-        #TODO(ilyas): optimize slicing and mul
-        x[:, : self.intermediate_size // self.tp_size] *= self.gate_multiplier 
+        x[:, :self.intermediate_size // self.tp_size] *= self.gate_multiplier 
         x = self.act_fn(x)
         x, _ = self.down_proj(x)
         x = x * self.down_multiplier
@@ -107,11 +85,8 @@ class FalconH1SSMDecoderLayer(nn.Module):
         self.config = config
         self.tp_size = get_tensor_model_parallel_world_size()
 
-        self.d_ssm = (
-            int(config.mamba_expand * config.hidden_size)
-            if config.mamba_d_ssm is None
-            else config.mamba_d_ssm
-        )
+        self.d_ssm = (int(config.mamba_expand * config.hidden_size)
+                      if config.mamba_d_ssm is None else config.mamba_d_ssm)
 
         self.mamba = MambaMixer2(
             hidden_size=config.hidden_size,
@@ -153,41 +128,38 @@ class FalconH1SSMDecoderLayer(nn.Module):
             - S:         SSM state size per group
             - All indices are divided by tp_size to support tensor parallelism
         """
-        vector_shape = (
-            2 * self.d_ssm
-            + 2 * self.groups_time_state_size
-            + self.config.mamba_n_heads
-        ) // self.tp_size
+        vector_shape = (2 * self.d_ssm + 2 * self.groups_time_state_size +
+                        self.config.mamba_n_heads) // self.tp_size
         mup_vector = torch.ones(1, vector_shape)
         # Z vector 0 -> d_ssm
-        mup_vector[:, : self.d_ssm // self.tp_size] *= self.zxbcdt_multipliers[
-            0
-        ]
+        mup_vector[:, :self.d_ssm //
+                   self.tp_size] *= self.zxbcdt_multipliers[0]
         # X vector d_ssm -> 2 * d_ssm
-        mup_vector[
-            :, (self.d_ssm // self.tp_size) : (2 * self.d_ssm // self.tp_size)
-        ] *= self.zxbcdt_multipliers[1]
+        mup_vector[:,
+                   (self.d_ssm //
+                    self.tp_size):(2 * self.d_ssm //
+                                   self.tp_size)] *= self.zxbcdt_multipliers[1]
         # B vector 2 * d_ssm -> 2 * d_ssm + (n_group * d_state)
         mup_vector[
             :,
-            (2 * self.d_ssm)
-            // self.tp_size : (2 * self.d_ssm + self.groups_time_state_size)
-            // self.tp_size,
+            (2 * self.d_ssm) //
+            self.tp_size:(2 * self.d_ssm + self.groups_time_state_size) //
+            self.tp_size,
         ] *= self.zxbcdt_multipliers[2]
-        # C vector 2 * d_ssm + (n_group * d_state) 
+        # C vector 2 * d_ssm + (n_group * d_state)
         # -> 2 * d_ssm + 2 * (n_group * d_state)
         mup_vector[
             :,
-            (2 * self.d_ssm + self.groups_time_state_size)
-            // self.tp_size : (2 * self.d_ssm + 2 * self.groups_time_state_size)
-            // self.tp_size,
+            (2 * self.d_ssm + self.groups_time_state_size) //
+            self.tp_size:(2 * self.d_ssm + 2 * self.groups_time_state_size) //
+            self.tp_size,
         ] *= self.zxbcdt_multipliers[3]
-        # dt vector 2 * d_ssm + 2 * (n_group * d_state) 
+        # dt vector 2 * d_ssm + 2 * (n_group * d_state)
         # -> 2 * d_ssm + 2 * (n_group * d_state) + n_heads
         mup_vector[
             :,
-            (2 * self.d_ssm + 2 * self.groups_time_state_size)
-            // self.tp_size :,
+            (2 * self.d_ssm + 2 * self.groups_time_state_size) //
+            self.tp_size:,
         ] *= self.zxbcdt_multipliers[4]
 
         self.register_buffer("mup_vector", mup_vector, persistent=False)
@@ -220,9 +192,8 @@ class FalconH1AttentionDecoderLayer(nn.Module):
         super().__init__()
         rope_theta = getattr(config, "rope_theta", 1e11)
         rope_scaling = getattr(config, "rope_scaling", None)
-        max_position_embeddings = getattr(
-            config, "max_position_embeddings", 8192
-        )
+        max_position_embeddings = getattr(config, "max_position_embeddings",
+                                          8192)
         self.hidden_size = config.hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = config.num_attention_heads
@@ -238,11 +209,8 @@ class FalconH1AttentionDecoderLayer(nn.Module):
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_kv_heads == 0
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        self.head_dim = (
-            config.hidden_size // self.total_num_heads
-            if getattr(config, "head_dim", None) is None
-            else config.head_dim
-        )
+        self.head_dim = (config.hidden_size // self.total_num_heads if getattr(
+            config, "head_dim", None) is None else config.head_dim)
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
@@ -361,12 +329,11 @@ class FalconH1ParallelHybrid(nn.Module):
 
         self.feed_forward = FalconH1MLP(config)
 
-        self.input_layernorm = RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
-        self.pre_ff_layernorm = RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
+        self.input_layernorm = RMSNorm(config.hidden_size,
+                                       eps=config.rms_norm_eps)
+        self.pre_ff_layernorm = RMSNorm(config.hidden_size,
+                                        eps=config.rms_norm_eps)
+
 
     def forward(
         self,
@@ -402,8 +369,7 @@ class FalconH1ParallelHybrid(nn.Module):
         # We assume both branches produce outputs of the same
         # dimensionality (config.hidden_size).
         hidden_states = (attn_hidden * self.attn_out_multiplier) + (
-            ssm_hidden * self.ssm_out_multiplier
-        )
+            ssm_hidden * self.ssm_out_multiplier)
         hidden_states = hidden_states + residual
 
         # feed-forward
@@ -423,11 +389,8 @@ class FalconH1Model(nn.Module):
         lora_config = vllm_config.lora_config
 
         self.config = config
-        lora_vocab = (
-            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
-            if lora_config
-            else 0
-        )
+        lora_vocab = ((lora_config.lora_extra_vocab_size *
+                       (lora_config.max_loras or 1)) if lora_config else 0)
         self.vocab_size = config.vocab_size + lora_vocab
         self.org_vocab_size = config.vocab_size
         if get_pp_group().is_first_rank:
@@ -453,17 +416,13 @@ class FalconH1Model(nn.Module):
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
-            config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers"
-        )
+            config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers")
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size
-            )
-        )
+                ["hidden_states", "residual"], config.hidden_size))
         if get_pp_group().is_last_rank:
             self.final_layernorm = RMSNorm(
-                config.hidden_size, eps=config.rms_norm_eps
-            )
+                config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.final_layernorm = PPMissingLayer()
 
@@ -492,10 +451,8 @@ class FalconH1Model(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds * self.embedding_multiplier
             else:
-                hidden_states = (
-                    self.get_input_embeddings(input_ids)
-                    * self.embedding_multiplier
-                )
+                hidden_states = (self.get_input_embeddings(input_ids) *
+                                 self.embedding_multiplier)
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
@@ -510,17 +467,15 @@ class FalconH1Model(nn.Module):
                 mamba2_metadata=mamba2_metadata,
             )
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors(
-                {"hidden_states": hidden_states,
-                 }
-            )
+            return IntermediateTensors({
+                "hidden_states": hidden_states,
+            })
         hidden_states = self.final_layernorm(hidden_states)
         return hidden_states
 
 
-class FalconH1ForCausalLM(
-    nn.Module, HasInnerState, SupportsLoRA, SupportsPP, IsHybrid, SupportsV0Only
-):
+class FalconH1ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
+                          IsHybrid, SupportsV0Only):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["up_proj", "down_proj"],
@@ -548,18 +503,16 @@ class FalconH1ForCausalLM(
         cache_config = vllm_config.cache_config
         lora_config = vllm_config.lora_config
         scheduler_config = vllm_config.scheduler_config
-        assert (
-            not cache_config.enable_prefix_caching
-        ), "FalconH1 currently does not support prefix caching"
+        assert (not cache_config.enable_prefix_caching
+                ), "FalconH1 currently does not support prefix caching"
 
         self.quant_config = vllm_config.quant_config
 
         super().__init__()
         self.config = config
         self.scheduler_config = scheduler_config
-        self.model = FalconH1Model(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
-        )
+        self.model = FalconH1Model(vllm_config=vllm_config,
+                                   prefix=maybe_prefix(prefix, "model"))
         self.tie_word_embeddings = config.tie_word_embeddings
         self.unpadded_vocab_size = config.vocab_size
         self.mamba_cache: Optional[MambaCacheManager] = None
@@ -575,12 +528,12 @@ class FalconH1ForCausalLM(
                     # We need bigger padding if using lora for kernel
                     # compatibility
                     if not lora_config
-                    else lora_config.lora_vocab_padding_size
-                ),
+                    else lora_config.lora_vocab_padding_size),
             )
             self.lm_head_multiplier = config.lm_head_multiplier
             if self.tie_word_embeddings:
-                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
+                self.lm_head = self.lm_head.tie_weights(
+                    self.model.embed_tokens)
             # Used to track and store by the Mamba cache between steps.
 
             self.logits_processor = LogitsProcessor(
@@ -592,8 +545,7 @@ class FalconH1ForCausalLM(
             self.lm_head = PPMissingLayer()
 
         self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors
-        )
+            self.model.make_empty_intermediate_tensors)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -609,7 +561,8 @@ class FalconH1ForCausalLM(
         if self.mamba_cache is None:
             self.mamba_cache = MambaCacheManager(
                 self.vllm_config,
-                self.lm_head.weight.dtype if hasattr(self.lm_head, 'weight') else torch.bfloat16,
+                self.lm_head.weight.dtype
+                if hasattr(self.lm_head, 'weight') else torch.bfloat16,
                 self.config.num_hidden_layers,
                 *self._get_mamba_cache_shape(),
             )
@@ -626,29 +579,26 @@ class FalconH1ForCausalLM(
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
         return self.mamba_cache.copy_inputs_before_cuda_graphs(
-            input_buffers, **kwargs
-        )
+            input_buffers, **kwargs)
 
     def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
         return self.mamba_cache.get_seqlen_agnostic_capture_inputs(batch_size)
 
-    def _get_mamba_cache_shape(self) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+    def _get_mamba_cache_shape(
+            self) -> Tuple[Tuple[int, int], Tuple[int, int]]:
         world_size = get_tensor_model_parallel_world_size()
         hidden_size = self.config.hidden_size
 
         conv_state_shape, temporal_state_shape = None, None
 
-        intermediate_size = (
-            int(self.config.mamba_expand * hidden_size)
-            if self.config.mamba_d_ssm is None
-            else self.config.mamba_d_ssm
-        )
+        intermediate_size = (int(self.config.mamba_expand *
+                                 hidden_size) if self.config.mamba_d_ssm
+                             is None else self.config.mamba_d_ssm)
 
         # if n_groups is not divisible by world_size, need to extend the shards
         # to ensure all groups needed by a head is sharded along with it
         n_groups = self.config.mamba_n_groups + extra_groups_for_head_shards(
-            self.config.mamba_n_groups, world_size
-        )
+            self.config.mamba_n_groups, world_size)
 
         # - heads and n_groups are TP-ed
         conv_dim = intermediate_size + 2 * n_groups * self.config.mamba_d_state
@@ -673,14 +623,12 @@ class FalconH1ForCausalLM(
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(
-            self.lm_head, hidden_states, sampling_metadata
-        )
+            self.lm_head, hidden_states, sampling_metadata)
         return logits
 
 
-    def load_weights(
-        self, weights: Iterable[Tuple[str, torch.Tensor]]
-    ) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -727,9 +675,8 @@ class FalconH1ForCausalLM(
                     continue
 
                 param = params_dict[name]
-                weight_loader = getattr(
-                    param, "weight_loader", default_weight_loader
-                )
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
 
