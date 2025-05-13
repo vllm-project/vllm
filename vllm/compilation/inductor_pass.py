@@ -5,7 +5,7 @@ import inspect
 import json
 import types
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, Optional, Union
+from typing import Any, Callable, Optional, Union
 
 import torch
 from torch import fx
@@ -83,7 +83,7 @@ class InductorPass(CustomGraphPass):
         return hasher.hexdigest()
 
     @staticmethod
-    def hash_dict(dict_: Dict[Any, Any]):
+    def hash_dict(dict_: dict[Any, Any]):
         """
         Utility method to hash a dictionary, can alternatively be used for uuid.
         :return: A sha256 hash of the json rep of the dictionary.

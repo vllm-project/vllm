@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 import torch._inductor.pattern_matcher as pm
@@ -125,7 +125,7 @@ class MiddleAllReduceRMSNormPattern(AllReduceRMSNormPattern):
             residual: torch.Tensor,
             mm_1: torch.Tensor,
             rms_norm_weights: torch.Tensor,
-        ) -> Tuple[torch.Tensor, torch.Tensor]:
+        ) -> tuple[torch.Tensor, torch.Tensor]:
             all_reduce = tensor_model_parallel_all_reduce(mm_1)
 
             rmsnorm = torch.ops.higher_order.auto_functionalized(
@@ -142,7 +142,7 @@ class MiddleAllReduceRMSNormPattern(AllReduceRMSNormPattern):
             residual: torch.Tensor,
             mm_1: torch.Tensor,
             rms_norm_weights: torch.Tensor,
-        ) -> Tuple[torch.Tensor, torch.Tensor]:
+        ) -> tuple[torch.Tensor, torch.Tensor]:
             tp = get_tp_group()
             tp_size = get_tensor_model_parallel_world_size()
             reduce_scatter = torch.ops.vllm.reduce_scatter.default(
@@ -190,7 +190,7 @@ class LastAllReduceRMSNormPattern(AllReduceRMSNormPattern):
             residual: torch.Tensor,
             mm_1: torch.Tensor,
             rms_norm_weights: torch.Tensor,
-        ) -> Tuple[torch.Tensor, torch.Tensor]:
+        ) -> tuple[torch.Tensor, torch.Tensor]:
             all_reduce = tensor_model_parallel_all_reduce(mm_1)
 
             rmsnorm = torch.ops.higher_order.auto_functionalized(
@@ -207,7 +207,7 @@ class LastAllReduceRMSNormPattern(AllReduceRMSNormPattern):
             residual: torch.Tensor,
             mm_1: torch.Tensor,
             rms_norm_weights: torch.Tensor,
-        ) -> Tuple[torch.Tensor, torch.Tensor]:
+        ) -> tuple[torch.Tensor, torch.Tensor]:
             tp = get_tp_group()
             tp_size = get_tensor_model_parallel_world_size()
             reduce_scatter = torch.ops.vllm.reduce_scatter.default(

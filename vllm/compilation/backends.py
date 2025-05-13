@@ -5,8 +5,9 @@ import dataclasses
 import os
 import pprint
 import time
+from collections.abc import Sequence
 from contextlib import ExitStack
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Optional
 from unittest.mock import patch
 
 import torch
@@ -56,7 +57,7 @@ class CompilerManager:
     """
 
     def __init__(self, compilation_config: CompilationConfig):
-        self.cache: Dict[Tuple[Optional[int], int, str], Any] = dict()
+        self.cache: dict[tuple[Optional[int], int, str], Any] = dict()
         self.is_cache_updated = False
         self.compilation_config = compilation_config
         self.compiler = make_compiler(compilation_config)
@@ -90,7 +91,7 @@ class CompilerManager:
 
     def load(self,
              graph: fx.GraphModule,
-             example_inputs: List[Any],
+             example_inputs: list[Any],
              graph_index: int,
              runtime_shape: Optional[int] = None) -> Optional[Callable]:
         if (runtime_shape, graph_index, self.compiler.name) not in self.cache:
@@ -186,7 +187,7 @@ class SplitItem:
 
 
 def split_graph(graph: fx.GraphModule,
-                ops: List[str]) -> Tuple[fx.GraphModule, List[SplitItem]]:
+                ops: list[str]) -> tuple[fx.GraphModule, list[SplitItem]]:
     # split graph by ops
     subgraph_id = 0
     node_to_subgraph_id = {}
@@ -252,7 +253,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
     """
 
     def __init__(self, module: torch.fx.GraphModule,
-                 compile_submod_names: List[str], vllm_config: VllmConfig,
+                 compile_submod_names: list[str], vllm_config: VllmConfig,
                  graph_pool, vllm_backend: "VllmBackend"):
         super().__init__(module)
         from torch._guards import detect_fake_mode
@@ -274,8 +275,8 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
             return super().run(*fake_args)
 
     def call_module(self, target: torch.fx.node.Target,
-                    args: Tuple[torch.fx.node.Argument,
-                                ...], kwargs: Dict[str, Any]) -> Any:
+                    args: tuple[torch.fx.node.Argument,
+                                ...], kwargs: dict[str, Any]) -> Any:
         assert isinstance(target, str)
         output = super().call_module(target, args, kwargs)
 
@@ -326,12 +327,12 @@ class VllmBackend:
     graph: fx.GraphModule
     # the stiching graph module for all the piecewise graphs
     split_gm: fx.GraphModule
-    piecewise_graphs: List[SplitItem]
+    piecewise_graphs: list[SplitItem]
     returned_callable: Callable
     # Inductor passes to run on the graph pre-defunctionalization
     post_grad_passes: Sequence[Callable]
-    sym_tensor_indices: List[int]
-    input_buffers: List[torch.Tensor]
+    sym_tensor_indices: list[int]
+    input_buffers: list[torch.Tensor]
     compiler_manager: CompilerManager
 
     def __init__(
@@ -573,14 +574,14 @@ class ConcreteSizeEntry:
 
     # for cudagraph debugging, track the input addresses
     # during capture, and check if they are the same during replay
-    input_addresses: Optional[List[int]] = None
+    input_addresses: Optional[list[int]] = None
 
 
 class PiecewiseBackend:
 
     def __init__(self, graph: fx.GraphModule, vllm_config: VllmConfig,
                  graph_pool: Any, piecewise_compile_index: int,
-                 total_piecewise_compiles: int, sym_shape_indices: List[int],
+                 total_piecewise_compiles: int, sym_shape_indices: list[int],
                  compiled_graph_for_general_shape: Callable,
                  vllm_backend: VllmBackend):
         """
@@ -608,9 +609,9 @@ class PiecewiseBackend:
         self.is_last_graph = (
             piecewise_compile_index == total_piecewise_compiles - 1)
 
-        self.compile_sizes: Set[int] = set(
+        self.compile_sizes: set[int] = set(
             self.compilation_config.compile_sizes)
-        self.cudagraph_capture_sizes: Set[int] = set(
+        self.cudagraph_capture_sizes: set[int] = set(
             self.compilation_config.cudagraph_capture_sizes
         ) if self.compilation_config.use_cudagraph else set()
 
@@ -624,11 +625,11 @@ class PiecewiseBackend:
 
         # the entries for different shapes that we need to either
         # compile or capture cudagraph
-        self.concrete_size_entries: Dict[int, ConcreteSizeEntry] = {}
+        self.concrete_size_entries: dict[int, ConcreteSizeEntry] = {}
 
         # to_be_compiled_sizes tracks the remaining sizes to compile,
         # and updates during the compilation process, so we need to copy it
-        self.to_be_compiled_sizes: Set[int] = self.compile_sizes.copy()
+        self.to_be_compiled_sizes: set[int] = self.compile_sizes.copy()
         for shape in self.compile_sizes.union(self.cudagraph_capture_sizes):
             self.concrete_size_entries[shape] = ConcreteSizeEntry(
                 runtime_shape=shape,
