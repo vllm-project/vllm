@@ -1,17 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 """Attention layer with PagedAttention and Triton prefix prefill."""
-from typing import Any, Optional
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
+from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.ops.triton_unified_attention import unified_attention
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.worker.block_table import BlockTable
+# TODO(ngl): this should be completely independent from the flash_attn
+#  backend. Maybe use utilities
 from vllm.v1.attention.backends.flash_attn import (
-    FlashAttentionMetadata, FlashAttentionMetadataBuilder, FlashAttentionImpl)
+    FlashAttentionMetadata, FlashAttentionMetadataBuilder)
+
+if TYPE_CHECKING:
+    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.worker.gpu_input_batch import InputBatch
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -52,11 +63,35 @@ class TritonAttentionBackend(AttentionBackend):
         return False
 
     @staticmethod
-    def get_builder_cls() -> type["FlashAttentionMetadataBuilder"]:
-        return FlashAttentionMetadataBuilder
+    def get_builder_cls() -> type["TritonAttentionMetadataBuilder"]:
+        return TritonAttentionMetadataBuilder
 
 
-class TritonAttentionImpl(FlashAttentionImpl):
+class TritonAttentionMetadataBuilder(FlashAttentionMetadataBuilder):
+    # TODO(ngl): this should be completely independent from the flash_attn
+    #  backend. Maybe use utilities
+
+    def __init__(self, runner: "GPUModelRunner", kv_cache_spec: AttentionSpec,
+                 block_table: BlockTable):
+        model_config = runner.model_config
+        compilation_config = runner.vllm_config.compilation_config
+
+        self.runner = runner
+        self.num_heads_q = model_config.get_num_attention_heads(
+            runner.parallel_config)
+        self.num_heads_kv = model_config.get_num_kv_heads(
+            runner.parallel_config)
+        self.headdim = model_config.get_head_size()
+        self.block_size = kv_cache_spec.block_size
+        self.kv_cache_spec = kv_cache_spec
+        self.block_table = block_table
+
+        self.aot_schedule = False
+        # Sliding window size to be used with the AOT scheduler will be
+        # populated on first build() call.
+        self.aot_sliding_window: Optional[tuple[int, int]] = None
+
+class TritonAttentionImpl:
 
     def __init__(
         self,
