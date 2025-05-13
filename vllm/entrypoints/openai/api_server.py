@@ -150,10 +150,6 @@ async def build_async_engine_client(
 
     async with build_async_engine_client_from_engine_args(
             engine_args, args.disable_frontend_multiprocessing) as engine:
-
-        # Don't keep the dummy data in memory
-        await engine.reset_mm_cache()
-
         yield engine
 
 
@@ -189,6 +185,10 @@ async def build_async_engine_client_from_engine_args(
                 usage_context=usage_context,
                 disable_log_requests=engine_args.disable_log_requests,
                 disable_log_stats=engine_args.disable_log_stats)
+
+            # Don't keep the dummy data in memory
+            await async_llm.reset_mm_cache()
+
             yield async_llm
         finally:
             if async_llm:
