@@ -497,7 +497,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
-            indices_type=torch.uint32 if self.use_pplx_kernels else None)
+            indices_type=torch.uint32 if self.moe.use_pplx_kernels else None)
 
         if self.rocm_aiter_moe_enabled:
             return self.rocm_aiter_fused_experts(
