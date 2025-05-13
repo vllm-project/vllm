@@ -147,23 +147,24 @@ stages:
           cd .jenkins/lm-eval-harness && 
           VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 
           bash run-tests.sh -c configs/models-mss.txt -t 1
-  - name: test_gsm8k_spec_decode
-    steps:
-      - name: gsm8k_small_g2_tp1_mlp_spec_decode
-        flavor: g2
-        command: >-
-          VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 TORCH_COMPILE_DISABLE=true VLLM_CONTIGUOUS_PA=false VLLM_SKIP_WARMUP=True 
-          pytest -v tests/spec_decode/e2e/test_mlp_correctness.py::test_mlp_e2e_greedy_correctness 
-      - name: gsm8k_small_g2_tp1_medusa_spec_decode
-        flavor: g2
-        command: >-
-          VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 TORCH_COMPILE_DISABLE=true VLLM_CONTIGUOUS_PA=false VLLM_SKIP_WARMUP=True 
-          pytest -v tests/spec_decode/e2e/test_medusa_correctness.py::test_medusa_e2e_greedy_correctness
-      - name: gsm8k_small_g2_tp1_eagle_spec_decode
-        flavor: g2
-        command:  >
-          VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 VLLM_COS_SIN_RECOMPUTE=true TORCH_COMPILE_DISABLE=true VLLM_CONTIGUOUS_PA=false VLLM_SKIP_WARMUP=True 
-          pytest -v tests/spec_decode/e2e/test_eagle_correctness.py::test_eagle_e2e_greedy_correctness
+  #NOTE(kwisniewski98): Tests are currently disabled because they are not working when V1 engine is disabled by default
+  # - name: test_gsm8k_spec_decode
+  #   steps:
+  #     - name: gsm8k_small_g2_tp1_mlp_spec_decode
+  #       flavor: g2
+  #       command: >-
+  #         VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 TORCH_COMPILE_DISABLE=true VLLM_CONTIGUOUS_PA=false VLLM_SKIP_WARMUP=True 
+  #         pytest -v tests/spec_decode/e2e/test_mlp_correctness.py::test_mlp_e2e_greedy_correctness 
+  #     - name: gsm8k_small_g2_tp1_medusa_spec_decode
+  #       flavor: g2
+  #       command: >-
+  #         VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 TORCH_COMPILE_DISABLE=true VLLM_CONTIGUOUS_PA=false VLLM_SKIP_WARMUP=True 
+  #         pytest -v tests/spec_decode/e2e/test_medusa_correctness.py::test_medusa_e2e_greedy_correctness
+  #     - name: gsm8k_small_g2_tp1_eagle_spec_decode
+  #       flavor: g2
+  #       command:  >
+  #         VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 VLLM_COS_SIN_RECOMPUTE=true TORCH_COMPILE_DISABLE=true VLLM_CONTIGUOUS_PA=false VLLM_SKIP_WARMUP=True 
+  #         pytest -v tests/spec_decode/e2e/test_eagle_correctness.py::test_eagle_e2e_greedy_correctness
   - name: tests_lora
     steps:
       - name: test_llama_lora

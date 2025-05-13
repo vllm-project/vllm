@@ -528,7 +528,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # If set, use the V1 code path.
     "VLLM_USE_V1":
-    lambda: bool(int(os.getenv("VLLM_USE_V1", "1"))),
+    lambda: bool(int(os.getenv("VLLM_USE_V1", "0"))),
 
     # Disable aiter ops unless specifically enabled.
     # Acts as a parent switch to enable the rest of the other operations.
