@@ -1211,10 +1211,10 @@ def apply_hf_chat_template(
     **kwargs: Any,
 ) -> str:
     hf_chat_template = resolve_hf_chat_template(
-        model_config,
         tokenizer,
         chat_template=chat_template,
         tools=tools,
+        model_config=model_config,
     )
 
     if hf_chat_template is None:
