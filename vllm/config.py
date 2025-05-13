@@ -929,6 +929,23 @@ class ModelConfig:
                 "Number of experts in the model must be greater than 0 "
                 "when expert parallelism is enabled.")
 
+    def verify_dual_chunk_attention_config(
+        self,
+        load_config: "LoadConfig",
+    ) -> None:
+        if hasattr(self.hf_config, "dual_chunk_attention_config"):
+            # Try loading the sparse attention config
+            from vllm.model_executor.model_loader.weight_utils import (
+                get_sparse_attention_config)
+            sparse_attn_config = get_sparse_attention_config(self, load_config)
+            if sparse_attn_config:
+                self.hf_config.dual_chunk_attention_config[
+                    "sparse_attention_config"] = sparse_attn_config
+                if "sparse_attention_enabled" not in \
+                        self.hf_config.dual_chunk_attention_config:
+                    self.hf_config.dual_chunk_attention_config[
+                        "sparse_attention_enabled"] = True
+
     def verify_async_output_proc(self, parallel_config, speculative_config,
                                  device_config) -> None:
         if not self.use_async_output_proc:
@@ -4187,6 +4204,8 @@ class VllmConfig:
                                                        self.speculative_config,
                                                        self.device_config)
             self.model_config.verify_with_parallel_config(self.parallel_config)
+            self.model_config.verify_dual_chunk_attention_config(
+                self.load_config)
 
         if self.cache_config is not None:
             self.cache_config.verify_with_parallel_config(self.parallel_config)
