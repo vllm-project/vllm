@@ -8,8 +8,9 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
-    QuarkLinearMethod, QuarkW8A8Fp8, QuarkW8A8Int8, QuarkW4A4MXFP4)
-from vllm.model_executor.layers.quantization.quark.quark_moe import QuarkW4A4MXFp4MoEMethod
+    QuarkLinearMethod, QuarkW4A4MXFP4, QuarkW8A8Fp8, QuarkW8A8Int8)
+from vllm.model_executor.layers.quantization.quark.quark_moe import (
+    QuarkW4A4MXFp4MoEMethod)
 from vllm.platforms import current_platform
 
 
@@ -105,9 +106,11 @@ def test_mxfp4_loading_and_execution(vllm_runner, tp: int):
             assert isinstance(qkv_proj.quant_method, QuarkLinearMethod)
             assert isinstance(qkv_proj.scheme, QuarkW4A4MXFP4)
 
-            assert isinstance(layer.mlp.experts.quant_method, QuarkW4A4MXFp4MoEMethod)
+            assert isinstance(layer.mlp.experts.quant_method,
+                              QuarkW4A4MXFp4MoEMethod)
 
         llm.apply_model(check_model)
 
-        output = llm.generate_greedy("Today I am in the French Alps and", max_tokens=20)
+        output = llm.generate_greedy("Today I am in the French Alps and",
+                                     max_tokens=20)
         assert output
