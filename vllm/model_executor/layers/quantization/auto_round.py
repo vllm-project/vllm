@@ -142,7 +142,6 @@ class AutoRoundConfig(QuantizationConfig):
                      sym)
         if backend == "auto" or "marlin" in backend:
             if isinstance(layer, FusedMoE):
-
                 use_marlin = check_moe_marlin_supports_layer(layer, group_size)
             else:
 

@@ -21,7 +21,7 @@ MODELS = [
                     and not current_platform.is_xpu() and not current_platform.is_cuda(),
                     reason="only supports CPU/XPU/CUDA backend.")
 @pytest.mark.parametrize("model", MODELS)
-def test_auto_round_cpu_xpu(vllm_runner, model):
+def test_auto_round(vllm_runner, model):
     with vllm_runner(model) as llm:
         output = llm.generate_greedy(["The capital of France is"],
                                      max_tokens=8)
