@@ -616,7 +616,7 @@ class ModelConfig:
             model: Model name or path
             tokenizer: Tokenizer name or path
         """
-        if not is_s3(model) and not is_s3(tokenizer):
+        if not (is_s3(model) or is_s3(tokenizer)):
             return
             
         if is_s3(model):
