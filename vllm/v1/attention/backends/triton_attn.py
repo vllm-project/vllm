@@ -153,11 +153,12 @@ class TritonAttentionImpl(AttentionImpl):
         # performance to make sure it does not introduce any overhead.
 
         num_queries_per_kv = query.shape[1] // key.shape[1]
-        use_paged_attn = (num_queries_per_kv & (num_queries_per_kv - 1)) != 0
+        use_prefill_decode_attn = (num_queries_per_kv &
+                                   (num_queries_per_kv - 1)) != 0
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
-        if use_paged_attn:
+        if use_prefill_decode_attn:
             key_cache, value_cache = PagedAttention.split_kv_cache(
                 kv_cache, self.num_kv_heads, self.head_size)
 
@@ -219,7 +220,7 @@ class TritonAttentionImpl(AttentionImpl):
             max_seqlen_k = attn_metadata.max_seq_len
             block_table = attn_metadata.block_table
 
-        if use_paged_attn:
+        if use_prefill_decode_attn:
             # Compute attention and update output up to `num_actual_tokens`.
             chunked_prefill_paged_decode(query=query[:num_actual_tokens],
                                          key=key[:num_actual_tokens],
