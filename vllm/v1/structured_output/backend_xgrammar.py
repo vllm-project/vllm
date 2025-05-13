@@ -215,9 +215,8 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
 
         # Check for array unsupported keywords
         if obj.get("type") == "array" and any(
-                key in obj
-                for key in ("uniqueItems", "contains", "minContains",
-                            "maxContains", "minItems", "maxItems")):
+                key in obj for key in ("uniqueItems", "contains",
+                                       "minContains", "maxContains")):
             return True
 
         # Unsupported keywords for strings
