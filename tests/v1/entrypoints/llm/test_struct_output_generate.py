@@ -37,7 +37,7 @@ PARAMS_MODELS_BACKENDS_TOKENIZER_MODE_REASONING_PARSER_SPEC_CONFIG = [
      None), ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", None, None),
     ("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", "xgrammar", "auto",
      "deepseek_r1", None),
-    ("Qwen/Qwen3-0.6B", "xgrammar", "auto", "qwen3", NGRAM_SPEC_CONFIG),
+    ("Qwen/Qwen3-0.6B", "xgrammar", "auto", "deepseek_r1", NGRAM_SPEC_CONFIG),
     ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto", None,
      NGRAM_SPEC_CONFIG),
     ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", None,
