@@ -151,18 +151,8 @@ async def send_request_to_service(client_info: dict, endpoint: str,
     Send a request to a service using a client from the pool.
     """
     req_data = req_data.copy()
-    req_data['kv_transfer_params'] = {
-        "do_remote_decode": True,
-        "do_remote_prefill": False,
-        "remote_engine_id": None,
-        "remote_block_ids": None,
-        "remote_host": None,
-        "remote_port": None
-    }
+    req_data['do_remote_decode'] = True
     req_data["stream"] = False
-    req_data["max_tokens"] = 1
-    if "stream_options" in req_data:
-        del req_data["stream_options"]
     headers = {
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
         "X-Request-Id": request_id
@@ -177,7 +167,9 @@ async def send_request_to_service(client_info: dict, endpoint: str,
 
 
 async def stream_service_response(client_info: dict, endpoint: str,
-                                  req_data: dict, request_id: str):
+                                  req_data: dict, remote_block_ids: list[int],
+                                  remote_engine_id: str, remote_host: str,
+                                  remote_port: int, request_id: str):
     """
     Asynchronously stream response from a service using a client from the pool.
     """
@@ -185,6 +177,12 @@ async def stream_service_response(client_info: dict, endpoint: str,
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
         "X-Request-Id": request_id
     }
+    req_data = req_data.copy()
+    req_data['do_remote_prefill'] = True
+    req_data["remote_block_ids"] = remote_block_ids
+    req_data['remote_engine_id'] = remote_engine_id
+    req_data["remote_host"] = remote_host
+    req_data["remote_port"] = remote_port
 
     async with client_info['client'].stream("POST",
                                             endpoint,
@@ -211,9 +209,10 @@ async def handle_completions(request: Request):
 
         # Extract the needed fields
         response_json = response.json()
-        kv_transfer_params = response_json.get('kv_transfer_params', {})
-        if kv_transfer_params:
-            req_data["kv_transfer_params"] = kv_transfer_params
+        remote_block_ids = response_json.get('remote_block_ids', [])
+        remote_engine_id = response_json.get('remote_engine_id', '')
+        remote_host = response_json.get('remote_host', '')
+        remote_port = response_json.get('remote_port', 0)
 
         # Get the next decode client in round-robin fashion
         decode_client_info = get_next_client(request.app, 'decode')
@@ -222,10 +221,15 @@ async def handle_completions(request: Request):
 
         # Stream response from decode service
         async def generate_stream():
-            async for chunk in stream_service_response(decode_client_info,
-                                                       "/completions",
-                                                       req_data,
-                                                       request_id=request_id):
+            async for chunk in stream_service_response(
+                    decode_client_info,
+                    "/completions",
+                    req_data,
+                    remote_block_ids=remote_block_ids,
+                    remote_engine_id=remote_engine_id,
+                    remote_host=remote_host,
+                    remote_port=remote_port,
+                    request_id=request_id):
                 yield chunk
 
         return StreamingResponse(generate_stream(),
