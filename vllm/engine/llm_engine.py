@@ -409,6 +409,9 @@ class LLMEngine:
         # the next step without re-scheduling.
         self._skip_scheduling_next_step = False
 
+        # Don't keep the dummy data in memory
+        self.reset_mm_cache()
+
     def _initialize_kv_caches(self) -> None:
         """Initialize the KV cache in the worker(s).
 
@@ -912,6 +915,10 @@ class LLMEngine:
         Returns True if there are unfinished requests for the virtual engine.
         """
         return self.scheduler[virtual_engine].has_unfinished_seqs()
+
+    def reset_mm_cache(self) -> bool:
+        """Reset the multi-modal cache."""
+        return self.input_preprocessor.mm_registry.reset_processor_cache()
 
     def reset_prefix_cache(self, device: Optional[Device] = None) -> bool:
         """Reset prefix cache for all devices."""
