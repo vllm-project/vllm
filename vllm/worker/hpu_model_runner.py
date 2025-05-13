@@ -1554,10 +1554,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                            'Please update Gaudi Software Suite.')
         with compile_only_mode_context(
         ) if can_use_compile_only_mode else contextlib.nullcontext():
-            print("aa")
             self.warmup_all_buckets(self.bucketing_ctx.prompt_buckets, True,
                                     kv_caches)
-            print("bb")
             self.warmup_all_buckets(self.bucketing_ctx.decode_buckets, False,
                                     kv_caches)
 
