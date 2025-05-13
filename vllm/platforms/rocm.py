@@ -104,6 +104,7 @@ def device_id_to_physical_device_id(device_id: int) -> int:
         return device_id
 
 
+@cache
 def on_mi250_mi300() -> bool:
     GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
     return any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942"])
@@ -326,6 +327,11 @@ class RocmPlatform(Platform):
     @classmethod
     def get_device_communicator_cls(cls) -> str:
         return "vllm.distributed.device_communicators.cuda_communicator.CudaCommunicator"  # noqa
+
+    @classmethod
+    def supports_mx(cls) -> bool:
+        gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
+        return any(gfx in gcn_arch for gfx in ["gfx95"])
 
     @classmethod
     def supports_fp8(cls) -> bool:

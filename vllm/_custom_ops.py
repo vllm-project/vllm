@@ -122,7 +122,7 @@ def paged_attention_rocm(
     kv_cache_dtype: str,
     k_scale: torch.Tensor,
     v_scale: torch.Tensor,
-    fp8_out_scale: Optional[torch.Tensor],
+    fp8_out_scale: Optional[torch.Tensor] = None,
 ) -> None:
     torch.ops._rocm_C.paged_attention(out, exp_sum, max_logits, tmp_out, query,
                                       key_cache, value_cache, num_kv_heads,
@@ -159,40 +159,44 @@ def merge_attn_states(output: torch.Tensor,
 def rotary_embedding(
     positions: torch.Tensor,
     query: torch.Tensor,
-    key: torch.Tensor,
+    key: Optional[torch.Tensor],
     head_size: int,
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
 ) -> None:
     # TODO: Remove this contiguous call when the kernel is updated to support tensor slices
     query_contiguous = query.contiguous()
-    key_contiguous = key.contiguous()
+    key_contiguous = key.contiguous() if key is not None else None
     torch.ops._C.rotary_embedding(positions, query_contiguous, key_contiguous,
                                   head_size, cos_sin_cache, is_neox)
     query.copy_(query_contiguous)
-    key.copy_(key_contiguous)
+    if key is not None:
+        key.copy_(key_contiguous)
 
 
 def batched_rotary_embedding(positions: torch.Tensor, query: torch.Tensor,
-                             key: torch.Tensor, head_size: int,
+                             key: Optional[torch.Tensor], head_size: int,
                              cos_sin_cache: torch.Tensor, is_neox: bool,
                              rot_dim: int,
                              cos_sin_cache_offsets: torch.Tensor) -> None:
     # TODO: Remove this contiguous call when the kernel is updated to support tensor slices
     query_contiguous = query.contiguous()
-    key_contiguous = key.contiguous()
+    key_contiguous = key.contiguous() if key is not None else None
     torch.ops._C.batched_rotary_embedding(positions, query_contiguous,
                                           key_contiguous, head_size,
                                           cos_sin_cache, is_neox, rot_dim,
                                           cos_sin_cache_offsets)
     query.copy_(query_contiguous)
-    key.copy_(key_contiguous)
+    if key is not None:
+        key.copy_(key_contiguous)
 
 
 # layer norm ops
 def rms_norm(out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
              epsilon: float) -> None:
-    torch.ops._C.rms_norm(out, input, weight, epsilon)
+    # TODO: Remove this contiguous call when the kernel is updated to support non-contiguous input
+    input_contiguous = input.contiguous()
+    torch.ops._C.rms_norm(out, input_contiguous, weight, epsilon)
 
 
 def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
@@ -513,6 +517,24 @@ if hasattr(torch.ops._C, "ggml_dequantize"):
         tokens = X.size(0)
         return torch.empty((tokens * top_k, row),
                            dtype=torch.float16,
+                           device=W.device)
+
+
+if hasattr(torch.ops._C, "ggml_moe_a8_vec"):
+
+    @register_fake("_C::ggml_moe_a8_vec")
+    def _ggml_moe_a8_vec_fake(
+        X: torch.Tensor,
+        W: torch.Tensor,
+        topk_ids: torch.Tensor,
+        top_k: int,
+        quant_type: int,
+        row: torch.SymInt,
+        tokens: torch.SymInt,
+    ) -> torch.Tensor:
+        tokens = X.size(0)
+        return torch.empty((tokens * top_k, row),
+                           dtype=X.dtype,
                            device=W.device)
 
 
@@ -1163,6 +1185,19 @@ def ggml_moe_a8(
     return torch.ops._C.ggml_moe_a8(X, W, sorted_token_ids, expert_ids,
                                     num_tokens_post_padded, quant_type, row,
                                     top_k, tokens)
+
+
+def ggml_moe_a8_vec(
+    X: torch.Tensor,
+    W: torch.Tensor,
+    topk_ids: torch.Tensor,
+    top_k: int,
+    quant_type: int,
+    row: torch.SymInt,
+    tokens: torch.SymInt,
+) -> torch.Tensor:
+    return torch.ops._C.ggml_moe_a8_vec(X, W, topk_ids, top_k, quant_type, row,
+                                        tokens)
 
 
 def ggml_moe_get_block_size(quant_type: int) -> int:
