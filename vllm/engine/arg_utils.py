@@ -5,6 +5,7 @@ import argparse
 import dataclasses
 import json
 import re
+import sys
 import threading
 import warnings
 from dataclasses import MISSING, dataclass, fields, is_dataclass
@@ -440,7 +441,8 @@ class EngineArgs:
             title="ModelConfig",
             description=ModelConfig.__doc__,
         )
-        model_group.add_argument("--model", **model_kwargs["model"])
+        if 'serve' not in sys.argv[1:] and '--help' not in sys.argv[1:]:
+            model_group.add_argument("--model", **model_kwargs["model"])
         model_group.add_argument("--task", **model_kwargs["task"])
         model_group.add_argument("--tokenizer", **model_kwargs["tokenizer"])
         model_group.add_argument("--tokenizer-mode",
@@ -1205,7 +1207,9 @@ class EngineArgs:
                 and not envs.is_set("VLLM_ATTENTION_BACKEND")
             ) or envs.VLLM_ATTENTION_BACKEND == "FLASH_ATTN_VLLM_V1"
             supported = False
-            if fp8_attention and will_use_fa:
+            if current_platform.is_rocm():
+                supported = True
+            elif fp8_attention and will_use_fa:
                 from vllm.attention.utils.fa_utils import (
                     flash_attn_supports_fp8)
                 supported = flash_attn_supports_fp8()
@@ -1438,11 +1442,15 @@ class EngineArgs:
         from vllm.platforms import current_platform
         try:
             device_memory = current_platform.get_device_total_memory()
+            device_name = current_platform.get_device_name().lower()
         except Exception:
             # This is only used to set default_max_num_batched_tokens
             device_memory = 0
 
-        if device_memory >= 70 * GiB_bytes:
+        # NOTE(Kuntai): Setting large `max_num_batched_tokens` for A100 reduces
+        # throughput, see PR #17885 for more details.
+        # So here we do an extra device name check to prevent such regression.
+        if device_memory >= 70 * GiB_bytes and "a100" not in device_name:
             # For GPUs like H100 and MI300x, use larger default values.
             default_max_num_batched_tokens = {
                 UsageContext.LLM_CLASS: 16384,
