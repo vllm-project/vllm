@@ -9,7 +9,7 @@ from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
-from vllm.model_executor.models import ModelRegistry
+from vllm.model_executor.models import ModelRegistry, supports_multimodal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
@@ -313,7 +313,10 @@ class EagleProposer:
                 self.model.model.embed_tokens = target_model.model.embed_tokens
         else:
             logger.info("Loading EAGLE LM head weights from the target model.")
-            self.model.lm_head = target_model.lm_head
+            if supports_multimodal(target_model) or hasattr(target_model, 'get_language_model'):
+                self.model.lm_head = target_model.get_language_model().lm_head
+            else:
+                self.model.lm_head = target_model.lm_head
 
     @torch.inference_mode()
     def dummy_run(
