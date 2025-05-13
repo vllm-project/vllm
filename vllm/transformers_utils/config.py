@@ -686,54 +686,9 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
     config_dict["hidden_act"] = config_dict.get("activation", "silu")
     config_dict["tie_word_embeddings"] = config_dict.get(
         "tie_embeddings", False)
-    # Check if max_position_embeddings is in params.json
-    mpe_from_params = config_dict.get("max_position_embeddings")
-    final_mpe_to_set = mpe_from_params
-
-    if final_mpe_to_set is None:
-        # Not found in params.json, try to get from standard HF AutoConfig
-        hf_config_for_defaults = None
-        try:
-            trust_remote_code_val = kwargs.get("trust_remote_code", False)
-            token_val = kwargs.get("token")  # Passed from get_config
-
-            hf_config_for_defaults = AutoConfig.from_pretrained(
-                model,
-                revision=revision,
-                trust_remote_code=trust_remote_code_val,
-                token=token_val)
-        except Exception as e:
-            error_message = (
-                "Invalid repository ID or local directory specified:"
-                " '{model}'.\nPlease verify the following requirements:\n"
-                "1. Provide a valid Hugging Face repository ID.\n"
-                "2. Specify a local directory that contains a recognized "
-                "configuration file.\n").format(model=model)
-
-            raise ValueError(error_message) from e
-
-        if hf_config_for_defaults:
-            # Try to get from text_config first, then top-level
-            mpe_from_hf_config = None
-            text_config_obj = getattr(hf_config_for_defaults, "text_config",
-                                      None)
-            if text_config_obj and hasattr(text_config_obj,
-                                           "max_position_embeddings"):
-                mpe_from_hf_config = getattr(text_config_obj,
-                                             "max_position_embeddings", None)
-
-            if mpe_from_hf_config is None and hasattr(
-                    hf_config_for_defaults, "max_position_embeddings"):
-                mpe_from_hf_config = getattr(hf_config_for_defaults,
-                                             "max_position_embeddings", None)
-
-            if mpe_from_hf_config is not None:
-                final_mpe_to_set = mpe_from_hf_config
-
-        if final_mpe_to_set is None:  # Still not found, use ultimate fallback
-            final_mpe_to_set = 128_000
-
-    config_dict["max_position_embeddings"] = final_mpe_to_set
+    config_dict["max_seq_len"] = config_dict.get("max_seq_len", 128_000)
+    config_dict["max_position_embeddings"] = config_dict.get(
+        "max_position_embeddings", 128_000)
 
     if config_dict.get("quantization") is not None:
         quantization = config_dict.get("quantization", {})
