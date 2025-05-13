@@ -10,7 +10,8 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import OCP_MX_BLOCK_SIZE, dequant_mxfp4
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    OCP_MX_BLOCK_SIZE, dequant_mxfp4)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d, normalize_e4m3fn_to_e4m3fnuz, per_tensor_dequantize)
 from vllm.model_executor.utils import set_weight_attrs
@@ -324,13 +325,15 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
         if self.emulate and not envs.VLLM_QUARK_EMU_MEM_OPT:
             # Unpack and dequantize the weights (the operators are in high-precision, with simulated quantization).
             layer.w13_weight = torch.nn.Parameter(
-                dequant_mxfp4(layer.w13_weight.data, layer.w13_weight_scale.data, float_dtype),
+                dequant_mxfp4(layer.w13_weight.data,
+                              layer.w13_weight_scale.data, float_dtype),
                 requires_grad=False,
             )
             layer.w13_weight_scale = None
 
             layer.w2_weight = torch.nn.Parameter(
-                dequant_mxfp4(layer.w2_weight.data, layer.w2_weight_scale.data, float_dtype),
+                dequant_mxfp4(layer.w2_weight.data, layer.w2_weight_scale.data,
+                              float_dtype),
                 requires_grad=False,
             )
             layer.w2_weight_scale = None

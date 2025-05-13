@@ -593,7 +593,7 @@ class FusedMoE(torch.nn.Module):
         else:
             assert shard_id == "w3"
             expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
-        
+
         expert_data.copy_(loaded_weight)
 
     def _load_w2(self,

@@ -8,10 +8,7 @@ import torch.nn.functional as F
 import vllm.envs as envs
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-    OCP_MX_BLOCK_SIZE,
-    quant_dequant_mxfp4,
-    dequant_mxfp4,
-)
+    OCP_MX_BLOCK_SIZE, dequant_mxfp4, quant_dequant_mxfp4)
 from vllm.model_executor.parameter import (GroupQuantScaleParameter,
                                            PackedvLLMParameter)
 from vllm.platforms import current_platform
@@ -41,7 +38,8 @@ class QuarkW4A4MXFP4(QuarkScheme):
 
         if self.emulate and not envs.VLLM_QUARK_EMU_MEM_OPT:
             layer.weight = torch.nn.Parameter(
-                dequant_mxfp4(layer.weight.data, layer.weight_scale.data, self.out_dtype),
+                dequant_mxfp4(layer.weight.data, layer.weight_scale.data,
+                              self.out_dtype),
                 requires_grad=False,
             )
             layer.weight_scale = None
