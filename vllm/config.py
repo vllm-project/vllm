@@ -2274,7 +2274,7 @@ class SpeculativeConfig:
     `TypicalAcceptanceSampler`."""
 
     speculative_token_tree: Optional[str] = None
-    """Specifies the tree structure for speculative token generation. 
+    """Specifies the tree structure for speculative token generation.
     """
     # required configuration params passed from engine
     target_model_config: ModelConfig = field(default=None,
@@ -3605,9 +3605,9 @@ class CompilationConfig(BaseModel):
             are always used, it can set this to False. Otherwise, it should
             set this to True, and the compiler will copy the input to an
             internally managed buffer. Default is False.
-        - full_cuda_graph: whether to use a full cuda graph for the entire forward 
-            pass rather than splitting certain operations such as attention into subgraphs. 
-            Thus this flag cannot be used together with splitting_ops. This may provide 
+        - full_cuda_graph: whether to use a full cuda graph for the entire forward
+            pass rather than splitting certain operations such as attention into subgraphs.
+            Thus this flag cannot be used together with splitting_ops. This may provide
             performance benefits for smaller models.
     - Inductor compilation:
         - use_inductor: whether to use inductor compilation.
@@ -3907,7 +3907,7 @@ class VllmConfig:
     lora_config: Optional[LoRAConfig] = None
     speculative_config: SpeculativeConfig = field(default=None,
                                                   init=True)  # type: ignore
-    decoding_config: Optional[DecodingConfig] = None
+    decoding_config: DecodingConfig = field(default_factory=DecodingConfig)
     observability_config: Optional[ObservabilityConfig] = None
     prompt_adapter_config: Optional[PromptAdapterConfig] = None
     quant_config: Optional[QuantizationConfig] = None
