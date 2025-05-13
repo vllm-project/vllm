@@ -3470,7 +3470,17 @@ class KVTransferConfig:
     """The KV connector port, used to build distributed connection."""
 
     kv_connector_external_registration_args: Optional[dict[str, Any]] = None
-    """Extra args for external kv connector registration."""
+    """Extra args for external kv connector registration.
+       Example Usages:
+          kv_transfer_config=KVTransferConfig(
+                kv_connector="ExternalConnector",
+                kv_connector_external_registration_args={
+                    "name": "ExternalConnector",
+                    "module_path": "external_lib.path.external_kv_connector",
+                    "class_name": "ExternalConnector",
+                },
+          )
+    """
 
     kv_connector_extra_config: dict[str, Any] = field(default_factory=dict)
     """any extra config that the connector may need."""
