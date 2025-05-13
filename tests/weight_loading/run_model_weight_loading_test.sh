@@ -35,7 +35,7 @@ do
     if [ ${#array[@]} -gt 3 ]; then
         export MIN_CAPABILITY=${array[3]}
     fi
-    pytest -s weight_loading/test_weight_loading.py || LOCAL_SUCCESS=$?
+    pytest --import-mode=append -s weight_loading/test_weight_loading.py || LOCAL_SUCCESS=$?
 
     if [[ $LOCAL_SUCCESS == 0 ]]; then
         echo "=== PASSED MODEL: ${MODEL_CONFIG} ==="
