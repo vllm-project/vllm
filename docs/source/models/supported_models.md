@@ -331,8 +331,8 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
   * ✅︎
 - * `FalconH1ForCausalLM`
-  * FalconMamba
-  * `tiiuae/Falcon-Mamba2-7b`, etc.
+  * Falcon-H1
+  * `tiiuae/Falcon-H1-34B-Base`, `tiiuae/Falcon-H1-34B-Instruct`, etc.
   * ✅︎
   * ✅︎
 - * `GemmaForCausalLM`
