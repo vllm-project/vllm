@@ -345,7 +345,7 @@ def resolve_hf_chat_template(
                 trust_remote_code=trust_remote_code,
             )
             if isinstance(processor, ProcessorMixin) and \
-                processor.chat_template is not None:
+                hasattr(processor, 'chat_template') and processor.chat_template is not None:
                 return processor.chat_template
         except Exception:
             logger.debug("Failed to load AutoProcessor chat template for %s",
