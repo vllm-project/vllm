@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import numpy as np
 import numpy.typing as npt
+import pytest
 
 from vllm.multimodal.video import VIDEO_LOADER_REGISTRY, VideoLoader
 
@@ -33,3 +34,8 @@ def test_video_loader_registry():
     custom_loader_2 = VIDEO_LOADER_REGISTRY.load("test_video_loader_2")
     output_2 = custom_loader_2.load_bytes(b"test")
     np.testing.assert_array_equal(output_2, FAKE_OUTPUT_2)
+
+
+def test_video_loader_type_doesnt_exist():
+    with pytest.raises(AssertionError):
+        VIDEO_LOADER_REGISTRY.load("non_existing_video_loader")
