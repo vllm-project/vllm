@@ -835,14 +835,15 @@ class FusedMoE(torch.nn.Module):
 
         if quant_config is None:
             quant_method = UnquantizedFusedMoEMethod(moe)
+            prepare_finalize = _construct_prepare_finalize(moe, quant_config)
         else:
             quant_method = quant_config.get_quant_method(self, prefix)
+            # No pplx for quantized types yet.
+            prepare_finalize = None
 
         assert quant_method is not None
         assert isinstance(quant_method, FusedMoEMethodBase)
         self.quant_method = quant_method
-
-        prepare_finalize = _construct_prepare_finalize(moe, quant_config)
 
         if prepare_finalize is not None:
             world_size = moe.ep_size
