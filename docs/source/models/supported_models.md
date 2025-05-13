@@ -592,6 +592,11 @@ Specified using `--task generate`.
   * `Zyphra/Zamba2-7B-instruct`, `Zyphra/Zamba2-2.7B-instruct`, `Zyphra/Zamba2-1.2B-instruct`, etc.
   *
   *
+- * `MiMoForCausalLM`
+  * MiMo
+  * `XiaomiMiMo/MiMo-7B-RL`, etc.
+  *
+  *
 :::
 
 :::{note}
