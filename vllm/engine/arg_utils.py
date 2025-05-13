@@ -867,6 +867,13 @@ class EngineArgs:
         if check_gguf_file(self.model):
             self.quantization = self.load_format = "gguf"
 
+        # Neuron requires lora_modules to be specified prior to compilation
+        #  as a part of override_neuron_config
+        if self.lora_modules is not None:
+            if self.override_neuron_config is None:
+                self.override_neuron_config = {}
+            self.override_neuron_config["lora_modules"] = self.lora_modules
+
         # NOTE: This is to allow model loading from S3 in CI
         if (not isinstance(self, AsyncEngineArgs) and envs.VLLM_CI_USE_S3
                 and self.model in MODELS_ON_S3
@@ -1147,11 +1154,6 @@ class EngineArgs:
         # bitsandbytes pre-quantized model need a specific model loader
         if model_config.quantization == "bitsandbytes":
             self.quantization = self.load_format = "bitsandbytes"
-
-        if self.lora_modules is not None:
-            if self.override_neuron_config is None:
-                self.override_neuron_config = {}
-            self.override_neuron_config["lora_modules"] = self.lora_modules
 
         load_config = self.create_load_config()
 
