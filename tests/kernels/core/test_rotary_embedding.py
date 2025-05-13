@@ -68,3 +68,10 @@ def test_rotary_embedding_opcheck(dist_init, device, max_position,
                           device=device,
                           dtype=torch.long)
     rotary_embedding_opcheck(rot, positions, query, key, offsets)
+
+    # if we have a contiguous head stride, test the alternate
+    # [..., num_heads * head_dim] shape/layout
+    if head_stride_is_contingous:
+        rotary_embedding_opcheck(
+            rot, positions, query.flatten(start_dim=-2),
+            key.flatten(start_dim=-2) if use_key else None)
