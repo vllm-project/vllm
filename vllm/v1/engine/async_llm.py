@@ -20,6 +20,7 @@ from vllm.outputs import RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
+from vllm.streaming_params import StreamingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
@@ -263,6 +264,7 @@ class AsyncLLM(EngineClient):
         self,
         prompt: PromptType,
         sampling_params: SamplingParams,
+        streaming_params: StreamingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
@@ -303,6 +305,8 @@ class AsyncLLM(EngineClient):
             # The output_handler task pushes items into the queue.
             # This task pulls from the queue and yields to caller.
             finished = False
+            buffer: Optional[RequestOutput] = None  # buffer of output tokens
+            buffer_token_count = 0
             while not finished:
                 # Note: drain queue without await if possible (avoids
                 # task switching under load which helps performance).
@@ -311,7 +315,18 @@ class AsyncLLM(EngineClient):
                 # Note: both OutputProcessor and EngineCore handle their
                 # own request cleanup based on finished.
                 finished = out.finished
-                yield out
+
+                if buffer is None:
+                    buffer = out
+                else:
+                    buffer.add(out, aggregate=True)
+
+                buffer_token_count += sum(
+                    len(o.token_ids) for o in out.outputs)
+                if buffer_token_count >= streaming_params.stream_n or finished:
+                    yield buffer
+                    buffer = None
+                    buffer_token_count = 0
 
         # If the request is disconnected by the client, generate()
         # is cancelled. So, we abort the request if we end up here.
