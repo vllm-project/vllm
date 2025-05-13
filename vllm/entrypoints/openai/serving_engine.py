@@ -670,11 +670,11 @@ class OpenAIServing:
         model_config = self.model_config
 
         resolved_content_format = resolve_chat_template_content_format(
-            model_config,
             chat_template,
             tool_dicts,
             chat_template_content_format,
             tokenizer,
+            model_config=model_config,
         )
         conversation, mm_data_future = parse_chat_messages_futures(
             messages,

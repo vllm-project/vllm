@@ -903,11 +903,11 @@ def test_resolve_content_format_hf_defined(model, expected_format):
     print(_try_extract_ast(chat_template))
 
     resolved_format = resolve_chat_template_content_format(
-        model_config,
         None,  # Test detecting the tokenizer's chat_template
         None,
         "auto",
         tokenizer,
+        model_config=model_config,
     )
 
     assert resolved_format == expected_format
@@ -962,11 +962,11 @@ def test_resolve_content_format_fallbacks(model, expected_format):
     print(_try_extract_ast(chat_template))
 
     resolved_format = resolve_chat_template_content_format(
-        model_config,
         None,  # Test detecting the tokenizer's chat_template
         None,
         "auto",
         tokenizer,
+        model_config=model_config,
     )
 
     assert resolved_format == expected_format
@@ -1021,11 +1021,11 @@ def test_resolve_content_format_examples(template_path, expected_format):
     print(_try_extract_ast(chat_template))
 
     resolved_format = resolve_chat_template_content_format(
-        model_config,
         chat_template,
         None,
         "auto",
         dummy_tokenizer,
+        model_config=model_config,
     )
 
     assert resolved_format == expected_format

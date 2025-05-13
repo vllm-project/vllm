@@ -330,10 +330,13 @@ def resolve_mistral_chat_template(
     return None
 
 def resolve_hf_chat_template(
-    model_config: ModelConfig,
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     chat_template: Optional[str],
     tools: Optional[list[dict[str, Any]]],
+    *,
+    model_config: ModelConfig,
+    # For backwards compatibility, keep deprecated args as kwargs
+    **kwargs: dict[str, Any],
 ) -> Optional[str]:
     # 1st priority: The given chat template
     if chat_template is not None:
@@ -379,18 +382,21 @@ def resolve_hf_chat_template(
 
 
 def _resolve_chat_template_content_format(
-    model_config: ModelConfig,
     chat_template: Optional[str],
     tools: Optional[list[dict[str, Any]]],
     given_format: ChatTemplateContentFormatOption,
     tokenizer: AnyTokenizer,
+    *,
+    model_config: ModelConfig,
+    # For backwards compatibility, keep deprecated args as kwargs
+    **kwargs: dict[str, Any],
 ) -> _ChatTemplateContentFormat:
     if isinstance(tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
         hf_chat_template = resolve_hf_chat_template(
-            model_config,
             tokenizer,
             chat_template=chat_template,
             tools=tools,
+            model_config=model_config,
         )
     else:
         hf_chat_template = None
@@ -429,18 +435,21 @@ def _log_chat_template_content_format(
 
 
 def resolve_chat_template_content_format(
-    model_config: ModelConfig,
     chat_template: Optional[str],
     tools: Optional[list[dict[str, Any]]],
     given_format: ChatTemplateContentFormatOption,
     tokenizer: AnyTokenizer,
+    *,
+    model_config: ModelConfig,
+    # For backwards compatibility, keep deprecated args as kwargs
+    **kwargs: dict[str, Any],
 ) -> _ChatTemplateContentFormat:
     detected_format = _resolve_chat_template_content_format(
-        model_config,
         chat_template,
         tools,
         given_format,
         tokenizer,
+        model_config=model_config,
     )
 
     _log_chat_template_content_format(
