@@ -1141,9 +1141,13 @@ async def run_server(args, **uvicorn_kwargs) -> None:
             return a or "0.0.0.0"
 
         is_ssl = args.ssl_keyfile and args.ssl_certfile
-        logger.info("Starting vLLM API server on http%s://%s:%d",
-                    "s" if is_ssl else "", _listen_addr(sock_addr[0]),
-                    sock_addr[1])
+        if args.uds:
+            logger.info("Starting vLLM API server on unix socket %s",
+                        sock_addr[0])
+        else:
+            logger.info("Starting vLLM API server on http%s://%s:%d",
+                        "s" if is_ssl else "", _listen_addr(sock_addr[0]),
+                        sock_addr[1])
 
         shutdown_task = await serve_http(
             app,
