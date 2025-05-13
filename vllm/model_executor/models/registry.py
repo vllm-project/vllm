@@ -18,6 +18,7 @@ from typing import (AbstractSet, Callable, Dict, List, Optional, Tuple, Type,
 import cloudpickle
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 from .interfaces import (has_inner_state, has_noops, is_attention_free,
@@ -118,6 +119,10 @@ _TEXT_GENERATION_MODELS = {
     "BartModel": ("bart", "BartForConditionalGeneration"),
     "BartForConditionalGeneration": ("bart", "BartForConditionalGeneration"),
 }
+
+# hack
+if envs.VLLM_USE_JAX:
+    _TEXT_GENERATION_MODELS['LlamaForCausalLM'] = ("llama_jax", "JAXLlamaForCausalLM")
 
 _EMBEDDING_MODELS = {
     # [Text-only]
