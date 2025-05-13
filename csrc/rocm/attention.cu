@@ -3104,7 +3104,7 @@ void paged_attention_custom_launcher(
     torch::Tensor& block_tables, torch::Tensor& context_lens,
     const std::optional<torch::Tensor>& query_start_loc, int max_context_len,
     const std::optional<torch::Tensor>& alibi_slopes, torch::Tensor& k_scale,
-    torch::Tensor& v_scale, const c10::optional<torch::Tensor>& fp8_out_scale) {
+    torch::Tensor& v_scale, const std::optional<torch::Tensor>& fp8_out_scale) {
   int num_seqs = block_tables.size(0);
   int num_heads = query.size(1);
   int head_size = query.size(2);
@@ -3532,7 +3532,7 @@ void paged_attention(
     const std::optional<torch::Tensor>& alibi_slopes,
     const std::string& kv_cache_dtype, torch::Tensor& k_scale,
     torch::Tensor& v_scale,
-    const c10::optional<torch::Tensor>& fp8_out_scale) {
+    const std::optional<torch::Tensor>& fp8_out_scale) {
   // clang-format on
   bool is_navi = is_navi_gpu();
 
