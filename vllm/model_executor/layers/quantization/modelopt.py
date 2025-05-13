@@ -583,10 +583,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 if scale_ndim == 2 else swizzled_scale.reshape(B, M, K))
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+
         # GEMM 1
         assert torch.allclose(
             layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]), (
-                "Expected w1_weight_scale_2 to equal w3_weight_scale_2")
+                "w1_weight_scale_2 must match w3_weight_scale_2")
 
         w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0]
         layer.w13_weight_scale_2 = Parameter(w13_weight_scale_2,
@@ -694,7 +695,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         assert not apply_router_weight_on_input, (
             "Router weight on input is not "
             "supported for ModelOptNvFp4FusedMoE.")
-        assert expert_map is None, ("Expert Parallelism /expert_map "
+        assert expert_map is None, ("Expert Parallelism / expert_map "
                                     "is currently not supported for "
                                     "ModelOptNvFp4FusedMoE.")
 
