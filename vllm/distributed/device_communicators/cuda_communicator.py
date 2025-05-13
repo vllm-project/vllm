@@ -149,7 +149,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             return
         all2all_backend = envs.VLLM_ALL2ALL_BACKEND
         if all2all_backend == "naive":
-            from .naive_all2all import NaiveAll2All
+            from .all2all import NaiveAll2All
             self.all2all_impl = NaiveAll2All(self.cpu_group, model)
 
     def dispatch(
