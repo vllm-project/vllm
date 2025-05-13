@@ -1734,6 +1734,15 @@ def create_server_socket(addr: tuple[str, int]) -> socket.socket:
     return sock
 
 
+def create_server_unix_socket(addr: str) -> socket.socket:
+    family = socket.AF_UNIX
+
+    sock = socket.socket(family=family, type=socket.SOCK_STREAM)
+    sock.bind(addr)
+
+    return sock
+
+
 def validate_api_server_args(args):
     valid_tool_parses = ToolParserManager.tool_parsers.keys()
     if args.enable_auto_tool_choice \
