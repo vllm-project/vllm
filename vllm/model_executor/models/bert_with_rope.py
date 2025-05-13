@@ -332,7 +332,7 @@ class BertWithRopeBlock(nn.Module):
         if moe:
             self.mlp = NomicMoELayer(config=config, )
         else:
-            if config.hidden_act in ["silu", "gelu_and_mul"]:
+            if config.hidden_act in ["silu", "geglu"]:
                 self.mlp = BertWithRopeGatedMLP(
                     hidden_size=config.hidden_size,
                     intermediate_size=config.intermediate_size,
@@ -432,7 +432,7 @@ class BertWithRope(nn.Module, SupportsV0Only, SupportsQuant):
                                                    torch.Tensor]]) -> Set[str]:
         weights = self.hf_to_vllm_mapper.apply(weights)
 
-        if self.config.hidden_act in ["silu", "gelu_and_mul"]:
+        if self.config.hidden_act in ["silu", "geglu"]:
             stacked_params_mapping = [
                 # (param_name, shard_name, shard_id)
                 ("gate_up_proj", "gate_proj", 0),
@@ -555,7 +555,7 @@ class GteNewModel(BertWithRope):
         assert config.__class__.__name__ == "NewConfig"
         assert config.hidden_act == "gelu"
 
-        config.hidden_act = "gelu_and_mul"
+        config.hidden_act = "geglu"
 
         head_dim = config.hidden_size // config.num_attention_heads
         config.rotary_kwargs = {
@@ -607,7 +607,7 @@ class SnowflakeGteNewModel(GteNewModel):
         assert config.__class__.__name__ == "GteConfig"
         assert config.hidden_act == "gelu"
 
-        config.hidden_act = "gelu_and_mul"
+        config.hidden_act = "geglu"
 
         head_dim = config.hidden_size // config.num_attention_heads
         config.rotary_kwargs = {
