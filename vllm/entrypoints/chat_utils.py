@@ -34,10 +34,12 @@ from transformers import (PreTrainedTokenizer, PreTrainedTokenizerFast,
 # pydantic needs the TypedDict from typing_extensions
 from typing_extensions import Required, TypeAlias, TypedDict
 
+import vllm.tools
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
 from vllm.multimodal.utils import MediaConnector
+from vllm.tools import CHAT_TEMPLATES
 # yapf: disable
 from vllm.transformers_utils.chat_templates import (
     get_chat_template_fallback_path)
@@ -811,6 +813,8 @@ def validate_chat_template(chat_template: Optional[Union[Path, str]]):
             "the supplied chat template path doesn't exist")
 
     elif isinstance(chat_template, str):
+        if chat_template in CHAT_TEMPLATES:
+            return
         JINJA_CHARS = "{}\n"
         if not any(c in chat_template
                    for c in JINJA_CHARS) and not Path(chat_template).exists():
@@ -837,6 +841,9 @@ def _load_chat_template(
                             "from its value")
 
         return chat_template
+
+    if isinstance(chat_template, str) and chat_template in CHAT_TEMPLATES:
+        return getattr(vllm.tools, chat_template)
 
     try:
         with open(chat_template) as f:

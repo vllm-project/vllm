@@ -90,7 +90,12 @@ and all chat requests will error.
 vllm serve <model> --chat-template ./path-to-chat-template.jinja
 ```
 
-vLLM community provides a set of chat templates for popular models. You can find them under the <gh-dir:examples> directory.
+vLLM community provides a set of chat templates for popular models. You can find them under the <gh-dir:vllm/tools> directory.
+One can specify this with the following format🇮🇶
+
+```bash
+vllm serve <model> --chat-template tool_chat_template_hermes
+```
 
 With the inclusion of multi-modal chat APIs, the OpenAI spec now accepts chat messages in a new format which specifies
 both a `type` and a `text` field. An example is provided below:
@@ -301,7 +306,7 @@ To serve the model:
 
 ```bash
 vllm serve TIGER-Lab/VLM2Vec-Full --task embed \
-  --trust-remote-code --max-model-len 4096 --chat-template examples/template_vlm2vec.jinja
+  --trust-remote-code --max-model-len 4096 --chat-template template_vlm2vec
 ```
 
 :::{important}
@@ -346,7 +351,7 @@ To serve the model:
 
 ```bash
 vllm serve MrLight/dse-qwen2-2b-mrl-v1 --task embed \
-  --trust-remote-code --max-model-len 8192 --chat-template examples/template_dse_qwen2_vl.jinja
+  --trust-remote-code --max-model-len 8192 --chat-template template_dse_qwen2_vl
 ```
 
 :::{important}
