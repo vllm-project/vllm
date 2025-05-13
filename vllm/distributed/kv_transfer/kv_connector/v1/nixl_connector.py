@@ -318,6 +318,10 @@ class NixlConnectorWorker:
         logger.info("Initializing NIXL wrapper")
         logger.info("Initializing NIXL worker %s", engine_id)
 
+        # Config.
+        self.vllm_config = vllm_config
+        self.block_size = vllm_config.cache_config.block_size
+
         # Agent.
         self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), None)
         # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
@@ -378,7 +382,8 @@ class NixlConnectorWorker:
         self._tp_size: dict[str, int] = {self.engine_id: self.world_size}
         # With heterogeneous TP, P must wait for all assigned D TP workers to
         # finish reading before safely freeing the blocks.
-        self.consumer_notification_counts_by_req = defaultdict(int)
+        self.consumer_notification_counts_by_req: dict[str,
+                                                       int] = defaultdict(int)
 
     @staticmethod
     def _nixl_handshake_listener(metadata: NixlAgentMetadata,
@@ -424,41 +429,39 @@ class NixlConnectorWorker:
         # a hack to keep us moving. We will switch when moving to etcd
         # or where we have a single ZMQ socket in the scheduler.
 
-        def handshake(sock, rank: int) -> NixlAgentMetadata:
+        def handshake(path: str, rank: int) -> NixlAgentMetadata:
             # Send query for the request.
-            sock.send(GET_META_MSG)
-            metadata_bytes = sock.recv()
-            decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
-            metadata = decoder.decode(metadata_bytes)
-            got_metadata_time = time.perf_counter()
+            with zmq_ctx(zmq.REQ, path) as sock:
+                sock.send(GET_META_MSG)
+                metadata_bytes = sock.recv()
+                decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
+                metadata = decoder.decode(metadata_bytes)
+                got_metadata_time = time.perf_counter()
 
-            # Register Remote agent.
-            self.add_remote_agent(metadata, rank)
-            setup_agent_time = time.perf_counter()
+                # Register Remote agent.
+                self.add_remote_agent(metadata, rank)
+                setup_agent_time = time.perf_counter()
 
-            logger.debug("NIXL handshake: get metadata took: %s",
-                         got_metadata_time - start_time)
-            logger.debug("NIXL handshake: add agent took: %s",
-                         setup_agent_time - got_metadata_time)
-            return metadata
+                logger.debug("NIXL handshake: get metadata took: %s",
+                             got_metadata_time - start_time)
+                logger.debug("NIXL handshake: add agent took: %s",
+                             setup_agent_time - got_metadata_time)
+                return metadata
 
         # Handshake with remote agent-rank0 first to get the tp_size of remote
         path = f"tcp://{host}:{port}"
         logger.debug("Querying master rank metadata on path: %s", path)
-        with zmq_ctx(zmq.REQ, path) as sock:
-            metadata = handshake(sock, 0)
+        metadata = handshake(path, 0)
 
         # Handshake only with the other TP remote the current local rank will
         # pull from. With homogeneous TP it happens to be the same rank_i.
-        d_workers_per_p_worker = self._tp_size[
-            self.engine_id] // metadata.tp_size
-        p_remote_rank = self.rank // d_workers_per_p_worker
+        tp_rate = self._tp_size[self.engine_id] // metadata.tp_size
+        p_remote_rank = self.rank // tp_rate
         if p_remote_rank > 0:
             path = f"tcp://{host}:{port + p_remote_rank}"
             logger.debug("Querying metadata on path: %s at remote rank %s",
                          path, p_remote_rank)
-            with zmq_ctx(zmq.REQ, path) as sock:
-                metadata = handshake(sock, p_remote_rank)
+            _ = handshake(path, p_remote_rank)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
@@ -473,17 +476,17 @@ class NixlConnectorWorker:
             self.num_blocks = first_kv_cache.shape[0]
             block_rank = 2  # [block_size, latent_dim]
             block_shape = first_kv_cache.shape[-block_rank:]
-            self.block_size, kv_latent_dim = block_shape
+            block_size, kv_latent_dim = block_shape
             self.slot_size_bytes = kv_elem_size * kv_latent_dim
         else:
             # [2 (k and v), num_blocks, block_size, kv_heads, head_dim]
             self.num_blocks = first_kv_cache.shape[1]
             block_rank = 3  # [block_size, kv_heads, head_dim]
             block_shape = first_kv_cache.shape[-block_rank:]
-            self.block_size, n_kv_heads, head_dim = block_shape
+            block_size, n_kv_heads, head_dim = block_shape
             # head size in bytes.
             self.slot_size_bytes = kv_elem_size * n_kv_heads * head_dim
-
+        assert block_size == self.block_size
         # TODO(tms): self.block_len needs to be per-layer for sliding window,
         # hybrid attn, etc
         # block size in bytes
