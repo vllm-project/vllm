@@ -561,7 +561,7 @@ def test_structured_output_with_reasoning_matrices(
     reasoner = ReasoningParserManager.get_reasoning_parser(reasoning_parser)(
         tokenizer=tokenizer)
 
-    reasoning_prompt = "Solve the following math problem step-by-step, then provide the final answer as JSON object with a single key 'result'. Problem: What is 5 * 8 + 2?"  # noqa: E501
+    reasoning_prompt = "Solve the following math problem step-by-step, then provide the final answer as JSON object with a single key 'result'. Make sure to correct your reasoning if there are any issue should it arise.\nProblem: What is 5 * 8 + 2?"  # noqa: E501
     reasoning_schema = {
         "type": "object",
         "properties": {
@@ -572,6 +572,8 @@ def test_structured_output_with_reasoning_matrices(
         "required": ["result"],
         "additionalProperties": False
     }
+    if "Qwen3" in model_name:
+        reasoning_prompt += "<think>\n"
 
     sampling_params = SamplingParams(
         temperature=0.1,
