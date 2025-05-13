@@ -9,8 +9,11 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, FlexibleArgumentParser,
-                        create_kv_caches_with_random)
+from vllm.utils import (
+    STR_DTYPE_TO_TORCH_DTYPE,
+    FlexibleArgumentParser,
+    create_kv_caches_with_random,
+)
 
 logger = init_logger(__name__)
 
@@ -38,19 +41,15 @@ def main(
     current_platform.seed_everything(seed)
 
     scale = float(1.0 / (head_size**0.5))
-    query = torch.empty(num_seqs,
-                        num_query_heads,
-                        head_size,
-                        dtype=dtype,
-                        device=device)
+    query = torch.empty(
+        num_seqs, num_query_heads, head_size, dtype=dtype, device=device
+    )
     query.uniform_(-scale, scale)
 
     assert num_query_heads % num_kv_heads == 0
     alibi_slopes = None
     if use_alibi:
-        alibi_slopes = torch.randn(num_query_heads,
-                                   dtype=torch.float,
-                                   device=device)
+        alibi_slopes = torch.randn(num_query_heads, dtype=torch.float, device=device)
 
     seq_lens = [seq_len for _ in range(num_seqs)]
     max_seq_len = max(seq_lens)
@@ -61,24 +60,23 @@ def main(
     block_tables_lst: list[list[int]] = []
     for _ in range(num_seqs):
         block_table = [
-            random.randint(0, NUM_BLOCKS - 1)
-            for _ in range(max_num_blocks_per_seq)
+            random.randint(0, NUM_BLOCKS - 1) for _ in range(max_num_blocks_per_seq)
         ]
         block_tables_lst.append(block_table)
 
-    block_tables = torch.tensor(block_tables_lst,
-                                dtype=torch.int,
-                                device=device)
+    block_tables = torch.tensor(block_tables_lst, dtype=torch.int, device=device)
 
     # Create the KV cache.
-    key_caches, value_caches = create_kv_caches_with_random(NUM_BLOCKS,
-                                                            block_size,
-                                                            1,
-                                                            num_kv_heads,
-                                                            head_size,
-                                                            kv_cache_dtype,
-                                                            dtype,
-                                                            device=device)
+    key_caches, value_caches = create_kv_caches_with_random(
+        NUM_BLOCKS,
+        block_size,
+        1,
+        num_kv_heads,
+        head_size,
+        kv_cache_dtype,
+        dtype,
+        device=device,
+    )
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Prepare for the paged attention kernel.
@@ -86,11 +84,8 @@ def main(
     if version == "v2":
         if current_platform.is_rocm():
             global PARTITION_SIZE
-            if not args.custom_paged_attn:
-                PARTITION_SIZE = 1024
-            else:
-                PARTITION_SIZE = PARTITION_SIZE_ROCM
-        num_partitions = ((max_seq_len + PARTITION_SIZE - 1) // PARTITION_SIZE)
+            PARTITION_SIZE = 1024 if not args.custom_paged_attn else PARTITION_SIZE_ROCM
+        num_partitions = (max_seq_len + PARTITION_SIZE - 1) // PARTITION_SIZE
         tmp_output = torch.empty(
             size=(num_seqs, num_query_heads, num_partitions, head_size),
             dtype=output.dtype,
@@ -110,9 +105,7 @@ def main(
         start_time = time.perf_counter()
 
         # Using default kv_scale
-        k_scale = v_scale = torch.tensor(1.0,
-                                         dtype=torch.float32,
-                                         device=device)
+        k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
 
         for _ in range(num_iters):
             if version == "v1":
@@ -195,30 +188,29 @@ def main(
     print(f"Kernel running time: {latency * 1000000:.3f} us")
 
 
-if __name__ == '__main__':
-    logger.warning("This script benchmarks the paged attention kernel. "
-                   "By default this is no longer used in vLLM inference.")
+if __name__ == "__main__":
+    logger.warning(
+        "This script benchmarks the paged attention kernel. "
+        "By default this is no longer used in vLLM inference."
+    )
 
-    parser = FlexibleArgumentParser(
-        description="Benchmark the paged attention kernel.")
-    parser.add_argument("--version",
-                        type=str,
-                        choices=["v1", "v2"],
-                        default="v2")
+    parser = FlexibleArgumentParser(description="Benchmark the paged attention kernel.")
+    parser.add_argument("--version", type=str, choices=["v1", "v2"], default="v2")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--seq-len", type=int, default=4096)
     parser.add_argument("--num-query-heads", type=int, default=64)
     parser.add_argument("--num-kv-heads", type=int, default=8)
-    parser.add_argument("--head-size",
-                        type=int,
-                        choices=[64, 80, 96, 112, 120, 128, 192, 256],
-                        default=128)
+    parser.add_argument(
+        "--head-size",
+        type=int,
+        choices=[64, 80, 96, 112, 120, 128, 192, 256],
+        default=128,
+    )
     parser.add_argument("--block-size", type=int, choices=[16, 32], default=16)
     parser.add_argument("--use-alibi", action="store_true")
-    parser.add_argument("--dtype",
-                        type=str,
-                        choices=["half", "bfloat16", "float"],
-                        default="half")
+    parser.add_argument(
+        "--dtype", type=str, choices=["half", "bfloat16", "float"], default="half"
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--profile", action="store_true")
     parser.add_argument(
@@ -228,10 +220,11 @@ if __name__ == '__main__':
         default="auto",
         help="Data type for kv cache storage. If 'auto', will use model "
         "data type. CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. "
-        "ROCm (AMD GPU) supports fp8 (=fp8_e4m3)")
-    parser.add_argument("--custom-paged-attn",
-                        action="store_true",
-                        help="Use custom paged attention")
+        "ROCm (AMD GPU) supports fp8 (=fp8_e4m3)",
+    )
+    parser.add_argument(
+        "--custom-paged-attn", action="store_true", help="Use custom paged attention"
+    )
     args = parser.parse_args()
     print(args)
 

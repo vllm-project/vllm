@@ -187,13 +187,13 @@ class PrometheusStatLogger(StatLoggerBase):
         self.counter_gpu_prefix_cache_queries = self._create_counter(
             name="vllm:gpu_prefix_cache_queries",
             documentation=
-            "GPU prefix cache queries, in terms of number of queried blocks.",
+            "GPU prefix cache queries, in terms of number of queried tokens.",
             labelnames=labelnames).labels(*labelvalues)
 
         self.counter_gpu_prefix_cache_hits = self._create_counter(
             name="vllm:gpu_prefix_cache_hits",
             documentation=
-            "GPU prefix cache hits, in terms of number of cached blocks.",
+            "GPU prefix cache hits, in terms of number of cached tokens.",
             labelnames=labelnames).labels(*labelvalues)
 
         #
