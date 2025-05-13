@@ -22,7 +22,7 @@ def test_bad_callable():
     pass_manager.configure(config)
 
     with pytest.raises(AssertionError):
-        pass_manager.add(simple_callable)  # noqa, type wrong on purpose
+        pass_manager.add(simple_callable)
 
 
 # Pass that inherits from InductorPass

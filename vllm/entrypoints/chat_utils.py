@@ -349,11 +349,11 @@ def resolve_hf_chat_template(
                 trust_remote_code=model_config.trust_remote_code,
             )
             if isinstance(processor, ProcessorMixin) and \
+                hasattr(processor, 'chat_template') and \
                 processor.chat_template is not None:
                 return processor.chat_template
         except Exception:
-            logger.debug("Failed to load AutoProcessor chat template for %s",
-                        tokenizer.name_or_path, exc_info=True)
+            logger.debug("Failed to load AutoProcessor chat template for %s", tokenizer.name_or_path, exc_info=True)  # noqa: E501
 
     # 3rd priority: AutoTokenizer chat template
     try:
