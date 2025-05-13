@@ -54,6 +54,10 @@ class Processor:
         self.use_hash = self.mm_input_cache_client.use_cache or \
             self.cache_config.enable_prefix_caching
 
+    @property
+    def mm_registry(self):
+        return self.input_preprocessor.mm_registry
+
     def _validate_logprobs(
         self,
         params: SamplingParams,

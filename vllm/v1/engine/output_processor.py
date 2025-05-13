@@ -3,7 +3,7 @@
 import asyncio
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Optional, Union, cast
+from typing import Any, Optional, Union, cast
 
 import torch
 
@@ -165,6 +165,7 @@ class RequestState:
         pooling_output: Optional[torch.Tensor],
         finish_reason: Optional[FinishReason],
         stop_reason: Union[int, str, None],
+        kv_transfer_params: Optional[dict[str, Any]] = None,
     ) -> Optional[Union[RequestOutput, PoolingRequestOutput]]:
 
         finished = finish_reason is not None
@@ -198,6 +199,7 @@ class RequestState:
         request_id: str,
         outputs: Union[list[CompletionOutput], list[PoolingOutput]],
         finished: bool,
+        kv_transfer_params: Optional[dict[str, Any]] = None,
     ) -> Union[RequestOutput, PoolingRequestOutput]:
 
         if isinstance(outputs[0], PoolingOutput):
@@ -222,6 +224,7 @@ class RequestState:
             prompt_logprobs=prompt_logprobs,
             outputs=cast(list[CompletionOutput], outputs),
             finished=finished,
+            kv_transfer_params=kv_transfer_params,
         )
 
     def _new_completion_output(
@@ -378,6 +381,7 @@ class OutputProcessor:
             pooling_output = engine_core_output.pooling_output
             finish_reason = engine_core_output.finish_reason
             stop_reason = engine_core_output.stop_reason
+            kv_transfer_params = engine_core_output.kv_transfer_params
 
             req_state.is_prefilling = False
 
@@ -398,7 +402,8 @@ class OutputProcessor:
 
             # 4) Create and handle RequestOutput objects.
             if request_output := req_state.make_request_output(
-                    new_token_ids, pooling_output, finish_reason, stop_reason):
+                    new_token_ids, pooling_output, finish_reason, stop_reason,
+                    kv_transfer_params):
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().
                     req_state.queue.put(request_output)
