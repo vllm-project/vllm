@@ -525,7 +525,8 @@ Make the response as short as possible.
     [
         ("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", "xgrammar", "auto",
          "deepseek_r1", None),
-        ("Qwen/Qwen3-0.6B", "xgrammar", "auto", "qwen3", NGRAM_SPEC_CONFIG),
+        ("Qwen/Qwen3-0.6B", "xgrammar", "auto", "deepseek_r1",
+         NGRAM_SPEC_CONFIG),
     ],
 )
 def test_structured_output_with_reasoning_matrices(
@@ -576,33 +577,33 @@ def test_structured_output_with_reasoning_matrices(
         max_tokens=8192,
         guided_decoding=GuidedDecodingParams(json=reasoning_schema),
     )
-    outputs = llm.generate(
-        [reasoning_prompt],
-        sampling_params=sampling_params,
-        use_tqdm=True,
-    )
+    for _ in range(2):
+        outputs = llm.generate(
+            [reasoning_prompt],
+            sampling_params=sampling_params,
+            use_tqdm=True,
+        )
 
-    assert outputs is not None
-    output = outputs[0]
-    assert output is not None and isinstance(output, RequestOutput)
-    prompt = output.prompt
-    generated_text = output.outputs[0].text
-    print(generated_text)
-    reasoning_content, content = reasoner.extract_reasoning_content(
-        generated_text,
-        request=ChatCompletionRequest(
-            messages=[],
-            model="test-model",
-            seed=123,
-        ),
-    )
-    assert content is not None
-    print(
-        f"Prompt: {prompt!r}\nReasoning: {reasoning_content!r}\nContent: {content!r}"
-    )
+        assert outputs is not None
+        output = outputs[0]
+        assert output is not None and isinstance(output, RequestOutput)
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        reasoning_content, content = reasoner.extract_reasoning_content(
+            generated_text,
+            request=ChatCompletionRequest(
+                messages=[],
+                model="test-model",
+                seed=123,
+            ),
+        )
+        assert content is not None
+        print(
+            f"Prompt: {prompt!r}\nReasoning: {reasoning_content!r}\nContent: {content!r}"
+        )
 
-    output_json = json.loads(content)
-    jsonschema.validate(instance=output_json, schema=reasoning_schema)
+        output_json = json.loads(content)
+        jsonschema.validate(instance=output_json, schema=reasoning_schema)
 
 
 @pytest.mark.skip_global_cleanup
