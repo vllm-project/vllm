@@ -18,21 +18,10 @@ MODELS = [
 
 
 @pytest.mark.skipif(not current_platform.is_cpu()
-                    and not current_platform.is_xpu(),
-                    reason="only supports Intel CPU/XPU backend.")
+                    and not current_platform.is_xpu() and not current_platform.is_cuda(),
+                    reason="only supports CPU/XPU/CUDA backend.")
 @pytest.mark.parametrize("model", MODELS)
 def test_auto_round_cpu_xpu(vllm_runner, model):
-    with vllm_runner(model) as llm:
-        output = llm.generate_greedy(["The capital of France is"],
-                                     max_tokens=8)
-    assert output
-    print(f"{output[0][1]}")
-
-
-@pytest.mark.skipif(not current_platform.is_cuda(),
-                    reason="only supports cuda backend.")
-@pytest.mark.parametrize("model", MODELS)
-def test_auto_round_cuda(vllm_runner, model):
     with vllm_runner(model) as llm:
         output = llm.generate_greedy(["The capital of France is"],
                                      max_tokens=8)
