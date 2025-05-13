@@ -22,7 +22,6 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
@@ -65,7 +64,6 @@ class KVTransferParams:
         return None
 
 
-@dataclass
 class KVConnectorMetadata:
     """
     Abstract Metadata used to communicate between the
