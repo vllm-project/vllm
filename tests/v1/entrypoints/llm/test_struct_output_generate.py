@@ -12,8 +12,8 @@ import jsonschema
 import pytest
 from pydantic import BaseModel
 
+from tests.reasoning.utils import run_reasoning_extraction
 from vllm.entrypoints.llm import LLM
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParserManager
@@ -35,11 +35,13 @@ EAGLE_SPEC_CONFIG = {
     "num_speculative_tokens": 5,
 }
 
-PARAMS_MODELS_BACKENDS_TOKENIZER_MODE_SPEC_CONFIG = [
+PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
     ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "auto", None),
     ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto", None),
     ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "mistral", None),
     ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", None),
+    #FIXME: This test is flaky on CI thus disabled
+    #("Qwen/Qwen2.5-1.5B-Instruct", "guidance", "auto"),
     ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto",
      NGRAM_SPEC_CONFIG),
     ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", NGRAM_SPEC_CONFIG),
@@ -78,9 +80,8 @@ def _load_json(s: str, backend: str) -> str:
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
-    "model_name, guided_decoding_backend, tokenizer_mode, speculative_config",  # noqa: E501
-    PARAMS_MODELS_BACKENDS_TOKENIZER_MODE_SPEC_CONFIG,
-)
+    "model_name, guided_decoding_backend, tokenizer_mode, speculative_config",
+    PARAMS_MODELS_BACKENDS_TOKENIZER_MODE)
 def test_structured_output(
     monkeypatch: pytest.MonkeyPatch,
     sample_json_schema: dict[str, Any],
@@ -524,9 +525,8 @@ Make the response as short as possible.
     "model_name, guided_decoding_backend, tokenizer_mode, reasoning_parser, speculative_config",  # noqa: E501
     [
         ("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", "xgrammar", "auto",
-         "deepseek_r1", None),
-        ("Qwen/Qwen3-0.6B", "xgrammar", "auto", "deepseek_r1",
-         NGRAM_SPEC_CONFIG),
+         "deepseek_r1", NGRAM_SPEC_CONFIG),
+        ("Qwen/Qwen3-0.6B", "xgrammar", "auto", "qwen3", None),
     ],
 )
 def test_structured_output_with_reasoning_matrices(
@@ -535,7 +535,7 @@ def test_structured_output_with_reasoning_matrices(
     tokenizer_mode: TokenizerMode,
     reasoning_parser: str,
     model_name: str,
-    speculative_config: dict[str, Any],
+    speculative_config: dict[str, Any] | None,
 ):
     monkeypatch.setenv("VLLM_USE_V1", "1")
 
@@ -550,6 +550,7 @@ def test_structured_output_with_reasoning_matrices(
         # recompilation at runtime
         enforce_eager=bool(not current_platform.is_tpu()),
         max_model_len=1024,
+        max_num_seqs=16,
         guided_decoding_backend=guided_decoding_backend,
         guided_decoding_disable_any_whitespace=True,
         tokenizer_mode=tokenizer_mode,
@@ -588,14 +589,8 @@ def test_structured_output_with_reasoning_matrices(
     assert output is not None and isinstance(output, RequestOutput)
     prompt = output.prompt
     generated_text = output.outputs[0].text
-    reasoning_content, content = reasoner.extract_reasoning_content(
-        generated_text,
-        request=ChatCompletionRequest(
-            messages=[],
-            model="test-model",
-            seed=123,
-        ),
-    )
+    reasoning_content, content = run_reasoning_extraction(
+        reasoner, [generated_text])
     print(
         f"Prompt: {prompt!r}\nReasoning: {reasoning_content!r}\nContent: {content!r}"
     )
