@@ -17,7 +17,7 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.utils import cdiv
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
-from vllm.bok_torch_api import *
+import bok_torch_api
 
 
 if TYPE_CHECKING:
@@ -424,7 +424,7 @@ class BokAttentionImpl(AttentionImpl):
 
         # Continue with the original operation
 
-        fwd_kvcache_xqa(
+        bok_torch_api.fwd_kvcache_xqa(
             q=query,
             kcache=kv_cache,
             vcache=kv_cache,
