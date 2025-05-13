@@ -749,6 +749,7 @@ def main(args: argparse.Namespace):
             "top_k": args.top_k,
             "min_p": args.min_p,
             "temperature": args.temperature,
+            "seed": args.seed,
         }.items()
         if v is not None
     }
