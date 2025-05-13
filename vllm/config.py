@@ -621,20 +621,23 @@ class ModelConfig:
             
         if is_s3(model):
             s3_model = S3Model()
-            s3_model.pull_files(model, allow_pattern=["*.model", "*.py", "*.json"])
+            s3_model.pull_files(model,
+                                allow_pattern=["*.model", "*.py", "*.json"])
             self.model_weights = model
             self.model = s3_model.dir
             
             # If tokenizer is same as model, download to same directory
             if model == tokenizer:
-                s3_model.pull_files(model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
+                s3_model.pull_files(
+                    model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
                 self.tokenizer = s3_model.dir
                 return
                 
         # Only download tokenizer if needed and not already handled
         if is_s3(tokenizer):
             s3_tokenizer = S3Model()
-            s3_tokenizer.pull_files(tokenizer, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
+            s3_tokenizer.pull_files(
+                model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
             self.tokenizer = s3_tokenizer.dir
 
     def _init_multimodal_config(self) -> Optional["MultiModalConfig"]:
