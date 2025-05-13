@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List, Optional
+from typing import Optional
 
 from vllm.config import LoRAConfig, ModelConfig, SchedulerConfig
 from vllm.lora.request import LoRARequest
@@ -32,7 +32,7 @@ class TokenizerGroup:
         return self.max_input_length
 
     def _raise_if_input_too_long(self,
-                                 encoded_tokens: List[int],
+                                 encoded_tokens: list[int],
                                  lora_request: Optional[LoRARequest] = None):
         input_length = len(encoded_tokens)
         if lora_request:
@@ -48,7 +48,7 @@ class TokenizerGroup:
                max_length: Optional[int] = None,
                truncation: Optional[bool] = None,
                lora_request: Optional[LoRARequest] = None,
-               add_special_tokens: Optional[bool] = None) -> List[int]:
+               add_special_tokens: Optional[bool] = None) -> list[int]:
 
         tokenizer = self.get_lora_tokenizer(lora_request)
         ret = encode_tokens(tokenizer,
@@ -65,7 +65,7 @@ class TokenizerGroup:
             max_length: Optional[int] = None,
             truncation: Optional[bool] = None,
             lora_request: Optional[LoRARequest] = None,
-            add_special_tokens: Optional[bool] = None) -> List[int]:
+            add_special_tokens: Optional[bool] = None) -> list[int]:
         tokenizer = await self.get_lora_tokenizer_async(lora_request)
         ret = encode_tokens(tokenizer,
                             prompt,
