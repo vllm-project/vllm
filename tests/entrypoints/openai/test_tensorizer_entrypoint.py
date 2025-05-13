@@ -50,10 +50,15 @@ def model_uri(tmp_dir):
 
 @pytest.fixture(scope="module")
 def tensorize_model_and_lora(tmp_dir, model_uri):
+    if USING_V1:
+        pytest.skip("Tensorizer serialization is not yet supported with V1.")
+
     tensorizer_config = TensorizerConfig(tensorizer_uri=model_uri,
                                          lora_dir=tmp_dir)
     args = EngineArgs(model=MODEL_NAME)
 
+    _original = os.getenv("VLLM_USE_V1") or None
+    os.environ["VLLM_USE_V1"] = "0"
     tensorize_lora_adapter(LORA_PATH, tensorizer_config)
     tensorize_vllm_model(args, tensorizer_config)
 
@@ -61,6 +66,11 @@ def tensorize_model_and_lora(tmp_dir, model_uri):
     # fixture won't be guaranteed to be called after this
     # when this fixture is used for a test
     _cleanup()
+    yield
+    if _original is not None:
+        os.environ["VLLM_USE_V1"] = _original
+    else:
+        del os.environ["VLLM_USE_V1"]
 
 
 @pytest.fixture(scope="module")
