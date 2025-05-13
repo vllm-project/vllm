@@ -526,7 +526,7 @@ Make the response as short as possible.
     [
         ("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", "xgrammar", "auto",
          "deepseek_r1", NGRAM_SPEC_CONFIG),
-        ("Qwen/Qwen3-0.6B", "xgrammar", "auto", "qwen3", None),
+        ("Qwen/Qwen3-0.6B", "xgrammar", "auto", "deepseek_r1", None),
     ],
 )
 def test_structured_output_with_reasoning_matrices(
