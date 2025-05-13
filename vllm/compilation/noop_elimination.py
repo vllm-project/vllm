@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Union
 from collections.abc import Iterable
+from typing import Union
 
 import torch.fx
 from torch import SymInt

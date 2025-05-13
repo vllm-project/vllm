@@ -5,9 +5,9 @@ import dataclasses
 import os
 import pprint
 import time
+from collections.abc import Sequence
 from contextlib import ExitStack
 from typing import Any, Callable, Optional
-from collections.abc import Sequence
 from unittest.mock import patch
 
 import torch
