@@ -84,7 +84,6 @@ exclude = [
 "vllm/model_executor/models/**/*.py" = ["UP006", "UP035"]
 "vllm/platforms/**/*.py" = ["UP006", "UP035"]
 "vllm/plugins/**/*.py" = ["UP006", "UP035"]
-"vllm/profiler/**/*.py" = ["UP006", "UP035"]
 "vllm/prompt_adapter/**/*.py" = ["UP006", "UP035"]
 "vllm/spec_decode/**/*.py" = ["UP006", "UP035"]
 "vllm/transformers_utils/**/*.py" = ["UP006", "UP035"]
