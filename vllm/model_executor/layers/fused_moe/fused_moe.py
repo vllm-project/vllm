@@ -1127,8 +1127,7 @@ def fused_experts(hidden_states: torch.Tensor,
                   a1_scale: Optional[torch.Tensor] = None,
                   a2_scale: Optional[torch.Tensor] = None,
                   block_shape: Optional[List[int]] = None,
-                  allow_deep_gemm: bool = False,
-                  use_ck_moe_2stages: bool = False) -> torch.Tensor:
+                  allow_deep_gemm: bool = False) -> torch.Tensor:
     if (allow_deep_gemm and use_fp8_w8a8
             and _valid_deep_gemm(hidden_states, w1, w2, expert_map)):
         assert apply_router_weight_on_input is False
