@@ -13,8 +13,10 @@ import pytest
 from pydantic import BaseModel
 
 from vllm.entrypoints.llm import LLM
+from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
+from vllm.reasoning.abs_reasoning_parsers import ReasoningParserManager
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
 if TYPE_CHECKING:
@@ -523,8 +525,7 @@ Make the response as short as possible.
     [
         ("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", "xgrammar", "auto",
          "deepseek_r1", None),
-        ("Qwen/Qwen3-0.6B", "xgrammar", "auto", "deepseek_r1",
-         NGRAM_SPEC_CONFIG),
+        ("Qwen/Qwen3-0.6B", "xgrammar", "auto", "qwen3", NGRAM_SPEC_CONFIG),
     ],
 )
 def test_structured_output_with_reasoning_matrices(
@@ -554,6 +555,9 @@ def test_structured_output_with_reasoning_matrices(
         reasoning_parser=reasoning_parser,
         speculative_config=speculative_config,
     )
+    tokenizer = llm.get_tokenizer(None)
+    reasoner = ReasoningParserManager.get_reasoning_parser(reasoning_parser)(
+        tokenizer=tokenizer)
 
     reasoning_prompt = "Solve the following math problem step-by-step, then provide the final answer as JSON object with a single key 'result'. Problem: What is 5 * 8 + 2?"  # noqa: E501
     reasoning_schema = {
@@ -569,24 +573,35 @@ def test_structured_output_with_reasoning_matrices(
 
     sampling_params = SamplingParams(
         temperature=0.1,
-        max_tokens=4096,
+        max_tokens=8192,
         guided_decoding=GuidedDecodingParams(json=reasoning_schema),
     )
     outputs = llm.generate(
-        prompts=[reasoning_prompt],
+        [reasoning_prompt],
         sampling_params=sampling_params,
         use_tqdm=True,
     )
 
     assert outputs is not None
     output = outputs[0]
-    assert output is not None
-    assert isinstance(output, RequestOutput)
+    assert output is not None and isinstance(output, RequestOutput)
     prompt = output.prompt
     generated_text = output.outputs[0].text
-    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    print(generated_text)
+    reasoning_content, content = reasoner.extract_reasoning_content(
+        generated_text,
+        request=ChatCompletionRequest(
+            messages=[],
+            model="test-model",
+            seed=123,
+        ),
+    )
+    assert content is not None
+    print(
+        f"Prompt: {prompt!r}\nReasoning: {reasoning_content!r}\nContent: {content!r}"
+    )
 
-    output_json = json.loads(generated_text)
+    output_json = json.loads(content)
     jsonschema.validate(instance=output_json, schema=reasoning_schema)
 
 
