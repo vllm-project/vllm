@@ -2,7 +2,7 @@
 
 from abc import abstractmethod
 from enum import Enum
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Optional
 
 import torch
 import torch.nn.functional as F
@@ -326,7 +326,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
 def determine_expert_map(
         ep_size: int, ep_rank: int,
-        global_num_experts: int) -> Tuple[int, Optional[torch.Tensor]]:
+        global_num_experts: int) -> tuple[int, Optional[torch.Tensor]]:
     """
         Calculates how many experts should be assigned to each rank for EP and
         creates a mapping from global to local expert index. Experts are
@@ -338,7 +338,7 @@ def determine_expert_map(
             global_num_experts (int): The total number of experts in the model.
 
         Returns:
-            Tuple[int, Optional[torch.Tensor]]: A tuple containing:
+            tuple[int, Optional[torch.Tensor]]: A tuple containing:
                 - local_num_experts (int): The number of experts assigned
                     to the current rank.
                 - expert_map (Optional[torch.Tensor]): A tensor of shape
@@ -909,7 +909,7 @@ class FusedMoE(torch.nn.Module):
     def make_expert_params_mapping(
             cls, ckpt_gate_proj_name: str, ckpt_down_proj_name: str,
             ckpt_up_proj_name: str,
-            num_experts: int) -> List[Tuple[str, str, int, str]]:
+            num_experts: int) -> list[tuple[str, str, int, str]]:
 
         return [
             # (param_name, weight_name, expert_id, shard_id)

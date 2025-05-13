@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from math import prod
-from typing import List, Optional, Tuple
+from typing import Optional
 
 import torch
 
@@ -10,7 +10,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.utils import cdiv
 
 
-def _resize_cache(x: torch.Tensor, v: Tuple[int, ...]) -> torch.Tensor:
+def _resize_cache(x: torch.Tensor, v: tuple[int, ...]) -> torch.Tensor:
     """
     Shrink the given tensor and apply the given view to it.  This is
     used to resize the intermediate fused_moe caches.
@@ -22,8 +22,8 @@ def _resize_cache(x: torch.Tensor, v: Tuple[int, ...]) -> torch.Tensor:
 def _fp8_quantize(
     A: torch.Tensor,
     A_scale: Optional[torch.Tensor],
-    block_shape: Optional[List[int]],
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    block_shape: Optional[list[int]],
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Perform fp8 quantization on the inputs.  If a block_shape
     is provided, the output will be blocked.

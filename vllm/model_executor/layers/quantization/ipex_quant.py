@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import torch
 
@@ -32,7 +32,7 @@ class IPEXConfig(QuantizationConfig):
         method: str,
         weight_bits: int,
         group_size: int,
-        modules_to_not_convert: Optional[List[str]] = None,
+        modules_to_not_convert: Optional[list[str]] = None,
         desc_act: Optional[bool] = None,
         lm_head_quantized: Optional[bool] = None,
     ) -> None:
@@ -63,7 +63,7 @@ class IPEXConfig(QuantizationConfig):
         return "ipex"
 
     @classmethod
-    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
         return [torch.bfloat16, torch.float16]
 
     @classmethod
@@ -71,14 +71,14 @@ class IPEXConfig(QuantizationConfig):
         return -1
 
     @staticmethod
-    def get_config_filenames() -> List[str]:
+    def get_config_filenames() -> list[str]:
         return [
             "quant_config.json",
             "quantize_config.json",
         ]
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "IPEXConfig":
+    def from_config(cls, config: dict[str, Any]) -> "IPEXConfig":
         method = cls.get_from_keys(config, ["quant_method"]).lower()
         if method == "awq":
             weight_bits = cls.get_from_keys(config, ["w_bit", "bits"])

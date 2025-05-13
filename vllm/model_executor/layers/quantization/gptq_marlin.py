@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, Callable, Dict, List, Optional, Set, Union
+from typing import Any, Callable, Optional, Union
 
 import torch
 
@@ -45,8 +45,8 @@ class GPTQMarlinConfig(QuantizationConfig):
 
     def __init__(self, weight_bits: int, group_size: int, desc_act: bool,
                  is_sym: bool, lm_head_quantized: bool,
-                 dynamic: Dict[str, Dict[str, Union[int, bool]]],
-                 full_config: Dict[str, Any]) -> None:
+                 dynamic: dict[str, dict[str, Union[int, bool]]],
+                 full_config: dict[str, Any]) -> None:
         super().__init__()
         if desc_act and group_size == -1:
             # In this case, act_order == True is the same as act_order == False
@@ -55,7 +55,7 @@ class GPTQMarlinConfig(QuantizationConfig):
 
         # GPTQModel use `dynamic` config property to allow per module
         # quantization config so each module can be individually optimized.
-        # Format is Dict[str, Dict] where key is a regex string that can
+        # Format is dict[str, dict] where key is a regex string that can
         # perform both positive ("+:" prefixed) or negative ("-:" prefixed)
         # matching of a module.
         # Default to positive match, override base quant config mode, if no
@@ -105,7 +105,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         return "gptq_marlin"
 
     @classmethod
-    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
         return [torch.half, torch.bfloat16]
 
     @classmethod
@@ -113,11 +113,11 @@ class GPTQMarlinConfig(QuantizationConfig):
         return 80
 
     @classmethod
-    def get_config_filenames(cls) -> List[str]:
+    def get_config_filenames(cls) -> list[str]:
         return ["quantize_config.json"]
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "GPTQMarlinConfig":
+    def from_config(cls, config: dict[str, Any]) -> "GPTQMarlinConfig":
         dynamic = cls.get_from_keys_or(config, ["dynamic"], default={})
         dynamic = {} if dynamic is None else dynamic
 
@@ -167,7 +167,7 @@ class GPTQMarlinConfig(QuantizationConfig):
                                        GPTQMarlinLinearMethod)
 
     @classmethod
-    def is_gptq_marlin_compatible(cls, quant_config: Dict[str, Any]):
+    def is_gptq_marlin_compatible(cls, quant_config: dict[str, Any]):
         quant_method = quant_config.get("quant_method", "").lower()
         num_bits = quant_config.get("bits")
         group_size = quant_config.get("group_size")
@@ -199,7 +199,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         quant_config: The GPTQ Marlin quantization config.
     """
 
-    _kernel_backends_being_used: Set[str] = set()
+    _kernel_backends_being_used: set[str] = set()
 
     def __init__(self, quant_config: GPTQMarlinConfig) -> None:
         self.quant_config = quant_config
@@ -212,7 +212,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         input_size_per_partition: int,
-        output_partition_sizes: List[int],
+        output_partition_sizes: list[int],
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,

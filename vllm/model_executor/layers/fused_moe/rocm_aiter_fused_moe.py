@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from functools import cache
-from typing import List, Optional, Tuple
+from typing import Optional
 
 import torch
 
@@ -97,7 +97,7 @@ def rocm_aiter_fmoe_fp8_blockscale_g1u1_impl(
         w1_scale: torch.Tensor,
         w2_scale: torch.Tensor,
         a1_scale: torch.Tensor,
-        block_shape: List[int],
+        block_shape: list[int],
         smooth_scale: Optional[torch.Tensor] = None) -> torch.Tensor:
     from aiter import fmoe_fp8_blockscale_g1u1
     from aiter.fused_moe_bf16_asm import moe_sorting_ck
@@ -142,7 +142,7 @@ def rocm_aiter_fmoe_fp8_blockscale_g1u1_fake(
         w1_scale: torch.Tensor,
         w2_scale: torch.Tensor,
         a1_scale: torch.Tensor,
-        block_shape: List[int],
+        block_shape: list[int],
         smooth_scale: Optional[torch.Tensor] = None) -> torch.Tensor:
 
     return torch.empty_like(a1, dtype=hidden_states_dtype)
@@ -280,7 +280,7 @@ def rocm_aiter_fused_experts(hidden_states: torch.Tensor,
                              w2_zp: Optional[torch.Tensor] = None,
                              a1_scale: Optional[torch.Tensor] = None,
                              a2_scale: Optional[torch.Tensor] = None,
-                             block_shape: Optional[List[int]] = None,
+                             block_shape: Optional[list[int]] = None,
                              allow_deep_gemm: bool = False) -> torch.Tensor:
 
     from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -372,14 +372,14 @@ def rocm_aiter_topk_softmax(topk_weights: torch.Tensor,
                             topk_indices: torch.Tensor,
                             token_expert_indices: torch.Tensor,
                             gating_output: torch.Tensor,
-                            renormalize: bool) -> Tuple[torch.Tensor, ...]:
+                            renormalize: bool) -> tuple[torch.Tensor, ...]:
     torch.ops.vllm.rocm_aiter_topk_softmax(topk_weights, topk_indices,
                                            token_expert_indices, gating_output,
                                            renormalize)
     return topk_weights, topk_indices
 
 
-def shuffle_weights(*tensors: torch.Tensor) -> Tuple[torch.Tensor, ...]:
+def shuffle_weights(*tensors: torch.Tensor) -> tuple[torch.Tensor, ...]:
     """
     Applies shuffle_weight function from AITER to each 
     input tensor and returns them.
@@ -395,7 +395,7 @@ def shuffle_weights(*tensors: torch.Tensor) -> Tuple[torch.Tensor, ...]:
 
 
 def expand_weights(*tensors: torch.Tensor,
-                   expansion_dims: list[int]) -> Tuple[torch.Tensor, ...]:
+                   expansion_dims: list[int]) -> tuple[torch.Tensor, ...]:
     """
     Expands the dimensions of input tensors.
 
