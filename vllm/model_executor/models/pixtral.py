@@ -28,7 +28,6 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
@@ -37,8 +36,9 @@ from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement,
-                                        PromptUpdate, PromptUpdateDetails)
+                                        BaseProcessingInfo, MultiModalHashes,
+                                        PromptReplacement, PromptUpdate,
+                                        PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import (MistralTokenizer,
@@ -65,14 +65,14 @@ class PixtralImagePixelInputs(TypedDict):
     """
     Shape: `(batch_size * num_images, num_channels, image_width, image_height)`
 
-    The result of stacking :attr:`ImageEncoding.tokens` from each prompt.
+    The result of stacking {attr}`ImageEncoding.tokens` from each prompt.
     """
 
 
 class PixtralProcessorAdapter:
     """
     Provide a HF-compatible interface for
-    :class:`mistral_common.tokens.tokenizers.multimodal.ImageEncoder`.
+    {class}`mistral_common.tokens.tokenizers.multimodal.ImageEncoder`.
     """
 
     def __init__(self, tokenizer: MistralTokenizer) -> None:
@@ -272,15 +272,19 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
         prompt: Union[str, list[int]],
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[list[int], MultiModalKwargs, bool]:
-        prompt_ids, mm_kwargs, _ = super()._cached_apply_hf_processor(
+        *,
+        return_mm_hashes: bool,
+    ) -> tuple[list[int], MultiModalKwargs, Optional[MultiModalHashes], bool]:
+        prompt_ids, mm_kwargs, mm_hashes, _ = super(
+        )._cached_apply_hf_processor(
             prompt=prompt,
             mm_data_items=mm_data_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            return_mm_hashes=return_mm_hashes,
         )
 
         # NOTE: The tokens are already inserted by the chat template
-        return prompt_ids, mm_kwargs, True
+        return prompt_ids, mm_kwargs, mm_hashes, True
 
 
 @MULTIMODAL_REGISTRY.register_processor(PixtralMultiModalProcessor,
@@ -330,13 +334,6 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
-
-    @cached_property
-    def sampler(self):
-        if hasattr(self.language_model, "sampler"):
-            return self.language_model.sampler
-
-        return get_sampler()
 
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[PixtralImagePixelInputs]:
@@ -440,13 +437,6 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> Optional[torch.Tensor]:
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
 
@@ -926,9 +916,9 @@ class PixtralHFEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
         return self.vision_config.image_size
 
     def get_patch_size(self) -> int:
-        spatial_merge_size = getattr(self.vision_config, "spatial_merge_size",
-                                     1)
-        return (self.vision_config.patch_size * spatial_merge_size)
+        # spatial_merge_size is needed for Mistral3
+        spatial_merge_size = getattr(self.hf_config, "spatial_merge_size", 1)
+        return self.vision_config.patch_size * spatial_merge_size
 
     def get_patch_grid_length(self) -> int:
         image_size, patch_size = self.get_image_size(), self.get_patch_size()

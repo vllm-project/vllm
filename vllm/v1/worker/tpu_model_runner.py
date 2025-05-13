@@ -17,7 +17,7 @@ import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
@@ -30,14 +30,16 @@ from vllm.utils import LayerBlockType, cdiv, is_pin_memory_available
 from vllm.v1.attention.backends.pallas import (PallasAttentionBackend,
                                                PallasMetadata)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheSpec, SlidingWindowSpec)
+from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
+                                        KVCacheConfig, KVCacheSpec,
+                                        SlidingWindowSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.sample.tpu.metadata import TPUSupportedSamplingMetadata
 from vllm.v1.sample.tpu.sampler import Sampler as TPUSampler
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from .utils import sanity_check_mm_encoder_outputs
 
@@ -89,7 +91,7 @@ MIN_NUM_SEQS = 8
 # The dummy_run should be comprehensive, ensuring all potential input shapes and
 # branch predictions are included as subgraph inputs to facilitate
 # pre-compilation.
-class TPUModelRunner:
+class TPUModelRunner(LoRAModelRunnerMixin):
 
     def __init__(
         self,
@@ -148,6 +150,7 @@ class TPUModelRunner:
         self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
         self.head_size = model_config.get_head_size()
         self.hidden_size = model_config.get_hidden_size()
+        self.vocab_size = model_config.get_vocab_size()
 
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
@@ -176,9 +179,10 @@ class TPUModelRunner:
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
             max_num_blocks_per_req=self.max_num_blocks_per_req,
+            max_num_batched_tokens=self.max_num_tokens,
             device=self.device,
             pin_memory=self.pin_memory,
-            vocab_size=model_config.get_vocab_size(),
+            vocab_size=self.vocab_size,
         )
 
         # Cached torch/numpy tensor
@@ -194,10 +198,6 @@ class TPUModelRunner:
                                          device="cpu")
         self.positions_np = self.positions_cpu.numpy()
 
-        self.slot_mapping_cpu = torch.zeros(self.max_num_tokens,
-                                            dtype=torch.int64,
-                                            device="cpu")
-        self.slot_mapping_np = self.slot_mapping_cpu.numpy()
         self.block_table_cpu = torch.zeros(
             (self.max_num_reqs, self.max_num_blocks_per_req),
             dtype=self.input_batch.block_table.get_cpu_tensor().dtype,
@@ -217,9 +217,24 @@ class TPUModelRunner:
 
         # Range tensor with values [0 .. self.max_num_tokens - 1].
         # Used to initialize positions / context_lens / seq_lens
-        self.arange_np = np.arange(self.max_num_tokens, dtype=np.int32)
+        # Keep in int64 to avoid overflow with long context
+        self.arange_np = np.arange(self.max_num_tokens, dtype=np.int64)
         self.num_reqs_paddings = _get_req_paddings(
             min_req_size=MIN_NUM_SEQS, max_req_size=self.max_num_reqs)
+
+        # tensors for structured decoding
+        self.grammar_bitmask_cpu = torch.zeros(
+            (self.max_num_reqs, cdiv(self.vocab_size, 32)),
+            dtype=torch.int32,
+            device="cpu",
+            pin_memory=self.pin_memory)
+        self.require_structured_out_cpu = torch.zeros(
+            (self.max_num_reqs, 1),
+            dtype=torch.bool,
+            device="cpu",
+            pin_memory=self.pin_memory)
+        self.structured_decode_arange = torch.arange(
+            0, 32, device="cpu", pin_memory=self.pin_memory)
 
         # Get maximum number of mm items per modality (batch size).
         self.max_num_mm_items_by_modality = dict()
@@ -339,7 +354,6 @@ class TPUModelRunner:
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
-                prompt=new_req_data.prompt,
                 mm_inputs=new_req_data.mm_inputs,
                 mm_positions=new_req_data.mm_positions,
                 sampling_params=sampling_params,
@@ -413,11 +427,10 @@ class TPUModelRunner:
             format. Layers that do not need KV cache are not included.
         """
 
-        forward_ctx = self.vllm_config.compilation_config.static_forward_context
+        layers = get_layers_from_vllm_config(self.vllm_config, Attention)
         block_size = self.vllm_config.cache_config.block_size
         kv_cache_spec: dict[str, KVCacheSpec] = {}
-        for layer_name, attn_module in forward_ctx.items():
-            assert isinstance(attn_module, Attention)
+        for layer_name, attn_module in layers.items():
             if attn_module.attn_type == AttentionType.DECODER:
                 if attn_module.sliding_window is not None:
                     kv_cache_spec[layer_name] = SlidingWindowSpec(
@@ -517,7 +530,8 @@ class TPUModelRunner:
         block_offsets = positions_np % self.block_size
         np.add(block_numbers * self.block_size,
                block_offsets,
-               out=self.slot_mapping_np[:total_num_scheduled_tokens])
+               out=self.input_batch.block_table.
+               slot_mapping_np[:total_num_scheduled_tokens])
 
         # Prepare the attention metadata.
         self.query_start_loc_np[0] = 0
@@ -541,10 +555,12 @@ class TPUModelRunner:
         self.position_ids = self.positions_cpu[:
                                                padded_total_num_scheduled_tokens].to(
                                                    self.device)
-        self.slot_mapping_cpu[total_num_scheduled_tokens:] = _PAD_SLOT_ID
-        slot_mapping = self.slot_mapping_cpu[:
-                                             padded_total_num_scheduled_tokens].to(
-                                                 self.device)
+        self.input_batch.block_table.slot_mapping_cpu[
+            total_num_scheduled_tokens:] = _PAD_SLOT_ID
+        slot_mapping = (
+            self.input_batch.block_table.
+            slot_mapping_cpu[:padded_total_num_scheduled_tokens].to(
+                self.device))
         block_tables = self.block_table_cpu[:self.max_num_reqs]
         block_tables[:num_reqs, :self.max_num_blocks_per_req] = (
             self.input_batch.block_table.get_cpu_tensor()[:num_reqs])
@@ -552,6 +568,17 @@ class TPUModelRunner:
         query_start_loc = self.query_start_loc_cpu[:self.max_num_reqs + 1].to(
             self.device)
         seq_lens = self.seq_lens_cpu[:self.max_num_reqs].to(self.device)
+
+        if self.lora_config is not None:
+            # We need to respect padding when activating LoRA adapters
+            padded_num_scheduled_tokens_per_req = np.copy(
+                num_scheduled_tokens_per_req
+            )  # Copying to avoid accidental state corruption bugs
+            padded_num_scheduled_tokens_per_req[-1] += \
+                padded_total_num_scheduled_tokens - total_num_scheduled_tokens
+
+            self.set_active_loras(self.input_batch,
+                                  padded_num_scheduled_tokens_per_req)
 
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
@@ -573,7 +600,14 @@ class TPUModelRunner:
         # Padded to avoid recompiling when `num_reqs` varies.
         logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
         logits_indices = logits_indices.to(self.device)
-        return attn_metadata, logits_indices, padded_num_reqs
+
+        layer_names = get_layers_from_vllm_config(self.vllm_config,
+                                                  Attention).keys()
+        per_layer_attn_metadata = {
+            layer_name: attn_metadata
+            for layer_name in layer_names
+        }
+        return per_layer_attn_metadata, logits_indices, padded_num_reqs
 
     def _scatter_placeholders(
         self,
@@ -754,7 +788,10 @@ class TPUModelRunner:
         xm.mark_step()
         num_reqs = self.input_batch.num_reqs
         # Run the decoder
-        with set_forward_context(attn_metadata, self.vllm_config):
+        with set_forward_context(
+                attn_metadata,
+                self.vllm_config,
+                num_tokens=scheduler_output.total_num_scheduled_tokens):
             hidden_states = self.model(
                 input_ids=input_ids,
                 positions=self.position_ids,
@@ -762,12 +799,29 @@ class TPUModelRunner:
             )
         hidden_states = self.select_hidden_states(hidden_states,
                                                   logits_indices)
+        logits = self.compute_logits(hidden_states)
         tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
             from_input_batch(self.input_batch, padded_num_reqs, self.device)
-        selected_token_ids = self.sample_from_hidden(hidden_states,
+        if scheduler_output.grammar_bitmask is not None:
+            require_struct_decoding, grammar_bitmask_padded, arange = \
+                self.prepare_structured_decoding_input(logits, scheduler_output)
+            logits = self.structured_decode(require_struct_decoding,
+                                            grammar_bitmask_padded, logits,
+                                            arange)
+        selected_token_ids = self.sample_from_logits(logits,
                                                      tpu_sampling_metadata)
+
+        # NOTE (NickLucche) Use the original logits (before any penalties or
+        # temperature scaling) for the top-k logprobs. We can't enforce it due
+        # to recompilations outside torch.compiled code, so just make sure
+        # `sample_from_logits` does not modify the logits in-place.
+        logprobs = self.gather_logprobs(logits, selected_token_ids) \
+            if tpu_sampling_metadata.logprobs else None
+
         # Remove padding on cpu and keep dynamic op outside of xla graph.
         selected_token_ids = selected_token_ids.cpu()[:num_reqs]
+        logprobs_lists = logprobs.tolists() \
+            if tpu_sampling_metadata.logprobs else None
 
         # Update the cache state concurrently. Code above will not block until
         # we use `selected_token_ids`. Add mark_step if post-processing changes
@@ -837,7 +891,7 @@ class TPUModelRunner:
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=valid_sampled_token_ids,
             spec_token_ids=None,
-            logprobs=None,
+            logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
         )
 
@@ -865,6 +919,11 @@ class TPUModelRunner:
                 "get_tensor_model_parallel_rank",
                 return_value=xm_tp_rank):
             model = get_model(vllm_config=self.vllm_config)
+        if self.lora_config is not None:
+            model = self.load_lora_model(model, self.model_config,
+                                         self.scheduler_config,
+                                         self.lora_config, self.device)
+
         # Sync all pending XLA execution during model initialization and weight
         # loading.
         xm.mark_step()
@@ -921,7 +980,17 @@ class TPUModelRunner:
         torch._dynamo.mark_dynamic(position_ids, 0)
         torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
 
-        with set_forward_context(attn_metadata, self.vllm_config, 0):
+        layer_names = get_layers_from_vllm_config(self.vllm_config,
+                                                  Attention).keys()
+        per_layer_attn_metadata = {
+            layer_name: attn_metadata
+            for layer_name in layer_names
+        }
+
+        with self.maybe_dummy_run_with_lora(
+                self.lora_config,
+                np.array([num_tokens], dtype=np.int32)), set_forward_context(
+                    per_layer_attn_metadata, self.vllm_config, 0):
             out = self.model(input_ids=input_ids,
                              positions=position_ids,
                              inputs_embeds=inputs_embeds)
@@ -997,7 +1066,7 @@ class TPUModelRunner:
             self._dummy_run(num_tokens)
         xm.wait_device_ops()
         end = time.perf_counter()
-        logger.info("Compilation finished in in %.2f [secs].", end - start)
+        logger.info("Compilation finished in %.2f [secs].", end - start)
         self._update_num_xla_graphs("model backbone")
 
     def _precompile_select_hidden_states(self) -> None:
@@ -1026,19 +1095,59 @@ class TPUModelRunner:
                     break
         xm.wait_device_ops()
         end = time.perf_counter()
-        logger.info("Compilation finished in in %.2f [secs].", end - start)
+        logger.info("Compilation finished in %.2f [secs].", end - start)
         self._update_num_xla_graphs("select_hidden_states")
 
-    def _precompile_sample_from_hidden(self) -> None:
-        logger.info("Compiling sampling with different num_reqs.")
+    def _precompile_compute_logits(self) -> None:
+        logger.info("Compiling compute_logits with different input shapes.")
         start = time.perf_counter()
         hsize = self.model_config.get_hidden_size()
         for num_reqs in self.num_reqs_paddings:
             dummy_hidden = torch.zeros((num_reqs, hsize),
                                        device=self.device,
                                        dtype=self._hidden_states_dtype)
-            # The first dimension of dummy_hidden cannot be mark_dynamic because
-            # some operations in the sampler require it to be static.
+            torch._dynamo.mark_dynamic(dummy_hidden, 0)
+            self.compute_logits(dummy_hidden)
+            logger.info("  -- num_seqs: %d", num_reqs)
+        xm.wait_device_ops()
+        end = time.perf_counter()
+        logger.info("Compilation finished in %.2f [secs].", end - start)
+        self._update_num_xla_graphs("compute_logits")
+
+    def _precompile_structured_decoding(self) -> None:
+        logger.info(
+            "Compiling structured_decoding with different input shapes.")
+        start = time.perf_counter()
+        for num_reqs in self.num_reqs_paddings:
+            dummy_logits = torch.zeros((num_reqs, self.vocab_size),
+                                       device=self.device,
+                                       dtype=self._hidden_states_dtype)
+            dummy_require_struct_decoding = \
+                self.require_structured_out_cpu[:num_reqs].to(self.device)
+            dummy_grammar_bitmask = \
+                self.grammar_bitmask_cpu[:num_reqs].to(self.device)
+            # The first dimension of the above 3 dummy tensors cannot be
+            # mark_dynamic because some operations in structured_decode require
+            # them to be static.
+            arange = self.structured_decode_arange.to(self.device)
+            self.structured_decode(dummy_require_struct_decoding,
+                                   dummy_grammar_bitmask, dummy_logits, arange)
+            logger.info("  -- num_seqs: %d", num_reqs)
+        xm.wait_device_ops()
+        end = time.perf_counter()
+        logger.info("Compilation finished in %.2f [secs].", end - start)
+        self._update_num_xla_graphs("structured_decoding")
+
+    def _precompile_sample_from_logits(self) -> None:
+        logger.info(
+            "Compiling sample_from_logits with different input shapes.")
+        start = time.perf_counter()
+        for num_reqs in self.num_reqs_paddings:
+            dummy_logits = torch.zeros((num_reqs, self.vocab_size),
+                                       device=self.device,
+                                       dtype=self._hidden_states_dtype)
+            # The first dimension of dummy_logits cannot be mark_dynamic
+            # because some operations in the sampler require it to be static.
             for all_greedy in [False, True]:
                 generate_params_if_all_greedy = not all_greedy
                 sampling_metadata = (
@@ -1049,12 +1158,28 @@ class TPUModelRunner:
                         generate_params_if_all_greedy,
                     ))
                 sampling_metadata.all_greedy = all_greedy
-                self.sample_from_hidden(dummy_hidden, sampling_metadata)
+                self.sample_from_logits(dummy_logits, sampling_metadata)
             logger.info("  -- num_seqs: %d", num_reqs)
         xm.wait_device_ops()
         end = time.perf_counter()
-        logger.info("Compilation finished in in %.2f [secs].", end - start)
-        self._update_num_xla_graphs("sampling")
+        logger.info("Compilation finished in %.2f [secs].", end - start)
+        self._update_num_xla_graphs("sample_from_logits")
+
+    def _precompile_gather_logprobs(self) -> None:
+        logger.info("Compiling gather_logprobs with different input shapes.")
+        start = time.perf_counter()
+        for num_reqs in self.num_reqs_paddings:
+            dummy_logits = torch.zeros((num_reqs, self.vocab_size),
+                                       device=self.device,
+                                       dtype=self._hidden_states_dtype)
+            dummy_tokens = torch.zeros((num_reqs, 1),
+                                       dtype=torch.int64).to(self.device)
+            self.gather_logprobs(dummy_logits, dummy_tokens)
+            logger.info("  -- num_seqs: %d", num_reqs)
+        xm.wait_device_ops()
+        end = time.perf_counter()
+        logger.info("Compilation finished in %.2f [secs].", end - start)
+        self._update_num_xla_graphs("gather_logprobs")
 
     def capture_model(self) -> None:
         """
@@ -1063,7 +1188,10 @@ class TPUModelRunner:
         self._precompile_mm_encoder()
         self._precompile_backbone()
         self._precompile_select_hidden_states()
-        self._precompile_sample_from_hidden()
+        self._precompile_compute_logits()
+        self._precompile_structured_decoding()
+        self._precompile_sample_from_logits()
+        self._precompile_gather_logprobs()
 
     def profile_run(
         self,
@@ -1144,7 +1272,7 @@ class TPUModelRunner:
                 tensor_config = kv_cache_config.tensors[layer_name]
                 assert tensor_config.size % kv_cache_spec.page_size_bytes == 0
                 num_blocks = tensor_config.size // kv_cache_spec.page_size_bytes
-                if isinstance(kv_cache_spec, FullAttentionSpec):
+                if isinstance(kv_cache_spec, AttentionSpec):
                     kv_cache_shape = PallasAttentionBackend.get_kv_cache_shape(
                         num_blocks, kv_cache_spec.block_size,
                         kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
@@ -1179,16 +1307,18 @@ class TPUModelRunner:
         return hidden_states[indices_do_sample]
 
     @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
-    def sample_from_hidden(
-        self,
-        sample_hidden_states: torch.Tensor,
-        sampling_metadata: TPUSupportedSamplingMetadata,
-    ) -> torch.Tensor:
+    def compute_logits(self,
+                       sample_hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.model.compute_logits(sample_hidden_states, None)
+
+    @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
+    def sample_from_logits(
+            self, logits: torch.Tensor,
+            sampling_metadata: TPUSupportedSamplingMetadata) -> torch.Tensor:
         """
         Sample with xla-friendly function. This function is to be traced 
         separately from `forward` for lighter compilation overhead.
         """
-        logits = self.model.compute_logits(sample_hidden_states, None)
         if sampling_metadata.all_greedy:
             out_tokens = torch.argmax(logits, dim=-1, keepdim=True)
         else:
@@ -1196,11 +1326,84 @@ class TPUModelRunner:
                                       sampling_metadata).sampled_token_ids
         return out_tokens
 
+    @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
+    def gather_logprobs(self, logits: torch.Tensor,
+                        sampled_tokens: torch.Tensor) -> LogprobsTensors:
+        """
+        Gather the top_logprobs with corresponding tokens. Use a fixed number
+        of logprobs as an alternative to having multiple pre-compiled graphs.
+        Select the number of logprobs actually demanded by each request on CPU.
+        """
+        logprobs = self.sampler.compute_logprobs(logits)
+        return self.sampler.gather_logprobs(
+            logprobs,
+            self.model_config.max_logprobs,
+            token_ids=sampled_tokens.squeeze(-1))
+
+    @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
+    def structured_decode(self, require_struct_decoding: torch.Tensor,
+                          grammar_bitmask: torch.Tensor, logits: torch.Tensor,
+                          arange: torch.Tensor) -> torch.Tensor:
+        return torch.where(
+            require_struct_decoding,
+            self.apply_grammar_bitmask(logits, grammar_bitmask, arange),
+            logits)
+
+    def apply_grammar_bitmask(self, logits: torch.Tensor,
+                              grammar_bitmask: torch.Tensor,
+                              arange: torch.Tensor):
+        assert (logits.shape[0] == grammar_bitmask.shape[0])
+        logits_cloned = logits.clone()
+        for i in range(logits.shape[0]):
+            unpacked_bitmask = (torch.bitwise_right_shift(
+                grammar_bitmask[i][:, None], arange[None, :]) & 1) == 0
+            unpacked_bitmask = unpacked_bitmask.reshape(-1)[:self.vocab_size]
+            logits_cloned[i] = logits_cloned[i].masked_fill(
+                unpacked_bitmask, -float("inf"))
+        return logits_cloned
+
     def get_multimodal_embeddings(self, *args, **kwargs):
         return self.model.get_multimodal_embeddings(*args, **kwargs)
 
     def get_input_embeddings(self, *args, **kwargs):
         return self.model.get_input_embeddings(*args, **kwargs)
+
+    def prepare_structured_decoding_input(
+        self, logits: torch.Tensor, scheduler_output: "SchedulerOutput"
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        grammar_bitmask = scheduler_output.grammar_bitmask
+        assert grammar_bitmask is not None
+        num_reqs, _ = logits.shape
+
+        # Reset pre-allocated tensors
+        self.grammar_bitmask_cpu.zero_()
+        self.require_structured_out_cpu.zero_()
+
+        # We receive the structured output bitmask from the scheduler, but the
+        # indices of the requests in the batch may not match the indices of
+        # the bitmask since the scheduler doesn't know how the tpu runner is
+        # ordering the requests in the batch. We need to match the order of
+        # bitmask with the order of requests
+        struct_out_indices: list[int] = []
+        mask_indices: list[int] = []
+        for req_id in self.input_batch.req_ids:
+            mask_index = scheduler_output.structured_output_request_ids.get(
+                req_id)
+            if mask_index is None:
+                continue
+            batch_index = self.input_batch.req_id_to_index[req_id]
+            struct_out_indices.append(batch_index)
+            mask_indices.append(mask_index)
+        self.grammar_bitmask_cpu[struct_out_indices] = torch.from_numpy(
+            grammar_bitmask[mask_indices])
+        # It's not guaranteed that all requests in this batch require
+        # structured output, so create a bool tensor to represent
+        # the requests that need structured output.
+        struct_out_indices = torch.tensor(struct_out_indices, dtype=torch.long)
+        self.require_structured_out_cpu[struct_out_indices] = True
+        return self.require_structured_out_cpu[:num_reqs].to(logits.device), \
+            self.grammar_bitmask_cpu[:num_reqs].to(logits.device), \
+            self.structured_decode_arange.to(logits.device)
 
     def _get_mm_dummy_batch(self, modality: str,
                             batch_size: int) -> BatchedTensorInputs:

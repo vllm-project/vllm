@@ -12,6 +12,7 @@
 /vllm/model_executor/layers/quantization @mgoin @robertgshaw2-redhat @tlrmchlsmth
 /vllm/model_executor/guided_decoding @mgoin @russellb
 /vllm/multimodal @DarkLight1337 @ywang96
+/vllm/vllm_flash_attn @LucasWilkinson
 CMakeLists.txt @tlrmchlsmth
 
 # vLLM V1

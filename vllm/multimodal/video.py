@@ -4,80 +4,13 @@ import base64
 from functools import partial
 from io import BytesIO
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
 import numpy.typing as npt
 from PIL import Image
 
-from vllm.inputs.registry import InputContext
-from vllm.logger import init_logger
-from vllm.transformers_utils.processor import cached_get_video_processor
-from vllm.utils import is_list_of
-
-from .base import MediaIO, ModalityData
-from .image import ImageMediaIO, ImagePlugin
-from .inputs import MultiModalKwargs, VideoItem
-
-if TYPE_CHECKING:
-    from vllm.config import ModelConfig
-
-logger = init_logger(__name__)
-
-
-class VideoPlugin(ImagePlugin):
-    """Plugin for video data."""
-
-    def get_data_key(self) -> str:
-        return "video"
-
-    def _get_hf_video_processor(
-        self,
-        model_config: "ModelConfig",
-        mm_processor_kwargs: Optional[dict[str, Any]] = None,
-    ):
-        if mm_processor_kwargs is None:
-            mm_processor_kwargs = {}
-        return cached_get_video_processor(
-            model_config.model,
-            trust_remote_code=model_config.trust_remote_code,
-            **mm_processor_kwargs)
-
-    def _default_input_mapper(
-        self,
-        ctx: InputContext,
-        data: ModalityData[VideoItem],
-        **mm_processor_kwargs,
-    ) -> MultiModalKwargs:
-        model_config = ctx.model_config
-
-        if isinstance(data, list) and len(data) == 1:
-            data = data[0]  # type: ignore
-
-        if isinstance(data, np.ndarray) or is_list_of(data, np.ndarray):
-            video_processor = self._get_hf_video_processor(
-                model_config,
-                mm_processor_kwargs,
-            )
-            if video_processor is None:
-                raise RuntimeError("No HuggingFace processor is available "
-                                   "to process the video object")
-            try:
-                # NOTE: Similar to image; it may be a good idea to filter and
-                # pass mm_processor_kwargs here too, but for now we don't to
-                # avoid extra complexity if the initializer and preprocess
-                # signatures of the processor don't align
-                batch_data = video_processor(data, return_tensors="pt").data
-            except Exception:
-                logger.error("Failed to process video (%s)", data)
-                raise
-
-            return MultiModalKwargs(batch_data)
-
-        raise TypeError(f"Invalid video type: {type(data)}")
-
-    def _default_max_multimodal_tokens(self, ctx: InputContext) -> int:
-        return 4096
+from .base import MediaIO
+from .image import ImageMediaIO
 
 
 def resize_video(frames: npt.NDArray, size: tuple[int, int]) -> npt.NDArray:
@@ -148,7 +81,8 @@ class OpenCVVideoBackend(VideoLoader):
         total_frames_num = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         full_read = num_frames == -1 or total_frames_num < num_frames
         if full_read:
-            frame_idx = list(range(0, total_frames_num))
+            num_frames = total_frames_num
+            frame_idx = list(range(0, num_frames))
         else:
             uniform_sampled_frames = np.linspace(0,
                                                  total_frames_num - 1,
@@ -171,7 +105,8 @@ class OpenCVVideoBackend(VideoLoader):
                     frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     i += 1
         # we expect all frames loaded
-        assert i == num_frames
+        assert i == num_frames, (f"Expected reading {num_frames} frames, "
+                                 f"but only loaded {i} frames from video.")
         return frames
 
 
