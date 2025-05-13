@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from abc import ABC, abstractmethod
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 
@@ -41,7 +41,7 @@ def _moe_problem_size(
     w1: torch.Tensor,
     w2: torch.Tensor,
     topk_ids: torch.Tensor,
-) -> Tuple[int, int, int, int, int]:
+) -> tuple[int, int, int, int, int]:
     """
     Extract the MoE problem size from the given tensor arguments:
     - a: The hidden states, input to the MoE layer.
@@ -93,7 +93,7 @@ class FusedMoEPrepareAndFinalize(ABC):
         num_experts: int,
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         Perform any quantization (and/or) dispatching needed
         for this kernel.
@@ -153,7 +153,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         K: int,
         topk: int,
         num_experts: int,
-    ) -> Tuple[int, int, torch.dtype]:
+    ) -> tuple[int, int, torch.dtype]:
         """
         Compute the number of elements for the temporary outputs of the two
         gemms and activation in the fused expert function.  Since the

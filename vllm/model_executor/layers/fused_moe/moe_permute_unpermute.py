@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 
@@ -16,7 +16,7 @@ def _moe_permute(
     global_num_experts: int,
     expert_map: Optional[torch.Tensor],
     block_m: int,
-) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, torch.Tensor,
+) -> tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, torch.Tensor,
            Optional[torch.Tensor]]:
     """
     Determine the sorted_token_ids, expert_ids for the given problem size.

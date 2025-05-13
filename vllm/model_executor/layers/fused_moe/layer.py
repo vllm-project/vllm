@@ -5,7 +5,7 @@ import threading
 from abc import abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Optional
 from weakref import WeakValueDictionary
 
 import torch

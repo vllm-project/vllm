@@ -3,7 +3,7 @@
 import functools
 import json
 import os
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Optional
 
 import torch
 
@@ -757,8 +757,8 @@ def get_default_config(
     topk: int,
     dtype: Optional[str],
     is_marlin: bool,
-    block_shape: Optional[List[int]] = None,
-) -> Dict[str, int]:
+    block_shape: Optional[list[int]] = None,
+) -> dict[str, int]:
     if dtype == "fp8_w8a8" and block_shape is not None:
         # Block-wise quant: BLOCK_SIZE_N must be divisible by block_shape[0]
         # BLOCK_SIZE_K must be divisible by block_shape[1]
@@ -816,7 +816,7 @@ def try_get_optimal_moe_config(
     dtype: Optional[str],
     M: int,
     is_marlin: bool = False,
-    block_shape: Optional[List[int]] = None,
+    block_shape: Optional[list[int]] = None,
 ):
     from vllm.model_executor.layers.fused_moe import get_config
     override_config = get_config()
@@ -871,7 +871,7 @@ def fused_topk(
     topk: int,
     renormalize: bool,
     indices_type: Optional[torch.dtype] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     assert hidden_states.shape[0] == gating_output.shape[0], (
         "Number of tokens mismatch")
 
@@ -1013,7 +1013,7 @@ def inplace_fused_experts(hidden_states: torch.Tensor,
                           w2_zp: Optional[torch.Tensor] = None,
                           a1_scale: Optional[torch.Tensor] = None,
                           a2_scale: Optional[torch.Tensor] = None,
-                          block_shape: Optional[List[int]] = None) -> None:
+                          block_shape: Optional[list[int]] = None) -> None:
     fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids, True,
                        activation, apply_router_weight_on_input, use_fp8_w8a8,
                        use_int8_w8a8, use_int8_w8a16, use_int4_w4a16,
@@ -1043,7 +1043,7 @@ def inplace_fused_experts_fake(
         w2_zp: Optional[torch.Tensor] = None,
         a1_scale: Optional[torch.Tensor] = None,
         a2_scale: Optional[torch.Tensor] = None,
-        block_shape: Optional[List[int]] = None) -> None:
+        block_shape: Optional[list[int]] = None) -> None:
     pass
 
 
@@ -1077,7 +1077,7 @@ def outplace_fused_experts(
         w2_zp: Optional[torch.Tensor] = None,
         a1_scale: Optional[torch.Tensor] = None,
         a2_scale: Optional[torch.Tensor] = None,
-        block_shape: Optional[List[int]] = None) -> torch.Tensor:
+        block_shape: Optional[list[int]] = None) -> torch.Tensor:
     return fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids,
                               False, activation, apply_router_weight_on_input,
                               use_fp8_w8a8, use_int8_w8a8, use_int8_w8a16,
@@ -1107,7 +1107,7 @@ def outplace_fused_experts_fake(
         w2_zp: Optional[torch.Tensor] = None,
         a1_scale: Optional[torch.Tensor] = None,
         a2_scale: Optional[torch.Tensor] = None,
-        block_shape: Optional[List[int]] = None) -> torch.Tensor:
+        block_shape: Optional[list[int]] = None) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 
 
@@ -1228,7 +1228,7 @@ def fused_experts_impl(
     w2_zp: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
-    block_shape: Optional[List[int]] = None,
+    block_shape: Optional[list[int]] = None,
 ) -> torch.Tensor:
     # Check constraints.
     if use_int4_w4a16:
@@ -1429,7 +1429,7 @@ def fused_moe(
     w2_zp: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
-    block_shape: Optional[List[int]] = None,
+    block_shape: Optional[list[int]] = None,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
@@ -1525,7 +1525,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         use_int8_w8a16: bool,
         use_int4_w4a16: bool,
         per_channel_quant: bool,
-        block_shape: Optional[List[int]] = None,
+        block_shape: Optional[list[int]] = None,
         block_m: Optional[int] = None,
     ):
         super().__init__()
@@ -1549,7 +1549,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         K: int,
         topk: int,
         num_experts: int,
-    ) -> Tuple[int, int, torch.dtype]:
+    ) -> tuple[int, int, torch.dtype]:
         factor = num_experts if a.dim() == 3 else 1
         workspace1 = M * topk * max(N * 2, K) * factor
         workspace2 = M * topk * N * factor
@@ -1697,7 +1697,7 @@ def modular_triton_fused_moe(
     use_int8_w8a16: bool,
     use_int4_w4a16: bool,
     per_channel_quant: bool,
-    block_shape: Optional[List[int]] = None,
+    block_shape: Optional[list[int]] = None,
 ) -> mk.FusedMoEModularKernel:
     qtype = get_config_qtype(
         use_fp8_w8a8=use_fp8_w8a8,

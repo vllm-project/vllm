@@ -38,7 +38,7 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         K: int,
         topk: int,
         num_experts: int,
-    ) -> Tuple[int, int, torch.dtype]:
+    ) -> tuple[int, int, torch.dtype]:
         # Note that K, N are transposed
         N, K = K, N
         workspace1 = M * topk * max(2 * N, K)

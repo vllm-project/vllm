@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import functools
 import importlib.util
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 
@@ -83,7 +83,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         K: int,
         topk: int,
         num_experts: int,
-    ) -> Tuple[int, int, torch.dtype]:
+    ) -> tuple[int, int, torch.dtype]:
         block_m = self.block_shape[0]
         M_sum = (M * topk) + num_experts * (block_m - 1)
         M_sum = round_up(M_sum, block_m)

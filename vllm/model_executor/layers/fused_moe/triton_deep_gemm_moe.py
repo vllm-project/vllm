@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import List, Optional, Tuple
+from typing import Optional
 
 import torch
 
@@ -17,7 +17,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                  use_int8_w8a16: bool = False,
                  use_int4_w4a16: bool = False,
                  per_channel_quant: bool = False,
-                 block_shape: Optional[List[int]] = None,
+                 block_shape: Optional[list[int]] = None,
                  block_m: Optional[int] = None,
                  allow_deep_gemm: bool = False):
         super().__init__()
@@ -40,7 +40,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         K: int,
         topk: int,
         num_experts: int,
-    ) -> Tuple[int, int, torch.dtype]:
+    ) -> tuple[int, int, torch.dtype]:
         # Note: the deep gemm workspaces are strictly larger than the triton
         # workspaces so we can be pessimistic here and allocate for DeepGemm
         # even if we fall back to triton later, e.g. if expert maps are set.

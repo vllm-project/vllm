@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import List, Optional, Tuple
+from typing import Optional
 
 import pplx_kernels as pplx
 import torch
@@ -21,7 +21,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                  rank: int,
                  dp_size: int,
                  quant_dtype: Optional[torch.dtype] = None,
-                 block_shape: Optional[List[int]] = None):
+                 block_shape: Optional[list[int]] = None):
         super().__init__()
         assert max_num_tokens > 0
         self.a2a = a2a
@@ -42,7 +42,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         num_experts: int,
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         num_tokens = a1.size(0)  # M
         hidden_dim = a1.size(-1)  # K
 

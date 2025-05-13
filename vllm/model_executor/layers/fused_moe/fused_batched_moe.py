@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Fused batched MoE kernel."""
-from typing import List, Optional, Tuple
+from typing import Optional
 
 import torch
 import triton
@@ -406,7 +406,7 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         num_experts: int,
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         assert a1.dim() == 2
         assert topk_ids.dim() == 2
         assert topk_ids.size(0) == a1.size(0)
@@ -495,7 +495,7 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         use_int8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
         use_int4_w4a16: bool = False,
-        block_shape: Optional[List[int]] = None,
+        block_shape: Optional[list[int]] = None,
         block_m: Optional[int] = None,
     ):
         super().__init__()
@@ -517,7 +517,7 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         K: int,
         topk: int,
         num_experts: int,
-    ) -> Tuple[int, int, torch.dtype]:
+    ) -> tuple[int, int, torch.dtype]:
         assert a.dim() == 2
         num_dp = self.world_size // self.dp_size
         max_num_tokens = a.size(
@@ -600,7 +600,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         use_int8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
         use_int4_w4a16: bool = False,
-        block_shape: Optional[List[int]] = None,
+        block_shape: Optional[list[int]] = None,
         world_size: int = 1,
         dp_size: int = 1,
     ):
@@ -624,7 +624,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         K: int,
         topk: int,
         num_experts: int,
-    ) -> Tuple[int, int, torch.dtype]:
+    ) -> tuple[int, int, torch.dtype]:
         assert a.dim() == 2
         num_dp = self.world_size // self.dp_size
         max_num_tokens = a.size(
