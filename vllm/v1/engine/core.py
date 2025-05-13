@@ -289,7 +289,7 @@ class EngineCore:
     def reset_mm_cache(self):
         # NOTE: Since this is mainly for debugging, we don't attempt to
         # re-sync the internal caches (P0 processor, P0 mirror, P1 mirror)
-        if self.scheduler.get_num_unfinished_requests():
+        if self.scheduler.has_unfinished_requests():
             logger.warning("Resetting the multi-modal cache when requests are "
                            "in progress may lead to desynced internal caches.")
 
