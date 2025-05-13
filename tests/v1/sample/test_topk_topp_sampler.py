@@ -1,19 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+import pytest
 import torch
+from flashinfer.sampling import top_k_renorm_probs, top_p_renorm_probs
 from torch import Generator
 
-import pytest
-
 from vllm.platforms import current_platform
-from vllm.v1.sample.ops.topk_topp_sampler import (
-    is_flashinfer_available,
-    apply_top_k_top_p,
-)
-
-from flashinfer.sampling import (
-    top_k_renorm_probs,
-    top_p_renorm_probs,
-)
+from vllm.v1.sample.ops.topk_topp_sampler import (apply_top_k_top_p,
+                                                  is_flashinfer_available)
 
 DEVICE = "cuda"
 
@@ -49,6 +42,7 @@ def test_topk_impl_equivalance():
 
         assert torch.allclose(result1, result2)
 
+
 def test_flashinfer_sampler():
     '''
     This test verifies that the FlashInfer top-k and top-p sampling
@@ -61,27 +55,34 @@ def test_flashinfer_sampler():
     '''
 
     if not FLASHINFER_ENABLED:
-        pytest.skip("FlashInfer not installed or not available on this platform.")
-    
+        pytest.skip(
+            "FlashInfer not installed or not available on this platform.")
+
     with torch.device(DEVICE):
         generator = Generator(device=DEVICE).manual_seed(42)
-        
+
         # Generate random logits
         logits = torch.rand((BATCH_SIZE, VOCAB_SIZE), generator=generator)
-        
+
         # Generate various top-k and top-p values
-        k_values = torch.randint(1, 1000, (BATCH_SIZE,), generator=generator)
-        p_values = torch.rand((BATCH_SIZE,), generator=generator) * 0.5 + 0.5  # range in [0.5, 1.0]
-        
+        k_values = torch.randint(1, 1000, (BATCH_SIZE, ), generator=generator)
+        p_values = torch.rand(
+            (BATCH_SIZE, ),
+            generator=generator) * 0.5 + 0.5  # range in [0.5, 1.0]
+
         # Sometimes disable top-k (k=vocab_size)
         k_values.masked_fill_(
-            torch.randint(0, 2, (BATCH_SIZE,), generator=generator, dtype=torch.bool), 
-            VOCAB_SIZE)
-        
+            torch.randint(0,
+                          2, (BATCH_SIZE, ),
+                          generator=generator,
+                          dtype=torch.bool), VOCAB_SIZE)
+
         # Sometimes disable top-p (p=1.0)
         p_values.masked_fill_(
-            torch.randint(0, 2, (BATCH_SIZE,), generator=generator, dtype=torch.bool), 
-            1.0)
+            torch.randint(0,
+                          2, (BATCH_SIZE, ),
+                          generator=generator,
+                          dtype=torch.bool), 1.0)
 
         python_logits = apply_top_k_top_p(
             logits=logits.clone(),
