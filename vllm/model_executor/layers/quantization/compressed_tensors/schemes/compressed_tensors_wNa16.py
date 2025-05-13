@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Callable, List, Optional, Set
+from typing import Callable, Optional
 
 import torch
 from compressed_tensors.quantization import ActivationOrdering
@@ -35,7 +35,7 @@ WNA16_SUPPORTED_BITS = list(WNA16_SUPPORTED_TYPES_MAP.keys())
 
 
 class CompressedTensorsWNA16(CompressedTensorsScheme):
-    _kernel_backends_being_used: Set[str] = set()
+    _kernel_backends_being_used: set[str] = set()
 
     def __init__(self,
                  strategy: str,
@@ -70,7 +70,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         return 80
 
     def create_weights(self, layer: torch.nn.Module, output_size: int,
-                       input_size: int, output_partition_sizes: List[int],
+                       input_size: int, output_partition_sizes: list[int],
                        input_size_per_partition: int,
                        params_dtype: torch.dtype, weight_loader: Callable,
                        **kwargs):
