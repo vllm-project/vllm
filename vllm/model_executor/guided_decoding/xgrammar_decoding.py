@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, List
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -273,7 +273,7 @@ class GrammarConfig:
         return re.sub(r'(["\\])', r'\\\1', s)
 
     @staticmethod
-    def choice_as_grammar(choice: List[str] | None) -> str:
+    def choice_as_grammar(choice: list[str] | None) -> str:
         if choice is None:
             raise ValueError("Choice is not set")
         escaped_choices = (GrammarConfig.escape_ebnf_string(c) for c in choice)
@@ -346,7 +346,7 @@ class XGrammarLogitsProcessor:
                  scores: torch.Tensor) -> torch.Tensor:
 
         # Skip the structured logits processing if reasoning is not finished.
-        # reasoner is not None only when `--enable-reasoning` is set.
+        # reasoner is not None only when `--reasoning-parser` is set.
         if self.reasoner is not None and \
         not self.reasoner.is_reasoning_end(
                 input_ids):

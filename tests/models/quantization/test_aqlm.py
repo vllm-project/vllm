@@ -1,12 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Compare the outputs of a AQLM model between vLLM and HF Transformers
-
-Run `pytest tests/models/test_aqlm.py`.
-"""
-
 import pytest
 
 from tests.quantization.utils import is_quant_method_supported
+from vllm.platforms import current_platform
 
 # These ground truth generations were generated using `transformers==4.38.1
 # aqlm==1.1.0 torch==2.2.0`
@@ -39,7 +35,9 @@ ground_truth_generations = [
 ]
 
 
-@pytest.mark.skipif(not is_quant_method_supported("aqlm"),
+@pytest.mark.skipif(not is_quant_method_supported("aqlm")
+                    or current_platform.is_rocm()
+                    or not current_platform.is_cuda(),
                     reason="AQLM is not supported on this GPU type.")
 @pytest.mark.parametrize("model", ["ISTA-DASLab/Llama-2-7b-AQLM-2Bit-1x16-hf"])
 @pytest.mark.parametrize("dtype", ["half"])

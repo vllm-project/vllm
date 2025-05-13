@@ -141,9 +141,9 @@ Known issues:
 much shorter than what vLLM generates. Since an exception is thrown when this condition
 is not met, the following additional chat templates are provided:
 
-* `examples/tool_chat_template_mistral.jinja` - this is the "official" Mistral chat template, but tweaked so that
+* <gh-file:examples/tool_chat_template_mistral.jinja> - this is the "official" Mistral chat template, but tweaked so that
 it works with vLLM's tool call IDs (provided `tool_call_id` fields are truncated to the last 9 digits)
-* `examples/tool_chat_template_mistral_parallel.jinja` - this is a "better" version that adds a tool-use system prompt
+* <gh-file:examples/tool_chat_template_mistral_parallel.jinja> - this is a "better" version that adds a tool-use system prompt
 when tools are provided, that results in much better reliability when working with parallel tool calling.
 
 Recommended flags: `--tool-call-parser mistral --chat-template examples/tool_chat_template_mistral_parallel.jinja`
@@ -170,15 +170,15 @@ Known issues:
 
 VLLM provides two JSON based chat templates for Llama 3.1 and 3.2:
 
-* `examples/tool_chat_template_llama3.1_json.jinja` - this is the "official" chat template for the Llama 3.1
+* <gh-file:examples/tool_chat_template_llama3.1_json.jinja> - this is the "official" chat template for the Llama 3.1
 models, but tweaked so that it works better with vLLM.
-* `examples/tool_chat_template_llama3.2_json.jinja` - this extends upon the Llama 3.1 chat template by adding support for
+* <gh-file:examples/tool_chat_template_llama3.2_json.jinja> - this extends upon the Llama 3.1 chat template by adding support for
 images.
 
 Recommended flags: `--tool-call-parser llama3_json --chat-template {see_above}`
 
 VLLM also provides a JSON based chat template for Llama 4:
-* `examples/tool_chat_template_llama4_json.jinja` - this is based on the "official" chat template for the Llama 4
+* <gh-file:examples/tool_chat_template_llama4_json.jinja> - this is based on the "official" chat template for the Llama 4
 models, but tweaked so that it works better with vLLM.
 
 For Llama 4 use `--tool-call-parser llama4_json examples/tool_chat_template_llama4_json.jinja`.
@@ -191,7 +191,7 @@ Supported models:
 
 Recommended flags: `--tool-call-parser granite --chat-template examples/tool_chat_template_granite.jinja`
 
-`examples/tool_chat_template_granite.jinja`: this is a modified chat template from the original on Huggingface. Parallel function calls are supported.
+<gh-file:examples/tool_chat_template_granite.jinja>: this is a modified chat template from the original on Huggingface. Parallel function calls are supported.
 
 * `ibm-granite/granite-3.1-8b-instruct`
 
@@ -203,7 +203,7 @@ The chat template from Huggingface can be used directly. Parallel function calls
 
 Recommended flags: `--tool-call-parser granite-20b-fc --chat-template examples/tool_chat_template_granite_20b_fc.jinja`
 
-`examples/tool_chat_template_granite_20b_fc.jinja`: this is a modified chat template from the original on Huggingface, which is not vLLM compatible. It blends function description elements from the Hermes template and follows the same system prompt as "Response Generation" mode from [the paper](https://arxiv.org/abs/2407.00121). Parallel function calls are supported.
+<gh-file:examples/tool_chat_template_granite_20b_fc.jinja>: this is a modified chat template from the original on Huggingface, which is not vLLM compatible. It blends function description elements from the Hermes template and follows the same system prompt as "Response Generation" mode from [the paper](https://arxiv.org/abs/2407.00121). Parallel function calls are supported.
 
 ### InternLM Models (`internlm`)
 
@@ -236,6 +236,13 @@ For Qwen2.5, the chat template in tokenizer_config.json has already included sup
 
 Flags: `--tool-call-parser hermes`
 
+### DeepSeek-V3 Models (`deepseek_v3`)
+
+Supported models:
+* `deepseek-ai/DeepSeek-V3-0324`
+
+Flags: `--tool-call-parser deepseek_v3 --chat-template examples/tool_chat_template_deepseekv3.jinja`
+
 ### Models with Pythonic Tool Calls (`pythonic`)
 
 A growing number of models output a python list to represent tool calls instead of using JSON. This has the advantage of inherently supporting parallel tool calls and removing ambiguity around the JSON schema required for tool calls. The `pythonic` tool parser can support such models.
@@ -253,12 +260,12 @@ Limitations:
 
 Example supported models:
 
-* `meta-llama/Llama-3.2-1B-Instruct`\* (use with `examples/tool_chat_template_llama3.2_pythonic.jinja`)
-* `meta-llama/Llama-3.2-3B-Instruct`\* (use with `examples/tool_chat_template_llama3.2_pythonic.jinja`)
-* `Team-ACE/ToolACE-8B` (use with `examples/tool_chat_template_toolace.jinja`)
-* `fixie-ai/ultravox-v0_4-ToolACE-8B` (use with `examples/tool_chat_template_toolace.jinja`)
-* `meta-llama/Llama-4-Scout-17B-16E-Instruct`\* (use with `examples/tool_chat_template_llama4_pythonic.jinja`)
-* `meta-llama/Llama-4-Maverick-17B-128E-Instruct`\* (use with `examples/tool_chat_template_llama4_pythonic.jinja`)
+* `meta-llama/Llama-3.2-1B-Instruct`\* (use with <gh-file:examples/tool_chat_template_llama3.2_pythonic.jinja>)
+* `meta-llama/Llama-3.2-3B-Instruct`\* (use with <gh-file:examples/tool_chat_template_llama3.2_pythonic.jinja>)
+* `Team-ACE/ToolACE-8B` (use with <gh-file:examples/tool_chat_template_toolace.jinja>)
+* `fixie-ai/ultravox-v0_4-ToolACE-8B` (use with <gh-file:examples/tool_chat_template_toolace.jinja>)
+* `meta-llama/Llama-4-Scout-17B-16E-Instruct`\* (use with <gh-file:examples/tool_chat_template_llama4_pythonic.jinja>)
+* `meta-llama/Llama-4-Maverick-17B-128E-Instruct`\* (use with <gh-file:examples/tool_chat_template_llama4_pythonic.jinja>)
 
 Flags: `--tool-call-parser pythonic --chat-template {see_above}`
 
@@ -270,7 +277,7 @@ Llama's smaller models frequently fail to emit tool calls in the correct format.
 
 ## How to write a tool parser plugin
 
-A tool parser plugin is a Python file containing one or more ToolParser implementations. You can write a ToolParser similar to the `Hermes2ProToolParser` in vllm/entrypoints/openai/tool_parsers/hermes_tool_parser.py.
+A tool parser plugin is a Python file containing one or more ToolParser implementations. You can write a ToolParser similar to the `Hermes2ProToolParser` in <gh-file:vllm/entrypoints/openai/tool_parsers/hermes_tool_parser.py>.
 
 Here is a summary of a plugin file:
 

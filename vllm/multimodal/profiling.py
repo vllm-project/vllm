@@ -25,7 +25,7 @@ logger = init_logger(__name__)
 class ProcessorInputs:
     """
     Represents the keyword arguments to
-    :meth:`vllm.multimodal.processing.BaseMultiModalProcessor.apply`.
+    {meth}`vllm.multimodal.processing.BaseMultiModalProcessor.apply`.
     """
     prompt_text: str
     mm_data: MultiModalDataDict
@@ -63,7 +63,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
     # TODO: @abstractmethod after transition
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         """
-        Build the text input corresponding to :code:`mm_counts`.
+        Build the text input corresponding to `mm_counts`.
         """
         if (type(self).get_dummy_processor_inputs ==
                 BaseDummyInputsBuilder.get_dummy_processor_inputs):
