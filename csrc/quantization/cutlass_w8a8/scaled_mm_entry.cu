@@ -29,7 +29,8 @@ void cutlass_scaled_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
                             torch::Tensor const& a_scales,
                             torch::Tensor const& b_scales,
                             std::optional<torch::Tensor> const& bias);
-
+#endif
+#if defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90
 void cutlass_moe_mm_sm90(
     torch::Tensor& out_tensors, torch::Tensor const& a_tensors,
     torch::Tensor const& b_tensors, torch::Tensor const& a_scales,
