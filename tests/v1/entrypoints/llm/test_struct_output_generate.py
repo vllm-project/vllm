@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import re
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import jsonschema
 import pytest
@@ -16,6 +16,9 @@ from vllm.entrypoints.llm import LLM
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
+
+if TYPE_CHECKING:
+    from vllm.config import TokenizerMode
 
 NGRAM_SPEC_CONFIG = {
     "model": "[ngram]",
@@ -30,19 +33,15 @@ EAGLE_SPEC_CONFIG = {
     "num_speculative_tokens": 5,
 }
 
-PARAMS_MODELS_BACKENDS_TOKENIZER_MODE_REASONING_PARSER_SPEC_CONFIG = [
-    ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "auto", None, None),
-    ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto", None, None),
-    ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "mistral", None,
-     None), ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", None, None),
-    ("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", "xgrammar", "auto",
-     "deepseek_r1", None),
-    ("Qwen/Qwen3-0.6B", "xgrammar", "auto", "deepseek_r1", NGRAM_SPEC_CONFIG),
-    ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto", None,
+PARAMS_MODELS_BACKENDS_TOKENIZER_MODE_SPEC_CONFIG = [
+    ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "auto", None),
+    ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto", None),
+    ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "mistral", None),
+    ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", None),
+    ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto",
      NGRAM_SPEC_CONFIG),
-    ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", None,
-     NGRAM_SPEC_CONFIG),
-    ("meta-llama/Meta-Llama-3.1-8B-Instruct", "xgrammar", "auto", None,
+    ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", NGRAM_SPEC_CONFIG),
+    ("meta-llama/Meta-Llama-3.1-8B-Instruct", "xgrammar", "auto",
      EAGLE_SPEC_CONFIG)
 ]
 
@@ -77,8 +76,8 @@ def _load_json(s: str, backend: str) -> str:
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
-    "model_name, guided_decoding_backend, tokenizer_mode, reasoning_parser, speculative_config",  # noqa: E501
-    PARAMS_MODELS_BACKENDS_TOKENIZER_MODE_REASONING_PARSER_SPEC_CONFIG,
+    "model_name, guided_decoding_backend, tokenizer_mode, speculative_config",  # noqa: E501
+    PARAMS_MODELS_BACKENDS_TOKENIZER_MODE_SPEC_CONFIG,
 )
 def test_structured_output(
     monkeypatch: pytest.MonkeyPatch,
@@ -90,7 +89,6 @@ def test_structured_output(
     sample_guided_choice: str,
     guided_decoding_backend: str,
     tokenizer_mode: str,
-    reasoning_parser: str | None,
     model_name: str,
     speculative_config: dict[str, Any],
 ):
@@ -110,7 +108,6 @@ def test_structured_output(
               guided_decoding_backend=guided_decoding_backend,
               guided_decoding_disable_any_whitespace=True,
               tokenizer_mode=tokenizer_mode,
-              reasoning_parser=reasoning_parser,
               speculative_config=speculative_config)
 
     #
@@ -519,40 +516,78 @@ Make the response as short as possible.
             pytest.fail("Invalid function call format: "
                         f"{generated_text!r}\nError: {str(e)}")
 
-    #
-    # Test 12: Generate structured output with reasoning step
-    #
-    if reasoning_parser is not None:
-        reasoning_prompt = "Solve the following math problem step-by-step, then provide the final answer as JSON object with a single key 'result'. Problem: What is 5 * 8 + 2?"  # noqa: E501
-        reasoning_schema = {
-            "type": "object",
-            "properties": {
-                "result": {
-                    "type": "integer"
-                }
-            },
-            "required": ["result"],
-            "additionalProperties": False
-        }
 
-        sampling_params = SamplingParams(
-            temperature=0.1,
-            max_tokens=4096,
-            guided_decoding=GuidedDecodingParams(json=reasoning_schema))
-        outputs = llm.generate(prompts=[reasoning_prompt],
-                               sampling_params=sampling_params,
-                               use_tqdm=True)
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    "model_name, guided_decoding_backend, tokenizer_mode, reasoning_parser, speculative_config",  # noqa: E501
+    [
+        ("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", "xgrammar", "auto",
+         "deepseek_r1", None),
+        ("Qwen/Qwen3-0.6B", "xgrammar", "auto", "deepseek_r1",
+         NGRAM_SPEC_CONFIG),
+    ],
+)
+def test_structured_output_with_reasoning_matrices(
+    monkeypatch: pytest.MonkeyPatch,
+    guided_decoding_backend: str,
+    tokenizer_mode: TokenizerMode,
+    reasoning_parser: str,
+    model_name: str,
+    speculative_config: dict[str, Any],
+):
+    monkeypatch.setenv("VLLM_USE_V1", "1")
 
-        assert outputs is not None
-        output = outputs[0]
-        assert output is not None
-        assert isinstance(output, RequestOutput)
-        prompt = output.prompt
-        generated_text = output.outputs[0].text
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    if current_platform.is_tpu() and speculative_config:
+        pytest.skip("TPU does not support speculative decoding")
 
-        output_json = json.loads(generated_text)
-        jsonschema.validate(instance=output_json, schema=reasoning_schema)
+    # Use a single LLM instance for several scenarios to
+    # speed up the test suite.
+    llm = LLM(
+        model=model_name,
+        # Don't use eager execution on TPUs because we want to test for no
+        # recompilation at runtime
+        enforce_eager=bool(not current_platform.is_tpu()),
+        max_model_len=1024,
+        guided_decoding_backend=guided_decoding_backend,
+        guided_decoding_disable_any_whitespace=True,
+        tokenizer_mode=tokenizer_mode,
+        reasoning_parser=reasoning_parser,
+        speculative_config=speculative_config,
+    )
+
+    reasoning_prompt = "Solve the following math problem step-by-step, then provide the final answer as JSON object with a single key 'result'. Problem: What is 5 * 8 + 2?"  # noqa: E501
+    reasoning_schema = {
+        "type": "object",
+        "properties": {
+            "result": {
+                "type": "integer"
+            }
+        },
+        "required": ["result"],
+        "additionalProperties": False
+    }
+
+    sampling_params = SamplingParams(
+        temperature=0.1,
+        max_tokens=4096,
+        guided_decoding=GuidedDecodingParams(json=reasoning_schema),
+    )
+    outputs = llm.generate(
+        prompts=[reasoning_prompt],
+        sampling_params=sampling_params,
+        use_tqdm=True,
+    )
+
+    assert outputs is not None
+    output = outputs[0]
+    assert output is not None
+    assert isinstance(output, RequestOutput)
+    prompt = output.prompt
+    generated_text = output.outputs[0].text
+    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
+    output_json = json.loads(generated_text)
+    jsonschema.validate(instance=output_json, schema=reasoning_schema)
 
 
 @pytest.mark.skip_global_cleanup
