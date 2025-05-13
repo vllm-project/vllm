@@ -21,9 +21,6 @@ from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
-else:
-    ModelConfig = None
-    VllmConfig = None
 
 logger = init_logger(__name__)
 
@@ -35,24 +32,6 @@ pynvml = import_pynvml()
 # pytorch 2.5 uses cudnn sdpa by default, which will cause crash on some models
 # see https://github.com/huggingface/diffusers/issues/9704 for details
 torch.backends.cuda.enable_cudnn_sdp(False)
-
-
-def device_id_to_physical_device_id(device_id: int) -> int:
-    if "CUDA_VISIBLE_DEVICES" in os.environ:
-        device_ids = os.environ["CUDA_VISIBLE_DEVICES"].split(",")
-        if device_ids == [""]:
-            msg = (
-                "CUDA_VISIBLE_DEVICES is set to empty string, which means"
-                " GPU support is disabled. If you are using ray, please unset"
-                " the environment variable `CUDA_VISIBLE_DEVICES` inside the"
-                " worker/actor. "
-                "Check https://github.com/vllm-project/vllm/issues/8402 for"
-                " more information.")
-            raise RuntimeError(msg)
-        physical_device_id = device_ids[device_id]
-        return int(physical_device_id)
-    else:
-        return device_id
 
 
 def with_nvml_context(fn: Callable[_P, _R]) -> Callable[_P, _R]:
@@ -75,6 +54,19 @@ class CudaPlatformBase(Platform):
     dispatch_key: str = "CUDA"
     ray_device_key: str = "GPU"
     device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
+
+    @property
+    def supported_dtypes(self) -> List[torch.dtype]:
+        if self.has_device_capability(80):
+            # Ampere and Hopper or later NVIDIA GPUs.
+            return [torch.bfloat16, torch.float16, torch.float32]
+        elif (not self.has_device_capability(80)
+              ) and self.has_device_capability(60):
+            # Pascal, Volta and Turing NVIDIA GPUs, BF16 is not supported
+            return [torch.float16, torch.float32]
+        # Kepler and Maxwell NVIDIA GPUs, only FP32 is supported,
+        # though vLLM doesn't support these GPUs.
+        return [torch.float32]
 
     @classmethod
     def get_device_capability(cls,
@@ -109,7 +101,7 @@ class CudaPlatformBase(Platform):
         pass
 
     @classmethod
-    def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+    def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
         compilation_config = vllm_config.compilation_config
@@ -230,6 +222,10 @@ class CudaPlatformBase(Platform):
         elif selected_backend == _Backend.XFORMERS:
             logger.info("Using XFormers backend.")
             return "vllm.attention.backends.xformers.XFormersBackend"
+        elif selected_backend == _Backend.DUAL_CHUNK_FLASH_ATTN:
+            logger.info("Using DualChunkFlashAttention backend.")
+            return ("vllm.attention.backends.dual_chunk_flash_attn."
+                    "DualChunkFlashAttentionBackend")
         elif selected_backend == _Backend.FLASH_ATTN:
             pass
         elif selected_backend:
@@ -308,7 +304,7 @@ class CudaPlatformBase(Platform):
         return cls.has_device_capability(89)
 
     @classmethod
-    def supports_v1(cls, model_config: ModelConfig) -> bool:
+    def supports_v1(cls, model_config: "ModelConfig") -> bool:
         return True
 
     @classmethod
@@ -328,7 +324,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
                               device_id: int = 0
                               ) -> Optional[DeviceCapability]:
         try:
-            physical_device_id = device_id_to_physical_device_id(device_id)
+            physical_device_id = cls.device_id_to_physical_device_id(device_id)
             handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
             major, minor = pynvml.nvmlDeviceGetCudaComputeCapability(handle)
             return DeviceCapability(major=major, minor=minor)
@@ -350,20 +346,20 @@ class NvmlCudaPlatform(CudaPlatformBase):
     @classmethod
     @with_nvml_context
     def get_device_name(cls, device_id: int = 0) -> str:
-        physical_device_id = device_id_to_physical_device_id(device_id)
+        physical_device_id = cls.device_id_to_physical_device_id(device_id)
         return cls._get_physical_device_name(physical_device_id)
 
     @classmethod
     @with_nvml_context
     def get_device_uuid(cls, device_id: int = 0) -> str:
-        physical_device_id = device_id_to_physical_device_id(device_id)
+        physical_device_id = cls.device_id_to_physical_device_id(device_id)
         handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
         return pynvml.nvmlDeviceGetUUID(handle)
 
     @classmethod
     @with_nvml_context
     def get_device_total_memory(cls, device_id: int = 0) -> int:
-        physical_device_id = device_id_to_physical_device_id(device_id)
+        physical_device_id = cls.device_id_to_physical_device_id(device_id)
         handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
         return int(pynvml.nvmlDeviceGetMemoryInfo(handle).total)
 
@@ -457,10 +453,4 @@ finally:
 
 CudaPlatform = NvmlCudaPlatform if nvml_available else NonNvmlCudaPlatform
 
-try:
-    from sphinx.ext.autodoc.mock import _MockModule
-
-    if not isinstance(pynvml, _MockModule):
-        CudaPlatform.log_warnings()
-except ModuleNotFoundError:
-    CudaPlatform.log_warnings()
+CudaPlatform.log_warnings()

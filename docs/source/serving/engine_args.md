@@ -16,6 +16,7 @@ Below, you can find an explanation of every engine argument:
     :func: _engine_args_parser
     :prog: vllm serve
     :nodefaultconst:
+    :markdownhelp:
 ```
 
 ## Async Engine Arguments
@@ -29,4 +30,5 @@ Additional arguments are available to the asynchronous engine which is used for 
     :func: _async_engine_args_parser
     :prog: vllm serve
     :nodefaultconst:
+    :markdownhelp:
 ```

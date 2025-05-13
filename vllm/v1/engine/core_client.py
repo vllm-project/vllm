@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import contextlib
+import json
 import queue
 import uuid
 import weakref
 from abc import ABC, abstractmethod
+from collections import deque
 from collections.abc import Awaitable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass, field
@@ -85,6 +88,9 @@ class EngineCoreClient(ABC):
     def profile(self, is_start: bool = True) -> None:
         raise NotImplementedError
 
+    def reset_mm_cache(self) -> None:
+        raise NotImplementedError
+
     def reset_prefix_cache(self) -> None:
         raise NotImplementedError
 
@@ -138,6 +144,9 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def profile_async(self, is_start: bool = True) -> None:
+        raise NotImplementedError
+
+    async def reset_mm_cache_async(self) -> None:
         raise NotImplementedError
 
     async def reset_prefix_cache_async(self) -> None:
@@ -210,6 +219,9 @@ class InprocClient(EngineCoreClient):
 
     def profile(self, is_start: bool = True) -> None:
         self.engine_core.profile(is_start)
+
+    def reset_mm_cache(self) -> None:
+        self.engine_core.reset_mm_cache()
 
     def reset_prefix_cache(self) -> None:
         self.engine_core.reset_prefix_cache()
@@ -360,6 +372,7 @@ class MPClient(EngineCoreClient):
         executor_class: type[Executor],
         log_stats: bool,
     ):
+        self.vllm_config = vllm_config
         # Serialization setup.
         self.encoder = MsgpackEncoder()
         self.decoder = MsgpackDecoder(EngineCoreOutputs)
@@ -396,6 +409,12 @@ class MPClient(EngineCoreClient):
             self._wait_for_engine_startup()
 
             self.utility_results: dict[int, AnyFuture] = {}
+
+            # Request objects which may contain pytorch-allocated tensors
+            # that we need to keep references to until zmq is done with the
+            # underlying data.
+            self.pending_messages = deque[tuple[zmq.MessageTracker, Any]]()
+
             success = True
         finally:
             if not success:
@@ -422,14 +441,20 @@ class MPClient(EngineCoreClient):
                 raise RuntimeError("Engine core initialization failed. "
                                    "See root cause above.")
 
-            eng_id_bytes, msg = sync_input_socket.recv_multipart()
+            eng_id_bytes, data = sync_input_socket.recv_multipart()
             eng_id = int.from_bytes(eng_id_bytes, byteorder="little")
             if eng_id not in identities:
                 raise RuntimeError(f"Unexpected or duplicate engine: {eng_id}")
-            if msg != b'READY':
-                raise RuntimeError(f"Engine {eng_id} failed: {msg.decode()}")
+            message_dict = json.loads(data.decode('utf-8'))
+            if message_dict['type'] != 'READY':
+                raise RuntimeError(f"Engine {eng_id} failed: {data.decode()}")
             logger.info("Core engine process %d ready.", eng_id)
             identities.discard(eng_id)
+            # Setup KV cache config with initialization state from
+            # engine core process. Sum values from all engines in DP case.
+            num_gpu_blocks = self.vllm_config.cache_config.num_gpu_blocks or 0
+            num_gpu_blocks += message_dict['num_gpu_blocks']
+            self.vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
 
     def _init_core_engines(
         self,
@@ -458,6 +483,14 @@ class MPClient(EngineCoreClient):
     def ensure_alive(self):
         if self.resources.engine_dead:
             raise EngineDeadError()
+
+    def add_pending_message(self, tracker: zmq.MessageTracker, msg: Any):
+        if not tracker.done:
+            self.pending_messages.appendleft((tracker, msg))
+
+    def free_pending_messages(self):
+        while self.pending_messages and self.pending_messages[-1][0].done:
+            self.pending_messages.pop()
 
 
 def _process_utility_output(output: UtilityOutput,
@@ -544,10 +577,18 @@ class SyncMPClient(MPClient):
 
     def _send_input(self, request_type: EngineCoreRequestType, request: Any):
         self.ensure_alive()
+        self.free_pending_messages()
         # (Identity, RequestType, SerializedRequest)
         msg = (self.core_engine.identity, request_type.value,
                *self.encoder.encode(request))
-        self.input_socket.send_multipart(msg, copy=False)
+
+        if len(msg) <= 3:
+            # No auxiliary buffers => no tensor backing buffers in request.
+            self.input_socket.send_multipart(msg, copy=False)
+            return
+
+        tracker = self.input_socket.send_multipart(msg, copy=False, track=True)
+        self.add_pending_message(tracker, request)
 
     def call_utility(self, method: str, *args) -> Any:
         call_id = uuid.uuid1().int >> 64
@@ -559,9 +600,6 @@ class SyncMPClient(MPClient):
         return future.result()
 
     def add_request(self, request: EngineCoreRequest) -> None:
-        # NOTE: text prompt is not needed in the core engine as it has been
-        # tokenized.
-        request.prompt = None
         self._send_input(EngineCoreRequestType.ADD, request)
 
     def abort_requests(self, request_ids: list[str]) -> None:
@@ -570,6 +608,9 @@ class SyncMPClient(MPClient):
 
     def profile(self, is_start: bool = True) -> None:
         self.call_utility("profile", is_start)
+
+    def reset_mm_cache(self) -> None:
+        self.call_utility("reset_mm_cache")
 
     def reset_prefix_cache(self) -> None:
         self.call_utility("reset_prefix_cache")
@@ -698,19 +739,38 @@ class AsyncMPClient(MPClient):
     def _send_input(self,
                     request_type: EngineCoreRequestType,
                     request: Any,
-                    engine: Optional[CoreEngine] = None) -> Awaitable[None]:
+                    engine: Optional[CoreEngine] = None) -> Awaitable[Any]:
         self.ensure_alive()
         if engine is None:
             engine = self.core_engine
 
         message = (request_type.value, *self.encoder.encode(request))
-        return self._send_input_message(message, engine)
+        return self._send_input_message(message, engine, request)
 
-    def _send_input_message(self, message: tuple[bytestr, ...],
-                            engine: CoreEngine) -> Awaitable[None]:
+    def _send_input_message(self, message: tuple[bytestr,
+                                                 ...], engine: CoreEngine,
+                            objects: Any) -> Awaitable[Any]:
+        """
+        objects is a reference to retain until zmq is finished with the
+        buffers, in case they were extracted from tensors in the request.
+        """
         self.ensure_alive()
-        message = (engine.identity, ) + message
-        return self.input_socket.send_multipart(message, copy=False)
+        self.free_pending_messages()
+
+        msg = (engine.identity, ) + message
+        if not objects or len(msg) <= 3:
+            # No auxiliary buffers => no tensor backing buffers in request.
+            return self.input_socket.send_multipart(msg, copy=False)
+
+        future: asyncio.Future[zmq.MessageTracker]
+        future = self.input_socket.send_multipart(msg, copy=False, track=True)
+
+        def add_pending(f: asyncio.Future[zmq.MessageTracker]):
+            with contextlib.suppress(BaseException):
+                self.add_pending_message(f.result(), objects)
+
+        future.add_done_callback(add_pending)
+        return future
 
     async def call_utility_async(self, method: str, *args) -> Any:
         return await self._call_utility_async(method,
@@ -724,14 +784,11 @@ class AsyncMPClient(MPClient):
         self.utility_results[call_id] = future
         message = (EngineCoreRequestType.UTILITY.value, *self.encoder.encode(
             (call_id, method, args)))
-        await self._send_input_message(message, engine)
+        await self._send_input_message(message, engine, args)
         self._ensure_output_queue_task()
         return await future
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
-        # NOTE: text prompt is not needed in the core engine as it has been
-        # tokenized.
-        request.prompt = None
         await self._send_input(EngineCoreRequestType.ADD, request)
         self._ensure_output_queue_task()
 
@@ -741,6 +798,9 @@ class AsyncMPClient(MPClient):
 
     async def profile_async(self, is_start: bool = True) -> None:
         await self.call_utility_async("profile", is_start)
+
+    async def reset_mm_cache_async(self) -> None:
+        await self.call_utility_async("reset_mm_cache")
 
     async def reset_prefix_cache_async(self) -> None:
         await self.call_utility_async("reset_prefix_cache")
@@ -824,9 +884,6 @@ class DPAsyncMPClient(AsyncMPClient):
         ]))[0]
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
-        # NOTE: text prompt is not needed in the core engine as it has been
-        # tokenized.
-        request.prompt = None
         request.current_wave = self.current_wave
 
         chosen_engine = self.get_core_engine_for_request()
