@@ -17,7 +17,7 @@ repos:
   - id: ruff
     args: [--output-format, github, --fix]
   - id: ruff-format
-    files: ^(.buildkite).*
+    files: ^(.buildkite|benchmarks)/.*
 - repo: https://github.com/codespell-project/codespell
   rev: v2.4.1
   hooks:
@@ -28,8 +28,6 @@ repos:
   rev: 6.0.1
   hooks:
   - id: isort
-    # necessary during the transition from yapf to ruff format
-    args: [--resolve-all-configs, --config-root, .]
 - repo: https://github.com/pre-commit/mirrors-clang-format
   rev: v20.1.3
   hooks:

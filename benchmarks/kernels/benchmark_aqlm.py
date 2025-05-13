@@ -9,32 +9,39 @@ import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.aqlm import (
-    dequantize_weight, generic_dequantize_gemm, get_int_dtype,
-    optimized_dequantize_gemm)
+    dequantize_weight,
+    generic_dequantize_gemm,
+    get_int_dtype,
+    optimized_dequantize_gemm,
+)
 from vllm.utils import FlexibleArgumentParser
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 
 def torch_mult(
-        input: torch.Tensor,  #  [..., in_features]
-        weights: torch.Tensor,
-        scales: torch.Tensor,  #  [num_out_groups, 1, 1, 1]
+    # [..., in_features]
+    input: torch.Tensor,
+    weights: torch.Tensor,
+    # [num_out_groups, 1, 1, 1]
+    scales: torch.Tensor,
 ) -> torch.Tensor:
     output = F.linear(input, weights)
     return output
 
 
 def dequant_out_scale(
-    input: torch.Tensor,  #  [..., in_features]
-    codes: torch.IntTensor,  #  [num_out_groups, num_in_groups, num_codebooks]
-    codebooks: torch.
-    Tensor,  #  [num_codebooks, codebook_size, out_group_size, in_group_size]
-    scales: torch.Tensor,  #  [num_out_groups, 1, 1, 1]
+    # [..., in_features]
+    input: torch.Tensor,
+    # [num_out_groups, num_in_groups, num_codebooks]
+    codes: torch.IntTensor,
+    # [num_codebooks, codebook_size, out_group_size, in_group_size]
+    codebooks: torch.Tensor,
+    # [num_out_groups, 1, 1, 1]
+    scales: torch.Tensor,
     output_partition_sizes: torch.IntTensor,
     bias: Optional[torch.Tensor],
 ) -> torch.Tensor:
-
     weights = ops.aqlm_dequant(codes, codebooks, output_partition_sizes)
 
     if bias is None:
@@ -46,40 +53,42 @@ def dequant_out_scale(
         flattened_output *= b_scales
         return flattened_output.view(orig_shape)
     else:
-        b_scales = scales.view(scales.shape[:-3] + (-1, )).expand(
-            -1, weights.shape[1])
+        b_scales = scales.view(scales.shape[:-3] + (-1,)).expand(-1, weights.shape[1])
         weights *= b_scales
         return F.linear(input, weights, bias)
 
 
 def dequant_weight_scale(
-    input: torch.Tensor,  #  [..., in_features]
-    codes: torch.IntTensor,  #  [num_out_groups, num_in_groups, num_codebooks]
-    codebooks: torch.
-    Tensor,  #  [num_codebooks, codebook_size, out_group_size, in_group_size]
-    scales: torch.Tensor,  #  [num_out_groups, 1, 1, 1]
+    # [..., in_features]
+    input: torch.Tensor,
+    # [num_out_groups, num_in_groups, num_codebooks]
+    codes: torch.IntTensor,
+    # [num_codebooks, codebook_size, out_group_size, in_group_size]
+    codebooks: torch.Tensor,
+    # [num_out_groups, 1, 1, 1]
+    scales: torch.Tensor,
     output_partition_sizes: torch.IntTensor,
     bias: Optional[torch.Tensor],
 ) -> torch.Tensor:
-
     weights = ops.aqlm_dequant(codes, codebooks, output_partition_sizes)
 
-    b_scales = scales.view(scales.shape[:-3] + (-1, )).expand(
-        -1, weights.shape[1])
+    b_scales = scales.view(scales.shape[:-3] + (-1,)).expand(-1, weights.shape[1])
     weights *= b_scales
     return F.linear(input, weights, bias)
 
 
 def dequant_no_scale(
-    input: torch.Tensor,  #  [..., in_features]
-    codes: torch.IntTensor,  #  [num_out_groups, num_in_groups, num_codebooks]
-    codebooks: torch.
-    Tensor,  #  [num_codebooks, codebook_size, out_group_size, in_group_size]
-    scales: torch.Tensor,  #  [num_out_groups, 1, 1, 1]
+    # [..., in_features]
+    input: torch.Tensor,
+    # [num_out_groups, num_in_groups, num_codebooks]
+    codes: torch.IntTensor,
+    # [num_codebooks, codebook_size, out_group_size, in_group_size]
+    codebooks: torch.Tensor,
+    # [num_out_groups, 1, 1, 1]
+    scales: torch.Tensor,
     output_partition_sizes: torch.IntTensor,
     bias: Optional[torch.Tensor],
 ) -> torch.Tensor:
-
     weights = ops.aqlm_dequant(codes, codebooks, output_partition_sizes)
 
     return F.linear(input, weights, bias)
@@ -89,23 +98,26 @@ def dequant_no_scale(
 # the generic pytorch version.
 # Just visual comparison.
 def dequant_test(k: int, parts: torch.Tensor, nbooks: int, bits: int) -> None:
-
     n = int(parts.sum().item())
 
-    device = torch.device('cuda:0')
+    device = torch.device("cuda:0")
 
     code_range = (1 << bits) // 2
     ingroups = 8
 
-    codes = torch.randint(-code_range,
-                          code_range,
-                          size=(n, k // ingroups, nbooks),
-                          dtype=get_int_dtype(bits),
-                          device=device)
+    codes = torch.randint(
+        -code_range,
+        code_range,
+        size=(n, k // ingroups, nbooks),
+        dtype=get_int_dtype(bits),
+        device=device,
+    )
 
-    codebooks = torch.randn(size=(parts.shape[0] * nbooks, 1 << bits, 1, 8),
-                            dtype=torch.float16,
-                            device=device)
+    codebooks = torch.randn(
+        size=(parts.shape[0] * nbooks, 1 << bits, 1, 8),
+        dtype=torch.float16,
+        device=device,
+    )
 
     count = 0
     for index in range(16):
@@ -138,24 +150,25 @@ def dequant_test(k: int, parts: torch.Tensor, nbooks: int, bits: int) -> None:
 
 
 def main():
-
     parser = FlexibleArgumentParser(description="Benchmark aqlm performance.")
 
     # Add arguments
-    parser.add_argument("--nbooks",
-                        type=int,
-                        default=1,
-                        help="Number of codebooks (default: 1)")
-    parser.add_argument("--bits",
-                        type=int,
-                        default=16,
-                        help="Number of bits per code element (default: 16)")
+    parser.add_argument(
+        "--nbooks", type=int, default=1, help="Number of codebooks (default: 1)"
+    )
+    parser.add_argument(
+        "--bits",
+        type=int,
+        default=16,
+        help="Number of bits per code element (default: 16)",
+    )
     parser.add_argument(
         "--test",
         type=bool,
         default=False,
         help="Run the decompression/dequant tester rather than benchmarking "
-        "(default: False)")
+        "(default: False)",
+    )
 
     # Parse the arguments
     args = parser.parse_args()
@@ -165,7 +178,7 @@ def main():
     bits = args.bits
 
     if args.test:
-        dequant_test(4096, torch.tensor((4096, )), nbooks, bits)
+        dequant_test(4096, torch.tensor((4096,)), nbooks, bits)
         return
 
     # Otherwise, benchmark.
@@ -184,31 +197,54 @@ def main():
     with open(filename, "w") as f:
         sys.stdout = f
 
-        print('m | k | n | n parts', end='')
+        print("m | k | n | n parts", end="")
         for method in methods:
-            print(f" | {method.__name__.replace('_', ' ')} (µs)", end='')
-        print('')
+            print(f" | {method.__name__.replace('_', ' ')} (µs)", end="")
+        print("")
 
         # These are reasonable prefill sizes.
-        ksandpartions = ((4096, (4096, 4096, 4096)), (4096, (4096, )),
-                         (4096, (11008, 11008)), (11008, (4096, )))
+        ksandpartions = (
+            (4096, (4096, 4096, 4096)),
+            (4096, (4096,)),
+            (4096, (11008, 11008)),
+            (11008, (4096,)),
+        )
 
         # reasonable ranges for m.
         for m in [
-                1, 2, 4, 8, 10, 12, 14, 16, 24, 32, 48, 52, 56, 64, 96, 112,
-                128, 256, 512, 1024, 1536, 2048, 3072, 4096
+            1,
+            2,
+            4,
+            8,
+            10,
+            12,
+            14,
+            16,
+            24,
+            32,
+            48,
+            52,
+            56,
+            64,
+            96,
+            112,
+            128,
+            256,
+            512,
+            1024,
+            1536,
+            2048,
+            3072,
+            4096,
         ]:
-            print(f'{m}', file=sys.__stdout__)
+            print(f"{m}", file=sys.__stdout__)
             for ksp in ksandpartions:
-                run_grid(m, ksp[0], torch.tensor(ksp[1]), nbooks, bits,
-                         methods)
+                run_grid(m, ksp[0], torch.tensor(ksp[1]), nbooks, bits, methods)
 
         sys.stdout = sys.__stdout__
 
 
-def run_grid(m: int, k: int, parts: torch.Tensor, nbooks: int, bits: int,
-             methods):
-
+def run_grid(m: int, k: int, parts: torch.Tensor, nbooks: int, bits: int, methods):
     # I didn't see visible improvements from increasing these, but feel free :)
     num_warmup_trials = 1
     num_trials = 1
@@ -229,7 +265,7 @@ def run_grid(m: int, k: int, parts: torch.Tensor, nbooks: int, bits: int,
             )
 
     n = parts.sum().item()
-    print(f'{m} | {k} | {n} | {parts.tolist()}', end='')
+    print(f"{m} | {k} | {n} | {parts.tolist()}", end="")
 
     for method in methods:
         best_time_us = 1e20
@@ -249,32 +285,36 @@ def run_grid(m: int, k: int, parts: torch.Tensor, nbooks: int, bits: int,
             if kernel_dur_us < best_time_us:
                 best_time_us = kernel_dur_us
 
-        print(f' | {kernel_dur_us:.0f}', end='')
+        print(f" | {kernel_dur_us:.0f}", end="")
 
-    print('')
+    print("")
 
 
-def run_timing(num_calls: int, m: int, k: int, parts: torch.Tensor,
-               nbooks: int, bits: int, method) -> float:
-
+def run_timing(
+    num_calls: int, m: int, k: int, parts: torch.Tensor, nbooks: int, bits: int, method
+) -> float:
     n = int(parts.sum().item())
 
-    device = torch.device('cuda:0')
+    device = torch.device("cuda:0")
 
     input = torch.randn((1, m, k), dtype=torch.float16, device=device)
 
     code_range = (1 << bits) // 2
     ingroups = 8
 
-    codes = torch.randint(-code_range,
-                          code_range,
-                          size=(n, k // ingroups, nbooks),
-                          dtype=get_int_dtype(bits),
-                          device=device)
+    codes = torch.randint(
+        -code_range,
+        code_range,
+        size=(n, k // ingroups, nbooks),
+        dtype=get_int_dtype(bits),
+        device=device,
+    )
 
-    codebooks = torch.randn(size=(parts.shape[0] * nbooks, 1 << bits, 1, 8),
-                            dtype=torch.float16,
-                            device=device)
+    codebooks = torch.randn(
+        size=(parts.shape[0] * nbooks, 1 << bits, 1, 8),
+        dtype=torch.float16,
+        device=device,
+    )
 
     scales = torch.randn(size=(n, 1, 1, 1), dtype=torch.float16, device=device)
 
