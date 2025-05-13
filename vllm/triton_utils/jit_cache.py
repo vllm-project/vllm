@@ -15,18 +15,18 @@ Authors:
 
 from __future__ import annotations
 
+import copy
 import inspect
 import time
 from typing import List
-import copy
 
 from triton import KernelInterface
 from triton import __version__ as triton_version
 from triton.runtime.autotuner import OutOfResources
 from triton.runtime.driver import driver
 
-from vllm.logger import init_logger
 import vllm.envs as envs
+from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
@@ -173,21 +173,22 @@ class JitCache(KernelInterface):
         assume_const=None,
     ):
         if not envs.VLLM_TRITON_ENABLE_JITCACHE:
-            # we are deactivated -> do nothing and set self.run 
+            # we are deactivated -> do nothing and set self.run
             #  to JitFunction.run
             self.run = fn.run
             return
         # we depend on the triton version, this implementation supports only 3.3
         if not (int(triton_version.split(".")[0]) == 3
                 and int(triton_version.split(".")[1]) == 3):
-            logger.warning_once("JITCache is incompatible to installed Triton " \
-                           "version: %s! The cache acts in pass-through mode" \
+            logger.warning_once("JITCache is incompatible to installed Triton" \
+                           " version: %s! The cache acts in pass-through mode" \
                            " (no caching happening).", triton_version)
             self.run = fn.run
             return
-        fn_name = str(fn).split(":")[1][:-1] 
-        logger.info_once("JITCache for Triton kernel '%s' is activated.", fn_name)
-        
+        fn_name = str(fn).split(":")[1][:-1]
+        logger.info_once("JITCache for Triton kernel '%s' is activated.",
+                         fn_name)
+
         self.arg_names = arg_names
         self.fn = fn
         self.base_fn = fn
@@ -212,13 +213,12 @@ class JitCache(KernelInterface):
         if len(check_keys) == 0:
             self.cache_index_func = lambda ignore: "_default_"
 
-
     def _get_prepared_kernel(self, *args, **kwargs) -> PreparedKernel:
         """
         more or less redo what JITFunction.run is doing
         (c.f. triton/python/triton/runtime/jit.py:565)
         """
-        
+
         kwargs["warmup"] = True
         compile_start = time.time()
         kernel = self.fn.run(*args, **kwargs)

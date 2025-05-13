@@ -8,9 +8,9 @@
 
 import triton
 import triton.language as tl
-from vllm.triton_utils.jit_cache import jitcache
 
 from vllm.logger import init_logger
+from vllm.triton_utils.jit_cache import jitcache
 
 logger = init_logger(__name__)
 
@@ -26,6 +26,7 @@ def apply_softcap(S, x):
     p1 = tl.exp(Sdiv)
     p2 = tl.exp(-Sdiv)
     return x * (p1 - p2) / (p1 + p2)
+
 
 @jitcache(
     check_keys=[],

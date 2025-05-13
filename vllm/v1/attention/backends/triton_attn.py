@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 """Attention layer with PagedAttention and Triton prefix prefill."""
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
@@ -11,17 +10,14 @@ from vllm.attention.backends.abstract import (AttentionBackend,
 from vllm.attention.ops.triton_unified_attention import unified_attention
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
-from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.v1.worker.block_table import BlockTable
 # TODO(ngl): this should be completely independent from the flash_attn
 #  backend. Maybe use utilities
 from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionMetadata, FlashAttentionMetadataBuilder)
+from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.worker.block_table import BlockTable
 
 if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.worker.gpu_input_batch import InputBatch
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
@@ -74,7 +70,6 @@ class TritonAttentionMetadataBuilder(FlashAttentionMetadataBuilder):
     def __init__(self, runner: "GPUModelRunner", kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):
         model_config = runner.model_config
-        compilation_config = runner.vllm_config.compilation_config
 
         self.runner = runner
         self.num_heads_q = model_config.get_num_attention_heads(
@@ -90,6 +85,7 @@ class TritonAttentionMetadataBuilder(FlashAttentionMetadataBuilder):
         # Sliding window size to be used with the AOT scheduler will be
         # populated on first build() call.
         self.aot_sliding_window: Optional[tuple[int, int]] = None
+
 
 class TritonAttentionImpl:
 
