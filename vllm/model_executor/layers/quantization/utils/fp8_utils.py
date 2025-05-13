@@ -27,23 +27,6 @@ def is_fp8(x: Union[torch.dtype, torch.Tensor]) -> bool:
     return x == torch.float8_e4m3fn or x == torch.float8_e4m3fnuz
 
 
-def is_shape_supported_by_cutlass(weight: torch.Tensor, block_size: List[int],
-                                  weight_scale: torch.Tensor,
-                                  input_2d: torch.Tensor) -> bool:
-    if current_platform.is_rocm():
-        # TODO this is never used, as cutlass_block_fp8_supported is False
-        scale_a_shape = ((input_2d.shape[-1] // block_size[1], ) +
-                         input_2d.shape[:-1])[::-1]
-        scale_b_shape = (weight_scale.view(-1, 1)
-                         if weight_scale.dim() <= 1 else weight_scale.T).shape
-        ar, ac = scale_a_shape
-        br, bc = scale_b_shape
-        return ac > 1 or bc > 1 or ar not in (1, input_2d.shape[0]) \
-            or br not in (1, weight.shape[0])
-
-    return weight.shape[0] % 128 == 0 and weight.shape[1] % 128 == 0
-
-
 def cutlass_scaled_mm(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -131,8 +114,11 @@ def apply_w8a8_block_fp8_linear(
     input_2d = input.view(-1, input.shape[-1])
     output_shape = [*input.shape[:-1], weight.shape[0]]
 
-    use_cutlass = cutlass_block_fp8_supported and is_shape_supported_by_cutlass(
-        weight, block_size, weight_scale, input_2d)
+    if current_platform.is_cuda():
+        use_cutlass = cutlass_block_fp8_supported and (
+            weight.shape[0] % 128 == 0 and weight.shape[1] % 128 == 0)
+    else:
+        use_cutlass = False
 
     w8a8_blockscale_func = dispatch_w8a8_blockscale_func(
         use_cutlass, use_aiter_and_is_supported)
