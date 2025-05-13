@@ -55,7 +55,8 @@ else:
     fused_moe_pallas = None  # type: ignore
 logger = init_logger(__name__)
 
-MOE_DP_CHUNK_SIZE = 256
+# Note: this limit is somewhat arbitrary and might be changed later.
+MOE_DP_CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
 
 
 @dataclass
@@ -435,8 +436,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
         experts: Optional[FusedMoEPermuteExpertsUnpermute] = None
 
-        self.using_pplx = False
-
         if isinstance(prepare_finalize,
                       (BatchedPrepareAndFinalize, PplxPrepareAndFinalize)):
             logger.debug("BatchedTritonExperts %s", self.moe)
@@ -450,8 +449,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 use_int4_w4a16=False,
                 block_shape=None,
             )
-            self.using_pplx = isinstance(prepare_finalize,
-                                         PplxPrepareAndFinalize)
         else:
             logger.debug("TritonExperts %s", self.moe)
             experts = TritonExperts(
@@ -499,7 +496,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
-            indices_type=torch.uint32 if self.using_pplx else None)
+            indices_type=torch.uint32 if self.use_pplx_kernels else None)
 
         if self.rocm_aiter_moe_enabled:
             return self.rocm_aiter_fused_experts(
@@ -828,7 +825,8 @@ class FusedMoE(torch.nn.Module):
             hidden_dim=hidden_size,
             num_local_experts=self.local_num_experts,
             moe_parallel_config=self.moe_parallel_config,
-            in_dtype=params_dtype,  # TODO: is this right?
+            # TODO (bnell): this needs to be fixed for quantized types.
+            in_dtype=params_dtype,
         )
 
         # Note: get_quant_method will look at the layer's local_num_experts
