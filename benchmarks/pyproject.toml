@@ -1,13 +1,8 @@
 # This local pyproject file is part of the migration from yapf to ruff format.
 # It uses the same core rules as the main pyproject.toml file, but with the
 # following differences:
-# - isort profile is set to black
 # - ruff line length is overridden to 88
 # - deprecated typing ignores (UP006, UP035) have been removed
-
-[tool.isort]
-profile = "black"
-known_first_party = ["vllm"]
 
 [tool.ruff]
 line-length = 88
@@ -51,6 +46,10 @@ ignore = [
     # Can remove once 3.10+ is the minimum Python version
     "UP007",
 ]
+
+[tool.ruff.lint.isort]
+known-first-party = ["vllm"]
+known-local-folder = ["benchmarks"]
 
 [tool.ruff.format]
 docstring-code-format = true

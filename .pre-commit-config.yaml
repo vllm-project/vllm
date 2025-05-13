@@ -28,8 +28,6 @@ repos:
   rev: 6.0.1
   hooks:
   - id: isort
-    # necessary during the transition from yapf to ruff format
-    args: [--resolve-all-configs, --config-root, .]
 - repo: https://github.com/pre-commit/mirrors-clang-format
   rev: v20.1.3
   hooks:
