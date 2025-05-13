@@ -5,6 +5,7 @@ import multiprocessing
 import os
 import signal
 import sys
+import tempfile
 from multiprocessing.context import SpawnProcess
 from typing import Any
 
@@ -162,7 +163,20 @@ def run_multi_api_server(args: argparse.Namespace):
 
     assert not args.headless
     num_api_servers = args.api_server_count
-    # assert num_api_servers > 1
+
+    assert num_api_servers > 1
+    if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
+        # Make TemporaryDirectory for prometheus multiprocessing
+        # Note: global TemporaryDirectory will be automatically
+        #   cleaned up upon exit.
+        global prometheus_multiproc_dir
+        prometheus_multiproc_dir = tempfile.TemporaryDirectory()
+        os.environ["PROMETHEUS_MULTIPROC_DIR"] = prometheus_multiproc_dir.name
+    else:
+        logger.warning("Found PROMETHEUS_MULTIPROC_DIR was set by user. "
+                       "This directory must be wiped between vLLM runs or "
+                       "you will find inaccurate metrics. Unset the variable "
+                       "and vLLM will properly handle cleanup.")
 
     listen_address, sock = setup_server(args)
 

@@ -198,6 +198,19 @@ class AsyncLLM(EngineClient):
     def shutdown(self):
         """Shutdown, cleaning up the background proc and IPC."""
 
+        # Upon shutdown of this process, we should mark the metrics as dead
+        # See https://prometheus.github.io/client_python/multiprocess/
+        try:
+            import os
+
+            from prometheus_client import multiprocess
+
+            multiprocess.mark_process_dead(os.getpid())
+            logger.debug("Marked Prometheus metrics for process %d as dead",
+                         os.getpid())
+        except Exception as e:
+            logger.error("Error during metrics cleanup: %s", str(e))
+
         if engine_core := getattr(self, "engine_core", None):
             engine_core.shutdown()
 
