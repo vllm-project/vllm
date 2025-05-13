@@ -374,6 +374,12 @@ class Fp8LinearMethod(LinearMethodBase):
                 weight = layer.weight
                 weight_scale = layer.weight_scale
 
+                weight_scale, weight = requantize_with_max_scale(
+                    weight=weight,
+                    weight_scale=weight_scale,
+                    logical_widths=layer.logical_widths,
+                )
+
                 if current_platform.is_fp8_fnuz():
                     weight, weight_scale, input_scale = \
                         normalize_e4m3fn_to_e4m3fnuz(
@@ -383,12 +389,6 @@ class Fp8LinearMethod(LinearMethodBase):
                     if input_scale is not None:
                         layer.input_scale = Parameter(input_scale,
                                                       requires_grad=False)
-
-                weight_scale, weight = requantize_with_max_scale(
-                    weight=weight,
-                    weight_scale=weight_scale,
-                    logical_widths=layer.logical_widths,
-                )
 
             weight = self._maybe_pad_weight(weight)
             # Update layer with new values.
