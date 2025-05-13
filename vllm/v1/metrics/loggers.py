@@ -3,7 +3,7 @@
 import logging
 import time
 from abc import ABC, abstractmethod
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
 import numpy as np
 import prometheus_client
@@ -174,8 +174,7 @@ class PrometheusStatLogger(StatLoggerBase):
         self.gauge_scheduler_waiting = self._create_gauge(
             name="vllm:num_requests_waiting",
             documentation="Number of requests waiting to be processed.",
-            labelnames=labelnames,
-            multiprocess_mode="all").labels(*labelvalues)
+            labelnames=labelnames).labels(*labelvalues)
 
         #
         # GPU cache
@@ -183,22 +182,19 @@ class PrometheusStatLogger(StatLoggerBase):
         self.gauge_gpu_cache_usage = self._create_gauge(
             name="vllm:gpu_cache_usage_perc",
             documentation="GPU KV-cache usage. 1 means 100 percent usage.",
-            labelnames=labelnames,
-            multiprocess_mode="all").labels(*labelvalues)
+            labelnames=labelnames).labels(*labelvalues)
 
         self.counter_gpu_prefix_cache_queries = self._create_counter(
             name="vllm:gpu_prefix_cache_queries",
             documentation=
             "GPU prefix cache queries, in terms of number of queried blocks.",
-            labelnames=labelnames,
-            multiprocess_mode="all").labels(*labelvalues)
+            labelnames=labelnames).labels(*labelvalues)
 
         self.counter_gpu_prefix_cache_hits = self._create_counter(
             name="vllm:gpu_prefix_cache_hits",
             documentation=
             "GPU prefix cache hits, in terms of number of cached blocks.",
-            labelnames=labelnames,
-            multiprocess_mode="all").labels(*labelvalues)
+            labelnames=labelnames).labels(*labelvalues)
 
         #
         # Counters
@@ -206,28 +202,24 @@ class PrometheusStatLogger(StatLoggerBase):
         self.counter_num_preempted_reqs = self._create_counter(
             name="vllm:num_preemptions_total",
             documentation="Cumulative number of preemption from the engine.",
-            labelnames=labelnames,
-            multiprocess_mode="sum").labels(*labelvalues)
+            labelnames=labelnames).labels(*labelvalues)
 
         self.counter_prompt_tokens = self._create_counter(
             name="vllm:prompt_tokens_total",
             documentation="Number of prefill tokens processed.",
-            labelnames=labelnames,
-            multiprocess_mode="sum").labels(*labelvalues)
+            labelnames=labelnames).labels(*labelvalues)
 
         self.counter_generation_tokens = self._create_counter(
             name="vllm:generation_tokens_total",
             documentation="Number of generation tokens processed.",
-            labelnames=labelnames,
-            multiprocess_mode="sum").labels(*labelvalues)
+            labelnames=labelnames).labels(*labelvalues)
 
         self.counter_request_success: dict[FinishReason,
                                            prometheus_client.Counter] = {}
         counter_request_success_base = self._create_counter(
             name="vllm:request_success_total",
             documentation="Count of successfully processed requests.",
-            labelnames=labelnames + ["finished_reason"],
-            multiprocess_mode="sum")
+            labelnames=labelnames + ["finished_reason"])
         for reason in FinishReason:
             self.counter_request_success[
                 reason] = counter_request_success_base.labels(*(labelvalues +
@@ -368,7 +360,7 @@ class PrometheusStatLogger(StatLoggerBase):
 
     def _create_gauge(self,
                       name: str,
-                      documentation: str,
+                      documentation: Optional[str],
                       labelnames: list[str],
                       multiprocess_mode: str = "all"):
         return prometheus_client.Gauge(name=name,
@@ -376,18 +368,15 @@ class PrometheusStatLogger(StatLoggerBase):
                                        labelnames=labelnames,
                                        multiprocess_mode=multiprocess_mode)
 
-    def _create_counter(self,
-                        name: str,
-                        documentation: str,
-                        labelnames: list[str],
-                        multiprocess_mode: str = "all"):
+    def _create_counter(self, name: str, documentation: Optional[str],
+                        labelnames: list[str]):
         return prometheus_client.Counter(name=name,
                                          documentation=documentation,
-                                         labelnames=labelnames,
-                                         multiprocess_mode=multiprocess_mode)
+                                         labelnames=labelnames)
 
-    def _create_histogram(self, name: str, documentation: str,
-                          buckets: list[float], labelnames: list[str]):
+    def _create_histogram(self, name: str, documentation: Optional[str],
+                          buckets: list[Union[int,
+                                              float]], labelnames: list[str]):
         return prometheus_client.Histogram(
             name=name,
             documentation=documentation,
@@ -499,14 +488,15 @@ class PrometheusStatLogger(StatLoggerBase):
         self.log_metrics_info("cache_config", self.vllm_config.cache_config)
 
 
-def build_buckets(mantissa_lst: list[int], max_value: int) -> list[int]:
+def build_buckets(mantissa_lst: list[int],
+                  max_value: int) -> list[Union[int, float]]:
     """
     Builds a list of buckets with increasing powers of 10 multiplied by
     mantissa values until the value exceeds the specified maximum.
 
     """
     exponent = 0
-    buckets: list[int] = []
+    buckets: list[Union[int, float]] = []
     while True:
         for m in mantissa_lst:
             value = m * 10**exponent
@@ -517,7 +507,7 @@ def build_buckets(mantissa_lst: list[int], max_value: int) -> list[int]:
         exponent += 1
 
 
-def build_1_2_5_buckets(max_value: int) -> list[int]:
+def build_1_2_5_buckets(max_value: int) -> list[Union[int, float]]:
     """
     Example:
     >>> build_1_2_5_buckets(100)

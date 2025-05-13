@@ -198,7 +198,7 @@ class AsyncLLM(EngineClient):
     def shutdown(self):
         """Shutdown, cleaning up the background proc and IPC."""
 
-        # Upon shutdown of this process, we should mark the metrics as dead
+        # Upon shutdown of this process, we should mark the process as dead
         # See https://prometheus.github.io/client_python/multiprocess/
         try:
             import os
