@@ -636,12 +636,12 @@ Specified using `--task embed`.
   * ✅︎
   * ✅︎
 - * `GteModel`
-  * Snowflake Arctic-Embed-2.0-M [paper](https://arxiv.org/abs/2412.04506), [hf](https://huggingface.co/Snowflake/snowflake-arctic-embed-m-v2.0)
+  * Snowflake Arctic-Embed-2.0-M
   * `Snowflake/snowflake-arctic-embed-m-v2.0`.
   *
   * ︎
 - * `GteNewModel`
-  * The 2-gen GTE model is named `NewModel`, [paper](https://arxiv.org/abs/2407.19669), [hf](https://huggingface.co/Alibaba-NLP/new-impl), while vllm names it `GteNewModel`.  (see note)
+  * mGTE-TRM  (see note)
   * `Alibaba-NLP/gte-multilingual-base`, etc.
   * ︎
   * ︎
@@ -695,7 +695,7 @@ See [relevant issue on HF Transformers](https://github.com/huggingface/transform
 :::
 
 :::{note}
-The name `NewModel` is too generic, you should set `--hf-overrides '{"architectures": ["GteNewModel"]}'` specify the use of the `GteNewModel` architecture.
+The 2-gen GTE model(mGTE-TRM) is named `NewModel`. The name `NewModel` is too generic, you should set `--hf-overrides '{"architectures": ["GteNewModel"]}'` specify the use of the `GteNewModel` architecture.
 :::
 
 If your model is not in the above list, we will try to automatically convert the model using
