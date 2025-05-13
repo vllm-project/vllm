@@ -77,6 +77,7 @@ def test_models_correctness(hf_runner, vllm_runner, model_info: EmbedModelInfo,
     if not model_info.enable_test:
         pytest.skip("Skipping test.")
 
+    # ST will strip the input texts, see test_embedding.py
     example_prompts = [str(s).strip() for s in example_prompts]
 
     vllm_extra_kwargs: dict[str, Any] = {}
