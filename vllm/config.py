@@ -609,7 +609,8 @@ class ModelConfig:
     def architectures(self) -> list[str]:
         return getattr(self.hf_config, "architectures", [])
 
-    def maybe_pull_model_tokenizer_for_s3(self, model: str, tokenizer: str) -> None:
+    def maybe_pull_model_tokenizer_for_s3(self, model: str,
+                                          tokenizer: str) -> None:
         """Pull model/tokenizer from S3 to temporary directory when needed.
         
         Args:
@@ -618,21 +619,21 @@ class ModelConfig:
         """
         if not (is_s3(model) or is_s3(tokenizer)):
             return
-            
+
         if is_s3(model):
             s3_model = S3Model()
             s3_model.pull_files(model,
                                 allow_pattern=["*.model", "*.py", "*.json"])
             self.model_weights = model
             self.model = s3_model.dir
-            
+
             # If tokenizer is same as model, download to same directory
             if model == tokenizer:
                 s3_model.pull_files(
                     model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
                 self.tokenizer = s3_model.dir
                 return
-                
+
         # Only download tokenizer if needed and not already handled
         if is_s3(tokenizer):
             s3_tokenizer = S3Model()
