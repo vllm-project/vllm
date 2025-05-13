@@ -112,24 +112,20 @@ def server(default_server_args, request):
         yield remote_server
 
 
-@pytest.fixture(scope='module')
-def monkeymodule():
-    with pytest.MonkeyPatch.context() as mp:
-        yield mp
-
-
 @pytest.fixture(scope="module",
                 params=["", "--disable-frontend-multiprocessing"])
-def server_with_prompt_embeds(common_server_args, request, monkeymodule):
+def server_with_prompt_embeds(common_server_args, request):
     if request.param:
         common_server_args.append(request.param)
 
-    # Prompt embeds are currently only supported on v0
-    monkeymodule.setenv("VLLM_USE_V1", "0")
     # We use the common server args instead of the default server args because
     # prompt embeds are not compatible with Lora or Prompt Adapter requests
     common_server_args.append("--enable-prompt-embeds")
-    with RemoteOpenAIServer(MODEL_NAME, common_server_args) as remote_server:
+
+    # Prompt embeds are currently only supported on v0
+    with RemoteOpenAIServer(MODEL_NAME,
+                            common_server_args,
+                            env_dict={"VLLM_USE_V1": "0"}) as remote_server:
         yield remote_server
 
 
