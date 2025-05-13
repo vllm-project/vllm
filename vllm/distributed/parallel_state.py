@@ -757,6 +757,11 @@ class GroupCoordinator:
         if self.mq_broadcaster is not None:
             self.mq_broadcaster = None
 
+    def prepare_communication_buffer_for_model(self, model: torch.nn.Module):
+        if self.device_communicator is not None:
+            self.device_communicator.prepare_communication_buffer_for_model(
+                model)
+
 
 _WORLD: Optional[GroupCoordinator] = None
 
@@ -1052,6 +1057,23 @@ def ensure_model_parallel_initialized(
         "pipeline parallel group already initialized, but of unexpected size: "
         f"{pp_world_size=} vs. "
         f"{pipeline_model_parallel_size=}")
+
+
+def prepare_communication_buffer_for_model(model: torch.nn.Module):
+    """Prepare the communication buffer for the model.
+    Traditional communication libraries like NCCL are almost
+    model agnostic. However, emerging new communication libraries like
+    MoE all-to-all (DeepEP) usually allocate the communication buffer
+    based on the model shape for optimal performance.
+    """
+    if _TP is not None:
+        _TP.prepare_communication_buffer_for_model(model)
+    if _PP is not None:
+        _PP.prepare_communication_buffer_for_model(model)
+    if _DP is not None:
+        _DP.prepare_communication_buffer_for_model(model)
+    if _EP is not None:
+        _EP.prepare_communication_buffer_for_model(model)
 
 
 def model_parallel_is_initialized():

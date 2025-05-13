@@ -149,3 +149,11 @@ class DeviceCommunicatorBase:
 
     def destroy(self):
         pass
+
+    def prepare_communication_buffer_for_model(self,
+                                               model: torch.nn.Module) -> None:
+        """
+        Prepare the communication buffer for the model.
+        This is a no-op in the base class.
+        """
+        pass
