@@ -926,7 +926,9 @@ class Scheduler(SchedulerInterface):
         """Invoke the KV connector request_finished() method if applicable."""
         if self.connector is None:
             return False, None
-        block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
+        assert len(self.kv_cache_config.kv_cache_groups
+                   ) == 1, "KV connector only supports one KV cache group now"
+        block_ids = self.kv_cache_manager.get_block_ids(request.request_id)[0]
         return self.connector.request_finished(request, block_ids)
 
     def _update_waiting_for_remote_kv(self, request: Request) -> bool:
@@ -943,9 +945,10 @@ class Scheduler(SchedulerInterface):
         """
         if request.request_id not in self.finished_recving_kv_req_ids:
             return False
-
+        assert len(self.kv_cache_config.kv_cache_groups
+                   ) == 1, "KV connector only supports one KV cache group now"
         # Now that the blocks are ready, actually cache them.
-        block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
+        block_ids = self.kv_cache_manager.get_block_ids(request.request_id)[0]
         num_computed_tokens = len(block_ids) * self.block_size
         if num_computed_tokens == request.num_tokens:
             num_computed_tokens -= 1
