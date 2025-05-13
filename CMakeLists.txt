@@ -253,8 +253,6 @@ set(VLLM_EXT_SRC
   "csrc/cuda_utils_kernels.cu"
   "csrc/prepare_inputs/advance_step.cu"
   "csrc/custom_all_reduce.cu"
-  "csrc/custom_quickreduce.cu"
-  "csrc/quickreduce/quick_reduce.cu"
   "csrc/torch_bindings.cpp")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
@@ -638,6 +636,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     endif()
   endif()
 # if CUDA endif
+endif()
+
+if (VLLM_GPU_LANG STREQUAL "HIP")
+  # Add QuickReduce kernels
+  list(APPEND VLLM_EXT_SRC
+    "csrc/custom_quickreduce.cu"
+  )
+# if ROCM endif
 endif()
 
 message(STATUS "Enabling C extension.")
