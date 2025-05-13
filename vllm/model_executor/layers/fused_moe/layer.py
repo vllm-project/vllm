@@ -155,7 +155,7 @@ class FusedMoEParallelConfig:
                   and vllm_parallel_config.enable_expert_parallel)
 
         dp_size = dp_size_
-        dp_rank = get_dp_group().rank_in_group
+        dp_rank = get_dp_group().rank_in_group if dp_size > 1 else 0
         tp_size, tp_rank = flatten_tp_across_dp(dp_rank)
 
         if not use_ep:
@@ -299,6 +299,7 @@ class AllToAllCache:
                 # TODO (varun): Add support to switch to intranode
                 # when all communications are within the same
                 # node.
+                logger.debug("Create AllToAll %s", kwargs)
                 instance = pplx.AllToAll.internode(**kwargs)
                 self._cache[key] = instance
             return instance
