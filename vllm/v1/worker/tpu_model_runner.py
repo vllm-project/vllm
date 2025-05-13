@@ -1299,7 +1299,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                         tp_size = \
                             self.original_parallel_config.tensor_parallel_size
                         # TODO: Handle kv cache duplication under SPMD mode.
-                        assert num_kv_heads // tp_size > 0, (
+                        assert num_kv_heads % tp_size == 0, (
                             f"num_kv_heads {num_kv_heads} must be divisible by "
                             f"tp_size {tp_size} under SPMD mode")
                     kv_cache_shape = PallasAttentionBackend.get_kv_cache_shape(
