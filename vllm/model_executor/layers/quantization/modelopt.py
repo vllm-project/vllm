@@ -401,8 +401,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
 
         layer.weight_scale_swizzled = Parameter(swizzled_weight_scale,
                                                 requires_grad=False)
-        weight = layer.weight.data
-        layer.weight = Parameter(weight, requires_grad=False)
+        layer.weight = Parameter(layer.weight.data, requires_grad=False)
 
         if self.use_marlin:
             prepare_fp4_layer_for_marlin(layer)
