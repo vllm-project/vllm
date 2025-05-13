@@ -2,7 +2,7 @@ nav:
   - Getting Started:
     - getting_started/installation.md
     - getting_started/quickstart.md
-    - getting_started/examples/examples_index.md
+    - getting_started/examples
     - getting_started/troubleshooting.md
     - getting_started/faq.md
     - getting_started/v1_user_guide.md
