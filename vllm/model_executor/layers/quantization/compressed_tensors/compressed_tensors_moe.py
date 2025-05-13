@@ -323,6 +323,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        num_share_fusion_replicas: int = 0,
+        routed_scaling_factor: Optional[float] = None,
     ) -> torch.Tensor:
 
         topk_weights, topk_ids = FusedMoE.select_experts(
@@ -335,7 +337,10 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias)
+            e_score_correction_bias=e_score_correction_bias,
+            num_share_fusion_replicas=num_share_fusion_replicas,
+            routed_scaling_factor=routed_scaling_factor,
+        )
 
         if self.rocm_aiter_moe_enabled:
             return self.rocm_aiter_fused_experts_func(
@@ -575,6 +580,8 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        num_share_fusion_replicas: int = 0,
+        routed_scaling_factor: Optional[float] = None,
     ) -> torch.Tensor:
 
         assert activation == "silu", (
@@ -590,7 +597,10 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias)
+            e_score_correction_bias=e_score_correction_bias,
+            num_share_fusion_replicas=num_share_fusion_replicas,
+            routed_scaling_factor=routed_scaling_factor,
+        )
 
         from vllm.model_executor.layers.fused_moe import cutlass_moe_fp8
 
@@ -712,6 +722,8 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        num_share_fusion_replicas: int = 0,
+        routed_scaling_factor: Optional[float] = None,
     ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe import fused_experts
 
@@ -725,7 +737,10 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias)
+            e_score_correction_bias=e_score_correction_bias,
+            num_share_fusion_replicas=num_share_fusion_replicas,
+            routed_scaling_factor=routed_scaling_factor,
+        )
 
         return fused_experts(
             hidden_states=x,
@@ -1002,6 +1017,8 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        num_share_fusion_replicas: int = 0,
+        routed_scaling_factor: Optional[float] = None,
     ) -> torch.Tensor:
         assert activation == "silu", (
             f"{activation} not supported for Marlin MoE.")
@@ -1018,7 +1035,10 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias)
+            e_score_correction_bias=e_score_correction_bias,
+            num_share_fusion_replicas=num_share_fusion_replicas,
+            routed_scaling_factor=routed_scaling_factor,
+        )
 
         return torch.ops.vllm.fused_marlin_moe(
             x,
@@ -1218,6 +1238,8 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        num_share_fusion_replicas: int = 0,
+        routed_scaling_factor: Optional[float] = None,
     ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe import fused_experts
 
@@ -1231,7 +1253,10 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias)
+            e_score_correction_bias=e_score_correction_bias,
+            num_share_fusion_replicas=num_share_fusion_replicas,
+            routed_scaling_factor=routed_scaling_factor,
+        )
 
         return fused_experts(
             x,
