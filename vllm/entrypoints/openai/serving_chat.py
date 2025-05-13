@@ -1086,6 +1086,7 @@ class OpenAIServingChat(OpenAIServing):
             choices=choices,
             usage=usage,
             prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
+            kv_transfer_params=final_res.kv_transfer_params,
         )
 
         return response
