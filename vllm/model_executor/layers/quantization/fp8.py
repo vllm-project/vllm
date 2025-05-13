@@ -584,7 +584,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             expand_weights, is_rocm_aiter_moe_enabled, shuffle_weights)
 
         self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
-        self.rocm_aiter_2stage_moe_enabled = envs.VLLM_ROCM_USE_AITER_2STAGE_MOE
 
         # TODO (rob): refactor block quant into separate class.
         if self.block_quant:
@@ -673,17 +672,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 layer.w2_weight_scale = torch.nn.Parameter(
                     w2_scales.contiguous(), requires_grad=False)
 
-                if self.rocm_aiter_2stage_moe_enabled:
-                    logger.warning_once(
-                        "VLLM_ROCM_USE_AITER_2STAGE_MOE=1."
-                        "However,dynamic FP8 quantization do not support"
-                        " AITER 2 stage moe, fallback to asm_moe")
-                # override the rocm_aiter_2stage_moe_enabled
-                self.rocm_aiter_2stage_moe_enabled = False
-                layout = (16, 16)
                 shuffled_w13, shuffled_w2 = shuffle_weights(layer.w13_weight,
                                                             layer.w2_weight,
-                                                            layout=layout)
+                                                            layout=(16, 16))
 
                 layer.w13_weight = torch.nn.Parameter(shuffled_w13,
                                                       requires_grad=False)
@@ -766,18 +757,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 layer.w2_weight_scale = torch.nn.Parameter(
                     w2_scales.contiguous(), requires_grad=False)
 
-                if not self.rocm_aiter_2stage_moe_enabled:
-                    logger.warning_once(
-                        "VLLM_ROCM_USE_AITER_2STAGE_MOE=0."
-                        "However, static FP8 quantization do not support"
-                        " AITER 1 stage moe, fallback to 2 stage moe.")
-                # override the rocm_aiter_2stage_moe_enabled
-                self.rocm_aiter_2stage_moe_enabled = True
-                layout = (32, 32)
-
                 shuffled_w13, shuffled_w2 = shuffle_weights(layer.w13_weight,
                                                             layer.w2_weight,
-                                                            layout=layout)
+                                                            layout=(32, 32))
 
                 layer.w13_weight = torch.nn.Parameter(shuffled_w13,
                                                       requires_grad=False)
@@ -844,9 +826,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                           if self.block_quant else layer.w2_weight_scale),
                 a1_scale=layer.w13_input_scale,
                 a2_scale=layer.w2_input_scale,
-                block_shape=self.quant_config.weight_block_size,
-                use_ck_moe_2stages=self.rocm_aiter_2stage_moe_enabled,
-            )
+                block_shape=self.quant_config.weight_block_size)
 
         if self.use_marlin:
             return torch.ops.vllm.fused_marlin_moe(

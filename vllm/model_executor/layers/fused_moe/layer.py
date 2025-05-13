@@ -125,15 +125,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             is_rocm_aiter_moe_enabled, shuffle_weights)
 
         self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
-        self.rocm_aiter_2stage_moe_enabled = envs.VLLM_ROCM_USE_AITER_2STAGE_MOE
 
         if self.rocm_aiter_moe_enabled:
-            # reshaping weights is required for aiter moe kernel.
-            layout = (32, 32) if self.rocm_aiter_2stage_moe_enabled else (16,
-                                                                          16)
+            # use 2stage ck moe layout
             shuffled_w13, shuffled_w2 = shuffle_weights(layer.w13_weight.data,
                                                         layer.w2_weight.data,
-                                                        layout=layout)
+                                                        layout=(32, 32))
 
             layer.w13_weight.data = shuffled_w13
             layer.w2_weight.data = shuffled_w2
@@ -222,8 +219,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 activation=activation,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                use_ck_moe_2stages=self.rocm_aiter_2stage_moe_enabled)
+                apply_router_weight_on_input=apply_router_weight_on_input)
 
         return fused_experts(
             hidden_states=x,

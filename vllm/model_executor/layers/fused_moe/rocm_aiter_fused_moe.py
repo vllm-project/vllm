@@ -69,23 +69,6 @@ def rocm_aiter_asm_moe_tkw1_fake(
     return torch.empty_like(hidden_states)
 
 
-def rocm_aiter_ck_moe_impl(hidden_states: torch.Tensor, w1: torch.Tensor,
-                           w2: torch.Tensor, topk_weights: torch.Tensor,
-                           topk_ids: torch.Tensor) -> torch.Tensor:
-    from aiter import ck_moe
-    return ck_moe(hidden_states=hidden_states,
-                  w1=w1,
-                  w2=w2,
-                  topk_weights=topk_weights,
-                  topk_ids=topk_ids)
-
-
-def rocm_aiter_ck_moe_fake(hidden_states: torch.Tensor, w1: torch.Tensor,
-                           w2: torch.Tensor, topk_weights: torch.Tensor,
-                           topk_ids: torch.Tensor) -> torch.Tensor:
-    return torch.empty_like(hidden_states)
-
-
 def rocm_aiter_fmoe_fp8_blockscale_g1u1_impl(
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
@@ -270,14 +253,6 @@ if current_platform.is_rocm():
     )
 
     direct_register_custom_op(
-        op_name="rocm_aiter_ck_moe",
-        op_func=rocm_aiter_ck_moe_impl,
-        mutates_args=[],
-        fake_impl=rocm_aiter_ck_moe_fake,
-        dispatch_key=current_platform.dispatch_key,
-    )
-
-    direct_register_custom_op(
         op_name="rocm_aiter_fmoe_fp8_blockscale_g1u1",
         op_func=rocm_aiter_fmoe_fp8_blockscale_g1u1_impl,
         mutates_args=[],
@@ -311,22 +286,20 @@ if current_platform.is_rocm():
 
 
 def rocm_aiter_fused_experts(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    activation: str = "silu",
-    apply_router_weight_on_input: bool = False,
-    use_fp8_w8a8: bool = False,
-    per_channel_quant: bool = False,
-    w1_scale: Optional[torch.Tensor] = None,
-    w2_scale: Optional[torch.Tensor] = None,
-    a1_scale: Optional[torch.Tensor] = None,
-    a2_scale: Optional[torch.Tensor] = None,
-    block_shape: Optional[List[int]] = None,
-    use_ck_moe_2stages: bool = False,
-) -> torch.Tensor:
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: str = "silu",
+        apply_router_weight_on_input: bool = False,
+        use_fp8_w8a8: bool = False,
+        per_channel_quant: bool = False,
+        w1_scale: Optional[torch.Tensor] = None,
+        w2_scale: Optional[torch.Tensor] = None,
+        a1_scale: Optional[torch.Tensor] = None,
+        a2_scale: Optional[torch.Tensor] = None,
+        block_shape: Optional[List[int]] = None) -> torch.Tensor:
 
     from vllm.model_executor.layers.quantization.utils.fp8_utils import (
         per_token_group_quant_fp8)
@@ -385,7 +358,7 @@ def rocm_aiter_fused_experts(
 
         # - faster static per-tensor-activation static per-tensor-weight
         #   fp8 quantization w8a8
-        if use_ck_moe_2stages and a1_scale is not None and a2_scale is not None:
+        if a1_scale is not None and a2_scale is not None:
             return torch.ops.vllm.rocm_aiter_ck_moe_2stages(
                 hidden_states=hidden_states,
                 w1=w1,
@@ -424,21 +397,12 @@ def rocm_aiter_fused_experts(
         topk_ids = topk_ids.to(torch.int32)
         topk_weights = torch.ones_like(topk_weights, dtype=torch.float32)
 
-    # faster w16a16
-    if use_ck_moe_2stages:
-        return torch.ops.vllm.rocm_aiter_ck_moe_2stages(
-            hidden_states=hidden_states,
-            w1=w1,
-            w2=w2,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids)
-
-    # w16a16 fallback to rocm_aiter_ck_moe w16a16
-    return torch.ops.vllm.rocm_aiter_ck_moe(hidden_states=hidden_states,
-                                            w1=w1,
-                                            w2=w2,
-                                            topk_weights=topk_weights,
-                                            topk_ids=topk_ids)
+    return torch.ops.vllm.rocm_aiter_ck_moe_2stages(
+        hidden_states=hidden_states,
+        w1=w1,
+        w2=w2,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids)
 
 
 def rocm_aiter_topk_softmax(topk_weights: torch.Tensor,
