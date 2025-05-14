@@ -4,8 +4,8 @@ types / modalities.
 """
 from pathlib import PosixPath
 
-from .....conftest import (HfRunner, ImageTestAssets, VideoTestAssets,
-                           VllmRunner)
+from .....conftest import (AudioTestAssets, HfRunner, ImageTestAssets,
+                           VideoTestAssets, VllmRunner)
 from . import builders, core
 from .types import ExpandableVLMTestArgs, VLMTestInfo
 
@@ -101,6 +101,32 @@ def run_video_test(
         max_tokens=test_case.max_tokens,
         num_logprobs=test_case.num_logprobs,
         limit_mm_per_prompt={"video": len(video_assets)},
+        distributed_executor_backend=test_case.distributed_executor_backend,
+        **model_test_info.get_non_parametrized_runner_kwargs())
+
+
+def run_audio_test(
+    *,
+    model_test_info: VLMTestInfo,
+    test_case: ExpandableVLMTestArgs,
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+    audio_assets: AudioTestAssets,
+):
+    assert test_case.size_wrapper is not None
+    assert test_case.num_video_frames is not None
+    inputs = builders.build_audio_inputs_from_test_info(
+        model_test_info, audio_assets)
+
+    core.run_test(
+        hf_runner=hf_runner,
+        vllm_runner=vllm_runner,
+        inputs=inputs,
+        model=test_case.model,
+        dtype=test_case.dtype,
+        max_tokens=test_case.max_tokens,
+        num_logprobs=test_case.num_logprobs,
+        limit_mm_per_prompt={"audio": 1},
         distributed_executor_backend=test_case.distributed_executor_backend,
         **model_test_info.get_non_parametrized_runner_kwargs())
 

@@ -11,15 +11,15 @@ from vllm.multimodal.image import rescale_image_size
 from vllm.multimodal.video import (rescale_video_size, resize_video,
                                    sample_frames_from_video)
 
-from .....conftest import ImageTestAssets, VideoTestAssets
-from .types import (SINGLE_IMAGE_BASE_PROMPTS, TEST_IMG_PLACEHOLDER,
-                    TEST_VIDEO_PLACEHOLDER, VIDEO_BASE_PROMPT,
-                    ImageSizeWrapper, PromptWithMultiModalInput, SizeType,
-                    VLMTestInfo)
+from .....conftest import AudioTestAssets, ImageTestAssets, VideoTestAssets
+from .types import (SINGLE_IMAGE_BASE_PROMPTS, TEST_AUDIO_PLACEHOLDER,
+                    TEST_IMG_PLACEHOLDER, TEST_VIDEO_PLACEHOLDER,
+                    VIDEO_BASE_PROMPT, ImageSizeWrapper,
+                    PromptWithMultiModalInput, SizeType, VLMTestInfo)
 
 
-def replace_test_placeholder(prompt: str, img_idx_to_prompt: Callable[[int],
-                                                                      str],
+def replace_test_placeholder(prompt: str, mm_idx_to_prompt: Callable[[int],
+                                                                     str],
                              test_placeholder: str) -> str:
     """Given a prompt, replaces each test placeholder with the
     model-specific tag.
@@ -27,7 +27,7 @@ def replace_test_placeholder(prompt: str, img_idx_to_prompt: Callable[[int],
     prompt_segments = prompt.split(test_placeholder)
     img_prompt = prompt_segments[0]
     for placeholder_idx, next_seg in enumerate(prompt_segments[1:], start=1):
-        img_prompt += img_idx_to_prompt(placeholder_idx)
+        img_prompt += mm_idx_to_prompt(placeholder_idx)
         img_prompt += next_seg
     return img_prompt
 
@@ -35,6 +35,7 @@ def replace_test_placeholder(prompt: str, img_idx_to_prompt: Callable[[int],
 def get_model_prompts(base_prompts: Iterable[str],
                       img_idx_to_prompt: Optional[Callable[[int], str]],
                       video_idx_to_prompt: Optional[Callable[[int], str]],
+                      audio_idx_to_prompt: Optional[Callable[[int], str]],
                       prompt_formatter: Callable[[str], str]) -> list[str]:
     """Given a model-agnostic base prompt and test configuration for a model(s)
     to be tested, update the media placeholders and apply the prompt formatting
@@ -61,6 +62,11 @@ def get_model_prompts(base_prompts: Iterable[str],
                                                    video_idx_to_prompt,
                                                    TEST_VIDEO_PLACEHOLDER)
 
+        if audio_idx_to_prompt:
+            base_prompt = replace_test_placeholder(base_prompt,
+                                                   audio_idx_to_prompt,
+                                                   TEST_AUDIO_PLACEHOLDER)
+
         # Apply the prompt formatter to wrap the base prompt with
         # the correct media placeholders to get the model test prompt
         model_prompt = prompt_formatter(base_prompt)
@@ -81,6 +87,7 @@ def build_single_image_inputs_from_test_info(
     model_prompts = get_model_prompts(test_info.single_image_prompts,
                                       test_info.img_idx_to_prompt,
                                       test_info.video_idx_to_prompt,
+                                      test_info.audio_idx_to_prompt,
                                       test_info.prompt_formatter)
 
     # For models that require a local path / URL encoded in the image; export
@@ -132,6 +139,7 @@ def build_multi_image_inputs_from_test_info(
     model_prompts = get_model_prompts([test_info.multi_image_prompt],
                                       test_info.img_idx_to_prompt,
                                       test_info.video_idx_to_prompt,
+                                      test_info.audio_idx_to_prompt,
                                       test_info.prompt_formatter)
 
     if test_info.prompt_path_encoder is not None:
@@ -186,6 +194,7 @@ def build_embedding_inputs_from_test_info(
         SINGLE_IMAGE_BASE_PROMPTS,
         test_info.img_idx_to_prompt,
         test_info.video_idx_to_prompt,
+        test_info.audio_idx_to_prompt,
         test_info.prompt_formatter,
     )
 
@@ -211,6 +220,7 @@ def build_video_inputs_from_test_info(
         [VIDEO_BASE_PROMPT],
         test_info.img_idx_to_prompt,
         test_info.video_idx_to_prompt,
+        test_info.audio_idx_to_prompt,
         test_info.prompt_formatter,
     )
 
@@ -249,3 +259,26 @@ def apply_image_size_scaling(image, size: Union[float, tuple[int, int]],
         # We have a list of fixed sizes
         return image.resize(size)
     raise ValueError("ImageSizeWrapper type must be FIXED_SIZE or SIZE_FACTOR")
+
+
+def build_audio_inputs_from_test_info(
+    test_info: VLMTestInfo,
+    audio_assets: AudioTestAssets,
+) -> list[PromptWithMultiModalInput]:
+    if test_info.prompt_formatter is None:
+        raise ValueError("Prompt formatter must be set to build audio inputs")
+    model_prompts = get_model_prompts(
+        [test_info.audio_idx_to_prompt(0)],
+        test_info.img_idx_to_prompt,
+        test_info.video_idx_to_prompt,
+        test_info.audio_idx_to_prompt,
+        test_info.prompt_formatter,
+    )
+    audios = [asset.audio_and_sample_rate for asset in audio_assets]
+
+    return [
+        PromptWithMultiModalInput.create(
+            prompts=[prompt],
+            audio_data=[audio],
+        ) for audio, prompt in zip(audios, model_prompts)
+    ]
