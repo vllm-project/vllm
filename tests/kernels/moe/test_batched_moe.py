@@ -66,7 +66,8 @@ def ref_impl(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
                          [32, 64, 128, 192, 224, 256, 512])
 @pytest.mark.parametrize("K", [128, 256, 1024])
 @pytest.mark.parametrize("N", [128, 256, 512, 1024])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dtype",
+                         [torch.float32, torch.float16, torch.bfloat16])
 def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
                     N: int, dtype: torch.dtype):
 
@@ -104,4 +105,10 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
     ref_output = ref_impl(tensors.A, tensors.B, ref_output,
                           tensors.num_expert_tokens)
 
-    torch.testing.assert_close(test_output, ref_output, atol=1e-3, rtol=1e-3)
+    rtol, atol = {
+        torch.float16: (6e-2, 6e-2),
+        torch.bfloat16: (6e-2, 6e-2),
+        torch.float32: (1e-2, 1e-2),
+    }[test_output.dtype]
+
+    torch.testing.assert_close(test_output, ref_output, atol=atol, rtol=rtol)
