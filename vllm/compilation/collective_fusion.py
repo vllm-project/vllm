@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 import torch._inductor.pattern_matcher as pm
@@ -73,7 +73,7 @@ class AllGatherGEMMPattern(BasePattern):
         def pattern(
             x: torch.Tensor,
             weight: torch.Tensor,
-        ) -> Tuple[torch.Tensor, torch.Tensor]:
+        ) -> tuple[torch.Tensor, torch.Tensor]:
             all_gather = torch.ops.vllm.all_gather.default(
                 x,
                 dim=0,
@@ -84,7 +84,7 @@ class AllGatherGEMMPattern(BasePattern):
 
         def replacement(
                 x: torch.Tensor,
-                weight: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+                weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
             ag_output, mm_outputs = torch.ops.symm_mem.fused_all_gather_matmul(
                 x,
                 [weight],
