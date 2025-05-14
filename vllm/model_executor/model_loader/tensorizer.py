@@ -18,6 +18,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 import vllm.envs as envs
+from vllm import LLMEngine
 from vllm.config import ModelConfig, ParallelConfig, set_current_vllm_config
 from vllm.engine.arg_utils import EngineArgs
 from vllm.logger import init_logger
@@ -481,13 +482,14 @@ def tensorize_vllm_model(engine_args: EngineArgs,
 
     from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
 
-    engine = V1LLMEngine.from_vllm_config(engine_config)
     if not envs.VLLM_USE_V1:
+        engine = LLMEngine.from_engine_args(engine_args)
         engine.model_executor.collective_rpc(
             "save_tensorized_model",
             kwargs=dict(tensorizer_config=tensorizer_config),
         )
     else:
+        engine = V1LLMEngine.from_vllm_config(engine_config)
         engine.collective_rpc(
             "save_tensorized_model",
             kwargs=dict(tensorizer_config=tensorizer_config),
@@ -504,20 +506,35 @@ def tensorize_lora_adapter(lora_path: str,
     Serializes the files in the tensorizer_config.lora_dir
     """
     import safetensors
-    from huggingface_hub import snapshot_download
 
-    lora_files = snapshot_download(repo_id=lora_path)
+    from vllm.lora.utils import get_adapter_absolute_path
+
+    lora_dir = get_adapter_absolute_path(lora_path)
+
+    tensor_path = config_path = ""
+
+    for file in os.listdir(lora_dir):
+        if file.startswith("adapter_model"):
+            tensor_path = lora_dir + "/" + file
+        if file.startswith("adapter_config"):
+            config_path = lora_dir + "/" + file
+        if tensor_path and config_path:
+            break
+
+    if tensor_path.endswith(".safetensors"):
+        tensors = safetensors.torch.load_file(tensor_path)
+    elif tensor_path.endswith(".bin"):
+        tensors = torch.load(tensor_path)
+    else:
+        raise ValueError("Unsupported file: %s" % (tensor_path))
 
     # Current LoRA loading logic in
     # vllm.lora.models.LoRAModel.from_local_checkpoint assumes that
     # the tensors and config filenames are adapter_model.safetensors and
     # adapter_config.json respectively, so this logic makes the same
     # assumption
-    tensor_path = os.path.join(lora_files, "adapter_model.safetensors")
-    config_path = os.path.join(lora_files, "adapter_config.json")
     with open(config_path) as f:
         config = json.load(f)
-    tensors = safetensors.torch.load_file(tensor_path)
 
     tensorizer_args = tensorizer_config._construct_tensorizer_args()
 

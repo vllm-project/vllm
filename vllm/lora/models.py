@@ -6,7 +6,7 @@ import os
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Union, TYPE_CHECKING
+from typing import Any, Callable, Optional, Union
 
 import safetensors.torch
 import torch
@@ -185,20 +185,19 @@ class LoRAModel(AdapterModel):
 
     @classmethod
     def from_local_checkpoint(
-        cls,
-        lora_dir: str,
-        expected_lora_modules: list[str],
-        peft_helper: PEFTHelper,
-        *,
-        lora_model_id: Optional[int] = None,
-        device: str = "cuda",
-        dtype: Optional[torch.dtype] = None,
-        target_embedding_padding: Optional[int] = None,
-        embedding_modules: Optional[dict[str, str]] = None,
-        embedding_padding_modules: Optional[list[str]] = None,
-        weights_mapper: Optional[WeightsMapper] = None,
-        tensorizer_config_dict: Optional[dict] = None
-    ) -> "LoRAModel":
+            cls,
+            lora_dir: str,
+            expected_lora_modules: list[str],
+            peft_helper: PEFTHelper,
+            *,
+            lora_model_id: Optional[int] = None,
+            device: str = "cuda",
+            dtype: Optional[torch.dtype] = None,
+            target_embedding_padding: Optional[int] = None,
+            embedding_modules: Optional[dict[str, str]] = None,
+            embedding_padding_modules: Optional[list[str]] = None,
+            weights_mapper: Optional[WeightsMapper] = None,
+            tensorizer_config_dict: Optional[dict] = None) -> "LoRAModel":
         """Create a LoRAModel from a local checkpoint.
         
         Args:
