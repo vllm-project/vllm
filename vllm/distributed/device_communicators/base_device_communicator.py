@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 import torch.distributed as dist
@@ -160,7 +160,7 @@ class DeviceCommunicatorBase:
 
     def dispatch(
             self, hidden_states: torch.Tensor,
-            router_logits: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+            router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Dispatch the hidden states and router logits to the appropriate device.
         This is a no-op in the base class.

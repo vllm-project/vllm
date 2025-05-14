@@ -8,7 +8,7 @@ MooncakePipe.
 
 But the logic can be extended to support other pipe and lookup buffer.
 """
-from typing import TYPE_CHECKING, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 
@@ -133,7 +133,7 @@ class SimpleConnector(KVConnectorBase):
             )
 
     def select(self, input_tokens: Optional[torch.Tensor],
-               roi: Optional[torch.Tensor]) -> List[Optional[torch.Tensor]]:
+               roi: Optional[torch.Tensor]) -> list[Optional[torch.Tensor]]:
 
         assert self.consumer_buffer is not None, "Please initialize the "\
             "consumer buffer before calling select."
@@ -152,7 +152,7 @@ class SimpleConnector(KVConnectorBase):
         self,
         model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         hidden_or_intermediate_states: Union[torch.Tensor,
                                              IntermediateTensors],
     ) -> None:
@@ -207,8 +207,8 @@ class SimpleConnector(KVConnectorBase):
     def recv_kv_caches_and_hidden_states(
         self, model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
-        kv_caches: List[torch.Tensor]
-    ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
+        kv_caches: list[torch.Tensor]
+    ) -> tuple[Union[torch.Tensor, IntermediateTensors], bool,
                "ModelInputForGPUWithSamplingMetadata"]:
 
         # When bypass_model_exec is set to False, it means that at least for one
