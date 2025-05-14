@@ -15,8 +15,8 @@ import os
 import time
 from array import array
 from enum import Enum, IntEnum
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, NamedTuple,
-                    Optional, Set, Tuple, Type, TypeVar, Union)
+from typing import (TYPE_CHECKING, Any, Callable, NamedTuple, Optional,
+                    TypeVar, Union)
 
 import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
@@ -83,8 +83,8 @@ class PhaseType(Enum):
 
 def subtuple(obj: object,
              typename: str,
-             to_copy: List[str],
-             to_override: Optional[Dict[str, object]] = None):
+             to_copy: list[str],
+             to_override: Optional[dict[str, object]] = None):
     if obj is None:
         return None
     if to_override is None:
@@ -330,16 +330,16 @@ class HpuModelAdapter:
 
 class PreparePromptMetadata(NamedTuple):
     input_tokens: torch.Tensor
-    input_positions: List[List[int]]
+    input_positions: list[list[int]]
     attn_metadata: Optional[AttentionMetadata]
-    seq_lens: List[int]
-    query_lens: List[int]
-    lora_index_mapping: List[List[int]]
-    lora_prompt_mapping: List[List[int]]
-    lora_requests: Set[LoRARequest]
-    multi_modal_kwargs: Optional[Dict[str, BatchedTensorInputs]]
-    slot_mapping: List[List[int]]
-    lora_ids: List[int]
+    seq_lens: list[int]
+    query_lens: list[int]
+    lora_index_mapping: list[list[int]]
+    lora_prompt_mapping: list[list[int]]
+    lora_requests: set[LoRARequest]
+    multi_modal_kwargs: Optional[dict[str, BatchedTensorInputs]]
+    slot_mapping: list[list[int]]
+    lora_ids: list[int]
 
     @classmethod
     def empty(cls):
@@ -358,13 +358,13 @@ class PreparePromptMetadata(NamedTuple):
 
 class PrepareDecodeMetadata(NamedTuple):
     input_tokens: torch.Tensor
-    input_positions: List[List[int]]
+    input_positions: list[list[int]]
     attn_metadata: Optional[AttentionMetadata]
-    lora_index_mapping: List[List[int]]
-    lora_prompt_mapping: List[List[int]]
-    lora_requests: Set[LoRARequest]
-    slot_mapping: List[List[int]]
-    lora_ids: List[int]
+    lora_index_mapping: list[list[int]]
+    lora_prompt_mapping: list[list[int]]
+    lora_requests: set[LoRARequest]
+    slot_mapping: list[list[int]]
+    lora_ids: list[int]
 
     @classmethod
     def empty(cls):
@@ -401,21 +401,21 @@ class ModelInputForHPU(ModelRunnerInputBase):
     """
     input_tokens: Optional[torch.Tensor] = None
     input_positions: Optional[torch.Tensor] = None
-    seq_lens: Optional[List[int]] = None
-    query_lens: Optional[List[int]] = None
+    seq_lens: Optional[list[int]] = None
+    query_lens: Optional[list[int]] = None
     lora_mapping: Optional["LoRAMapping"] = None
-    lora_requests: Optional[Set[LoRARequest]] = None
+    lora_requests: Optional[set[LoRARequest]] = None
     attn_metadata: Optional["AttentionMetadata"] = None
-    multi_modal_kwargs: Optional[Dict[str, torch.Tensor]] = None
+    multi_modal_kwargs: Optional[dict[str, torch.Tensor]] = None
     real_batch_size: Optional[int] = None
     batch_size_padded: Optional[int] = None
     virtual_engine: int = 0
-    lora_ids: Optional[List[int]] = None
+    lora_ids: Optional[list[int]] = None
     async_callback: Optional[Callable] = None
     is_first_multi_step: bool = True
     is_last_step: bool = True
 
-    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
+    def as_broadcastable_tensor_dict(self) -> dict[str, Any]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
@@ -434,8 +434,8 @@ class ModelInputForHPU(ModelRunnerInputBase):
 
     @classmethod
     def from_broadcasted_tensor_dict(
-        cls: Type[TModelInputForHPU],
-        tensor_dict: Dict[str, Any],
+        cls: type[TModelInputForHPU],
+        tensor_dict: dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None,
     ) -> TModelInputForHPU:
         if attn_backend is not None:
@@ -454,7 +454,7 @@ class ModelInputForHPUWithSamplingMetadata(ModelInputForHPU):
     # used by the driver worker.
     is_prompt: Optional[bool] = None
 
-    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
+    def as_broadcastable_tensor_dict(self) -> dict[str, Any]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
@@ -471,7 +471,7 @@ class ModelInputForHPUWithSamplingMetadata(ModelInputForHPU):
     @classmethod
     def from_broadcasted_tensor_dict(
         cls,
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None,
     ) -> "ModelInputForHPUWithSamplingMetadata":
         tensor_dict = _init_sampling_metadata_from_tensor_dict(tensor_dict)
@@ -486,7 +486,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
     """
     Helper class for shared methods between GPU model runners.
     """
-    _model_input_cls: Type[TModelInputForHPU]
+    _model_input_cls: type[TModelInputForHPU]
 
     def __init__(
         self,
@@ -541,7 +541,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                                  self.block_size,
                                                  self.max_num_batched_tokens,
                                                  False, self.max_model_len)
-        self.graphed_buckets: Set[Any] = set()
+        self.graphed_buckets: set[Any] = set()
         self._set_gc_threshold()
         if self.vllm_config.cache_config.enable_prefix_caching:
             os.environ.setdefault("VLLM_CONTIGUOUS_PA", "False")
@@ -551,9 +551,9 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.use_contiguous_pa = envs.VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH
 
         # For multi-step scheduling
-        self.cached_step_outputs: List[torch.Tensor] = []
+        self.cached_step_outputs: list[torch.Tensor] = []
         # For delayed sampling
-        self.cached_step_inputs: List[
+        self.cached_step_inputs: list[
             ModelInputForHPUWithSamplingMetadata] = []
 
     def _set_gc_threshold(self) -> None:
@@ -686,20 +686,20 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
     def _prepare_prompt(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        seq_group_metadata_list: list[SequenceGroupMetadata],
     ) -> PreparePromptMetadata:
-        input_tokens: List[List[int]] = []
-        input_positions: List[List[int]] = []
-        slot_mapping: List[List[int]] = []
-        lora_index_mapping: List[List[int]] = []
-        lora_prompt_mapping: List[List[int]] = []
-        lora_requests: Set[LoRARequest] = set()
+        input_tokens: list[list[int]] = []
+        input_positions: list[list[int]] = []
+        slot_mapping: list[list[int]] = []
+        lora_index_mapping: list[list[int]] = []
+        lora_prompt_mapping: list[list[int]] = []
+        lora_requests: set[LoRARequest] = set()
 
-        seq_lens: List[int] = []
-        context_lens: List[int] = []
-        query_lens: List[int] = []
-        prefix_block_tables: List[List[int]] = []
-        multi_modal_kwargs_list: List[MultiModalKwargs] = []
+        seq_lens: list[int] = []
+        context_lens: list[int] = []
+        query_lens: list[int] = []
+        prefix_block_tables: list[list[int]] = []
+        multi_modal_kwargs_list: list[MultiModalKwargs] = []
 
         if len(seq_group_metadata_list) == 0:
             return PreparePromptMetadata.empty()
@@ -805,7 +805,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             self.bucketing_ctx.get_padded_prompt_seq_len(max_query_len),
             self.block_size)
 
-        lora_ids: List[int] = []
+        lora_ids: list[int] = []
         for seq_group_metadata, context_len in zip(seq_group_metadata_list,
                                                    context_lens):
             lora_id = seq_group_metadata.lora_int_id
@@ -904,21 +904,21 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
     def _prepare_decode(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        seq_group_metadata_list: list[SequenceGroupMetadata],
         output=None,
     ) -> PrepareDecodeMetadata:
-        input_tokens: List[List[int]] = []
-        input_positions: List[List[int]] = []
-        slot_mapping: List[List[int]] = []
-        seq_lens: List[int] = []
-        block_tables: List[List[int]] = []
-        lora_index_mapping: List[List[int]] = []
-        lora_prompt_mapping: List[List[int]] = []
-        lora_requests: Set[LoRARequest] = set()
+        input_tokens: list[list[int]] = []
+        input_positions: list[list[int]] = []
+        slot_mapping: list[list[int]] = []
+        seq_lens: list[int] = []
+        block_tables: list[list[int]] = []
+        lora_index_mapping: list[list[int]] = []
+        lora_prompt_mapping: list[list[int]] = []
+        lora_requests: set[LoRARequest] = set()
 
         if len(seq_group_metadata_list) == 0:
             return PrepareDecodeMetadata.empty()
-        lora_ids: List[int] = []
+        lora_ids: list[int] = []
 
         dummy_slots = itertools.cycle(
             range(_PAD_SLOT_ID, _PAD_SLOT_ID + self.block_size))
@@ -1005,7 +1005,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             block_bucket_size = max(max(block_list) + 1, len(block_list))
             block_bucket_size = self.bucketing_ctx.get_padded_decode_num_blocks(
                 block_bucket_size)
-            indices: List[Any]
+            indices: list[Any]
             indices = [None] * block_bucket_size
             for i, bid in enumerate(block_list):
                 indices[bid] = i
@@ -1067,8 +1067,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
     def prepare_input_tensors(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[TModelInputForHPU, SamplingMetadata]:
+        seq_group_metadata_list: list[SequenceGroupMetadata],
+    ) -> tuple[TModelInputForHPU, SamplingMetadata]:
         if len(seq_group_metadata_list) == 0:
             return self._model_input_cls(), None
 
@@ -1321,8 +1321,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         # that will have unique loras, an therefore the max amount of memory
         # consumption create dummy lora request copies from the lora request
         # passed in, which contains a lora from the lora warmup path.
-        dummy_lora_requests: List[LoRARequest] = []
-        dummy_lora_requests_per_seq: List[LoRARequest] = []
+        dummy_lora_requests: list[LoRARequest] = []
+        dummy_lora_requests_per_seq: list[LoRARequest] = []
         if self.lora_config and is_lora_profile_run:
             assert self.lora_manager is not None
             with self.lora_manager.dummy_lora_cache():
@@ -1406,7 +1406,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             raise RuntimeError("LoRA is not enabled.")
         self.lora_manager.remove_all_adapters()
 
-    def set_active_loras(self, lora_requests: Set[LoRARequest],
+    def set_active_loras(self, lora_requests: set[LoRARequest],
                          lora_mapping: LoRAMapping) -> None:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
@@ -1427,7 +1427,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.pin_adapter(lora_id)
 
-    def list_loras(self) -> Set[int]:
+    def list_loras(self) -> set[int]:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.list_adapters()
@@ -1462,8 +1462,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         idx = 0
         phase = f'Graph/{"Prompt" if is_prompt else "Decode"}'
         num_candidates = len(buckets)
-        ordering : Union[Callable[[Any], Tuple[Any, Any]], \
-            Callable[[Any], Tuple[Any, Any, Any]]]
+        ordering : Union[Callable[[Any], tuple[Any, Any]], \
+            Callable[[Any], tuple[Any, Any, Any]]]
         if strategy == 'min_tokens':
             ordering = lambda b: (b[0] * b[1], b[1], b[0])
         elif strategy == 'max_bs':
@@ -1509,7 +1509,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         logger.info(msg)
 
     @torch.inference_mode()
-    def warmup_model(self, kv_caches: List[torch.Tensor]) -> None:
+    def warmup_model(self, kv_caches: list[torch.Tensor]) -> None:
         max_blocks = kv_caches[0][0].size(0)
         self.bucketing_ctx.generate_decode_buckets(max_blocks)
         if profile := os.environ.get('VLLM_PT_PROFILE', None):
@@ -1753,12 +1753,12 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
     """
     GPU model runner with sampling step.
     """
-    _model_input_cls: Type[ModelInputForHPUWithSamplingMetadata] = (
+    _model_input_cls: type[ModelInputForHPUWithSamplingMetadata] = (
         ModelInputForHPUWithSamplingMetadata)
 
     def make_model_input_from_broadcasted_tensor_dict(
         self,
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
     ) -> ModelInputForHPUWithSamplingMetadata:
         return (
             ModelInputForHPUWithSamplingMetadata.from_broadcasted_tensor_dict(
@@ -1769,9 +1769,9 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
     @torch.inference_mode()
     def prepare_model_input(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        seq_group_metadata_list: list[SequenceGroupMetadata],
         virtual_engine: int = 0,
-        finished_requests_ids: Optional[List[str]] = None
+        finished_requests_ids: Optional[list[str]] = None
     ) -> ModelInputForHPUWithSamplingMetadata:
         """Prepare the model input based on a given sequence group, including
         metadata for the sampling step.
@@ -1840,7 +1840,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                             num_blocks) if is_prefix_caching else
                            (phase, batch_size, seq_len))
 
-    def create_lora_mask(self, input_tokens: torch.Tensor, lora_ids: List[int],
+    def create_lora_mask(self, input_tokens: torch.Tensor, lora_ids: list[int],
                          is_prompt: bool):
         '''
         This is a helper function to create the mask for lora computations.
@@ -1929,12 +1929,12 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
     def execute_model(
         self,
         model_input: ModelInputForHPUWithSamplingMetadata,
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
         warmup_mode=False,
         seqs=None,
-    ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
+    ) -> Optional[Union[list[SamplerOutput], IntermediateTensors]]:
         VLLM_DELAYED_SAMPLING = envs.VLLM_HPU_USE_DELAYED_SAMPLING
         use_delayed_sampling = VLLM_DELAYED_SAMPLING and not warmup_mode
         assert not (use_delayed_sampling and num_steps != 1), \
@@ -2047,7 +2047,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                 # we only want to pythonize in the last step
                 sampling_metadata.skip_sampler_cpu_output = True
                 self.model.sampler.include_gpu_probs_tensor = True
-            cache_orig_output_tokens_len: List[Dict] = []
+            cache_orig_output_tokens_len: list[dict] = []
 
             def try_revert_dummy_output_tokens():
                 if len(cache_orig_output_tokens_len) > 0:
@@ -2253,8 +2253,8 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
 
     def _make_decode_output(
         self,
-        next_token_ids: List[List[int]],
-        seq_groups: List[SequenceGroupToSample],
+        next_token_ids: list[list[int]],
+        seq_groups: list[SequenceGroupToSample],
     ) -> SamplerOutput:
         zero_logprob = Logprob(0.0)
         sampler_outputs = []

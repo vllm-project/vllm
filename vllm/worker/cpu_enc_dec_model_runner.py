@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import dataclasses
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, cast
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 import torch
 
@@ -31,7 +31,7 @@ class EncoderDecoderModelInputForCPU(ModelInputForCPUWithSamplingMetadata):
     encoder_input_tokens: Optional[torch.Tensor] = None
     encoder_input_positions: Optional[torch.Tensor] = None
 
-    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
+    def as_broadcastable_tensor_dict(self) -> dict[str, Any]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
@@ -47,7 +47,7 @@ class EncoderDecoderModelInputForCPU(ModelInputForCPUWithSamplingMetadata):
     @classmethod
     def from_broadcasted_tensor_dict(
         cls,
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None,
     ) -> "EncoderDecoderModelInputForCPU":
         return cast(
@@ -57,19 +57,19 @@ class EncoderDecoderModelInputForCPU(ModelInputForCPUWithSamplingMetadata):
 
 class CPUEncoderDecoderModelRunner(
         CPUModelRunnerBase[EncoderDecoderModelInputForCPU]):
-    _model_input_cls: Type[EncoderDecoderModelInputForCPU] = (
+    _model_input_cls: type[EncoderDecoderModelInputForCPU] = (
         EncoderDecoderModelInputForCPU)
-    _builder_cls: Type[ModelInputForCPUBuilder] = ModelInputForCPUBuilder
+    _builder_cls: type[ModelInputForCPUBuilder] = ModelInputForCPUBuilder
 
     def _list_to_int32_tensor(
         self,
-        _list: List[int],
+        _list: list[int],
     ) -> torch.Tensor:
         return torch.tensor(_list, dtype=torch.int32, device=self.device)
 
     def _list_to_long_tensor(
         self,
-        _list: List[int],
+        _list: list[int],
     ) -> torch.Tensor:
         return torch.tensor(_list, dtype=torch.long, device=self.device)
 
@@ -80,7 +80,7 @@ class CPUEncoderDecoderModelRunner(
         return self._list_to_long_tensor([])
 
     def make_model_input_from_broadcasted_tensor_dict(
-            self, tensor_dict: Dict[str,
+            self, tensor_dict: dict[str,
                                     Any]) -> EncoderDecoderModelInputForCPU:
         return EncoderDecoderModelInputForCPU.from_broadcasted_tensor_dict(
             tensor_dict,
@@ -89,9 +89,9 @@ class CPUEncoderDecoderModelRunner(
 
     def prepare_model_input(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        seq_group_metadata_list: list[SequenceGroupMetadata],
         virtual_engine: int = 0,
-        finished_requests_ids: Optional[List[str]] = None
+        finished_requests_ids: Optional[list[str]] = None
     ) -> EncoderDecoderModelInputForCPU:
         model_input = self._prepare_model_input_tensors(
             seq_group_metadata_list, finished_requests_ids)
@@ -120,9 +120,9 @@ class CPUEncoderDecoderModelRunner(
 
     def _prepare_encoder_model_input_tensors(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        seq_group_metadata_list: list[SequenceGroupMetadata],
         model_input: EncoderDecoderModelInputForCPU,
-    ) -> Tuple[AttentionMetadata, Optional[torch.Tensor],
+    ) -> tuple[AttentionMetadata, Optional[torch.Tensor],
                Optional[torch.Tensor]]:
         """Helper method to prepare the encoder- and cross-attn-related
         model inputs based on a given sequence group. These additional inputs
@@ -167,7 +167,7 @@ class CPUEncoderDecoderModelRunner(
         is_prompt = seq_group_metadata_list[0].is_prompt
 
         # Build encoder inputs
-        encoder_seq_lens: List[int] = []
+        encoder_seq_lens: list[int] = []
         if is_prompt:
             # Prefill phase.
             cross_block_tables = self._empty_int32_tensor().view(
@@ -279,10 +279,10 @@ class CPUEncoderDecoderModelRunner(
     def execute_model(
         self,
         model_input: EncoderDecoderModelInputForCPU,
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[list[SamplerOutput]]:
         if num_steps > 1:
             raise ValueError(
                 "CPU worker does not support multi-step execution.")

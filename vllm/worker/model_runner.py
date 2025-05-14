@@ -8,8 +8,7 @@ import time
 import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set,
-                    Tuple, Type, TypeVar, Union)
+from typing import TYPE_CHECKING, Any, Callable, Optional, TypeVar, Union
 
 import numpy as np
 import torch
@@ -89,22 +88,22 @@ class ModelInputForGPU(ModelRunnerInputBase):
     inputs_embeds: Optional[torch.Tensor] = None
     input_positions: Optional[torch.Tensor] = None
     token_types: Optional[torch.Tensor] = None
-    seq_lens: Optional[List[int]] = None
-    query_lens: Optional[List[int]] = None
+    seq_lens: Optional[list[int]] = None
+    query_lens: Optional[list[int]] = None
     lora_mapping: Optional["LoRAMapping"] = None
-    lora_requests: Optional[Set[LoRARequest]] = None
+    lora_requests: Optional[set[LoRARequest]] = None
     attn_metadata: Optional["AttentionMetadata"] = None
     prompt_adapter_mapping: Optional[PromptAdapterMapping] = None
-    prompt_adapter_requests: Optional[Set[PromptAdapterRequest]] = None
+    prompt_adapter_requests: Optional[set[PromptAdapterRequest]] = None
     multi_modal_kwargs: Optional[BatchedTensorInputs] = None
-    request_ids_to_seq_ids: Optional[Dict[str, List[int]]] = None
-    finished_requests_ids: Optional[List[str]] = None
+    request_ids_to_seq_ids: Optional[dict[str, list[int]]] = None
+    finished_requests_ids: Optional[list[str]] = None
     virtual_engine: int = 0
     async_callback: Optional[Callable] = None
     scheduler_outputs: Optional[SchedulerOutputs] = None
     previous_hidden_states: Optional[torch.Tensor] = None
 
-    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
+    def as_broadcastable_tensor_dict(self) -> dict[str, Any]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "inputs_embeds": self.inputs_embeds,
@@ -123,8 +122,8 @@ class ModelInputForGPU(ModelRunnerInputBase):
 
     @classmethod
     def from_broadcasted_tensor_dict(
-        cls: Type[TModelInputForGPU],
-        tensor_dict: Dict[str, Any],
+        cls: type[TModelInputForGPU],
+        tensor_dict: dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None,
     ) -> TModelInputForGPU:
         if attn_backend is not None:
@@ -155,7 +154,7 @@ class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
     # used by the driver worker.
     is_prompt: Optional[bool] = None
 
-    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
+    def as_broadcastable_tensor_dict(self) -> dict[str, Any]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "inputs_embeds": self.inputs_embeds,
@@ -177,7 +176,7 @@ class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
     @classmethod
     def from_broadcasted_tensor_dict(
         cls,
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None,
     ) -> "ModelInputForGPUWithSamplingMetadata":
         tensor_dict = _init_sampling_metadata_from_tensor_dict(tensor_dict)
@@ -219,46 +218,46 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             *,
             # From sequence group metadata.
             request_id: str,
-            seq_ids: List[int],
+            seq_ids: list[int],
             is_prompt: bool,
-            block_tables: Optional[Dict[int, List[int]]],
-            computed_block_nums: List[int],
+            block_tables: Optional[dict[int, list[int]]],
+            computed_block_nums: list[int],
             n_seqs: int = 0,
 
             # Input tokens and positions.
-            input_tokens: Optional[List[List[int]]] = None,
+            input_tokens: Optional[list[list[int]]] = None,
             inputs_embeds: Optional[torch.Tensor] = None,
-            input_positions: Optional[List[List[int]]] = None,
-            token_types: Optional[List[List[int]]] = None,
-            mrope_input_positions: Optional[List[List[List[int]]]] = None,
+            input_positions: Optional[list[list[int]]] = None,
+            token_types: Optional[list[list[int]]] = None,
+            mrope_input_positions: Optional[list[list[list[int]]]] = None,
 
             # The sequence length (may be capped to the sliding window).
-            seq_lens: Optional[List[int]] = None,
+            seq_lens: Optional[list[int]] = None,
             # The original sequence length (before applying sliding window).
             # This is used to compute slot mapping.
-            orig_seq_lens: Optional[List[int]] = None,
+            orig_seq_lens: Optional[list[int]] = None,
             # This is used in the dual-chunk flash attention backend.
-            prompt_lens: Optional[List[int]] = None,
+            prompt_lens: Optional[list[int]] = None,
             # The query length.
-            query_lens: Optional[List[int]] = None,
+            query_lens: Optional[list[int]] = None,
             # The number of tokens that are already computed.
-            context_lens: Optional[List[int]] = None,
+            context_lens: Optional[list[int]] = None,
             # The current sliding window block.
-            curr_sliding_window_blocks: Optional[List[int]] = None,
+            curr_sliding_window_blocks: Optional[list[int]] = None,
 
             # LoRA inputs.
-            lora_index_mapping: Optional[List[List[int]]] = None,
-            lora_prompt_mapping: Optional[List[List[int]]] = None,
-            lora_requests: Optional[Set[LoRARequest]] = None,
+            lora_index_mapping: Optional[list[list[int]]] = None,
+            lora_prompt_mapping: Optional[list[list[int]]] = None,
+            lora_requests: Optional[set[LoRARequest]] = None,
 
             # Prompt adapter inputs.
-            prompt_adapter_index_mapping: Optional[List[int]] = None,
-            prompt_adapter_prompt_mapping: Optional[List[int]] = None,
+            prompt_adapter_index_mapping: Optional[list[int]] = None,
+            prompt_adapter_prompt_mapping: Optional[list[int]] = None,
             prompt_adapter_request: Optional[PromptAdapterRequest] = None,
 
             # Multi-modal inputs.
             multi_modal_kwargs: Optional[MultiModalKwargs] = None,
-            multi_modal_placeholder_maps: Optional[Dict[
+            multi_modal_placeholder_maps: Optional[dict[
                 str, MultiModalPlaceholderMap]] = None,
 
             # Whether the prefix cache is hit (prefill only).
@@ -471,7 +470,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
     def __init__(self,
                  runner: "GPUModelRunnerBase",
-                 finished_requests_ids: Optional[List[str]] = None):
+                 finished_requests_ids: Optional[list[str]] = None):
         super().__init__()
         # Compute functions for each sequence in a sequence group.
         # WARNING: The order of the functions matters!
@@ -515,7 +514,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 self.sliding_window_blocks * self.block_size
 
     def prepare(self,
-                finished_requests_ids: Optional[List[str]] = None) -> None:
+                finished_requests_ids: Optional[list[str]] = None) -> None:
         self.finished_requests_ids = finished_requests_ids
 
         # if the current batch is decode-only.
@@ -524,7 +523,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         # Intermediate data (data in CPU before going to GPU) for
         # the current sequence group.
-        self.inter_data_list: List[
+        self.inter_data_list: list[
             ModelInputForGPUBuilder.InterDataForSeqGroup] = []
 
         self.attn_metadata_builder.prepare()
@@ -898,7 +897,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             # prefix caching and there is no decode request.
             return self.model_input_cls()
 
-        mrope_input_positions: Optional[List[List[int]]] = None
+        mrope_input_positions: Optional[list[list[int]]] = None
         if any(inter_data.mrope_input_positions is not None
                for inter_data in self.inter_data_list):
             mrope_input_positions = [[] for _ in range(3)]
@@ -1012,7 +1011,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                        is_prefill=not self.decode_only))
 
         # Prompt adapter data.
-        prompt_adapter_requests: Set[PromptAdapterRequest] = set()
+        prompt_adapter_requests: set[PromptAdapterRequest] = set()
         prompt_adapter_mapping = None
         if self.enable_prompt_adapter:
             prompt_adapter_requests = set(
@@ -1062,8 +1061,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
     """
     Helper class for shared methods between GPU model runners.
     """
-    _model_input_cls: Type[TModelInputForGPU]
-    _builder_cls: Type[ModelInputForGPUBuilder]
+    _model_input_cls: type[TModelInputForGPU]
+    _builder_cls: type[ModelInputForGPUBuilder]
     builder: ModelInputForGPUBuilder
 
     def __init__(
@@ -1094,10 +1093,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             self.vllm_config.compilation_config.max_capture_size
 
         #
-        self.graph_runners: List[Dict[Tuple[int, bool], CUDAGraphRunner]] = [
+        self.graph_runners: list[dict[tuple[int, bool], CUDAGraphRunner]] = [
             {} for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
-        self.graph_memory_pool: Optional[Tuple[
+        self.graph_memory_pool: Optional[tuple[
             int, int]] = None  # Set during graph capture.
 
         self.has_inner_state = model_config.has_inner_state
@@ -1153,7 +1152,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             int(self.cache_config.cpu_offload_gb * 1024**3))
 
         # Used to cache python objects
-        self.inter_data_cache: Dict[int, PyObjectCache] = {}
+        self.inter_data_cache: dict[int, PyObjectCache] = {}
 
         # Using the PythonizationCache in Pipeline-Parallel clobbers the
         # SequenceGroupToSample object. In Pipeline-Parallel, we have
@@ -1256,8 +1255,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
     def _prepare_model_input_tensors(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        finished_requests_ids: Optional[List[str]] = None
+        seq_group_metadata_list: list[SequenceGroupMetadata],
+        finished_requests_ids: Optional[list[str]] = None
     ) -> TModelInputForGPU:
         """Helper method to prepare the model input based on a given sequence
         group. Prepares metadata needed for the base model forward pass but not
@@ -1337,8 +1336,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             # memory consumption. Create dummy lora request copies from the
             # lora request passed in, which contains a lora from the lora
             # warmup path.
-            dummy_lora_requests: List[LoRARequest] = []
-            dummy_lora_requests_per_seq: List[LoRARequest] = []
+            dummy_lora_requests: list[LoRARequest] = []
+            dummy_lora_requests_per_seq: list[LoRARequest] = []
             if self.lora_config:
                 dummy_lora_requests = self._add_dummy_loras(
                     self.lora_config.max_loras)
@@ -1350,7 +1349,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
             # Profile memory usage with max_num_sequences sequences and the
             # total number of tokens equal to max_num_batched_tokens.
-            seqs: List[SequenceGroupMetadata] = []
+            seqs: list[SequenceGroupMetadata] = []
             # Additional GPU memory may be needed for multi-modal encoding,
             # which needs to be accounted for when calculating the GPU blocks
             # for vLLM blocker manager.
@@ -1437,7 +1436,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             raise RuntimeError("LoRA is not enabled.")
         self.lora_manager.remove_all_adapters()
 
-    def set_active_loras(self, lora_requests: Set[LoRARequest],
+    def set_active_loras(self, lora_requests: set[LoRARequest],
                          lora_mapping: LoRAMapping) -> None:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
@@ -1458,7 +1457,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.pin_adapter(lora_id)
 
-    def list_loras(self) -> Set[int]:
+    def list_loras(self) -> set[int]:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.list_adapters()
@@ -1469,7 +1468,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.prompt_adapter_manager.remove_all_adapters()
 
     def set_active_prompt_adapters(
-            self, prompt_adapter_requests: Set[PromptAdapterRequest],
+            self, prompt_adapter_requests: set[PromptAdapterRequest],
             prompt_adapter_mapping: PromptAdapterMapping) -> None:
         if not self.prompt_adapter_manager:
             raise RuntimeError("PromptAdapter is not enabled.")
@@ -1492,13 +1491,13 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             raise RuntimeError("PromptAdapter is not enabled.")
         return self.prompt_adapter_manager.pin_adapter(prompt_adapter_id)
 
-    def list_prompt_adapters(self) -> Set[int]:
+    def list_prompt_adapters(self) -> set[int]:
         if not self.prompt_adapter_manager:
             raise RuntimeError("PromptAdapter is not enabled.")
         return self.prompt_adapter_manager.list_adapters()
 
     @torch.inference_mode()
-    def capture_model(self, kv_caches: List[List[torch.Tensor]]) -> None:
+    def capture_model(self, kv_caches: list[list[torch.Tensor]]) -> None:
         """Cuda graph capture a model.
 
         Note that CUDA graph's performance gain is negligible if number
@@ -1674,7 +1673,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     elapsed_time, cuda_graph_size / GiB_bytes)
 
     def _update_inputs_to_capture_for_enc_dec_model(self,
-                                                    capture_inputs: Dict[str,
+                                                    capture_inputs: dict[str,
                                                                          Any]):
         """
         Updates the set of input tensors needed for CUDA graph capture in an
@@ -1702,13 +1701,13 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
     """
     GPU model runner with sampling step.
     """
-    _model_input_cls: Type[ModelInputForGPUWithSamplingMetadata] = (
+    _model_input_cls: type[ModelInputForGPUWithSamplingMetadata] = (
         ModelInputForGPUWithSamplingMetadata)
-    _builder_cls: Type[ModelInputForGPUBuilder] = ModelInputForGPUBuilder
+    _builder_cls: type[ModelInputForGPUBuilder] = ModelInputForGPUBuilder
 
     def make_model_input_from_broadcasted_tensor_dict(
         self,
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
     ) -> ModelInputForGPUWithSamplingMetadata:
         model_input = \
             ModelInputForGPUWithSamplingMetadata.from_broadcasted_tensor_dict(
@@ -1719,9 +1718,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
     def prepare_model_input(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        seq_group_metadata_list: list[SequenceGroupMetadata],
         virtual_engine: int = 0,
-        finished_requests_ids: Optional[List[str]] = None,
+        finished_requests_ids: Optional[list[str]] = None,
     ) -> ModelInputForGPUWithSamplingMetadata:
         """Prepare the model input based on a given sequence group, including
         metadata for the sampling step.
@@ -1758,11 +1757,11 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
     def execute_model(
         self,
         model_input: ModelInputForGPUWithSamplingMetadata,
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
         **kwargs,
-    ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
+    ) -> Optional[Union[list[SamplerOutput], IntermediateTensors]]:
         if num_steps > 1:
             raise ValueError("num_steps > 1 is not supported in ModelRunner")
 
@@ -2017,8 +2016,8 @@ class CUDAGraphRunner(nn.Module):
         self.backend_name = backend_name
         self.attn_state = attn_state
 
-        self.input_buffers: Dict[str, torch.Tensor] = {}
-        self.output_buffers: Dict[str, torch.Tensor] = {}
+        self.input_buffers: dict[str, torch.Tensor] = {}
+        self.output_buffers: dict[str, torch.Tensor] = {}
 
         self._graph: Optional[torch.cuda.CUDAGraph] = None
         self._is_encoder_decoder_model = is_encoder_decoder_model
@@ -2034,9 +2033,9 @@ class CUDAGraphRunner(nn.Module):
         inputs_embeds: Optional[torch.Tensor],
         positions: torch.Tensor,
         intermediate_inputs: Optional[IntermediateTensors],
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         attn_metadata: AttentionMetadata,
-        memory_pool: Optional[Tuple[int, int]],
+        memory_pool: Optional[tuple[int, int]],
         stream: torch.cuda.Stream,
         **kwargs,
     ):

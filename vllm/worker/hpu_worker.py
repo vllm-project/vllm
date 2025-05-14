@@ -7,7 +7,7 @@
 import contextlib
 import gc
 import os
-from typing import List, Optional, Set, Tuple, Type
+from typing import Optional
 
 import habana_frameworks.torch as htorch  # noqa:F401
 import torch
@@ -49,7 +49,7 @@ class HPUWorker(LocalOrDistributedWorkerBase):
         rank: int,
         distributed_init_method: str,
         is_driver_worker: bool = False,
-        model_runner_cls: Optional[Type[ModelRunnerBase]] = None,
+        model_runner_cls: Optional[type[ModelRunnerBase]] = None,
     ) -> None:
         WorkerBase.__init__(self, vllm_config=vllm_config)
         self.parallel_config.rank = rank
@@ -69,9 +69,9 @@ class HPUWorker(LocalOrDistributedWorkerBase):
             vllm_config=vllm_config, is_driver_worker=is_driver_worker)
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
-        self.cache_engine: List[HPUCacheEngine]
+        self.cache_engine: list[HPUCacheEngine]
         # Initialize gpu_cache as pooling models don't initialize kv_caches
-        self.hpu_cache: Optional[List[List[torch.Tensor]]] = None
+        self.hpu_cache: Optional[list[list[torch.Tensor]]] = None
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
         if envs.VLLM_TORCH_PROFILER_DIR:
@@ -131,7 +131,7 @@ class HPUWorker(LocalOrDistributedWorkerBase):
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None,
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[list[SamplerOutput]]:
         # VLLM_HPU_LOG_STEP_GRAPH_COMPILATION     - will log graph compilations per engine step, only when there was any - highly recommended to use alongside PT_HPU_METRICS_GC_DETAILS! # noqa:E501
         # VLLM_HPU_LOG_STEP_GRAPH_COMPILATION_ALL - will log graph compilations per engine step, always, even if there were none # noqa:E501
         # VLLM_HPU_LOG_STEP_CPU_FALLBACKS         - will log cpu fallbacks per engine step, only when there was any # noqa:E501
@@ -193,7 +193,7 @@ class HPUWorker(LocalOrDistributedWorkerBase):
         return output
 
     @torch.inference_mode()
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> tuple[int, int]:
         """Profiles the peak memory usage of the model to determine how many
         KV blocks may be allocated without OOMs.
 
@@ -307,7 +307,7 @@ class HPUWorker(LocalOrDistributedWorkerBase):
         return self.parallel_config.tensor_parallel_size > 1
 
     @property
-    def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
+    def kv_cache(self) -> Optional[list[list[torch.Tensor]]]:
         return self.hpu_cache
 
     @torch.inference_mode()
@@ -363,7 +363,7 @@ class HPUWorker(LocalOrDistributedWorkerBase):
     def pin_lora(self, lora_id: int) -> bool:
         return self.model_runner.pin_lora(lora_id)
 
-    def list_loras(self) -> Set[int]:
+    def list_loras(self) -> set[int]:
         return self.model_runner.list_loras()
 
     def add_prompt_adapter(
@@ -379,7 +379,7 @@ class HPUWorker(LocalOrDistributedWorkerBase):
         raise NotImplementedError(
             "Prompt Adapter is not implemented for HPU backend.")
 
-    def list_prompt_adapters(self) -> Set[int]:
+    def list_prompt_adapters(self) -> set[int]:
         raise NotImplementedError(
             "Prompt Adapter is not implemented for HPU backend.")
 
@@ -469,11 +469,11 @@ class HPUCacheEngine(CacheEngine):
         self,
         num_blocks: int,
         device: str,
-    ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
         """Allocates KV cache on the specified device."""
         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
             num_blocks, self.block_size, self.num_kv_heads, self.head_size)
-        kv_cache: List[Tuple[torch.Tensor, torch.Tensor]] = []
+        kv_cache: list[tuple[torch.Tensor, torch.Tensor]] = []
         for _ in range(self.num_attention_layers):
             key_cache = torch.zeros(kv_cache_shape,
                                     dtype=self.dtype,

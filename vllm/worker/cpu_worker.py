@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """A CPU worker class."""
 import os
-from typing import Dict, List, Optional, Set, Tuple, Type
+from typing import Optional
 
 import torch
 import torch.distributed
@@ -76,23 +76,23 @@ class CPUCacheEngine:
     def _allocate_kv_cache(
         self,
         num_blocks: int,
-    ) -> List[torch.Tensor]:
+    ) -> list[torch.Tensor]:
         """Allocates KV cache on CPU."""
         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
             num_blocks, self.block_size, self.num_heads, self.head_size)
-        kv_cache: List[torch.Tensor] = []
+        kv_cache: list[torch.Tensor] = []
         for _ in range(self.num_layers):
             kv_cache.append(
                 torch.empty(kv_cache_shape, dtype=self.dtype, device="cpu"))
         return kv_cache
 
-    def swap_in(self, src_to_dst: Dict[int, int]) -> None:
+    def swap_in(self, src_to_dst: dict[int, int]) -> None:
         raise NotImplementedError("Swap is not supported in CPUCacheEngine.")
 
-    def swap_out(self, src_to_dst: Dict[int, int]) -> None:
+    def swap_out(self, src_to_dst: dict[int, int]) -> None:
         raise NotImplementedError("Swap is not supported in CPUCacheEngine.")
 
-    def copy(self, src_to_dsts: Dict[int, List[int]]) -> None:
+    def copy(self, src_to_dsts: dict[int, list[int]]) -> None:
         self.attn_backend.copy_blocks(self.cpu_cache, src_to_dsts)
 
     @staticmethod
@@ -134,7 +134,7 @@ class CPUWorker(LocalOrDistributedWorkerBase):
         distributed_init_method: str,
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
-        model_runner_cls: Optional[Type[CPUModelRunner]] = None,
+        model_runner_cls: Optional[type[CPUModelRunner]] = None,
     ) -> None:
         WorkerBase.__init__(self, vllm_config=vllm_config)
 
@@ -170,7 +170,7 @@ class CPUWorker(LocalOrDistributedWorkerBase):
             or (speculative_config.draft_model_config.hf_config.model_type
                 not in ["medusa", "mlp_speculator", "eagle"]) \
                     else {"return_hidden_states": True}
-        ModelRunnerClass: Type[CPUModelRunnerBase] = CPUModelRunner
+        ModelRunnerClass: type[CPUModelRunnerBase] = CPUModelRunner
         if self.model_config.runner_type == "pooling":
             ModelRunnerClass = CPUPoolingModelRunner
         elif self.model_config.is_encoder_decoder:
@@ -185,9 +185,9 @@ class CPUWorker(LocalOrDistributedWorkerBase):
             self.model_runner = model_runner_cls(self.model_runner)
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
-        self.cache_engine: List[CPUCacheEngine]
+        self.cache_engine: list[CPUCacheEngine]
         # Initialize cpu_cache as pooling models don't initialize kv_caches
-        self.cpu_cache: Optional[List[List[torch.Tensor]]] = None
+        self.cpu_cache: Optional[list[list[torch.Tensor]]] = None
 
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
@@ -232,7 +232,7 @@ class CPUWorker(LocalOrDistributedWorkerBase):
     def load_model(self):
         self.model_runner.load_model()
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> tuple[int, int]:
         """Determine the number of blocks available for the KV cache.
 
         This determines how many KV blocks can fit into the configured CPU
@@ -287,7 +287,7 @@ class CPUWorker(LocalOrDistributedWorkerBase):
     def pin_lora(self, lora_id: int) -> bool:
         return self.model_runner.pin_lora(lora_id)
 
-    def list_loras(self) -> Set[int]:
+    def list_loras(self) -> set[int]:
         return self.model_runner.list_loras()
 
     def _validate_num_cpu_blocks(self, num_cpu_blocks: int) -> None:
@@ -335,7 +335,7 @@ class CPUWorker(LocalOrDistributedWorkerBase):
         return self.parallel_config.tensor_parallel_size > 1
 
     @property
-    def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
+    def kv_cache(self) -> Optional[list[list[torch.Tensor]]]:
         return self.cpu_cache
 
     @property

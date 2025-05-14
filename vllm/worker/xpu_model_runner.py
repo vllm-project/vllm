@@ -5,8 +5,7 @@ import time
 import weakref
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
-                    Type, TypeVar)
+from typing import TYPE_CHECKING, Any, Callable, Optional, TypeVar
 
 import torch
 import torch.nn as nn
@@ -54,11 +53,11 @@ class ModelInputForXPU(ModelRunnerInputBase):
     attn_metadata: Optional["AttentionMetadata"] = None
     multi_modal_kwargs: Optional[BatchedTensorInputs] = None
     virtual_engine: Optional[int] = None
-    seq_lens: Optional[List[int]] = None
-    query_lens: Optional[List[int]] = None
+    seq_lens: Optional[list[int]] = None
+    query_lens: Optional[list[int]] = None
     async_callback: Optional[Callable] = None
 
-    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
+    def as_broadcastable_tensor_dict(self) -> dict[str, Any]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
@@ -69,8 +68,8 @@ class ModelInputForXPU(ModelRunnerInputBase):
 
     @classmethod
     def from_broadcasted_tensor_dict(
-        cls: Type[TModelInputForXPU],
-        tensor_dict: Dict[str, Any],
+        cls: type[TModelInputForXPU],
+        tensor_dict: dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None,
     ) -> TModelInputForXPU:
         if attn_backend is not None:
@@ -86,7 +85,7 @@ class ModelInputForXPUWithSamplingMetadata(ModelInputForXPU):
     """
     sampling_metadata: Optional["SamplingMetadata"] = None
 
-    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
+    def as_broadcastable_tensor_dict(self) -> dict[str, Any]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
@@ -99,7 +98,7 @@ class ModelInputForXPUWithSamplingMetadata(ModelInputForXPU):
     @classmethod
     def from_broadcasted_tensor_dict(
         cls,
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None,
     ) -> "ModelInputForXPUWithSamplingMetadata":
         tensor_dict = _init_sampling_metadata_from_tensor_dict(tensor_dict)
@@ -113,7 +112,7 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
 
     def __init__(self,
                  runner: "XPUModelRunner",
-                 finished_requests_ids: Optional[List[str]] = None) -> None:
+                 finished_requests_ids: Optional[list[str]] = None) -> None:
         super().__init__()
         self.runner = runner
         self.model_input_cls = self.runner._model_input_cls
@@ -123,8 +122,8 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
         self.device = self.runner.device
 
     def prepare(self,
-                finished_requests_ids: Optional[List[str]] = None) -> None:
-        self.seq_group_metadata_list: List[SequenceGroupMetadata] = []
+                finished_requests_ids: Optional[list[str]] = None) -> None:
+        self.seq_group_metadata_list: list[SequenceGroupMetadata] = []
 
     def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata):
         self.seq_group_metadata_list.append(seq_group_metadata)
@@ -154,16 +153,16 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
 
     def _prepare_prompt(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, List[int],
+        seq_group_metadata_list: list[SequenceGroupMetadata],
+    ) -> tuple[torch.Tensor, torch.Tensor, AttentionMetadata, list[int],
                BatchedTensorInputs]:
         assert len(seq_group_metadata_list) > 0
-        input_tokens: List[int] = []
-        input_positions: List[int] = []
-        slot_mapping: List[int] = []
-        seq_lens: List[int] = []
-        multi_modal_kwargs_list: List[MultiModalKwargs] = []
-        multi_modal_placeholder_maps: Dict[
+        input_tokens: list[int] = []
+        input_positions: list[int] = []
+        slot_mapping: list[int] = []
+        seq_lens: list[int] = []
+        multi_modal_kwargs_list: list[MultiModalKwargs] = []
+        multi_modal_placeholder_maps: dict[
             str,
             MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
 
@@ -273,14 +272,14 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
 
     def _prepare_decode(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata]:
+        seq_group_metadata_list: list[SequenceGroupMetadata],
+    ) -> tuple[torch.Tensor, torch.Tensor, AttentionMetadata]:
         assert len(seq_group_metadata_list) > 0
-        input_tokens: List[int] = []
-        input_positions: List[int] = []
-        slot_mapping: List[int] = []
-        seq_lens: List[int] = []
-        block_tables: List[List[int]] = []
+        input_tokens: list[int] = []
+        input_positions: list[int] = []
+        slot_mapping: list[int] = []
+        seq_lens: list[int] = []
+        block_tables: list[list[int]] = []
 
         for seq_group_metadata in seq_group_metadata_list:
             assert not seq_group_metadata.is_prompt
@@ -358,9 +357,9 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
 
 
 class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
-    _model_input_cls: Type[ModelInputForXPUWithSamplingMetadata] = (
+    _model_input_cls: type[ModelInputForXPUWithSamplingMetadata] = (
         ModelInputForXPUWithSamplingMetadata)
-    _builder_cls: Type[ModelInputForXPUBuilder] = ModelInputForXPUBuilder
+    _builder_cls: type[ModelInputForXPUBuilder] = ModelInputForXPUBuilder
 
     def __init__(
         self,
@@ -430,7 +429,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
 
         # Profile memory usage with max_num_sequences sequences and the total
         # number of tokens equal to max_num_batched_tokens.
-        seqs: List[SequenceGroupMetadata] = []
+        seqs: list[SequenceGroupMetadata] = []
         # Additional GPU memory may be needed for multi-modal encoding, which
         # needs to be accounted for when calculating the GPU blocks for
         # vLLM blocker manager.
@@ -488,7 +487,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
 
     def make_model_input_from_broadcasted_tensor_dict(
             self,
-            tensor_dict: Dict[str,
+            tensor_dict: dict[str,
                               Any]) -> ModelInputForXPUWithSamplingMetadata:
         return (
             ModelInputForXPUWithSamplingMetadata.from_broadcasted_tensor_dict(
@@ -498,8 +497,8 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
 
     def _prepare_model_input_tensors(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        finished_requests_ids: Optional[List[str]] = None
+        seq_group_metadata_list: list[SequenceGroupMetadata],
+        finished_requests_ids: Optional[list[str]] = None
     ) -> ModelInputForXPUWithSamplingMetadata:
         """Helper method to prepare the model input based on a given sequence
         group. Prepares metadata needed for the base model forward pass but not
@@ -515,9 +514,9 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
 
     def prepare_model_input(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        seq_group_metadata_list: list[SequenceGroupMetadata],
         virtual_engine: int = 0,
-        finished_requests_ids: Optional[List[str]] = None
+        finished_requests_ids: Optional[list[str]] = None
     ) -> ModelInputForXPUWithSamplingMetadata:
         """Prepare the model input based on a given sequence group, including
         metadata for the sampling step.
@@ -544,10 +543,10 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
     def execute_model(
         self,
         model_input: ModelInputForXPUWithSamplingMetadata,
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[list[SamplerOutput]]:
         if num_steps > 1:
             raise ValueError(
                 "XPUModelRunner does not support multi-step execution.")

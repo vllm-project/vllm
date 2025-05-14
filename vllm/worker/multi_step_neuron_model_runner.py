@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from importlib.util import find_spec
-from typing import List, Optional
+from typing import Optional
 
 import torch
 
@@ -62,10 +62,10 @@ class MultiStepNeuronModelRunner(NeuronModelRunner):
     def execute_model(
         self,
         model_input: ModelInputForNeuron,
-        kv_caches: Optional[List[torch.Tensor]] = None,
+        kv_caches: Optional[list[torch.Tensor]] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[list[SamplerOutput]]:
         logits = self.model(
             input_ids=model_input.input_tokens,
             positions=model_input.input_positions,

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List, Optional
+from typing import Optional
 
 import torch
 from neuronx_distributed_inference.modules.generation.sampling import (
@@ -65,10 +65,10 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
     def execute_model(
         self,
         model_input: ModelInputForNeuron,
-        kv_caches: Optional[List[torch.Tensor]] = None,
+        kv_caches: Optional[list[torch.Tensor]] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[list[SamplerOutput]]:
         if num_steps > 1:
             raise ValueError(
                 "NeuronModelRunner does not support multi-step execution.")

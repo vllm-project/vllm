@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import List, Optional
+from typing import Optional
 
 import torch
 
@@ -34,10 +34,10 @@ class MultiStepNeuronxDistributedModelRunner(NeuronxDistributedModelRunner):
     def execute_model(
         self,
         model_input,
-        kv_caches: Optional[List[torch.Tensor]] = None,
+        kv_caches: Optional[list[torch.Tensor]] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[list[SamplerOutput]]:
         sampling_params = torch.tensor([[
             seq_group.sampling_params.top_k,
             seq_group.sampling_params.top_p,

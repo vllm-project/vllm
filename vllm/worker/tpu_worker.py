@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-from typing import List, Optional, Tuple, Union
+from typing import Optional, Union
 
 import torch
 import torch_xla.core.xla_model as xm
@@ -133,7 +133,7 @@ class TPUWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     def load_model(self):
         self.model_runner.load_model()
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> tuple[int, int]:
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         head_size = self.model_config.get_head_size()
         num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
@@ -194,8 +194,8 @@ class TPUWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
         head_size = self.model_config.get_head_size()
 
-        self.cpu_cache: List[Tuple[torch.Tensor, torch.Tensor]] = []
-        self.tpu_cache: List[Tuple[torch.Tensor, torch.Tensor]] = []
+        self.cpu_cache: list[tuple[torch.Tensor, torch.Tensor]] = []
+        self.tpu_cache: list[tuple[torch.Tensor, torch.Tensor]] = []
         tpu_cache_shape = self.model_runner.attn_backend.get_kv_cache_shape(
             num_gpu_blocks, self.block_size, num_kv_heads, head_size)
         cpu_cache_shape = self.model_runner.attn_backend.get_kv_cache_shape(
@@ -244,7 +244,7 @@ class TPUWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         return self.parallel_config.tensor_parallel_size > 1
 
     @property
-    def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
+    def kv_cache(self) -> Optional[list[list[torch.Tensor]]]:
         # NOTE(woosuk): This assumes virtual_engine == 0, i.e., no pipeline
         # parallelism.
         return [self.tpu_cache]
@@ -305,10 +305,10 @@ class TPUWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
 
 def _make_src_to_dst(
-    mapping: List[Tuple[int, int]],
+    mapping: list[tuple[int, int]],
     src_device: Union[torch.device, str],
     dst_device: Union[torch.device, str],
-) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
     if not mapping:
         return None
 

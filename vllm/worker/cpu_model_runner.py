@@ -4,8 +4,7 @@ import dataclasses
 import weakref
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Set, Type,
-                    TypeVar, Union)
+from typing import TYPE_CHECKING, Any, Optional, TypeVar, Union
 
 import torch
 from torch import nn
@@ -53,13 +52,13 @@ class ModelInputForCPU(ModelRunnerInputBase):
     attn_metadata: Optional["AttentionMetadata"] = None
     multi_modal_kwargs: Optional[BatchedTensorInputs] = None
     virtual_engine: Optional[int] = None
-    seq_lens: Optional[List[int]] = None
-    query_lens: Optional[List[int]] = None
+    seq_lens: Optional[list[int]] = None
+    query_lens: Optional[list[int]] = None
     lora_mapping: Optional["LoRAMapping"] = None
-    lora_requests: Optional[Set[LoRARequest]] = None
+    lora_requests: Optional[set[LoRARequest]] = None
 
     def as_broadcastable_tensor_dict(
-            self) -> Dict[str, Union[int, torch.Tensor]]:
+            self) -> dict[str, Union[int, torch.Tensor]]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
@@ -74,8 +73,8 @@ class ModelInputForCPU(ModelRunnerInputBase):
 
     @classmethod
     def from_broadcasted_tensor_dict(
-        cls: Type[TModelInputForCPU],
-        tensor_dict: Dict[str, Any],
+        cls: type[TModelInputForCPU],
+        tensor_dict: dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None
     ) -> TModelInputForCPU:
         if attn_backend is not None:
@@ -92,7 +91,7 @@ class ModelInputForCPUWithSamplingMetadata(ModelInputForCPU):
     sampling_metadata: Optional["SamplingMetadata"] = None
     is_prompt: Optional[bool] = None
 
-    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
+    def as_broadcastable_tensor_dict(self) -> dict[str, Any]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
@@ -107,7 +106,7 @@ class ModelInputForCPUWithSamplingMetadata(ModelInputForCPU):
     @classmethod
     def from_broadcasted_tensor_dict(
         cls,
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None,
     ) -> "ModelInputForCPUWithSamplingMetadata":
         tensor_dict = _init_sampling_metadata_from_tensor_dict(tensor_dict)
@@ -123,28 +122,28 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
 
         def __init__(self, use_mrope: bool):
             self.use_mrope = use_mrope
-            self.input_tokens: List[int] = []
-            self.input_positions: List[int] = []
-            self.token_type_ids: Optional[List[int]] = []
-            self.seq_lens: List[int] = []
-            self.query_lens: List[int] = []
-            self.prefill_block_tables: List[List[int]] = []
-            self.decode_block_tables: List[List[int]] = []
+            self.input_tokens: list[int] = []
+            self.input_positions: list[int] = []
+            self.token_type_ids: Optional[list[int]] = []
+            self.seq_lens: list[int] = []
+            self.query_lens: list[int] = []
+            self.prefill_block_tables: list[list[int]] = []
+            self.decode_block_tables: list[list[int]] = []
             self.max_decode_seq_len: int = 0
             self.num_prefills: int = 0
             self.num_prefill_tokens: int = 0
             self.num_decode_tokens: int = 0
-            self.slot_mapping: List[int] = []
-            self.multi_modal_inputs_list: List[MultiModalKwargs] = []
-            self.multi_modal_placeholder_maps: Dict[
+            self.slot_mapping: list[int] = []
+            self.multi_modal_inputs_list: list[MultiModalKwargs] = []
+            self.multi_modal_placeholder_maps: dict[
                 str, MultiModalPlaceholderMap] = defaultdict(
                     MultiModalPlaceholderMap)
-            self.input_mrope_positions: List[List[int]] = [[]
+            self.input_mrope_positions: list[list[int]] = [[]
                                                            for _ in range(3)]
 
     def __init__(self,
                  runner: "CPUModelRunner",
-                 finished_requests_ids: Optional[List[str]] = None) -> None:
+                 finished_requests_ids: Optional[list[str]] = None) -> None:
         super().__init__()
         self.runner = runner
         self.chunked_prefill = (runner.scheduler_config.chunked_prefill_enabled
@@ -161,8 +160,8 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             self.att_metadata_builder = attn_backend.get_builder_cls()(self)
 
     def prepare(self,
-                finished_requests_ids: Optional[List[str]] = None) -> None:
-        self.seq_group_metadata_list: List[SequenceGroupMetadata] = []
+                finished_requests_ids: Optional[list[str]] = None) -> None:
+        self.seq_group_metadata_list: list[SequenceGroupMetadata] = []
         self.input_data = ModelInputForCPUBuilder.ModelInputData(
             self.runner.model_config.uses_mrope)
         self.att_metadata_builder.prepare()
@@ -171,7 +170,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         self.seq_group_metadata_list.append(seq_group_metadata)
 
     def set_seq_group_list(
-            self, seq_group_metadata_list: List[SequenceGroupMetadata]):
+            self, seq_group_metadata_list: list[SequenceGroupMetadata]):
         self.seq_group_metadata_list = seq_group_metadata_list
 
     def build(self) -> ModelInputForCPU:
@@ -410,7 +409,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                 placeholder_map)
 
     def _prepare_lora_input(
-            self, seq_group_metadata_list: List[SequenceGroupMetadata],
+            self, seq_group_metadata_list: list[SequenceGroupMetadata],
             is_prefill: bool) -> LoRAMapping:
         index_mapping = []
         prompt_mapping = []
@@ -432,8 +431,8 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
     """
     Helper class for shared methods between CPU model runners.
     """
-    _model_input_cls: Type[TModelInputForCPU]
-    _builder_cls: Type[ModelInputForCPUBuilder]
+    _model_input_cls: type[TModelInputForCPU]
+    _builder_cls: type[ModelInputForCPUBuilder]
     builder: ModelInputForCPUBuilder
 
     def __init__(
@@ -513,8 +512,8 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
 
     def _prepare_model_input_tensors(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        finished_requests_ids: Optional[List[str]] = None
+        seq_group_metadata_list: list[SequenceGroupMetadata],
+        finished_requests_ids: Optional[list[str]] = None
     ) -> TModelInputForCPU:
         """Helper method to prepare the model input based on a given sequence
         group. Prepares metadata needed for the base model forward pass but not
@@ -535,7 +534,7 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
             raise RuntimeError("LoRA is not enabled.")
         self.lora_manager.remove_all_adapters()
 
-    def set_active_loras(self, lora_requests: Set[LoRARequest],
+    def set_active_loras(self, lora_requests: set[LoRARequest],
                          lora_mapping: LoRAMapping) -> None:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
@@ -556,20 +555,20 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
             raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.pin_adapter(lora_id)
 
-    def list_loras(self) -> Set[int]:
+    def list_loras(self) -> set[int]:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.list_adapters()
 
 
 class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
-    _model_input_cls: Type[ModelInputForCPUWithSamplingMetadata] = (
+    _model_input_cls: type[ModelInputForCPUWithSamplingMetadata] = (
         ModelInputForCPUWithSamplingMetadata)
-    _builder_cls: Type[ModelInputForCPUBuilder] = ModelInputForCPUBuilder
+    _builder_cls: type[ModelInputForCPUBuilder] = ModelInputForCPUBuilder
 
     def make_model_input_from_broadcasted_tensor_dict(
         self,
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
     ) -> ModelInputForCPUWithSamplingMetadata:
         return ModelInputForCPUWithSamplingMetadata.from_broadcasted_tensor_dict(  # noqa: E501
             tensor_dict,
@@ -578,9 +577,9 @@ class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
 
     def prepare_model_input(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        seq_group_metadata_list: list[SequenceGroupMetadata],
         virtual_engine: int = 0,
-        finished_requests_ids: Optional[List[str]] = None
+        finished_requests_ids: Optional[list[str]] = None
     ) -> ModelInputForCPUWithSamplingMetadata:
         """Prepare the model input based on a given sequence group, including
         metadata for the sampling step.
@@ -608,11 +607,11 @@ class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
     def execute_model(
         self,
         model_input: ModelInputForCPUWithSamplingMetadata,
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
         previous_hidden_states: Optional[torch.Tensor] = None,
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[list[SamplerOutput]]:
         if num_steps > 1:
             raise ValueError(
                 "CPU worker does not support multi-step execution.")

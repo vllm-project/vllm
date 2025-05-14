@@ -5,7 +5,7 @@
 ###############################################################################
 
 import dataclasses
-from typing import Dict, Optional, Tuple
+from typing import Optional
 
 import torch
 
@@ -24,7 +24,7 @@ class MultiStepHPUWorker(HPUWorker):
 
     def _get_driver_input_and_broadcast(
         self, execute_model_req: ExecuteModelRequest
-    ) -> Tuple[ModelInputForHPU, WorkerInput, Dict[str, torch.Tensor]]:
+    ) -> tuple[ModelInputForHPU, WorkerInput, dict[str, torch.Tensor]]:
         """
         Get the driver input and broadcast it to other workers.
         """
@@ -82,7 +82,7 @@ class MultiStepHPUWorker(HPUWorker):
     def prepare_input(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None,
-    ) -> Optional[Tuple[ModelInputForHPU, WorkerInput, Dict[str,
+    ) -> Optional[tuple[ModelInputForHPU, WorkerInput, dict[str,
                                                             torch.Tensor]]]:
         if self.is_driver_worker:
             if execute_model_req is None:

@@ -2,7 +2,7 @@
 """A GPU worker class."""
 import gc
 import os
-from typing import Dict, List, Optional, Set, Tuple, Type, Union
+from typing import Optional, Union
 
 import torch
 import torch.distributed
@@ -50,7 +50,7 @@ class Worker(LocalOrDistributedWorkerBase):
         rank: int,
         distributed_init_method: str,
         is_driver_worker: bool = False,
-        model_runner_cls: Optional[Type[GPUModelRunnerBase]] = None,
+        model_runner_cls: Optional[type[GPUModelRunnerBase]] = None,
     ) -> None:
         WorkerBase.__init__(self, vllm_config)
         self.parallel_config.rank = rank
@@ -78,7 +78,7 @@ class Worker(LocalOrDistributedWorkerBase):
                          "mimo_mtp")) \
                     else {"return_hidden_states": True}
 
-        ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
+        ModelRunnerClass: type[GPUModelRunnerBase] = ModelRunner
         if model_config.runner_type == "pooling":
             ModelRunnerClass = PoolingModelRunner
         elif self.model_config.is_encoder_decoder:
@@ -94,13 +94,13 @@ class Worker(LocalOrDistributedWorkerBase):
 
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
-        self.cache_engine: List[CacheEngine]
+        self.cache_engine: list[CacheEngine]
         # Initialize gpu_cache as pooling models don't initialize kv_caches
-        self.gpu_cache: Optional[List[List[torch.Tensor]]] = None
-        self._seq_group_metadata_cache: Dict[str, SequenceGroupMetadata] = {}
+        self.gpu_cache: Optional[list[list[torch.Tensor]]] = None
+        self._seq_group_metadata_cache: dict[str, SequenceGroupMetadata] = {}
 
         # Buffers saved before sleep
-        self._sleep_saved_buffers: Dict[str, torch.Tensor] = {}
+        self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
 
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
@@ -226,7 +226,7 @@ class Worker(LocalOrDistributedWorkerBase):
             tensorizer_config=tensorizer_config, )
 
     @torch.inference_mode()
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> tuple[int, int]:
         """Profiles the peak memory usage of the model to determine how many
         KV blocks may be allocated without OOMs.
 
@@ -370,7 +370,7 @@ class Worker(LocalOrDistributedWorkerBase):
         return self.parallel_config.tensor_parallel_size > 1
 
     @property
-    def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
+    def kv_cache(self) -> Optional[list[list[torch.Tensor]]]:
         return self.gpu_cache
 
     @torch.inference_mode()
@@ -421,9 +421,9 @@ class Worker(LocalOrDistributedWorkerBase):
 
     def _get_cached_seq_group_metadata(
             self,
-            seq_group_metadata_list: List[Union[SequenceGroupMetadata,
+            seq_group_metadata_list: list[Union[SequenceGroupMetadata,
                                                 SequenceGroupMetadataDelta]],
-            finished_request_ids: List[str]) -> List[SequenceGroupMetadata]:
+            finished_request_ids: list[str]) -> list[SequenceGroupMetadata]:
         """Return a list of cached Sequence Group Metadata after updating its
         state.
 
@@ -464,7 +464,7 @@ class Worker(LocalOrDistributedWorkerBase):
         self,
         execute_model_req: ExecuteModelRequest,
         intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[list[SamplerOutput]]:
         if execute_model_req is not None:
             new_seq_group_metadata_list = self._get_cached_seq_group_metadata(
                 execute_model_req.seq_group_metadata_list,
@@ -485,7 +485,7 @@ class Worker(LocalOrDistributedWorkerBase):
     def pin_lora(self, lora_id: int) -> bool:
         return self.model_runner.pin_lora(lora_id)
 
-    def list_loras(self) -> Set[int]:
+    def list_loras(self) -> set[int]:
         return self.model_runner.list_loras()
 
     def add_prompt_adapter(
@@ -498,7 +498,7 @@ class Worker(LocalOrDistributedWorkerBase):
     def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
         return self.model_runner.pin_prompt_adapter(prompt_adapter_id)
 
-    def list_prompt_adapters(self) -> Set[int]:
+    def list_prompt_adapters(self) -> set[int]:
         return self.model_runner.list_prompt_adapters()
 
     @property
