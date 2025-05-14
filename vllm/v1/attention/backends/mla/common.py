@@ -865,8 +865,10 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         assert output is not None, "Output tensor must be provided."
 
         if attn_metadata is None:
-            # Profiling run.
-            return output
+            # The zero fill is required when used with DP + EP
+            # to ensure all ranks within a DP group compute the
+            # same expert outputs.
+            return output.fill_(0)
 
         num_actual_toks = attn_metadata.num_actual_tokens
 

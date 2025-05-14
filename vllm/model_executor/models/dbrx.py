@@ -79,7 +79,6 @@ class DbrxExperts(FusedMoE):
             prefix=prefix,
         )
         self.config = config
-        self.tp_size = get_tensor_model_parallel_world_size()
         self.d_model = config.d_model
         self.intermediate_size = (self.config.ffn_config.ffn_hidden_size //
                                   self.tp_size)

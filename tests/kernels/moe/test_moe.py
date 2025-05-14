@@ -12,6 +12,7 @@ from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
 import vllm.model_executor.layers.fused_moe  # noqa
 from tests.kernels.utils import opcheck, stack_and_dev, torch_moe
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.moe_torch_iterative import (
@@ -31,6 +32,10 @@ from vllm.scalar_type import ScalarType, scalar_types
 NUM_EXPERTS = [8, 64]
 EP_SIZE = [1, 4]
 TOP_KS = [2, 6]
+
+vllm_config = VllmConfig()
+vllm_config.scheduler_config.max_num_seqs = 128
+vllm_config.scheduler_config.max_model_len = 8192
 
 
 @pytest.mark.parametrize("m", [1, 33, 64, 222, 1024 * 128])
@@ -70,31 +75,33 @@ def test_fused_moe(
     else:
         e_map = None
 
-    torch_output = torch_moe(a, w1, w2, score, topk, e_map)
-    iterative_output = iterative_moe(a,
-                                     w1,
-                                     w2,
-                                     score,
-                                     topk,
-                                     global_num_experts=e,
-                                     expert_map=e_map,
-                                     renormalize=False)
+    with set_current_vllm_config(vllm_config):
+        torch_output = torch_moe(a, w1, w2, score, topk, e_map)
+        iterative_output = iterative_moe(a,
+                                         w1,
+                                         w2,
+                                         score,
+                                         topk,
+                                         global_num_experts=e,
+                                         expert_map=e_map,
+                                         renormalize=False)
 
-    # Pad the weight if moe padding is enabled
-    if padding:
-        w1 = F.pad(w1, (0, 128), "constant", 0)[..., 0:-128]
-        torch.cuda.empty_cache()
-        w2 = F.pad(w2, (0, 128), "constant", 0)[..., 0:-128]
-        torch.cuda.empty_cache()
+        # Pad the weight if moe padding is enabled
+        if padding:
+            w1 = F.pad(w1, (0, 128), "constant", 0)[..., 0:-128]
+            torch.cuda.empty_cache()
+            w2 = F.pad(w2, (0, 128), "constant", 0)[..., 0:-128]
+            torch.cuda.empty_cache()
 
-    triton_output = fused_moe(a,
-                              w1,
-                              w2,
-                              score,
-                              topk,
-                              global_num_experts=e,
-                              expert_map=e_map,
-                              renormalize=False)
+        triton_output = fused_moe(a,
+                                  w1,
+                                  w2,
+                                  score,
+                                  topk,
+                                  global_num_experts=e,
+                                  expert_map=e_map,
+                                  renormalize=False)
+
     torch.testing.assert_close(triton_output, torch_output, atol=2e-2, rtol=0)
     torch.testing.assert_close(iterative_output,
                                torch_output,
@@ -115,7 +122,6 @@ def test_fused_moe(
 def test_fused_moe_wn16(m: int, n: int, k: int, e: int, topk: int,
                         ep_size: int, dtype: torch.dtype, group_size: int,
                         has_zp: bool, weight_bits: int):
-    print(m, n, k, e, topk, dtype, group_size, has_zp, weight_bits)
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
     w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
@@ -194,22 +200,24 @@ def test_fused_moe_wn16(m: int, n: int, k: int, e: int, topk: int,
     else:
         e_map = None
 
-    triton_output = fused_moe(a,
-                              w1_qweight,
-                              w2_qweight,
-                              score,
-                              topk,
-                              renormalize=False,
-                              use_int4_w4a16=weight_bits == 4,
-                              use_int8_w8a16=weight_bits == 8,
-                              global_num_experts=e,
-                              expert_map=e_map,
-                              w1_scale=w1_scales,
-                              w2_scale=w2_scales,
-                              w1_zp=w1_qzeros if has_zp else None,
-                              w2_zp=w2_qzeros if has_zp else None,
-                              block_shape=[0, group_size])
-    torch_output = torch_moe(a, w1_ref, w2_ref, score, topk, e_map)
+    with set_current_vllm_config(vllm_config):
+        triton_output = fused_moe(a,
+                                  w1_qweight,
+                                  w2_qweight,
+                                  score,
+                                  topk,
+                                  renormalize=False,
+                                  use_int4_w4a16=weight_bits == 4,
+                                  use_int8_w8a16=weight_bits == 8,
+                                  global_num_experts=e,
+                                  expert_map=e_map,
+                                  w1_scale=w1_scales,
+                                  w2_scale=w2_scales,
+                                  w1_zp=w1_qzeros if has_zp else None,
+                                  w2_zp=w2_qzeros if has_zp else None,
+                                  block_shape=[0, group_size])
+        torch_output = torch_moe(a, w1_ref, w2_ref, score, topk, e_map)
+
     torch.testing.assert_close(triton_output, torch_output, atol=2e-2, rtol=0)
 
 
@@ -515,7 +523,8 @@ def test_fused_marlin_moe(
 
     topk_weights, topk_ids, _ = fused_topk(a, score, topk, False)
 
-    torch_output = torch_moe(a, w_ref1, w_ref2, score, topk, e_map)
+    with set_current_vllm_config(vllm_config):
+        torch_output = torch_moe(a, w_ref1, w_ref2, score, topk, e_map)
 
     marlin_output = torch.ops.vllm.fused_marlin_moe(
         a,
