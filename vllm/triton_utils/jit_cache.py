@@ -18,7 +18,6 @@ from __future__ import annotations
 import copy
 import inspect
 import time
-from typing import List
 
 from triton import KernelInterface
 from triton import __version__ as triton_version
@@ -365,10 +364,10 @@ class JitCache(KernelInterface):
 
 
 def jitcache(
-    check_keys: List[str],
+    check_keys: list[str],
     cache_lock: CacheLock | None = None,
     cache_launch_grid: bool = False,
-    assume_const: List[str] | None = None,
+    assume_const: list[str] | None = None,
 ):
     """
     Decorator for caching a :code:`triton.jit`'d function.
