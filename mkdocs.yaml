@@ -30,6 +30,7 @@ theme:
     - content.code.copy
 
 hooks:
+  - transpile_docs.py  # temporary
   - docs/gen_examples.py
   - docs/url_schemes.py
 

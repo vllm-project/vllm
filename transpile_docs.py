@@ -2,6 +2,7 @@
 import logging
 import re
 from pathlib import Path
+from typing import Literal
 
 from tabulate import tabulate
 
@@ -237,8 +238,7 @@ def transpile_myst_to_md(old_path: Path) -> None:
     with open(new_path, "w") as f:
         f.write(content)
 
-
-if __name__ == "__main__":
+def main():
     for path in OLD_DIR.rglob("*.*"):
         if path.is_relative_to(EXAMPLES_DIR):
             continue
@@ -256,3 +256,11 @@ if __name__ == "__main__":
     logger.info(
         f"Handled {handled_blocks} blocks, unhandled {unhandled_blocks} blocks"
     )
+
+
+def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool) -> None:
+    main()
+
+
+if __name__ == "__main__":
+    main()
