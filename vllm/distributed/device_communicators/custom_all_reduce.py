@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from contextlib import contextmanager
-from typing import List, Optional, Union
+from typing import Optional, Union
 
 import torch
 import torch.distributed as dist
@@ -276,7 +276,7 @@ class CustomAllreduce:
     @staticmethod
     def create_shared_buffer(size_in_bytes: int,
                              group: Optional[ProcessGroup] = None,
-                             uncached: Optional[bool] = False) -> List[int]:
+                             uncached: Optional[bool] = False) -> list[int]:
         pointer, handle = ops.allocate_shared_buffer_and_handle(size_in_bytes)
 
         world_size = dist.get_world_size(group=group)
@@ -284,7 +284,7 @@ class CustomAllreduce:
         handles = [None] * world_size
         dist.all_gather_object(handles, handle, group=group)
 
-        pointers: List[int] = []
+        pointers: list[int] = []
         for i, h in enumerate(handles):
             if i == rank:
                 pointers.append(pointer)  # type: ignore
@@ -293,7 +293,7 @@ class CustomAllreduce:
         return pointers
 
     @staticmethod
-    def free_shared_buffer(pointers: List[int],
+    def free_shared_buffer(pointers: list[int],
                            group: Optional[ProcessGroup] = None,
                            rank: Optional[int] = 0) -> None:
         if rank is None:

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-from typing import List, Optional
+from typing import Optional
 
 import torch
 from torch.distributed import ProcessGroup
@@ -126,7 +126,7 @@ class _CPUSHMDistributed:
 
     def gather(self,
                input: torch.Tensor,
-               gather_list: Optional[List[torch.Tensor]],
+               gather_list: Optional[list[torch.Tensor]],
                dst: int = -1,
                group: Optional[ProcessGroup] = None) -> None:
         # Note: different from the torch gather, here we use local dst rank.
