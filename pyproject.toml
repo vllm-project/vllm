@@ -78,13 +78,8 @@ exclude = [
 "vllm/executor/**/*.py" = ["UP006", "UP035"]
 "vllm/model_executor/model_loader/**/*.py" = ["UP006", "UP035"]
 "vllm/model_executor/models/**/*.py" = ["UP006", "UP035"]
-"vllm/platforms/**/*.py" = ["UP006", "UP035"]
-"vllm/plugins/**/*.py" = ["UP006", "UP035"]
 "vllm/prompt_adapter/**/*.py" = ["UP006", "UP035"]
 "vllm/spec_decode/**/*.py" = ["UP006", "UP035"]
-"vllm/transformers_utils/**/*.py" = ["UP006", "UP035"]
-"vllm/triton_utils/**/*.py" = ["UP006", "UP035"]
-"vllm/vllm_flash_attn/**/*.py" = ["UP006", "UP035"]
 "vllm/worker/**/*.py" = ["UP006", "UP035"]
 "vllm/utils.py" = ["UP006", "UP035"]
 
