@@ -27,6 +27,14 @@ class MultiKVConnectorMetadata(tuple[KVConnectorMetadata, ...],
 
 
 class MultiConnector(KVConnectorBase_V1):
+    """
+    A wrapper for using multiple KVConnectors at the same time.
+
+    The current logic is:
+    - Load KV from the first connector that advertises available tokens from
+      get_num_new_matched_tokens(), based on the order in the config.
+    - Save to all connectors.
+    """
 
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
         super().__init__(vllm_config=vllm_config, role=role)
