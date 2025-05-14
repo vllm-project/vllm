@@ -5,8 +5,7 @@ pynvml. However, it should not initialize cuda context.
 
 import os
 from functools import wraps
-from typing import (TYPE_CHECKING, Callable, Optional, TypeVar,
-                    Union)
+from typing import TYPE_CHECKING, Callable, Optional, TypeVar, Union
 
 import torch
 from typing_extensions import ParamSpec
