@@ -20,20 +20,21 @@ ENV UV_LINK_MODE=copy
 # Note: A symlink for libatomic.so is created for gcc-13 (linker fails to find libatomic otherwise - reqd. for sentencepiece)
 # Note: A dummy file 'control' is created in /tmp/ to artificially create dependencies between stages when building stages in parallel
 #       when `--jobs=<N>` is passed with podman build command
-RUN microdnf install -y openssl-devel dnf \
+RUN microdnf install -y dnf \
     && dnf install -y https://mirror.stream.centos.org/9-stream/BaseOS/`arch`/os/Packages/centos-gpg-keys-9.0-24.el9.noarch.rpm \
         https://mirror.stream.centos.org/9-stream/BaseOS/`arch`/os/Packages/centos-stream-repos-9.0-24.el9.noarch.rpm \
         https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm \
     && dnf config-manager --add-repo https://mirror.stream.centos.org/9-stream/BaseOS/`arch`/os \
     && dnf config-manager --add-repo https://mirror.stream.centos.org/9-stream/AppStream/`arch`/os \
     && dnf config-manager --set-enabled crb \
+    && rpm -e openssl-fips-provider-so --nodeps \
     && dnf install -y \
-       git tar gcc-toolset-13 automake libtool numactl-devel lapack-devel \
+       git tar gcc-toolset-13 automake libtool \
        pkgconfig xsimd zeromq-devel kmod findutils protobuf* \
        libtiff-devel libjpeg-devel openjpeg2-devel zlib-devel \
        freetype-devel lcms2-devel libwebp-devel tcl-devel tk-devel \
        harfbuzz-devel fribidi-devel libraqm-devel libimagequant-devel libxcb-devel \
-       python${PYTHON_VERSION}-devel python${PYTHON_VERSION}-pip \
+       python${PYTHON_VERSION}-devel python${PYTHON_VERSION}-pip openssl-devel \
     && dnf clean all \
     && ln -sf /usr/lib64/libatomic.so.1 /usr/lib64/libatomic.so \
     && python${PYTHON_VERSION} -m venv ${VIRTUAL_ENV} \
@@ -138,44 +139,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     cd opencv && git cherry-pick --no-commit $OPENCV_PATCH && cd .. && \
     python -m build --wheel --installer=uv --outdir /opencvwheels/
 
-###############################################################
-# Stage to build vllm - this stage builds and installs
-# vllm, tensorizer and vllm-tgis-adapter and builds uv cache
-# for transitive dependencies - eg. grpcio
-###############################################################
-
-FROM base-builder AS vllmcache-builder
-
-COPY --from=torch-builder /tmp/control /dev/null
-COPY --from=arrow-builder /tmp/control /dev/null
-COPY --from=cv-builder /tmp/control /dev/null
-
-ARG VLLM_TARGET_DEVICE=cpu
-ARG GRPC_PYTHON_BUILD_SYSTEM_OPENSSL=1
-
-# this step installs vllm and populates uv cache
-# with all the transitive dependencies
-RUN --mount=type=cache,target=/root/.cache/uv \
-    source /opt/rh/gcc-toolset-13/enable && \
-    git clone https://github.com/huggingface/xet-core.git && cd xet-core/hf_xet/ && \
-    uv pip install maturin && \
-    uv build --wheel --out-dir /hf_wheels/
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,from=torch-builder,source=/torchwheels/,target=/torchwheels/,ro \
-    --mount=type=bind,from=arrow-builder,source=/arrowwheels/,target=/arrowwheels/,ro \
-    --mount=type=bind,from=cv-builder,source=/opencvwheels/,target=/opencvwheels/,ro \
-    --mount=type=bind,src=.,dst=/src/,rw \
-    source /opt/rh/gcc-toolset-13/enable && \
-    uv pip install /opencvwheels/*.whl /arrowwheels/*.whl /torchwheels/*.whl && \
-    sed -i -e 's/.*torch.*//g' /src/pyproject.toml /src/requirements/*.txt && \
-    uv pip install pandas pythran pybind11 /hf_wheels/*.whl && \
-    # sentencepiece.pc is in some pkgconfig inside uv cache
-    export PKG_CONFIG_PATH=$(find / -type d -name "pkgconfig" 2>/dev/null | tr '\n' ':') && \
-    uv pip install -r /src/requirements/common.txt -r /src/requirements/cpu.txt -r /src/requirements/build.txt --no-build-isolation && \
-    cd /src/ && \
-    uv build --wheel --out-dir /vllmwheel/ --no-build-isolation && \
-    uv pip install /vllmwheel/*.whl
-
 
 ###############################################################
 # Stage to build numactl
@@ -191,6 +154,49 @@ RUN git clone --recursive https://github.com/numactl/numactl.git -b v${NUMACTL_V
     && cd numactl \
     && autoreconf -i && ./configure \
     && make -j ${MAX_JOBS:-$(nproc)}
+
+
+###############################################################
+# Stage to build vllm - this stage builds and installs
+# vllm, tensorizer and vllm-tgis-adapter and builds uv cache
+# for transitive dependencies - eg. grpcio
+###############################################################
+
+FROM base-builder AS vllmcache-builder
+
+COPY --from=torch-builder /tmp/control /dev/null
+COPY --from=arrow-builder /tmp/control /dev/null
+COPY --from=cv-builder /tmp/control /dev/null
+COPY --from=numa-builder /tmp/control /dev/null
+
+ARG VLLM_TARGET_DEVICE=cpu
+ARG GRPC_PYTHON_BUILD_SYSTEM_OPENSSL=1
+
+# this step installs vllm and populates uv cache
+# with all the transitive dependencies
+RUN --mount=type=cache,target=/root/.cache/uv \
+    source /opt/rh/gcc-toolset-13/enable && dnf install -y openssl-devel && \
+    git clone https://github.com/huggingface/xet-core.git && cd xet-core/hf_xet/ && \
+    uv pip install maturin && \
+    uv build --wheel --out-dir /hf_wheels/
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,from=torch-builder,source=/torchwheels/,target=/torchwheels/,ro \
+    --mount=type=bind,from=arrow-builder,source=/arrowwheels/,target=/arrowwheels/,ro \
+    --mount=type=bind,from=cv-builder,source=/opencvwheels/,target=/opencvwheels/,ro \
+    --mount=type=bind,from=numa-builder,source=/numactl/,target=/numactl/,rw \
+    --mount=type=bind,src=.,dst=/src/,rw \
+    source /opt/rh/gcc-toolset-13/enable && \
+    uv pip install /opencvwheels/*.whl /arrowwheels/*.whl /torchwheels/*.whl && \
+    sed -i -e 's/.*torch.*//g' /src/pyproject.toml /src/requirements/*.txt && \
+    uv pip install pandas pythran pybind11 /hf_wheels/*.whl && \
+    # sentencepiece.pc is in some pkgconfig inside uv cache
+    export PKG_CONFIG_PATH=$(find / -type d -name "pkgconfig" 2>/dev/null | tr '\n' ':') && \
+    uv pip install -r /src/requirements/common.txt -r /src/requirements/cpu.txt -r /src/requirements/build.txt --no-build-isolation && \
+    cd /src/ && \
+    make -C /numactl install && \
+    uv build --wheel --out-dir /vllmwheel/ --no-build-isolation && \
+    uv pip install /vllmwheel/*.whl
+
 
 ###############################################################
 # Stage to build lapack
