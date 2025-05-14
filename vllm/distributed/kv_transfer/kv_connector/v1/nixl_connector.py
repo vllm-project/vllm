@@ -360,7 +360,7 @@ class NixlConnectorWorker:
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
 
-        # Llama 4 specific logic
+        # Optimization for models with local attention (Llama 4 for now)
         # List of block window sizes for each layer for local attention
         self.block_window_per_layer: list[Optional[int]] = []
 
@@ -482,14 +482,14 @@ class NixlConnectorWorker:
             assert isinstance(self.vllm_config.model_config.hf_text_config,
                               Llama4TextConfig)
             llama4_config = self.vllm_config.model_config.hf_text_config
-            for layer_idx, _ in enumerate(self.kv_caches.keys()):
+            for layer_idx in range(self.num_layers):
                 no_rope_layers = llama4_config.no_rope_layers
                 # no_rope_layers[layer_idx] == 0 means NoPE (global)
                 # Any other value means RoPE (local chunked)
                 chunk_size = None if no_rope_layers[
                     layer_idx] == 0 else llama4_config.attention_chunk_size
-                chunkblock__size = math.ceil(chunk_size / self.block_size)
-                self.block_window_per_layer.append(chunkblock__size)
+                chunk_block_size = math.ceil(chunk_size / self.block_size)
+                self.block_window_per_layer.append(chunk_block_size)
             logger.debug("Llama 4 block window per layer mapping: %s",
                          self.block_window_per_layer)
             assert len(self.block_window_per_layer) == self.num_layers
@@ -722,10 +722,13 @@ class NixlConnectorWorker:
         if num_local_blocks < num_remote_blocks:
             remote_block_ids = remote_block_ids[-num_local_blocks:]
 
-        local_block_descs_ids: list[int] = []
-        remote_block_descs_ids: list[int] = []
+        # Get side handles.
+        local_xfer_side_handle = self.src_xfer_side_handle
+        remote_xfer_side_handle = self.dst_xfer_side_handles[dst_engine_id]
 
         # Get descs ids.
+        local_block_descs_ids: list[int] = []
+        remote_block_descs_ids: list[int] = []
         if not self.block_window_per_layer:
             # Default case: assume global attention
             remote_block_descs_ids = self._get_block_descs_ids(
@@ -758,10 +761,6 @@ class NixlConnectorWorker:
             local_block_descs_ids.extend(layer_local_desc_ids)
 
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
-
-        # Get side handles.
-        local_xfer_side_handle = self.src_xfer_side_handle
-        remote_xfer_side_handle = self.dst_xfer_side_handles[dst_engine_id]
 
         # Prepare transfer with Nixl.
         handle = self.nixl_wrapper.make_prepped_xfer(
