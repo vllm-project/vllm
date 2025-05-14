@@ -105,6 +105,13 @@ def main():
     outputs = llm.generate(prompt_token_ids=prompt_ids,
                            sampling_params=sampling_params)
 
+    # print the generated text
+    for output in outputs:
+        print("-" * 50)
+        print(f"prompt: {output.prompt}")
+        print(f"generated text: {output.outputs[0].text}")
+        print("-" * 50)
+
     if not hasattr(outputs, "metrics") or outputs.metrics is None:
         return
 
