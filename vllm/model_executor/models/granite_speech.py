@@ -21,7 +21,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only IBM Granite speeech model."""
+"""Inference-only IBM Granite speech model."""
 import math
 from typing import Iterable, Mapping, Optional, Set, Tuple, TypedDict, Union
 
@@ -625,7 +625,7 @@ class GraniteSpeechForConditionalGeneration(
         audio_embed_sizes: torch.Tensor,
     ) -> torch.Tensor:
         """Calculate the input features mask, which will generally be used
-        to mask the the padded features for all entries in the batch except
+        to mask the padded features for all entries in the batch except
         for those with the most audio features.
 
         Args:
