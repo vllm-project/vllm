@@ -237,7 +237,7 @@ def transpile_myst_to_md(old_path: Path) -> None:
 
 
 if __name__ == "__main__":
-    for path in OLD_DIR.rglob("*"):
+    for path in OLD_DIR.rglob("*.*"):
         if path.suffix == ".md":
             transpile_myst_to_md(path)
         elif path.suffix in {".png", ".jpg", ".ico"}:
