@@ -49,7 +49,7 @@ def test_basic_lifecycle():
 
     # Request freed in Scheduler and in Persistent Batch ...
     assert request_id in scheduler.finished_req_ids
-    assert request_id in scheduler.unfreed_kv_req_ids
+    assert request_id in scheduler.pending_kv_free_req_ids
     assert len(scheduler.running) == 0
     assert len(scheduler.waiting) == 0
 
@@ -207,7 +207,7 @@ def test_abort():
 
     # (1c): update_from_output()
     scheduler.update_from_output(scheduler_output, model_runner_output)
-    assert request_id in scheduler.unfreed_kv_req_ids
+    assert request_id in scheduler.pending_kv_free_req_ids
     assert request_id in scheduler.finished_req_ids
     blocks = scheduler.kv_cache_manager.single_type_manager.req_to_blocks[
         request_id]

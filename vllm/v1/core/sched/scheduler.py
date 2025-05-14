@@ -101,7 +101,7 @@ class Scheduler(SchedulerInterface):
         # P/D: requests in process of recving KV transfers
         self.finished_recving_kv_req_ids: set[str] = set()
         # P/D: completed requests with unfreed KV blocks
-        self.unfreed_kv_req_ids: set[str] = set()
+        self.pending_kv_free_req_ids: set[str] = set()
 
         # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating
         # them at each scheduling step.
@@ -842,8 +842,8 @@ class Scheduler(SchedulerInterface):
             # Request is already finished.
             if request is None:
                 # If unfreed kv req_ids free the blocks.
-                if req_id in self.unfreed_kv_req_ids:
-                    self.unfreed_kv_req_ids.remove(req_id)
+                if req_id in self.pending_kv_free_req_ids:
+                    self.pending_kv_free_req_ids.remove(req_id)
                     self._free_blocks(req_id)
                 continue
 
@@ -866,11 +866,11 @@ class Scheduler(SchedulerInterface):
         self.finished_req_ids.add(request_id)
         del self.requests[request_id]
 
-        # Free blocks or add to unfreed_kv_req_ids.
+        # Free blocks or add to pending_kv_free_req_ids.
         if not delay_free_blocks:
             self._free_blocks(request_id)
         else:
-            self.unfreed_kv_req_ids.add(request_id)
+            self.pending_kv_free_req_ids.add(request_id)
 
         return kv_xfer_params
 
@@ -988,6 +988,11 @@ class Scheduler(SchedulerInterface):
             self.finished_recving_kv_req_ids.add(req_id)
         for req_id in (model_runner_output.finished_sending or ()):
             logger.debug("Finished sending KV transfer for request %s", req_id)
-            assert req_id in self.unfreed_kv_req_ids
-            self.unfreed_kv_req_ids.remove(req_id)
-            self._free_blocks(req_id)
+            if req_id in self.pending_kv_free_req_ids:
+                self.pending_kv_free_req_ids.remove(req_id)
+                self._free_blocks(req_id)
+            else:
+                logger.warning(
+                    "Got finished transfer for request %s but not found ",
+                    "in the pending free list. This can happen if the request "
+                    "was aborted due to client cancellation.", req_id)
