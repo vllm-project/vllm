@@ -24,9 +24,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Qwen2.5-VL model compatible with HuggingFace weights."""
+from collections.abc import Iterable, Mapping
 from functools import partial
-from typing import (Callable, Iterable, List, Literal, Mapping, Optional, Set,
-                    Tuple, TypedDict, Union)
+from typing import Callable, Literal, Optional, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -91,7 +91,7 @@ class Qwen2_5_VLImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
     image_embeds: torch.Tensor
     """Supported types:
-    - List[`torch.Tensor`]: A list of tensors holding all images' features.
+    - list[`torch.Tensor`]: A list of tensors holding all images' features.
         Each tensor holds an image's features.
     - `torch.Tensor`: A tensor holding all images' features
         (concatenation of all images' feature tensors).
@@ -137,7 +137,7 @@ class Qwen2_5_VLVideoEmbeddingInputs(TypedDict):
     type: Literal["video_embeds"]
     video_embeds: torch.Tensor
     """Supported types:
-    - List[`torch.Tensor`]: A list of tensors holding all videos' features.
+    - list[`torch.Tensor`]: A list of tensors holding all videos' features.
         Each tensor holds an video's features.
     - `torch.Tensor`: A tensor holding all videos' features
       (concatenation of all videos' feature tensors).
@@ -709,8 +709,8 @@ class Qwen2_5_VisionTransformer(nn.Module):
         hidden_states = hidden_states[reverse_indices, :]
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("attn.qkv.", "attn.q.", "q"),
@@ -718,7 +718,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
             ("attn.qkv.", "attn.v.", "v"),
         ]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
@@ -750,7 +750,7 @@ class Qwen2_5_VLProcessingInfo(Qwen2VLProcessingInfo):
         min_pixels: Optional[int] = None,
         max_pixels: Optional[int] = None,
         size: Optional[dict[str, int]] = None,
-        fps: Optional[Union[float, List[float]]] = None,
+        fps: Optional[Union[float, list[float]]] = None,
         **kwargs: object,
     ) -> Qwen2_5_VLProcessor:
         if fps is not None:
@@ -1116,8 +1116,8 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
 
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
