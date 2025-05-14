@@ -611,28 +611,35 @@ class ModelConfig:
 
     def maybe_pull_model_tokenizer_for_s3(self, model: str,
                                           tokenizer: str) -> None:
-        """
-        Pull the model config or tokenizer to a temporary
-        directory in case of S3.
-
+        """Pull model/tokenizer from S3 to temporary directory when needed.
+        
         Args:
-            model: The model name or path.
-            tokenizer: The tokenizer name or path.
-
+            model: Model name or path
+            tokenizer: Tokenizer name or path
         """
-        if is_s3(model) or is_s3(tokenizer):
-            if is_s3(model):
-                s3_model = S3Model()
-                s3_model.pull_files(
-                    model, allow_pattern=["*.model", "*.py", "*.json"])
-                self.model_weights = self.model
-                self.model = s3_model.dir
+        if not (is_s3(model) or is_s3(tokenizer)):
+            return
 
-            if is_s3(tokenizer):
-                s3_tokenizer = S3Model()
-                s3_tokenizer.pull_files(
+        if is_s3(model):
+            s3_model = S3Model()
+            s3_model.pull_files(model,
+                                allow_pattern=["*.model", "*.py", "*.json"])
+            self.model_weights = model
+            self.model = s3_model.dir
+
+            # If tokenizer is same as model, download to same directory
+            if model == tokenizer:
+                s3_model.pull_files(
                     model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
-                self.tokenizer = s3_tokenizer.dir
+                self.tokenizer = s3_model.dir
+                return
+
+        # Only download tokenizer if needed and not already handled
+        if is_s3(tokenizer):
+            s3_tokenizer = S3Model()
+            s3_tokenizer.pull_files(
+                model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
+            self.tokenizer = s3_tokenizer.dir
 
     def _init_multimodal_config(self) -> Optional["MultiModalConfig"]:
         if self.registry.is_multimodal_model(self.architectures):
