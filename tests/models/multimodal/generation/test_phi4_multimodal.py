@@ -99,9 +99,7 @@ def run_test(
             for prompts, images, audios in inputs
         ]
 
-    hf_model_kwargs = {"attn_implementation": "sdpa"}
-    with hf_runner(model, dtype=dtype,
-                   model_kwargs=hf_model_kwargs) as hf_model:
+    with hf_runner(model, dtype=dtype) as hf_model:
         hf_model.model.load_adapter(
             vision_lora_path,
             adapter_name="vision",

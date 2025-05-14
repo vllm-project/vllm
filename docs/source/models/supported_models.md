@@ -1139,14 +1139,14 @@ Specified using `--task generate`.
   *
   * ✅︎
 - * `Phi4MultimodalForCausalLM`
-  * Phi-4-multimodal
+  * Phi-4-multimodal (HF Transformers)
   * T + I<sup>+</sup> / T + A<sup>+</sup> / I<sup>+</sup> + A<sup>+</sup>
   * `microsoft/Phi-4-multimodal-instruct` (after conversion PR: [refs/pr/70](https://huggingface.co/microsoft/Phi-4-multimodal-instruct/discussions/70)), etc.
   * ✅︎
   *
   * ✅︎
 - * `PixtralForConditionalGeneration`
-  * Pixtral
+  * Mistral3 (HF Transformers), Pixtral
   * T + I<sup>+</sup>
   * `mistralai/Mistral-Small-3.1-24B-Instruct-2503`, `mistral-community/pixtral-12b`, etc.
   *
