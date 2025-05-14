@@ -119,8 +119,9 @@ def server_with_prompt_embeds(common_server_args, request):
         common_server_args.append(request.param)
 
     # We use the common server args instead of the default server args because
-    # prompt embeds are not compatible with Lora or Prompt Adapter requests
+    # prompt embeds are not compatible with Prompt Adapter requests
     common_server_args.append("--enable-prompt-embeds")
+    common_server_args.append("--no-enable-chunked-prefill")
 
     # Prompt embeds are currently only supported on v0
     with RemoteOpenAIServer(MODEL_NAME,
