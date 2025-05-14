@@ -31,22 +31,30 @@ class TPUModelLoader(DefaultModelLoader):
             with target_device:
                 model = initialize_model(vllm_config=vllm_config)
 
-            weights_to_load = {name for name, _ in model.named_parameters()}
-            all_weights = self.get_all_weights(model_config, model)
-            loaded_weights = model.load_weights(all_weights)
-            self.counter_after_loading_weights = time.perf_counter()
-            logger.info(
-                "Loading weights took %.2f seconds",
-                self.counter_after_loading_weights -
-                self.counter_before_loading_weights)
-            # We only enable strict check for non-quantized models
-            # that have loaded weights tracking currently.
-            if model_config.quantization is None and loaded_weights is not None:
-                weights_not_loaded = weights_to_load - loaded_weights
-                if weights_not_loaded:
-                    raise ValueError(
-                        "Following weights were not initialized from "
-                        f"checkpoint: {weights_not_loaded}")
+            load_format = vllm_config.load_config.load_format
+            if load_format != "dummy":
+                weights_to_load = {
+                    name
+                    for name, _ in model.named_parameters()
+                }
+                all_weights = self.get_all_weights(model_config, model)
+                loaded_weights = model.load_weights(all_weights)
+                self.counter_after_loading_weights = time.perf_counter()
+                logger.info(
+                    "Loading weights took %.2f seconds",
+                    self.counter_after_loading_weights -
+                    self.counter_before_loading_weights)
+                # We only enable strict check for non-quantized models
+                # that have loaded weights tracking currently.
+                if model_config.quantization is None and \
+                    loaded_weights is not None:
+                    weights_not_loaded = weights_to_load - loaded_weights
+                    if weights_not_loaded:
+                        raise ValueError(
+                            "Following weights were not initialized from "
+                            f"checkpoint: {weights_not_loaded}")
+            else:
+                logger.info("Use dummy weight during weight loading.")
 
             process_weights_after_loading(model, model_config, target_device)
 
@@ -87,7 +95,8 @@ class TPUModelLoader(DefaultModelLoader):
         # Check buffers
         for name, buffer in model.named_buffers():
             assert buffer.device.type == device_type, \
-                f"Buffer {name} is on {buffer.device.type} instead of {device_type}"
+                f"Buffer {name} is on {buffer.device.type} instead of \
+                    {device_type}"
 
         for module in model.modules():
             if (mesh is not None) and (get_fqn(module) == 'QKVParallelLinear'):
