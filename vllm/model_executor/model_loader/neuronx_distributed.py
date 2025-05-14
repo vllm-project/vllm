@@ -99,7 +99,7 @@ class NeuronCausalLM(nn.Module):
                             attention_mask=None,
                             position_ids=positions,
                             seq_ids=sorted_input_block_ids,
-                            sampling_params=sampling_params),
+                            sampling_params=sampling_params,
                             prev_hidden=prev_hidden,
                             adapter_ids=adapter_ids)
         # on-device sampling
