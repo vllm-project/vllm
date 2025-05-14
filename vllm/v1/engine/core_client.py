@@ -4,6 +4,11 @@ import contextlib
 import queue
 import uuid
 import weakref
+import os
+import stat
+import pwd
+import grp
+from pathlib import Path
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Awaitable, Sequence
@@ -334,6 +339,97 @@ class BackgroundResources:
             raise EngineDeadError()
 
 
+def check_ipc_socket_permissions(input_address: str):
+    """Check permissions and status of a ZMQ IPC socket file."""
+    try:
+        # Extract the file path from the ZMQ address
+        if "://" in input_address:
+            input_filename = input_address.split("://")[1]
+        else:
+            input_filename = input_address
+        
+        path = Path(input_filename)
+        
+        # Check if the file exists
+        if not path.exists():
+            logger.warning(f"Socket file {input_filename} does not exist.")
+            
+            # Check if the parent directory exists and its permissions
+            parent = path.parent
+            if not parent.exists():
+                logger.error(f"Parent directory {parent} does not exist.")
+                return
+            
+            # Check parent directory permissions
+            parent_stat = parent.stat()
+            parent_mode = stat.filemode(parent_stat.st_mode)
+            parent_owner = pwd.getpwuid(parent_stat.st_uid).pw_name
+            parent_group = grp.getgrgid(parent_stat.st_gid).gr_name
+            
+            logger.info(f"Parent directory permissions: {parent_mode}")
+            logger.info(f"Parent directory owner: {parent_owner}")
+            logger.info(f"Parent directory group: {parent_group}")
+            
+            # Check if current process can write to parent directory
+            if os.access(parent, os.W_OK):
+                logger.info("Current process CAN write to parent directory.")
+            else:
+                logger.error("Current process CANNOT write to parent directory.")
+            
+            return
+        
+        # Get file stats
+        file_stat = path.stat()
+        
+        # Get file mode as a string (like 'srwxrwxrwx')
+        file_mode = stat.filemode(file_stat.st_mode)
+        
+        # Get owner and group names
+        try:
+            owner = pwd.getpwuid(file_stat.st_uid).pw_name
+        except KeyError:
+            owner = f"Unknown UID: {file_stat.st_uid}"
+            
+        try:
+            group = grp.getgrgid(file_stat.st_gid).gr_name
+        except KeyError:
+            group = f"Unknown GID: {file_stat.st_gid}"
+        
+        # Get current process info
+        current_uid = os.getuid()
+        current_user = pwd.getpwuid(current_uid).pw_name
+        current_gids = os.getgroups()
+        current_groups = [grp.getgrgid(gid).gr_name for gid in current_gids]
+        
+        # Check if it's actually a socket
+        is_socket = stat.S_ISSOCK(file_stat.st_mode)
+        
+        # Check permissions
+        can_read = os.access(path, os.R_OK)
+        can_write = os.access(path, os.W_OK)
+        
+        # Print all information
+        logger.info(f"Socket file: {input_filename}")
+        logger.info(f"Exists: Yes")
+        logger.info(f"Is socket: {'Yes' if is_socket else 'No - THIS IS A PROBLEM'}")
+        logger.info(f"File mode: {file_mode}")
+        logger.info(f"Owner: {owner} (UID: {file_stat.st_uid})")
+        logger.info(f"Group: {group} (GID: {file_stat.st_gid})")
+        logger.info(f"Size: {file_stat.st_size} bytes")
+        logger.info(f"Current user: {current_user} (UID: {current_uid})")
+        logger.info(f"Current user groups: {', '.join(current_groups)}")
+        logger.info(f"Current process can read: {'Yes' if can_read else 'No - THIS IS A PROBLEM'}")
+        logger.info(f"Current process can write: {'Yes' if can_write else 'No - THIS IS A PROBLEM'}")
+        
+        # Check for sticky socket file
+        if path.exists() and not is_socket:
+            logger.warning("File exists but is not a socket. It may be a stale socket file.")
+            logger.warning(f"Try removing it: rm {path}")
+    
+    except Exception as e:
+        logger.error(f"Error checking socket permissions: {str(e)}")
+
+
 class MPClient(EngineCoreClient):
     """
     MPClient: base client for multi-proc EngineCore.
@@ -394,6 +490,14 @@ class MPClient(EngineCoreClient):
 
             input_address, output_address = self._get_zmq_addresses(
                 parallel_config, spmd_mode)
+                
+            # Check IPC socket permissions
+            if "ipc://" in input_address:
+                logger.info(f"Checking IPC socket permissions for input address: {input_address}")
+                check_ipc_socket_permissions(input_address)
+            if "ipc://" in output_address:
+                logger.info(f"Checking IPC socket permissions for output address: {output_address}")
+                check_ipc_socket_permissions(output_address)
 
             # Create input and output sockets.
             self.input_socket = self.resources.input_socket = make_zmq_socket(
@@ -485,6 +589,7 @@ class MPClient(EngineCoreClient):
 
     def _wait_for_engine_startup(self, output_address: str,
                                  parallel_config: ParallelConfig):
+        assert False, "should not reach here"
         # Get a sync handle to the socket which can be sync or async.
         sync_input_socket = zmq.Socket.shadow(self.input_socket)
 
@@ -595,16 +700,6 @@ class MPClient(EngineCoreClient):
     def free_pending_messages(self):
         while self.pending_messages and self.pending_messages[-1][0].done:
             self.pending_messages.pop()
-
-
-def _process_utility_output(output: UtilityOutput,
-                            utility_results: dict[int, AnyFuture]):
-    """Set the result from a utility method in the waiting future"""
-    future = utility_results.pop(output.call_id)
-    if output.failure_message is not None:
-        future.set_exception(Exception(output.failure_message))
-    else:
-        future.set_result(output.result)
 
 
 class SyncMPClient(MPClient):
@@ -865,6 +960,7 @@ class AsyncMPClient(MPClient):
         msg = (engine.identity, ) + message
         if not objects or len(msg) <= 3:
             # No auxiliary buffers => no tensor backing buffers in request.
+            logger.info(f"input_socket send_multipart to [{engine.index}] {engine.identity} on {self.input_socket}")
             return self.input_socket.send_multipart(msg, copy=False)
 
         future: asyncio.Future[zmq.MessageTracker]
@@ -1024,7 +1120,7 @@ class DPAsyncMPClient(AsyncMPClient):
                 exclude_index=outputs.engine_index))
 
     def _start_wave_coros(self, exclude_index: int) -> list[Awaitable[None]]:
-        logger.debug("Sending start DP wave %d.", self.current_wave)
+        logger.info("Sending start DP wave %d.", self.current_wave)
         return [
             self._send_input(EngineCoreRequestType.START_DP_WAVE,
                              self.current_wave, engine)
@@ -1116,10 +1212,17 @@ class RayClient(DPAsyncMPClient):
 
             input_address, output_address = self._get_zmq_addresses(
                 parallel_config, spmd_mode)
+            
+            import os
+            os.environ["ZMQ_TRACE"] = "1"
 
             # Create input and output sockets.
             self.input_socket = self.resources.input_socket = make_zmq_socket(
                 self.ctx, input_address, zmq.ROUTER, bind=True)
+            logger.info(f"input_address: {input_address}")
+            logger.info(f"input_socket make_zmq_socket {self.input_socket}")
+            logger.info(f"Socket type: {self.input_socket.type}")
+            logger.info(f"Socket options: {self.input_socket.getsockopt(zmq.EVENTS)}")
 
             self.resources.output_socket = make_zmq_socket(
                 self.ctx, output_address, zmq.constants.PULL)
@@ -1176,6 +1279,7 @@ class RayClient(DPAsyncMPClient):
         """Returns (input_address, output_address)."""
         dp_size = parallel_config.data_parallel_size
         local_engine_count = parallel_config.data_parallel_size_local
+        logger.info(f"dp_size: {dp_size}, local_engine_count: {local_engine_count}, spmd_mode: {spmd_mode}")
 
         if local_engine_count == dp_size or spmd_mode:
             input_address = get_open_zmq_ipc_path()
@@ -1191,6 +1295,7 @@ class RayClient(DPAsyncMPClient):
 
     def _wait_for_engine_startup(self, output_address: str,
                                  parallel_config: ParallelConfig):
+        assert False, "should not reach here"
         # Get a sync handle to the socket which can be sync or async.
         sync_input_socket = zmq.Socket.shadow(self.input_socket)
 
