@@ -6,7 +6,6 @@ from pathlib import PosixPath
 from typing import Any, Callable, NamedTuple, Optional, Union
 
 import torch
-from PIL.Image import Image
 from pytest import MarkDecorator
 from transformers import AutoModelForCausalLM
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
@@ -15,7 +14,9 @@ from vllm.config import TaskOption
 from vllm.sequence import SampleLogprobs
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
-from .....conftest import IMAGE_ASSETS, HfRunner, ImageAsset, ImageTestAssets
+from .....conftest import (IMAGE_ASSETS, HfRunner, ImageAsset, ImageTestAssets,
+                           PromptAudioInput, PromptImageInput,
+                           PromptVideoInput)
 from ....utils import check_logprobs_close
 
 # meta image tag; will be replaced by the appropriate tag for the model
@@ -38,6 +39,34 @@ RunnerOutput = tuple[list[int], str, Optional[SampleLogprobs]]
 # yapf: enable
 
 
+class PromptWithMultiModalInput(NamedTuple):
+    """Holds the multimodal input for a single test case."""
+    prompts: list[str]
+    image_data: list[Optional[PromptImageInput]]
+    video_data: list[Optional[PromptVideoInput]]
+    audio_data: list[Optional[PromptAudioInput]]
+
+    @classmethod
+    def create(
+        cls,
+        prompts: list[str],
+        image_data: Optional[list[Optional[PromptImageInput]]] = None,
+        video_data: Optional[list[Optional[PromptVideoInput]]] = None,
+        audio_data: Optional[list[Optional[PromptAudioInput]]] = None,
+    ) -> "PromptWithMultiModalInput":
+        """
+        Constructs a multimodal input from a prompt and optional mm_data.
+        This method will pad unprovided inputs with None values to 
+        match the length of prompts for parameterization automatically.
+        """
+        return cls(
+            prompts,
+            image_data if image_data is not None else [None] * len(prompts),
+            video_data if video_data is not None else [None] * len(prompts),
+            audio_data if audio_data is not None else [None] * len(prompts),
+        )
+
+
 class VLMTestType(Enum):
     IMAGE = 1
     MULTI_IMAGE = 2
@@ -52,10 +81,8 @@ class SizeType(Enum):
 
 
 class CustomTestOptions(NamedTuple):
-    inputs: list[tuple[list[str], list[Union[list[Image], Image]]]]
+    inputs: list[PromptWithMultiModalInput]
     limit_mm_per_prompt: dict[str, int]
-    # kwarg to pass multimodal data in as to vllm/hf runner instances.
-    runner_mm_key: str = "images"
 
 
 class ImageSizeWrapper(NamedTuple):

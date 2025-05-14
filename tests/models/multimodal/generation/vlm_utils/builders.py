@@ -14,7 +14,8 @@ from vllm.multimodal.video import (rescale_video_size, resize_video,
 from .....conftest import ImageTestAssets, VideoTestAssets
 from .types import (SINGLE_IMAGE_BASE_PROMPTS, TEST_IMG_PLACEHOLDER,
                     TEST_VIDEO_PLACEHOLDER, VIDEO_BASE_PROMPT,
-                    ImageSizeWrapper, SizeType, VLMTestInfo)
+                    ImageSizeWrapper, PromptWithMultiModalInput, SizeType,
+                    VLMTestInfo)
 
 
 def replace_test_placeholder(prompt: str, img_idx_to_prompt: Callable[[int],
@@ -68,10 +69,11 @@ def get_model_prompts(base_prompts: Iterable[str],
 
 
 def build_single_image_inputs_from_test_info(
-        test_info: VLMTestInfo,
-        image_assets: ImageTestAssets,
-        size_wrapper: ImageSizeWrapper,
-        tmp_path: Optional[PosixPath] = None):
+    test_info: VLMTestInfo,
+    image_assets: ImageTestAssets,
+    size_wrapper: ImageSizeWrapper,
+    tmp_path: Optional[PosixPath] = None,
+) -> list[PromptWithMultiModalInput]:
     if test_info.prompt_formatter is None:
         raise ValueError(
             "Prompt formatter must be set to build single image inputs")
@@ -97,28 +99,32 @@ def build_single_image_inputs_from_test_info(
     return build_single_image_inputs(images, model_prompts, size_wrapper)
 
 
-def build_single_image_inputs(images, model_prompts,
-                              size_wrapper: ImageSizeWrapper):
+def build_single_image_inputs(
+        images, model_prompts,
+        size_wrapper: ImageSizeWrapper) -> list[PromptWithMultiModalInput]:
     # For every image / prompt pair, get a pair containing two lists of
     # length size_factors, where the first contains duplicates of the model
     # prompt [str], and the second contains copies of the image after being
     # scaled by one of the size factors.
     #
     # NOTE: rescaling preserves the image aspect ratio.
-    return [(
-        [prompt for _ in size_wrapper.data],
-        [
-            apply_image_size_scaling(image, size, size_wrapper.type)
-            for size in size_wrapper.data
-        ],
-    ) for image, prompt in zip(images, model_prompts)]
+    return [
+        PromptWithMultiModalInput.create(
+            prompts=[prompt for _ in size_wrapper.data],
+            image_data=[
+                apply_image_size_scaling(image, size, size_wrapper.type)
+                for size in size_wrapper.data
+            ],
+        ) for image, prompt in zip(images, model_prompts)
+    ]
 
 
 def build_multi_image_inputs_from_test_info(
-        test_info: VLMTestInfo,
-        image_assets: ImageTestAssets,
-        size_wrapper: ImageSizeWrapper,
-        tmp_path: Optional[PosixPath] = None):
+    test_info: VLMTestInfo,
+    image_assets: ImageTestAssets,
+    size_wrapper: ImageSizeWrapper,
+    tmp_path: Optional[PosixPath] = None,
+) -> list[PromptWithMultiModalInput]:
     if test_info.prompt_formatter is None:
         raise ValueError(
             "Prompt formatter must be set to build multi image inputs")
@@ -146,15 +152,18 @@ def build_multi_image_inputs_from_test_info(
     )
 
 
-def build_multi_image_inputs(image_lists, model_prompts,
-                             size_wrapper: ImageSizeWrapper):
-    return [(
-        [prompt for _ in size_wrapper.data],
-        [[
-            apply_image_size_scaling(image, size, size_wrapper.type)
-            for image in images
-        ] for size in size_wrapper.data],
-    ) for images, prompt in zip(image_lists, model_prompts)]
+def build_multi_image_inputs(
+        image_lists, model_prompts,
+        size_wrapper: ImageSizeWrapper) -> list[PromptWithMultiModalInput]:
+    return [
+        PromptWithMultiModalInput.create(
+            prompts=[prompt for _ in size_wrapper.data],
+            image_data=[[
+                apply_image_size_scaling(image, size, size_wrapper.type)
+                for image in images
+            ] for size in size_wrapper.data],
+        ) for images, prompt in zip(image_lists, model_prompts)
+    ]
 
 
 def build_embedding_inputs_from_test_info(
@@ -195,7 +204,7 @@ def build_video_inputs_from_test_info(
     video_assets: VideoTestAssets,
     size_wrapper: ImageSizeWrapper,
     num_frames: int,
-):
+) -> list[PromptWithMultiModalInput]:
     if test_info.prompt_formatter is None:
         raise ValueError("Prompt formatter must be set to build video inputs")
     model_prompts = get_model_prompts(
@@ -213,10 +222,14 @@ def build_video_inputs_from_test_info(
     video_scaler = (resize_video if size_wrapper.type == SizeType.FIXED_SIZE
                     else rescale_video_size)
 
-    return [(
-        [prompt for _ in size_wrapper.data],
-        [video_scaler(video, size) for size in size_wrapper.data],
-    ) for video, prompt in zip(sampled_vids, model_prompts)]
+    return [
+        PromptWithMultiModalInput.create(
+            prompts=[prompt for _ in size_wrapper.data],
+            video_data=[
+                video_scaler(video, size) for size in size_wrapper.data
+            ],
+        ) for video, prompt in zip(sampled_vids, model_prompts)
+    ]
 
 
 def apply_image_size_scaling(image, size: Union[float, tuple[int, int]],
