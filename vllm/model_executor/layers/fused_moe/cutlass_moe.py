@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """ CUTLASS based Fused MoE kernels."""
+import os
 from typing import Optional
 
 import torch
@@ -183,7 +184,8 @@ def cutlass_moe_fp8(
 
 FLOAT4_E2M1_MAX = scalar_types.float4_e2m1f.max()
 FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
-MAX_TOKENS_PER_EXPERT = 65536
+MAX_TOKENS_PER_EXPERT = int(
+    os.environ.get('VLLM_MODELOPT_MAX_TOKENS_PER_EXPERT', '65536'))
 
 
 def cutlass_moe_fp4(a: torch.Tensor, a1_gscale: torch.Tensor,
@@ -243,7 +245,8 @@ def cutlass_moe_fp4(a: torch.Tensor, a1_gscale: torch.Tensor,
             == m), ("topk must be provided for each row of a")
     assert (m <= MAX_TOKENS_PER_EXPERT), (
         f"m must be less than MAX_TOKENS_PER_EXPERT({MAX_TOKENS_PER_EXPERT})"
-        f" for cutlass_moe_fp4, observed m = {m}")
+        f" for cutlass_moe_fp4, observed m = {m}. Use"
+        f" VLLM_MODELOPT_MAX_TOKENS_PER_EXPERT to set this value.")
     out_dtype = a.dtype
     num_topk = topk_ids.shape[1]
 
