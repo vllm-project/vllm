@@ -19,7 +19,8 @@ from vllm.config import (CompilationLevel, VllmConfig,
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
-from vllm.distributed.parallel_state import get_pp_group, graph_capture
+from vllm.distributed.parallel_state import (
+    get_pp_group, graph_capture, prepare_communication_buffer_for_model)
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
@@ -288,7 +289,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                          dtype=torch.int32,
                                          device="cpu",
                                          pin_memory=self.pin_memory)
-        self.input_ids_np = self.input_ids_cpu.numpy()
         self.positions_cpu = torch.zeros(self.max_num_tokens,
                                          dtype=torch.int64,
                                          device="cpu",
@@ -1459,6 +1459,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.model_load_time = time_after_load - time_before_load
         logger.info("Model loading took %.4f GiB and %.6f seconds",
                     self.model_memory_usage / GiB_bytes, self.model_load_time)
+        prepare_communication_buffer_for_model(self.model)
 
     def _get_prompt_logprobs_dict(
         self,

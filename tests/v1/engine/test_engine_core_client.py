@@ -18,9 +18,10 @@ from vllm.platforms import current_platform
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
-from vllm.v1.engine.core_client import (AsyncMPClient, CoreEngine,
-                                        EngineCoreClient, SyncMPClient)
+from vllm.v1.engine.core_client import (AsyncMPClient, EngineCoreClient,
+                                        SyncMPClient)
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.utils import CoreEngineProcManager
 
 from ...distributed.conftest import MockSubscriber
 from ...utils import create_new_process_for_each_test
@@ -348,13 +349,13 @@ def test_startup_failure(monkeypatch: pytest.MonkeyPatch):
 
         # Monkey-patch to extract core process pid while it's starting.
         core_proc_pid = [None]
-        ce_ctor = CoreEngine.__init__
+        cepm_ctor = CoreEngineProcManager.__init__
 
-        def patched_ce_ctor(self, *args, **kwargs):
-            ce_ctor(self, *args, **kwargs)
-            core_proc_pid[0] = self.proc_handle.proc.pid
+        def patched_cepm_ctor(self: CoreEngineProcManager, *args, **kwargs):
+            cepm_ctor(self, *args, **kwargs)
+            core_proc_pid[0] = self.processes[0].pid
 
-        m.setattr(CoreEngine, "__init__", patched_ce_ctor)
+        m.setattr(CoreEngineProcManager, "__init__", patched_cepm_ctor)
 
         t = time.time()
         engine_args = EngineArgs(model=MODEL_NAME)
