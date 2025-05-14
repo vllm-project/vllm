@@ -104,7 +104,8 @@ def transpile_myst_to_md(old_path: Path) -> None:
         if ((match := re.match(r"^# (.*)$", line))
                 and "```" not in "".join(lines[:i])):
             lines[0] = f"---\ntitle: {match.group(1)}\n---\n{lines[0]}"
-            line = ""
+            if i > 0:
+                line = ""
 
         # Delete MyST options that don't have a MkDocs equivalent
         deletes = {":selected:", ":sync-group:"}
