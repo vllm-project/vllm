@@ -18,16 +18,23 @@ Check the ❌ or 🟠 with links to see tracking issue for unsupported feature/h
 
 :::{raw} html
 <style>
-  /* Make smaller to try to improve readability  */
-  td {
-    font-size: 0.8rem;
-    text-align: center;
-  }
+td:not(:first-child) {
+  text-align: center !important;
+}
+td {
+  padding: 0.5rem !important;
+  white-space: nowrap;
+}
 
-  th {
-    text-align: center;
-    font-size: 0.8rem;
-  }
+th {
+  padding: 0.5rem !important;
+  min-width: 0 !important;
+}
+
+th:not(:first-child) {
+  writing-mode: vertical-lr;
+  transform: rotate(180deg)
+}
 </style>
 :::
 
