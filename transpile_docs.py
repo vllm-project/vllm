@@ -144,7 +144,15 @@ def transpile_myst_to_md(old_path: Path) -> None:
             lines[end] = ""
             block["handled"] = True
 
-        # Handle figures
+        # Handle images
+        if block["type"] == "image":
+            src = block["args"]
+            content, attrs = parse_fence_block(lines[start + 1:end], indent)
+            if attrs:
+                logger.warning("Image attributes not handled: %s", attrs)
+            lines[start] = f"{indent}![]({src})\n"
+            lines[start + 1:end] = ["" for _ in lines[start + 1:end]]
+            lines[end] = ""
         if block["type"] == "figure":
             src = block["args"]
             caption, attrs = parse_fence_block(lines[start + 1:end], indent)
