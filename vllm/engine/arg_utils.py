@@ -37,8 +37,8 @@ from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import (FlexibleArgumentParser, GiB_bytes, is_in_doc_build,
-                        is_in_ray_actor)
+from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
+                        GiB_bytes, is_in_doc_build, is_in_ray_actor)
 
 # yapf: enable
 
@@ -283,6 +283,9 @@ class EngineArgs:
     pipeline_parallel_size: int = ParallelConfig.pipeline_parallel_size
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     data_parallel_size: int = ParallelConfig.data_parallel_size
+    data_parallel_size_local: Optional[int] = None
+    data_parallel_address: Optional[str] = None
+    data_parallel_rpc_port: Optional[int] = None
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     max_parallel_loading_workers: Optional[
         int] = ParallelConfig.max_parallel_loading_workers
@@ -596,6 +599,21 @@ class EngineArgs:
                                     **parallel_kwargs["tensor_parallel_size"])
         parallel_group.add_argument("--data-parallel-size", "-dp",
                                     **parallel_kwargs["data_parallel_size"])
+        parallel_group.add_argument('--data-parallel-size-local',
+                                    '-dpl',
+                                    type=int,
+                                    help='Number of data parallel replicas '
+                                    'to run on this node.')
+        parallel_group.add_argument('--data-parallel-address',
+                                    '-dpa',
+                                    type=str,
+                                    help='Address of data parallel cluster '
+                                    'head-node.')
+        parallel_group.add_argument('--data-parallel-rpc-port',
+                                    '-dpp',
+                                    type=int,
+                                    help='Port for data parallel RPC '
+                                    'communication.')
         parallel_group.add_argument(
             "--enable-expert-parallel",
             **parallel_kwargs["enable_expert_parallel"])
@@ -983,6 +1001,17 @@ class EngineArgs:
 
         assert self.enable_chunked_prefill is not None
 
+        if envs.VLLM_ATTENTION_BACKEND in [STR_DUAL_CHUNK_FLASH_ATTN_VAL]:
+            assert self.enforce_eager, (
+                "Cuda graph is not supported with DualChunkFlashAttention. "
+                "To run the model in eager mode, set 'enforce_eager=True' "
+                "or use '--enforce-eager' in the CLI.")
+            assert current_platform.is_cuda(), (
+                "DualChunkFlashAttention is only supported on CUDA platform.")
+            assert not use_v1, (
+                "DualChunkFlashAttention is not supported on V1 engine. "
+                "To run the model in V0 engine, try set 'VLLM_USE_V1=0'")
+
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
@@ -1008,10 +1037,30 @@ class EngineArgs:
             # but we should not do this here.
             placement_group = ray.util.get_current_placement_group()
 
+        # Local DP size defaults to global DP size if not set.
+        data_parallel_size_local = self.data_parallel_size if (
+            self.data_parallel_size_local
+            is None) else self.data_parallel_size_local
+
+        # DP address, used in multi-node case for torch distributed group
+        # and ZMQ sockets.
+        data_parallel_address = self.data_parallel_address if (
+            self.data_parallel_address
+            is not None) else ParallelConfig.data_parallel_master_ip
+
+        # This port is only used when there are remote data parallel engines,
+        # otherwise the local IPC transport is used.
+        data_parallel_rpc_port = self.data_parallel_rpc_port if (
+            self.data_parallel_rpc_port
+            is not None) else ParallelConfig.data_parallel_rpc_port
+
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
             data_parallel_size=self.data_parallel_size,
+            data_parallel_size_local=data_parallel_size_local,
+            data_parallel_master_ip=data_parallel_address,
+            data_parallel_rpc_port=data_parallel_rpc_port,
             enable_expert_parallel=self.enable_expert_parallel,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,

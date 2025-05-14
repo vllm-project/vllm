@@ -185,6 +185,10 @@ async def build_async_engine_client_from_engine_args(
                 usage_context=usage_context,
                 disable_log_requests=engine_args.disable_log_requests,
                 disable_log_stats=engine_args.disable_log_stats)
+
+            # Don't keep the dummy data in memory
+            await async_llm.reset_mm_cache()
+
             yield async_llm
         finally:
             if async_llm:
@@ -967,10 +971,10 @@ async def init_app_state(
                 chat_template=resolved_chat_template)
         else:
             hf_chat_template = resolve_hf_chat_template(
-                vllm_config.model_config,
-                tokenizer,
+                tokenizer=tokenizer,
                 chat_template=None,
                 tools=None,
+                model_config=vllm_config.model_config,
             )
 
             if hf_chat_template != resolved_chat_template:

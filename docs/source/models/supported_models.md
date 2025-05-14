@@ -168,6 +168,66 @@ If vLLM successfully returns text (for generative models) or hidden states (for 
 Otherwise, please refer to [Adding a New Model](#new-model) for instructions on how to implement your model in vLLM.
 Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project/vllm/issues/new/choose) to request vLLM support.
 
+#### Download a model
+
+If you prefer, you can use the Hugging Face CLI to [download a model](https://huggingface.co/docs/huggingface_hub/guides/cli#huggingface-cli-download) or specific files from a model repository:
+
+```console
+# Download a model
+huggingface-cli download HuggingFaceH4/zephyr-7b-beta
+
+# Specify a custom cache directory
+huggingface-cli download HuggingFaceH4/zephyr-7b-beta --cache-dir ./path/to/cache
+
+# Download a specific file from a model repo
+huggingface-cli download HuggingFaceH4/zephyr-7b-beta eval_results.json
+```
+
+#### List the downloaded models
+
+Use the Hugging Face CLI to [manage models](https://huggingface.co/docs/huggingface_hub/guides/manage-cache#scan-your-cache) stored in local cache:
+
+```console
+# List cached models
+huggingface-cli scan-cache
+
+# Show detailed (verbose) output
+huggingface-cli scan-cache -v
+
+# Specify a custom cache directory
+huggingface-cli scan-cache --dir ~/.cache/huggingface/hub
+```
+
+#### Delete a cached model
+
+Use the Hugging Face CLI to interactively [delete downloaded model](https://huggingface.co/docs/huggingface_hub/guides/manage-cache#clean-your-cache) from the cache:
+
+```console
+# The `delete-cache` command requires extra dependencies to work with the TUI.
+# Please run `pip install huggingface_hub[cli]` to install them.
+
+# Launch the interactive TUI to select models to delete
+$ huggingface-cli delete-cache
+? Select revisions to delete: 1 revisions selected counting for 438.9M.
+  ○ None of the following (if selected, nothing will be deleted).
+Model BAAI/bge-base-en-v1.5 (438.9M, used 1 week ago)
+❯ ◉ a5beb1e3: main # modified 1 week ago
+
+Model BAAI/bge-large-en-v1.5 (1.3G, used 1 week ago)
+  ○ d4aa6901: main # modified 1 week ago
+
+Model BAAI/bge-reranker-base (1.1G, used 4 weeks ago)
+  ○ 2cfc18c9: main # modified 4 weeks ago
+
+Press <space> to select, <enter> to validate and <ctrl+c> to quit without modification.
+
+# Need to confirm after selected
+? Select revisions to delete: 1 revision(s) selected.
+? 1 revisions selected counting for 438.9M. Confirm deletion ? Yes
+Start deletion.
+Done. Deleted 1 repo(s) and 0 revision(s) for a total of 438.9M.
+```
+
 #### Using a proxy
 
 Here are some tips for loading/downloading models from Hugging Face using a proxy:
@@ -479,7 +539,7 @@ Specified using `--task generate`.
   * ✅︎
 - * `OLMo2ForCausalLM`
   * OLMo2
-  * `allenai/OLMo2-7B-1124`, etc.
+  * `allenai/OLMo-2-0425-1B`, etc.
   *
   * ✅︎
 - * `OLMoEForCausalLM`
@@ -592,6 +652,11 @@ Specified using `--task generate`.
   * `Zyphra/Zamba2-7B-instruct`, `Zyphra/Zamba2-2.7B-instruct`, `Zyphra/Zamba2-1.2B-instruct`, etc.
   *
   *
+- * `MiMoForCausalLM`
+  * MiMo
+  * `XiaomiMiMo/MiMo-7B-RL`, etc.
+  *
+  *
 :::
 
 :::{note}
@@ -636,12 +701,22 @@ Specified using `--task embed`.
   * ✅︎
   * ✅︎
 - * `GteModel`
-  * GteModel
+  * Arctic-Embed-2.0-M
   * `Snowflake/snowflake-arctic-embed-m-v2.0`.
   *
   * ︎
+- * `GteNewModel`
+  * mGTE-TRM (see note)
+  * `Alibaba-NLP/gte-multilingual-base`, etc.
+  * ︎
+  * ︎
+- * `ModernBertModel`
+  * ModernBERT-based
+  * `Alibaba-NLP/gte-modernbert-base`, etc.
+  * ︎
+  * ︎
 - * `NomicBertModel`
-  * NomicBertModel
+  * Nomic BERT
   * `nomic-ai/nomic-embed-text-v1`, `nomic-ai/nomic-embed-text-v2-moe`, `Snowflake/snowflake-arctic-embed-m-long`, etc.
   * ︎
   * ︎
@@ -682,6 +757,10 @@ See [relevant issue on HF Transformers](https://github.com/huggingface/transform
 
 :::{note}
 `jinaai/jina-embeddings-v3` supports multiple tasks through lora, while vllm temporarily only supports text-matching tasks by merging lora weights.
+:::
+
+:::{note}
+The second-generation GTE model (mGTE-TRM) is named `NewModel`. The name `NewModel` is too generic, you should set `--hf-overrides '{"architectures": ["GteNewModel"]}'` to specify the use of the `GteNewModel` architecture.
 :::
 
 If your model is not in the above list, we will try to automatically convert the model using
@@ -1045,10 +1124,10 @@ Specified using `--task generate`.
   *
   * ✅︎
   * ✅︎
-- * `Ovis2ForConditionalGeneration`<sup>^</sup>
-  * Ovis2
+- * `Ovis`
+  * Ovis2, Ovis1.6
   * T + I<sup>+</sup>
-  * `AIDC-AI/Ovis2-1B`, `AIDC-AI/Ovis2-2B`, etc.
+  * `AIDC-AI/Ovis2-1B`, `AIDC-AI/Ovis1.6-Llama3.2-3B`, etc.
   *
   *
   * ✅︎
