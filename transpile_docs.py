@@ -153,6 +153,7 @@ def transpile_myst_to_md(old_path: Path) -> None:
             lines[start] = f"{indent}![]({src})\n"
             lines[start + 1:end] = ["" for _ in lines[start + 1:end]]
             lines[end] = ""
+            block["handled"] = True
         if block["type"] == "figure":
             src = block["args"]
             caption, attrs = parse_fence_block(lines[start + 1:end], indent)
