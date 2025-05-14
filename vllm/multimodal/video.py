@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import base64
+from abc import abstractmethod
 from functools import partial
 from io import BytesIO
 from pathlib import Path
@@ -50,7 +51,8 @@ def sample_frames_from_video(frames: npt.NDArray,
 class VideoLoader:
 
     @classmethod
-    def load_bytes(self, data: bytes, num_frames: int = -1) -> npt.NDArray:
+    @abstractmethod
+    def load_bytes(cls, data: bytes, num_frames: int = -1) -> npt.NDArray:
         raise NotImplementedError
 
 
