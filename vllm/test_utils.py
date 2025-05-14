@@ -110,7 +110,7 @@ MODELS_ON_S3 = [
     "royokong/e5-v",
     "sentence-transformers/all-roberta-large-v1",
     "sentence-transformers/stsb-roberta-base-v2",
-    "shanearora/OLMo-7B-1124-hf",
+    "allenai/OLMo-2-0425-1B",
     "shuyuej/Llama-3.2-1B-Instruct-GPTQ",
     "ssmits/Qwen2-7B-Instruct-embed-base",
     "stabilityai/stablelm-3b-4e1t",
