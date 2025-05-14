@@ -191,7 +191,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self.input_ids_cpu = torch.zeros(self.max_num_tokens,
                                          dtype=torch.int32,
                                          device="cpu")
-        self.input_ids_np = self.input_ids_cpu.numpy()
 
         self.positions_cpu = torch.zeros(self.max_num_tokens,
                                          dtype=torch.int32,
