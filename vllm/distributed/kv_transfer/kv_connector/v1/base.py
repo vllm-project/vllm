@@ -212,13 +212,6 @@ class KVConnectorBase_V1(ABC):
         """
         return True
 
-    def set_kv_transfer_params(self, request: "Request"):
-        """Parse raw KV Transfer params."""
-        assert request.kv_transfer_params is None
-        kv_transfer_params = self._KVTransferParams.from_raw_dict(
-            request.raw_kv_transfer_params)
-        request.kv_transfer_params = kv_transfer_params
-
     @abstractmethod
     def get_num_new_matched_tokens(
         self,
