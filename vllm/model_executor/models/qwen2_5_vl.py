@@ -69,8 +69,6 @@ from .utils import (AutoWeightsLoader, WeightsMapper, cast_overflow_tensors,
                     merge_multimodal_embeddings)
 from .vision import get_vit_attn_backend
 
-#import nvtx
-
 logger = init_logger(__name__)
 
 # === Vision Inputs === #
@@ -651,7 +649,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
         x: torch.Tensor,
         grid_thw: list[list[int]],
     ) -> torch.Tensor:
-        #with nvtx.annotate("rope_const", color="olive"):
         # patchify
         seq_len, _ = x.size()
         rotary_pos_emb = []
