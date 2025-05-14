@@ -287,56 +287,57 @@ endmacro()
 #   OUT_CUDA_ARCHS="8.0;8.6;9.0;9.0a"
 #
 # Example With PTX:
-#   SRC_CUDA_ARCHS="8.0;9.0a"
-#   TGT_CUDA_ARCHS="8.0+PTX"
+#   SRC_CUDA_ARCHS="8.0+PTX"
+#   TGT_CUDA_ARCHS="9.0"
 #   cuda_archs_loose_intersection(OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_ARCHS)
 #   OUT_CUDA_ARCHS="8.0+PTX"
 #
 function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_ARCHS)
-  list(REMOVE_DUPLICATES SRC_CUDA_ARCHS)
-  set(TGT_CUDA_ARCHS_ ${TGT_CUDA_ARCHS})
-  
+  set(_SRC_CUDA_ARCHS "${SRC_CUDA_ARCHS}")
+  set(_TGT_CUDA_ARCHS ${TGT_CUDA_ARCHS})
+
   # handle +PTX suffix: separate base arch for matching, record PTX requests
   set(_PTX_ARCHS)
-  foreach(_arch ${TGT_CUDA_ARCHS_})
+  foreach(_arch ${_SRC_CUDA_ARCHS})
     if(_arch MATCHES "\\+PTX$")
       string(REPLACE "+PTX" "" _base "${_arch}")
       list(APPEND _PTX_ARCHS "${_base}")
-      list(REMOVE_ITEM TGT_CUDA_ARCHS_ "${_arch}")
-      list(APPEND TGT_CUDA_ARCHS_ "${_base}")
+      list(REMOVE_ITEM _SRC_CUDA_ARCHS "${_arch}")
+      list(APPEND _SRC_CUDA_ARCHS "${_base}")
     endif()
   endforeach()
   list(REMOVE_DUPLICATES _PTX_ARCHS)
+  list(REMOVE_DUPLICATES _SRC_CUDA_ARCHS)
 
   # if x.0a is in SRC_CUDA_ARCHS and x.0 is in CUDA_ARCHS then we should
   # remove x.0a from SRC_CUDA_ARCHS and add x.0a to _CUDA_ARCHS
   set(_CUDA_ARCHS)
-  if ("9.0a" IN_LIST SRC_CUDA_ARCHS)
-    list(REMOVE_ITEM SRC_CUDA_ARCHS "9.0a")
-    if ("9.0" IN_LIST TGT_CUDA_ARCHS_)
-      list(REMOVE_ITEM TGT_CUDA_ARCHS_ "9.0")
+  if ("9.0a" IN_LIST _SRC_CUDA_ARCHS)
+    list(REMOVE_ITEM _SRC_CUDA_ARCHS "9.0a")
+    if ("9.0" IN_LIST TGT_CUDA_ARCHS)
+      list(REMOVE_ITEM _TGT_CUDA_ARCHS "9.0")
       set(_CUDA_ARCHS "9.0a")
     endif()
   endif()
 
-  if ("10.0a" IN_LIST SRC_CUDA_ARCHS)
-    list(REMOVE_ITEM SRC_CUDA_ARCHS "10.0a")
+  if ("10.0a" IN_LIST _SRC_CUDA_ARCHS)
+    list(REMOVE_ITEM _SRC_CUDA_ARCHS "10.0a")
     if ("10.0" IN_LIST TGT_CUDA_ARCHS)
-      list(REMOVE_ITEM TGT_CUDA_ARCHS_ "10.0")
+      list(REMOVE_ITEM _TGT_CUDA_ARCHS "10.0")
       set(_CUDA_ARCHS "10.0a")
     endif()
   endif()
 
-  list(SORT SRC_CUDA_ARCHS COMPARE NATURAL ORDER ASCENDING)
+  list(SORT _SRC_CUDA_ARCHS COMPARE NATURAL ORDER ASCENDING)
 
   # for each ARCH in TGT_CUDA_ARCHS find the highest arch in SRC_CUDA_ARCHS that
   # is less or equal to ARCH (but has the same major version since SASS binary
   # compatibility is only forward compatible within the same major version).
-  foreach(_ARCH ${TGT_CUDA_ARCHS_})
+  foreach(_ARCH ${_TGT_CUDA_ARCHS})
     set(_TMP_ARCH)
     # Extract the major version of the target arch
     string(REGEX REPLACE "^([0-9]+)\\..*$" "\\1" TGT_ARCH_MAJOR "${_ARCH}")
-    foreach(_SRC_ARCH ${SRC_CUDA_ARCHS})
+    foreach(_SRC_ARCH ${_SRC_CUDA_ARCHS})
       # Extract the major version of the source arch
       string(REGEX REPLACE "^([0-9]+)\\..*$" "\\1" SRC_ARCH_MAJOR "${_SRC_ARCH}")
       # Check version-less-or-equal, and allow PTX arches to match across majors
