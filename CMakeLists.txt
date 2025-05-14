@@ -675,7 +675,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     CUDA_ARCHS "${CUDA_ARCHS}")
 
   list(APPEND VLLM_MOE_EXT_SRC "${VLLM_MOE_WNA16_SRC}")
-  cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0;8.6;8.7;8.9;9.0;10.0;10.1;12.0" "${CUDA_ARCHS}")
+  cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0+PTX" "${CUDA_ARCHS}")
   if (MARLIN_MOE_ARCHS)
 
     #
