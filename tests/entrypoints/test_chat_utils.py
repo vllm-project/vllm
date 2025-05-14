@@ -845,10 +845,10 @@ def test_resolve_hf_chat_template(sample_json_schema, model, use_tools):
 
     # Test detecting the tokenizer's chat_template
     chat_template = resolve_hf_chat_template(
-        model_config,
         tokenizer,
         chat_template=None,
         tools=tools,
+        model_config=model_config,
     )
     assert isinstance(chat_template, str)
 
@@ -890,10 +890,10 @@ def test_resolve_content_format_hf_defined(model, expected_format):
 
     # Test detecting the tokenizer's chat_template
     chat_template = resolve_hf_chat_template(
-        model_config,
         tokenizer,
         chat_template=None,
         tools=None,
+        model_config=model_config,
     )
     assert isinstance(chat_template, str)
 
@@ -949,10 +949,10 @@ def test_resolve_content_format_fallbacks(model, expected_format):
 
     # Test detecting the tokenizer's chat_template
     chat_template = resolve_hf_chat_template(
-        model_config,
         tokenizer,
         chat_template=None,
         tools=None,
+        model_config=model_config,
     )
     assert isinstance(chat_template, str)
 
