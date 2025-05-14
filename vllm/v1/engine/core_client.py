@@ -442,9 +442,10 @@ class MPClient(EngineCoreClient):
             logger.info("Core engine process %d ready.", eng_id)
             identities.discard(eng_id)
             # Setup KV cache config with initialization state from
-            # engine core process.
-            self.vllm_config.cache_config.num_gpu_blocks = message_dict[
-                'num_gpu_blocks']
+            # engine core process. Sum values from all engines in DP case.
+            num_gpu_blocks = self.vllm_config.cache_config.num_gpu_blocks or 0
+            num_gpu_blocks += message_dict['num_gpu_blocks']
+            self.vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
 
     def _init_core_engines(
         self,
