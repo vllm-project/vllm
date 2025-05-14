@@ -172,6 +172,8 @@ class JitCache(KernelInterface):
         cache_launch_grid=False,
         assume_const=None,
     ):
+        self.arg_names = arg_names
+        self.fn = fn
         if not envs.VLLM_TRITON_ENABLE_JITCACHE:
             # we are deactivated -> do nothing and set self.run
             #  to JitFunction.run
@@ -189,8 +191,6 @@ class JitCache(KernelInterface):
         logger.info_once("JITCache for Triton kernel '%s' is activated.",
                          fn_name)
 
-        self.arg_names = arg_names
-        self.fn = fn
         self.base_fn = fn
         while not inspect.isfunction(self.base_fn):
             self.base_fn = self.base_fn.fn
