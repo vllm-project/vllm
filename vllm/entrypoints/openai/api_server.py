@@ -1734,12 +1734,9 @@ def create_server_socket(addr: tuple[str, int]) -> socket.socket:
     return sock
 
 
-def create_server_unix_socket(addr: str) -> socket.socket:
-    family = socket.AF_UNIX
-
-    sock = socket.socket(family=family, type=socket.SOCK_STREAM)
-    sock.bind(addr)
-
+def create_server_unix_socket(path: str) -> socket.socket:
+    sock = socket.socket(family=socket.AF_UNIX, type=socket.SOCK_STREAM)
+    sock.bind(path)
     return sock
 
 
