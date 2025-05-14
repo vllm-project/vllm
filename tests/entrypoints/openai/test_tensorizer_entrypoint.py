@@ -102,6 +102,7 @@ async def test_single_completion(client: openai.AsyncOpenAI, model_name: str):
 
 def test_confirm_deserialize_and_serve(model_uri, tmp_dir,
                                        tensorize_model_and_lora):
+    _cleanup()
     tc = TensorizerConfig(tensorizer_uri=model_uri, lora_dir=tmp_dir)
     llm = VllmRunner(MODEL_NAME,
                      load_format="tensorizer",

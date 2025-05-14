@@ -258,7 +258,10 @@ if __name__ == '__main__':
 
     model_name = model_ref.split("/")[1]
 
-    keyfile = args.keyfile if args.keyfile else None
+    if args.command == "serialize" or args.command == "deserialize":
+        keyfile = args.keyfile
+    else:
+        keyfile = None
 
     if args.model_loader_extra_config:
         config = json.loads(args.model_loader_extra_config)
