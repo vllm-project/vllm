@@ -209,8 +209,6 @@ class GritLM(LlamaForCausalLM, SupportsV0Only):
                 if hasattr(hf_config, attr):
                     delattr(hf_config, attr)
 
-            vllm_config.model_config.disable_sliding_window = True
-
         super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
 
         self._pooler = GritLMPooler(vllm_config.model_config)
