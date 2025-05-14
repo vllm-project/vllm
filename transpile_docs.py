@@ -90,12 +90,13 @@ def transpile_myst_to_md(old_path: Path) -> None:
     """
     new_path = NEW_DIR / old_path.relative_to(OLD_DIR)
     new_path.parent.mkdir(parents=True, exist_ok=True)
-    logger.info(f"Transpiling to {new_path}")
+    logger.info(f"Transpiling from {old_path} to {new_path}")
 
     with open(old_path) as f:
         lines = f.readlines()
 
     for i, line in enumerate(lines):
+        # Replace MyST links with regular markdown links
         line = replace_links(line)
 
         # Move page title to front matter
