@@ -52,8 +52,9 @@ class StructuredOutputManager:
         ).get_lora_tokenizer(None)
         reasoning_backend = vllm_config.decoding_config.reasoning_backend
         if reasoning_backend:
-            self.reasoner = ReasoningParserManager.get_reasoning_parser(
-                reasoning_backend)(tokenizer=self.tokenizer)  # noqa: E501
+            reasoner_cls = ReasoningParserManager.get_reasoning_parser(
+                reasoning_backend)
+            self.reasoner = reasoner_cls(tokenizer=self.tokenizer)
 
     def grammar_init(self, request: Request) -> None:
         if request.structured_output_request is None:
