@@ -811,6 +811,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         )
 
         if self.use_marlin:
+            assert activation == "silu", (
+                f"{activation} not supported for Marlin MoE.")
+            assert not apply_router_weight_on_input, (
+                "Apply router weight on input not supported for Marlin MoE.")
             return torch.ops.vllm.fused_marlin_moe(
                 x,
                 layer.w13_weight,
