@@ -34,7 +34,7 @@ class CPUModelRunner(GPUModelRunner):
         )
         self.seq_start_loc_np = self.seq_start_loc_cpu.numpy()
 
-    def _postprocess_tenosrs(self) -> None:
+    def _postprocess_tensors(self) -> None:
         # Note: replace device tensors with cpu tensors
         def replace_tensor(obj: Any, cpu_attr_name: str,
                            device_attr_name) -> None:
