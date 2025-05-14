@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # imports for guided decoding tests
-import base64
-import io
 import json
 import re
 import shutil
@@ -13,11 +11,10 @@ import jsonschema
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
-import torch
 # downloading lora to test lora requests
 from huggingface_hub import snapshot_download
 from openai import BadRequestError
-from transformers import AutoConfig, AutoTokenizer
+from transformers import AutoTokenizer
 
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
@@ -34,7 +31,6 @@ PA_NAME = "swapnilbp/llama_tweet_ptune"
 PA_NUM_VIRTUAL_TOKENS = 8
 
 GUIDED_DECODING_BACKENDS = ["outlines", "lm-format-enforcer", "xgrammar"]
-CONFIG = AutoConfig.from_pretrained(MODEL_NAME)
 
 
 @pytest.fixture(scope="module")
@@ -64,7 +60,8 @@ def zephyr_pa_files():
 
 
 @pytest.fixture(scope="module")
-def common_server_args() -> list[str]:
+def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files,
+                        zephyr_pa_files):
     return [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -74,14 +71,6 @@ def common_server_args() -> list[str]:
         "--max-num-seqs",
         "128",
         "--enforce-eager",
-    ]
-
-
-@pytest.fixture(scope="module")
-def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files,
-                        zephyr_pa_files, common_server_args: list[str]):
-    return [
-        *common_server_args,
         # lora config
         "--enable-lora",
         "--lora-modules",
@@ -112,42 +101,10 @@ def server(default_server_args, request):
         yield remote_server
 
 
-@pytest.fixture(scope="module",
-                params=["", "--disable-frontend-multiprocessing"])
-def server_with_prompt_embeds(common_server_args, request):
-    if request.param:
-        common_server_args.append(request.param)
-
-    # We use the common server args instead of the default server args because
-    # prompt embeds are not compatible with Prompt Adapter requests
-    common_server_args.append("--enable-prompt-embeds")
-    common_server_args.append("--no-enable-chunked-prefill")
-
-    # Prompt embeds are currently only supported on v0
-    with RemoteOpenAIServer(MODEL_NAME,
-                            common_server_args,
-                            env_dict={"VLLM_USE_V1": "0"}) as remote_server:
-        yield remote_server
-
-
 @pytest_asyncio.fixture
 async def client(server):
     async with server.get_async_client() as async_client:
         yield async_client
-
-
-@pytest_asyncio.fixture
-async def client_with_prompt_embeds(server_with_prompt_embeds):
-    async with server_with_prompt_embeds.get_async_client() as async_client:
-        yield async_client
-
-
-def create_dummy_embeds(num_tokens: int = 5) -> str:
-    """Create dummy embeddings and return them as base64 encoded string."""
-    dummy_embeds = torch.randn(num_tokens, CONFIG.hidden_size)
-    buffer = io.BytesIO()
-    torch.save(dummy_embeds, buffer)
-    return base64.b64encode(buffer.getvalue()).decode('utf-8')
 
 
 @pytest.mark.asyncio
@@ -822,145 +779,3 @@ async def test_guided_decoding_type_error(client: openai.AsyncOpenAI,
             prompt="Give an example string that fits this regex",
             extra_body=dict(guided_regex=sample_regex,
                             guided_json=sample_json_schema))
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_completions_with_prompt_embeds(
-        client_with_prompt_embeds: openai.AsyncOpenAI, model_name: str):
-    # Test case: Single prompt embeds input
-    encoded_embeds = create_dummy_embeds()
-    completion = await client_with_prompt_embeds.completions.create(
-        model=model_name,
-        prompt="",  # Add empty prompt as required parameter
-        max_tokens=5,
-        temperature=0.0,
-        extra_body={"prompt_embeds": encoded_embeds})
-    assert len(completion.choices[0].text) >= 1
-    assert completion.choices[0].prompt_logprobs is None
-
-    # Test case: batch completion with prompt_embeds
-    encoded_embeds2 = create_dummy_embeds()
-    completion = await client_with_prompt_embeds.completions.create(
-        model=model_name,
-        prompt="",  # Add empty prompt as required parameter
-        max_tokens=5,
-        temperature=0.0,
-        extra_body={"prompt_embeds": [encoded_embeds, encoded_embeds2]})
-    assert len(completion.choices) == 2
-    assert len(completion.choices[0].text) >= 1
-    assert len(completion.choices[1].text) >= 1
-
-    # Test case: streaming with prompt_embeds
-    encoded_embeds = create_dummy_embeds()
-    single_completion = await client_with_prompt_embeds.completions.create(
-        model=model_name,
-        prompt="",  # Add empty prompt as required parameter
-        max_tokens=5,
-        temperature=0.0,
-        extra_body={"prompt_embeds": encoded_embeds})
-    single_output = single_completion.choices[0].text
-
-    stream = await client_with_prompt_embeds.completions.create(
-        model=model_name,
-        prompt="",  # Add empty prompt as required parameter
-        max_tokens=5,
-        temperature=0.0,
-        stream=True,
-        extra_body={"prompt_embeds": encoded_embeds})
-    chunks = []
-    finish_reason_count = 0
-    async for chunk in stream:
-        chunks.append(chunk.choices[0].text)
-        if chunk.choices[0].finish_reason is not None:
-            finish_reason_count += 1
-    assert finish_reason_count == 1
-    assert chunk.choices[0].finish_reason == "length"
-    assert chunk.choices[0].text
-    assert "".join(chunks) == single_output
-
-    # Test case: batch streaming with prompt_embeds
-    encoded_embeds2 = create_dummy_embeds()
-    stream = await client_with_prompt_embeds.completions.create(
-        model=model_name,
-        prompt="",  # Add empty prompt as required parameter
-        max_tokens=5,
-        temperature=0.0,
-        stream=True,
-        extra_body={"prompt_embeds": [encoded_embeds, encoded_embeds2]})
-    chunks_stream_embeds: list[list[str]] = [[], []]
-    finish_reason_count = 0
-    async for chunk in stream:
-        chunks_stream_embeds[chunk.choices[0].index].append(
-            chunk.choices[0].text)
-        if chunk.choices[0].finish_reason is not None:
-            finish_reason_count += 1
-    assert finish_reason_count == 2
-    assert chunk.choices[0].finish_reason == "length"
-    assert chunk.choices[0].text
-    assert len(chunks_stream_embeds[0]) > 0
-    assert len(chunks_stream_embeds[1]) > 0
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_completions_errors_with_prompt_embeds(
-        client_with_prompt_embeds: openai.AsyncOpenAI, model_name: str):
-    # Test error case: invalid prompt_embeds
-    with pytest.raises(BadRequestError):
-        await client_with_prompt_embeds.completions.create(
-            prompt="",
-            model=model_name,
-            max_tokens=5,
-            temperature=0.0,
-            extra_body={"prompt_embeds": "invalid_base64"})
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("logprobs_arg", [1, 0])
-@pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_completions_with_logprobs_and_prompt_embeds(
-        client_with_prompt_embeds: openai.AsyncOpenAI, logprobs_arg: int,
-        model_name: str):
-    # Test case: Logprobs using prompt_embeds
-    encoded_embeds = create_dummy_embeds()
-    completion = await client_with_prompt_embeds.completions.create(
-        model=model_name,
-        prompt="",  # Add empty prompt as required parameter
-        max_tokens=5,
-        temperature=0.0,
-        echo=False,
-        logprobs=logprobs_arg,
-        extra_body={"prompt_embeds": encoded_embeds})
-
-    logprobs = completion.choices[0].logprobs
-    assert logprobs is not None
-    assert len(logprobs.text_offset) == 5
-    assert len(logprobs.token_logprobs) == 5
-    assert len(logprobs.top_logprobs) == 5
-    for top_logprobs in logprobs.top_logprobs[1:]:
-        assert max(logprobs_arg, 1) <= len(top_logprobs) <= logprobs_arg + 1
-    assert len(logprobs.tokens) == 5
-
-    # Test case: Log probs with batch completion and prompt_embeds
-    encoded_embeds2 = create_dummy_embeds()
-    completion = await client_with_prompt_embeds.completions.create(
-        model=model_name,
-        prompt="",  # Add empty prompt as required parameter
-        max_tokens=5,
-        temperature=0.0,
-        echo=False,
-        logprobs=logprobs_arg,
-        extra_body={"prompt_embeds": [encoded_embeds, encoded_embeds2]})
-
-    assert len(completion.choices) == 2
-    for choice in completion.choices:
-        logprobs = choice.logprobs
-        assert logprobs is not None
-        assert len(logprobs.text_offset) == 5
-        assert len(logprobs.token_logprobs) == 5
-        assert len(logprobs.top_logprobs) == 5
-        for top_logprobs in logprobs.top_logprobs[1:]:
-            assert max(logprobs_arg,
-                       1) <= len(top_logprobs) <= logprobs_arg + 1
-        assert len(logprobs.tokens) == 5
