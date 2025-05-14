@@ -123,6 +123,13 @@ def transpile_myst_to_md(old_path: Path) -> None:
 
         block["type"] = maybe_update_admonition(block["type"])
 
+        # Handle contents
+        if block["type"] == "contents":
+            lines[start] = f"{indent}[TOC]\n"
+            lines[start + 1:end] = ["" for _ in lines[start + 1:end]]
+            lines[end] = ""
+            block["handled"] = True
+
         # Handle admonitions
         if block["type"] in ADMONITIONS:
             args = f" \"{block['args']}\"" if block["args"] else ""
