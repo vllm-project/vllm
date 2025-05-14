@@ -857,22 +857,22 @@ class Scheduler(SchedulerInterface):
             self._free_request(request)
 
     def _free_request(self, request: Request) -> Optional[dict[str, Any]]:
-        """Free the request and return the KV transfer parameters."""
-        assert request.is_finished()
-        request_id = request.request_id
 
-        # Free request.
+        assert request.is_finished()
+
         delay_free_blocks, kv_xfer_params = self._connector_finished(request)
         self.encoder_cache_manager.free(request)
-        self._cached_reqs_data.pop(request_id, None)
-        self.finished_req_ids.add(request_id)
-        del self.requests[request_id]
+        self._cached_reqs_data.pop(request.request_id, None)
+        self.finished_req_ids.add(request.request_id)
 
         # Free blocks or add to pending_kv_free_req_ids.
         if not delay_free_blocks:
-            self._free_blocks(request_id)
+            self._free_blocks(request.request_id)
         else:
-            self.pending_kv_free_req_ids.add(request_id)
+            self.pending_kv_free_req_ids.add(request.request_id)
+
+        # Free the request.
+        del self.requests[request.request_id]
 
         return kv_xfer_params
 
