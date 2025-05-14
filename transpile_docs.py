@@ -11,8 +11,8 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 
-ROOT_DIR = Path(__file__).parent.parent
-OLD_DIR = Path("source")
+ROOT_DIR = Path(__file__).parent
+OLD_DIR = Path("docs/source")
 NEW_DIR = Path("docs")
 ADMONITIONS = {
     "note", "abstract", "info", "tip", "success", "question", "warning",

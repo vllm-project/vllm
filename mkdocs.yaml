@@ -1,6 +1,8 @@
 site_name: vLLM
 site_url: https://docs.vllm.ai
 repo_url: https://github.com/vllm-project/vllm
+# The old docs we're transpiling from
+exclude_docs: source
 theme:
   name: material
   logo: assets/logos/vllm-logo-only-light.ico
