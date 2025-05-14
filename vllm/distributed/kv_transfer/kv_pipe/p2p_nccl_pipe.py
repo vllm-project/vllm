@@ -74,7 +74,8 @@ class P2pNcclPipe:
         self.send_stream = torch.cuda.Stream()
         self.recv_stream = torch.cuda.Stream()
 
-        self.pool = TensorMemoryPool(max_block_size=100 * 1024**3)  # 100GB
+        mem_pool_size = self.config.get_from_extra_config("mem_pool_size", 128)
+        self.pool = TensorMemoryPool(max_block_size=mem_pool_size * 1024**3)  # GB
 
         # The sending type includes tree mutually exclusive options:
         # PUT, GET, PUT_ASYNC.
