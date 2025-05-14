@@ -531,7 +531,7 @@ def tensorize_lora_adapter(lora_path: str,
     elif tensor_path.endswith(".bin"):
         tensors = torch.load(tensor_path)
     else:
-        raise ValueError("Unsupported file: %s" % (tensor_path))
+        raise ValueError("Unsupported file: %s", tensor_path)
 
     # Current LoRA loading logic in
     # vllm.lora.models.LoRAModel.from_local_checkpoint assumes that
