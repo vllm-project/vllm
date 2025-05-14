@@ -10,6 +10,7 @@ import pytest
 from scipy.spatial.distance import cosine
 
 from vllm import LLM, SamplingParams
+from vllm.attention.selector import _cached_get_attn_backend
 from vllm.config import ModelConfig
 from vllm.utils import STR_BACKEND_ENV_VAR
 
@@ -172,6 +173,8 @@ async def test_gritlm_api_server_embedding():
 
 
 def test_gritlm_offline_generate(monkeypatch: pytest.MonkeyPatch, vllm_runner):
+    _cached_get_attn_backend.cache_clear()
+
     # GritLM embedding implementation is only supported by XFormers backend.
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "0")
@@ -194,6 +197,8 @@ def test_gritlm_offline_generate(monkeypatch: pytest.MonkeyPatch, vllm_runner):
 
 @pytest.mark.asyncio
 async def test_gritlm_api_server_generate():
+    _cached_get_attn_backend.cache_clear()
+
     input = "<|user|>\nWhat is the capital of France?\n<|assistant|>\n"
 
     # GritLM embedding implementation is only supported by XFormers backend.
