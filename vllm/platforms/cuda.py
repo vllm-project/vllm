@@ -310,6 +310,10 @@ class CudaPlatformBase(Platform):
     def use_custom_allreduce(cls) -> bool:
         return True
 
+    @classmethod
+    def supports_spec_decoding(cls) -> bool:
+        return True
+
 
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,

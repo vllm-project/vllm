@@ -84,7 +84,7 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
 
         # Run model sample_len times.
         model_outputs: List[SamplerOutput] = []
-        if current_platform.is_cuda_alike() and isinstance(
+        if current_platform.supports_spec_decoding() and isinstance(
                 self.model_runner, TP1DraftModelRunner
         ) and self.model_runner.supports_gpu_multi_step(expanded_request):
             # Here we run the draft_model_runner with multi-step prepare
