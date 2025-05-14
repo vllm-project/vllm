@@ -193,7 +193,7 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
     batch_size = context.batch_size
     prompt_len = context.prompt_len
 
-    scheduler_config = llm.llm_engine.scheduler_config
+    scheduler_config = llm.llm_engine.vllm_config.scheduler_config
     max_model_len = llm.llm_engine.model_config.max_model_len
     max_num_batched_tokens = scheduler_config.max_num_batched_tokens
     max_num_seqs = scheduler_config.max_num_seqs
