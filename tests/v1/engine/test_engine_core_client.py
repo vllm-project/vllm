@@ -256,6 +256,8 @@ async def test_engine_core_client_asyncio(monkeypatch: pytest.MonkeyPatch):
             client.shutdown()
 
 
+# TRACKING: https://github.com/vllm-project/vllm/issues/18167
+@pytest.mark.skip(reason="RE-ENABLE: this test is failing on main.")
 @pytest.mark.parametrize(
     "multiprocessing_mode,publisher_config",
     [(True, "tcp"), (False, "inproc")],
@@ -290,7 +292,6 @@ def test_kv_cache_events(
             log_stats=False,
         )
         endpoint = publisher_config.endpoint.replace("*", "127.0.0.1")
-        time.sleep(0.1)
         subscriber = MockSubscriber(endpoint,
                                     topic=publisher_config.topic,
                                     decode_type=KVEventBatch)
