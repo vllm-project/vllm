@@ -32,12 +32,10 @@ from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionMetadata, FlashAttentionMetadataBuilder)
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
-from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
-                                        KVCacheConfig, KVCacheSpec,
-                                        SlidingWindowSpec)
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
+                                        KVCacheSpec, SlidingWindowSpec)
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.pool.metadata import PoolingMetadata
-from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_pooling_input_batch import (CachedRequestState,
                                                     InputBatch)
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
@@ -114,7 +112,8 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
         self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
         self.head_size = model_config.get_head_size()
         self.hidden_size = model_config.get_hidden_size()
-        self.attention_chunk_size = model_config.attention_chunk_size
+        assert model_config.attention_chunk_size is None
+        self.attention_chunk_size = None
 
         self.attn_backend = get_attn_backend(
             self.head_size,
@@ -157,13 +156,6 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
         )
         self.max_num_encoder_input_tokens = encoder_compute_budget
         self.encoder_cache_size = encoder_cache_size
-
-        # Lazy initializations
-        # self.model: nn.Module  # Set after load_model
-        # Initialize in initialize_kv_cache
-        self.kv_caches: list[torch.Tensor] = []
-        # self.kv_cache_config: KVCacheConfig
-        # self.attn_metadata_builder: type[AttentionMetadataBuilder]
 
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: dict[str, dict[int, torch.Tensor]] = {}
@@ -425,8 +417,7 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
             # Update the persistent batch.
             self.input_batch.num_computed_tokens_cpu[req_index] = (
                 num_computed_tokens)
-            self.input_batch.block_table.append_row(req_data.new_block_ids,
-                                                    req_index)
+
             # Add new_token_ids to token_ids_cpu.
             start_token_index = num_computed_tokens
             end_token_index = num_computed_tokens + len(req_data.new_token_ids)
@@ -476,10 +467,6 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
-
-        # OPTIMIZATION: Start copying the block table first.
-        # This way, we can overlap the copy with the following CPU operations.
-        self.input_batch.block_table.commit(num_reqs)
 
         # Get the number of scheduled tokens for each request.
         req_ids = self.input_batch.req_ids
@@ -537,22 +524,6 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
             self.get_token_type_ids()[:total_num_scheduled_tokens]\
                 .copy_(token_type_ids, non_blocking=True)
 
-        # Calculate the slot mapping.
-        # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
-        # where K is the max_num_blocks_per_req and the block size is 2.
-        # NOTE(woosuk): We can't simply use `token_indices // block_size` here
-        # because M (max_model_len) is not necessarily divisible by block_size.
-        block_table_indices = (req_indices * self.max_num_blocks_per_req +
-                               positions_np // self.block_size)
-        block_table_cpu = self.input_batch.block_table.get_cpu_tensor()
-        block_numbers = block_table_cpu.flatten()[block_table_indices].numpy()
-        block_offsets = positions_np % self.block_size
-        np.add(block_numbers * self.block_size,
-               block_offsets,
-               out=self.input_batch.block_table.
-               slot_mapping_np[:total_num_scheduled_tokens])
-
         # Prepare the attention metadata.
         self.query_start_loc_np[0] = 0
         self.query_start_loc_np[1:num_reqs + 1] = cu_num_tokens
@@ -593,29 +564,23 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
         attn_metadata: dict[str, FlashAttentionMetadata] = {}
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
-        # NOTE(Chen): there is exactly one KV cache group that contains all
-        # attetnion layers in the model for now, so the current logic for
-        # getting attn_metadata is not related to kv_cache_group information.
-        # Will extend this part to support multiple KV cache groups later.
-        for kv_cache_group_id, kv_cache_group_spec in enumerate(
-                self.kv_cache_config.kv_cache_groups):
 
-            # Prepare for cascade attention if enabled & beneficial.
-            common_prefix_len = 0
-            if self.cascade_attn_enabled:
-                common_prefix_len = self._compute_cascade_attn_prefix_len(
-                    num_scheduled_tokens,
-                    scheduler_output.num_common_prefix_blocks,
-                )
+        # Prepare for cascade attention if enabled & beneficial.
+        common_prefix_len = 0
+        if self.cascade_attn_enabled:
+            common_prefix_len = self._compute_cascade_attn_prefix_len(
+                num_scheduled_tokens,
+                scheduler_output.num_common_prefix_blocks,
+            )
 
-            attn_metadata_i = self.attn_metadata_builder.build(
-                num_reqs=num_reqs,
-                num_actual_tokens=total_num_scheduled_tokens,
-                max_query_len=max_num_scheduled_tokens,
-                common_prefix_len=common_prefix_len,
-                common_attn_metadata=common_attn_metadata)
-            for layer_name in kv_cache_group_spec.layer_names:
-                attn_metadata[layer_name] = attn_metadata_i
+        attn_metadata_i = self.attn_metadata_builder.build(
+            num_reqs=num_reqs,
+            num_actual_tokens=total_num_scheduled_tokens,
+            max_query_len=max_num_scheduled_tokens,
+            common_prefix_len=common_prefix_len,
+            common_attn_metadata=common_attn_metadata)
+        for layer_name in self.kv_cache_group_spec.layer_names:
+            attn_metadata[layer_name] = attn_metadata_i
 
         # NOTE(woosuk): Due to chunked prefills, the batch may contain
         # partial requests. While we should not sample any token
@@ -1250,53 +1215,15 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
             kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
-        if len(kv_cache_config.kv_cache_groups) > 1:
+        if len(kv_cache_config.kv_cache_groups) != 1:
             raise NotImplementedError(
                 "Hybrid models with more than one KV cache type are not "
                 "supported yet.")
-        self.kv_cache_config = kv_cache_config
+        self.kv_cache_group_spec = kv_cache_config.kv_cache_groups[0]
 
-        kv_caches: dict[str, torch.Tensor] = {}
-
-        for kv_cache_group in kv_cache_config.kv_cache_groups:
-            kv_cache_spec = kv_cache_group.kv_cache_spec
-            for layer_name in kv_cache_group.layer_names:
-                tensor_config = kv_cache_config.tensors[layer_name]
-                assert tensor_config.size % kv_cache_spec.page_size_bytes == 0
-                num_blocks = tensor_config.size // kv_cache_spec.page_size_bytes
-                # `num_blocks` is the number of blocks the model runner can use.
-                # `kv_cache_config.num_blocks` is the number of blocks that
-                # KVCacheManager may allocate.
-                # Since different GPUs may have different number of layers and
-                # different memory capacities, `num_blocks` can be different on
-                # different GPUs, and `kv_cache_config.num_blocks` is set to
-                # the min of all `num_blocks`. Verify it here.
-                assert num_blocks >= kv_cache_config.num_blocks
-                if isinstance(kv_cache_spec, AttentionSpec):
-                    kv_cache_shape = self.attn_backend.get_kv_cache_shape(
-                        num_blocks, kv_cache_spec.block_size,
-                        kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
-                    dtype = kv_cache_spec.dtype
-                    kv_caches[layer_name] = torch.zeros(kv_cache_shape,
-                                                        dtype=dtype,
-                                                        device=self.device)
-                else:
-                    # TODO: add new branches when introducing more types of
-                    # KV cache specs.
-                    raise ValueError("Unknown KV cache spec type.")
-
-        bind_kv_cache(
-            kv_caches,
-            self.vllm_config.compilation_config.static_forward_context,
-            self.kv_caches)
-
-        self.attn_metadata_builder = cast(
-            type[FlashAttentionMetadataBuilder],
-            self.attn_backend.get_builder_cls())(
-                weakref.proxy(self),
-                cast(AttentionSpec,
-                     kv_cache_config.kv_cache_groups[0].kv_cache_spec),
-                self.input_batch.block_table)
+        self.attn_metadata_builder = cast(type[FlashAttentionMetadataBuilder],
+                                          self.attn_backend.get_builder_cls())(
+                                              weakref.proxy(self), None, None)
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
@@ -1306,6 +1233,12 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
             KVCacheSpec: A dictionary mapping layer names to their KV cache
             format. Layers that do not need KV cache are not included.
         """
+
+        # The KV cache spec has to be returned even though we're not
+        # actually using a KV cache here. Unless we create a specialized
+        # scheduler for pooling, the default scheduler is tightly coupled
+        # with the kv_cache_manager. But at least this will make the
+        # scheduler schedule based on memory usage.
 
         layers = get_layers_from_vllm_config(self.vllm_config, Attention)
         block_size = self.vllm_config.cache_config.block_size
@@ -1331,10 +1264,8 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
                         head_size=attn_module.head_size,
                         dtype=self.kv_cache_dtype,
                         use_mla=use_mla)
-            elif attn_module.attn_type == AttentionType.ENCODER:
-                # encoder attention does not need KV cache.
-                continue
-            elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
+            elif attn_module.attn_type in (AttentionType.ENCODER,
+                                           AttentionType.ENCODER_DECODER):
                 raise NotImplementedError
             else:
                 raise ValueError(
