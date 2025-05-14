@@ -178,12 +178,17 @@ stages:
           pytest -v tests/lora/test_multilora_hpu.py::test_llama_multilora_1x
       # - name: test_long_context
       #   flavor: g2
-      #   command: PT_HPU_LAZY_MODE=1 VLLM_SKIP_WARMUP=true pytest -v tests/lora/test_long_context_hpu.py::test_quality
+      #   command: >-
+      #     PT_HPU_LAZY_MODE=1 VLLM_SKIP_WARMUP=true 
+      #     pytest -v tests/lora/test_long_context_hpu.py::test_quality
   - name: tests_multimodal
     steps:
       - name: multimodal_small_g3_tp1
         flavor: g3
-        command: cd .jenkins/vision && PT_HPU_LAZY_MODE=1 bash run-tests.sh -c configs/models-small.txt -t 1
+        command: >-
+          cd .jenkins/vision && 
+          PT_HPU_LAZY_MODE=1 
+          bash run-tests.sh -c configs/models-small.txt -t 1
       - name: multimodal_small_g3_tp2
         flavor: g3.s
         command: >-
@@ -228,9 +233,12 @@ stages:
         pip install -e tests/vllm_test_utils &&
         export VLLM_SKIP_WARMUP=true && PT_HPU_LAZY_MODE=1 
         pytest -v tests/entrypoints/llm/test_lazy_outlines.py -s -vvv --log-cli-level=INFO 
-    #- name: test_guided_generate
-    #  flavor: g2
-    #  command: export VLLM_SKIP_WARMUP=true && pip install -e tests/vllm_test_utils && PT_HPU_LAZY_MODE=1 pytest -v tests/entrypoints/llm/test_guided_generate.py -s -vvv --log-cli-level=INFO
+    # - name: test_guided_generate
+    #   flavor: g2
+    #   command: >-
+    #     pip install -e tests/vllm_test_utils &&
+    #     export VLLM_SKIP_WARMUP=true &&  PT_HPU_LAZY_MODE=1 &&
+    #     pytest -v tests/entrypoints/llm/test_guided_generate.py -s -vvv --log-cli-level=INFO
   - name: test_v1_basic_uts
     steps:
     - name: test_v1_core_engine_worker_g2

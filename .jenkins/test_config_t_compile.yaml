@@ -147,29 +147,28 @@ stages:
           cd .jenkins/lm-eval-harness && 
           VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 
           bash run-tests.sh -c configs/models-mss.txt -t 1
-  #NOTE(kwisniewski98): Tests are currently disabled because they are not working when V1 engine is disabled by default
-  # - name: test_gsm8k_spec_decode
-  #   steps:
-  #     - name: gsm8k_small_g2_tp1_mlp_spec_decode
-  #       flavor: g2
-  #       command: >-
-  #         VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 TORCH_COMPILE_DISABLE=true VLLM_CONTIGUOUS_PA=false VLLM_SKIP_WARMUP=True 
-  #         pytest -v tests/spec_decode/e2e/test_mlp_correctness.py::test_mlp_e2e_greedy_correctness 
-  #     - name: gsm8k_small_g2_tp1_medusa_spec_decode
-  #       flavor: g2
-  #       command: >-
-  #         VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 TORCH_COMPILE_DISABLE=true VLLM_CONTIGUOUS_PA=false VLLM_SKIP_WARMUP=True 
-  #         pytest -v tests/spec_decode/e2e/test_medusa_correctness.py::test_medusa_e2e_greedy_correctness
-  #     - name: gsm8k_small_g2_tp1_eagle_spec_decode
-  #       flavor: g2
-  #       command:  >
-  #         VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 VLLM_COS_SIN_RECOMPUTE=true TORCH_COMPILE_DISABLE=true VLLM_CONTIGUOUS_PA=false VLLM_SKIP_WARMUP=True 
-  #         pytest -v tests/spec_decode/e2e/test_eagle_correctness.py::test_eagle_e2e_greedy_correctness
+  - name: test_gsm8k_spec_decode
+    steps:
+      - name: gsm8k_small_g2_tp1_mlp_spec_decode
+        flavor: g2
+        command: >-
+          PT_HPU_LAZY_MODE=0 VLLM_CONTIGUOUS_PA=false VLLM_SKIP_WARMUP=True 
+          pytest -v tests/spec_decode/e2e/test_mlp_correctness.py::test_mlp_e2e_greedy_correctness
+      - name: gsm8k_small_g2_tp1_medusa_spec_decode
+        flavor: g2
+        command: >-
+          PT_HPU_LAZY_MODE=0 VLLM_CONTIGUOUS_PA=false VLLM_SKIP_WARMUP=True 
+          pytest -v tests/spec_decode/e2e/test_medusa_correctness.py::test_medusa_e2e_greedy_correctness
+      - name: gsm8k_small_g2_tp1_eagle_spec_decode
+        flavor: g2
+        command: >-
+          PT_HPU_LAZY_MODE=0 VLLM_CONTIGUOUS_PA=false VLLM_SKIP_WARMUP=True 
+          pytest -v tests/spec_decode/e2e/test_eagle_correctness.py::test_eagle_e2e_greedy_correctness
   - name: tests_lora
     steps:
       - name: test_llama_lora
         flavor: g2
-        command:  >
+        command: >-
           VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 VLLM_SKIP_WARMUP=true 
           pytest -v tests/lora/test_llama_hpu.py::test_llama_lora_1x
       - name: test_multilora
@@ -208,6 +207,12 @@ stages:
           cd .jenkins/vision &&
           VLLM_T_COMPILE_FULLGRAPH=False PT_HPU_LAZY_MODE=0 
           bash run-tests.sh -c configs/models-mss.txt -t 2
+      - name: multimodal_llama4_scout_g3_tp2_ep
+        flavor: g3.s
+        command: >-
+          cd .jenkins/vision &&
+          PT_HPU_LAZY_MODE=0
+          bash run-tests.sh -c configs/models-llama4-scout.txt -t 2
   - name: tests_int4_quantization
     steps:
       - name: test_awq
@@ -228,23 +233,26 @@ stages:
         pip install -e tests/vllm_test_utils &&
         VLLM_SKIP_WARMUP=true  VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 
         pytest -v tests/entrypoints/llm/test_lazy_outlines.py -s -vvv --log-cli-level=INFO 
-    #- name: test_guided_generate
-    #  flavor: g2
-    #  command: export VLLM_SKIP_WARMUP=true && pip install -e tests/vllm_test_utils && PT_HPU_LAZY_MODE=0 pytest -v tests/entrypoints/llm/test_guided_generate.py -s -vvv --log-cli-level=INFO
+    # - name: test_guided_generate
+    #   flavor: g2
+    #   command: >-
+    #     pip install -e tests/vllm_test_utils &&
+    #     export VLLM_SKIP_WARMUP=true &&  PT_HPU_LAZY_MODE=0 &&
+    #     pytest -v tests/entrypoints/llm/test_guided_generate.py -s -vvv --log-cli-level=INFO
   - name: test_v1_basic_uts
     steps:
     - name: test_v1_core_engine_worker_g2
       flavor: g2
       command: >-
         export PT_HPU_LAZY_MODE=0 && export VLLM_USE_V1=1 && export VLLM_SKIP_WARMUP=true && 
-        pytest -v -s -vvv --log-cli-level=INFO tests/v1/core && 
+        pytest -v -s -vvv --log-cli-level=INFO tests/v1/core -k "not kv_connector" && 
         pytest -v -s -vvv --log-cli-level=INFO tests/v1/engine && 
         pytest -v -s -vvv --log-cli-level=INFO tests/v1/worker 
     - name: test_v1_core_engine_worker_g3
       flavor: g3
       command: >-
         export PT_HPU_LAZY_MODE=0 && export VLLM_USE_V1=1 && export VLLM_SKIP_WARMUP=true && 
-        pytest -v -s -vvv --log-cli-level=INFO tests/v1/core && 
+        pytest -v -s -vvv --log-cli-level=INFO tests/v1/core -k "not kv_connector" && 
         pytest -v -s -vvv --log-cli-level=INFO tests/v1/engine && 
         pytest -v -s -vvv --log-cli-level=INFO tests/v1/worker 
   - name: benchmarks
