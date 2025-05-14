@@ -99,7 +99,7 @@ def subtuple(obj: object,
             'object': collections.namedtuple(typename, ' '.join(fields)),
             'fields': fields
         }
-    return _TYPE_CACHE[typename]['object'](**values)  # type: ignore        
+    return _TYPE_CACHE[typename]['object'](**values)  # type: ignore
 
 
 def round_up(value: int, k: int):
