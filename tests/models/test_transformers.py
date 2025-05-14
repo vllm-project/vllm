@@ -32,7 +32,7 @@ def check_implementation(
         name_1="vllm",
     )
 
-@pytest.mark.skipif(current_platform.is_rocm()
+@pytest.mark.skipif(current_platform.is_rocm())
     reason="Llama-3.2-1B-Instruct, Ilama-3.2-1B produce memory access fault.")
 @pytest.mark.parametrize(
     "model,model_impl",
