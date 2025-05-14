@@ -43,15 +43,29 @@ class Qwen3ReasoningParser(ReasoningParser):
                 "Qwen3 reasoning parser could not locate think start/end "
                 "tokens in the tokenizer!")
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        return self.think_end_token_id in input_ids
+    def is_reasoning_end(self,
+                         input_ids: list[int],
+                         previous_ids: Optional[list[int]] = None) -> bool:
+        # Check if <think>...</think> tokens are
+        # present in the input or previous IDs.
+        think_start_in_previous = previous_ids and \
+            self.think_start_token_id in previous_ids
+        think_start_in_input = self.think_start_token_id in input_ids
+        think_end_in_input = self.think_end_token_id in input_ids
+
+        if think_start_in_previous or think_start_in_input:
+            # If <think> is found, check for </think>.
+            return think_end_in_input
+        else:
+            # If <think> is not found, reasoning is disabled.
+            return True
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """
         Extract the content after the end tokens
         """
-        if self.think_end_token_id not in input_ids[:-1]:
-            return []
+        if self.think_end_token_id not in input_ids:
+            return input_ids
         else:
             return input_ids[input_ids.index(self.think_end_token_id) + 1:]
 
