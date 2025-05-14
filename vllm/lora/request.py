@@ -7,12 +7,6 @@ import msgspec
 
 from vllm.adapter_commons.request import AdapterRequest
 
-try:
-    from vllm.model_executor.model_loader.tensorizer_loader import (
-        TensorizerConfig)
-except ImportError:
-    TensorizerConfig = None
-
 
 class LoRARequest(
         msgspec.Struct,
@@ -37,8 +31,7 @@ class LoRARequest(
     lora_local_path: Optional[str] = msgspec.field(default=None)
     long_lora_max_len: Optional[int] = None
     base_model_name: Optional[str] = msgspec.field(default=None)
-    tensorizer_config: Optional[
-        TensorizerConfig] = None  # type: ignore # noqa: F821
+    tensorizer_config_dict: Optional[dict] = None
 
     def __post_init__(self):
         if self.lora_local_path:
