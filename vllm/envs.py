@@ -118,6 +118,7 @@ if TYPE_CHECKING:
     VLLM_ALL2ALL_BACKEND: str = "naive"
     VLLM_MODELOPT_MAX_TOKENS_PER_EXPERT: int = 65536
 
+
 def get_default_cache_root():
     return os.getenv(
         "XDG_CACHE_HOME",
@@ -769,11 +770,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # all2all backend for vllm's expert parallel communication
     "VLLM_ALL2ALL_BACKEND":
     lambda: os.getenv("VLLM_ALL2ALL_BACKEND", "naive"),
-    
+
     # Control the maximum number of tokens per expert supported by the
     # NVFP4 MoE CUTLASS Kernel. This value is used to create a buffer for
     # the blockscale tensor of activations NVFP4 Quantization.
-    # This is used to prevent the kernel from running out of memory. 
+    # This is used to prevent the kernel from running out of memory.
     "VLLM_MODELOPT_MAX_TOKENS_PER_EXPERT":
     lambda: int(os.getenv("VLLM_MODELOPT_MAX_TOKENS_PER_EXPERT", "163840")),
 }
