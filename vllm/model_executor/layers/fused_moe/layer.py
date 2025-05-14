@@ -92,7 +92,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             from .rocm_aiter_fused_moe import rocm_aiter_fused_experts
             self.rocm_aiter_fused_experts = rocm_aiter_fused_experts
         else:
-            self.rocm_aiter_fused_experts = None
+            self.rocm_aiter_fused_experts = None  # type: ignore
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
