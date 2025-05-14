@@ -254,8 +254,8 @@ class AsyncLLM(EngineClient):
         # Add the EngineCoreRequest to EngineCore (separate process).
         await self.engine_core.add_request_async(request)
 
-        if self.log_requests:
-            logger.info("Added request %s.", request.request_id)
+        #if self.log_requests:
+        logger.info("Added request %s.", request.request_id)
 
     # TODO: we should support multiple prompts in one call, as you
     # can do with LLM.generate. So that for multi-prompt completion
