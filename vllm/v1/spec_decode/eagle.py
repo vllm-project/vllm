@@ -309,7 +309,7 @@ class EagleProposer:
             assert "model.embed_tokens.weight" not in loaded_weights, \
             "For PP = 1, Eagle draft should share embed with target model"
             logger.info(
-                "Loading EAGLE embedding weights from the target model.")
+                "The EAGLE head shares the same vocab embedding with the target model.")
             self.model.model.embed_tokens = target_model.model.embed_tokens
         else:
             assert "model.embed_tokens.weight" in loaded_weights, \
