@@ -70,7 +70,7 @@ For more information on the available arguments for serializing, run
 
 Or for deserializing:
 
-`python -m examples.other.tensorize_vllm_model deserialize --help`.
+`python examples/other/tensorize_vllm_model.py deserialize --help`.
 
 Once a model is serialized, tensorizer can be invoked with the `LLM` class 
 directly to load models:
@@ -91,7 +91,7 @@ TensorizerConfig arguments desired.
 In order to see all of the available arguments usable to configure 
 loading with tensorizer that are given to `TensorizerConfig`, run:
 
-`python -m examples.other.tensorize_vllm_model deserialize --help`
+`python examples/other/tensorize_vllm_model.py deserialize --help`
 
 under the `tensorizer options` section. These can also be used for
 deserialization in this example script, although `--tensorizer-uri` and
