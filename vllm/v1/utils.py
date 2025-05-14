@@ -192,7 +192,8 @@ class CoreEngineActorManager(CoreEngineProcManager):
         for index in range(local_engine_count):
             local_index = local_start_index + index
             global_index = start_index + index
-            logger.info(f"global_index: {global_index}, local_index: {local_index}")
+            logger.info(f"global_index: {global_index}, local_index: {local_index}, "
+                        f"input_address: {input_address}, output_address: {output_address}")
             self.local_engine_actors.append(
                 ray.remote(EngineCoreActor).remote(
                     #name=f"EngineCore_{global_index}",

@@ -250,6 +250,7 @@ class AsyncLLM(EngineClient):
         self.output_processor.add_request(request, prompt, parent_req, index,
                                           queue)
 
+        logger.info("Adding request to engine_core")
         # Add the EngineCoreRequest to EngineCore (separate process).
         await self.engine_core.add_request_async(request)
 
@@ -301,6 +302,8 @@ class AsyncLLM(EngineClient):
                 prompt_adapter_request=prompt_adapter_request,
                 priority=priority,
             )
+
+            logger.info("add_request done")
 
             # The output_handler task pushes items into the queue.
             # This task pulls from the queue and yields to caller.
@@ -358,8 +361,10 @@ class AsyncLLM(EngineClient):
         async def output_handler():
             try:
                 while True:
+                    logger.info("Getting outputs from engine_core")
                     # 1) Pull EngineCoreOutputs from the EngineCore.
                     outputs = await engine_core.get_output_async()
+                    logger.info("Got outputs from engine_core %s", outputs)
                     num_outputs = len(outputs.outputs)
 
                     iteration_stats = IterationStats() if (
@@ -405,6 +410,7 @@ class AsyncLLM(EngineClient):
                 output_processor.propagate_error(e)
 
         self.output_handler = asyncio.create_task(output_handler())
+        logger.info("output_handler created")
 
     async def abort(self, request_id: str) -> None:
         """Abort RequestId in OutputProcessor and EngineCore."""

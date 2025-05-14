@@ -607,6 +607,7 @@ class EngineCoreProc(EngineCore):
             # (RequestType, RequestData)
             type_frame, *data_frames = input_socket.recv_multipart(copy=False)
             request_type = EngineCoreRequestType(bytes(type_frame.buffer))
+            logger.info(f"process_input_socket: {request_type}")
 
             # Deserialize the request data.
             decoder = add_request_decoder if (
@@ -796,6 +797,7 @@ class DPEngineCoreProc(EngineCoreProc):
         return ParallelConfig.has_unfinished_dp(self.dp_group,
                                                 local_unfinished)
 
+
 class EngineCoreActor(DPEngineCoreProc):
     """Actor for running EngineCore."""
 
@@ -811,7 +813,9 @@ class EngineCoreActor(DPEngineCoreProc):
         dp_rank: int = 0,
         local_dp_rank: int = 0,
     ):
-        logger.info(f"EngineCoreActor init: {on_head_node}, {input_address}, {output_address}, {engine_index}, {dp_rank}, {local_dp_rank}")
+        logger.info(
+            f"EngineCoreActor init: {on_head_node}, {input_address}, {output_address}, {engine_index}, {dp_rank}, {local_dp_rank}"
+        )
 
         # Signal handler used for graceful termination.
         # SystemExit exception is only raised once to allow this and worker
@@ -864,7 +868,7 @@ class EngineCoreActor(DPEngineCoreProc):
 
             # Initialize engine core and model.
             EngineCore.__init__(self, vllm_config, executor_class, log_stats,
-                             executor_fail_callback)
+                                executor_fail_callback)
 
             self.step_fn = (self.step if self.batch_queue is None else
                             self.step_with_batch_queue)
@@ -887,15 +891,17 @@ class EngineCoreActor(DPEngineCoreProc):
             self.input_queue = input_queue
             self.output_queue = queue.Queue[Union[EngineCoreOutputs, bytes]]()
             # FIXME(rui): use Ray-specific approach to start these "threads"
-            # threading.Thread(target=self.process_input_socket,
-            #                  args=(input_socket, ),
-            #                  daemon=True).start()
-            # input_socket = None
-            # self.output_thread = threading.Thread(
-            #     target=self.process_output_socket,
-            #     args=(output_address, engine_index),
-            #     daemon=True)
-            # self.output_thread.start()
+            threading.Thread(target=self.process_input_socket,
+                             args=(input_socket, ),
+                             daemon=True).start()
+            input_socket = None
+            self.output_thread = threading.Thread(
+                target=self.process_output_socket,
+                args=(output_address, engine_index),
+                daemon=True)
+            self.output_thread.start()
+            # self.test_thread = threading.Thread(target=self.test_thread_fn, daemon=True)
+            # self.test_thread.start()
         finally:
             if input_socket is not None:
                 input_socket.close(linger=0)
@@ -905,7 +911,7 @@ class EngineCoreActor(DPEngineCoreProc):
         except SystemExit:
             logger.debug("EngineCore exiting.")
             raise
-        except Exception as e:
+        except Exception:
             logger.exception("EngineCore encountered a fatal error.")
             raise
         finally:
@@ -917,7 +923,9 @@ class EngineCoreActor(DPEngineCoreProc):
         dp_rank = vllm_config.parallel_config.data_parallel_rank
         dp_size = vllm_config.parallel_config.data_parallel_size
         local_dp_rank = vllm_config.parallel_config.data_parallel_rank_local
-        print(f"dp_rank: {dp_rank}, dp_size: {dp_size}, local_dp_rank: {local_dp_rank}")
+        print(
+            f"dp_rank: {dp_rank}, dp_size: {dp_size}, local_dp_rank: {local_dp_rank}"
+        )
         import time
         time.sleep(10)
 
@@ -935,9 +943,14 @@ class EngineCoreActor(DPEngineCoreProc):
             str(current_platform.device_id_to_physical_device_id(i))
             for i in range(local_dp_rank * world_size, (local_dp_rank + 1) *
                            world_size))
-        
+
         logger.info("Before stateless_init_dp_group()")
         self.local_dp_rank = local_dp_rank
         self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
         logger.info("After stateless_init_dp_group()")
         self.current_wave = 0
+
+    def test_thread_fn(self):
+        while True:
+            logger.info("test_thread_fn")
+            time.sleep(1)

@@ -1314,6 +1314,7 @@ class RayClient(DPAsyncMPClient):
         ]))[0]
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
+        logger.info("add_request_async")
         request.current_wave = self.current_wave
 
         chosen_engine = self.get_core_engine_for_request()
@@ -1331,6 +1332,7 @@ class RayClient(DPAsyncMPClient):
                 *self._start_wave_coros(exclude_index=chosen_engine.index))
 
         await to_await
+        logger.info("_send_input done")
 
         self._ensure_output_queue_task()
 
