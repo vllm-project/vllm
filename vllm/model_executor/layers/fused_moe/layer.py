@@ -33,11 +33,8 @@ else:
 if is_rocm_aiter_moe_enabled():
     from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
         rocm_aiter_biased_group_topk as grouped_topk)
-
-    from .rocm_aiter_fused_moe import rocm_aiter_fused_experts
 else:
     from vllm.model_executor.layers.fused_moe.fused_moe import grouped_topk
-    rocm_aiter_fused_experts = None  # type: ignore
 if current_platform.is_tpu():
     # the iterative moe implementation is used until the moe_pallas is fixed
     from .moe_torch_iterative import fused_moe as fused_moe_pallas
@@ -91,6 +88,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         super().__init__()
 
         self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
+        if self.rocm_aiter_moe_enabled:
+            from .rocm_aiter_fused_moe import rocm_aiter_fused_experts
+            self.rocm_aiter_fused_experts = rocm_aiter_fused_experts
+        else:
+            self.rocm_aiter_fused_experts = None
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -222,7 +224,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             e_score_correction_bias=e_score_correction_bias)
 
         if self.rocm_aiter_moe_enabled:
-            return rocm_aiter_fused_experts(
+            return self.rocm_aiter_fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
