@@ -224,8 +224,15 @@ def test_mixtral_moe(dtype: torch.dtype, padding: bool, use_rocm_aiter: bool,
     """Make sure our Mixtral MoE implementation agrees with the one from
     huggingface."""
 
+    # clear the cache before every test
+    from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+        is_rocm_aiter_moe_enabled)
+    is_rocm_aiter_moe_enabled.cache_clear()
     if use_rocm_aiter:
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+
+        if dtype == torch.float32:
+            pytest.skip("AITER ROCm test skip for float32")
 
     # Instantiate our and huggingface's MoE blocks
     config = MixtralConfig()

@@ -10,7 +10,8 @@ import pickle
 import socket
 import time
 from collections import deque
-from typing import Any, Deque, Dict, Optional, Sequence, Tuple
+from collections.abc import Sequence
+from typing import Any, Optional
 
 import torch
 from torch.distributed import ProcessGroup, TCPStore
@@ -22,6 +23,7 @@ from torch.distributed.rendezvous import rendezvous
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.utils import get_tcp_uri
 
 logger = init_logger(__name__)
 
@@ -68,7 +70,7 @@ def split_tensor_along_last_dim(
 
 
 def get_pp_indices(num_hidden_layers: int, pp_rank: int,
-                   pp_size: int) -> Tuple[int, int]:
+                   pp_size: int) -> tuple[int, int]:
     """Try to evenly distribute layers across partitions.
 
     If the number of layers is not divisible by the number of partitions,
@@ -131,15 +133,15 @@ class StatelessProcessGroup:
     data_expiration_seconds: int = 3600  # 1 hour
 
     # dst rank -> counter
-    send_dst_counter: Dict[int, int] = dataclasses.field(default_factory=dict)
+    send_dst_counter: dict[int, int] = dataclasses.field(default_factory=dict)
     # src rank -> counter
-    recv_src_counter: Dict[int, int] = dataclasses.field(default_factory=dict)
+    recv_src_counter: dict[int, int] = dataclasses.field(default_factory=dict)
     broadcast_send_counter: int = 0
-    broadcast_recv_src_counter: Dict[int, int] = dataclasses.field(
+    broadcast_recv_src_counter: dict[int, int] = dataclasses.field(
         default_factory=dict)
 
     # A deque to store the data entries, with key and timestamp.
-    entries: Deque[Tuple[str,
+    entries: deque[tuple[str,
                          float]] = dataclasses.field(default_factory=deque)
 
     def __post_init__(self):
@@ -303,7 +305,7 @@ def stateless_init_torch_distributed_process_group(
     always formed with process 1, 2, ..., 8, and the additional communication
     channel is formed with process 9 and 10.
     """
-    init_method = f"tcp://{host}:{port}"
+    init_method = get_tcp_uri(host, port)
     backend = Backend(backend)  # it is basically string
     timeout = _get_default_timeout(backend)
 
@@ -361,6 +363,11 @@ def stateless_destroy_torch_distributed_process_group(
         stateless_init_torch_distributed_process_group().
     """
     # Lazy import for non-CUDA backends.
-    from torch.distributed.distributed_c10d import _shutdown_backend
-    _shutdown_backend(pg)
+    try:
+        # pytorch <= 2.6
+        from torch.distributed.distributed_c10d import _shutdown_backend
+        _shutdown_backend(pg)
+    except ImportError:
+        # pytorch >= 2.7
+        pg.shutdown()
     _unregister_process_group(pg.group_name)

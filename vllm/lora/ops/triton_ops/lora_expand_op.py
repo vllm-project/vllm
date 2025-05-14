@@ -6,8 +6,6 @@ Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
-from typing import List
-
 import torch
 import triton
 import triton.language as tl
@@ -127,7 +125,7 @@ def _lora_expand_kernel(
 @torch.inference_mode()
 def _lora_expand(
     inputs: torch.Tensor,  # shape [num_slices, num_tokens, lora_rank]
-    lora_b_weights: List[
+    lora_b_weights: list[
         torch.Tensor],  # shape [num_lora, hidden_size, lora_rank]
     output_tensor: torch.
     Tensor,  # shape [num_tokens, hidden_size * num_slices]
@@ -143,7 +141,7 @@ def _lora_expand(
     """
     Args:
         inputs (torch.Tensor): input tensor
-        lora_b_weights (List[torch.Tensor]): lora'b weight
+        lora_b_weights (list[torch.Tensor]): lora'b weight
         output_tensor (torch.Tensor): output tensor
         token_lora_mapping (torch.Tensor): A tensor mapping each input token
             to the lora-id related to that token. A value of -1 indicates that
@@ -264,7 +262,7 @@ def _lora_expand(
 
 def _lora_expand_fake(
     inputs: torch.Tensor,
-    lora_b_weights: List[torch.Tensor],
+    lora_b_weights: list[torch.Tensor],
     output_tensor: torch.Tensor,
     token_lora_mapping: torch.Tensor,
     token_indices_sorted_by_lora_ids: torch.Tensor,

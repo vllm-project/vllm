@@ -149,3 +149,27 @@ class DeviceCommunicatorBase:
 
     def destroy(self):
         pass
+
+    def prepare_communication_buffer_for_model(self,
+                                               model: torch.nn.Module) -> None:
+        """
+        Prepare the communication buffer for the model.
+        This is a no-op in the base class.
+        """
+        pass
+
+    def dispatch(
+            self, hidden_states: torch.Tensor,
+            router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Dispatch the hidden states and router logits to the appropriate device.
+        This is a no-op in the base class.
+        """
+        return hidden_states, router_logits
+
+    def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """
+        Combine the hidden states and router logits from the appropriate device.
+        This is a no-op in the base class.
+        """
+        return hidden_states
