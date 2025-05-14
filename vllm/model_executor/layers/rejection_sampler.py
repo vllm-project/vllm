@@ -124,8 +124,8 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         if self.use_flashinfer and chain_speculative_sampling is not None:
             batch_size, k, _ = draft_probs.shape
 
-            accepted_token_num = torch.zeros(batch_size)
-            emitted_token_num = torch.zeros(batch_size)
+            accepted_token_num = torch.zeros(batch_size, dtype=int)
+            emitted_token_num = torch.zeros(batch_size, dtype=int)
 
             output_token_ids = chain_speculative_sampling(
                 draft_probs,
