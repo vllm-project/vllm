@@ -1083,7 +1083,7 @@ Specified using `--task generate`.
   * ✅︎
   * ✅︎
 - * `Mistral3ForConditionalGeneration`
-  * Mistral3
+  * Mistral3 (HF Transformers)
   * T + I<sup>+</sup>
   * `mistralai/Mistral-Small-3.1-24B-Instruct-2503`, etc.
   * ✅︎
@@ -1146,7 +1146,7 @@ Specified using `--task generate`.
   *
   * ✅︎
 - * `PixtralForConditionalGeneration`
-  * Mistral3 (HF Transformers), Pixtral
+  * Pixtral
   * T + I<sup>+</sup>
   * `mistralai/Mistral-Small-3.1-24B-Instruct-2503`, `mistral-community/pixtral-12b`, etc.
   *
