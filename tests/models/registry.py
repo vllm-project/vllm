@@ -205,7 +205,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MPTForCausalLM": _HfExamplesInfo("mosaicml/mpt-7b"),
     "NemotronForCausalLM": _HfExamplesInfo("nvidia/Minitron-8B-Base"),
     "OlmoForCausalLM": _HfExamplesInfo("allenai/OLMo-1B-hf"),
-    "Olmo2ForCausalLM": _HfExamplesInfo("shanearora/OLMo-7B-1124-hf"),
+    "Olmo2ForCausalLM": _HfExamplesInfo("allenai/OLMo-2-0425-1B"),
     "OlmoeForCausalLM": _HfExamplesInfo("allenai/OLMoE-1B-7B-0924-Instruct"),
     "OPTForCausalLM": _HfExamplesInfo("facebook/opt-125m",
                                       {"1b": "facebook/opt-iml-max-1.3b"}),
