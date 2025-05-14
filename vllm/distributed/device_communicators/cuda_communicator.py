@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 from torch.distributed import ProcessGroup
@@ -154,7 +154,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
     def dispatch(
             self, hidden_states: torch.Tensor,
-            router_logits: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+            router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         assert self.all2all_impl is not None
         hidden_states, router_logits = self.all2all_impl.dispatch(
             hidden_states, router_logits)

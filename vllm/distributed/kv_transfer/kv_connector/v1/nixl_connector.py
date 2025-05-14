@@ -5,13 +5,13 @@ import threading
 import time
 import uuid
 from collections import defaultdict
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Iterator
+from typing import TYPE_CHECKING, Any, Optional
 
 import msgspec
 import torch
 import zmq
-from typing_extensions import Optional
 
 from vllm import envs
 from vllm.config import VllmConfig
