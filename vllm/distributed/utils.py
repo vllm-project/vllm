@@ -22,6 +22,7 @@ from torch.distributed.rendezvous import rendezvous
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.utils import get_tcp_uri
 
 logger = init_logger(__name__)
 
@@ -303,7 +304,7 @@ def stateless_init_torch_distributed_process_group(
     always formed with process 1, 2, ..., 8, and the additional communication
     channel is formed with process 9 and 10.
     """
-    init_method = f"tcp://{host}:{port}"
+    init_method = get_tcp_uri(host, port)
     backend = Backend(backend)  # it is basically string
     timeout = _get_default_timeout(backend)
 

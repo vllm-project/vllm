@@ -197,6 +197,11 @@ class NixlConnectorScheduler:
         """
 
         params = request.kv_transfer_params
+        logger.debug(
+            "NIXLConnector get_num_new_matched_tokens: "
+            "num_computed_tokens=%s, kv_transfer_params=%s",
+            num_computed_tokens, params)
+
         if params is not None and params.get("do_remote_prefill"):
             # Remote prefill: get all prompt blocks from remote.
             assert num_computed_tokens % self.block_size == 0
@@ -213,6 +218,11 @@ class NixlConnectorScheduler:
                                  num_external_tokens: int):
 
         params = request.kv_transfer_params
+        logger.debug(
+            "NIXLConnector update_state_after_alloc: "
+            "num_external_tokens=%s, kv_transfer_params=%s",
+            num_external_tokens, params)
+
         if params is not None and params.get("do_remote_prefill"):
             # NOTE(rob): if prompt < block_size, no remote blocks
             # since the remote only sends fully computed blocks, so
@@ -264,6 +274,10 @@ class NixlConnectorScheduler:
         """
 
         params = request.kv_transfer_params
+        logger.debug(
+            "NIXLConnector request_finished, request_status=%s, "
+            "kv_transfer_params=%s", request.status, params)
+
         if (params is None or not params.get("do_remote_decode")
                 or request.status != RequestStatus.FINISHED_LENGTH_CAPPED):
             return False, None
