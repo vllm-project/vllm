@@ -3491,6 +3491,10 @@ class KVTransferConfig:
     """The KV connector for vLLM to transmit KV caches between vLLM instances.
     """
 
+    kv_connector_module_path: Optional[str] = None
+    """The Python module path to dynamically load the KV connector from.
+    Only supported in V1."""
+
     engine_id: str = str(uuid.uuid4())
     """The engine id for KV transfers."""
 
