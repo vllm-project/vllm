@@ -25,7 +25,7 @@ logger = init_logger(__name__)
 class ProcessorInputs:
     """
     Represents the keyword arguments to
-    :meth:`vllm.multimodal.processing.BaseMultiModalProcessor.apply`.
+    {meth}`vllm.multimodal.processing.BaseMultiModalProcessor.apply`.
     """
     prompt_text: str
     mm_data: MultiModalDataDict
@@ -63,7 +63,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
     # TODO: @abstractmethod after transition
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         """
-        Build the text input corresponding to :code:`mm_counts`.
+        Build the text input corresponding to `mm_counts`.
         """
         if (type(self).get_dummy_processor_inputs ==
                 BaseDummyInputsBuilder.get_dummy_processor_inputs):
@@ -215,17 +215,14 @@ class MultiModalProfiler(Generic[_I]):
         elif total_len > seq_len and not envs.VLLM_USE_V1:
             # `max_num_batched_tokens` is defined by `SchedulerConfig`
             logger.warning_once(
-                "The encoder sequence length used for profiling ("
-                f"max_num_batched_tokens / max_num_seqs = {seq_len}) "
-                " is too short "
-                "to hold the multi-modal embeddings in the worst case "
-                f"({total_len} tokens in total, out of which "
-                f"{self._get_mm_num_tokens(mm_inputs)} are reserved for "
-                "multi-modal embeddings). This may cause certain "
-                "multi-modal inputs to fail during inference, even when "
-                "the input text is short. To avoid this, you should "
-                "increase `max_model_len`, reduce `max_num_seqs`, "
-                "and/or reduce `mm_counts`.")
+                "The encoder sequence length used for profiling (max_num_batched_tokens / max_num_seqs = %d) "  # noqa: E501
+                "is too short to hold the multi-modal embeddings in the worst case (%d tokens in total, out of which %s are reserved for multi-modal embeddings). "  # noqa: E501
+                "This may cause certain multi-modal inputs to fail during inference, even when the input text is short. "  # noqa: E501
+                "To avoid this, you should increase `max_model_len`, reduce `max_num_seqs`, and/or reduce `mm_counts`.",  # noqa: E501
+                seq_len,
+                total_len,
+                str(self._get_mm_num_tokens(mm_inputs)),
+            )
 
         return DummyEncoderData(encoder_prompt_token_ids)
 
@@ -243,17 +240,14 @@ class MultiModalProfiler(Generic[_I]):
         if total_len > seq_len and not envs.VLLM_USE_V1:
             # `max_num_batched_tokens` is defined by `SchedulerConfig`
             logger.warning_once(
-                "The sequence length used for profiling ("
-                f"max_num_batched_tokens / max_num_seqs = {seq_len}) "
-                "is too short "
-                "to hold the multi-modal embeddings in the worst case "
-                f"({total_len} tokens in total, out of which "
-                f"{self._get_mm_num_tokens(mm_inputs)} are reserved for "
-                "multi-modal embeddings). This may cause certain "
-                "multi-modal inputs to fail during inference, even when "
-                "the input text is short. To avoid this, you should "
-                "increase `max_model_len`, reduce `max_num_seqs`, "
-                "and/or reduce `mm_counts`.")
+                "The sequence length used for profiling (max_num_batched_tokens / max_num_seqs = %d) "  # noqa: E501
+                "is too short to hold the multi-modal embeddings in the worst case (%d tokens in total, out of which %s are reserved for multi-modal embeddings). "  # noqa: E501
+                "This may cause certain multi-modal inputs to fail during inference, even when the input text is short. "  # noqa: E501
+                "To avoid this, you should increase `max_model_len`, reduce `max_num_seqs`, and/or reduce `mm_counts`.",  # noqa: E501
+                seq_len,
+                total_len,
+                str(self._get_mm_num_tokens(mm_inputs)),
+            )
 
         if total_len < seq_len:
             prompt_token_ids.extend([0] * (seq_len - total_len))

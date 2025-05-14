@@ -101,6 +101,9 @@ class LLMEngine:
             # for v0 compatibility
             self.model_executor = self.engine_core.engine_core.model_executor  # type: ignore
 
+        # Don't keep the dummy data in memory
+        self.reset_mm_cache()
+
     @classmethod
     def from_vllm_config(
         cls,
@@ -175,6 +178,7 @@ class LLMEngine:
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
@@ -182,7 +186,8 @@ class LLMEngine:
         # Process raw inputs into the request.
         prompt_str, request = self.processor.process_inputs(
             request_id, prompt, params, arrival_time, lora_request,
-            trace_headers, prompt_adapter_request, priority)
+            tokenization_kwargs, trace_headers, prompt_adapter_request,
+            priority)
 
         n = params.n if isinstance(params, SamplingParams) else 1
 
@@ -237,6 +242,11 @@ class LLMEngine:
 
     def stop_profile(self):
         self.engine_core.profile(False)
+
+    def reset_mm_cache(self):
+        self.processor.mm_registry.reset_processor_cache()
+        self.processor.mm_input_cache_client.reset()
+        self.engine_core.reset_mm_cache()
 
     def reset_prefix_cache(self, device: Optional[Device] = None):
         self.engine_core.reset_prefix_cache()

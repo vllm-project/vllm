@@ -4,12 +4,12 @@ An example shows how to generate structured outputs from reasoning models
 like DeepSeekR1. The thinking process will not be guided by the JSON
 schema provided by the user. Only the final output will be structured.
 
-To run this example, you need to start the vLLM server with the reasoning 
+To run this example, you need to start the vLLM server with the reasoning
 parser:
 
 ```bash
 vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
-     --enable-reasoning --reasoning-parser deepseek_r1
+    --reasoning-parser deepseek_r1
 ```
 
 This example demonstrates how to generate chat completions from reasoning models

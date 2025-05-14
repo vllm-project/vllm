@@ -44,7 +44,7 @@ def create_scheduler(
                              (None)
 
     Returns:
-      :class:`Scheduler` instance
+      {class}`Scheduler` instance
     '''
     if max_model_len is None:
         max_model_len = max_num_batched_tokens
@@ -185,7 +185,7 @@ def test_get_num_unfinished_requests():
 ])
 def test_schedule(enable_prefix_caching: Optional[bool],
                   prompt_logprobs: Optional[int]):
-    '''Test scheduling. 
+    '''Test scheduling.
     Two cases: default APC/no prompt logprobs; APC=True + prompt logprobs
     '''
     scheduler = create_scheduler(enable_prefix_caching=enable_prefix_caching)
@@ -812,10 +812,11 @@ def _assert_right_kv_cache_manager(
     # Make sure the request stats are right.
     EXPECTED_TOTAL_BLOCKS = num_tokens // block_size
     for req_id in req_ids:
-        blocks = scheduler.kv_cache_manager.req_to_blocks[req_id]
+        blocks = (scheduler.kv_cache_manager.single_type_manager.
+                  req_to_blocks[req_id])
         hashes = scheduler.kv_cache_manager.req_to_block_hashes[req_id]
-        assert (scheduler.kv_cache_manager.num_cached_block[req_id] ==
-                EXPECTED_TOTAL_BLOCKS)
+        assert (scheduler.kv_cache_manager.single_type_manager.
+                num_cached_block[req_id] == EXPECTED_TOTAL_BLOCKS)
         assert len(blocks) == EXPECTED_TOTAL_BLOCKS
         assert len(hashes) == EXPECTED_TOTAL_BLOCKS
 
@@ -869,7 +870,7 @@ def test_kv_connector_basic():
     NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE * 2
     scheduler.connector.get_num_new_matched_tokens = Mock(name="method")
     scheduler.connector.get_num_new_matched_tokens.return_value = (
-        NUM_MATCHED_NEW_TOKENS)
+        NUM_MATCHED_NEW_TOKENS, False)
 
     ######################################################
     # FIRST SET OF REQUESTS - External Hit Only
@@ -980,7 +981,7 @@ def test_kv_connector_unable_to_allocate():
     NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE * 2
     scheduler.connector.get_num_new_matched_tokens = Mock(name="method")
     scheduler.connector.get_num_new_matched_tokens.return_value = (
-        NUM_MATCHED_NEW_TOKENS)
+        NUM_MATCHED_NEW_TOKENS, False)
 
     # Create two requests. The second request will not be able to
     # allocate slots because it will not have enough blocks.
@@ -1059,7 +1060,7 @@ def test_kv_connector_handles_preemption():
     NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE
     scheduler.connector.get_num_new_matched_tokens = Mock(name="method")
     scheduler.connector.get_num_new_matched_tokens.return_value = (
-        NUM_MATCHED_NEW_TOKENS)
+        NUM_MATCHED_NEW_TOKENS, False)
 
     # Create two requests.
     # Both can be scheduled at first, but the second request
@@ -1171,15 +1172,9 @@ def test_scheduler_jump_forward():
     scheduler = create_scheduler()
     so_manager = scheduler.structured_output_manager
 
-    # Mock the tokenizer used by StructuredOutputManager
     mock_tokenizer = Mock()
-    # Example tokenization behavior:
-    # decode([10, 20]) -> "ab"
-    # encode("abc") -> [10, 25]  (Simulates 'c' being token 25)
-    # encode("ab" + "c") -> [10, 25]
     mock_tokenizer.decode.side_effect = lambda ids: {
         tuple([10, 20]): "ab",
-        # Add more cases as needed
     }.get(tuple(ids), "decode_fallback")
     mock_tokenizer.encode.side_effect = lambda text, add_special_tokens: {
         "abc": [10, 25],
@@ -1187,19 +1182,17 @@ def test_scheduler_jump_forward():
 
     so_manager.tokenizer = mock_tokenizer
 
-    # 2. Create a request using structured output
     request = create_requests(num_requests=1)[0]
     request.use_structured_output = True
     request.structured_output_request = Mock()
     request.structured_output_request.structured_output_key = ("json", "{}"
                                                                )  # Dummy key
 
-    # Mock the grammar object
     mock_grammar = Mock()
-    mock_grammar.find_jump_string.return_value = "c"  # The jump string
-    mock_grammar.accept_tokens.return_value = True  # Assume validation passes for now
+    mock_grammar.find_jump_string.return_value = "c"
+    mock_grammar.accept_tokens.return_value = True
     mock_grammar.is_terminated.return_value = False
-    mock_grammar.rollback = Mock()  # To track calls
+    mock_grammar.rollback = Mock()
 
     request.structured_output_request.grammar = mock_grammar
 
@@ -1207,30 +1200,12 @@ def test_scheduler_jump_forward():
     scheduler.add_request(request)
     output = scheduler.schedule()  # Schedule the prompt
 
-    # Simulate model outputting initial tokens (e.g., [10, 20] for "ab")
     initial_output_tokens = [10, 20]
-    model_runner_output = ModelRunnerOutput(
-        req_ids=[request.request_id],
-        req_id_to_index={request.request_id: 0},
-        sampled_token_ids=[initial_output_tokens],
-        spec_token_ids=None,
-        logprobs=None,
-        prompt_logprobs_dict={},
-    )
-
-    # 4. Call update_from_output - this triggers jump_forward_tokens
-    # First, manually update computed tokens as schedule() does
     request.num_computed_tokens += output.num_scheduled_tokens[
         request.request_id]
-    # Update output_token_ids with initial output before jump-forward call
     request.append_output_token_ids(initial_output_tokens)
 
-    # Now manually call jump_forward_tokens (since it's complex to mock the whole update flow)
-    # In reality, update_from_output calls this internally
     jump_tokens = so_manager.jump_forward_tokens(request)
-
-    # 5. Assertions
-    # Based on mock tokenizer: decode([10, 20]) -> "ab"
     # jf_string = "c"
     # text = "ab" + "c" = "abc"
     # encode("abc") -> [10, 25]
@@ -1242,10 +1217,89 @@ def test_scheduler_jump_forward():
     # rollback(1) should be called
     # accept_tokens([25]) should be called and return True
     # expected jump_tokens = [25]
-
-    assert jump_tokens == [
-        25
-    ], f"Expected jump tokens [25], but got {jump_tokens}"
+    if jump_tokens != [25]:
+        pytest.fail(f"Expected jump tokens [25], but got {jump_tokens}")
     mock_grammar.rollback.assert_called_once_with(1)
-    mock_grammar.accept_tokens.assert_called_once_with(request.request_id,
-                                                       [25])
+    mock_grammar.accept_tokens.assert_called_once_with(
+        request.request_id,
+        [25],
+    )
+
+
+def make_output(scheduler: Scheduler):
+    return ModelRunnerOutput(
+        req_ids=[req.request_id for req in scheduler.running],
+        req_id_to_index={
+            req.request_id: i
+            for i, req in enumerate(scheduler.running)
+        },
+        sampled_token_ids=[[1000]] * len(scheduler.running),
+        spec_token_ids=None,
+        logprobs=None,
+        prompt_logprobs_dict={},
+    )
+
+
+def assert_scheduler_empty(scheduler: Scheduler):
+    """Confirm the scheduler is "empty" - i.e. no leaks."""
+    # Scheduler Metadata.
+    assert len(scheduler.requests) == 0
+    assert len(scheduler.waiting) == 0
+    assert len(scheduler.running) == 0
+    assert len(scheduler.finished_req_ids) == 0
+    assert len(scheduler._cached_reqs_data) == 0
+
+    # EncoderCacheManager.
+    assert len(scheduler.encoder_cache_manager.freed) == 0
+    assert len(scheduler.encoder_cache_manager.cached) == 0
+
+    # KVCache Manager.
+    assert len(
+        scheduler.kv_cache_manager.single_type_manager.req_to_blocks) == 0
+    assert len(scheduler.kv_cache_manager.req_to_block_hashes) == 0
+    assert len(
+        scheduler.kv_cache_manager.single_type_manager.num_cached_block) == 0
+    num_free_blocks = (
+        scheduler.kv_cache_manager.block_pool.free_block_queue.num_free_blocks)
+    assert num_free_blocks == (
+        scheduler.kv_cache_manager.block_pool.num_gpu_blocks - 1)
+
+    # NOTE(rob): just the ref count on blocks will be 0. The hash
+    # value, etc will remain since we lazily evict for prefix cache.
+    for block in scheduler.kv_cache_manager.block_pool.blocks:
+        assert block.ref_cnt == 0
+        # assert block._block_hash is None
+    # assert (
+    #     len(scheduler.kv_cache_manager.block_pool.cached_block_hash_to_block
+    #           ) == 0)
+
+
+def test_memory_leak():
+    """Test that we do not have a memory leak."""
+
+    scheduler = create_scheduler(enable_prefix_caching=True)
+
+    NUM_REQUESTS = 5
+    NUM_TOKENS = 10
+    MAX_TOKENS = 10
+    requests = create_requests(num_requests=NUM_REQUESTS,
+                               num_tokens=NUM_TOKENS,
+                               max_tokens=MAX_TOKENS)
+
+    # Add each request.
+    for request in requests:
+        scheduler.add_request(request)
+        scheduler_output = scheduler.schedule()
+        model_runner_output = make_output(scheduler)
+        scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    # Iterate until done.
+    while True:
+        scheduler_output = scheduler.schedule()
+        if len(scheduler.running) == 0:
+            break
+        model_runner_output = make_output(scheduler)
+        scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    # Confirm no memory leak.
+    assert_scheduler_empty(scheduler)

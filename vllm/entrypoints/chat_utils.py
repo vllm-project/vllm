@@ -38,8 +38,13 @@ from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
 from vllm.multimodal.utils import MediaConnector
+# yapf: disable
+from vllm.transformers_utils.chat_templates import (
+    get_chat_template_fallback_path)
+# yapf: enable
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
+from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
@@ -325,11 +330,10 @@ def resolve_mistral_chat_template(
     return None
 
 def resolve_hf_chat_template(
+    model_config: ModelConfig,
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     chat_template: Optional[str],
     tools: Optional[list[dict[str, Any]]],
-    *,
-    trust_remote_code: bool,
 ) -> Optional[str]:
     # 1st priority: The given chat template
     if chat_template is not None:
@@ -342,14 +346,14 @@ def resolve_hf_chat_template(
                 tokenizer.name_or_path,
                 processor_cls=(PreTrainedTokenizer, PreTrainedTokenizerFast,
                                ProcessorMixin),
-                trust_remote_code=trust_remote_code,
+                trust_remote_code=model_config.trust_remote_code,
             )
             if isinstance(processor, ProcessorMixin) and \
+                hasattr(processor, 'chat_template') and \
                 processor.chat_template is not None:
                 return processor.chat_template
         except Exception:
-            logger.debug("Failed to load AutoProcessor chat template for %s",
-                        tokenizer.name_or_path, exc_info=True)
+            logger.debug("Failed to load AutoProcessor chat template for %s", tokenizer.name_or_path, exc_info=True)  # noqa: E501
 
     # 3rd priority: AutoTokenizer chat template
     try:
@@ -358,22 +362,34 @@ def resolve_hf_chat_template(
         logger.debug("Failed to load AutoTokenizer chat template for %s",
                      tokenizer.name_or_path, exc_info=True)
 
-    return None
+    # 4th priority: Predefined fallbacks
+    path = get_chat_template_fallback_path(
+        model_type=model_config.hf_config.model_type,
+        tokenizer_name_or_path=model_config.tokenizer,
+    )
+    if path is not None:
+        logger.info("Loading chat template fallback for %s as there isn't one "
+                    "defined on HF Hub.", tokenizer.name_or_path)
+        chat_template = load_chat_template(path)
+    else:
+        logger.debug("There is no chat template fallback for %s",
+                     tokenizer.name_or_path)
+
+    return chat_template
 
 
 def _resolve_chat_template_content_format(
+    model_config: ModelConfig,
     chat_template: Optional[str],
     tools: Optional[list[dict[str, Any]]],
     given_format: ChatTemplateContentFormatOption,
     tokenizer: AnyTokenizer,
-    *,
-    trust_remote_code: bool,
 ) -> _ChatTemplateContentFormat:
     if isinstance(tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
         hf_chat_template = resolve_hf_chat_template(
+            model_config,
             tokenizer,
             chat_template=chat_template,
-            trust_remote_code=trust_remote_code,
             tools=tools,
         )
     else:
@@ -413,19 +429,18 @@ def _log_chat_template_content_format(
 
 
 def resolve_chat_template_content_format(
+    model_config: ModelConfig,
     chat_template: Optional[str],
     tools: Optional[list[dict[str, Any]]],
     given_format: ChatTemplateContentFormatOption,
     tokenizer: AnyTokenizer,
-    *,
-    trust_remote_code: bool = False,
 ) -> _ChatTemplateContentFormat:
     detected_format = _resolve_chat_template_content_format(
+        model_config,
         chat_template,
         tools,
         given_format,
         tokenizer,
-        trust_remote_code=trust_remote_code,
     )
 
     _log_chat_template_content_format(
@@ -496,9 +511,10 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             if model_type.startswith("llava"):
                 return self._cached_token_str(self._tokenizer,
                                               hf_config.image_token_index)
+
             if model_type in ("aya_vision", "chameleon", "deepseek_vl_v2",
-                              "internvl_chat", "skywork_chat", "NVLM_D",
-                              "h2ovl_chat", "idefics3", "smolvlm"):
+                              "internvl_chat", "ovis", "skywork_chat",
+                              "NVLM_D", "h2ovl_chat", "idefics3", "smolvlm"):
                 return "<image>"
             if model_type in ("mllama", "llama4"):
                 return "<|image|>"
@@ -1176,20 +1192,20 @@ def parse_chat_messages_futures(
 
 
 def apply_hf_chat_template(
+    model_config: ModelConfig,
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     conversation: list[ConversationMessage],
     chat_template: Optional[str],
     tools: Optional[list[dict[str, Any]]],
     *,
-    trust_remote_code: bool = False,
     tokenize: bool = False,  # Different from HF's default
     **kwargs: Any,
 ) -> str:
     hf_chat_template = resolve_hf_chat_template(
+        model_config,
         tokenizer,
         chat_template=chat_template,
         tools=tools,
-        trust_remote_code=trust_remote_code,
     )
 
     if hf_chat_template is None:
@@ -1257,3 +1273,6 @@ def apply_mistral_chat_template(
             "An error occurred in `mistral_common` while applying chat "
             "template")
         raise ValueError from e
+
+def random_tool_call_id() -> str:
+    return f"chatcmpl-tool-{random_uuid()}"
