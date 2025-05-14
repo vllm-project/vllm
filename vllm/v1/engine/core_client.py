@@ -961,6 +961,7 @@ class AsyncMPClient(MPClient):
         if not objects or len(msg) <= 3:
             # No auxiliary buffers => no tensor backing buffers in request.
             logger.info(f"input_socket send_multipart to [{engine.index}] {engine.identity} on {self.input_socket}")
+            logger.info(f"send_multipart msg: {msg}")
             return self.input_socket.send_multipart(msg, copy=False)
 
         future: asyncio.Future[zmq.MessageTracker]

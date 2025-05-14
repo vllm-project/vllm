@@ -627,7 +627,7 @@ class EngineCoreProc(EngineCore):
                 
                 try:
                     # (RequestType, RequestData)
-                    message_parts = input_socket.recv_multipart(copy=True)
+                    message_parts = input_socket.recv_multipart(copy=False)
                     logger.info(f"Received message with {len(message_parts)} parts")
                     
                     if not message_parts:
@@ -636,6 +636,7 @@ class EngineCoreProc(EngineCore):
                         
                     type_frame, *data_frames = message_parts
                     
+                    logger.info(f"Received type frame: {type_frame} and data frames: {data_frames}")
                     request_type = EngineCoreRequestType(bytes(type_frame.buffer))
                     logger.info(f"Received message of type: {request_type}")
 
