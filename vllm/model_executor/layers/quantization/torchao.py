@@ -5,10 +5,11 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
-from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
+                                               UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+    QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
 
 
@@ -55,10 +56,24 @@ class TorchAOConfig(QuantizationConfig):
         return cls(ao_config)
 
     def get_quant_method(self, layer: torch.nn.Module,
-                         prefix: str) -> Optional["TorchAOLinearMethod"]:
-        if isinstance(layer, LinearBase):
-            return TorchAOLinearMethod(self)
-        return None
+                         prefix: str) -> Optional["QuantizeMethodBase"]:
+        if not isinstance(layer, LinearBase):
+            return None
+
+        from torchao.quantization import AOPerModuleConfig
+
+        module_fqn = prefix
+        if isinstance(self.torchao_config, AOPerModuleConfig):
+            module_fqn_to_config = self.torchao_config.module_fqn_to_config
+            c = module_fqn_to_config.get(
+                module_fqn) or module_fqn_to_config.get("_default", None)
+            if c is not None:
+                current_torchao_config = TorchAOConfig(c)
+                return TorchAOLinearMethod(current_torchao_config)
+            else:
+                return UnquantizedLinearMethod()
+
+        return TorchAOLinearMethod(self)
 
     def get_scaled_act_names(self) -> list[str]:
         return []
@@ -75,7 +90,7 @@ def torchao_quantize_param_data(param: torch.Tensor,
     """
     from torchao.core.config import AOBaseConfig
     from torchao.quantization import quantize_
-    assert isinstance(torchao_config, AOBaseConfig)
+    assert isinstance(torchao_config, AOBaseConfig), f"{torchao_config}"
     dummy_linear = torch.nn.Linear(param.shape[1], param.shape[0], bias=False)
     dummy_linear.weight = param
     quantize_(dummy_linear, torchao_config)
