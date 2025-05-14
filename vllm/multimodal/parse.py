@@ -8,11 +8,9 @@ from typing import (TYPE_CHECKING, Any, Generic, Literal, NamedTuple, Optional,
 
 import numpy as np
 import torch
-from PIL.Image import Image
-from transformers import BatchFeature
 from typing_extensions import TypeAlias, TypeGuard, assert_never
 
-from vllm.utils import is_list_of
+from vllm.utils import LazyLoader, is_list_of
 
 from .audio import AudioResampler
 from .inputs import (AudioItem, HfAudioItem, HfImageItem, HfVideoItem,
@@ -21,6 +19,11 @@ from .inputs import (AudioItem, HfAudioItem, HfImageItem, HfVideoItem,
 
 _T = TypeVar("_T")
 _I = TypeVar("_I")
+
+if TYPE_CHECKING:
+    import PIL.Image as PILImage
+else:
+    PILImage = LazyLoader("PILImage", globals(), "PIL.Image")
 
 
 class ModalityDataItems(ABC, Generic[_T, _I]):
@@ -131,6 +134,8 @@ class DictEmbeddingItems(ModalityDataItems[Mapping[str, torch.Tensor],
             Mapping[str, MultiModalFieldConfig],
         ],
     ) -> None:
+        from transformers.feature_extraction_utils import BatchFeature
+
         super().__init__(data, modality)
 
         missing_required_data_keys = required_fields - data.keys()
@@ -200,7 +205,7 @@ class ImageProcessorItems(ProcessorBatchItems[HfImageItem]):
     def get_image_size(self, item_idx: int) -> ImageSize:
         image = self.get(item_idx)
 
-        if isinstance(image, Image):
+        if isinstance(image, PILImage.Image):
             return ImageSize(*image.size)
         if isinstance(image, (np.ndarray, torch.Tensor)):
             _, h, w = image.shape
@@ -226,7 +231,7 @@ class VideoProcessorItems(ProcessorBatchItems[HfVideoItem]):
     def get_frame_size(self, item_idx: int) -> ImageSize:
         image = self.get(item_idx)[0]  # Assume that the video isn't empty
 
-        if isinstance(image, Image):
+        if isinstance(image, PILImage.Image):
             return ImageSize(*image.size)
         if isinstance(image, (np.ndarray, torch.Tensor)):
             _, h, w = image.shape
@@ -253,7 +258,7 @@ class MultiModalDataItems(UserDict[str, ModalityDataItems[Any, Any]]):
     def get_count(self, modality: str, *, strict: bool = True) -> int:
         """
         Get the number of data items belonging to a modality.
-        
+
         If `strict=False`, return `0` instead of raising {exc}`KeyError`
         even if the modality is not found.
         """
@@ -399,7 +404,7 @@ class MultiModalDataParser:
         if self._is_embeddings(data):
             return ImageEmbeddingItems(data)
 
-        if (isinstance(data, Image)
+        if (isinstance(data, PILImage.Image)
                 or isinstance(data,
                               (np.ndarray, torch.Tensor)) and data.ndim == 3):
             data_items = [data]
@@ -420,7 +425,7 @@ class MultiModalDataParser:
         if self._is_embeddings(data):
             return VideoEmbeddingItems(data)
 
-        if (is_list_of(data, Image)
+        if (is_list_of(data, PILImage.Image)
                 or isinstance(data,
                               (np.ndarray, torch.Tensor)) and data.ndim == 4):
             data_items = [data]
