@@ -135,7 +135,7 @@ class TpuPlatform(Platform):
         scheduler_config = vllm_config.scheduler_config
         if parallel_config.worker_cls == "auto":
             if envs.VLLM_USE_JAX:
-                parallel_config.worker_cls = "vllm.v1.worker.tpu_worker_jax.JAXTPUWorker"
+                parallel_config.worker_cls = "vllm.v1.worker.tpu_worker_jax.TPUWorkerJax"
             else:
                 if scheduler_config.is_multi_step:
                     if envs.VLLM_USE_V1:
