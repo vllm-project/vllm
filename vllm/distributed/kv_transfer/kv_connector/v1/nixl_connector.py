@@ -795,12 +795,13 @@ class NixlConnectorWorker:
             if self.num_layers < self.num_regions:
                 # If we have more regions than layers, we assume that
                 # the regions are organized as [K0, V0, K1, V1, ...]
+                # and we select K_i and V_i
                 assert 2 * self.num_layers == self.num_regions
-                region_ids = [2 * layer_idx, 2 * layer_idx + 1]
+                region_ids = range(2 * layer_idx, 2 * layer_idx + 2)
             else:
-                # Otherwise, we assume we have MLA
+                # Otherwise, we assume we have MLA and select i-th layer
                 assert self.num_layers == self.num_regions
-                region_ids = [layer_idx]
+                region_ids = range(layer_idx, layer_idx + 1)
 
         num_blocks = self.dst_num_blocks[engine_id]
 
