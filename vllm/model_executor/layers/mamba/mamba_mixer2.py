@@ -182,7 +182,7 @@ def mamba_v2_sharded_weight_loader(
             #   seem to handle slices well.
             # https://github.com/python/mypy/issues/2410
             param.data[
-                boundary:(boundary + take), 
+                boundary:(boundary + take),
                 ...  # type: ignore[misc]
             ] = loaded_weight[loaded_start_idx:(loaded_start_idx +
                                                 take)  # type: ignore[misc]
@@ -368,8 +368,7 @@ class MambaMixer2(CustomOp):
             torch.empty(
                 divide(num_heads, self.tp_size),
                 dtype=torch.float32,
-            )
-        )
+            ))
         self.D = nn.Parameter(torch.ones(num_heads // self.tp_size))
         self.dt_bias = nn.Parameter(torch.ones(num_heads // self.tp_size))
         self.use_rms_norm = use_rms_norm
