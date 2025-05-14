@@ -10,7 +10,7 @@ import time
 from collections.abc import Generator
 from dataclasses import dataclass
 from functools import partial
-from typing import BinaryIO, Optional, Union
+from typing import BinaryIO, Optional, Union, Any
 import json
 
 import torch
@@ -20,7 +20,6 @@ from transformers import PretrainedConfig
 import vllm.envs as envs
 from vllm.config import ModelConfig, ParallelConfig, set_current_vllm_config
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.llm_engine import LLMEngine
 from vllm.logger import init_logger
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
@@ -88,6 +87,11 @@ class TensorizerConfig:
                                                  "provided.")
         self.tensorizer_dir = os.path.dirname(self.tensorizer_uri)
         self.lora_dir = self.tensorizer_dir
+
+    @classmethod
+    def as_dict(cls, *args, **kwargs) -> dict[str, Any]:
+        cfg = TensorizerConfig(*args, **kwargs)
+        return dataclasses.asdict(cfg)
 
     def _construct_tensorizer_args(self) -> "TensorizerArgs":
         tensorizer_args = {
@@ -475,7 +479,9 @@ def tensorize_vllm_model(engine_args: EngineArgs,
         ) as stream:
             stream.write(encryption_params.key)
 
-    engine = LLMEngine.from_engine_args(engine_args)
+    from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
+
+    engine = V1LLMEngine.from_vllm_config(engine_config)
     if not envs.VLLM_USE_V1:
         engine.model_executor.collective_rpc(
             "save_tensorized_model",

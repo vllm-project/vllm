@@ -35,9 +35,6 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import PPMissingLayer, WeightsMapper
 from vllm.utils import is_pin_memory_available
 
-if TYPE_CHECKING:
-    from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-
 logger = init_logger(__name__)
 
 _GLOBAL_LORA_ID = 0
@@ -200,7 +197,7 @@ class LoRAModel(AdapterModel):
         embedding_modules: Optional[dict[str, str]] = None,
         embedding_padding_modules: Optional[list[str]] = None,
         weights_mapper: Optional[WeightsMapper] = None,
-        tensorizer_config: Optional["TensorizerConfig"] = None
+        tensorizer_config_dict: Optional[dict] = None
     ) -> "LoRAModel":
         """Create a LoRAModel from a local checkpoint.
         
@@ -225,8 +222,13 @@ class LoRAModel(AdapterModel):
                                                     "new_embeddings.bin")
         tensors: dict[str, torch.Tensor] = {}
         unexpected_modules: list[Union[list[str], str]]
-        if tensorizer_config:
+        if tensorizer_config_dict:
             from tensorizer import TensorDeserializer
+
+            from vllm.model_executor.model_loader.tensorizer import (
+                TensorizerConfig)
+
+            tensorizer_config = TensorizerConfig(**tensorizer_config_dict)
             lora_tensor_path = os.path.join(tensorizer_config.tensorizer_dir,
                                             "adapter_model.tensors")
             tensorizer_args = tensorizer_config._construct_tensorizer_args()
