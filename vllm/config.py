@@ -2617,6 +2617,8 @@ class SpeculativeConfig:
             ray_workers_use_nsight=target_parallel_config.
             ray_workers_use_nsight,
             placement_group=target_parallel_config.placement_group,
+            enable_expert_parallel=target_parallel_config.
+            enable_expert_parallel,
         )
 
         return draft_parallel_config

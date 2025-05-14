@@ -420,7 +420,11 @@ class HpuModelAdapter(torch.nn.Module):
                 current_module = getattr(current_module, layer)
             elif isinstance(layer,
                             int):  # Indexed-based access (like ModuleList)
-                current_module = list(current_module._modules.values())[layer]
+                module_list = list(current_module._modules.values())
+                if layer >= len(module_list):
+                    # for MTP models, last layer is MTP layer
+                    layer = -1
+                current_module = module_list[layer]
 
         # At the end, we should be at the RotaryEmbedding layer.
         if hasattr(current_module, 'prepare_cos_sin'):
@@ -577,6 +581,7 @@ class ModelInputForHPU(ModelRunnerInputBase):
     async_callback: Optional[Callable] = None
     is_first_multi_step: bool = True
     is_last_step: bool = True
+    previous_hidden_states: Optional[torch.Tensor] = None
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
@@ -2653,6 +2658,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
         assert not (use_delayed_sampling and self.spec_decode_enabled), \
             'Delayed sampling is not compatible with speculative decoding!'
         assert model_input.input_tokens is not None
+        output = None
         if use_delayed_sampling and not model_input.is_prompt and \
                 self.is_driver_worker:
             num_cached = len(self.cached_step_outputs)
@@ -3002,7 +3008,8 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                     output.sampled_token_probs = output.sampled_token_probs[:
                                                                             real_batch_size]
                     output.logprobs = output.logprobs[:real_batch_size]
-                if self.return_hidden_states:
+                if self.return_hidden_states and isinstance(
+                        output, SamplerOutput):
                     # we only need to pass hidden states of most recent token
                     assert model_input.sampling_metadata is not None
                     hidden_states = hidden_states[:real_batch_size]

@@ -77,7 +77,7 @@ class HPUWorker(LocalOrDistributedWorkerBase):
             or (speculative_config.draft_model_config.hf_config.model_type \
                 == model_config.hf_config.model_type) \
             or (speculative_config.draft_model_config.hf_config.model_type
-                not in ["medusa", "mlp_speculator", "eagle"]) \
+                not in ["medusa", "mlp_speculator", "eagle", "deepseek_mtp"]) \
                     else {"return_hidden_states": True}
 
         is_encoder_decoder_model = self._is_encoder_decoder_model()

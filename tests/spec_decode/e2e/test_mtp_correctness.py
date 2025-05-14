@@ -51,7 +51,10 @@ PRECISION = "bfloat16"
         "model_name": MAIN_MODEL,
 
         # GPU memory utilization
-        "gpu_memory_utilization": 0.85
+        "gpu_memory_utilization": 0.85,
+
+        # scheduler
+        "use_padding_aware_scheduling": False,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])

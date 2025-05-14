@@ -9,6 +9,8 @@ import torch.nn as nn
 
 from vllm.platforms import current_platform
 
+is_hpu = current_platform.is_hpu()
+
 
 class SpecDecodeBaseSampler(nn.Module):
     """Base class for samplers used for Speculative Decoding verification
@@ -98,7 +100,11 @@ class SpecDecodeBaseSampler(nn.Module):
         batch_size, k = substitute_token_ids.shape
         bonus_token_ids = bonus_token_ids.squeeze(-1)
         # Determine the index of the first False value for each row.
-        limits = (accepted == 0).max(1).indices
+        if is_hpu:
+            # WA on HPU to bypass the cpu_fallback
+            limits = (accepted == 0).to(torch.int32).max(1).indices
+        else:
+            limits = (accepted == 0).max(1).indices
         limits[~(accepted == 0).any(1)] = k
 
         # Create masks using the indices.
