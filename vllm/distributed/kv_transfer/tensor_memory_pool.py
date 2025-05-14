@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
 import torch
-import tensor_store_load_mem as cuda_kernels
+from vllm import _custom_ops as ops
 
 
 @dataclass
@@ -127,7 +127,7 @@ class TensorMemoryPool:
             raise MemoryError(f"Failed to create tensor view: {e}")
 
         with torch.cuda.stream(self.store_stream):
-            cuda_kernels.store_tensor(tensor, cpu_tensor)
+            ops.store_tensor(tensor, cpu_tensor)
         self.store_stream.synchronize()
 
         return addr
@@ -150,7 +150,7 @@ class TensorMemoryPool:
         cuda_tensor = torch.empty(shape, dtype=dtype, device=device)
 
         with torch.cuda.stream(self.load_stream):
-            cuda_kernels.load_tensor(cpu_tensor, cuda_tensor)
+            ops.load_tensor(cpu_tensor, cuda_tensor)
         self.load_stream.synchronize()
 
         self.free(addr)

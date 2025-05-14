@@ -665,4 +665,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
   custom_ar.def("free_shared_buffer", &free_shared_buffer);
 }
 
+TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _mem_pool), mem_pool) {
+  mem_pool.def("store_tensor", &store_tensor);
+  mem_pool.def("load_tensor", &load_tensor);
+}
+
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
