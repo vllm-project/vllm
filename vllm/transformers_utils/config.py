@@ -699,11 +699,12 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
                 token=token_val)
             if hf_value := hf_config.get_text_config().max_position_embeddings:
                 max_position_embeddings = hf_value
-        except Exception:
-            warning_message = ("Could not read 'max_position_embeddings' "
-                               "from the config for model: "
-                               "'{model}'.\n").format(model=model)
-            logger.warning(warning_message)
+        except Exception as e:
+            logger.warning(
+                "The params.json file is missing 'max_position_embeddings'"
+                " and could not get a value from the HF config."
+                " Defaulting to 128000",
+                exc_info=e)
         config_dict["max_position_embeddings"] = max_position_embeddings
 
     if config_dict.get("quantization") is not None:
