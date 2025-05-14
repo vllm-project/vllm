@@ -260,6 +260,8 @@ class Sampler(nn.Module):
         do_top_p_top_k = self._do_top_p_top_k
         do_min_p = self._do_min_p
 
+        logits = _apply_thinking_budget(logits, sampling_metadata)
+
         logits = _apply_min_tokens_penalty(logits, sampling_metadata)
 
         # Apply presence and frequency penalties.
@@ -340,6 +342,34 @@ class Sampler(nn.Module):
         method be encoded into the probability distribution.
         """
         return self.should_modify_greedy_probs_inplace
+
+def _apply_thinking_budget(
+    logits: torch.Tensor,
+    sampling_metadata: SamplingMetadata,
+) -> torch.Tensor:
+
+    for seq_group in sampling_metadata.seq_groups:
+        seq_ids = seq_group.seq_ids
+        try:
+            if seq_group.sampling_params.extra_args:
+                if thinking_budget := seq_group.sampling_params.extra_args.get('thinking_budget', 0):
+                    for seq_id in seq_ids:
+                        output_token_ids = seq_group.seq_data[seq_id].output_token_ids
+                        if output_token_ids and output_token_ids[-1] == envs.VLLM_END_THINKING_TOKEN_ID:
+                            seq_group.sampling_params.extra_args.pop('thinking_budget', None)
+                        elif len(output_token_ids) > thinking_budget:
+                            last = output_token_ids[-1]
+                            index = seq_group.sample_indices[0]
+                            if last == envs.VLLM_PRE_END_THINKING_TOKEN_ID:
+                                logits[index].fill_(-float('inf'))
+                                logits[index][envs.VLLM_END_THINKING_TOKEN_ID] = 0
+                                seq_group.sampling_params.extra_args.pop('thinking_budget', None)
+                            else:
+                                logits[index].fill_(-float('inf'))
+                                logits[index][envs.VLLM_PRE_END_THINKING_TOKEN_ID] = 0
+        except:
+            pass
+    return logits
 
 
 def _apply_min_tokens_penalty(

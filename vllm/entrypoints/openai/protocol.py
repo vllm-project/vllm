@@ -266,6 +266,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
     spaces_between_special_tokens: bool = True
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
     prompt_logprobs: Optional[int] = None
+
+    thinking_budget: int=0
     # doc: end-chat-completion-sampling-params
 
     # doc: begin-chat-completion-extra-params
@@ -515,7 +517,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
             whitespace_pattern=self.guided_whitespace_pattern,
             structural_tag=self.structural_tag,
         )
-
+        extra_args = {}
+        if self.kv_transfer_params:
+            extra_args = {"kv_transfer_params": self.kv_transfer_params}
+        if self.chat_template_kwargs and self.chat_template_kwargs.get('enable_thinking', True) and self.thinking_budget > 0:
+            extra_args = {'thinking_budget': self.thinking_budget}
         return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
@@ -544,8 +550,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 else RequestOutputKind.FINAL_ONLY,
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias,
-            extra_args=({"kv_transfer_params": self.kv_transfer_params}
-                        if self.kv_transfer_params else None))
+            extra_args=extra_args)
 
     def _get_guided_json_from_tool(
             self) -> Optional[Union[str, dict, BaseModel]]:

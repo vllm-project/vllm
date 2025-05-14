@@ -4,6 +4,7 @@
 import torch
 import torch.nn as nn
 
+from vllm.envs import VLLM_END_THINKING_TOKEN_ID, VLLM_PRE_END_THINKING_TOKEN_ID
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.bad_words import apply_bad_words
@@ -37,6 +38,9 @@ class Sampler(nn.Module):
 
         # Use float32 for the logits.
         logits = logits.to(torch.float32)
+
+        logits = self.apply_thinking_budget(logits, sampling_metadata)
+
         # Apply allowed token ids.
         logits = self.apply_allowed_token_ids(logits, sampling_metadata)
         # Apply bad words exclusion.
@@ -254,6 +258,27 @@ class Sampler(nn.Module):
         if sampling_metadata.allowed_token_ids_mask is not None:
             logits.masked_fill_(sampling_metadata.allowed_token_ids_mask,
                                 float("-inf"))
+        return logits
+
+
+    def apply_thinking_budget(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> torch.Tensor:
+        remove_indices = []
+        for index, budget in sampling_metadata.thinking_budget.items():
+            if sampling_metadata.output_token_ids[index][-1] == VLLM_END_THINKING_TOKEN_ID:
+                remove_indices.append(index)
+            elif len(sampling_metadata.output_token_ids[index]) == budget:
+                logits[index].fill_(-float('inf'))
+                logits[index][VLLM_PRE_END_THINKING_TOKEN_ID] = 0
+            elif len(sampling_metadata.output_token_ids[index]) == budget +1:
+                logits[index].fill_(-float('inf'))
+                logits[index][VLLM_END_THINKING_TOKEN_ID] = 0
+                remove_indices.append(index)
+        for index in remove_indices:
+            sampling_metadata.thinking_budget.pop(index)
         return logits
 
     def apply_bad_words(

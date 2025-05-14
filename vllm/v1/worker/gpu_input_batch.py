@@ -190,6 +190,8 @@ class InputBatch:
         # req_index -> (min_tokens, stop_token_ids)
         self.min_tokens: dict[int, tuple[int, set[int]]] = {}
 
+        self.thinking_budget: dict[int, int] = {}
+
         # lora related
         self.request_lora_mapping = np.zeros((self.max_num_reqs, ),
                                              dtype=np.int32)
@@ -305,6 +307,9 @@ class InputBatch:
             self.min_tokens[req_index] = (sampling_params.min_tokens,
                                           sampling_params.all_stop_token_ids)
 
+        if request.sampling_params.extra_args and request.sampling_params.extra_args.get('thinking_budget', 0) > 0:
+            self.thinking_budget[req_index] = request.sampling_params.extra_args.get('thinking_budget', 0)
+
         # NOTE(woosuk): self.generators should not include the requests that
         # do not have their own generator.
         if request.generator is not None:
@@ -368,6 +373,8 @@ class InputBatch:
         self.top_k_reqs.discard(req_id)
         self.min_p_reqs.discard(req_id)
         self.min_tokens.pop(req_index, None)
+        self.thinking_budget.pop(req_index, None)
+
         self.frequency_penalties_reqs.discard(req_id)
         self.presence_penalties_reqs.discard(req_id)
         self.repetition_penalties_reqs.discard(req_id)
@@ -437,6 +444,7 @@ class InputBatch:
 
         swap_dict_values(self.generators, i1, i2)
         swap_dict_values(self.min_tokens, i1, i2)
+        swap_dict_values(self.thinking_budget, i1, i2)
         swap_dict_values(self.bad_words_token_ids, i1, i2)
 
         self.request_lora_mapping[i1], self.request_lora_mapping[i2] =\
@@ -512,6 +520,10 @@ class InputBatch:
             if min_token is not None:
                 self.min_tokens[empty_index] = min_token
 
+            thinking_budget = self.thinking_budget.pop(last_req_index, None)
+            if thinking_budget is not None:
+                self.thinking_budget[empty_index] = thinking_budget
+
             self.request_lora_mapping[empty_index] = self.request_lora_mapping[
                 last_req_index]
 
@@ -575,6 +587,17 @@ class InputBatch:
                        self.allowed_token_ids_mask, num_reqs)
             allowed_token_ids_mask = self.allowed_token_ids_mask[:num_reqs]
 
+        remove_indices = []
+        for index, budget in self.thinking_budget.items():
+            from vllm.envs import VLLM_END_THINKING_TOKEN_ID
+            if index > len(self.req_output_token_ids):
+                if len(self.req_output_token_ids[index]) > budget + 1:
+                    remove_indices.append(index)
+                elif VLLM_END_THINKING_TOKEN_ID in self.req_output_token_ids[index]:
+                    remove_indices.append(index)
+        for index in remove_indices:
+            self.thinking_budget.pop(index, None)
+
         return SamplingMetadata(
             temperature=temperature,
             all_greedy=self.all_greedy,
@@ -590,6 +613,7 @@ class InputBatch:
             repetition_penalties=self.repetition_penalties[:num_reqs],
             output_token_ids=cast(list[list[int]], self.req_output_token_ids),
             min_tokens=self.min_tokens,
+            thinking_budget=self.thinking_budget,
             no_penalties=self.no_penalties,
             logit_bias=self.logit_bias[:num_reqs],
             allowed_token_ids_mask=allowed_token_ids_mask,

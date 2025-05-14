@@ -33,6 +33,9 @@ class SamplingMetadata:
     # req_index -> (min_tokens, stop_token_ids)
     min_tokens: dict[int, tuple[int, set[int]]]
 
+    # req_index -> thinking_budget
+    thinking_budget: dict[int, int]
+
     logit_bias: list[Optional[dict[int, float]]]
 
     # `allowed_token_ids_mask` is a 2D bool tensor of shape (max batch size,

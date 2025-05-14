@@ -1670,6 +1670,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             repetition_penalties=dummy_tensors(0.1),
             output_token_ids=[[] for _ in range(num_reqs)],
             min_tokens={},
+            thinking_budget={},
             logit_bias=[None for _ in range(num_reqs)],
             allowed_token_ids_mask=None,
             bad_words_token_ids={},

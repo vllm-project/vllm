@@ -115,6 +115,9 @@ if TYPE_CHECKING:
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5557
+    VLLM_PRE_END_THINKING_TOKEN_ID: int = 198 ## /n
+    VLLM_END_THINKING_TOKEN_ID: int = 151668 ## </think>
+
 
 
 def get_default_cache_root():
@@ -764,6 +767,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Port used for NIXL handshake between remote agents.
     "VLLM_NIXL_SIDE_CHANNEL_PORT":
     lambda: int(os.getenv("VLLM_NIXL_SIDE_CHANNEL_PORT", "5557")),
+
+    "VLLM_PRE_END_THINKING_TOKEN_ID":
+        lambda: int(os.getenv("VLLM_PRE_END_THINKING_TOKEN_ID", "198")),
+
+    "VLLM_END_THINKING_TOKEN_ID":
+        lambda: int(os.getenv("VLLM_END_THINKING_TOKEN_ID", "151668")),
+
 }
 
 # end-env-vars-definition
