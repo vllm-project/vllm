@@ -539,7 +539,7 @@ Specified using `--task generate`.
   * ✅︎
 - * `OLMo2ForCausalLM`
   * OLMo2
-  * `allenai/OLMo2-7B-1124`, etc.
+  * `allenai/OLMo-2-0425-1B`, etc.
   *
   * ✅︎
 - * `OLMoEForCausalLM`
