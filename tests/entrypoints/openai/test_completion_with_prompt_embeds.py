@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-# imports for guided decoding tests
 import base64
 import io
 import shutil
@@ -19,8 +18,6 @@ from ...utils import RemoteOpenAIServer
 
 # any model with a chat template should work here
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
-# technically these adapters use a different base model,
-# but we're not testing generation quality here
 LORA_NAME = "typeof/zephyr-7b-beta-lora"
 
 CONFIG = AutoConfig.from_pretrained(MODEL_NAME)
