@@ -76,6 +76,9 @@ async def test_load(output_kind: RequestOutputKind):
 
         request_ids = [f"request-{i}" for i in range(NUM_REQUESTS)]
 
+        import time
+        time.sleep(20)
+
         # Create concurrent requests.
         tasks = []
         for request_id in request_ids:
