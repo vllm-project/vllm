@@ -64,7 +64,7 @@ markdown_extensions:
   - toc:
       permalink: true
 extra_javascript:
-  - _static/custom.js
+  - javascript/run_llm_widget.js
 # extra:
 #   consent:
 #     title: Cookie consent
