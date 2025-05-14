@@ -50,8 +50,8 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
                            Logprob, SequenceData, SequenceGroupMetadata,
                            SequenceOutput)
-from vllm.utils import (bind_kv_cache, is_pin_memory_available,
-                        make_tensor_with_pad, is_fake_hpu)
+from vllm.utils import (bind_kv_cache, is_fake_hpu, is_pin_memory_available,
+                        make_tensor_with_pad)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase,
     _add_attn_metadata_broadcastable_dict,
