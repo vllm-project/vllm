@@ -2,43 +2,61 @@
 import time
 from typing import Optional, Union
 
-from vllm.config import SpeculativeConfig, VllmConfig
+import prometheus_client
+
+from vllm.config import VllmConfig
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.spec_decode.metrics import SpecDecodingProm
 
 try:
     from ray.util import metrics as ray_metrics
+    from ray.util.metrics import Metric
 except ImportError:
     ray_metrics = None
 
 
-class _RayGaugeWrapper:
+class RayPrometheusMetric:
+
+    def __init__(self):
+        if ray_metrics is None:
+            raise ImportError(
+                "RayPrometheusMetric requires Ray to be installed.")
+
+        self.metric: Metric = None
+
+    def labels(self, *labels, **labelskwargs):
+        if labelskwargs:
+            for k, v in labelskwargs.items():
+                if not isinstance(v, str):
+                    labelskwargs[k] = str(v)
+
+            self.metric.set_default_tags(labelskwargs)
+
+        return self
+
+
+class RayGaugeWrapper(RayPrometheusMetric):
     """Wraps around ray.util.metrics.Gauge to provide same API as
     prometheus_client.Gauge"""
 
     def __init__(self,
                  name: str,
                  documentation: Optional[str] = "",
-                 labelnames: Optional[list[str]] = None,
-                 multiprocess_mode: str = ""):
+                 labelnames: Optional[list[str]] = None):
         labelnames_tuple = tuple(labelnames) if labelnames else None
-        self._gauge = ray_metrics.Gauge(name=name,
+        self.metric = ray_metrics.Gauge(name=name,
                                         description=documentation,
                                         tag_keys=labelnames_tuple)
 
-    def labels(self, **labels):
-        self._gauge.set_default_tags(labels)
-        return self
-
     def set(self, value: Union[int, float]):
-        return self._gauge.set(value)
+        return self.metric.set(value)
 
     def set_to_current_time(self):
         # ray metrics doesn't have set_to_current time, https://docs.ray.io/en/latest/_modules/ray/util/metrics.html
-        return self._gauge.set(time.time())
+        return self.metric.set(time.time())
 
 
-class _RayCounterWrapper:
+class RayCounterWrapper(RayPrometheusMetric):
     """Wraps around ray.util.metrics.Counter to provide same API as
     prometheus_client.Counter"""
 
@@ -47,21 +65,17 @@ class _RayCounterWrapper:
                  documentation: Optional[str] = "",
                  labelnames: Optional[list[str]] = None):
         labelnames_tuple = tuple(labelnames) if labelnames else None
-        self._counter = ray_metrics.Counter(name=name,
-                                            description=documentation,
-                                            tag_keys=labelnames_tuple)
-
-    def labels(self, **labels):
-        self._counter.set_default_tags(labels)
-        return self
+        self.metric = ray_metrics.Counter(name=name,
+                                          description=documentation,
+                                          tag_keys=labelnames_tuple)
 
     def inc(self, value: Union[int, float] = 1.0):
         if value == 0:
             return
-        return self._counter.inc(value)
+        return self.metric.inc(value)
 
 
-class _RayHistogramWrapper:
+class RayHistogramWrapper(RayPrometheusMetric):
     """Wraps around ray.util.metrics.Histogram to provide same API as
     prometheus_client.Histogram"""
 
@@ -72,17 +86,13 @@ class _RayHistogramWrapper:
                  buckets: Optional[list[float]] = None):
         labelnames_tuple = tuple(labelnames) if labelnames else None
         boundaries = buckets if buckets else []
-        self._histogram = ray_metrics.Histogram(name=name,
-                                                description=documentation,
-                                                tag_keys=labelnames_tuple,
-                                                boundaries=boundaries)
-
-    def labels(self, **labels):
-        self._histogram.set_default_tags(labels)
-        return self
+        self.metric = ray_metrics.Histogram(name=name,
+                                            description=documentation,
+                                            tag_keys=labelnames_tuple,
+                                            boundaries=boundaries)
 
     def observe(self, value: Union[int, float]):
-        return self._histogram.observe(value)
+        return self.metric.observe(value)
 
 
 class RaySpecDecodingProm(SpecDecodingProm):
@@ -92,48 +102,19 @@ class RaySpecDecodingProm(SpecDecodingProm):
     util.metrics library.
     """
 
-    def _create_counter(self, name: str, documentation: Optional[str],
-                        labelnames: list[str]):
-        return _RayCounterWrapper(name=name,
-                                  documentation=documentation,
-                                  labelnames=labelnames)
+    _counter_cls = prometheus_client.Counter
 
 
 class RayPrometheusStatLogger(PrometheusStatLogger):
     """RayPrometheusStatLogger uses Ray metrics instead."""
 
+    _gauge_cls = RayGaugeWrapper
+    _counter_cls = RayCounterWrapper
+    _histogram_cls = RayHistogramWrapper
+    _spec_decoding_cls = RaySpecDecodingProm
+
     def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
         super().__init__(vllm_config, engine_index)
-
-    def _create_gauge(self,
-                      name: str,
-                      documentation: Optional[str],
-                      labelnames: list[str],
-                      multiprocess_mode: str = "all"):
-        return _RayGaugeWrapper(name=name,
-                                documentation=documentation,
-                                labelnames=labelnames,
-                                multiprocess_mode=multiprocess_mode)
-
-    def _create_counter(self, name: str, documentation: Optional[str],
-                        labelnames: list[str]):
-        return _RayCounterWrapper(name=name,
-                                  documentation=documentation,
-                                  labelnames=labelnames)
-
-    def _create_histogram(self, name: str, documentation: Optional[str],
-                          buckets: list[Union[int,
-                                              float]], labelnames: list[str]):
-        return _RayHistogramWrapper(
-            name=name,
-            documentation=documentation,
-            buckets=buckets,
-            labelnames=labelnames,
-        )
-
-    def _create_spec_decoding(self, config: SpeculativeConfig,
-                              labelnames: list[str], labelvalues: list[str]):
-        return RaySpecDecodingProm(config, labelnames, labelvalues)
 
     @staticmethod
     def _unregister_vllm_metrics():
