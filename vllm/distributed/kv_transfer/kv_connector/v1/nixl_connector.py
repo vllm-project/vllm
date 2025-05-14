@@ -88,7 +88,6 @@ class NixlConnector(KVConnectorBase_V1):
 
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
         assert vllm_config.kv_transfer_config is not None
-        self.vllm_config = vllm_config
         self.engine_id = vllm_config.kv_transfer_config.engine_id
 
         if role == KVConnectorRole.SCHEDULER:
@@ -98,7 +97,7 @@ class NixlConnector(KVConnectorBase_V1):
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
             self.connector_worker = NixlConnectorWorker(
-                str(self.engine_id), vllm_config)
+                vllm_config, str(self.engine_id))
 
     ############################################################
     # Scheduler Side Methods
@@ -304,7 +303,7 @@ class NixlConnectorScheduler:
 class NixlConnectorWorker:
     """Implementation of Worker side methods"""
 
-    def __init__(self, engine_id: str, vllm_config: VllmConfig):
+    def __init__(self, vllm_config: VllmConfig, engine_id: str):
         if NixlWrapper is None:
             logger.error("NIXL is not available")
             raise RuntimeError("NIXL is not available")
@@ -361,88 +360,9 @@ class NixlConnectorWorker:
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
 
-    def _get_layer_index_from_name(self, layer_name: str) -> Optional[int]:
-        """
-        Parses the numerical index from a layer name string.
-        Example: "model.layers.0.self_attn" -> 0
-        """
-        parts = layer_name.split('.')
-        for i, part in enumerate(parts):
-            if part == "layers" and i + 1 < len(parts):
-                try:
-                    return int(parts[i + 1])
-                except ValueError:
-                    logger.warning(
-                        f"Could not parse layer index from part '{parts[i+1]}' in layer name '{layer_name}'"
-                    )
-                    return None
-        logger.debug(
-            f"Could not find 'layers.X' pattern in layer name '{layer_name}' to extract index."
-        )
-        return None
-
-    def _get_llama4_layer_strategy(self, layer_name: str) -> Optional[int]:
-        """
-        Determines the transfer strategy for a given layer type.
-        At the moment this is used for Llama 4 models (RoPE vs NoPE).
-        Returns:
-            Optional[int]: chunk_size
-        """
-        layer_idx = self._get_layer_index_from_name(layer_name)
-        if layer_idx is None:
-            logger.debug(
-                f"Could not determine layer index for '{layer_name}'. Defaulting to global transfer."
-            )
-            return None
-
-        model_cfg = self.vllm_config.model_config
-        if not hasattr(model_cfg, 'hf_text_config'):
-            logger.debug(
-                "Model config does not have 'hf_text_config'. Defaulting to global transfer for layer %s.",
-                layer_name)
-            return None
-
-        model_hf_text_config = model_cfg.hf_text_config
-        if not hasattr(model_hf_text_config, 'no_rope_layers'):
-            logger.debug(
-                "Model hf_text_config does not have 'no_rope_layers'. Defaulting to global transfer for layer %s.",
-                layer_name)
-            return None
-        elif not hasattr(model_hf_text_config, 'attention_chunk_size'):
-            logger.debug(
-                "Model hf_text_config does not have 'attention_chunk_size'. Defaulting to global transfer for layer %s.",
-                layer_name)
-            return None
-
-        no_rope_layers = model_hf_text_config.no_rope_layers
-        if not isinstance(no_rope_layers, list) or not no_rope_layers:
-            logger.debug(
-                "'no_rope_layers' is not a valid list. Defaulting to global transfer for layer %s.",
-                layer_name)
-            return None
-
-        chunk_size = getattr(model_hf_text_config, 'attention_chunk_size',
-                             None)
-        if not isinstance(chunk_size, int) or chunk_size <= 0:
-            logger.debug(
-                "'attention_chunk_size' is not a valid integer. Defaulting to global transfer for layer %s.",
-                layer_name)
-            return None
-
-        if not (0 <= layer_idx < len(no_rope_layers)):
-            logger.debug(
-                f"Layer index {layer_idx} is out of bounds for 'no_rope_layers' list (len {len(no_rope_layers)}). Defaulting to global transfer for layer %s.",
-                layer_name)
-            return None
-
-        # Llama 4 specific logic:
-        # no_rope_layers[layer_idx] == 0 means NoPE (global)
-        # Any other value means RoPE (local chunked)
-        if no_rope_layers[layer_idx] == 0:
-            return None  # Global attention
-        else:
-            # Llama 4 RoPE layers have a fixed chunk_size token window
-            return chunk_size
+        # Llama 4 specific logic
+        # List of block window sizes for each layer for local attention
+        self.block_window_per_layer: list[Optional[int]] = []
 
     @staticmethod
     def _nixl_handshake_listener(metadata: NixlAgentMetadata,
@@ -555,6 +475,24 @@ class NixlConnectorWorker:
         self.kv_caches_base_addr[self.engine_id] = kv_caches_base_addr
         self.num_regions = len(caches_data)
         self.num_layers = len(self.kv_caches.keys())
+
+        # Local attention chunking optimization (Llama 4)
+        if self.vllm_config.model_config.model_type == "llama4":
+            from transformers import Llama4TextConfig
+            assert isinstance(self.vllm_config.model_config.hf_text_config,
+                              Llama4TextConfig)
+            llama4_config = self.vllm_config.model_config.hf_text_config
+            for layer_idx, _ in enumerate(self.kv_caches.keys()):
+                no_rope_layers = llama4_config.no_rope_layers
+                # no_rope_layers[layer_idx] == 0 means NoPE (global)
+                # Any other value means RoPE (local chunked)
+                chunk_size = None if no_rope_layers[
+                    layer_idx] == 0 else llama4_config.attention_chunk_size
+                chunkblock__size = math.ceil(chunk_size / self.block_size)
+                self.block_window_per_layer.append(chunkblock__size)
+            logger.debug("Llama 4 block window per layer mapping: %s",
+                         self.block_window_per_layer)
+            assert len(self.block_window_per_layer) == self.num_layers
 
         descs = self.nixl_wrapper.get_reg_descs(caches_data, "VRAM")
         logger.debug("Registering descs: %s", caches_data)
@@ -787,26 +725,28 @@ class NixlConnectorWorker:
         local_block_descs_ids: list[int] = []
         remote_block_descs_ids: list[int] = []
 
-        # Iterate through all layers this worker is responsible for
-        for layer_idx, layer_name in enumerate(self.kv_caches.keys()):
-
-            if chunk_size := self._get_llama4_layer_strategy(layer_name):
-                # Llama 4 specific logic
-                logger.debug(
-                    f"Layer {layer_name} is local attention with chunk_size: {chunk_size}"
-                )
-                num_blocks_for_window = math.ceil(chunk_size / self.block_size)
-                # Get the last num_blocks_for_window blocks
-                layer_local_block_ids = local_block_ids[
-                    -num_blocks_for_window:]
-                layer_remote_block_ids = remote_block_ids[
-                    -num_blocks_for_window:]
-            else:
-                logger.debug(f"Layer {layer_name} is global attention")
-                # If the layer is not chunked, we just use the
-                # full block lists (global attention)
-                layer_local_block_ids = local_block_ids
-                layer_remote_block_ids = remote_block_ids
+        # Get descs ids.
+        if not self.block_window_per_layer:
+            # Default case: assume global attention
+            remote_block_descs_ids = self._get_block_descs_ids(
+                dst_engine_id, remote_block_ids)
+            local_block_descs_ids = self._get_block_descs_ids(
+                self.engine_id, local_block_ids)
+            assert len(local_block_descs_ids) == len(remote_block_descs_ids)
+        else:
+            # Llama 4 specific case: local attention with chunking
+            for layer_idx, block_window in enumerate(
+                    self.block_window_per_layer):
+                # For each layer:
+                if block_window is None:
+                    # If not chunked, we just use the
+                    # full block lists (global attention)
+                    layer_local_block_ids = local_block_ids
+                    layer_remote_block_ids = remote_block_ids
+                else:
+                    # If chunked, get the last block_window blocks
+                    layer_local_block_ids = local_block_ids[-block_window:]
+                    layer_remote_block_ids = remote_block_ids[-block_window:]
 
             # Get descs ids for the layer.
             layer_remote_desc_ids = self._get_block_descs_ids(
@@ -817,9 +757,6 @@ class NixlConnectorWorker:
             remote_block_descs_ids.extend(layer_remote_desc_ids)
             local_block_descs_ids.extend(layer_local_desc_ids)
 
-        logger.debug(
-            f"NIXL READ for {len(local_block_descs_ids)} local descs and {len(remote_block_descs_ids)} remote descs"
-        )
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
 
         # Get side handles.
@@ -858,7 +795,7 @@ class NixlConnectorWorker:
             assert layer_idx < self.num_layers
             if self.num_layers < self.num_regions:
                 # If we have more regions than layers, we assume that
-                # the regions are organized as [K, V, K, V, ...]
+                # the regions are organized as [K0, V0, K1, V1, ...]
                 assert 2 * self.num_layers == self.num_regions
                 region_ids = [2 * layer_idx, 2 * layer_idx + 1]
             else:
