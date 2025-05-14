@@ -48,23 +48,6 @@ class KVConnectorRole(enum.Enum):
     WORKER = 1
 
 
-class KVTransferParams:
-    """
-    Abstract KVTransferParams used to send KVTransfer
-    parameters between instances of vLLM.
-    
-    Specific instances of KVConnector customize this
-    method for serializing / deserializing msgs sent
-    via the HTTP protocol.
-    """
-
-    @staticmethod
-    def from_raw_dict(
-            raw_dict: Optional[dict[str,
-                                    Any]]) -> Optional["KVTransferParams"]:
-        return None
-
-
 @dataclass
 class KVConnectorMetadata:
     """
@@ -75,7 +58,6 @@ class KVConnectorMetadata:
 
 
 class KVConnectorBase_V1(ABC):
-    _KVTransferParams = KVTransferParams
 
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
         logger.warning(

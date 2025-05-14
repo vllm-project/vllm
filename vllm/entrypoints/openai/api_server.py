@@ -971,10 +971,10 @@ async def init_app_state(
                 chat_template=resolved_chat_template)
         else:
             hf_chat_template = resolve_hf_chat_template(
-                vllm_config.model_config,
-                tokenizer,
+                tokenizer=tokenizer,
                 chat_template=None,
                 tools=None,
+                model_config=vllm_config.model_config,
             )
 
             if hf_chat_template != resolved_chat_template:

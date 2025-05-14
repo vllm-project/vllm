@@ -182,6 +182,13 @@ class Fp8LinearMethod(LinearMethodBase):
         if current_platform.is_rocm():
             self.use_marlin = False
 
+        # AITER is only supported on ROCm and only for FP8_FNUZ
+        # and at the moment are MI300 series
+        self.use_aiter_and_is_supported = (current_platform.is_rocm()
+                                           and envs.VLLM_ROCM_USE_AITER
+                                           and envs.VLLM_ROCM_USE_AITER_LINEAR
+                                           and current_platform.is_fp8_fnuz())
+
         self.block_quant = self.quant_config.weight_block_size is not None
         self.fp8_linear = Fp8LinearOp(
             # Default to using per_token quantization if cutlass is supported
@@ -402,6 +409,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 input_scale=layer.input_scale,
                 bias=bias,
                 cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
+                use_aiter_and_is_supported=self.use_aiter_and_is_supported,
             )
 
         return self.fp8_linear.apply(input=x,
@@ -583,6 +591,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
             expand_weights, is_rocm_aiter_moe_enabled, shuffle_weights)
 
+        self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
+
         # TODO (rob): refactor block quant into separate class.
         if self.block_quant:
             assert self.quant_config.activation_scheme == "dynamic"
@@ -608,10 +618,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w2_weight = Parameter(w2_weight, requires_grad=False)
             layer.w2_weight_scale_inv = Parameter(w2_weight_scale_inv,
                                                   requires_grad=False)
-            if is_rocm_aiter_moe_enabled():
+            if self.rocm_aiter_moe_enabled:
                 # reshaping weights is required for aiter moe kernel.
                 shuffled_w13, shuffled_w2 = shuffle_weights(
-                    layer.w13_weight.data, layer.w2_weight.data)
+                    layer.w13_weight.data,
+                    layer.w2_weight.data,
+                    layout=(16, 16))
 
                 layer.w13_weight = torch.nn.Parameter(shuffled_w13,
                                                       requires_grad=False)
@@ -655,7 +667,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                                                   requires_grad=False)
             layer.w2_weight = torch.nn.Parameter(w2_weight,
                                                  requires_grad=False)
-            if is_rocm_aiter_moe_enabled():
+            if self.rocm_aiter_moe_enabled:
                 # reshaping weights is required for aiter moe kernel.
                 w13_scales, w2_scales = expand_weights(
                     layer.w13_weight_scale.data,
@@ -668,8 +680,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 layer.w2_weight_scale = torch.nn.Parameter(
                     w2_scales.contiguous(), requires_grad=False)
 
-                shuffled_w13, shuffled_w2 = shuffle_weights(
-                    layer.w13_weight, layer.w2_weight)
+                shuffled_w13, shuffled_w2 = shuffle_weights(layer.w13_weight,
+                                                            layer.w2_weight,
+                                                            layout=(16, 16))
 
                 layer.w13_weight = torch.nn.Parameter(shuffled_w13,
                                                       requires_grad=False)
@@ -740,7 +753,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                             dq_weight, max_w13_scales[expert_id])
                     start += shard_size
 
-            if is_rocm_aiter_moe_enabled():
+            if self.rocm_aiter_moe_enabled:
                 # reshaping weights is required for aiter moe kernel.
                 expansion_dims = [
                     layer.w13_weight.shape[1], layer.w2_weight.shape[1]
@@ -752,8 +765,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 layer.w2_weight_scale = torch.nn.Parameter(
                     w2_scales.contiguous(), requires_grad=False)
 
-                shuffled_w13, shuffled_w2 = shuffle_weights(
-                    layer.w13_weight, layer.w2_weight)
+                shuffled_w13, shuffled_w2 = shuffle_weights(layer.w13_weight,
+                                                            layer.w2_weight,
+                                                            layout=(32, 32))
 
                 layer.w13_weight = torch.nn.Parameter(shuffled_w13,
                                                       requires_grad=False)
@@ -788,6 +802,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         activation: str = "silu",
     ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe import fused_experts
+        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+            rocm_aiter_fused_experts)
 
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
@@ -802,7 +818,29 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             e_score_correction_bias=e_score_correction_bias,
         )
 
+        if self.rocm_aiter_moe_enabled:
+            return rocm_aiter_fused_experts(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=activation,
+                use_fp8_w8a8=True,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                w1_scale=(layer.w13_weight_scale_inv
+                          if self.block_quant else layer.w13_weight_scale),
+                w2_scale=(layer.w2_weight_scale_inv
+                          if self.block_quant else layer.w2_weight_scale),
+                a1_scale=layer.w13_input_scale,
+                a2_scale=layer.w2_input_scale,
+                block_shape=self.quant_config.weight_block_size)
+
         if self.use_marlin:
+            assert activation == "silu", (
+                f"{activation} not supported for Marlin MoE.")
+            assert not apply_router_weight_on_input, (
+                "Apply router weight on input not supported for Marlin MoE.")
             return torch.ops.vllm.fused_marlin_moe(
                 x,
                 layer.w13_weight,
