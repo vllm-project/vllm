@@ -216,6 +216,37 @@ def rocm_aiter_topk_softmax_fake(topk_weights: torch.Tensor,
     pass
 
 
+def rocm_aiter_biased_grouped_topk_impl(
+        gating_output: torch.Tensor,
+        correction_bias: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        num_expert_group: int,
+        topk_group: int,
+        need_renorm: bool,
+        routed_scaling_factor: float = 1.0  # mul to topk_weights
+) -> None:
+
+    from aiter import biased_grouped_topk
+
+    biased_grouped_topk(gating_output, correction_bias, topk_weights, topk_ids,
+                        num_expert_group, topk_group, need_renorm,
+                        routed_scaling_factor)
+
+
+def rocm_aiter_biased_grouped_topk_fake(
+        gating_output: torch.Tensor,
+        correction_bias: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        num_expert_group: int,
+        topk_group: int,
+        need_renorm: bool,
+        routed_scaling_factor: float = 1.0  # mul to topk_weights
+) -> None:
+    pass
+
+
 if current_platform.is_rocm():
 
     direct_register_custom_op(
@@ -257,6 +288,46 @@ if current_platform.is_rocm():
         fake_impl=rocm_aiter_topk_softmax_fake,
         dispatch_key=current_platform.dispatch_key,
     )
+
+    direct_register_custom_op(
+        op_name="rocm_aiter_biased_grouped_topk",
+        op_func=rocm_aiter_biased_grouped_topk_impl,
+        mutates_args=["topk_weights", "topk_ids"],
+        fake_impl=rocm_aiter_biased_grouped_topk_fake,
+        dispatch_key=current_platform.dispatch_key,
+    )
+
+
+def rocm_aiter_biased_group_topk(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    num_expert_group: int = 0,
+    topk_group: int = 0,
+    scoring_func: str = "sigmoid",
+    e_score_correction_bias: Optional[torch.Tensor] = None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    assert scoring_func == "sigmoid", (
+        "rocm_aiter_biased_group_topk only supports 'sigmoid' scoring_func.")
+    assert e_score_correction_bias is not None, (
+        "'e_score_correction_bias' must not be None.")
+    token = hidden_states.shape[0]
+    device = hidden_states.device
+    topk_ids = torch.empty((token, topk), dtype=torch.int32, device=device)
+    topk_weights = torch.empty((token, topk),
+                               dtype=torch.float32,
+                               device=device)
+    torch.ops.vllm.rocm_aiter_biased_grouped_topk(
+        gating_output,
+        e_score_correction_bias,
+        topk_weights,
+        topk_ids,
+        num_expert_group,
+        topk_group,
+        renormalize,
+    )
+    return topk_weights, topk_ids
 
 
 def rocm_aiter_fused_experts(hidden_states: torch.Tensor,
