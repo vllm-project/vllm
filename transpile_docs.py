@@ -185,7 +185,7 @@ def transpile_myst_to_md(old_path: Path) -> None:
             table = tabulate(rows[1:], rows[0], tablefmt="github")
             lines[start] = "\n".join(
                 indent_lines(table.splitlines(),
-                             len(indent) + 2)) + "\n"
+                             len(indent))) + "\n"
             if block["args"]:
                 lines[
                     start] += f"{indent}  <figcaption>{block['args']}</figcaption>\n"
