@@ -6,7 +6,7 @@ import json
 import math
 import os
 from dataclasses import MISSING, dataclass, field, fields
-from typing import Literal, Optional, Union, TYPE_CHECKING
+from typing import Literal, Optional, Union
 
 from vllm.config import LoRAConfig
 from vllm.logger import init_logger
@@ -91,8 +91,7 @@ class PEFTHelper:
     @classmethod
     def from_local_dir(cls, lora_path: str,
                        max_position_embeddings: Optional[int],
-                       tensorizer_config_dict: Optional[dict]
-        )-> "PEFTHelper":
+                       tensorizer_config_dict: Optional[dict]) -> "PEFTHelper":
         lora_config_path = os.path.join(lora_path, "adapter_config.json")
 
         if tensorizer_config_dict:
