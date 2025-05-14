@@ -64,7 +64,7 @@ def test_distributed(
     check_implementation(hf_runner, vllm_runner, example_prompts,
                          "meta-llama/Llama-3.2-1B-Instruct", **kwargs)
 
-@pytest.mark.skipif(current_platform.is_rocm()
+@pytest.mark.skipif(current_platform.is_rocm(),
     reason="bitsandbytes quantization is currently not supported in rocm.")
 @pytest.mark.parametrize("model, quantization_kwargs", [
     (
