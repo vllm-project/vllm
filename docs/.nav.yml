@@ -10,7 +10,7 @@ nav:
     - models/supported_models.md
     - models/generative_models.md
     - models/pooling_models.md
-    - models/extensions/index.md
+    - models/extensions
   - Features:
     - features/quantization
     - features/lora.md
