@@ -51,5 +51,5 @@ def test_engine_log_metrics_ray(
                 )
 
     # Create the actor and call the async method
-    actor = EngineTestActor.remote()
+    actor = EngineTestActor.remote()  # type: ignore[attr-defined]
     ray.get(actor.run.remote())
