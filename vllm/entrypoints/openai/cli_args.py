@@ -238,6 +238,7 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
 
 
 def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
+<<<<<<< HEAD
     """Create the CLI argument parser used by the OpenAI API server.
 
     We rely on the helper methods of `FrontendArgs` and `AsyncEngineArgs` to
@@ -249,6 +250,20 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
                         nargs="?",
                         help="The model tag to serve "
                         "(optional if specified in config)")
+=======
+    parser.add_argument("--host",
+                        type=optional_type(str),
+                        default=None,
+                        help="Host name.")
+    parser.add_argument("--port", type=int, default=8000, help="Port number.")
+    parser.add_argument(
+        "--uds",
+        type=optional_type(str),
+        default=None,
+        help=
+        "Unix domain socket path. If set, host and port arguments are ignored."
+    )
+>>>>>>> 7469bca58 (Clarify UDS precedence over TCP)
     parser.add_argument(
         "--headless",
         action="store_true",
