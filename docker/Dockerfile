@@ -12,7 +12,7 @@ ARG CUDA_VERSION=12.8.1
 # private registries that use a different repository naming conventions.
 #
 # Example:
-# docker build --build-arg BUILD_BASE_IMAGE=regisry.acme.org/mirror/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
+# docker build --build-arg BUILD_BASE_IMAGE=registry.acme.org/mirror/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
 ARG BUILD_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
 ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
 
