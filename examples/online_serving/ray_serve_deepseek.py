@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """
 Example to deploy DeepSeek R1 or V3 with Ray Serve LLM.
-See Ray Serve LLM documentation at:
+See more details at:
+https://docs.ray.io/en/latest/serve/tutorials/serve-deepseek.html
+And see Ray Serve LLM documentation at:
 https://docs.ray.io/en/latest/serve/llm/serving-llms.html
 
 Run `python3 ray_serve_deepseek.py` to deploy the model.

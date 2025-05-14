@@ -6,6 +6,7 @@ sphinx-design==0.6.1
 sphinx-togglebutton==0.3.2
 myst-parser==3.0.1  # `myst-parser==4.0.1` breaks inline code in titles
 msgspec
+snowballstemmer<3  # https://github.com/snowballstem/snowball/issues/229
 commonmark # Required by sphinx-argparse when using :markdownhelp:
 
 # Custom autodoc2 is necessary for faster docstring processing
