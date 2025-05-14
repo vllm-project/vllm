@@ -793,10 +793,10 @@ def test_multimodal_image_parsing_matches_hf(model, image_url):
     )
 
     vllm_result = apply_hf_chat_template(
-        model_config,
-        tokenizer,
+        tokenizer=tokenizer,
         conversation=conversation,
         chat_template=None,
+        model_config=model_config,
         tools=None,
         add_generation_prompt=True,
     )
@@ -903,11 +903,11 @@ def test_resolve_content_format_hf_defined(model, expected_format):
     print(_try_extract_ast(chat_template))
 
     resolved_format = resolve_chat_template_content_format(
-        model_config,
         None,  # Test detecting the tokenizer's chat_template
         None,
         "auto",
         tokenizer,
+        model_config=model_config,
     )
 
     assert resolved_format == expected_format
@@ -962,11 +962,11 @@ def test_resolve_content_format_fallbacks(model, expected_format):
     print(_try_extract_ast(chat_template))
 
     resolved_format = resolve_chat_template_content_format(
-        model_config,
         None,  # Test detecting the tokenizer's chat_template
         None,
         "auto",
         tokenizer,
+        model_config=model_config,
     )
 
     assert resolved_format == expected_format
@@ -1021,11 +1021,11 @@ def test_resolve_content_format_examples(template_path, expected_format):
     print(_try_extract_ast(chat_template))
 
     resolved_format = resolve_chat_template_content_format(
-        model_config,
         chat_template,
         None,
         "auto",
         dummy_tokenizer,
+        model_config=model_config,
     )
 
     assert resolved_format == expected_format
