@@ -2,6 +2,7 @@
 import multiprocessing
 import sys
 import time
+import weakref
 from typing import Optional
 
 import msgspec.msgpack
@@ -12,7 +13,7 @@ from vllm.logger import init_logger
 from vllm.utils import get_mp_context, get_open_zmq_ipc_path, make_zmq_socket
 from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequestType
 from vllm.v1.serial_utils import MsgpackDecoder
-from vllm.v1.utils import get_engine_client_zmq_addr
+from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 
 logger = init_logger(__name__)
 
@@ -48,6 +49,7 @@ class DPCoordinator:
         self.stats_publish_address = front_publish_address
         self.coord_in_address = back_publish_address
         self.coord_out_address = back_output_address
+        self._finalizer = weakref.finalize(self, shutdown, [self.proc])
 
     def get_stats_publish_address(self) -> str:
         return self.stats_publish_address
@@ -59,7 +61,7 @@ class DPCoordinator:
         }
 
     def close(self):
-        self.proc.terminate()
+        self._finalizer()
 
 
 class EngineState:
