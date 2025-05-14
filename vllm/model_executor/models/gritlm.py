@@ -201,7 +201,7 @@ class GritLM(LlamaForCausalLM, SupportsV0Only):
         **kwargs,
     ) -> None:
         if vllm_config.model_config.runner_type == "pooling":
-            vllm_config.model_config.hf_config.is_causal = True
+            vllm_config.model_config.hf_config.is_causal = False
 
         super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
 
