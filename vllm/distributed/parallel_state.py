@@ -757,6 +757,22 @@ class GroupCoordinator:
         if self.mq_broadcaster is not None:
             self.mq_broadcaster = None
 
+    def prepare_communication_buffer_for_model(self, model: torch.nn.Module):
+        if self.device_communicator is not None:
+            self.device_communicator.prepare_communication_buffer_for_model(
+                model)
+
+    def dispatch(
+            self, hidden_states: torch.Tensor,
+            router_logits: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.device_communicator is not None:
+            return self.device_communicator.dispatch(hidden_states,
+                                                     router_logits)
+
+    def combine(self, hidden_states) -> torch.Tensor:
+        if self.device_communicator is not None:
+            return self.device_communicator.combine(hidden_states)
+
 
 _WORLD: Optional[GroupCoordinator] = None
 
@@ -814,6 +830,14 @@ _DP: Optional[GroupCoordinator] = None
 def get_dp_group() -> GroupCoordinator:
     assert _DP is not None, ("data parallel group is not initialized")
     return _DP
+
+
+_EP: Optional[GroupCoordinator] = None
+
+
+def get_ep_group() -> GroupCoordinator:
+    assert _EP is not None, ("expert parallel group is not initialized")
+    return _EP
 
 
 def get_pp_group() -> GroupCoordinator:
@@ -1001,10 +1025,21 @@ def initialize_model_parallel(
                                     backend,
                                     group_name="dp")
 
+    global _EP
+    assert _EP is None, ("expert parallel group is already initialized")
+    group_ranks = all_ranks.transpose(1, 2).reshape(
+        -1, data_parallel_size * tensor_model_parallel_size).unbind(0)
+    group_ranks = [x.tolist() for x in group_ranks]
+    _EP = init_model_parallel_group(group_ranks,
+                                    get_world_group().local_rank,
+                                    backend,
+                                    group_name="ep")
+
     logger.info(
         "rank %s in world size %s is assigned as "
-        "DP rank %s, PP rank %s, TP rank %s", rank, world_size,
-        _DP.rank_in_group, _PP.rank_in_group, _TP.rank_in_group)
+        "DP rank %s, PP rank %s, TP rank %s, EP rank %s", rank, world_size,
+        _DP.rank_in_group, _PP.rank_in_group, _TP.rank_in_group,
+        _EP.rank_in_group)
 
 
 def ensure_model_parallel_initialized(
@@ -1033,6 +1068,23 @@ def ensure_model_parallel_initialized(
         "pipeline parallel group already initialized, but of unexpected size: "
         f"{pp_world_size=} vs. "
         f"{pipeline_model_parallel_size=}")
+
+
+def prepare_communication_buffer_for_model(model: torch.nn.Module):
+    """Prepare the communication buffer for the model.
+    Traditional communication libraries like NCCL are almost
+    model agnostic. However, emerging new communication libraries like
+    MoE all2all (DeepEP) usually allocate the communication buffer
+    based on the model shape for optimal performance.
+    """
+    if _TP is not None:
+        _TP.prepare_communication_buffer_for_model(model)
+    if _PP is not None:
+        _PP.prepare_communication_buffer_for_model(model)
+    if _DP is not None:
+        _DP.prepare_communication_buffer_for_model(model)
+    if _EP is not None:
+        _EP.prepare_communication_buffer_for_model(model)
 
 
 def model_parallel_is_initialized():
@@ -1094,6 +1146,11 @@ def destroy_model_parallel():
     if _DP:
         _DP.destroy()
     _DP = None
+
+    global _EP
+    if _EP:
+        _EP.destroy()
+    _EP = None
 
 
 def destroy_distributed_environment():
