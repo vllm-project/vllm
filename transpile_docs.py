@@ -121,13 +121,6 @@ def transpile_myst_to_md(old_path: Path) -> None:
         start = block["start"]
         end = block["end"]
 
-        # Handle toctree
-        if block["type"] == "toctree":
-            lines[start] = "###### Contents\n"
-            lines[start + 1:end] = ["" for _ in lines[start + 1:end]]
-            lines[end] = ""
-            block["handled"] = True
-
         block["type"] = maybe_update_admonition(block["type"])
 
         # Handle admonitions
