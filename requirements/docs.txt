@@ -3,3 +3,4 @@ mkdocs-material
 mkdocstrings-python
 mkdocs-gen-files
 mkdocs-awesome-nav
+tabulate  # only needed as long as we are transpiling
