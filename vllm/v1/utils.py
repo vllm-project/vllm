@@ -192,6 +192,7 @@ class CoreEngineActorManager(CoreEngineProcManager):
         for index in range(local_engine_count):
             local_index = local_start_index + index
             global_index = start_index + index
+            logger.info(f"global_index: {global_index}, local_index: {local_index}")
             self.local_engine_actors.append(
                 ray.remote(EngineCoreActor).remote(
                     #name=f"EngineCore_{global_index}",
@@ -205,20 +206,20 @@ class CoreEngineActorManager(CoreEngineProcManager):
                     dp_rank=global_index,
                     local_dp_rank=local_index)
             )
-        dp_size = vllm_config.parallel_config.data_parallel_size
-        for index in range(dp_size - local_engine_count):
-            self.remote_engine_actors.append(
-                ray.remote(EngineCoreActor).remote(
-                    vllm_config=vllm_config,
-                    executor_class=executor_class,
-                    log_stats=log_stats,
-                    input_address=input_address,
-                    output_address=output_address,
-                    on_head_node=False,
-                    engine_index=global_index,
-                    dp_rank=global_index,
-                    local_dp_rank=local_index)
-                )
+        # dp_size = vllm_config.parallel_config.data_parallel_size
+        # for index in range(dp_size - local_engine_count):
+        #     self.remote_engine_actors.append(
+        #         ray.remote(EngineCoreActor).remote(
+        #             vllm_config=vllm_config,
+        #             executor_class=executor_class,
+        #             log_stats=log_stats,
+        #             input_address=input_address,
+        #             output_address=output_address,
+        #             on_head_node=False,
+        #             engine_index=global_index,
+        #             dp_rank=global_index,
+        #             local_dp_rank=local_index)
+        #         )
         
 
 # Note(rob): shutdown function cannot be a bound method,

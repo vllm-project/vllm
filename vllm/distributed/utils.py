@@ -305,6 +305,8 @@ def stateless_init_torch_distributed_process_group(
     channel is formed with process 9 and 10.
     """
     init_method = get_tcp_uri(host, port)
+    print(f"host: {host}, port: {port}")
+    print(f"init_method: {init_method}")
     backend = Backend(backend)  # it is basically string
     timeout = _get_default_timeout(backend)
 

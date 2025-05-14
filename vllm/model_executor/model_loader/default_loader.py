@@ -96,6 +96,7 @@ class DefaultModelLoader(BaseModelLoader):
         """Prepare weights for the model.
 
         If the model is not local, it will be downloaded."""
+        logger.info(f"prepare_weights: {model_name_or_path}")
         model_name_or_path = (self._maybe_download_from_modelscope(
             model_name_or_path, revision) or model_name_or_path)
 
@@ -174,6 +175,7 @@ class DefaultModelLoader(BaseModelLoader):
     def _get_weights_iterator(
             self, source: "Source"
     ) -> Generator[Tuple[str, torch.Tensor], None, None]:
+        logger.info("get_weights_iterator: %s", source)
         """Get an iterator for the model weights based on the load format."""
         hf_folder, hf_weights_files, use_safetensors = self._prepare_weights(
             source.model_or_path, source.revision, source.fall_back_to_pt,
@@ -258,6 +260,7 @@ class DefaultModelLoader(BaseModelLoader):
             yield from self._get_weights_iterator(source)
 
     def download_model(self, model_config: ModelConfig) -> None:
+        logger.info("download_model: %s", model_config.model)
         self._prepare_weights(model_config.model,
                               model_config.revision,
                               fall_back_to_pt=True,

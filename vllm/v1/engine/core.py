@@ -65,6 +65,7 @@ class EngineCore:
 
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
+        print(f"model_executor: {self.model_executor}")
         if executor_fail_callback is not None:
             self.model_executor.register_failure_callback(
                 executor_fail_callback)
@@ -120,6 +121,7 @@ class EngineCore:
                         self.batch_queue_size)
             self.batch_queue = queue.Queue(self.batch_queue_size)
         self.vllm_config = vllm_config
+        logger.info("EngineCore init done")
 
     def _initialize_kv_caches(
             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
@@ -131,6 +133,7 @@ class EngineCore:
         # Profiles the peak memory usage of the model to determine how much
         # memory can be allocated for kv cache.
         available_gpu_memory = self.model_executor.determine_available_memory()
+        logger.info(f"available_gpu_memory: {available_gpu_memory}")
 
         assert len(kv_cache_specs) == len(available_gpu_memory)
         # Get the kv cache tensor size
@@ -808,10 +811,7 @@ class EngineCoreActor(DPEngineCoreProc):
         dp_rank: int = 0,
         local_dp_rank: int = 0,
     ):
-        if on_head_node:
-            logger.info("EngineCoreActor on head node")
-        else:
-            logger.info("EngineCoreActor on worker node")
+        logger.info(f"EngineCoreActor init: {on_head_node}, {input_address}, {output_address}, {engine_index}, {dp_rank}, {local_dp_rank}")
 
         # Signal handler used for graceful termination.
         # SystemExit exception is only raised once to allow this and worker
@@ -863,7 +863,7 @@ class EngineCoreActor(DPEngineCoreProc):
             self._init_data_parallel(vllm_config)
 
             # Initialize engine core and model.
-            super().__init__(vllm_config, executor_class, log_stats,
+            EngineCore.__init__(self, vllm_config, executor_class, log_stats,
                              executor_fail_callback)
 
             self.step_fn = (self.step if self.batch_queue is None else
@@ -917,7 +917,9 @@ class EngineCoreActor(DPEngineCoreProc):
         dp_rank = vllm_config.parallel_config.data_parallel_rank
         dp_size = vllm_config.parallel_config.data_parallel_size
         local_dp_rank = vllm_config.parallel_config.data_parallel_rank_local
-        logger.info(f"dp_rank: {dp_rank}, dp_size: {dp_size}, local_dp_rank: {local_dp_rank}")
+        print(f"dp_rank: {dp_rank}, dp_size: {dp_size}, local_dp_rank: {local_dp_rank}")
+        import time
+        time.sleep(10)
 
         assert dp_size > 1
         assert 0 <= local_dp_rank <= dp_rank < dp_size

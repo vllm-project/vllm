@@ -421,6 +421,8 @@ class MPClient(EngineCoreClient):
             # FIXME(rui):
             # 1) use correct parameters to start the actors
             # 2) use proper placement strategy (pick local node and remote nodes)
+            logger.info("should not reach here", stack_info=True)
+            assert False, "should not reach here"
             import ray
             self.local_engine_actors = [
                 ray.remote(EngineCoreActor).remote(
@@ -1054,7 +1056,7 @@ class DPAsyncMPClient(AsyncMPClient):
 
 # FIXME(rui): technically this is not MP client, but it is async.
 # We need to refactor the code to have proper inheritance.
-class RayClient(AsyncMPClient):
+class RayClient(DPAsyncMPClient):
     """
     RayClient: client for Ray-based EngineCore,
     only used in data parallel mode.
@@ -1062,19 +1064,25 @@ class RayClient(AsyncMPClient):
 
     def __init__(
         self,
-        asyncio_mode: bool,
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
     ):
+        # NOTE(rui): from DPAsyncMPClient
+        self.current_wave = 0
+        self.engines_running = False
+        self.reqs_in_flight: dict[str, CoreEngine] = {}
+    
         self.vllm_config = vllm_config
         # Serialization setup.
         self.encoder = MsgpackEncoder()
         self.decoder = MsgpackDecoder(EngineCoreOutputs)
 
+        # NOTE(rui): by default using asyncio mode
+        # TODO(rui): clean up here
         # ZMQ setup.
         sync_ctx = zmq.Context(io_threads=2)
-        self.ctx = zmq.asyncio.Context(sync_ctx) if asyncio_mode else sync_ctx
+        self.ctx = zmq.asyncio.Context(sync_ctx)
 
         # FIXME(rui): check if this is correct
         # This will ensure resources created so far are closed
@@ -1119,6 +1127,7 @@ class RayClient(AsyncMPClient):
             # # Start all engines.
             # In server mode, start_index and local_start_index will
             # both be 0.
+            logger.info("Creating CoreEngineActorManager")
             self.resources.local_engine_manager = CoreEngineActorManager(
                 None,
                 vllm_config=vllm_config,
@@ -1147,6 +1156,19 @@ class RayClient(AsyncMPClient):
         finally:
             if not success:
                 self._finalizer()
+
+        # NOTE(rui): from AsyncMPClient
+        self.outputs_queue = asyncio.Queue[Union[EngineCoreOutputs,
+                                                 Exception]]()
+        try:
+            # If we are running in an asyncio event loop, start the queue task.
+            # Otherwise, it will be started lazily. If it is not started here,
+            # we could miss EXECUTOR_FAILED messages from engine core if they
+            # occur prior to any requests being sent.
+            asyncio.get_running_loop()
+            self._ensure_output_queue_task()
+        except RuntimeError:
+            pass
 
     @staticmethod
     def _get_zmq_addresses(parallel_config: ParallelConfig,

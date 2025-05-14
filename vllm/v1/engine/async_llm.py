@@ -86,6 +86,7 @@ class AsyncLLM(EngineClient):
         self.log_stats = log_stats
 
         # Set up stat loggers; independent set for each DP rank.
+        logger.info("custom_stat_loggers: %s", stat_loggers)
         self.stat_loggers: list[list[StatLoggerBase]] = setup_default_loggers(
             vllm_config=vllm_config,
             log_stats=self.log_stats,
@@ -113,7 +114,7 @@ class AsyncLLM(EngineClient):
         # EngineCore (starts the engine in background process).
         core_client_class = AsyncMPClient if (
             vllm_config.parallel_config.data_parallel_size
-            == 1) else DPAsyncMPClient
+            == 1) else RayClient
 
         self.engine_core = core_client_class(
             vllm_config=vllm_config,

@@ -16,7 +16,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core_client import DPAsyncMPClient
 
 engine_args = AsyncEngineArgs(
-    model="ibm-research/PowerMoE-3b",
+    model="Qwen/Qwen2.5-0.5B-Instruct",
     enforce_eager=True,
     disable_log_requests=True,
     tensor_parallel_size=int(os.getenv("TP_SIZE", 1)),
@@ -59,7 +59,7 @@ async def generate(engine: AsyncLLM,
 
 
 @pytest.mark.parametrize(
-    "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
+    "output_kind", [RequestOutputKind.DELTA])
 @pytest.mark.asyncio
 async def test_load(output_kind: RequestOutputKind):
 

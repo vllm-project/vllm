@@ -1803,6 +1803,7 @@ class ParallelConfig:
         if self.data_parallel_size > 1 or self.data_parallel_size_local == 0:
             # Data parallel was specified in the engine args.
             self.data_parallel_master_port = get_open_port()
+            logger.info(f"data_parallel_master_port: {self.data_parallel_master_port}")
         else:
             # Otherwise fall back to env vars (e.g. for offline SPMD case).
             self.data_parallel_size = envs.VLLM_DP_SIZE
@@ -1810,6 +1811,7 @@ class ParallelConfig:
             self.data_parallel_rank_local = envs.VLLM_DP_RANK_LOCAL
             self.data_parallel_master_ip = envs.VLLM_DP_MASTER_IP
             self.data_parallel_master_port = envs.VLLM_DP_MASTER_PORT
+            logger.info(f"data_parallel_master_port: {self.data_parallel_master_port}")
 
         if self.distributed_executor_backend == "external_launcher":
             import os
