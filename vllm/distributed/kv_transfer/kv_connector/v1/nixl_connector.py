@@ -253,6 +253,11 @@ class NixlConnectorScheduler:
               asynchronously (between scheduler steps).
         """
 
+        logger.debug(
+            "NIXLConnector get_num_new_matched_tokens: "
+            "num_computed_tokens=%s, kv_transfer_params=%s",
+            num_computed_tokens, request.kv_transfer_params)
+
         # No KVTransfer for this request.
         if request.kv_transfer_params is None:
             return 0, False
@@ -271,6 +276,12 @@ class NixlConnectorScheduler:
     def update_state_after_alloc(self, request: "Request",
                                  blocks: "KVCacheBlocks",
                                  num_external_tokens: int):
+
+        logger.debug(
+            "NIXLConnector update_state_after_alloc: "
+            "num_external_tokens=%s, kv_transfer_params=%s",
+            num_external_tokens, request.kv_transfer_params)
+
         if request.kv_transfer_params is None:
             return
 
@@ -318,6 +329,11 @@ class NixlConnectorScheduler:
         Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
         """
+
+        logger.debug(
+            "NIXLConnector request_finished, "
+            "request_status=%s, kv_transfer_params=%s", request.status,
+            request.kv_transfer_params)
 
         if request.kv_transfer_params is None:
             return False, None
