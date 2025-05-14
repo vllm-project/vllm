@@ -9,7 +9,7 @@ from collections.abc import (AsyncGenerator, Iterable, Iterator, Mapping,
 from concurrent.futures.thread import ThreadPoolExecutor
 from http import HTTPStatus
 from typing import (Annotated, Any, Callable, ClassVar, Generic, Optional,
-                    TypeVar, Union, cast, overload)
+                    TypeVar, Union, cast)
 
 import torch
 from fastapi import Request
@@ -631,7 +631,7 @@ class OpenAIServing:
                                         list[list[int]]]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
         add_special_tokens: bool = True,
-    ) -> Union[list[TextTokensPrompt], list[EmbedsPrompt]]:
+    ) -> list[Union[TextTokensPrompt, EmbedsPrompt]]:
         """
         Tokenize/detokenize depending on the input format.
 
@@ -639,22 +639,24 @@ class OpenAIServing:
         , each input can be a string or array of tokens. Note that each request
         can pass one or more inputs.
         """
+        inputs = list[Union[TextTokensPrompt, EmbedsPrompt]]()
+
         # We want to always ignore text prompts if prompt embeds are available
         if (isinstance(request, CompletionRequest)
                 and request.prompt_embeds is not None):
-            return self._load_prompt_embeds(request.prompt_embeds,
-                                            truncate_prompt_tokens)
+            inputs.extend(
+                self._load_prompt_embeds(request.prompt_embeds,
+                                         truncate_prompt_tokens))
 
-        if input_or_inputs is None:
-            raise ValueError(
-                "Prompt can only be None for a `/v1/completions` request"
-                " with prompt_embeds")
+        # Empty prompts are okay as long as there are prompt embeddings
+        if input_or_inputs is None or (inputs and input_or_inputs == ""):
+            return inputs
 
         # Although our type checking is based on mypy,
         # VSCode Pyright extension should still work properly
         # "is False" is required for Pyright to perform type narrowing
         # See: https://github.com/microsoft/pyright/issues/7672
-        return [
+        inputs.extend([
             self._normalize_prompt_text_to_input(
                 request,
                 tokenizer,
@@ -668,29 +670,9 @@ class OpenAIServing:
                 prompt_ids=prompt_input["content"],
                 truncate_prompt_tokens=truncate_prompt_tokens)
             for prompt_input in parse_and_batch_prompt(input_or_inputs)
-        ]
+        ])
 
-    @overload
-    async def _preprocess_completion(
-        self,
-        request: CompletionLikeRequest,
-        tokenizer: AnyTokenizer,
-        input_or_inputs: Union[str, list[str], list[int], list[list[int]]],
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = ...,
-        add_special_tokens: bool = ...,
-    ) -> tuple[list[TextTokensPrompt], list[EngineTokensPrompt]]:
-        ...
-
-    @overload
-    async def _preprocess_completion(
-        self,
-        request: CompletionRequest,
-        tokenizer: AnyTokenizer,
-        input_or_inputs: None,
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = ...,
-        add_special_tokens: bool = ...,
-    ) -> tuple[list[EmbedsPrompt], list[EngineEmbedsPrompt]]:
-        ...
+        return inputs
 
     async def _preprocess_completion(
         self,
@@ -700,8 +682,8 @@ class OpenAIServing:
                                         list[list[int]]]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
         add_special_tokens: bool = True,
-    ) -> tuple[Union[list[TextTokensPrompt], list[EmbedsPrompt]], Union[
-            list[EngineTokensPrompt], list[EngineEmbedsPrompt]]]:
+    ) -> tuple[list[Union[TextTokensPrompt, EmbedsPrompt]], list[Union[
+            EngineTokensPrompt, EngineEmbedsPrompt]]]:
         if not isinstance(request,
                           CompletionRequest) and input_or_inputs is None:
             raise ValueError(
@@ -715,14 +697,6 @@ class OpenAIServing:
             add_special_tokens=add_special_tokens,
         )
 
-        # This list has a weird type hint. This should be a union of lists, not
-        # a list of unions, but mypy does not play nicely with the variance of
-        # typeddicts, and there's no way to easily assert which list type we
-        # received from request_prompts. So the compromise is we type the list
-        # as a union as we build it, and then cast it to the correct type when
-        # we return.
-        # This casting is safe because we know the list can only be full of
-        # either EngineTokensPrompt or EngineEmbedsPrompt, but not a mix.
         engine_prompts: list[Union[EngineTokensPrompt,
                                    EngineEmbedsPrompt]] = []
         for request_prompt in request_prompts:
@@ -737,9 +711,7 @@ class OpenAIServing:
             else:
                 assert_never(request_prompt)
 
-        return request_prompts, cast(
-            Union[list[EngineTokensPrompt], list[EngineEmbedsPrompt]],
-            engine_prompts)
+        return request_prompts, engine_prompts
 
     async def _preprocess_chat(
         self,

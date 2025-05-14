@@ -171,6 +171,33 @@ async def test_completions_with_prompt_embeds(
     assert len(chunks_stream_embeds[0]) > 0
     assert len(chunks_stream_embeds[1]) > 0
 
+    # Test case: mixed text and prompt_embeds
+    encoded_embeds = create_dummy_embeds()
+    completion_mixed = await client_with_prompt_embeds.completions.create(
+        model=model_name,
+        prompt="This is a prompt",
+        max_tokens=5,
+        temperature=0.0,
+        extra_body={"prompt_embeds": encoded_embeds})
+    assert len(completion.choices) == 2
+    completion_text_only = await client_with_prompt_embeds.completions.create(
+        model=model_name,
+        prompt="This is a prompt",
+        max_tokens=5,
+        temperature=0.0,
+    )
+    completion_embeds_only = await client_with_prompt_embeds.completions.create(
+        model=model_name,
+        prompt="",
+        max_tokens=5,
+        temperature=0.0,
+        extra_body={"prompt_embeds": encoded_embeds})
+    # Embeddings responses should be handled first
+    assert completion_mixed.choices[0].text == completion_embeds_only.choices[
+        0].text
+    assert completion_mixed.choices[1].text == completion_text_only.choices[
+        0].text
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
