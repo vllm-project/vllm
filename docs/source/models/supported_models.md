@@ -1034,9 +1034,9 @@ Specified using `--task generate`.
   * ✅︎
   * ✅︎
 - * `LlavaForConditionalGeneration`
-  * LLaVA-1.5
+  * LLaVA-1.5, Pixtral (HF Transformers)
   * T + I<sup>E+</sup>
-  * `llava-hf/llava-1.5-7b-hf`, `TIGER-Lab/Mantis-8B-siglip-llama3` (see note), etc.
+  * `llava-hf/llava-1.5-7b-hf`, `TIGER-Lab/Mantis-8B-siglip-llama3` (see note), `mistral-community/pixtral-12b`, etc.
   *
   * ✅︎
   * ✅︎
@@ -1083,7 +1083,7 @@ Specified using `--task generate`.
   * ✅︎
   * ✅︎
 - * `Mistral3ForConditionalGeneration`
-  * Mistral3 (HF Transformers)
+  * Mistral 3 (HF Transformers)
   * T + I<sup>+</sup>
   * `mistralai/Mistral-Small-3.1-24B-Instruct-2503`, etc.
   * ✅︎
@@ -1146,9 +1146,9 @@ Specified using `--task generate`.
   *
   * ✅︎
 - * `PixtralForConditionalGeneration`
-  * Pixtral
+  * Mistral 3 (Mistral format), Pixtral (Mistral format)
   * T + I<sup>+</sup>
-  * `mistralai/Mistral-Small-3.1-24B-Instruct-2503`, `mistral-community/pixtral-12b`, etc.
+  * `mistralai/Mistral-Small-3.1-24B-Instruct-2503`, `mistralai/Pixtral-12B-2409`, etc.
   *
   * ✅︎
   * ✅︎
