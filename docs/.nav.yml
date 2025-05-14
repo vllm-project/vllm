@@ -1,6 +1,6 @@
 nav:
   - Getting Started:
-    - getting_started/installation.md
+    - getting_started
     - getting_started/quickstart.md
     - getting_started/examples
     - getting_started/troubleshooting.md
@@ -12,7 +12,7 @@ nav:
     - models/pooling_models.md
     - models/extensions
   - Features:
-    - features/quantization
+    - features/compatibility_matrix.md
     - features/lora.md
     - features/tool_calling.md
     - features/reasoning_outputs.md
@@ -20,7 +20,7 @@ nav:
     - features/automatic_prefix_caching.md
     - features/disagg_prefill.md
     - features/spec_decode.md
-    - features/compatibility_matrix.md
+    - features/quantization
   - Training:
     - training/trl.md
     - training/rlhf.md
