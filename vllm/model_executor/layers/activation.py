@@ -354,7 +354,7 @@ def get_act_fn(act_fn_name: str) -> nn.Module:
 _ACTIVATION_AND_MUL_REGISTRY = LazyDict({
     "gelu": lambda: GeluAndMul(),
     "silu": lambda: SiluAndMul(),
-    "gelu_and_mul": lambda: GeluAndMul(),
+    "geglu": lambda: GeluAndMul(),
 })
 
 

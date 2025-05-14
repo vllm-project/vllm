@@ -256,11 +256,17 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "GritLM": _HfExamplesInfo("parasail-ai/GritLM-7B-vllm"),
     "GteModel": _HfExamplesInfo("Snowflake/snowflake-arctic-embed-m-v2.0",
                                                trust_remote_code=True),
+    "GteNewModel": _HfExamplesInfo("Alibaba-NLP/gte-base-en-v1.5",
+                                   trust_remote_code=True,
+                                   hf_overrides={"architectures":
+                                                     ["GteNewModel"]}),
     "InternLM2ForRewardModel": _HfExamplesInfo("internlm/internlm2-1_8b-reward",
                                                trust_remote_code=True),
     "JambaForSequenceClassification": _HfExamplesInfo("ai21labs/Jamba-tiny-reward-dev"),  # noqa: E501
     "LlamaModel": _HfExamplesInfo("llama", is_available_online=False),
     "MistralModel": _HfExamplesInfo("intfloat/e5-mistral-7b-instruct"),
+    "ModernBertModel": _HfExamplesInfo("Alibaba-NLP/gte-modernbert-base",
+                                trust_remote_code=True),
     "NomicBertModel": _HfExamplesInfo("Snowflake/snowflake-arctic-embed-m-long",  # noqa: E501
                                                trust_remote_code=True),
     "Qwen2Model": _HfExamplesInfo("ssmits/Qwen2-7B-Instruct-embed-base"),
