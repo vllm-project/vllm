@@ -193,7 +193,7 @@ class KVConnectorBase_V1(ABC):
     # Scheduler-side methods
     # ==============================
 
-    def should_free_pending_on_abort(self) -> bool:
+    def should_free_pending_on_abort(self, req_id: str) -> bool:
         """
         For async sending, whether to free blocks for pending
         requests on abort.
