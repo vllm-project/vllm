@@ -10,7 +10,9 @@ import torch
 import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
-from vllm.platforms import _Backend, current_platform
+from vllm.platforms import _Backend
+if os.environ.get("DELAY_CURRENT_PLATFORM_IMPORT") != "1":
+    from vllm.platforms import current_platform
 from vllm.utils import STR_BACKEND_ENV_VAR, resolve_obj_by_qualname
 
 logger = init_logger(__name__)
@@ -145,6 +147,8 @@ def _cached_get_attn_backend(
             selected_backend = backend_name_to_enum(backend_by_env_var)
 
     # get device-specific attn_backend
+    if os.environ.get("DELAY_CURRENT_PLATFORM_IMPORT") == "1":
+        from vllm.platforms import current_platform
     attention_cls = current_platform.get_attn_backend_cls(
         selected_backend, head_size, dtype, kv_cache_dtype, block_size, use_v1,
         use_mla)
