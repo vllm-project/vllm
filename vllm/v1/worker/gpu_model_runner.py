@@ -1145,11 +1145,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             assert intermediate_tensors is not None
             assert self.intermediate_tensors is not None
+            tp = self.vllm_config.parallel_config.tensor_parallel_size
+            enabled_sp = self.vllm_config.compilation_config.pass_config. \
+                enable_sequence_parallelism
+            is_residual_scattered = tp > 1 and enabled_sp \
+                and num_input_tokens % tp == 0
+
             for k, v in intermediate_tensors.items():
-                self.intermediate_tensors[k][:num_input_tokens].copy_(
-                    v[:num_input_tokens], non_blocking=True)
+                is_scattered = "residual" and is_residual_scattered
+                copy_len = num_input_tokens // tp if is_scattered else \
+                    num_input_tokens
+                self.intermediate_tensors[k][:copy_len].copy_(
+                    v[:copy_len], non_blocking=True)
+
             intermediate_tensors = IntermediateTensors({
-                k: v[:num_input_tokens]
+                k:
+                v[:num_input_tokens // tp] if k == "residual"
+                and is_residual_scattered else v[:num_input_tokens]
                 for k, v in self.intermediate_tensors.items()
             })
 
@@ -1172,6 +1184,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if not get_pp_group().is_last_rank:
             # For mid-pipeline stages, return the hidden states.
+            # print(f"cascade pp is not last rank, return hidden states")
             return hidden_states
 
         sample_hidden_states = hidden_states[logits_indices]
@@ -1568,8 +1581,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                             batch_size=self.max_num_tokens,
                             dtype=self.model_config.dtype,
                             device=self.device))
+
+                tp = self.vllm_config.parallel_config.tensor_parallel_size
+                enabled_sp = self.vllm_config.compilation_config.pass_config. \
+                    enable_sequence_parallelism
+                is_residual_scattered = tp > 1 and enabled_sp \
+                    and num_tokens % tp == 0
+
                 intermediate_tensors = IntermediateTensors({
-                    k: v[:num_tokens]
+                    k:
+                    v[:num_tokens // tp] if k == "residual"
+                    and is_residual_scattered else v[:num_tokens]
                     for k, v in self.intermediate_tensors.items()
                 })
 
