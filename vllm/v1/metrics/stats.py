@@ -96,7 +96,7 @@ class PrefixCacheStats(CacheStats):
     Stores prefix cache hit statistics.
 
     - `reset`: Whether `reset_prefix_cache` was invoked.
-    - `queries`: Refers to the number of blocks that were queried.
+    - `queries`: Refers to the number of tokens that were queried.
     """
 
 

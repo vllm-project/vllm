@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Union
 
+_SCALAR_TYPES_ID_MAP = {}
+
 
 # Mirrors enum in `core/scalar_type.hpp`
 class NanRepr(Enum):
@@ -158,6 +160,8 @@ class ScalarType:
         assert offset <= 64, \
             f"ScalarType fields too big {offset} to fit into an int64"
 
+        _SCALAR_TYPES_ID_MAP[val] = self
+
         return val
 
     @property
@@ -295,6 +299,13 @@ class ScalarType:
         ret.id  # noqa B018: make sure the id is cached
         return ret
 
+    @classmethod
+    def from_id(cls, scalar_type_id: int):
+        if scalar_type_id not in _SCALAR_TYPES_ID_MAP:
+            raise ValueError(
+                f"scalar_type_id {scalar_type_id} doesn't exists.")
+        return _SCALAR_TYPES_ID_MAP[scalar_type_id]
+
 
 # naming generally follows: https://github.com/jax-ml/ml_dtypes
 # for floating point types (leading f) the scheme is:
@@ -322,7 +333,7 @@ class scalar_types:
     float6_e3m2f = ScalarType.float_(3, 2, True, NanRepr.NONE)
 
     # fp4, https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf
-    float4_e2m1fn = ScalarType.float_(2, 1, True, NanRepr.NONE)
+    float4_e2m1f = ScalarType.float_(2, 1, True, NanRepr.NONE)
 
     # "gptq" types
     uint2b2 = ScalarType.uint(2, 2)

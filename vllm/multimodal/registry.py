@@ -30,7 +30,7 @@ _I_co = TypeVar("_I_co", bound=BaseProcessingInfo, covariant=True)
 
 
 class ProcessingInfoFactory(Protocol[_I_co]):
-    """Constructs a :class:`MultiModalProcessor` instance from the context."""
+    """Constructs a {class}`MultiModalProcessor` instance from the context."""
 
     def __call__(
         self,
@@ -41,7 +41,7 @@ class ProcessingInfoFactory(Protocol[_I_co]):
 
 class DummyInputsBuilderFactory(Protocol[_I]):
     """
-    Constructs a :class:`BaseDummyInputsBuilder` instance from the context.
+    Constructs a {class}`BaseDummyInputsBuilder` instance from the context.
     """
 
     def __call__(self, info: _I) -> BaseDummyInputsBuilder[_I]:
@@ -49,7 +49,7 @@ class DummyInputsBuilderFactory(Protocol[_I]):
 
 
 class MultiModalProcessorFactory(Protocol[_I]):
-    """Constructs a :class:`MultiModalProcessor` instance from the context."""
+    """Constructs a {class}`MultiModalProcessor` instance from the context."""
 
     def __call__(
         self,
@@ -115,13 +115,13 @@ class MultiModalRegistry:
         model_config: "ModelConfig",
     ) -> Mapping[str, int]:
         """
-        Get the maximum number of tokens per data item from each modality based 
+        Get the maximum number of tokens per data item from each modality based
         on underlying model configuration.
         """
         if not model_config.is_multimodal_model:
             return {}
 
-        processor = self.create_processor(model_config, disable_cache=True)
+        processor = self.create_processor(model_config, disable_cache=False)
         profiler = MultiModalProfiler(processor)
 
         seq_len = model_config.max_model_len
@@ -141,11 +141,11 @@ class MultiModalRegistry:
     ) -> Mapping[str, int]:
         """
         Get the maximum number of tokens per data item from each modality based
-        on underlying model configuration, excluding modalities that user 
+        on underlying model configuration, excluding modalities that user
         explicitly disabled via `limit_mm_per_prompt`.
 
         Note:
-            This is currently directly used only in V1 for profiling the memory 
+            This is currently directly used only in V1 for profiling the memory
             usage of a model.
         """
         mm_limits = self.get_mm_limits_per_prompt(model_config)
@@ -165,7 +165,7 @@ class MultiModalRegistry:
         Get the maximum number of tokens from each modality
         for profiling the memory usage of a model.
 
-        See :meth:`MultiModalPlugin.get_max_multimodal_tokens` for more details.
+        See {meth}`MultiModalPlugin.get_max_multimodal_tokens` for more details.
         """
         mm_limits = self.get_mm_limits_per_prompt(model_config)
 
@@ -180,7 +180,7 @@ class MultiModalRegistry:
         Get the maximum number of multi-modal tokens
         for profiling the memory usage of a model.
 
-        See :meth:`MultiModalPlugin.get_max_multimodal_tokens` for more details.
+        See {meth}`MultiModalPlugin.get_max_multimodal_tokens` for more details.
         """
         return sum(self.get_max_tokens_by_modality(model_config).values())
 
@@ -205,7 +205,7 @@ class MultiModalRegistry:
         if not model_config.is_multimodal_model:
             return {}
 
-        processor = self.create_processor(model_config, disable_cache=True)
+        processor = self.create_processor(model_config, disable_cache=False)
         profiler = MultiModalProfiler(processor)
         return profiler.get_mm_limits()
 
@@ -223,8 +223,9 @@ class MultiModalRegistry:
         When the model receives multi-modal data, the provided function is
         invoked to transform the data into a dictionary of model inputs.
 
-        See also:
-            :ref:`mm-processing`
+        :::{seealso}
+        {ref}`mm-processing`
+        :::
         """
 
         def wrapper(model_cls: N) -> N:
@@ -268,8 +269,9 @@ class MultiModalRegistry:
         """
         Create a multi-modal processor for a specific model and tokenizer.
 
-        See also:
-            :ref:`mm-processing`
+        :::{seealso}
+        {ref}`mm-processing`
+        :::
         """
         if not model_config.is_multimodal_model:
             raise ValueError(f"{model_config.model} is not a multimodal model")
@@ -299,7 +301,7 @@ class MultiModalRegistry:
 
         The model is identified by ``model_config``.
         """
-        processor = self.create_processor(model_config, disable_cache=True)
+        processor = self.create_processor(model_config, disable_cache=False)
         profiler = MultiModalProfiler(processor)
         dummy_data = profiler.get_decoder_dummy_data(seq_len, mm_counts)
 
@@ -323,7 +325,7 @@ class MultiModalRegistry:
 
         The model is identified by ``model_config``.
         """
-        processor = self.create_processor(model_config, disable_cache=True)
+        processor = self.create_processor(model_config, disable_cache=False)
         profiler = MultiModalProfiler(processor)
         dummy_data = profiler.get_encoder_dummy_data(seq_len, mm_counts)
 
@@ -331,7 +333,9 @@ class MultiModalRegistry:
         token_ids = dummy_data.prompt_token_ids
         if len(token_ids) < seq_len:
             logger.warning_once(
-                f"Expected at least {seq_len} dummy encoder tokens for "
-                f"profiling, but found {len(token_ids)} tokens instead.")
+                "Expected at least %d dummy encoder tokens for profiling, but found %d tokens instead.",  # noqa: E501
+                seq_len,
+                len(token_ids),
+            )
 
         return dummy_data
