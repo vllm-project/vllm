@@ -5,13 +5,13 @@ from typing import Any, Optional
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
+from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.ops.triton_unified_attention import unified_attention
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import (
-    FlashAttentionMetadata, FlashAttentionMetadataBuilder)
+    FlashAttentionImpl, FlashAttentionMetadata, FlashAttentionMetadataBuilder)
 
 logger = init_logger(__name__)
 
@@ -56,7 +56,7 @@ class TritonAttentionBackend(AttentionBackend):
         return FlashAttentionMetadataBuilder
 
 
-class TritonAttentionImpl(AttentionImpl):
+class TritonAttentionImpl(FlashAttentionImpl):
 
     def __init__(
         self,
