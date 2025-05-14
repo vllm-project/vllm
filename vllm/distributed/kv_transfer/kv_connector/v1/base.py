@@ -213,6 +213,13 @@ class KVConnectorBase_V1(ABC):
     # Scheduler-side methods
     # ==============================
 
+    def should_free_pending_on_abort(self) -> bool:
+        """
+        For async sending, whether to free blocks for pending
+        requests on abort.
+        """
+        return True
+
     def set_kv_transfer_params(self, request: "Request"):
         """Parse raw KV Transfer params."""
         assert request.kv_transfer_params is None
