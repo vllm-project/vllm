@@ -18,6 +18,10 @@ if current_platform.get_device_capability() < (7, 0):
     pytest.skip("INT8 Triton requires CUDA 7.0 or higher",
                 allow_module_level=True)
 
+vllm_config = VllmConfig()
+vllm_config.scheduler_config.max_num_seqs = 128
+vllm_config.scheduler_config.max_model_len = 8192
+
 
 # For test
 def native_per_token_group_quant_int8(x,
@@ -174,7 +178,6 @@ def test_w8a8_block_int8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
     score = torch.randn((M, E), dtype=dtype)
 
     # Set the context to avoid lots of warning spam.
-    vllm_config = VllmConfig()
     with set_current_vllm_config(vllm_config):
         out = fused_moe(
             a,

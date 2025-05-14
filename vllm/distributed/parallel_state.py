@@ -23,6 +23,7 @@ If you only need to use the distributed environment without model/pipeline
 """
 import contextlib
 import gc
+import importlib.util
 import pickle
 import weakref
 from collections import namedtuple
@@ -42,7 +43,7 @@ from vllm.distributed.device_communicators.base_device_communicator import (
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.utils import (direct_register_custom_op, resolve_obj_by_qualname,
-                        supports_custom_op)
+                        run_once, supports_custom_op)
 
 
 @dataclass
@@ -936,9 +937,49 @@ def init_distributed_environment(
             "world group already initialized with a different world size")
 
 
+PPLX_DID_INIT: bool = False
+
+
+@run_once
+def pplx_init(rank, world_size):
+    has_pplx = importlib.util.find_spec("pplx_kernels") is not None
+
+    if has_pplx and world_size > 1:
+        from pplx_kernels.nvshmem import (nvshmem_alloc_empty_unique_id,
+                                          nvshmem_get_unique_id, nvshmem_init)
+        try:
+            global PPLX_DID_INIT
+            logger.debug(
+                "Initialize NVSHMEM for PPLX kernels: rank=%d, "
+                "world size=%d", rank, world_size)
+            uid = nvshmem_get_unique_id(
+            ) if rank == 0 else nvshmem_alloc_empty_unique_id()
+            uid_gpu = uid.cuda()
+            get_world_group().broadcast(uid_gpu, src=0)
+            uid = uid_gpu.to(device='cpu')
+            logger.debug("PPLX NVSHMEM UID = %s", uid)
+            nvshmem_init(uid, rank, world_size)
+            PPLX_DID_INIT = True
+        except Exception as ex:
+            logger.error("Failed to initialize NVSHMEM for PPLX: %s", ex)
+
+
+@run_once
+def pplx_finalize():
+    global PPLX_DID_INIT
+    if PPLX_DID_INIT:
+        from pplx_kernels.nvshmem import nvshmem_finalize
+        logger.debug("PPLX NVSHMEM finalize")
+        from vllm.model_executor.layers.fused_moe.layer import (
+            _all_to_all_cache)
+        _all_to_all_cache.destroy()
+        nvshmem_finalize()
+
+
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
+    enable_expert_parallel: bool = False,
     backend: Optional[str] = None,
 ) -> None:
     """
@@ -1041,10 +1082,14 @@ def initialize_model_parallel(
         _DP.rank_in_group, _PP.rank_in_group, _TP.rank_in_group,
         _EP.rank_in_group)
 
+    if enable_expert_parallel:
+        pplx_init(rank, world_size)
+
 
 def ensure_model_parallel_initialized(
     tensor_model_parallel_size: int,
     pipeline_model_parallel_size: int,
+    enable_expert_parallel: bool = False,
     backend: Optional[str] = None,
 ) -> None:
     """Helper to initialize model parallel groups if they are not initialized,
@@ -1055,7 +1100,8 @@ def ensure_model_parallel_initialized(
         get_world_group().device_group)
     if not model_parallel_is_initialized():
         initialize_model_parallel(tensor_model_parallel_size,
-                                  pipeline_model_parallel_size, backend)
+                                  pipeline_model_parallel_size,
+                                  enable_expert_parallel, backend)
         return
 
     assert (
@@ -1133,6 +1179,9 @@ def get_tensor_model_parallel_rank():
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
     global _TP
+
+    pplx_finalize()
+
     if _TP:
         _TP.destroy()
     _TP = None
