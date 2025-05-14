@@ -39,8 +39,8 @@ nav:
     - deployment/docker.md
     - deployment/k8s.md
     - deployment/nginx.md
-    - deployment/frameworks/index.md
-    - deployment/integrations/index.md
+    - deployment/frameworks
+    - deployment/integrations
   - Performance:
     - performance/optimization.md
     - performance/benchmarks.md
