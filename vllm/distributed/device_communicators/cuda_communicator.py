@@ -1,11 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import logging
+import os
 from typing import Optional
 
 import torch
 from torch.distributed import ProcessGroup
 
+from vllm.platforms import current_platform
+
 from .base_device_communicator import DeviceCommunicatorBase
+
+logger = logging.getLogger(__name__)
 
 
 class CudaCommunicator(DeviceCommunicatorBase):
@@ -33,6 +39,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
             CustomAllreduce)
         from vllm.distributed.device_communicators.pynccl import (
             PyNcclCommunicator)
+        from vllm.distributed.device_communicators.quick_all_reduce import (
+            QuickAllReduce, QuickReduceAlgo)
 
         self.pynccl_comm: Optional[PyNcclCommunicator] = None
         if use_pynccl and self.world_size > 1:
@@ -48,10 +56,37 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 group=self.cpu_group,
                 device=self.device,
             )
+        self.use_quick_allreduce = os.environ.get("VLLM_USE_QUICK_ALLREDUCE",
+                                                  "0") == "1"
+        if self.use_quick_allreduce and not current_platform.is_rocm():
+            logger.warning(
+                "Environment variable VLLM_USE_QUICK_ALLREDUCE is set to 1," \
+                " but QuickReduce is only supported on ROCm platform."
+            )
+        self.qr_comm: Optional[QuickAllReduce] = None
+        if self.use_quick_allreduce and self.world_size > 1 and \
+            current_platform.is_rocm():
+            # Initialize a custom fast all-reduce implementation.
+            qr_comm_algo = os.environ.get("VLLM_QUICK_ALLREDUCE_ALGO",
+                                          "TwoShot")
+            assert qr_comm_algo in QuickReduceAlgo.__members__, \
+            "Unknown QuickReduce algorithm: {}".format(
+            qr_comm_algo)
+            self.qr_comm_algo = QuickReduceAlgo[qr_comm_algo]
+            self.qr_comm = QuickAllReduce(group=self.cpu_group,
+                                          device=self.device,
+                                          algo=self.qr_comm_algo)
 
     def all_reduce(self, input_):
-        # always try custom allreduce first,
+        # always try quick reduce first, then custom allreduce,
         # and then pynccl.
+        qr_comm = self.qr_comm
+        if qr_comm is not None and not qr_comm.disabled and \
+            qr_comm.should_quick_allreduce(input_):
+            out = qr_comm.all_reduce(input_)
+            assert out is not None
+            return out
+
         ca_comm = self.ca_comm
         if ca_comm is not None and not ca_comm.disabled and \
             ca_comm.should_custom_ar(input_):
