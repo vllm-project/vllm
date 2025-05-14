@@ -2,7 +2,7 @@
 
 from abc import abstractmethod
 from enum import Enum
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Optional
 
 import torch
 import torch.nn.functional as F
@@ -10,12 +10,15 @@ from torch.nn.parameter import UninitializedParameter
 
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config
-from vllm.distributed import (get_dp_group, get_tensor_model_parallel_rank,
+from vllm.distributed import (get_dp_group, get_ep_group,
+                              get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+    is_rocm_aiter_moe_enabled)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
@@ -27,6 +30,11 @@ if current_platform.is_cuda_alike():
     from .fused_moe import fused_experts
 else:
     fused_experts = None  # type: ignore
+if is_rocm_aiter_moe_enabled():
+    from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
+        rocm_aiter_biased_group_topk as grouped_topk)
+else:
+    from vllm.model_executor.layers.fused_moe.fused_moe import grouped_topk
 if current_platform.is_tpu():
     # the iterative moe implementation is used until the moe_pallas is fixed
     from .moe_torch_iterative import fused_moe as fused_moe_pallas
@@ -326,7 +334,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
 def determine_expert_map(
         ep_size: int, ep_rank: int,
-        global_num_experts: int) -> Tuple[int, Optional[torch.Tensor]]:
+        global_num_experts: int) -> tuple[int, Optional[torch.Tensor]]:
     """
         Calculates how many experts should be assigned to each rank for EP and
         creates a mapping from global to local expert index. Experts are
@@ -338,7 +346,7 @@ def determine_expert_map(
             global_num_experts (int): The total number of experts in the model.
 
         Returns:
-            Tuple[int, Optional[torch.Tensor]]: A tuple containing:
+            tuple[int, Optional[torch.Tensor]]: A tuple containing:
                 - local_num_experts (int): The number of experts assigned
                     to the current rank.
                 - expert_map (Optional[torch.Tensor]): A tensor of shape
@@ -480,6 +488,7 @@ class FusedMoE(torch.nn.Module):
         self.custom_routing_function = custom_routing_function
         self.scoring_func = scoring_func
         self.e_score_correction_bias = e_score_correction_bias
+        self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = activation
 
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
@@ -498,7 +507,6 @@ class FusedMoE(torch.nn.Module):
             self.quant_method = quant_config.get_quant_method(self, prefix)
         assert self.quant_method is not None
 
-        self.apply_router_weight_on_input = apply_router_weight_on_input
         moe_quant_params = {
             "num_experts": self.local_num_experts,
             "hidden_size": hidden_size,
@@ -801,8 +809,7 @@ class FusedMoE(torch.nn.Module):
                        custom_routing_function: Optional[Callable] = None,
                        scoring_func: str = "softmax",
                        e_score_correction_bias: Optional[torch.Tensor] = None):
-        from vllm.model_executor.layers.fused_moe.fused_moe import (
-            fused_topk, grouped_topk)
+        from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 
         # DeekSeekv2 uses grouped_top_k
         if use_grouped_topk:
@@ -832,24 +839,6 @@ class FusedMoE(torch.nn.Module):
 
         return topk_weights, topk_ids
 
-    def naive_multicast(self, x: torch.Tensor,
-                        cu_tokens_across_dp_cpu: torch.Tensor):
-        assert (len(x.shape) == 2)
-        buffer = torch.empty((cu_tokens_across_dp_cpu[-1], x.size(1)),
-                             device=x.device,
-                             dtype=x.dtype)
-
-        start = 0 if self.dp_rank == 0 else cu_tokens_across_dp_cpu[
-            self.dp_rank - 1]
-        end = cu_tokens_across_dp_cpu[self.dp_rank]
-        buffer[start:end, :].copy_(x)
-        for idx in range(get_dp_group().world_size):
-            start = 0 if idx == 0 else cu_tokens_across_dp_cpu[idx - 1]
-            end = cu_tokens_across_dp_cpu[idx]
-            get_dp_group().broadcast(buffer[start:end, :], idx)
-
-        return buffer
-
     def forward(self, hidden_states: torch.Tensor,
                 router_logits: torch.Tensor):
         if self.use_direct_call:
@@ -863,14 +852,8 @@ class FusedMoE(torch.nn.Module):
         assert self.quant_method is not None
 
         if self.dp_size > 1:
-            cu_tokens_across_dp_cpu = get_forward_context(
-            ).dp_metadata.cu_tokens_across_dp_cpu
-
-            hidden_states = self.naive_multicast(hidden_states,
-                                                 cu_tokens_across_dp_cpu)
-            router_logits = self.naive_multicast(router_logits,
-                                                 cu_tokens_across_dp_cpu)
-
+            hidden_states, router_logits = get_ep_group().dispatch(
+                hidden_states, router_logits)
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
             layer=self,
@@ -891,12 +874,7 @@ class FusedMoE(torch.nn.Module):
         )
 
         if self.dp_size > 1:
-            start = 0 if self.dp_rank == 0 else cu_tokens_across_dp_cpu[
-                self.dp_rank - 1]
-            end = cu_tokens_across_dp_cpu[self.dp_rank]
-
-            all_hidden_states = get_dp_group().all_reduce(final_hidden_states)
-            final_hidden_states = all_hidden_states[start:end, :]
+            final_hidden_states = get_ep_group().combine(final_hidden_states)
 
         if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
             # Default set to False. (May have to add shared expert outputs.)
@@ -909,7 +887,7 @@ class FusedMoE(torch.nn.Module):
     def make_expert_params_mapping(
             cls, ckpt_gate_proj_name: str, ckpt_down_proj_name: str,
             ckpt_up_proj_name: str,
-            num_experts: int) -> List[Tuple[str, str, int, str]]:
+            num_experts: int) -> list[tuple[str, str, int, str]]:
 
         return [
             # (param_name, weight_name, expert_id, shard_id)

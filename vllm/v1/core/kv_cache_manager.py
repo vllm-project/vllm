@@ -36,6 +36,12 @@ class KVCacheBlocks:
         """Converts the KVCacheBlocks instance to a list of block IDs."""
         return [block.block_id for block in self.blocks]
 
+    def get_unhashed_block_ids(self) -> list[int]:
+        """Get block_ids of unhashed blocks from KVCacheBlocks instance."""
+        return [
+            block.block_id for block in self.blocks if block.block_hash is None
+        ]
+
 
 class KVCacheManager:
 
@@ -115,7 +121,6 @@ class KVCacheManager:
                 - A list of blocks that are computed for the request.
                 - The number of computed tokens.
         """
-
         # Prefix caching is disabled or
         # When the request requires prompt logprobs, we skip prefix caching.
         if (not self.enable_caching
@@ -134,45 +139,36 @@ class KVCacheManager:
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.requests += 1
 
-        if len(block_hashes) * self.block_size == request.num_tokens:
-            # When prompt length is divisible by the block size and all
-            # blocks are cached, we need to recompute the last token. This
-            # have to be achieved by re-computing an entire block because
-            # allocate_slots() assumes num_computed_tokens is always a
-            # multiple of the block size. To achieve this, remove the last
-            # block hash from the block_hashes for find_longest_cache_hit
-            # This limitation can potentially be removed in the future to
-            # slightly improve the performance.
-            last_block_hash = block_hashes.pop()
-        else:
-            last_block_hash = None
+        # NOTE: When all tokens hit the cache, we must recompute the last token
+        # to obtain logits. Thus, set max_cache_hit_length to prompt_length - 1.
+        # This can trigger recomputation of an entire block, rather than just
+        # the single last token, because allocate_slots() requires
+        # num_computed_tokens to be block-size aligned. Removing this limitation
+        # could slightly improve performance in the future.
+        max_cache_hit_length = request.num_tokens - 1
 
-        computed_blocks = (
-            self.single_type_manager.find_longest_cache_hit(block_hashes))
-
-        if self.log_stats:
-            assert self.prefix_cache_stats is not None
-            self.prefix_cache_stats.queries += len(block_hashes)
-            self.prefix_cache_stats.hits += len(computed_blocks)
-
-        if last_block_hash is not None:
-            # Add back the last block hash if it was removed.
-            # NOTE: Because block_hashes is cached in req_to_block_hashes,
-            # we shouldn't modify it directly.
-            block_hashes.append(last_block_hash)
-
+        computed_blocks = self.single_type_manager.find_longest_cache_hit(
+            block_hashes, max_cache_hit_length)
         # NOTE(woosuk): Since incomplete blocks are not eligible for
         # sharing, `num_computed_tokens` is always a multiple of
         # `block_size`.
         num_computed_tokens = len(computed_blocks) * self.block_size
+
+        if self.log_stats:
+            assert self.prefix_cache_stats is not None
+            self.prefix_cache_stats.queries += request.num_tokens
+            self.prefix_cache_stats.hits += num_computed_tokens
+
         return KVCacheBlocks(computed_blocks), num_computed_tokens
 
     def allocate_slots(
         self,
         request: Request,
         num_new_tokens: int,
+        num_new_computed_tokens: int = 0,
         new_computed_blocks: Optional[KVCacheBlocks] = None,
         num_lookahead_tokens: int = 0,
+        delay_cache_blocks: bool = False,
     ) -> Optional[KVCacheBlocks]:
         """Add slots for a request with new tokens to append.
 
@@ -181,11 +177,16 @@ class KVCacheManager:
             num_new_tokens: The number of tokens to allocate, including external
                 tokens. Note that this does not include tokens that have
                 already been computed locally (i.e. new_computed_blocks).
-            new_computed_blocks: The new computed blocks just hitting the
-                prefix caching.
+            num_new_computed_tokens: The number of new computed tokens just
+                hitting the prefix caching, excluding external tokens.
+            new_computed_blocks: The cached blocks for the above new computed 
+                tokens.
             num_lookahead_tokens: The number of speculative tokens to allocate.
                 This is used by spec decode proposers with kv-cache such 
                 as eagle.
+            delay_cache_blocks: Whether to skip caching the blocks. This is
+                used by P/D when allocating blocks used in a KV transfer
+                which will complete in a future step.
 
         Blocks layout:
         ```
@@ -224,7 +225,7 @@ class KVCacheManager:
         # The number of computed tokens is the number of computed tokens plus
         # the new prefix caching hits
         num_computed_tokens = (request.num_computed_tokens +
-                               len(new_computed_block_list) * self.block_size)
+                               num_new_computed_tokens)
         num_tokens_need_slot = min(
             num_computed_tokens + num_new_tokens + num_lookahead_tokens,
             self.max_model_len)
@@ -255,7 +256,9 @@ class KVCacheManager:
         new_blocks = self.single_type_manager.allocate_new_blocks(
             request.request_id, num_tokens_need_slot)
 
-        if not self.enable_caching:
+        # P/D: delay caching blocks if we have to recv from
+        # remote. Update state for locally cached blocks.
+        if not self.enable_caching or delay_cache_blocks:
             return KVCacheBlocks(new_blocks)
 
         # Speculated tokens might be rejected in the future, so we does
@@ -350,3 +353,11 @@ class KVCacheManager:
             A list of KV cache events.
         """
         return self.block_pool.take_events()
+
+    def get_block_ids(self, request_id: str) -> list[int]:
+        """Get the block ids of a request."""
+        assert request_id in self.single_type_manager.req_to_blocks
+        return [
+            block.block_id
+            for block in self.single_type_manager.req_to_blocks[request_id]
+        ]

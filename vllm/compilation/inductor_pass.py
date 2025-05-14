@@ -5,7 +5,7 @@ import inspect
 import json
 import types
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, Optional, Union
+from typing import Any, Callable, Optional, Union
 
 import torch
 from torch import fx
@@ -16,7 +16,7 @@ if is_torch_equal_or_newer("2.6"):
     from torch._inductor.custom_graph_pass import CustomGraphPass
 else:
     # CustomGraphPass is not present in 2.5 or lower, import our version
-    from .torch25_custom_graph_pass import (  # noqa: yapf
+    from .torch25_custom_graph_pass import (  # noqa: E501
         Torch25CustomGraphPass as CustomGraphPass)
 
 _pass_context = None
@@ -83,7 +83,7 @@ class InductorPass(CustomGraphPass):
         return hasher.hexdigest()
 
     @staticmethod
-    def hash_dict(dict_: Dict[Any, Any]):
+    def hash_dict(dict_: dict[Any, Any]):
         """
         Utility method to hash a dictionary, can alternatively be used for uuid.
         :return: A sha256 hash of the json rep of the dictionary.

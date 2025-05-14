@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from functools import cache
-from typing import List, Optional, Tuple
+from typing import Optional
 
 import torch
 
@@ -97,7 +97,7 @@ def rocm_aiter_fmoe_fp8_blockscale_g1u1_impl(
         w1_scale: torch.Tensor,
         w2_scale: torch.Tensor,
         a1_scale: torch.Tensor,
-        block_shape: List[int],
+        block_shape: list[int],
         smooth_scale: Optional[torch.Tensor] = None) -> torch.Tensor:
     from aiter import fmoe_fp8_blockscale_g1u1
     from aiter.fused_moe_bf16_asm import moe_sorting_ck
@@ -142,7 +142,7 @@ def rocm_aiter_fmoe_fp8_blockscale_g1u1_fake(
         w1_scale: torch.Tensor,
         w2_scale: torch.Tensor,
         a1_scale: torch.Tensor,
-        block_shape: List[int],
+        block_shape: list[int],
         smooth_scale: Optional[torch.Tensor] = None) -> torch.Tensor:
 
     return torch.empty_like(a1, dtype=hidden_states_dtype)
@@ -216,6 +216,37 @@ def rocm_aiter_topk_softmax_fake(topk_weights: torch.Tensor,
     pass
 
 
+def rocm_aiter_biased_grouped_topk_impl(
+        gating_output: torch.Tensor,
+        correction_bias: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        num_expert_group: int,
+        topk_group: int,
+        need_renorm: bool,
+        routed_scaling_factor: float = 1.0  # mul to topk_weights
+) -> None:
+
+    from aiter import biased_grouped_topk
+
+    biased_grouped_topk(gating_output, correction_bias, topk_weights, topk_ids,
+                        num_expert_group, topk_group, need_renorm,
+                        routed_scaling_factor)
+
+
+def rocm_aiter_biased_grouped_topk_fake(
+        gating_output: torch.Tensor,
+        correction_bias: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        num_expert_group: int,
+        topk_group: int,
+        need_renorm: bool,
+        routed_scaling_factor: float = 1.0  # mul to topk_weights
+) -> None:
+    pass
+
+
 if current_platform.is_rocm():
 
     direct_register_custom_op(
@@ -258,6 +289,46 @@ if current_platform.is_rocm():
         dispatch_key=current_platform.dispatch_key,
     )
 
+    direct_register_custom_op(
+        op_name="rocm_aiter_biased_grouped_topk",
+        op_func=rocm_aiter_biased_grouped_topk_impl,
+        mutates_args=["topk_weights", "topk_ids"],
+        fake_impl=rocm_aiter_biased_grouped_topk_fake,
+        dispatch_key=current_platform.dispatch_key,
+    )
+
+
+def rocm_aiter_biased_group_topk(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    num_expert_group: int = 0,
+    topk_group: int = 0,
+    scoring_func: str = "sigmoid",
+    e_score_correction_bias: Optional[torch.Tensor] = None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    assert scoring_func == "sigmoid", (
+        "rocm_aiter_biased_group_topk only supports 'sigmoid' scoring_func.")
+    assert e_score_correction_bias is not None, (
+        "'e_score_correction_bias' must not be None.")
+    token = hidden_states.shape[0]
+    device = hidden_states.device
+    topk_ids = torch.empty((token, topk), dtype=torch.int32, device=device)
+    topk_weights = torch.empty((token, topk),
+                               dtype=torch.float32,
+                               device=device)
+    torch.ops.vllm.rocm_aiter_biased_grouped_topk(
+        gating_output,
+        e_score_correction_bias,
+        topk_weights,
+        topk_ids,
+        num_expert_group,
+        topk_group,
+        renormalize,
+    )
+    return topk_weights, topk_ids
+
 
 def rocm_aiter_fused_experts(hidden_states: torch.Tensor,
                              w1: torch.Tensor,
@@ -280,7 +351,7 @@ def rocm_aiter_fused_experts(hidden_states: torch.Tensor,
                              w2_zp: Optional[torch.Tensor] = None,
                              a1_scale: Optional[torch.Tensor] = None,
                              a2_scale: Optional[torch.Tensor] = None,
-                             block_shape: Optional[List[int]] = None,
+                             block_shape: Optional[list[int]] = None,
                              allow_deep_gemm: bool = False) -> torch.Tensor:
 
     from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -372,14 +443,14 @@ def rocm_aiter_topk_softmax(topk_weights: torch.Tensor,
                             topk_indices: torch.Tensor,
                             token_expert_indices: torch.Tensor,
                             gating_output: torch.Tensor,
-                            renormalize: bool) -> Tuple[torch.Tensor, ...]:
+                            renormalize: bool) -> tuple[torch.Tensor, ...]:
     torch.ops.vllm.rocm_aiter_topk_softmax(topk_weights, topk_indices,
                                            token_expert_indices, gating_output,
                                            renormalize)
     return topk_weights, topk_indices
 
 
-def shuffle_weights(*tensors: torch.Tensor) -> Tuple[torch.Tensor, ...]:
+def shuffle_weights(*tensors: torch.Tensor) -> tuple[torch.Tensor, ...]:
     """
     Applies shuffle_weight function from AITER to each 
     input tensor and returns them.
@@ -395,7 +466,7 @@ def shuffle_weights(*tensors: torch.Tensor) -> Tuple[torch.Tensor, ...]:
 
 
 def expand_weights(*tensors: torch.Tensor,
-                   expansion_dims: list[int]) -> Tuple[torch.Tensor, ...]:
+                   expansion_dims: list[int]) -> tuple[torch.Tensor, ...]:
     """
     Expands the dimensions of input tensors.
 

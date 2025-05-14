@@ -8,6 +8,7 @@ import inspect
 import json
 import re
 import textwrap
+import uuid
 import warnings
 from collections import Counter
 from contextlib import contextmanager
@@ -260,7 +261,8 @@ class ModelConfig:
     - "float" is shorthand for FP32 precision.\n
     - "float32" for FP32 precision."""
     seed: Optional[int] = None
-    """Random seed for reproducibility."""
+    """Random seed for reproducibility. Initialized to None in V0, but
+    initialized to 0 in V1."""
     hf_config_path: Optional[str] = None
     """Name or path of the Hugging Face config to use. If unspecified, model
     name or path will be used."""
@@ -440,6 +442,24 @@ class ModelConfig:
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __post_init__(self) -> None:
+        # Set the default seed to 0 in V1.
+        # NOTE(woosuk): In V0, we set the default seed to None because the
+        # driver worker shares the same process as the user process, and thus
+        # setting a seed affects the user process as well.
+        # In V1, we use separate processes for workers (unless
+        # VLLM_ENABLE_V1_MULTIPROCESSING=0), so setting a seed here
+        # doesn't affect the user process. However, without a consistent seed,
+        # different tensor parallel workers would sample different tokens,
+        # leading to inconsistent results.
+        if envs.VLLM_USE_V1 and self.seed is None:
+            self.seed = 0
+            if not envs.VLLM_ENABLE_V1_MULTIPROCESSING:
+                logger.warning(
+                    "The global random seed is set to %d. Since "
+                    "VLLM_ENABLE_V1_MULTIPROCESSING is set to False, this may "
+                    "affect the random state of the Python process that "
+                    "launched vLLM.", self.seed)
+
         self.model = maybe_model_redirect(self.model)
         # The tokenizer is consistent with the model by default.
         if self.tokenizer is None:
@@ -591,28 +611,35 @@ class ModelConfig:
 
     def maybe_pull_model_tokenizer_for_s3(self, model: str,
                                           tokenizer: str) -> None:
-        """
-        Pull the model config or tokenizer to a temporary
-        directory in case of S3.
-
+        """Pull model/tokenizer from S3 to temporary directory when needed.
+        
         Args:
-            model: The model name or path.
-            tokenizer: The tokenizer name or path.
-
+            model: Model name or path
+            tokenizer: Tokenizer name or path
         """
-        if is_s3(model) or is_s3(tokenizer):
-            if is_s3(model):
-                s3_model = S3Model()
-                s3_model.pull_files(
-                    model, allow_pattern=["*.model", "*.py", "*.json"])
-                self.model_weights = self.model
-                self.model = s3_model.dir
+        if not (is_s3(model) or is_s3(tokenizer)):
+            return
 
-            if is_s3(tokenizer):
-                s3_tokenizer = S3Model()
-                s3_tokenizer.pull_files(
+        if is_s3(model):
+            s3_model = S3Model()
+            s3_model.pull_files(model,
+                                allow_pattern=["*.model", "*.py", "*.json"])
+            self.model_weights = model
+            self.model = s3_model.dir
+
+            # If tokenizer is same as model, download to same directory
+            if model == tokenizer:
+                s3_model.pull_files(
                     model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
-                self.tokenizer = s3_tokenizer.dir
+                self.tokenizer = s3_model.dir
+                return
+
+        # Only download tokenizer if needed and not already handled
+        if is_s3(tokenizer):
+            s3_tokenizer = S3Model()
+            s3_tokenizer.pull_files(
+                model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
+            self.tokenizer = s3_tokenizer.dir
 
     def _init_multimodal_config(self) -> Optional["MultiModalConfig"]:
         if self.registry.is_multimodal_model(self.architectures):
@@ -928,6 +955,23 @@ class ModelConfig:
                 "Number of experts in the model must be greater than 0 "
                 "when expert parallelism is enabled.")
 
+    def verify_dual_chunk_attention_config(
+        self,
+        load_config: "LoadConfig",
+    ) -> None:
+        if hasattr(self.hf_config, "dual_chunk_attention_config"):
+            # Try loading the sparse attention config
+            from vllm.model_executor.model_loader.weight_utils import (
+                get_sparse_attention_config)
+            sparse_attn_config = get_sparse_attention_config(self, load_config)
+            if sparse_attn_config:
+                self.hf_config.dual_chunk_attention_config[
+                    "sparse_attention_config"] = sparse_attn_config
+                if "sparse_attention_enabled" not in \
+                        self.hf_config.dual_chunk_attention_config:
+                    self.hf_config.dual_chunk_attention_config[
+                        "sparse_attention_enabled"] = True
+
     def verify_async_output_proc(self, parallel_config, speculative_config,
                                  device_config) -> None:
         if not self.use_async_output_proc:
@@ -1138,7 +1182,8 @@ class ModelConfig:
     def get_layers_start_end_indices(
             self, parallel_config: "ParallelConfig") -> tuple[int, int]:
         from vllm.distributed.utils import get_pp_indices
-        if self.hf_text_config.model_type == "deepseek_mtp":
+        if (self.hf_text_config.model_type == "deepseek_mtp"
+                or self.hf_config.model_type == "mimo_mtp"):
             total_num_hidden_layers = getattr(self.hf_text_config,
                                               "num_nextn_predict_layers", 0)
         else:
@@ -1630,25 +1675,17 @@ class ParallelConfig:
     data_parallel_size: int = 1
     """Number of data parallel groups. MoE layers will be sharded according to
     the product of the tensor parallel size and data parallel size."""
+    data_parallel_size_local: int = 1
+    """Number of local data parallel groups."""
     data_parallel_rank: int = 0
     """Rank of the data parallel group."""
-    _data_parallel_rank_local: Optional[int] = field(default=None, init=False)
-    """Private field to store the local rank of the data parallel group."""
-
-    @property
-    def data_parallel_rank_local(self) -> int:
-        """Local rank of the data parallel group, defaults to global rank."""
-        if self._data_parallel_rank_local is None:
-            return self.data_parallel_rank
-        return self._data_parallel_rank_local
-
-    @data_parallel_rank_local.setter
-    def data_parallel_rank_local(self, value: int) -> None:
-        """Set the local rank of the data parallel group."""
-        self._data_parallel_rank_local = value
-
+    data_parallel_rank_local: Optional[int] = None
+    """Local rank of the data parallel group,
+    set only in SPMD mode."""
     data_parallel_master_ip: str = "127.0.0.1"
     """IP of the data parallel master."""
+    data_parallel_rpc_port: int = 29550
+    """Port for data parallel messaging."""
     data_parallel_master_port: int = 29500
     """Port of the data parallel master."""
     enable_expert_parallel: bool = False
@@ -1696,12 +1733,15 @@ class ParallelConfig:
 
     world_size: int = field(init=False)
     """world_size is TPxPP, it affects the number of workers we create."""
-    world_size_across_dp: int = field(init=False)
-    """world_size_across_dp is TPxPPxDP, it is the size of the world
-    including data parallelism."""
 
     rank: int = 0
     """Global rank in distributed setup."""
+
+    @property
+    def world_size_across_dp(self) -> int:
+        """world_size_across_dp is TPxPPxDP, it is the size of the world
+        including data parallelism."""
+        return self.world_size * self.data_parallel_size
 
     def get_next_dp_init_port(self) -> int:
         """
@@ -1762,10 +1802,14 @@ class ParallelConfig:
         self.world_size = self.pipeline_parallel_size * \
             self.tensor_parallel_size
 
-        if self.data_parallel_size > 1:
+        if self.data_parallel_size_local > self.data_parallel_size:
+            raise ValueError(
+                f"data_parallel_size_local ({self.data_parallel_size_local}) "
+                f"must be <= data_parallel_size ({self.data_parallel_size})")
+
+        if self.data_parallel_size > 1 or self.data_parallel_size_local == 0:
             # Data parallel was specified in the engine args.
             self.data_parallel_master_port = get_open_port()
-            # TODO multi-node
         else:
             # Otherwise fall back to env vars (e.g. for offline SPMD case).
             self.data_parallel_size = envs.VLLM_DP_SIZE
@@ -1773,8 +1817,6 @@ class ParallelConfig:
             self.data_parallel_rank_local = envs.VLLM_DP_RANK_LOCAL
             self.data_parallel_master_ip = envs.VLLM_DP_MASTER_IP
             self.data_parallel_master_port = envs.VLLM_DP_MASTER_PORT
-
-        self.world_size_across_dp = self.world_size * self.data_parallel_size
 
         if self.distributed_executor_backend == "external_launcher":
             import os
@@ -2016,15 +2058,9 @@ class SchedulerConfig:
     def __post_init__(self) -> None:
         if self.max_model_len is None:
             self.max_model_len = 8192
-            logger.warning_once(
-                "max_model_len was is not set. Defaulting to arbitrary value "
-                "of %d.", self.max_model_len)
 
         if self.max_num_seqs is None:
             self.max_num_seqs = 128
-            logger.warning_once(
-                "max_num_seqs was is not set. Defaulting to arbitrary value "
-                "of %d.", self.max_num_seqs)
 
         if self.max_num_batched_tokens is None:
             if self.enable_chunked_prefill:
@@ -2356,6 +2392,17 @@ class SpeculativeConfig:
                 "n_predict": n_predict,
                 "architectures": ["DeepSeekMTPModel"]
             })
+
+        if hf_config.architectures[0] == "MiMoForCausalLM":
+            hf_config.model_type = "mimo_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update({
+                "num_hidden_layers": 0,
+                "n_predict": n_predict,
+                "architectures": ["MiMoMTPModel"]
+            })
+            return hf_config
+
         return hf_config
 
     def __post_init__(self):
@@ -2372,8 +2419,10 @@ class SpeculativeConfig:
             # TODO(Shangming): Refactor mtp configuration logic when supporting
             # mtp acceleration for more models besides deepseek_v3
             if self.target_model_config and \
-                self.target_model_config.hf_text_config.model_type \
-                        == "deepseek_v3":
+                (self.target_model_config.hf_text_config.model_type \
+                        == "deepseek_v3" or
+                    self.target_model_config.hf_text_config.model_type \
+                        == "mimo"):
                 # use the draft model from the same model:
                 self.model = self.target_model_config.model
             elif self.method in ("ngram", "[ngram]"):
@@ -3438,6 +3487,9 @@ class KVTransferConfig:
     """The KV connector for vLLM to transmit KV caches between vLLM instances.
     """
 
+    engine_id: str = str(uuid.uuid4())
+    """The engine id for KV transfers."""
+
     kv_buffer_device: Optional[str] = "cuda"
     """The device used by kv connector to buffer the KV cache.
     Currently only support 'cuda'."""
@@ -3448,7 +3500,7 @@ class KVTransferConfig:
 
     kv_role: Optional[KVRole] = None
     """Whether this vLLM instance produces, consumes KV cache, or both. Choices
-    are 'kv_producer', 'kv_consumer', and 'both'."""
+    are 'kv_producer', 'kv_consumer', and 'kv_both'."""
 
     kv_rank: Optional[int] = None
     """The rank of this vLLM instance in the KV cache transfer. Typical value:
@@ -4175,6 +4227,8 @@ class VllmConfig:
                                                        self.speculative_config,
                                                        self.device_config)
             self.model_config.verify_with_parallel_config(self.parallel_config)
+            self.model_config.verify_dual_chunk_attention_config(
+                self.load_config)
 
         if self.cache_config is not None:
             self.cache_config.verify_with_parallel_config(self.parallel_config)
