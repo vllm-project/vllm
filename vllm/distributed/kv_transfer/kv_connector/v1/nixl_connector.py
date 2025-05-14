@@ -763,8 +763,8 @@ class NixlConnectorWorker:
                 req_id, tp_ratio = notif.decode("utf-8").rsplit(":", 1)
                 self.consumer_notification_counts_by_req[req_id] += 1
                 # Wait all consumers (D) to be done reading before freeing.
-                if self.consumer_notification_counts_by_req[
-                        req_id] == tp_ratio:
+                if self.consumer_notification_counts_by_req[req_id] == int(
+                        tp_ratio):
                     notified_req_ids.add(req_id)
                     del self.consumer_notification_counts_by_req[req_id]
         return notified_req_ids
@@ -929,6 +929,7 @@ class NixlConnectorWorker:
         If layer_idx is provided, we use the region_ids for the given layer.
         Otherwise, we use all regions.
         """
+        # TODO TP docs
 
         if layer_idx is None:
             region_ids = range(self.num_regions)
@@ -951,9 +952,9 @@ class NixlConnectorWorker:
         descs_ids: list[int] = []
         for reg_id in region_ids:
             for block_id in block_ids:
-                for kv_block in range(self.block_size):
+                for slot_id in range(self.block_size):
                     descs_ids.append(reg_id * num_blocks * self.block_size +
-                                     block_id * self.block_size + kv_block)
+                                     block_id * self.block_size + slot_id)
         return descs_ids
 
 
