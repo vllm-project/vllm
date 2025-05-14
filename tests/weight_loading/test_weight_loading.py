@@ -35,6 +35,7 @@ def test_weight_loading(vllm_runner):
             dtype=torch.half if NEEDS_FP16 else "auto",
             quantization=None if QUANTIZATION == "None" else QUANTIZATION,
             max_model_len=MAX_MODEL_LEN,
+            enforce_eager=True,
             tensor_parallel_size=2) as model:
 
         output = model.generate_greedy("Hello world!", max_tokens=20)

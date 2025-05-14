@@ -405,7 +405,7 @@ def apply_gptq_marlin_linear(
                                                   k=reshaped_x.size(1),
                                                   device=input.device,
                                                   dtype=input.dtype)
-
+    torch.cuda.synchronize()
     output = ops.gptq_marlin_gemm(reshaped_x,
                                   None,
                                   weight,
@@ -423,7 +423,7 @@ def apply_gptq_marlin_linear(
                                   use_atomic_add=use_atomic_add,
                                   use_fp32_reduce=use_fp32_reduce,
                                   is_zp_float=False)
-
+    torch.cuda.synchronize()
     if bias is not None:
         output.add_(bias)  # In-place add
 
