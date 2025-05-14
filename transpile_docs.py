@@ -232,13 +232,15 @@ if __name__ == "__main__":
     for path in OLD_DIR.rglob("*"):
         if path.suffix == ".md":
             transpile_myst_to_md(path)
-        elif path.is_file():
+        elif path.suffix in {".png", ".jpg", ".ico"}:
             new_path = NEW_DIR / path.relative_to(OLD_DIR)
             new_path.parent.mkdir(parents=True, exist_ok=True)
             with open(path, "rb") as f:
                 content = f.read()
             with open(new_path, "wb") as f:
                 f.write(content)
+        else:
+            logger.warning("Skipping %s", path)
     logger.info(
         f"Handled {handled_blocks} blocks, unhandled {unhandled_blocks} blocks"
     )
