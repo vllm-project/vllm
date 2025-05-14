@@ -670,11 +670,11 @@ class OpenAIServing:
         model_config = self.model_config
 
         resolved_content_format = resolve_chat_template_content_format(
-            model_config,
             chat_template,
             tool_dicts,
             chat_template_content_format,
             tokenizer,
+            model_config=model_config,
         )
         conversation, mm_data_future = parse_chat_messages_futures(
             messages,
@@ -701,9 +701,9 @@ class OpenAIServing:
             )
         else:
             request_prompt = apply_hf_chat_template(
-                model_config,
-                tokenizer,
+                tokenizer=tokenizer,
                 conversation=conversation,
+                model_config=model_config,
                 **_chat_template_kwargs,
             )
 
