@@ -30,7 +30,6 @@ def server():
         "--trust-remote-code",
         "--limit-mm-per-prompt",
         json.dumps({"audio": MAXIMUM_AUDIOS}),
-        "--disable-mm-preprocessor-cache",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
@@ -273,7 +272,7 @@ async def test_chat_streaming_audio(client: openai.AsyncOpenAI,
     chat_completion = await client.chat.completions.create(
         model=model_name,
         messages=messages,
-        max_completion_tokens=10,
+        max_completion_tokens=8,
         temperature=0.0,
     )
     output = chat_completion.choices[0].message.content
@@ -283,7 +282,7 @@ async def test_chat_streaming_audio(client: openai.AsyncOpenAI,
     stream = await client.chat.completions.create(
         model=model_name,
         messages=messages,
-        max_completion_tokens=10,
+        max_completion_tokens=8,
         temperature=0.0,
         stream=True,
     )
@@ -333,7 +332,7 @@ async def test_chat_streaming_input_audio(client: openai.AsyncOpenAI,
     chat_completion = await client.chat.completions.create(
         model=model_name,
         messages=messages,
-        max_completion_tokens=10,
+        max_completion_tokens=8,
         temperature=0.0,
     )
     output = chat_completion.choices[0].message.content
@@ -343,7 +342,7 @@ async def test_chat_streaming_input_audio(client: openai.AsyncOpenAI,
     stream = await client.chat.completions.create(
         model=model_name,
         messages=messages,
-        max_completion_tokens=10,
+        max_completion_tokens=8,
         temperature=0.0,
         stream=True,
     )
