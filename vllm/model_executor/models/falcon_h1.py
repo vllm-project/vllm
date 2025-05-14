@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Inference-only FalconH1 model."""
 from typing import Iterable, Optional, Set, Tuple
 
@@ -67,7 +68,7 @@ class FalconH1MLP(nn.Module):
 
     def forward(self, x):
         x, _ = self.gate_up_proj(x)
-        x[:, :self.intermediate_size // self.tp_size] *= self.gate_multiplier 
+        x[:, :self.intermediate_size // self.tp_size] *= self.gate_multiplier
         x = self.act_fn(x)
         x, _ = self.down_proj(x)
         x = x * self.down_multiplier
@@ -421,8 +422,8 @@ class FalconH1Model(nn.Module):
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
         if get_pp_group().is_last_rank:
-            self.final_layernorm = RMSNorm(
-                config.hidden_size, eps=config.rms_norm_eps)
+            self.final_layernorm = RMSNorm(config.hidden_size,
+                                           eps=config.rms_norm_eps)
         else:
             self.final_layernorm = PPMissingLayer()
 
@@ -527,8 +528,8 @@ class FalconH1ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                     DEFAULT_VOCAB_PADDING_SIZE
                     # We need bigger padding if using lora for kernel
                     # compatibility
-                    if not lora_config
-                    else lora_config.lora_vocab_padding_size),
+                    if not lora_config else
+                    lora_config.lora_vocab_padding_size),
             )
             self.lm_head_multiplier = config.lm_head_multiplier
             if self.tie_word_embeddings:
@@ -622,8 +623,9 @@ class FalconH1ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(
-            self.lm_head, hidden_states, sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states,
+                                       sampling_metadata)
+
         return logits
 
 

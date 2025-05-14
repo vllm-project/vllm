@@ -12,9 +12,9 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_reduce)
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.custom_op import CustomOp
-from vllm.model_executor.layers.mamba.mamba2_metadata import Mamba2Metadata
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.mamba.mamba2_metadata import Mamba2Metadata
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_update)
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
@@ -182,7 +182,7 @@ def mamba_v2_sharded_weight_loader(
             #   seem to handle slices well.
             # https://github.com/python/mypy/issues/2410
             param.data[
-                 boundary:(boundary + take),
+                boundary:(boundary + take), 
                 ...  # type: ignore[misc]
             ] = loaded_weight[loaded_start_idx:(loaded_start_idx +
                                                 take)  # type: ignore[misc]
@@ -378,8 +378,8 @@ class MambaMixer2(CustomOp):
         a_weight_loader = composed_weight_loader(
             sharded_weight_loader(0), lambda x: -torch.exp(x.float()))
         set_weight_attrs(self.A, {"weight_loader": a_weight_loader})
-        set_weight_attrs(
-            self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
+        set_weight_attrs(self.dt_bias,
+                         {"weight_loader": sharded_weight_loader(0)})
 
         self.out_proj = RowParallelLinear(
             intermediate_size,
@@ -495,7 +495,7 @@ class MambaMixer2(CustomOp):
                         mamba_cache_params.state_indices_tensor], 0)
 
             scan_output, varlen_state = mamba_chunk_scan_combined(
-                 hidden_states.view(1, seq_len, self.num_heads // self.tp_size,
+                hidden_states.view(1, seq_len, self.num_heads // self.tp_size,
                                    self.head_dim),
                 dt.unsqueeze(0),
                 self.A,
@@ -559,8 +559,7 @@ class MambaMixer2(CustomOp):
                 state_batch_indices=mamba_cache_params.state_indices_tensor,
             )
             hidden_states = hidden_states.view(
-                -1, (self.num_heads // self.tp_size) * self.head_dim
-            )
+                -1, (self.num_heads // self.tp_size) * self.head_dim)
 
         # # 4. gated MLP
         if self.use_rms_norm:
