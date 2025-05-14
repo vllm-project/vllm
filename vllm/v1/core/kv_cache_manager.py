@@ -128,13 +128,6 @@ class KVCacheManager:
                 - A list of blocks that are computed for the request.
                 - The number of computed tokens.
         """
-
-        # Request already has blocks from async load via KVConnector.
-        num_existing_blocks = len(
-            self.single_type_manager.req_to_blocks[request.request_id])
-        if num_existing_blocks > 0:
-            return KVCacheBlocks.create_empty(), request.num_computed_tokens
-
         # Prefix caching is disabled or
         # When the request requires prompt logprobs, we skip prefix caching.
         if (not self.enable_caching
@@ -153,21 +146,16 @@ class KVCacheManager:
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.requests += 1
 
-        if len(block_hashes) * self.block_size == request.num_tokens:
-            # When prompt length is divisible by the block size and all
-            # blocks are cached, we need to recompute the last token. This
-            # have to be achieved by re-computing an entire block because
-            # allocate_slots() assumes num_computed_tokens is always a
-            # multiple of the block size. To achieve this, remove the last
-            # block hash from the block_hashes for find_longest_cache_hit
-            # This limitation can potentially be removed in the future to
-            # slightly improve the performance.
-            last_block_hash = block_hashes.pop()
-        else:
-            last_block_hash = None
+        # NOTE: When all tokens hit the cache, we must recompute the last token
+        # to obtain logits. Thus, set max_cache_hit_length to prompt_length - 1.
+        # This can trigger recomputation of an entire block, rather than just
+        # the single last token, because allocate_slots() requires
+        # num_computed_tokens to be block-size aligned. Removing this limitation
+        # could slightly improve performance in the future.
+        max_cache_hit_length = request.num_tokens - 1
 
-        computed_blocks = (
-            self.single_type_manager.find_longest_cache_hit(block_hashes))
+        computed_blocks = self.single_type_manager.find_longest_cache_hit(
+            block_hashes, max_cache_hit_length)
         # NOTE(woosuk): Since incomplete blocks are not eligible for
         # sharing, `num_computed_tokens` is always a multiple of
         # `block_size`.
@@ -178,18 +166,13 @@ class KVCacheManager:
             self.prefix_cache_stats.queries += request.num_tokens
             self.prefix_cache_stats.hits += num_computed_tokens
 
-        if last_block_hash is not None:
-            # Add back the last block hash if it was removed.
-            # NOTE: Because block_hashes is cached in req_to_block_hashes,
-            # we shouldn't modify it directly.
-            block_hashes.append(last_block_hash)
-
         return KVCacheBlocks(computed_blocks), num_computed_tokens
 
     def allocate_slots(
         self,
         request: Request,
         num_new_tokens: int,
+        num_new_computed_tokens: int = 0,
         new_computed_blocks: Optional[KVCacheBlocks] = None,
         num_lookahead_tokens: int = 0,
         delay_cache_blocks: bool = False,
@@ -201,8 +184,10 @@ class KVCacheManager:
             num_new_tokens: The number of tokens to allocate, including external
                 tokens. Note that this does not include tokens that have
                 already been computed locally (i.e. new_computed_blocks).
-            new_computed_blocks: The new computed blocks just hitting the
-                prefix caching.
+            num_new_computed_tokens: The number of new computed tokens just
+                hitting the prefix caching, excluding external tokens.
+            new_computed_blocks: The cached blocks for the above new computed 
+                tokens.
             num_lookahead_tokens: The number of speculative tokens to allocate.
                 This is used by spec decode proposers with kv-cache such 
                 as eagle.
@@ -247,7 +232,7 @@ class KVCacheManager:
         # The number of computed tokens is the number of computed tokens plus
         # the new prefix caching hits
         num_computed_tokens = (request.num_computed_tokens +
-                               len(new_computed_block_list) * self.block_size)
+                               num_new_computed_tokens)
         num_tokens_need_slot = min(
             num_computed_tokens + num_new_tokens + num_lookahead_tokens,
             self.max_model_len)

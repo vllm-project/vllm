@@ -261,7 +261,8 @@ class ModelConfig:
     - "float" is shorthand for FP32 precision.\n
     - "float32" for FP32 precision."""
     seed: Optional[int] = None
-    """Random seed for reproducibility."""
+    """Random seed for reproducibility. Initialized to None in V0, but
+    initialized to 0 in V1."""
     hf_config_path: Optional[str] = None
     """Name or path of the Hugging Face config to use. If unspecified, model
     name or path will be used."""
@@ -441,6 +442,24 @@ class ModelConfig:
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __post_init__(self) -> None:
+        # Set the default seed to 0 in V1.
+        # NOTE(woosuk): In V0, we set the default seed to None because the
+        # driver worker shares the same process as the user process, and thus
+        # setting a seed affects the user process as well.
+        # In V1, we use separate processes for workers (unless
+        # VLLM_ENABLE_V1_MULTIPROCESSING=0), so setting a seed here
+        # doesn't affect the user process. However, without a consistent seed,
+        # different tensor parallel workers would sample different tokens,
+        # leading to inconsistent results.
+        if envs.VLLM_USE_V1 and self.seed is None:
+            self.seed = 0
+            if not envs.VLLM_ENABLE_V1_MULTIPROCESSING:
+                logger.warning(
+                    "The global random seed is set to %d. Since "
+                    "VLLM_ENABLE_V1_MULTIPROCESSING is set to False, this may "
+                    "affect the random state of the Python process that "
+                    "launched vLLM.", self.seed)
+
         self.model = maybe_model_redirect(self.model)
         # The tokenizer is consistent with the model by default.
         if self.tokenizer is None:
@@ -1649,25 +1668,17 @@ class ParallelConfig:
     data_parallel_size: int = 1
     """Number of data parallel groups. MoE layers will be sharded according to
     the product of the tensor parallel size and data parallel size."""
+    data_parallel_size_local: int = 1
+    """Number of local data parallel groups."""
     data_parallel_rank: int = 0
     """Rank of the data parallel group."""
-    _data_parallel_rank_local: Optional[int] = field(default=None, init=False)
-    """Private field to store the local rank of the data parallel group."""
-
-    @property
-    def data_parallel_rank_local(self) -> int:
-        """Local rank of the data parallel group, defaults to global rank."""
-        if self._data_parallel_rank_local is None:
-            return self.data_parallel_rank
-        return self._data_parallel_rank_local
-
-    @data_parallel_rank_local.setter
-    def data_parallel_rank_local(self, value: int) -> None:
-        """Set the local rank of the data parallel group."""
-        self._data_parallel_rank_local = value
-
+    data_parallel_rank_local: Optional[int] = None
+    """Local rank of the data parallel group,
+    set only in SPMD mode."""
     data_parallel_master_ip: str = "127.0.0.1"
     """IP of the data parallel master."""
+    data_parallel_rpc_port: int = 29550
+    """Port for data parallel messaging."""
     data_parallel_master_port: int = 29500
     """Port of the data parallel master."""
     enable_expert_parallel: bool = False
@@ -1715,12 +1726,15 @@ class ParallelConfig:
 
     world_size: int = field(init=False)
     """world_size is TPxPP, it affects the number of workers we create."""
-    world_size_across_dp: int = field(init=False)
-    """world_size_across_dp is TPxPPxDP, it is the size of the world
-    including data parallelism."""
 
     rank: int = 0
     """Global rank in distributed setup."""
+
+    @property
+    def world_size_across_dp(self) -> int:
+        """world_size_across_dp is TPxPPxDP, it is the size of the world
+        including data parallelism."""
+        return self.world_size * self.data_parallel_size
 
     def get_next_dp_init_port(self) -> int:
         """
@@ -1781,10 +1795,14 @@ class ParallelConfig:
         self.world_size = self.pipeline_parallel_size * \
             self.tensor_parallel_size
 
-        if self.data_parallel_size > 1:
+        if self.data_parallel_size_local > self.data_parallel_size:
+            raise ValueError(
+                f"data_parallel_size_local ({self.data_parallel_size_local}) "
+                f"must be <= data_parallel_size ({self.data_parallel_size})")
+
+        if self.data_parallel_size > 1 or self.data_parallel_size_local == 0:
             # Data parallel was specified in the engine args.
             self.data_parallel_master_port = get_open_port()
-            # TODO multi-node
         else:
             # Otherwise fall back to env vars (e.g. for offline SPMD case).
             self.data_parallel_size = envs.VLLM_DP_SIZE
@@ -1792,8 +1810,6 @@ class ParallelConfig:
             self.data_parallel_rank_local = envs.VLLM_DP_RANK_LOCAL
             self.data_parallel_master_ip = envs.VLLM_DP_MASTER_IP
             self.data_parallel_master_port = envs.VLLM_DP_MASTER_PORT
-
-        self.world_size_across_dp = self.world_size * self.data_parallel_size
 
         if self.distributed_executor_backend == "external_launcher":
             import os
