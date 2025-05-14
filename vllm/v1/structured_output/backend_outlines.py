@@ -32,6 +32,7 @@ else:
     import sre_constants
     import sre_parse
 
+
 @dataclass
 class OutlinesBackend(StructuredOutputBackend):
 
@@ -125,7 +126,6 @@ class OutlinesGrammar(StructuredOutputGrammar):
                 accepted.pop()
                 break
         return accepted
-            
 
     def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> None:
         mask = bitmask[idx]
