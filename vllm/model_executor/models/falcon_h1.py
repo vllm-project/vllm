@@ -39,6 +39,7 @@ from .utils import (PPMissingLayer, is_pp_missing_parameter,
 
 
 class FalconH1MLP(nn.Module):
+    
     def __init__(
         self,
         config: FalconH1Config,
@@ -76,6 +77,7 @@ class FalconH1MLP(nn.Module):
 
 
 class FalconH1SSMDecoderLayer(nn.Module):
+    
     def __init__(
         self,
         config: FalconH1Config,
@@ -183,6 +185,7 @@ class FalconH1SSMDecoderLayer(nn.Module):
 
 
 class FalconH1AttentionDecoderLayer(nn.Module):
+    
     def __init__(
         self,
         config: FalconH1Config,
@@ -335,7 +338,6 @@ class FalconH1ParallelHybrid(nn.Module):
         self.pre_ff_layernorm = RMSNorm(config.hidden_size,
                                         eps=config.rms_norm_eps)
 
-
     def forward(
         self,
         positions: torch.Tensor,
@@ -381,7 +383,9 @@ class FalconH1ParallelHybrid(nn.Module):
 
         return hidden_states
 
+
 class FalconH1Model(nn.Module):
+    
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config: FalconH1Config = vllm_config.model_config.hf_config
@@ -395,7 +399,7 @@ class FalconH1Model(nn.Module):
         self.vocab_size = config.vocab_size + lora_vocab
         self.org_vocab_size = config.vocab_size
         if get_pp_group().is_first_rank:
-                
+                            
             self.embed_tokens = VocabParallelEmbedding(
                 self.vocab_size,
                 config.hidden_size,
@@ -405,6 +409,7 @@ class FalconH1Model(nn.Module):
         else:
             self.embed_tokens = PPMissingLayer()
             self.embedding_multiplier = 1.0
+            
         def get_layer(prefix: str):
             layer_idx = int(prefix.rsplit(".", 1)[1])
             layer_class = FalconH1ParallelHybrid
@@ -627,7 +632,6 @@ class FalconH1ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                                        sampling_metadata)
 
         return logits
-
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
