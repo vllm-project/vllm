@@ -315,7 +315,7 @@ class EagleProposer:
             assert "model.embed_tokens.weight" in loaded_weights, \
             "For PP > 1, Eagle draft checkpoint should its own copy of "
             " the model.embed_tokens.weight"
-            logger.info("EAGLE embedding weights are already loaded.")
+            logger.info("Since PP > 1, the EAGLE head loaded its own vocab embedding weights instead of sharing them with the target model.")
 
         # share lm_head with the target model if needed
         # some model definition do not define lm_head explicitly
