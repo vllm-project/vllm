@@ -158,7 +158,7 @@ class KVCacheManager:
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.queries += request.num_tokens
             self.prefix_cache_stats.hits += num_computed_tokens
-
+        request.num_cached_tokens = num_computed_tokens
         return KVCacheBlocks(computed_blocks), num_computed_tokens
 
     def allocate_slots(

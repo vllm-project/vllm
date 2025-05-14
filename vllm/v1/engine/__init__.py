@@ -107,6 +107,8 @@ class EngineCoreOutput(
     events: Optional[list[EngineCoreEvent]] = None
     kv_transfer_params: Optional[dict[str, Any]] = None
 
+    num_cached_tokens: int = 0
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None
