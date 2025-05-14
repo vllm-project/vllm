@@ -100,7 +100,6 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
 
         self.block_size = cache_config.block_size
         self.max_model_len = model_config.max_model_len
-        self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
 
@@ -168,7 +167,6 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
-            max_num_blocks_per_req=self.max_num_blocks_per_req,
             max_num_batched_tokens=self.max_num_tokens,
             device=self.device,
             pin_memory=self.pin_memory,
@@ -342,7 +340,6 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
                 mm_inputs=new_req_data.mm_inputs,
                 mm_positions=new_req_data.mm_positions,
                 pooling_params=pooling_params,
-                block_ids=new_req_data.block_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 lora_request=new_req_data.lora_request,
             )
@@ -388,46 +385,8 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
 
             req_ids_to_add.append(req_id)
 
-        # Update the states of the running/resumed requests.
-        for req_data in scheduler_output.scheduled_cached_reqs:
-            req_id = req_data.req_id
-            req_state = self.requests[req_id]
-
-            # Update the cached states.
-            num_computed_tokens = req_data.num_computed_tokens
-            req_state.num_computed_tokens = num_computed_tokens
-
-            # Update the block IDs.
-            if not req_data.resumed_from_preemption:
-                # Append the new blocks to the existing block IDs.
-                req_state.block_ids.extend(req_data.new_block_ids)
-            else:
-                # The request is resumed from preemption.
-                # Replace the existing block IDs with the new ones.
-                req_state.block_ids = req_data.new_block_ids
-
-            req_index = self.input_batch.req_id_to_index.get(req_id)
-            if req_index is None:
-                # The request is not in the persistent batch.
-                # The request was either preempted and resumed later, or was not
-                # scheduled in the previous step and needs to be added again.
-                req_ids_to_add.append(req_id)
-                continue
-
-            # Update the persistent batch.
-            self.input_batch.num_computed_tokens_cpu[req_index] = (
-                num_computed_tokens)
-
-            # Add new_token_ids to token_ids_cpu.
-            start_token_index = num_computed_tokens
-            end_token_index = num_computed_tokens + len(req_data.new_token_ids)
-            self.input_batch.token_ids_cpu[
-                req_index,
-                start_token_index:end_token_index] = req_data.new_token_ids
-            self.input_batch.num_tokens_no_spec[req_index] = end_token_index
-
-            # NOTE(woosuk): `num_tokens` here may include spec decode tokens.
-            self.input_batch.num_tokens[req_index] = end_token_index
+        assert not scheduler_output.scheduled_cached_reqs, \
+            "pooling requests should never be cached"
 
         # Check if the batch has changed. If not, we can skip copying the
         # sampling metadata from CPU to GPU.

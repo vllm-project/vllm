@@ -24,7 +24,6 @@ class CachedRequestState:
     mm_positions: list[PlaceholderRange]
     pooling_params: PoolingParams
 
-    block_ids: list[int]
     num_computed_tokens: int
 
     mrope_positions: Optional[torch.Tensor] = None
@@ -49,7 +48,6 @@ class InputBatch(BaseInputBatch):
         self,
         max_num_reqs: int,
         max_model_len: int,
-        max_num_blocks_per_req: int,
         max_num_batched_tokens: int,
         device: torch.device,
         pin_memory: bool,
@@ -57,7 +55,6 @@ class InputBatch(BaseInputBatch):
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
-        self.max_num_blocks_per_req = max_num_blocks_per_req
         self.max_num_batched_tokens = max_num_batched_tokens
         self.device = device
         self.pin_memory = pin_memory
