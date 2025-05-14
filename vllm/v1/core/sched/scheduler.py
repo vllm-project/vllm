@@ -899,7 +899,7 @@ class Scheduler(SchedulerInterface):
                 # Abort pending free kv reqs depending on connector impl.
                 should_free = (self.connector is None or
                                self.connector.should_free_pending_on_abort())
-                if (req_id in self.pending_kv_free_req_ids and should_free):
+                if should_free and req_id in self.pending_kv_free_req_ids:
                     self.pending_kv_free_req_ids.remove(req_id)
                     self._free_blocks(req_id)
                 continue
