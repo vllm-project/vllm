@@ -29,6 +29,9 @@ theme:
     - navigation.top
     - content.code.copy
 
+hooks:
+  - docs/gen_examples.py
+
 plugins:
   - search
   - autorefs

@@ -11,8 +11,8 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 
-ROOT_DIR = Path(__file__).parent
 OLD_DIR = Path("docs/source")
+EXAMPLES_DIR = OLD_DIR / "getting_started/examples"
 NEW_DIR = Path("docs")
 ADMONITIONS = {
     "note", "abstract", "info", "tip", "success", "question", "warning",
@@ -187,7 +187,7 @@ def transpile_myst_to_md(old_path: Path) -> None:
         if block["type"] == "literalinclude":
             path = (old_path.parent / block["args"]).resolve()
             lines[
-                start] = f'{indent}``` title="{path.relative_to(ROOT_DIR)}"\n'
+                start] = f'{indent}``` title="{path}"\n'
             lines[start] += f'{indent}--8<-- "{path}"\n'
             # lines[start + 1:end] = ["" for _ in lines[start + 1:end]]
             lines[end] = f"{indent}```\n"
@@ -231,7 +231,9 @@ def transpile_myst_to_md(old_path: Path) -> None:
 
 if __name__ == "__main__":
     for path in OLD_DIR.rglob("*.*"):
-        if path.suffix == ".md":
+        if path.is_relative_to(EXAMPLES_DIR):
+            continue
+        elif path.suffix == ".md":
             transpile_myst_to_md(path)
         elif path.suffix in {".png", ".jpg", ".ico"}:
             new_path = NEW_DIR / path.relative_to(OLD_DIR)
