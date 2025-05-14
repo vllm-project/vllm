@@ -993,8 +993,3 @@ class Scheduler(SchedulerInterface):
             if req_id in self.pending_kv_free_req_ids:
                 self.pending_kv_free_req_ids.remove(req_id)
                 self._free_blocks(req_id)
-            else:
-                logger.warning(
-                    "Got finished transfer for request %s but not found ",
-                    "in the pending free list. This can happen if the request "
-                    "was aborted due to client cancellation.", req_id)
