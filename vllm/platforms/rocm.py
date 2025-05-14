@@ -363,5 +363,6 @@ class RocmPlatform(Platform):
         return torch.cuda.get_device_properties(
             device_id).multi_processor_count
 
+    @classmethod
     def supports_spec_decoding(cls) -> bool:
         return True
