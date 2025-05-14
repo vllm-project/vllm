@@ -74,8 +74,6 @@ exclude = [
 # Python 3.8 typing. TODO: Remove these excludes after v1.0.0
 "vllm/attention/**/*.py" = ["UP006", "UP035"]
 "vllm/core/**/*.py" = ["UP006", "UP035"]
-"vllm/device_allocator/**/*.py" = ["UP006", "UP035"]
-"vllm/distributed/**/*.py" = ["UP006", "UP035"]
 "vllm/engine/**/*.py" = ["UP006", "UP035"]
 "vllm/executor/**/*.py" = ["UP006", "UP035"]
 "vllm/model_executor/model_loader/**/*.py" = ["UP006", "UP035"]
