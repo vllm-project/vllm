@@ -33,7 +33,7 @@ nav:
     - serving/engine_args.md
     - serving/env_vars.md
     - serving/usage_stats.md
-    - serving/integrations/index.md
+    - serving/integrations
   - Deployment:
     - deployment/security.md
     - deployment/docker.md
@@ -60,9 +60,9 @@ nav:
   - Developer Guide:
     - contributing/overview.md
     - contributing/deprecation_policy.md
-    - contributing/profiling/profiling_index.md
+    - contributing/profiling.md
     - contributing/dockerfile/dockerfile.md
-    - contributing/model/index.md
+    - contributing/model
     - contributing/vulnerability_management.md
   - API Reference:
     - api/summary.md
