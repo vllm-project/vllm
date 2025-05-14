@@ -4,11 +4,12 @@ import argparse
 import multiprocessing
 import os
 import signal
+import socket
 import sys
 import weakref
 from multiprocessing import connection
 from multiprocessing.context import SpawnProcess
-from typing import Any, Optional
+from typing import Any, Optional, Union, cast
 
 import uvloop
 import zmq
@@ -32,6 +33,9 @@ from vllm.v1.utils import (CoreEngine, get_engine_client_zmq_addr, shutdown,
                            wait_for_engine_startup)
 
 logger = init_logger(__name__)
+
+# Type for process sentinel objects
+SentinelType = Union[connection.Connection, socket.socket, int]
 
 
 class APIServerProcessManager:
@@ -97,9 +101,12 @@ class APIServerProcessManager:
 
         logger.info("Started %d API server processes", len(self.processes))
 
+        # Casting due to mypy error
+        process_list: list[multiprocessing.Process] = cast(
+            list[multiprocessing.Process], self.processes)
         # Shutdown only the API server processes on garbage collection
         # The extra processes are managed by their owners
-        self._finalizer = weakref.finalize(self, shutdown, self.processes)
+        self._finalizer = weakref.finalize(self, shutdown, process_list)
 
     def wait_for_completion_or_failure(self) -> None:
         """Wait for all processes to complete or detect if any fail.
@@ -107,8 +114,11 @@ class APIServerProcessManager:
         """
         try:
             # Create a list of all processes we need to monitor
-            all_processes = []
-            all_processes.extend(self.processes)
+            all_processes: list[multiprocessing.Process] = []
+
+            # Casting due to mypy error
+            all_processes.extend(
+                cast(list[multiprocessing.Process], self.processes))
             all_processes.extend(self.extra_processes_to_healthcheck)
 
             # Log the processes we're monitoring
@@ -119,7 +129,10 @@ class APIServerProcessManager:
 
             # Create a mapping of sentinels to their corresponding processes
             # for efficient lookup
-            sentinel_to_proc = {proc.sentinel: proc for proc in all_processes}
+            sentinel_to_proc: dict[Any, multiprocessing.Process] = {
+                proc.sentinel: proc
+                for proc in all_processes
+            }
             sentinels = list(sentinel_to_proc.keys())
 
             # Check if any process terminates
