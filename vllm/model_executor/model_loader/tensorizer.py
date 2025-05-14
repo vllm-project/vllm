@@ -18,7 +18,6 @@ from torch import nn
 from transformers import PretrainedConfig
 
 import vllm.envs as envs
-from vllm import LLMEngine
 from vllm.config import ModelConfig, ParallelConfig, set_current_vllm_config
 from vllm.engine.arg_utils import EngineArgs
 from vllm.logger import init_logger
@@ -314,10 +313,10 @@ class TensorizerAgent:
         model_args.torch_dtype = self.tensorizer_config.dtype
         assert self.tensorizer_config.model_class is not None
         # TODO: Do we need to consider old-style model class?
-        with no_init_or_tensor(), set_current_vllm_config(self.vllm_config,
-                                                          check_compile=True):
+        with torch.device("meta"), set_current_vllm_config(self.vllm_config,
+                                                           check_compile=True):
             return self.tensorizer_config.model_class(
-                vllm_config=self.vllm_config, )
+                vllm_config=self.vllm_config)
 
     def _resize_lora_embeddings(self):
         """Modify LoRA embedding layers to use bigger tensors
@@ -485,6 +484,7 @@ def tensorize_vllm_model(engine_args: EngineArgs,
         ) as stream:
             stream.write(encryption_params.key)
 
+    from vllm import LLMEngine
     from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
 
     if not envs.VLLM_USE_V1:
