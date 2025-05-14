@@ -200,8 +200,16 @@ class GritLM(LlamaForCausalLM, SupportsV0Only):
         prefix: str = "",
         **kwargs,
     ) -> None:
+        # Use full attention for pooling
         if vllm_config.model_config.runner_type == "pooling":
-            vllm_config.model_config.hf_config.is_causal = False
+            hf_config = vllm_config.model_config.hf_config
+            hf_config.is_causal = False
+
+            for attr in ("sliding_window", "interleaved_sliding_window"):
+                if hasattr(hf_config, attr):
+                    delattr(hf_config, attr)
+
+            vllm_config.model_config.disable_sliding_window = True
 
         super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
 
