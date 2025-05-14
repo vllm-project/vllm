@@ -680,6 +680,8 @@ def use_cascade_attention(
     use_alibi: bool,
     use_sliding_window: bool,
     num_sms: int,
+    context_lens: np.ndarrary,
+    sliding_window: Optional[int],
 ) -> bool:
     """Decide whether to use cascade attention.
 
@@ -694,7 +696,16 @@ def use_cascade_attention(
     if common_prefix_len < 256:
         return False
     # Cascade attention is currently not supported with these variants.
-    if use_alibi or use_sliding_window:
+    # For sliding window, we could support it if the sequence length does not
+    # exceed sliding window size.
+
+    assert isinstance(
+        sliding_window,
+        int), f"Expected sliding_window a int, got {type(sliding_window)}"
+
+    if use_alibi:
+        return False
+    if use_sliding_window and np.any(context_lens > sliding_window):
         return False
     # Too few queries. Probably not worth using cascade attention.
     # We use an arbitrary threshold of 8 queries. TODO: Tune this threshold.
@@ -765,9 +776,8 @@ def cascade_attention(
     v_descale: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     assert alibi_slopes is None, ("Cascade attention does not support ALiBi.")
-    # TODO: Support sliding window.
-    assert sliding_window == (-1, -1), (
-        "Cascade attention does not support sliding window.")
+    # Support sliding window when seqs are within sliding window.
+    sliding_window = (-1, -1)
 
     num_tokens = query.shape[0]
     block_size = key_cache.shape[-3]
