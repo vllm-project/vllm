@@ -161,6 +161,7 @@ class Worker(WorkerBase):
             context = nullcontext()
         with context:
             self.model_runner.load_model()
+            ensure_kv_transfer_initialized(self.vllm_config)
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
@@ -342,8 +343,6 @@ def init_worker_distributed_environment(
 
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
-
-    ensure_kv_transfer_initialized(vllm_config)
 
 
 def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
