@@ -64,8 +64,7 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
         # Update LoRA config
         if self.lora_config is not None:
             self.lora_serving_config = self._get_nxdi_lora_config()
-
-        self.lora_checkpoint = LoraCheckpoint(self.lora_serving_config)
+            self.lora_checkpoint = LoraCheckpoint(self.lora_serving_config)
         self.model = get_neuron_model(
             self.model_config,
             parallel_config=self.parallel_config,
