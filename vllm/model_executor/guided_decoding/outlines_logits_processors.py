@@ -170,7 +170,8 @@ class OutlinesVocabulary:
         self.inner = vocabulary
         # Have to do abs(hash()) because python hashes can
         # be negative, and we are using hash as a cache key.
-        hex_str = hashlib.sha256(vocabulary.__repr__()).hexdigest()
+        hex_str = hashlib.sha256(
+            vocabulary.__repr__().encode('utf-8')).hexdigest()
         hash_int = int(hex_str, 16)
         self._hash = hash_int
 
