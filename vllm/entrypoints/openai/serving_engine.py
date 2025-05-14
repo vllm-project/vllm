@@ -9,13 +9,13 @@ from collections.abc import (AsyncGenerator, Iterable, Iterator, Mapping,
 from concurrent.futures.thread import ThreadPoolExecutor
 from http import HTTPStatus
 from typing import (Annotated, Any, Callable, ClassVar, Generic, Optional,
-                    TypeVar, Union, cast)
+                    TypeVar, Union, cast, overload)
 
 import torch
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.datastructures import Headers
-from typing_extensions import TypeIs, assert_never
+from typing_extensions import TypeIs
 
 if sys.version_info >= (3, 12):
     from typing import TypedDict
@@ -631,7 +631,7 @@ class OpenAIServing:
                                         list[list[int]]]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
         add_special_tokens: bool = True,
-    ) -> list[Union[TextTokensPrompt, EmbedsPrompt]]:
+    ) -> tuple[list[TextTokensPrompt], list[EmbedsPrompt]]:
         """
         Tokenize/detokenize depending on the input format.
 
@@ -639,24 +639,25 @@ class OpenAIServing:
         , each input can be a string or array of tokens. Note that each request
         can pass one or more inputs.
         """
-        inputs = list[Union[TextTokensPrompt, EmbedsPrompt]]()
+        inputs_embeds = list[EmbedsPrompt]()
+        inputs_text = list[TextTokensPrompt]()
 
-        # We want to always ignore text prompts if prompt embeds are available
         if (isinstance(request, CompletionRequest)
                 and request.prompt_embeds is not None):
-            inputs.extend(
+            inputs_embeds.extend(
                 self._load_prompt_embeds(request.prompt_embeds,
                                          truncate_prompt_tokens))
 
         # Empty prompts are okay as long as there are prompt embeddings
-        if input_or_inputs is None or (inputs and input_or_inputs == ""):
-            return inputs
+        if input_or_inputs is None or (inputs_embeds
+                                       and input_or_inputs == ""):
+            return [], inputs_embeds
 
         # Although our type checking is based on mypy,
         # VSCode Pyright extension should still work properly
         # "is False" is required for Pyright to perform type narrowing
         # See: https://github.com/microsoft/pyright/issues/7672
-        inputs.extend([
+        inputs_text.extend([
             self._normalize_prompt_text_to_input(
                 request,
                 tokenizer,
@@ -672,7 +673,33 @@ class OpenAIServing:
             for prompt_input in parse_and_batch_prompt(input_or_inputs)
         ])
 
-        return inputs
+        return inputs_text, inputs_embeds
+
+    @overload
+    async def _preprocess_completion(
+        self,
+        request: Union[DetokenizeRequest, EmbeddingCompletionRequest,
+                       RerankRequest, ClassificationRequest, ScoreRequest,
+                       TokenizeCompletionRequest],
+        tokenizer: AnyTokenizer,
+        input_or_inputs: Union[str, list[str], list[int], list[list[int]]],
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = ...,
+        add_special_tokens: bool = ...,
+    ) -> tuple[list[TextTokensPrompt], list[EngineTokensPrompt]]:
+        ...
+
+    @overload
+    async def _preprocess_completion(
+        self,
+        request: CompletionRequest,
+        tokenizer: AnyTokenizer,
+        input_or_inputs: Optional[Union[str, list[str], list[int],
+                                        list[list[int]]]],
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = ...,
+        add_special_tokens: bool = ...,
+    ) -> tuple[list[Union[TextTokensPrompt, EmbedsPrompt]], list[Union[
+            EngineTokensPrompt, EngineEmbedsPrompt]]]:
+        ...
 
     async def _preprocess_completion(
         self,
@@ -682,35 +709,50 @@ class OpenAIServing:
                                         list[list[int]]]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
         add_special_tokens: bool = True,
-    ) -> tuple[list[Union[TextTokensPrompt, EmbedsPrompt]], list[Union[
-            EngineTokensPrompt, EngineEmbedsPrompt]]]:
+    ) -> tuple[Union[list[TextTokensPrompt], list[Union[
+            TextTokensPrompt, EmbedsPrompt]]], Union[
+                list[EngineTokensPrompt], list[Union[EngineTokensPrompt,
+                                                     EngineEmbedsPrompt]]]]:
         if not isinstance(request,
                           CompletionRequest) and input_or_inputs is None:
             raise ValueError(
                 "Prompt embeds with non-completion requests is not"
                 " currently supported.")
-        request_prompts = await self._tokenize_prompt_input_or_inputs_async(
-            request,
-            tokenizer,
-            input_or_inputs,
-            truncate_prompt_tokens=truncate_prompt_tokens,
-            add_special_tokens=add_special_tokens,
-        )
 
-        engine_prompts: list[Union[EngineTokensPrompt,
-                                   EngineEmbedsPrompt]] = []
-        for request_prompt in request_prompts:
-            if is_embeds_prompt(request_prompt):
-                engine_prompts.append(
-                    EngineEmbedsPrompt(
-                        prompt_embeds=request_prompt["prompt_embeds"]))
-            elif is_text_tokens_prompt(request_prompt):
-                engine_prompts.append(
-                    EngineTokensPrompt(
-                        prompt_token_ids=request_prompt["prompt_token_ids"]))
-            else:
-                assert_never(request_prompt)
+        (request_prompts_text, request_prompts_embeds
+         ) = await self._tokenize_prompt_input_or_inputs_async(
+             request,
+             tokenizer,
+             input_or_inputs,
+             truncate_prompt_tokens=truncate_prompt_tokens,
+             add_special_tokens=add_special_tokens,
+         )
 
+        engine_prompts_text = [
+            EngineTokensPrompt(
+                prompt_token_ids=request_prompt_text["prompt_token_ids"])
+            for request_prompt_text in request_prompts_text
+        ]
+
+        # This check is equivalent to simply checking if
+        # `request_prompts_embeds` is empty, but it's difficult to propagate
+        # overloads to the private helper functions to enable this check.
+        # This overload is needed because only TextPrompts are allowed for
+        # non-completion requests and if we don't add the overload here,
+        # everywhere this function is used outside of serving_completion will
+        # need logic asserting that only text prompts are in the request.
+        if not isinstance(request,
+                          CompletionRequest) and input_or_inputs is not None:
+            return request_prompts_text, engine_prompts_text
+
+        engine_prompts_embeds = [
+            EngineEmbedsPrompt(
+                prompt_embeds=request_prompt_embeds["prompt_embeds"])
+            for request_prompt_embeds in request_prompts_embeds
+        ]
+
+        request_prompts = request_prompts_embeds + request_prompts_text
+        engine_prompts = engine_prompts_embeds + engine_prompts_text
         return request_prompts, engine_prompts
 
     async def _preprocess_chat(
