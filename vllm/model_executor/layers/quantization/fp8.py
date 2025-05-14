@@ -800,7 +800,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
             TritonOrDeepGemmExperts)
 
-        if self.use_marlin:
+        if self.use_marlin or self.rocm_aiter_moe_enabled:
             return False
 
         experts = TritonOrDeepGemmExperts(
@@ -834,9 +834,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
     ) -> torch.Tensor:
-        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-            rocm_aiter_fused_experts)
-
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -851,6 +848,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         )
 
         if self.rocm_aiter_moe_enabled:
+            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
+                rocm_aiter_fused_experts)
             return rocm_aiter_fused_experts(
                 x,
                 layer.w13_weight,
@@ -867,8 +866,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 a1_scale=layer.w13_input_scale,
                 a2_scale=layer.w2_input_scale,
                 block_shape=self.quant_config.weight_block_size)
-
-        if self.use_marlin:
+        elif self.use_marlin:
             assert activation == "silu", (
                 f"{activation} not supported for Marlin MoE.")
             assert not apply_router_weight_on_input, (

@@ -13,7 +13,7 @@ import torch.nn.functional as F
 from torch.nn.parameter import UninitializedParameter
 
 import vllm.envs as envs
-from vllm.config import get_current_vllm_config, ParallelConfig
+from vllm.config import ParallelConfig, get_current_vllm_config
 from vllm.distributed import (get_dp_group, get_ep_group,
                               get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -322,6 +322,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         super().__init__()
         self.fused_experts = fused_experts
         self.moe = moe
+
         self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
         if self.rocm_aiter_moe_enabled:
             from .rocm_aiter_fused_moe import rocm_aiter_fused_experts
@@ -501,6 +502,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             indices_type=torch.uint32 if self.moe.use_pplx_kernels else None)
 
         if self.rocm_aiter_moe_enabled:
+            assert not apply_router_weight_on_input
+            assert expert_map is None
             return self.rocm_aiter_fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,
@@ -510,8 +513,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 activation=activation,
                 apply_router_weight_on_input=apply_router_weight_on_input)
         else:
-            return fused_experts(
-                a1=x,
+            return self.fused_experts(
+                hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
                 topk_weights=topk_weights,
@@ -1191,8 +1194,7 @@ class FusedMoE(torch.nn.Module):
                        scoring_func: str = "softmax",
                        e_score_correction_bias: Optional[torch.Tensor] = None,
                        indices_type: Optional[torch.dtype] = None):
-        from vllm.model_executor.layers.fused_moe.fused_moe import (
-            fused_topk, grouped_topk)
+        from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 
         # DeekSeekv2 uses grouped_top_k
         if use_grouped_topk:
@@ -1227,24 +1229,6 @@ class FusedMoE(torch.nn.Module):
                 topk_ids = topk_ids.to(dtype=indices_type)
 
         return topk_weights, topk_ids
-
-    def naive_multicast(self, x: torch.Tensor,
-                        cu_tokens_across_dp_cpu: torch.Tensor):
-        assert (len(x.shape) == 2)
-        buffer = torch.empty((cu_tokens_across_dp_cpu[-1], x.size(1)),
-                             device=x.device,
-                             dtype=x.dtype)
-
-        start = 0 if self.dp_rank == 0 else cu_tokens_across_dp_cpu[
-            self.dp_rank - 1]
-        end = cu_tokens_across_dp_cpu[self.dp_rank]
-        buffer[start:end, :].copy_(x)
-        for idx in range(get_dp_group().world_size):
-            start = 0 if idx == 0 else cu_tokens_across_dp_cpu[idx - 1]
-            end = cu_tokens_across_dp_cpu[idx]
-            get_dp_group().broadcast(buffer[start:end, :], idx)
-
-        return buffer
 
     def must_reduce_shared_expert_outputs(self) -> bool:
         """
