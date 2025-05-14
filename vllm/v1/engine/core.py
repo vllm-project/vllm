@@ -182,14 +182,10 @@ class EngineCore:
             # Start grammar compilation asynchronously
             self.structured_output_manager.grammar_init(req)
 
-        if req.raw_kv_transfer_params is not None:
-            if (kv_connector := self.scheduler.get_kv_connector()):
-                # Parse raw KV transfer params via connector.
-                kv_connector.set_kv_transfer_params(req)
-            else:
-                logger.warning(
-                    "Got KVTransferParams, but no KVConnector found. "
-                    "Disabling KVTransfer for this request.")
+        if req.kv_transfer_params is not None and (
+                not self.scheduler.get_kv_connector()):
+            logger.warning("Got kv_transfer_params, but no KVConnector found. "
+                           "Disabling KVTransfer for this request.")
 
         self.scheduler.add_request(req)
 

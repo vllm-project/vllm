@@ -16,7 +16,7 @@ import zmq
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole, KVTransferParams)
+    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
     get_tp_group)
@@ -42,56 +42,6 @@ try:
 except ImportError:
     logger.warning("NIXL is not available")
     NixlWrapper = None
-
-
-@dataclass
-class NixlKVTransferParams(KVTransferParams):
-
-    def __init__(
-        self,
-        do_remote_prefill: bool,
-        do_remote_decode: bool,
-        remote_block_ids: Optional[list[int]] = None,
-        remote_host: Optional[str] = None,
-        remote_port: Optional[int] = None,
-        remote_engine_id: Optional[str] = None,
-    ):
-        self.do_remote_prefill = do_remote_prefill
-        self.do_remote_decode = do_remote_decode
-        self.remote_block_ids = remote_block_ids
-        self.remote_host = remote_host
-        self.remote_port = remote_port
-        self.remote_engine_id = remote_engine_id
-
-    @staticmethod
-    def from_raw_dict(
-        raw_dict: Optional[dict[str,
-                                Any]]) -> Optional["NixlKVTransferParams"]:
-
-        # If no raw transfer params passed, return None.
-        if raw_dict is None:
-            return None
-
-        # Validate the request is formatted properly.
-        if (("do_remote_prefill" not in raw_dict)
-                or ("do_remote_decode" not in raw_dict)
-                or ("remote_block_ids" not in raw_dict)
-                or ("remote_host" not in raw_dict)
-                or ("remote_port" not in raw_dict)
-                or ("remote_engine_id" not in raw_dict)):
-            logger.warning(
-                "Got invalid KVTransferParams: %s. This "
-                "request will not utilize KVTransfer", raw_dict)
-            return None
-
-        return NixlKVTransferParams(
-            do_remote_prefill=raw_dict["do_remote_prefill"],
-            do_remote_decode=raw_dict["do_remote_decode"],
-            remote_block_ids=raw_dict["remote_block_ids"],
-            remote_host=raw_dict["remote_host"],
-            remote_port=raw_dict["remote_port"],
-            remote_engine_id=raw_dict["remote_engine_id"],
-        )
 
 
 class NixlAgentMetadata(
@@ -123,25 +73,18 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         self,
         request_id: str,
         local_block_ids: list[int],
-        kv_transfer_params: NixlKVTransferParams,
+        kv_transfer_params: dict[str, Any],
     ):
-        assert request_id not in self.requests
-        assert kv_transfer_params.remote_block_ids is not None
-        assert kv_transfer_params.remote_engine_id is not None
-        assert kv_transfer_params.remote_host is not None
-        assert kv_transfer_params.remote_port is not None
-
         self.requests[request_id] = ReqMeta(
             local_block_ids=local_block_ids,
-            remote_block_ids=kv_transfer_params.remote_block_ids,
-            remote_engine_id=kv_transfer_params.remote_engine_id,
-            remote_host=kv_transfer_params.remote_host,
-            remote_port=kv_transfer_params.remote_port,
+            remote_block_ids=kv_transfer_params["remote_block_ids"],
+            remote_engine_id=kv_transfer_params["remote_engine_id"],
+            remote_host=kv_transfer_params["remote_host"],
+            remote_port=kv_transfer_params["remote_port"],
         )
 
 
 class NixlConnector(KVConnectorBase_V1):
-    _KVTransferParams: type[NixlKVTransferParams] = NixlKVTransferParams
 
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
         assert vllm_config.kv_transfer_config is not None
@@ -253,52 +196,52 @@ class NixlConnectorScheduler:
               asynchronously (between scheduler steps).
         """
 
+        params = request.kv_transfer_params
         logger.debug(
             "NIXLConnector get_num_new_matched_tokens: "
             "num_computed_tokens=%s, kv_transfer_params=%s",
-            num_computed_tokens, request.kv_transfer_params)
+            num_computed_tokens, params)
 
-        # No KVTransfer for this request.
-        if request.kv_transfer_params is None:
-            return 0, False
-        assert isinstance(request.kv_transfer_params, NixlKVTransferParams)
-
-        # Remote prefill: get all prompt blocks from remote.
-        if request.kv_transfer_params.do_remote_prefill:
+        if params is not None and params.get("do_remote_prefill"):
+            # Remote prefill: get all prompt blocks from remote.
             assert num_computed_tokens % self.block_size == 0
             rounded_num_prompt_tokens = round_down(
                 len(request.prompt_token_ids), self.block_size)
             count = max(rounded_num_prompt_tokens - num_computed_tokens, 0)
             return count, count > 0
 
+        # No remote prefill for this request.
         return 0, False
 
     def update_state_after_alloc(self, request: "Request",
                                  blocks: "KVCacheBlocks",
                                  num_external_tokens: int):
 
+        params = request.kv_transfer_params
         logger.debug(
             "NIXLConnector update_state_after_alloc: "
             "num_external_tokens=%s, kv_transfer_params=%s",
-            num_external_tokens, request.kv_transfer_params)
+            num_external_tokens, params)
 
-        if request.kv_transfer_params is None:
-            return
-
-        assert isinstance(request.kv_transfer_params, NixlKVTransferParams)
-        if request.kv_transfer_params.do_remote_prefill:
+        if params is not None and params.get("do_remote_prefill"):
             # NOTE(rob): if prompt < block_size, no remote blocks
             # since the remote only sends fully computed blocks, so
             # skip recving for this request. num_external_tokens
             # should be 0 if there are no remote blocks.
-            if request.kv_transfer_params.remote_block_ids:
-                # Get unhashed blocks to pull from remote.
-                self._reqs_need_recv[request.request_id] = (
-                    request, blocks.get_unhashed_block_ids())
+            if params.get("remote_block_ids"):
+                if all(p in params for p in ("remote_engine_id", "remote_host",
+                                             "remote_port")):
+                    # Get unhashed blocks to pull from remote.
+                    self._reqs_need_recv[request.request_id] = (
+                        request, blocks.get_unhashed_block_ids())
+                else:
+                    logger.warning(
+                        "Got invalid KVTransferParams: %s. This "
+                        "request will not utilize KVTransfer", params)
             else:
                 assert num_external_tokens == 0
             # Only trigger 1 KV transfer per request.
-            request.kv_transfer_params.do_remote_prefill = False
+            params["do_remote_prefill"] = False
 
     def build_connector_meta(
         self,
@@ -308,7 +251,7 @@ class NixlConnectorScheduler:
 
         # Loop through scheduled reqs and convert to ReqMeta.
         for req_id, (req, block_ids) in self._reqs_need_recv.items():
-            assert isinstance(req.kv_transfer_params, NixlKVTransferParams)
+            assert req.kv_transfer_params is not None
             meta.add_new_req(
                 request_id=req_id,
                 local_block_ids=block_ids,
@@ -330,34 +273,30 @@ class NixlConnectorScheduler:
         should be freed now or will be sent asynchronously and freed later.
         """
 
+        params = request.kv_transfer_params
         logger.debug(
-            "NIXLConnector request_finished, "
-            "request_status=%s, kv_transfer_params=%s", request.status,
-            request.kv_transfer_params)
+            "NIXLConnector request_finished, request_status=%s, "
+            "kv_transfer_params=%s", request.status, params)
 
-        if request.kv_transfer_params is None:
-            return False, None
-        assert isinstance(request.kv_transfer_params, NixlKVTransferParams)
-
-        if ((not request.kv_transfer_params.do_remote_decode)
-                or (request.status != RequestStatus.FINISHED_LENGTH_CAPPED)):
+        if (params is None or not params.get("do_remote_decode")
+                or request.status != RequestStatus.FINISHED_LENGTH_CAPPED):
             return False, None
 
         # Get computed blocks.
         all_full = request.num_computed_tokens % self.block_size == 0
-        computed_block_ids = (block_ids if all_full else block_ids[:-1])
+        computed_block_ids = block_ids if all_full else block_ids[:-1]
 
         # If prompt < block_size, no xfer so free blocks immediately.
         delay_free_blocks = len(computed_block_ids) > 0
 
-        return delay_free_blocks, NixlKVTransferParams(
+        return delay_free_blocks, dict(
             do_remote_prefill=True,
             do_remote_decode=False,
             remote_block_ids=computed_block_ids,
             remote_engine_id=self.engine_id,
             remote_host=envs.VLLM_NIXL_SIDE_CHANNEL_HOST,
             remote_port=envs.VLLM_NIXL_SIDE_CHANNEL_PORT,
-        ).__dict__
+        )
 
 
 class NixlConnectorWorker:
