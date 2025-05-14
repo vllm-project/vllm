@@ -110,3 +110,8 @@ KVConnectorFactory.register_connector(
     "NixlConnector",
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector",
     "NixlConnector")
+
+KVConnectorFactory.register_connector(
+    "MultiConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.multi_connector",
+    "MultiConnector")
