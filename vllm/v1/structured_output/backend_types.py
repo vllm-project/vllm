@@ -1,9 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
 import enum
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-import torch
+if TYPE_CHECKING:
+    import torch
+
+    from vllm.config import VllmConfig
+    from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 
 class StructuredOutputOptions(enum.Enum):
@@ -85,8 +93,13 @@ class StructuredOutputGrammar(ABC):
         """
 
 
+@dataclass
 class StructuredOutputBackend(ABC):
     """Engine-level backend for structured output requests."""
+
+    vllm_config: VllmConfig
+    tokenizer: AnyTokenizer
+    vocab_size: int
 
     @abstractmethod
     def compile_grammar(self, request_type: StructuredOutputOptions,
@@ -104,7 +117,7 @@ class StructuredOutputBackend(ABC):
         """
 
     @abstractmethod
-    def allocate_token_bitmask(self, max_num_seqs: int):
+    def allocate_token_bitmask(self, max_num_seqs: int) -> torch.Tensor:
         """
         Allocates a token bitmask for the specified maximum number of sequences.
 

@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
 import os
 from abc import abstractmethod
 from collections.abc import Sequence
@@ -33,7 +35,7 @@ class ReasoningParser:
         return self.model_tokenizer.get_vocab()
 
     @abstractmethod
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         """
         Check if the reasoning content ends in the input_ids.
 
@@ -106,7 +108,7 @@ class ReasoningParserManager:
     reasoning_parsers: dict[str, type] = {}
 
     @classmethod
-    def get_reasoning_parser(cls, name) -> type:
+    def get_reasoning_parser(cls, name: str | None) -> type[ReasoningParser]:
         """
         Get reasoning parser by name which is registered by `register_module`.
 
