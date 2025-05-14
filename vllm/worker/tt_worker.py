@@ -437,7 +437,9 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         num_devices_available = len(ttnn.get_device_ids())
         mesh_grid_dict = {
             "N150": (1, 1),
+            "P100": (1, 1),
             "P150": (1, 1),
+            "P150x2": (1, 2),
             "N300": (1, 2),
             "P300": (1, 2),
             "N150x4": (1, 4),
