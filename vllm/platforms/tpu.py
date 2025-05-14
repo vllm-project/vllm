@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import TYPE_CHECKING, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Optional, Union, cast
 
 import torch
 from tpu_info import device
@@ -73,7 +73,7 @@ class TpuPlatform(Platform):
         return "vllm.lora.punica_wrapper.punica_tpu.PunicaWrapperTPU"
 
     @classmethod
-    def get_infinity_values(cls, dtype: torch.dtype) -> Tuple[float, float]:
+    def get_infinity_values(cls, dtype: torch.dtype) -> tuple[float, float]:
         return torch.finfo(dtype).min, torch.finfo(dtype).max
 
     @classmethod
