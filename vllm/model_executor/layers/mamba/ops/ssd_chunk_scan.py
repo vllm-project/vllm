@@ -113,7 +113,20 @@ TRITON_22 = version.parse(triton.__version__) >= version.parse('2.2.0')
         "HAS_INITSTATES", "BLOCK_SIZE_M", "BLOCK_SIZE_N", "BLOCK_SIZE_K"
     ],
     # for variables that cannot be labeled constexpr because range > 32 bit
-    assume_const=[],
+    assume_const=[
+        "chunk_size",
+        "hdim",
+        "dstate",
+        "batch",
+        "nheads_ngroups_ratio",
+        # "stride_cb_chunk",
+        # "stride_cb_head",
+        # "stride_cb_csize_m",
+        # "stride_cb_csize_k",
+        # "stride_x_seqlen",
+        # "stride_x_head",
+        # "stride_x_hdim",
+    ],
     # cache_launch_grid=True,
 )
 @triton.jit
@@ -135,12 +148,12 @@ def _chunk_scan_fwd_kernel(
     chunk_offsets_ptr,
     chunk_meta_num: tl.int32,
     # Matrix dimensions
-    chunk_size: tl.constexpr,
-    hdim: tl.constexpr,
-    dstate: tl.constexpr,
-    batch: tl.constexpr,
+    chunk_size: tl.int32,
+    hdim: tl.int32,
+    dstate: tl.int32,
+    batch: tl.int32,
     seqlen: tl.int32,
-    nheads_ngroups_ratio: tl.constexpr,
+    nheads_ngroups_ratio: tl.int32,
     # Strides
     stride_cb_batch: tl.int32,
     stride_cb_chunk: tl.constexpr,
