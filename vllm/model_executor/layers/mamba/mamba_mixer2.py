@@ -54,6 +54,7 @@ class Mixer2RMSNormGated(CustomOp):
         self,
         x: torch.Tensor,
         gate: torch.Tensor,
+        use_rms_norm: bool = True,
     ):
         # Three tensor-parallel cases:
         #   1. n_groups is 1
@@ -66,6 +67,8 @@ class Mixer2RMSNormGated(CustomOp):
         #      the input and then redundantly compute the RMSNorm.
         input_dtype = x.dtype
         x = x * nn.functional.silu(gate.to(torch.float32))
+        if not use_rms_norm:
+            return x
 
         if self.n_groups == 1:
             if self.tp_size > 1:
@@ -104,7 +107,11 @@ class Mixer2RMSNormGated(CustomOp):
         self,
         x: torch.Tensor,
         gate: torch.Tensor,
+        use_rms_norm: bool = True,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+
+        if not use_rms_norm:
+            return x * nn.functional.silu(gate.to(torch.float32))
 
         if self.tp_size > 1 or self.n_groups != 1:
             return self.forward_native(x, gate)
@@ -220,7 +227,7 @@ class MambaMixer2(CustomOp):
         num_heads: int = 128,
         head_dim: int = 64,
         rms_norm_eps: float = 1e-5,
-        activation="silu",
+        activation: str = "silu",
         use_rms_norm: bool = True,
         quant_config: Optional[QuantizationConfig] = None,
     ):
@@ -388,10 +395,9 @@ class MambaMixer2(CustomOp):
             quant_config=quant_config,
         )
 
-        if self.use_rms_norm:
-            self.norm = Mixer2RMSNormGated(intermediate_size,
-                                           n_groups,
-                                           eps=rms_norm_eps)
+        self.norm = Mixer2RMSNormGated(intermediate_size,
+                                       n_groups,
+                                       eps=rms_norm_eps)
 
     def forward_native(
         self,
@@ -562,13 +568,12 @@ class MambaMixer2(CustomOp):
                 -1, (self.num_heads // self.tp_size) * self.head_dim)
 
         # # 4. gated MLP
-        if self.use_rms_norm:
-            # GatedRMSNorm internally applying SiLU to the gate
-            # SiLU is applied internally before normalization, unlike standard
-            # norm usage
-            hidden_states = self.norm(hidden_states, gate)
-        else:
-            hidden_states = hidden_states * torch.nn.functional.silu(gate)
+        # GatedRMSNorm internally applying SiLU to the gate
+        # SiLU is applied internally before normalization, unlike standard
+        # norm usage
+        hidden_states = self.norm(hidden_states,
+                                  gate,
+                                  use_rms_norm=self.use_rms_norm)
 
         # # 5. Final linear projection
         out, _ = self.out_proj(hidden_states)

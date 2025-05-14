@@ -235,7 +235,7 @@ class FalconH1AttentionDecoderLayer(nn.Module):
             rope_scaling=rope_scaling,
             base=rope_theta,
             is_neox_style=True,
-            dtype=torch.get_default_dtype(),  # see impl of get_rope
+            dtype=None,  # see impl of get_rope
         )
 
         self.qkv_proj = QKVParallelLinear(
@@ -245,12 +245,14 @@ class FalconH1AttentionDecoderLayer(nn.Module):
             self.total_num_kv_heads,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             config.hidden_size,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
         )
 
         self.attn = Attention(
@@ -305,7 +307,7 @@ class FalconH1ParallelHybrid(nn.Module):
 
     def __init__(
         self,
-        config: FalconH1Config,  # FalconH1Config instance
+        config: FalconH1Config,
         layer_idx: int,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
