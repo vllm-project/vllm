@@ -47,5 +47,8 @@ ignore = [
     "UP007",
 ]
 
+[tool.ruff.lint.isort]
+known-first-party = ["vllm"]
+
 [tool.ruff.format]
 docstring-code-format = true

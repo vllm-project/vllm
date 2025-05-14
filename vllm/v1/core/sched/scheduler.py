@@ -18,7 +18,7 @@ from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
-from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
@@ -311,12 +311,14 @@ class Scheduler(SchedulerInterface):
                     break
 
                 request = self.waiting[0]
-
+                num_prealloc_computed_tokens = 0
                 # P/D: skip request if still waiting for remote kvs.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                     is_ready = self._update_waiting_for_remote_kv(request)
                     if is_ready:
                         request.status = RequestStatus.WAITING
+                        num_prealloc_computed_tokens = (
+                            request.num_computed_tokens)
                     else:
                         self.waiting.popleft()
                         skipped_waiting_requests.appendleft(request)
@@ -345,18 +347,25 @@ class Scheduler(SchedulerInterface):
                     continue
 
                 # Get already-cached tokens.
-                new_computed_blocks, num_computed_tokens = \
-                    self.kv_cache_manager.get_computed_blocks(
-                        request)
+                if num_prealloc_computed_tokens == 0:
+                    new_computed_blocks, num_native_computed_tokens = \
+                        self.kv_cache_manager.get_computed_blocks(
+                            request)
+                else:
+                    # P/D: skip checking prefix cache if loaded from remote kvs.
+                    new_computed_blocks = KVCacheBlocks.create_empty()
+                    num_native_computed_tokens = 0
 
                 # Get externally-cached tokens if using a KVConnector.
-                num_external_tokens, load_kv_async = (
+                num_external_computed_tokens, load_kv_async = (
                     (0, False) if self.connector is None else
                     self.connector.get_num_new_matched_tokens(
-                        request, num_computed_tokens))
+                        request, num_native_computed_tokens))
 
                 # Total computed tokens (local + external).
-                num_computed_tokens += num_external_tokens
+                num_computed_tokens = (num_native_computed_tokens +
+                                       num_external_computed_tokens +
+                                       num_prealloc_computed_tokens)
 
                 encoder_inputs_to_schedule = None
                 new_encoder_budget = encoder_budget
@@ -390,7 +399,8 @@ class Scheduler(SchedulerInterface):
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
-                    num_new_tokens + num_external_tokens,
+                    num_new_tokens + num_external_computed_tokens,
+                    num_native_computed_tokens,
                     new_computed_blocks,
                     num_lookahead_tokens=self.num_lookahead_tokens,
                     delay_cache_blocks=load_kv_async,
@@ -406,7 +416,7 @@ class Scheduler(SchedulerInterface):
                     self.connector.update_state_after_alloc(
                         request,
                         new_computed_blocks + new_blocks,
-                        num_external_tokens,
+                        num_external_computed_tokens,
                     )
 
                 self.waiting.popleft()
