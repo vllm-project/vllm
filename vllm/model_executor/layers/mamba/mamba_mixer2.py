@@ -458,8 +458,9 @@ class MambaMixer2(CustomOp):
                 query_start_loc=attn_metadata.query_start_loc,
             ).transpose(0, 1)[:seq_len]
 
-            # Ensure memory layout is contiguous after transpose and slice operations
-            # to optimize subsequent tensor splitting and CUDA kernel execution
+            # Ensure memory layout is contiguous after transpose
+            # and slice operations to optimize subsequent tensor
+            # splitting and CUDA kernel execution
             hidden_states_B_C = hidden_states_B_C.contiguous()
         else:
             hidden_states_B_C = causal_conv1d_update(

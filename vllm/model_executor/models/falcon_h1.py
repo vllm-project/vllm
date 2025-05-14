@@ -39,7 +39,7 @@ from .utils import (PPMissingLayer, is_pp_missing_parameter,
 
 
 class FalconH1MLP(nn.Module):
-    
+
     def __init__(
         self,
         config: FalconH1Config,
@@ -77,7 +77,7 @@ class FalconH1MLP(nn.Module):
 
 
 class FalconH1SSMDecoderLayer(nn.Module):
-    
+
     def __init__(
         self,
         config: FalconH1Config,
@@ -106,7 +106,7 @@ class FalconH1SSMDecoderLayer(nn.Module):
             quant_config=quant_config,
             use_rms_norm=config.mamba_rms_norm,
         )
-        # n_groups is overriden later by `MambaMixer2`
+        # n_groups is overridden later by `MambaMixer2`
         self.groups_time_state_size = self.mamba.n_groups * config.mamba_d_state
         self.zxbcdt_multipliers = config.ssm_multipliers
         self._init_mup_vector()
@@ -185,7 +185,7 @@ class FalconH1SSMDecoderLayer(nn.Module):
 
 
 class FalconH1AttentionDecoderLayer(nn.Module):
-    
+
     def __init__(
         self,
         config: FalconH1Config,
@@ -385,7 +385,7 @@ class FalconH1ParallelHybrid(nn.Module):
 
 
 class FalconH1Model(nn.Module):
-    
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config: FalconH1Config = vllm_config.model_config.hf_config
@@ -399,7 +399,7 @@ class FalconH1Model(nn.Module):
         self.vocab_size = config.vocab_size + lora_vocab
         self.org_vocab_size = config.vocab_size
         if get_pp_group().is_first_rank:
-                            
+
             self.embed_tokens = VocabParallelEmbedding(
                 self.vocab_size,
                 config.hidden_size,
@@ -409,7 +409,7 @@ class FalconH1Model(nn.Module):
         else:
             self.embed_tokens = PPMissingLayer()
             self.embedding_multiplier = 1.0
-            
+
         def get_layer(prefix: str):
             layer_idx = int(prefix.rsplit(".", 1)[1])
             layer_class = FalconH1ParallelHybrid
