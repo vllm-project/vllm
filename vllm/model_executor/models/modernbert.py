@@ -230,9 +230,12 @@ class ModernBertModel(nn.Module):
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
+        positions: Optional[torch.Tensor] = None,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
     ) -> torch.Tensor:
+        position_ids = positions if positions is not None else position_ids
         if inputs_embeds is not None:
             hidden_states = inputs_embeds
         else:
