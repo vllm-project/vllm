@@ -893,19 +893,24 @@ class Scheduler(SchedulerInterface):
             request_ids = set(request_ids)
 
         for req_id in request_ids:
+            # Connector needs to handle abort.
+            if self.connector is not None:
+                self.connector.abort_request(req_id)
+
+            # TODO: delay freeing blocks until the KV transfer is sends.
             request = self.requests.get(req_id)
-            # Request is already finished.
             if request is None:
-                # Abort pending free kv reqs depending on connector impl.
-                should_free = (self.connector is None or
-                               self.connector.should_free_pending_on_abort())
-                if should_free and req_id in self.pending_kv_free_req_ids:
-                    self.pending_kv_free_req_ids.remove(req_id)
-                    self._free_blocks(req_id)
+                # Invalid request.
                 continue
 
             if request.status == RequestStatus.RUNNING:
                 self.running.remove(request)
+            elif request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+                # TODO: handle this - need to wait for the connector
+                # to ack that the abort is done in a future step before
+                # we free. Since we have not yet cached the blocks in
+                # this state, we should be okay.
+                pass
             else:
                 self.waiting.remove(request)
             request.status = finished_status

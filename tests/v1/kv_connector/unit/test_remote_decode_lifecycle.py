@@ -224,3 +224,15 @@ def test_abort():
     # SIMULATE ABORT.
     scheduler.finish_requests(request_id, RequestStatus.FINISHED_ABORTED)
     assert_scheduler_empty(scheduler)
+
+    # SIMULATE ABORT on empty scheduler (should be allowed).
+    scheduler.finish_requests(request_id, RequestStatus.FINISHED_ABORTED)
+    assert_scheduler_empty(scheduler)
+
+    # SIMULATE Got Free After Abort.
+    scheduler_output = scheduler.schedule()
+    model_runner_output = create_model_runner_output(
+        reqs=[], finished_sending=[request_id])
+    # This should not double free!!!
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+    assert_scheduler_empty(scheduler)

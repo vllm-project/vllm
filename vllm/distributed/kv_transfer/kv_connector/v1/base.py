@@ -205,12 +205,9 @@ class KVConnectorBase_V1(ABC):
     # Scheduler-side methods
     # ==============================
 
-    def should_free_pending_on_abort(self) -> bool:
-        """
-        For async sending, whether to free blocks for pending
-        requests on abort.
-        """
-        return True
+    def abort_request(self, req_id: str) -> bool:
+        """Abort send or recv in the KVConnector."""
+        return
 
     @abstractmethod
     def get_num_new_matched_tokens(
