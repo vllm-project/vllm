@@ -137,6 +137,15 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         raise NotImplementedError
 
+    def topk_indices_dtype(self) -> Optional[torch.dtype]:
+        """
+        The PrepareFinalize All2All implementations generally constrain the
+        dtype of the topk_ids they support. This function returns the
+        required topk indices dtype so it can be respected.
+        Return None if there are no such restrictions.
+        """
+        raise NotImplementedError
+
 
 class FusedMoEPermuteExpertsUnpermute(ABC):
     """
@@ -314,14 +323,25 @@ class FusedMoEModularKernel(torch.nn.Module):
         Returns:
         - torch.Tensor: The output tensor after applying the MoE layer.
         """
+
         a1 = hidden_states
-        E, M, N, K, top_k = _moe_problem_size(a1, w1, w2, topk_ids)
-
-        if global_num_experts == -1:
-            global_num_experts = E
-
         output = a1 if inplace else torch.zeros_like(a1)
 
+        if global_num_experts == -1:
+            global_num_experts = w1.size(0)
+
+        (a1q, a1q_scale, expert_num_tokens, _expert_topk_ids,
+         _expert_topk_weights) = self.prepare_finalize.prepare(
+             a1, a1_scale, a2_scale, topk_weights, topk_ids,
+             global_num_experts, expert_map, apply_router_weight_on_input)
+        # Maybe prepare gathered topk_ids and topk_weights from other EP ranks.
+        topk_ids = topk_ids if _expert_topk_ids is None else _expert_topk_ids
+        topk_weights = (topk_weights if _expert_topk_weights is None else
+                        _expert_topk_weights)
+
+        _, M, N, K, top_k = _moe_problem_size(a1q, w1, w2, topk_ids)
+
+        # Use a1 here to decipher the correct workspace datatype
         workspace13_shape, workspace2_shape, workspace_dtype = (
             self.fused_experts.workspace_shapes(a1, M, N, K, top_k,
                                                 global_num_experts))
@@ -334,10 +354,6 @@ class FusedMoEModularKernel(torch.nn.Module):
         workspace2 = torch.zeros(workspace2_shape,
                                  device=a1.device,
                                  dtype=workspace_dtype)
-
-        a1q, a1q_scale, expert_num_tokens = self.prepare_finalize.prepare(
-            a1, a1_scale, a2_scale, topk_weights, topk_ids, global_num_experts,
-            expert_map, apply_router_weight_on_input)
 
         fused_out = self.fused_experts.apply(
             a1q,

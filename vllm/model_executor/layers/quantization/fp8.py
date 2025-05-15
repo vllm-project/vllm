@@ -459,6 +459,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 logger.warning_once(
                     "DeepGemm not supported on the current platform.")
 
+        # TODO (varun) : deepgemm integration
+        self.use_batched_experts = False
+        if envs.VLLM_ALL2ALL_BACKEND == "deepep_low_latency":
+            self.use_batched_experts = True
+
         self.fused_experts = functools.partial(  # type: ignore
             fused_experts,
             block_shape=self.quant_config.weight_block_size,
@@ -764,17 +769,32 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             del layer.w2_input_scale
 
     def select_gemm_impl(self, prepare_finalize):
+
+        from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
+            BatchedTritonExperts)
         from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
             TritonOrDeepGemmExperts)
 
         assert not self.use_marlin and not self.rocm_aiter_moe_enabled, (
             "Marlin and ROCm AITER are not supported with all2all yet.")
 
-        experts = TritonOrDeepGemmExperts(
-            use_fp8_w8a8=True,
-            block_shape=self.quant_config.weight_block_size,
-            allow_deep_gemm=self.allow_deep_gemm,
-        )
+        if self.use_batched_experts:
+            experts = BatchedTritonExperts(
+                max_num_tokens=prepare_finalize.max_num_tokens,
+                world_size=prepare_finalize.world_size,
+                dp_size=prepare_finalize.dp_size,
+                use_fp8_w8a8=True,
+                use_int8_w8a8=False,
+                use_int8_w8a16=False,
+                use_int4_w4a16=False,
+                block_shape=None,
+            )
+        else:
+            experts = TritonOrDeepGemmExperts(
+                use_fp8_w8a8=True,
+                block_shape=self.quant_config.weight_block_size,
+                allow_deep_gemm=self.allow_deep_gemm,
+            )
 
         return experts
 
@@ -796,6 +816,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
     ) -> torch.Tensor:
+
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -807,6 +828,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
+            indices_type=self.topk_indices_dtype,
         )
 
         if self.rocm_aiter_moe_enabled:

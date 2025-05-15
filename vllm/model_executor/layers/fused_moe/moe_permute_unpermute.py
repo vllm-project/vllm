@@ -24,7 +24,7 @@ def _moe_permute(
     """
     top_k_num = curr_topk_ids.size(1)
 
-    tokens_in_chunk = curr_hidden_states.sizze(0)
+    tokens_in_chunk = curr_hidden_states.size(0)
 
     sorted_token_ids, expert_ids, num_tokens_post_padded = (
         moe_align_block_size(curr_topk_ids,
