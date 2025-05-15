@@ -159,7 +159,7 @@ class InputProcessingContext(InputContext):
             msg = (f"Failed to apply {type(hf_processor).__name__} "
                    f"on data={data} with kwargs={merged_kwargs}")
 
-            raise RuntimeError(msg) from exc
+            raise ValueError(msg) from exc
 
 
 class DummyData(NamedTuple):

@@ -2,7 +2,7 @@
 
 import os
 from functools import cache, lru_cache, wraps
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
@@ -35,7 +35,7 @@ except ImportError as e:
     logger.warning("Failed to import from vllm._rocm_C with %r", e)
 
 # Models not supported by ROCm.
-_ROCM_UNSUPPORTED_MODELS: List[str] = []
+_ROCM_UNSUPPORTED_MODELS: list[str] = []
 
 # Models partially supported by ROCm.
 # Architecture -> Reason.
@@ -43,7 +43,7 @@ _ROCM_SWA_REASON = ("Sliding window attention (SWA) is not yet supported in "
                     "Triton flash attention. For half-precision SWA support, "
                     "please use CK flash attention by setting "
                     "`VLLM_USE_TRITON_FLASH_ATTN=0`")
-_ROCM_PARTIALLY_SUPPORTED_MODELS: Dict[str, str] = {
+_ROCM_PARTIALLY_SUPPORTED_MODELS: dict[str, str] = {
     "Qwen2ForCausalLM":
     _ROCM_SWA_REASON,
     "MistralForCausalLM":
@@ -58,7 +58,7 @@ _ROCM_PARTIALLY_SUPPORTED_MODELS: Dict[str, str] = {
      "excessive use of shared memory. If this happens, disable Triton FA "
      "by setting `VLLM_USE_TRITON_FLASH_ATTN=0`")
 }
-_ROCM_DEVICE_ID_NAME_MAP: Dict[str, str] = {
+_ROCM_DEVICE_ID_NAME_MAP: dict[str, str] = {
     "0x74a0": "AMD_Instinct_MI300A",
     "0x74a1": "AMD_Instinct_MI300X",
     "0x74b5": "AMD_Instinct_MI300X",  # MI300X VF
@@ -93,15 +93,6 @@ def with_amdsmi_context(fn):
             amdsmi_shut_down()
 
     return wrapper
-
-
-def device_id_to_physical_device_id(device_id: int) -> int:
-    if "CUDA_VISIBLE_DEVICES" in os.environ:
-        device_ids = os.environ["CUDA_VISIBLE_DEVICES"].split(",")
-        physical_device_id = device_ids[device_id]
-        return int(physical_device_id)
-    else:
-        return device_id
 
 
 @cache
@@ -212,7 +203,7 @@ class RocmPlatform(Platform):
 
     @staticmethod
     @with_amdsmi_context
-    def is_fully_connected(physical_device_ids: List[int]) -> bool:
+    def is_fully_connected(physical_device_ids: list[int]) -> bool:
         """
         Query if the set of gpus are fully connected by xgmi (1 hop)
         """
@@ -238,7 +229,7 @@ class RocmPlatform(Platform):
     @with_amdsmi_context
     @lru_cache(maxsize=8)
     def get_device_name(cls, device_id: int = 0) -> str:
-        physical_device_id = device_id_to_physical_device_id(device_id)
+        physical_device_id = cls.device_id_to_physical_device_id(device_id)
         handle = amdsmi_get_processor_handles()[physical_device_id]
         asic_info = amdsmi_get_gpu_asic_info(handle)
         device_name: str = asic_info["device_id"]

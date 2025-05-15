@@ -1425,8 +1425,8 @@ class QKVCrossParallelLinear(LinearBase):
     ):
         missing_attrs_dict = {
             k: getattr(src_param, k)
-            for k in (set(src_param.__dict__.keys()) -
-                      set(tgt_param.__dict__.keys()))
+            for k in (set(vars(src_param).keys()) -
+                      set(vars(tgt_param).keys()))
         }
         # TODO(Isotr0py): handle bitsandbytes 8bit
         use_bitsandbytes_4bit = getattr(src_param, "use_bitsandbytes_4bit",

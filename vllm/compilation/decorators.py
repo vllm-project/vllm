@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import inspect
-from typing import Callable, Dict, List, Optional, TypeVar, Union, overload
+from typing import Callable, Optional, TypeVar, Union, overload
 from unittest.mock import patch
 
 import torch
@@ -25,7 +25,7 @@ _T = TypeVar("_T", bound=type[nn.Module])
 @overload
 def support_torch_compile(
     *,
-    dynamic_arg_dims: Optional[Dict[str, Union[int, List[int]]]],
+    dynamic_arg_dims: Optional[dict[str, Union[int, list[int]]]],
 ) -> Callable[[_T], _T]:
     ...
 
@@ -38,7 +38,7 @@ def support_torch_compile(cls: _T) -> _T:
 def support_torch_compile(
     cls: Optional[_T] = None,
     *,
-    dynamic_arg_dims: Optional[Dict[str, Union[int, List[int]]]] = None,
+    dynamic_arg_dims: Optional[dict[str, Union[int, list[int]]]] = None,
 ) -> Union[Callable[[_T], _T], _T]:
     """
     A decorator to add support for compiling the forward method of a class.
@@ -131,7 +131,7 @@ def support_torch_compile(
 
 def _support_torch_compile(
     cls: _T,
-    dynamic_arg_dims: Dict[str, Union[int, List[int]]],
+    dynamic_arg_dims: dict[str, Union[int, list[int]]],
 ) -> _T:
     """
     A decorator to add support for compiling the forward method of a class.
