@@ -2090,20 +2090,20 @@ class LLMEngine:
                 "LLMEngine. Params: %s", guided_decoding)
 
             tokenizer = self.get_tokenizer(lora_request=lora_request)
-            guided_decoding.backend = guided_decoding.backend or self.structured_output_config.backend  # noqa: E501
+            guided_decoding.backend = guided_decoding.backend or \
+                self.structured_output_config.backend
 
             if self.structured_output_config.reasoning_backend:
                 logger.debug("Building with reasoning backend %s",
                              self.structured_output_config.reasoning_backend)
 
-            # yapf: disable
             processor = get_local_guided_decoding_logits_processor(
                 guided_params=guided_decoding,
                 tokenizer=tokenizer,
                 model_config=self.model_config,
-                reasoning_backend=self.structured_output_config.reasoning_backend,
+                reasoning_backend=self.structured_output_config.
+                reasoning_backend,
             )
-            # yapf: enable
             if processor:
                 logits_processors.append(processor)
 
