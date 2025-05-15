@@ -166,52 +166,18 @@ class EagleProposer:
         attn_metadata.max_query_len = 1
         attn_metadata.query_start_loc = self.arange[:batch_size + 1]
         for _ in range(self.num_speculative_tokens - 1):
-            # Update the inputs.
-            # cast to int32 is crucial when eagle model is compiled.
-            # tensor.argmax() returns int64 by default.
-            input_ids = draft_token_ids_list[-1].int()
-            positions += 1
 
-            # NOTE(woosuk): We should handle the case where the draft model
-            # generates tokens beyond the max model length. Since it is complex
-            # to remove such requests from the batch, we keep them in the batch
-            # but adjust the position ids and slot mappings to avoid the
-            # out-of-range access during the model execution. The draft tokens
-            # generated with this adjustment should be ignored.
-            exceeds_max_model_len = positions >= self.max_model_len
-            # Mask out the position ids that exceed the max model length.
-            # Otherwise, we may get out-of-range error in RoPE.
-            clamped_positions = torch.where(exceeds_max_model_len, 0,
-                                            positions)
+            self.advance_speculative_state(draft_token_ids_list[-1], positions,
+                                           hidden_states, attn_metadata,
+                                           batch_size)
 
             # Increment the sequence lengths.
             attn_metadata.max_seq_len += 1
-            attn_metadata.seq_lens += 1
             # Consider max model length.
             attn_metadata.max_seq_len = min(attn_metadata.max_seq_len,
                                             self.max_model_len)
-            # For the requests that exceed the max model length, we set the
-            # sequence length to 1 to minimize their overheads in attention.
-            attn_metadata.seq_lens.masked_fill_(exceeds_max_model_len, 1)
-
-            # Compute the slot mapping.
-            block_numbers = clamped_positions // self.block_size
-            block_ids = block_table.gather(dim=1,
-                                           index=block_numbers.view(-1, 1))
-            block_ids = block_ids.view(-1)
-            attn_metadata.slot_mapping = (block_ids * self.block_size +
-                                          clamped_positions % self.block_size)
-            # Mask out the slot mappings that exceed the max model length.
-            # Otherwise, the KV cache will be inadvertently updated with the
-            # padding tokens.
-            attn_metadata.slot_mapping.masked_fill_(exceeds_max_model_len,
-                                                    PADDING_SLOT_ID)
 
             # copy inputs to buffer for cudagraph
-            self.input_ids[:batch_size] = input_ids
-            self.positions[:batch_size] = clamped_positions
-            self.hidden_states[:batch_size] = hidden_states
-
             # Run the model.
             with set_forward_context(attn_metadata,
                                      self.vllm_config,
@@ -232,6 +198,38 @@ class EagleProposer:
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
         return draft_token_ids
+
+    def advance_speculative_state(self, draft_token_ids: torch.Tensor,
+                                  positions: torch.Tensor,
+                                  hidden_states: torch.Tensor,
+                                  attn_metadata: FlashAttentionMetadata,
+                                  batch_size: int):
+        grid = lambda meta: (triton.cdiv(batch_size, meta['BLOCK_SIZE']), )
+        attn_metadata.slot_mapping = torch.empty_like(positions)
+        advance_state_kernel[grid](
+            # === Input tensors ===
+            draft_token_ids,
+            positions,
+            hidden_states,
+
+            # === Model input buffers to be updated ===
+            self.input_ids[:batch_size],
+            self.positions[:batch_size],
+            self.hidden_states[:batch_size],
+
+            # === Metadata tensors ===
+            attn_metadata.seq_lens,
+            attn_metadata.block_table,
+            attn_metadata.slot_mapping,
+
+            # === Scalar configuration ===
+            self.max_model_len,
+            self.block_size,
+
+            # === Execution control ===
+            batch_size,
+            BLOCK_SIZE=1024,
+            PADDING_SLOT_ID=PADDING_SLOT_ID)
 
     @staticmethod
     def prepare_inputs(
@@ -415,3 +413,82 @@ def prepare_input_kernel(
             index_start + offset,
             mask=offset < num_tokens,
         )
+
+
+@triton.jit
+def advance_state_kernel(
+    draft_token_ids_ptr,
+    positions_ptr,
+    hidden_states_ptr,
+
+    # === Model input buffers to be updated ===
+    model_input_ids_ptr,
+    model_positions_ptr,
+    model_hidden_states_ptr,
+
+    # === Metadata tensors ===
+    seq_lens_ptr,
+    block_table_ptr,
+    slot_mapping_ptr,
+
+    # === Scalar configuration ===
+    model_max_len: int,
+    model_block_size: int,
+
+    # === Execution control ===
+    n_elements: int,
+    BLOCK_SIZE: tl.constexpr,
+    PADDING_SLOT_ID: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+    draft_token_list_last = tl.load(draft_token_ids_ptr + offsets, mask=mask)
+    position = tl.load(positions_ptr + offsets, mask=mask)
+    seq_lens = tl.load(seq_lens_ptr + offsets, mask=mask)
+    hidden_states = tl.load(hidden_states_ptr + offsets, mask=mask)
+
+    # Update the inputs.
+    # cast to int32 is crucial when eagle model is compiled.
+    # tensor.argmax() returns int64 by default.
+    input_id = draft_token_list_last.cast(tl.int32)
+    position = position + 1
+
+    # NOTE(woosuk): We should handle the case where the draft model
+    # generates tokens beyond the max model length. Since it is complex
+    # to remove such requests from the batch, we keep them in the batch
+    # but adjust the position ids and slot mappings to avoid the
+    # out-of-range access during the model execution. The draft tokens
+    # generated with this adjustment should be ignored.
+    exceeds_max_model_len = position >= model_max_len
+    # Mask out the position ids that exceed the max model length.
+    # Otherwise, we may get out-of-range error in RoPE.
+    clamped_position = tl.where(exceeds_max_model_len, 0, position)
+
+    # For the requests that exceed the max model length, we set the
+    # sequence length to 1 to minimize their overheads in attention.
+    seq_lens += 1
+    seq_lens = tl.where(exceeds_max_model_len, 1, seq_lens)
+
+    block_numbers = clamped_position // model_block_size
+    block_offsets = clamped_position % model_block_size
+
+    # Gather from block_table[0, block_numbers]
+    block_ids = tl.load(block_table_ptr + block_numbers, mask=mask)
+
+    # Compute slot mapping
+    slot_mapping = block_ids * model_block_size + block_offsets
+
+    # Mask out the slot mappings that exceed the max model length.
+    # Otherwise, the KV cache will be inadvertently updated with the
+    # padding tokens.
+    slot_mapping = tl.where(exceeds_max_model_len, PADDING_SLOT_ID,
+                            slot_mapping)
+
+    tl.store(model_input_ids_ptr + offsets, input_id, mask=mask)
+    tl.store(positions_ptr + offsets, position, mask=mask)
+    tl.store(model_positions_ptr + offsets, clamped_position, mask=mask)
+    tl.store(seq_lens_ptr + offsets, seq_lens, mask=mask)
+    tl.store(slot_mapping_ptr + offsets, slot_mapping, mask=mask)
+    tl.store(model_hidden_states_ptr + offsets, hidden_states, mask=mask)
