@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 import gc
-import weakref
 from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 import torch
 
 from vllm.attention import get_attn_backend
+from vllm.attention.utils.fa_utils import get_flash_attn_version
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
@@ -50,7 +50,7 @@ class XPUModelRunner(GPUModelRunner):
         from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
         set_cpu_offload_max_bytes(
             int(self.cache_config.cpu_offload_gb * 1024**3))
-        
+
         model_config = self.model_config
         cache_config = self.cache_config
         scheduler_config = self.scheduler_config
@@ -131,7 +131,7 @@ class XPUModelRunner(GPUModelRunner):
 
         # Sampler
         self.sampler = Sampler()
-        
+
         # Lazy initializations
         # self.model: nn.Module  # Set after load_model
         # Initialize in initialize_kv_cache
