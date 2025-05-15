@@ -1207,7 +1207,9 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                                        dtype=self._hidden_states_dtype)
             dummy_tokens = torch.zeros((num_reqs, 1),
                                        dtype=torch.int64).to(self.device)
-            self.gather_logprobs(dummy_logits, dummy_tokens)
+            with self.maybe_select_dummy_loras(
+                    self.lora_config, np.array([num_reqs], dtype=np.int32)):
+                self.gather_logprobs(dummy_logits, dummy_tokens)
             logger.info("  -- num_seqs: %d", num_reqs)
         xm.wait_device_ops()
         end = time.perf_counter()
