@@ -22,11 +22,10 @@ Not currently supported:
 """
 
 import torch
-import triton
-import triton.language as tl
 
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx1x
+from vllm.triton_utils import tl, triton
 
 torch_dtype: tl.constexpr = torch.float16
 
