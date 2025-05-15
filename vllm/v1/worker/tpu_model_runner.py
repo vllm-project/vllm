@@ -20,6 +20,7 @@ from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
+from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.lora.ops.xla_ops import LORA_RANK_BLOCK_SIZE
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.model_loader import get_model
@@ -942,6 +943,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             model = self.load_lora_model(model, self.model_config,
                                          self.scheduler_config,
                                          self.lora_config, self.device)
+            replace_set_lora(model)
 
         # Sync all pending XLA execution during model initialization and weight
         # loading.
@@ -1006,7 +1008,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             for layer_name in layer_names
         }
 
-        with self.maybe_dummy_run_with_lora(
+        with self.maybe_select_dummy_loras(
                 self.lora_config,
                 np.array([num_tokens], dtype=np.int32)), set_forward_context(
                     per_layer_attn_metadata, self.vllm_config, 0):
@@ -1184,7 +1186,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                         generate_params_if_all_greedy,
                     ))
                 sampling_metadata.all_greedy = all_greedy
-                with self.maybe_dummy_run_with_lora(
+                with self.maybe_select_dummy_loras(
                         self.lora_config, np.array([num_reqs],
                                                    dtype=np.int32)):
                     self.sample_from_logits(dummy_logits, sampling_metadata)
@@ -1214,13 +1216,14 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         """
         Precompile all the subgraphs with possible input shapes.
         """
-        self._precompile_mm_encoder()
-        self._precompile_backbone()
-        self._precompile_select_hidden_states()
-        self._precompile_compute_logits()
-        self._precompile_structured_decoding()
-        self._precompile_sample_from_logits()
-        self._precompile_gather_logprobs()
+        with self.maybe_setup_dummy_loras(self.lora_config):
+            self._precompile_mm_encoder()
+            self._precompile_backbone()
+            self._precompile_select_hidden_states()
+            self._precompile_compute_logits()
+            self._precompile_structured_decoding()
+            self._precompile_sample_from_logits()
+            self._precompile_gather_logprobs()
 
     def profile_run(
         self,
@@ -1575,3 +1578,29 @@ def _get_padded_lora_rank(max_lora_rank: int, max_num_loras: int) -> int:
         return max_lora_rank
 
     return 1 << (LORA_RANK_BLOCK_SIZE // max_num_loras).bit_length()
+
+
+def replace_set_lora(model):
+
+    def _tpu_set_lora(self,
+                      idx: int,
+                      lora_a: torch.Tensor,
+                      lora_b: torch.Tensor,
+                      embeddings_tensor: Optional[torch.Tensor],
+                      bias: Optional[torch.Tensor] = None):
+        index = torch.tensor([idx], dtype=torch.int32, device="xla")
+        self._original_set_lora(index, lora_a, lora_b, embeddings_tensor, bias)
+        xm.mark_step()
+
+    def _tpu_reset_lora(self, idx: int):
+        index = torch.tensor([idx], dtype=torch.int32, device="xla")
+        self._original_reset_lora(index)
+        xm.mark_step()
+
+    for _, module in model.named_modules():
+        if isinstance(module, BaseLayerWithLoRA):
+            module._original_set_lora = module.set_lora
+            module._original_reset_lora = module.reset_lora
+            module.set_lora = _tpu_set_lora.__get__(module, module.__class__)
+            module.reset_lora = _tpu_reset_lora.__get__(
+                module, module.__class__)

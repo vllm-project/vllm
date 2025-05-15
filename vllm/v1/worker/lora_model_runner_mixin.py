@@ -14,7 +14,6 @@ from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora, supports_multimodal
-from vllm.platforms import current_platform
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
 logger = init_logger(__name__)
@@ -81,34 +80,21 @@ class LoRAModelRunnerMixin:
                                       lora_requests)
 
     @contextmanager
-    def maybe_dummy_run_with_lora(self, lora_config: LoRAConfig,
-                                  num_scheduled_tokens: np.ndarray):
+    def maybe_setup_dummy_loras(self, lora_config):
         if lora_config is None:
             yield
         else:
             # __enter__ code
             assert self.lora_manager is not None, "LoRA is not enabled"
 
-            num_reqs = len(num_scheduled_tokens)
             num_loras = lora_config.max_loras
-
-            base_lora_id = lora_config.max_loras + lora_config.max_cpu_loras + 1
-
-            # Make prompt lora mapping
-            # Assign LoRA IDs cyclically to simulate a worst-case scenario.
-            prompt_lora_mapping = (np.arange(num_reqs, dtype=np.int32) %
-                                   num_loras) + base_lora_id
-
-            # Make token lora mapping
-            token_lora_mapping = np.repeat(prompt_lora_mapping,
-                                           num_scheduled_tokens)
 
             # Make dummy lora requests
             lora_requests: set[LoRARequest] = {
                 LoRARequest(lora_name=f"warmup_{lora_id}",
-                            lora_int_id=lora_id + base_lora_id,
+                            lora_int_id=lora_id,
                             lora_path="/not/a/real/path")
-                for lora_id in range(num_loras)
+                for lora_id in range(1, num_loras + 1)
             }
 
             with self.lora_manager.dummy_lora_cache():
@@ -118,17 +104,52 @@ class LoRAModelRunnerMixin:
                     self.lora_manager.add_dummy_lora(
                         lr, rank=self.LORA_WARMUP_RANK)
 
-                self._set_active_loras(tuple(prompt_lora_mapping),
-                                       tuple(token_lora_mapping),
-                                       lora_requests)
-
                 yield
 
             # __exit__ code
-            # Disabling remove_all_adapters on the TPU backend allows us to save
-            # quite a bit of RAM. E.g. we save 2.22 GB with Llama3.1 8B
-            if not current_platform.is_tpu():
-                self.lora_manager.remove_all_adapters()
+            self.lora_manager.remove_all_adapters()
+
+    @contextmanager
+    def maybe_select_dummy_loras(self, lora_config: LoRAConfig,
+                                 num_scheduled_tokens: np.ndarray):
+        if lora_config is None:
+            yield
+        else:
+            # __enter__ code
+            assert self.lora_manager is not None, "LoRA is not enabled"
+
+            num_reqs = len(num_scheduled_tokens)
+            num_loras = lora_config.max_loras
+
+            # Make prompt lora mapping
+            # Assign LoRA IDs cyclically to simulate a worst-case scenario.
+            prompt_lora_mapping = (np.arange(num_reqs, dtype=np.int32) %
+                                   num_loras) + 1
+
+            # Make token lora mapping
+            token_lora_mapping = np.repeat(prompt_lora_mapping,
+                                           num_scheduled_tokens)
+
+            # Make dummy lora requests
+            lora_requests: set[LoRARequest] = {
+                LoRARequest(lora_name=f"warmup_{lora_id}",
+                            lora_int_id=lora_id,
+                            lora_path="/not/a/real/path")
+                for lora_id in range(1, num_loras + 1)
+            }
+
+            self._set_active_loras(tuple(prompt_lora_mapping),
+                                   tuple(token_lora_mapping), lora_requests)
+
+            yield
+
+    @contextmanager
+    def maybe_dummy_run_with_lora(self, lora_config: LoRAConfig,
+                                  num_scheduled_tokens: np.ndarray):
+        with self.maybe_setup_dummy_loras(
+                lora_config), self.maybe_select_dummy_loras(
+                    lora_config, num_scheduled_tokens):
+            yield
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         if not self.lora_manager:

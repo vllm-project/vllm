@@ -269,11 +269,12 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         y = y.view(-1, y.shape[-1])
         x = x.view(-1, x.shape[-1])
 
-        buffer = bgmv_shrink(x, lora_a_stacked, self.sampler_indices, scale)
+        sampler_indices = torch.narrow(self._sampler_indices, 0, 0, x.size(0))
+        buffer = bgmv_shrink(x, lora_a_stacked, sampler_indices, scale)
         y = bgmv_expand(buffer,
                         lora_b_stacked,
                         y,
-                        self.sampler_indices,
+                        sampler_indices,
                         add_inputs=True)
         return y.view_as(y_org)
 
@@ -349,24 +350,28 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             "cpu",
             long_lora_context,
         )
-        self._token_lora_indices[:base_indices.shape[0]] = base_indices.to(
-            self.device)
-        self._sampler_indices[:sampler_indices.shape[0]] = sampler_indices.to(
-            self.device)
-        self._sampler_indices_padded[:sampler_indices_padded.
-                                     shape[0]] = sampler_indices_padded.to(
-                                         self.device)
-        self._embeddings_indices[:embeddings_indices.
-                                 shape[0], :embeddings_indices.
-                                 shape[1]] = embeddings_indices.to(self.device)
+        self._token_lora_indices = self._pad_to_shape(
+            base_indices, self._token_lora_indices.shape,
+            dims=1).to(self.device)
+        self._sampler_indices = self._pad_to_shape(sampler_indices,
+                                                   self._sampler_indices.shape,
+                                                   dims=1).to(self.device)
+        self._sampler_indices_padded = self._pad_to_shape(
+            sampler_indices_padded, self._sampler_indices_padded.shape,
+            dims=1).to(self.device)
+        self._embeddings_indices = self._pad_to_shape(
+            embeddings_indices, self._embeddings_indices.shape,
+            dims=2).to(self.device)
         if long_lora_offsets_tensor is not None:
-            self._long_lora_indices[:long_lora_offsets_tensor.
-                                    shape[0]] = long_lora_offsets_tensor.to(
-                                        self.device)
+            self._long_lora_indices = self._pad_to_shape(
+                long_lora_offsets_tensor,
+                self._long_lora_indices.shape,
+                dims=1).to(self.device)
         else:
-            self._long_lora_indices.zero_()
+            zeroed = torch.zeros_like(self._long_lora_indices.cpu(),
+                                      dtype=torch.int32)
+            self._long_lora_indices = zeroed.to(self.device)
         self.indices_len[:] = indices_len
-        xm.mark_step()
 
     def _update_prefill_metadata(self,
                                  token_lora_tensor: torch.Tensor) -> None:
@@ -388,3 +393,13 @@ class PunicaWrapperTPU(PunicaWrapperBase):
 
         padding = [-1] * pad_len
         return tuple(list(prompt_mapping) + padding)
+
+    def _pad_to_shape(self, src, target_shape, dims=1):
+        if dims == 1:
+            pad_len = target_shape[0] - src.shape[0]
+            return F.pad(src, (0, pad_len), value=0).to(torch.int32)
+        else:
+            pad_rows = target_shape[0] - src.shape[0]
+            pad_cols = target_shape[1] - src.shape[1]
+            return F.pad(src, (0, pad_cols, 0, pad_rows),
+                         value=0).to(torch.int32)

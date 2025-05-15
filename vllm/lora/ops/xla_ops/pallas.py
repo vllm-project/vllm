@@ -150,9 +150,23 @@ LORA_RANK_BLOCK_SIZE = 256
 
 def _bgmv_shrink_kernel(bT: int, bL: int, n_lora_lanes: int, lane_size: int,
                         max_num_loras: int, idx_ref, inp_ref, lora_ref,
-                        out_ref, acc_ref, mask_ref):
+                        out_ref, acc_ref, mask_ref, lanes_ref):
 
-    @pl.when(pl.program_id(2) == 0)
+    t_idx = pl.program_id(0)
+    l_idx = pl.program_id(1)
+    d_idx = pl.program_id(2)
+
+    @pl.when((t_idx == 0) & (l_idx == 0) & (d_idx == 0))
+    def _():
+        lanes_ref[...] = jnp.zeros_like(lanes_ref[...], dtype=jnp.float32)
+        ones = jnp.ones((lane_size, ), dtype=jnp.float32)
+
+        for i in range(n_lora_lanes):
+            start = i * lane_size
+            end = start + lane_size
+            lanes_ref.at[i, start:end].set(ones)
+
+    @pl.when(d_idx == 0)
     def _():
         acc_ref[...] = jnp.zeros_like(acc_ref[...], dtype=jnp.float32)
 
@@ -162,38 +176,34 @@ def _bgmv_shrink_kernel(bT: int, bL: int, n_lora_lanes: int, lane_size: int,
                                             (((1, ), (1, )), ((), ())),
                                             preferred_element_type=jnp.float32)
     else:
-        t = pl.program_id(0)
+        mask_ref[...] = jnp.zeros_like(mask_ref[...], dtype=jnp.float32)
 
-        ones = jnp.ones((lane_size, ), dtype=jnp.float32)
+        def _mask_setup_step(i, valid):
+            idx = idx_ref[i + bT * t_idx]
+            inner_lane_idx = idx % n_lora_lanes
+            outer_lane_idx = idx // n_lora_lanes
 
-        base_lora_idx = 0
-        for lane_idx in range(max_num_loras):
-            mask_ref[...] = jnp.zeros_like(mask_ref[...], dtype=jnp.float32)
-            valid = False
-            for j in range(bT):
-                idx = idx_ref[j + bT * t]
-                for k in range(n_lora_lanes):
-                    lora_idx = base_lora_idx + k
-                    set_mask = idx == lora_idx
-                    valid |= set_mask
+            mask_ref.at[outer_lane_idx, i, :].set(lanes_ref[inner_lane_idx])
 
-                    @pl.when(set_mask)
-                    def _():
-                        lane_start = k * lane_size
-                        lane_end = lane_start + lane_size
+            return valid | (1 << outer_lane_idx)
 
-                        mask_ref.at[j, lane_start:lane_end].set(ones)
+        valid = jax.lax.fori_loop(0, bT, _mask_setup_step, 0)
 
-            base_lora_idx += n_lora_lanes
+        def _lora_matmul_step(lane_idx, check_bit):
 
-            @pl.when(valid)
+            @pl.when((valid & check_bit) > 0)
             def _():
                 acc_ref[...] += jax.lax.dot_general(
                     inp_ref[...],
                     lora_ref[lane_idx, ...], (((1, ), (1, )), ((), ())),
-                    preferred_element_type=jnp.float32) * mask_ref[...]
+                    preferred_element_type=jnp.float32) * mask_ref[lane_idx,
+                                                                   ...]
 
-    @pl.when(pl.program_id(2) == pl.num_programs(2) - 1)
+            return check_bit << 1
+
+        _ = jax.lax.fori_loop(0, max_num_loras, _lora_matmul_step, 1)
+
+    @pl.when(d_idx == pl.num_programs(2) - 1)
     def _():
         out_ref[...] = acc_ref[...].astype(out_ref.dtype)
 
@@ -233,7 +243,8 @@ def _bgmv_shrink(
                                    lambda i, j, k, block_idx: (i, j)),
             scratch_shapes=[
                 pltpu.VMEM((token_block, lora_block), jnp.float32),
-                pltpu.VMEM((token_block, lora_block), jnp.float32)
+                pltpu.VMEM((N, token_block, lora_block), jnp.float32),
+                pltpu.VMEM((n_lora_lanes, lora_block), jnp.float32)
             ]),
         compiler_params=pltpu.TPUCompilerParams(
             dimension_semantics=("parallel", "parallel", "arbitrary")),
@@ -345,22 +356,30 @@ def _bgmv_expand_kernel(bT: int, bL: int, max_num_loras: int, idx_ref, inp_ref,
 
         ones = jnp.ones((bL, ), dtype=jnp.float32)
 
-        for i in range(max_num_loras):
-            mask_ref[...] = jnp.zeros_like(mask_ref[...], dtype=jnp.float32)
-            valid = False
-            for j in range(bT):
-                valid |= idx_ref[j + bT * t] == i
+        mask_ref[...] = jnp.zeros_like(mask_ref[...], dtype=jnp.float32)
 
-                @pl.when(idx_ref[j + bT * t] == i)
-                def _():
-                    mask_ref.at[j, :].set(ones)
+        def _mask_setup_step(i, valid):
+            idx = idx_ref[i + bT * t]
+            lane_idx = idx % max_num_loras
 
-            @pl.when(valid)
+            mask_ref.at[lane_idx, i, :].set(ones)
+            return valid | (1 << lane_idx)
+
+        valid = jax.lax.fori_loop(0, bT, _mask_setup_step, 0)
+
+        def _lora_matmul_step(lane_idx, check_bit):
+
+            @pl.when((valid & check_bit) > 0)
             def _():
                 acc_ref[...] += jax.lax.dot(
                     inp_ref[...],
-                    lora_ref[i, ...],
-                    preferred_element_type=jnp.float32) * mask_ref[...]
+                    lora_ref[lane_idx, ...],
+                    preferred_element_type=jnp.float32) * mask_ref[lane_idx,
+                                                                   ...]
+
+            return check_bit << 1
+
+        _ = jax.lax.fori_loop(0, max_num_loras, _lora_matmul_step, 1)
 
     @pl.when(pl.program_id(2) == pl.num_programs(2) - 1)
     def _():
@@ -397,11 +416,11 @@ def _bgmv_expand(
                                    lambda i, j, k, block_idx: (i, j)),
             scratch_shapes=[
                 pltpu.VMEM((token_block, lora_block), jnp.float32),
-                pltpu.VMEM((token_block, lora_block), jnp.float32)
+                pltpu.VMEM((N, token_block, lora_block), jnp.float32)
             ]),
         compiler_params=pltpu.TPUCompilerParams(
             dimension_semantics=("parallel", "parallel", "arbitrary")),
-        name="bgmv_pre_transpose")(idxs, inputs, loras)
+        name="bgmv_expand")(idxs, inputs, loras)
 
 
 def bgmv_expand_shape_function(idxs, inputs, loras):
