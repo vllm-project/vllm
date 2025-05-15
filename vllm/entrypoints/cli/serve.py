@@ -5,9 +5,8 @@ import multiprocessing
 import os
 import signal
 import sys
-import tempfile
 from multiprocessing.context import SpawnProcess
-from typing import Any, Optional
+from typing import Any
 
 import uvloop
 import zmq
@@ -27,11 +26,9 @@ from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.core import EngineCoreProc
 from vllm.v1.engine.core_client import CoreEngineProcManager
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 from vllm.v1.utils import (CoreEngine, get_engine_client_zmq_addr,
                            wait_for_engine_startup)
-
-# Global variable for Prometheus multiprocessing directory
-prometheus_multiproc_dir: Optional[tempfile.TemporaryDirectory] = None
 
 logger = init_logger(__name__)
 
@@ -166,29 +163,9 @@ def run_multi_api_server(args: argparse.Namespace):
 
     assert not args.headless
     num_api_servers = args.api_server_count
-
     assert num_api_servers > 1
-    if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
 
-        # prometheus_client should always be imported lazily, because
-        # PROMETHEUS_MULTIPROC_DIR cannot be set after the import.
-        # See https://prometheus.github.io/client_python/multiprocess/
-        if "prometheus_client" in sys.modules:
-            raise RuntimeError("prometheus_client is already imported, "
-                               "PROMETHEUS_MULTIPROC_DIR should be set before "
-                               "importing prometheus_client.")
-
-        # Make TemporaryDirectory for prometheus multiprocessing
-        # Note: global TemporaryDirectory will be automatically
-        #   cleaned up upon exit.
-        global prometheus_multiproc_dir
-        prometheus_multiproc_dir = tempfile.TemporaryDirectory()
-        os.environ["PROMETHEUS_MULTIPROC_DIR"] = prometheus_multiproc_dir.name
-    else:
-        logger.warning("Found PROMETHEUS_MULTIPROC_DIR was set by user. "
-                       "This directory must be wiped between vLLM runs or "
-                       "you will find inaccurate metrics. Unset the variable "
-                       "and vLLM will properly handle cleanup.")
+    setup_multiprocess_prometheus()
 
     listen_address, sock = setup_server(args)
 

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import os
 from collections.abc import AsyncGenerator, Mapping
 from copy import copy
 from typing import Any, Optional, Union
@@ -34,6 +35,7 @@ from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.loggers import (StatLoggerBase, StatLoggerFactory,
                                      setup_default_loggers)
+from vllm.v1.metrics.prometheus import mark_process_dead
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 logger = init_logger(__name__)
@@ -199,17 +201,7 @@ class AsyncLLM(EngineClient):
         """Shutdown, cleaning up the background proc and IPC."""
 
         try:
-            # In case of using prometheus, we should mark the process as dead
-            # in the multiprocess mode (multi api servers)
-            # See https://prometheus.github.io/client_python/multiprocess/
-            # This part of the shutdown logic is a no-op in other scenarios
-            # (single api server or not using prometheus) so it is safe to call
-            # either way.
-            import os
-
-            from prometheus_client import multiprocess
-
-            multiprocess.mark_process_dead(os.getpid())
+            mark_process_dead(os.getpid())
             logger.debug("Marked Prometheus metrics for process %d as dead",
                          os.getpid())
         except Exception as e:

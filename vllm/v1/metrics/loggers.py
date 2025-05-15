@@ -3,14 +3,16 @@
 import logging
 import time
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Callable, Optional, Union
+from typing import TYPE_CHECKING, Callable, Optional
 
 import numpy as np
+import prometheus_client
 
 from vllm.config import SupportsMetricsInfo, VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import PrefixCachingMetrics
 from vllm.v1.engine import FinishReason
+from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
 
@@ -143,10 +145,8 @@ class LoggingStatLogger(StatLoggerBase):
 class PrometheusStatLogger(StatLoggerBase):
 
     def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
-        # Lazy import prometheus_client
-        import prometheus_client
 
-        self._unregister_vllm_metrics()
+        unregister_vllm_metrics()
         self.vllm_config = vllm_config
         self.engine_index = engine_index
         # Use this flag to hide metrics that were deprecated in
@@ -364,14 +364,11 @@ class PrometheusStatLogger(StatLoggerBase):
                 )
 
     def log_metrics_info(self, type: str, config_obj: SupportsMetricsInfo):
-        # Lazy import prometheus_client
-        import prometheus_client
 
         metrics_info = config_obj.metrics_info()
         metrics_info["engine"] = self.engine_index
 
         name, documentation = None, None
-        multiprocess_mode = "mostrecent"
         if type == "cache_config":
             name = "vllm:cache_config_info"
             documentation = "Information of the LLMEngine CacheConfig"
@@ -384,7 +381,7 @@ class PrometheusStatLogger(StatLoggerBase):
             name=name,
             documentation=documentation,
             labelnames=metrics_info.keys(),
-            multiprocess_mode=multiprocess_mode).labels(**metrics_info)
+            multiprocess_mode="mostrecent").labels(**metrics_info)
         info_gauge.set(1)
 
     def record(self, scheduler_stats: Optional[SchedulerStats],
@@ -458,29 +455,18 @@ class PrometheusStatLogger(StatLoggerBase):
             self.gauge_lora_info.labels(**lora_info_labels)\
                                 .set_to_current_time()
 
-    @staticmethod
-    def _unregister_vllm_metrics():
-        # Lazy import prometheus_client
-        import prometheus_client
-
-        # Unregister any existing vLLM collectors (for CI/CD
-        for collector in list(prometheus_client.REGISTRY._collector_to_names):
-            if hasattr(collector, "_name") and "vllm" in collector._name:
-                prometheus_client.REGISTRY.unregister(collector)
-
     def log_engine_initialized(self):
         self.log_metrics_info("cache_config", self.vllm_config.cache_config)
 
 
-def build_buckets(mantissa_lst: list[int],
-                  max_value: int) -> list[Union[int, float]]:
+def build_buckets(mantissa_lst: list[int], max_value: int) -> list[int]:
     """
     Builds a list of buckets with increasing powers of 10 multiplied by
     mantissa values until the value exceeds the specified maximum.
 
     """
     exponent = 0
-    buckets: list[Union[int, float]] = []
+    buckets: list[int] = []
     while True:
         for m in mantissa_lst:
             value = m * 10**exponent
@@ -491,7 +477,7 @@ def build_buckets(mantissa_lst: list[int],
         exponent += 1
 
 
-def build_1_2_5_buckets(max_value: int) -> list[Union[int, float]]:
+def build_1_2_5_buckets(max_value: int) -> list[int]:
     """
     Example:
     >>> build_1_2_5_buckets(100)
