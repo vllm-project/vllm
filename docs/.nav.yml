@@ -1,11 +1,13 @@
 nav:
   - Getting Started:
-    - getting_started
     - getting_started/quickstart.md
+    - getting_started/installation
+    - getting_started/installation/gpu.md
+    - getting_started/installation/cpu.md
+    - getting_started/installation/ai_accelerator.md
     - getting_started/examples
-    - getting_started/troubleshooting.md
-    - getting_started/faq.md
-    - getting_started/v1_user_guide.md
+    - Other:
+      - getting_started/*
   - Models:
     - models/supported_models.md
     - models/generative_models.md
