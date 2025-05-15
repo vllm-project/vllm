@@ -503,7 +503,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             indices_type=torch.uint32 if self.moe.use_pplx_kernels else None)
 
         if self.rocm_aiter_moe_enabled:
-            assert not apply_router_weight_on_input
             assert expert_map is None
             return self.rocm_aiter_fused_experts(
                 hidden_states=x,
