@@ -1592,8 +1592,9 @@ def replace_set_lora(model):
         self._original_set_lora(index, lora_a, lora_b, embeddings_tensor, bias)
         xm.mark_step()
 
-    def _tpu_reset_lora(self, idx: int):
-        index = torch.tensor([idx], dtype=torch.int32, device="xla")
+    def _tpu_reset_lora(self, idx: int | torch.Tensor):
+        index = idx if not isinstance(idx, int) else torch.tensor(
+            [idx], dtype=torch.int32, device="xla")
         self._original_reset_lora(index)
         xm.mark_step()
 
