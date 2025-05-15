@@ -235,11 +235,18 @@ def transpile_myst_to_md(old_path: Path) -> None:
         if block.type == "literalinclude":
             # All the literal includes we use reference library files
             path = (old_path.parent / block.args).resolve()
-            lines[start] = f'{indent}``` title="{path}"\n'
-            lines[start] += f'{indent}--8<-- "{path}"\n'
-            # lines[start + 1:end] = ["" for _ in lines[start + 1:end]]
+            _, attrs = parse_fence_block(lines[start + 1:end], indent)
+            language = attrs.pop("language", "")
+            name = attrs.pop("start-after") if "start-after" in attrs else ""
+            name = f":{name.replace('begin-', '')}" if name else ""
+            attrs.pop("end-before", None)
+            if attrs:
+                logger.warning("Literal include attributes not handled: %s", attrs)
+            title = "" if name else f' title="{path.relative_to(ROOT_DIR)}"'
+            lines[start] = f"{indent}```{language}{title}\n"
+            lines[start] += f'{indent}--8<-- "{path}{name}"\n'
+            lines[start + 1:end] = ["" for _ in lines[start + 1:end]]
             lines[end] = f"{indent}```\n"
-            logger.warning("Literal include only partially handled")
             continue
 
         # Handle includes
