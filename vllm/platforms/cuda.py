@@ -207,7 +207,8 @@ class CudaPlatformBase(Platform):
                                 "flashmla.FlashMLABackend")
         if use_v1:
             # Skip FlashInfer on CUDA 11.8 on Hopper
-            flash_infer_supported = (torch.version.cuda >= Version("12.0")
+            flash_infer_supported = (Version(
+                torch.version.cuda) >= Version("12.0")
                                      and not cls.has_device_capability(90))
             if (selected_backend == _Backend.FLASHINFER
                     and flash_infer_supported):
