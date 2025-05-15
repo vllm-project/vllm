@@ -623,8 +623,7 @@ class NixlConnectorWorker:
                 xfer_state = self.nixl_wrapper.check_xfer_state(handle)
                 if xfer_state == "DONE":
                     self.nixl_wrapper.release_xfer_handle(handle)
-                    continue
-                if xfer_state == "PROC":
+                elif xfer_state == "PROC":
                     running_reqs.append(handle)
                 else:
                     raise RuntimeError("Transfer failed with state %s",
