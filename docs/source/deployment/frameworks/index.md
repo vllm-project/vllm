@@ -10,6 +10,7 @@ chatbox
 dify
 dstack
 helm
+lobe-chat
 lws
 modal
 open-webui

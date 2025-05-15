@@ -70,7 +70,9 @@ class SiluAndMul(CustomOp):
             from vllm._ipex_ops import ipex_ops
             self.op = ipex_ops.silu_and_mul
 
-    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_native(self,
+                       x: torch.Tensor,
+                       scale: Optional[torch.Tensor] = None) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
         d = x.shape[-1] // 2
         return F.silu(x[..., :d]) * x[..., d:]
@@ -364,7 +366,7 @@ def get_act_fn(act_fn_name: str) -> nn.Module:
 _ACTIVATION_AND_MUL_REGISTRY = LazyDict({
     "gelu": lambda: GeluAndMul(),
     "silu": lambda: SiluAndMul(),
-    "gelu_and_mul": lambda: GeluAndMul(),
+    "geglu": lambda: GeluAndMul(),
 })
 
 
