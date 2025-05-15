@@ -46,15 +46,36 @@ from pydantic import BaseModel
 async def print_stream_response(
     stream_response: AsyncStream[ChatCompletionChunk],
     title: str,
+    args: argparse.Namespace,
 ):
-    print(f"\n{title} (Streaming):")
-    full_response = ""
+    print(f"{title} (Streaming):\n")
+    full_content = ""
+
+    # Reasoning specific
+    full_reasoning_text = ""
+    reasoning_header_printed = False
+
     async for chunk in stream_response:
-        content = chunk.choices[0].delta.content or ""
-        print(content, end="", flush=True)
-        full_response += content
-    print()
-    return full_response
+        delta = chunk.choices[0].delta
+
+        if args.reasoning:
+            reasoning_chunk = getattr(delta, "reasoning_content", None)
+            if reasoning_chunk:
+                if not reasoning_header_printed:
+                    if full_content and not full_content.endswith('\n'):
+                        print()
+                    print(f"[Reasoning for {title}]:")
+                    reasoning_header_printed = True
+                print(reasoning_chunk, end="", flush=True)
+                full_reasoning_text += str(reasoning_chunk)
+            else:
+                content_chunk = delta.content or ""
+                print(content_chunk, end="", flush=True)
+                full_content += content_chunk
+        else:
+            content_chunk = delta.content or ""
+            print(content_chunk, end="", flush=True)
+            full_content += content_chunk
 
 
 class CarType(str, Enum):
@@ -217,6 +238,12 @@ async def main():
         default=False,
         help="Enable streaming output",
     )
+    _ = parser.add_argument(
+        "--reasoning",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable printing of reasoning traces if available.",
+    )
     args = parser.parse_args()
 
     base_url = os.getenv("OPENAI_BASE_URL", "http://localhost:8000/v1")
@@ -243,21 +270,21 @@ async def main():
             if isinstance(stream_or_exc, Exception):
                 print(f"Error for {constraint_name}: {stream_or_exc}\n")
             else:
-                print_stream_response(
+                await print_stream_response(
                     stream_or_exc,
-                    title=constraint_name,
+                    title=str(constraint_name),
+                    args=args,
                 )
     else:
         for constraint_name, response_or_exc in zip(constraints, results):
-            print(f"Constraint: {constraint_name}\n")
             if isinstance(response_or_exc, Exception):
-                print(f"Output:\n  Error: {response_or_exc}\n")
+                print(f"Error:\n  {response_or_exc}")
             else:
                 assert isinstance(response_or_exc, ChatCompletion)
-                # response_or_exc is a ChatCompletion object
-                print(
-                    f"Output:\n  {response_or_exc.choices[0].message.content!r}\n"
-                )
+                message = response_or_exc.choices[0].message
+                if args.reasoning and hasattr(message, "reasoning_content"):
+                    print(f"Reasoning:\n  {message.reasoning_content or ''}")
+                print(f"Output:\n  {message.content!r}")
 
 
 if __name__ == "__main__":
