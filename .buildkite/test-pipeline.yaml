@@ -379,7 +379,7 @@ steps:
     - pytest -v -s kernels/mamba
 
 - label: Tensorizer Test # 11min
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   soft_fail: true
   source_file_dependencies:
   - vllm/model_executor/model_loader
