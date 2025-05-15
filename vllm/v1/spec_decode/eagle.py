@@ -14,6 +14,7 @@ from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
 
 logger = init_logger(__name__)
@@ -351,6 +352,24 @@ class EagleProposer:
                 positions=self.positions[:num_tokens],
                 hidden_states=self.hidden_states[:num_tokens],
             )
+
+    def validate_kv_cache_group(self, kv_cache_config: KVCacheConfig) -> None:
+        """
+        Validate that all eagle layers belong to the same KVCacheGroup.
+        Need this assumption to ensure all eagle layers can use the
+        same AttentionMetadata.
+        May extend to multiple AttentionMetadata in the future.
+        """
+        kv_cache_groups: dict[str, int] = {}
+        for id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+            for layer_name in kv_cache_group.layer_names:
+                kv_cache_groups[layer_name] = id
+        assert len(
+            set([
+                kv_cache_groups[layer_name]
+                for layer_name in self.attn_layer_names
+            ])
+        ) == 1, "All eagle layers should belong to the same kv cache group"
 
 
 # NOTE(woosuk): Currently, the below code is not used and we always use argmax
