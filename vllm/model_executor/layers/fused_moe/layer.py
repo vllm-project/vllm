@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib
-import threading
 from abc import abstractmethod
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Optional
-from weakref import WeakValueDictionary
 
 import torch
 import torch.nn.functional as F
@@ -74,7 +72,8 @@ class FusedMoEParallelConfig:
 
     @property
     def use_pplx_kernels(self):
-        return self.dp_size > 1 and self.use_ep and has_pplx
+        return self.dp_size > 1 and self.use_ep and \
+             envs.VLLM_ALL2ALL_BACKEND == "pplx"
 
     @staticmethod
     def make(tp_size_: int, dp_size_: int,
@@ -273,46 +272,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         activation: str = "silu",
     ) -> torch.Tensor:
         raise NotImplementedError
-
-
-class AllToAllCache:
-
-    def __init__(self):
-        self._cache: WeakValueDictionary = WeakValueDictionary()
-        self._lock = threading.RLock()  # Reentrant lock for thread safety
-
-    def destroy(self):
-        with self._lock:
-            # TODO: can we do del self._cache?
-            for _, a2a in self._cache.items():
-                a2a.destroy()
-
-    def get_or_create(self, **kwargs):
-        assert has_pplx
-        import pplx_kernels as pplx
-
-        # Create a hashable key from the kwargs
-        key = tuple(sorted((k, v) for k, v in kwargs.items()))
-
-        with self._lock:
-            instance = self._cache.get(key)
-            if instance is None:
-                # TODO (varun): Add support to switch to intranode
-                # when all communications are within the same
-                # node.
-                logger.debug("Create AllToAll %s", kwargs)
-                instance = pplx.AllToAll.internode(**kwargs)
-                self._cache[key] = instance
-            return instance
-
-
-# Global singleton
-_all_to_all_cache = AllToAllCache()
-
-
-# Factory function as a cleaner interface
-def get_all_to_all(**kwargs):
-    return _all_to_all_cache.get_or_create(**kwargs)
 
 
 @CustomOp.register("unquantized_fused_moe")
@@ -690,26 +649,8 @@ def _construct_prepare_finalize(
     rank = moe.ep_rank
 
     if moe.use_pplx_kernels:
-        logger.debug("using PplxPrepareAndFinalize")
-
-        all_to_all = get_all_to_all(
-            max_num_tokens=max_num_tokens,
-            num_experts=moe.num_experts,
-            experts_per_token=moe.experts_per_token,  # topk
-            rank=rank,
-            world_size=world_size,
-            dp_size=dp_size,
-            hidden_dim=moe.hidden_dim,
-            hidden_dim_bytes=moe.hidden_dim * moe.in_dtype.itemsize,
-            # For blocked per token: set to
-            #   ceil_div(hidden_dim, block_size) * sizeof(float32)
-            # For per-token: set to sizeof(float32)
-            hidden_dim_scale_bytes=(0 if moe.in_dtype.itemsize != 1 else
-                                    ((moe.hidden_dim + moe.block_size - 1) //
-                                     moe.block_size * torch.float32.itemsize)))
-
         return PplxPrepareAndFinalize(
-            all_to_all,
+            None,
             max_num_tokens=max_num_tokens,
             world_size=world_size,
             rank=rank,
@@ -834,6 +775,7 @@ class FusedMoE(torch.nn.Module):
             # TODO (bnell): this needs to be fixed for quantized types.
             in_dtype=params_dtype,
         )
+        self.moe_config = moe
 
         # Note: get_quant_method will look at the layer's local_num_experts
         # for heuristic purposes, so it must be initialized first.

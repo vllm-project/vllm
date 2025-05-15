@@ -31,7 +31,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
         use_pynccl = "ep" not in unique_name
 
         self.use_pynccl = use_pynccl
-        self.use_all2all = "ep" in unique_name
+
+        use_ep = False
+        from vllm.config import get_current_vllm_config
+        config = get_current_vllm_config()
+        if config is not None:
+            use_ep = config.parallel_config.enable_expert_parallel
+
+        self.use_all2all = "ep" in unique_name and use_ep
         self.all2all_impl: Optional[All2AllBase] = None
         self.use_custom_allreduce = use_custom_allreduce
 
@@ -151,6 +158,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if all2all_backend == "naive":
             from .all2all import NaiveAll2All
             self.all2all_impl = NaiveAll2All(self.cpu_group, model)
+        elif all2all_backend == "pplx":
+            from .all2all import PPLXAll2All
+            self.all2all_impl = PPLXAll2All(self.cpu_group, model)
 
     def dispatch(
             self, hidden_states: torch.Tensor,
