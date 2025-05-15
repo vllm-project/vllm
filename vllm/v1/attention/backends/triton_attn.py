@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Attention layer with PagedAttention and Triton prefix prefill."""
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 
@@ -12,8 +12,21 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionMetadata, FlashAttentionMetadataBuilder)
+from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.worker.block_table import BlockTable
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
+
+
+class TritonAttentionMetadataBuilder(FlashAttentionMetadataBuilder):
+
+    def __init__(self, runner: "GPUModelRunner", kv_cache_spec: AttentionSpec,
+                 block_table: BlockTable):
+        super().__init__(runner, kv_cache_spec, block_table)
+        self.aot_schedule = False
 
 
 class TritonAttentionBackend(AttentionBackend):
@@ -52,8 +65,8 @@ class TritonAttentionBackend(AttentionBackend):
         return False
 
     @staticmethod
-    def get_builder_cls() -> type["FlashAttentionMetadataBuilder"]:
-        return FlashAttentionMetadataBuilder
+    def get_builder_cls() -> type["TritonAttentionMetadataBuilder"]:
+        return TritonAttentionMetadataBuilder
 
 
 class TritonAttentionImpl(AttentionImpl):
