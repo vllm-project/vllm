@@ -709,7 +709,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Whether to use gguf mul_mat_q kernel that optimized for mi50.
     "VLLM_USE_MI50_OPTIM_GGUF_MUL_MAT_KERNEL":
-    lambda: bool(int(os.getenv("VLLM_USE_MI50_OPTIM_GGUF_MUL_MAT", "0")))
+    lambda: bool(int(os.getenv("VLLM_USE_MI50_OPTIM_GGUF_MUL_MAT_KERNEL", "0")))
 }
 
 # end-env-vars-definition

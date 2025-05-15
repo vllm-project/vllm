@@ -3,10 +3,9 @@
 #include <stdint.h>
 
 __global__ void quantize_q8_0_mi50(half* __restrict__ x,
-                                        block_q8_0* __restrict__ out,
-                                        int nrows_x, int ncols_x,
-                                        int ncols_x_padded,
-                                        int block_q8_0_per_row) {
+                                   block_q8_0* __restrict__ out, int nrows_x,
+                                   int ncols_x, int ncols_x_padded,
+                                   int block_q8_0_per_row) {
   /*
   quantize x to q8_0 on gcn arch
 
@@ -35,13 +34,12 @@ __global__ void quantize_q8_0_mi50(half* __restrict__ x,
 
   in each warp:
   1. load 64 elements (2 block_q8_0s) from x
-  2. calculate delta(d) and sum(s) of first 32-elements and second 32-elements
+  2. calculate delta(d) of first 32-elements and second 32-elements
   which corresponding to 1st block_q8_0 and 2nd block_q8_0
   d = max(x_i) / 127
-  s = sum(x_i)
   3. calculate 64 quantized elements(qs) with d
   qs = x_i / d = x_i * 127 / max
-  4. write qs, d, s to output
+  4. write qs and d to output
   */
 
   int global_thread_idx_x = blockDim.x * blockIdx.x + threadIdx.x;
@@ -59,25 +57,25 @@ __global__ void quantize_q8_0_mi50(half* __restrict__ x,
   {
     xi = __float2half(0.0f);
   }
-  __syncthreads();
 
   // 2. calculate d and sum
-  half max = xi;
+  half max = __habs(xi);
   half delta;
 
-  for (int offset = 16; offset > 0;
-       offset /=
-       2)  // broadcast max and sum to all threads handling the same block_q8_0
-  {
+  for (int offset = 16; offset > 0; offset /= 2) {
+    // broadcast max and sum to all threads handling the same block_q8_0
     max = __hmax(max, __shfl_xor_sync((uint64_t)-1, max, offset, 32));
   }
-  __syncthreads();
   delta = max / (half)127.0;
 
   // 3. calculate qs with d
-  uint8_t qs = delta != (half)0 ? (uint8_t)roundf(xi / delta) : 0;
+  int8_t qs = 0;
+  if (delta != (half)0.0f) {
+      float q = __half2float(xi) / __half2float(delta);
+      qs = (int8_t)roundf(q);
+  }
 
-  // 4. write qs, d, s to output
+  // 4. write qs and d to output
   int out_block_q8_0_1st_idx = blockIdx.y * block_q8_0_per_row +
                                blockIdx.x * 2;  // index of 1st out block_q8_0
   int out_block_q8_0_2nd_idx =
@@ -94,7 +92,7 @@ __global__ void quantize_q8_0_mi50(half* __restrict__ x,
     out[out_block_q8_0_2nd_idx].qs[local_qs_idx] = qs;
   }
 
-  // write d and s to output
+  // write d to output
   if (threadIdx.x == 0) {  // write 1st block of this warp
     out[out_block_q8_0_1st_idx].d = delta;
   } else if (threadIdx.x == 32) {  // write 2nd block of this wrap
