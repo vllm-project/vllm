@@ -49,10 +49,10 @@ class XgrammarBackend(StructuredOutputBackend):
                         )
                     ]
                 stop_token_ids = None
-                if hasattr(
+                if (hasattr(
                         self.tokenizer,
                         "eos_token_id",
-                ) and self.tokenizer.eos_token_id is not None:
+                ) and self.tokenizer.eos_token_id is not None):
                     stop_token_ids = [self.tokenizer.eos_token_id]
             except AttributeError as e:
                 raise ValueError(

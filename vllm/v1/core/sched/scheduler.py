@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
@@ -844,7 +844,7 @@ class Scheduler(SchedulerInterface):
 
     def finish_requests(
         self,
-        request_ids: str | Iterable[str],
+        request_ids: Union[str, Iterable[str]],
         finished_status: RequestStatus,
     ) -> None:
         """Handles the finish signal from outside the scheduler.
