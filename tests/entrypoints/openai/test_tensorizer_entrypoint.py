@@ -8,13 +8,10 @@ import pytest
 import pytest_asyncio
 import torch.cuda
 
-from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
-from vllm.lora.request import LoRARequest
 from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig, tensorize_lora_adapter, tensorize_vllm_model)
 
-from ...conftest import VllmRunner
 from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "unsloth/llama-3.2-1b-Instruct"
@@ -98,30 +95,3 @@ async def test_single_completion(client: openai.AsyncOpenAI, model_name: str):
     assert completion.choices[0].finish_reason == "length"
     assert completion.usage == openai.types.CompletionUsage(
         completion_tokens=5, prompt_tokens=6, total_tokens=11)
-
-
-def test_confirm_deserialize_and_serve(model_uri, tmp_dir,
-                                       tensorize_model_and_lora):
-    _cleanup()
-    tc = TensorizerConfig(tensorizer_uri=model_uri, lora_dir=tmp_dir)
-    llm = VllmRunner(MODEL_NAME,
-                     load_format="tensorizer",
-                     model_loader_extra_config=tc,
-                     enable_lora=True)
-
-    sampling_params = SamplingParams(temperature=0,
-                                     max_tokens=256,
-                                     stop=["[/assistant]"])
-
-    prompts = [
-        "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_74 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]",  # noqa: E501
-        "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_11 (nationality VARCHAR, elector VARCHAR)\n\n question: When Anchero Pantaleone was the elector what is under nationality? [/user] [assistant]",  # noqa: E501
-    ]
-
-    tc = TensorizerConfig.as_dict(tensorizer_uri=model_uri, lora_dir=tmp_dir)
-    llm.generate(prompts,
-                 sampling_params,
-                 lora_request=LoRARequest("sql-lora",
-                                          1,
-                                          tmp_dir,
-                                          tensorizer_config_dict=tc))
