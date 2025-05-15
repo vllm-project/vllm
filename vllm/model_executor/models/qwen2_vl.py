@@ -25,8 +25,7 @@
 """Inference-only Qwen2-VL model compatible with HuggingFace weights."""
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
-from typing import (Any, Callable, Literal, Optional, Set, Tuple, TypedDict,
-                    Union)
+from typing import Any, Callable, Literal, Optional, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -102,7 +101,7 @@ class Qwen2VLImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
     image_embeds: torch.Tensor
     """Supported types:
-    - List[`torch.Tensor`]: A list of tensors holding all images' features.
+    - list[`torch.Tensor`]: A list of tensors holding all images' features.
         Each tensor holds an image's features.
     - `torch.Tensor`: A tensor holding all images' features
         (concatenation of all images' feature tensors).
@@ -142,7 +141,7 @@ class Qwen2VLVideoEmbeddingInputs(TypedDict):
     type: Literal["video_embeds"]
     video_embeds: torch.Tensor
     """Supported types:
-    - List[`torch.Tensor`]: A list of tensors holding all videos' features.
+    - list[`torch.Tensor`]: A list of tensors holding all videos' features.
         Each tensor holds an video's features.
     - `torch.Tensor`: A tensor holding all videos' features
         (concatenation of all videos' feature tensors).
@@ -662,8 +661,8 @@ class Qwen2VisionTransformer(nn.Module):
 
         return x
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -671,7 +670,7 @@ class Qwen2VisionTransformer(nn.Module):
             ("qkv_proj", "v_proj", "v"),
         ]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
@@ -1394,8 +1393,8 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
 
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

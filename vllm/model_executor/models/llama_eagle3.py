@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Iterable, Optional, Set, Tuple
+from collections.abc import Iterable
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -56,7 +57,7 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         embeds: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
 
         residual = hidden_states
         embeds = self.input_layernorm(embeds)
@@ -140,8 +141,8 @@ class LlamaModel(nn.Module):
         hidden_states, hidden_prenorm = self.norm(hidden_states, residual)
         return hidden_states, hidden_prenorm
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -151,7 +152,7 @@ class LlamaModel(nn.Module):
             (".gate_up_proj", ".up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if 'midlayer.' in name:
                 name = name.replace('midlayer.', 'layers.0.')
@@ -228,7 +229,7 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         # combine multiple auxiliary hidden states returned by eagle3
         return self.model.fc(hidden_states)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=None,

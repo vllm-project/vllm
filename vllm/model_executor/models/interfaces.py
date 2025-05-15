@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import (TYPE_CHECKING, ClassVar, Dict, List, Literal, Optional,
-                    Protocol, Type, Union, overload, runtime_checkable)
+from typing import (TYPE_CHECKING, ClassVar, Literal, Optional, Protocol,
+                    Union, overload, runtime_checkable)
 
 import torch
 from torch import Tensor
@@ -102,7 +102,7 @@ class _SupportsMultiModalType(Protocol):
 
 @overload
 def supports_multimodal(
-        model: Type[object]) -> TypeIs[Type[SupportsMultiModal]]:
+        model: type[object]) -> TypeIs[type[SupportsMultiModal]]:
     ...
 
 
@@ -112,8 +112,8 @@ def supports_multimodal(model: object) -> TypeIs[SupportsMultiModal]:
 
 
 def supports_multimodal(
-    model: Union[Type[object], object],
-) -> Union[TypeIs[Type[SupportsMultiModal]], TypeIs[SupportsMultiModal]]:
+    model: Union[type[object], object],
+) -> Union[TypeIs[type[SupportsMultiModal]], TypeIs[SupportsMultiModal]]:
     if isinstance(model, type):
         return isinstance(model, _SupportsMultiModalType)
 
@@ -134,9 +134,9 @@ class SupportsLoRA(Protocol):
     """
     # The `embedding_module` and `embedding_padding_modules`
     # are empty by default.
-    embedding_modules: ClassVar[Dict[str, str]] = {}
-    embedding_padding_modules: ClassVar[List[str]] = []
-    packed_modules_mapping: ClassVar[Dict[str, List[str]]] = {}
+    embedding_modules: ClassVar[dict[str, str]] = {}
+    embedding_padding_modules: ClassVar[list[str]] = []
+    packed_modules_mapping: ClassVar[dict[str, list[str]]] = {}
 
 
 # We can't use runtime_checkable with ClassVar for issubclass checks
@@ -145,13 +145,13 @@ class SupportsLoRA(Protocol):
 class _SupportsLoRAType(Protocol):
     supports_lora: Literal[True]
 
-    packed_modules_mapping: Dict[str, List[str]]
-    embedding_modules: Dict[str, str]
-    embedding_padding_modules: List[str]
+    packed_modules_mapping: dict[str, list[str]]
+    embedding_modules: dict[str, str]
+    embedding_padding_modules: list[str]
 
 
 @overload
-def supports_lora(model: Type[object]) -> TypeIs[Type[SupportsLoRA]]:
+def supports_lora(model: type[object]) -> TypeIs[type[SupportsLoRA]]:
     ...
 
 
@@ -161,8 +161,8 @@ def supports_lora(model: object) -> TypeIs[SupportsLoRA]:
 
 
 def supports_lora(
-    model: Union[Type[object], object],
-) -> Union[TypeIs[Type[SupportsLoRA]], TypeIs[SupportsLoRA]]:
+    model: Union[type[object], object],
+) -> Union[TypeIs[type[SupportsLoRA]], TypeIs[SupportsLoRA]]:
     result = _supports_lora(model)
 
     if not result:
@@ -191,7 +191,7 @@ def supports_lora(
     return result
 
 
-def _supports_lora(model: Union[Type[object], object]) -> bool:
+def _supports_lora(model: Union[type[object], object]) -> bool:
     if isinstance(model, type):
         return isinstance(model, _SupportsLoRAType)
 
@@ -256,7 +256,7 @@ class _SupportsPPType(Protocol):
 
 
 @overload
-def supports_pp(model: Type[object]) -> TypeIs[Type[SupportsPP]]:
+def supports_pp(model: type[object]) -> TypeIs[type[SupportsPP]]:
     ...
 
 
@@ -266,8 +266,8 @@ def supports_pp(model: object) -> TypeIs[SupportsPP]:
 
 
 def supports_pp(
-    model: Union[Type[object], object],
-) -> Union[bool, TypeIs[Type[SupportsPP]], TypeIs[SupportsPP]]:
+    model: Union[type[object], object],
+) -> Union[bool, TypeIs[type[SupportsPP]], TypeIs[SupportsPP]]:
     supports_attributes = _supports_pp_attributes(model)
     supports_inspect = _supports_pp_inspect(model)
 
@@ -298,14 +298,14 @@ def supports_pp(
     return supports_attributes and supports_inspect
 
 
-def _supports_pp_attributes(model: Union[Type[object], object]) -> bool:
+def _supports_pp_attributes(model: Union[type[object], object]) -> bool:
     if isinstance(model, type):
         return isinstance(model, _SupportsPPType)
 
     return isinstance(model, SupportsPP)
 
 
-def _supports_pp_inspect(model: Union[Type[object], object]) -> bool:
+def _supports_pp_inspect(model: Union[type[object], object]) -> bool:
     model_forward = getattr(model, "forward", None)
     if not callable(model_forward):
         return False
@@ -336,13 +336,13 @@ def has_inner_state(model: object) -> TypeIs[HasInnerState]:
 
 
 @overload
-def has_inner_state(model: Type[object]) -> TypeIs[Type[HasInnerState]]:
+def has_inner_state(model: type[object]) -> TypeIs[type[HasInnerState]]:
     ...
 
 
 def has_inner_state(
-    model: Union[Type[object], object]
-) -> Union[TypeIs[Type[HasInnerState]], TypeIs[HasInnerState]]:
+    model: Union[type[object], object]
+) -> Union[TypeIs[type[HasInnerState]], TypeIs[HasInnerState]]:
     if isinstance(model, type):
         return isinstance(model, _HasInnerStateType)
 
@@ -373,13 +373,13 @@ def is_attention_free(model: object) -> TypeIs[IsAttentionFree]:
 
 
 @overload
-def is_attention_free(model: Type[object]) -> TypeIs[Type[IsAttentionFree]]:
+def is_attention_free(model: type[object]) -> TypeIs[type[IsAttentionFree]]:
     ...
 
 
 def is_attention_free(
-    model: Union[Type[object], object]
-) -> Union[TypeIs[Type[IsAttentionFree]], TypeIs[IsAttentionFree]]:
+    model: Union[type[object], object]
+) -> Union[TypeIs[type[IsAttentionFree]], TypeIs[IsAttentionFree]]:
     if isinstance(model, type):
         return isinstance(model, _IsAttentionFreeType)
 
@@ -410,13 +410,13 @@ def is_hybrid(model: object) -> TypeIs[IsHybrid]:
 
 
 @overload
-def is_hybrid(model: Type[object]) -> TypeIs[Type[IsHybrid]]:
+def is_hybrid(model: type[object]) -> TypeIs[type[IsHybrid]]:
     ...
 
 
 def is_hybrid(
-    model: Union[Type[object], object]
-) -> Union[TypeIs[Type[IsHybrid]], TypeIs[IsHybrid]]:
+    model: Union[type[object], object]
+) -> Union[TypeIs[type[IsHybrid]], TypeIs[IsHybrid]]:
     if isinstance(model, type):
         return isinstance(model, _IsHybridType)
 
@@ -439,13 +439,13 @@ def has_noops(model: object) -> TypeIs[HasNoOps]:
 
 
 @overload
-def has_noops(model: Type[object]) -> TypeIs[Type[HasNoOps]]:
+def has_noops(model: type[object]) -> TypeIs[type[HasNoOps]]:
     ...
 
 
 def has_noops(
-    model: Union[Type[object], object]
-) -> Union[TypeIs[Type[HasNoOps]], TypeIs[HasNoOps]]:
+    model: Union[type[object], object]
+) -> Union[TypeIs[type[HasNoOps]], TypeIs[HasNoOps]]:
     if isinstance(model, type):
         return isinstance(model, _HasNoOpsType)
 
@@ -461,7 +461,7 @@ class SupportsCrossEncoding(Protocol):
 
 @overload
 def supports_cross_encoding(
-        model: Type[object]) -> TypeIs[Type[SupportsCrossEncoding]]:
+        model: type[object]) -> TypeIs[type[SupportsCrossEncoding]]:
     ...
 
 
@@ -471,8 +471,8 @@ def supports_cross_encoding(model: object) -> TypeIs[SupportsCrossEncoding]:
 
 
 def _supports_cross_encoding(
-    model: Union[Type[object], object],
-) -> Union[TypeIs[Type[SupportsCrossEncoding]], TypeIs[SupportsCrossEncoding]]:
+    model: Union[type[object], object],
+) -> Union[TypeIs[type[SupportsCrossEncoding]], TypeIs[SupportsCrossEncoding]]:
 
     if isinstance(model, type):
         return isinstance(model, SupportsCrossEncoding)
@@ -481,15 +481,15 @@ def _supports_cross_encoding(
 
 
 def supports_cross_encoding(
-    model: Union[Type[object], object],
-) -> Union[TypeIs[Type[SupportsCrossEncoding]], TypeIs[SupportsCrossEncoding]]:
+    model: Union[type[object], object],
+) -> Union[TypeIs[type[SupportsCrossEncoding]], TypeIs[SupportsCrossEncoding]]:
     return is_pooling_model(model) and _supports_cross_encoding(model)
 
 
 class SupportsQuant:
     """The interface required for all models that support quantization."""
 
-    packed_modules_mapping: ClassVar[Dict[str, List[str]]] = {}
+    packed_modules_mapping: ClassVar[dict[str, list[str]]] = {}
     quant_config: Optional[QuantizationConfig] = None
 
     def __new__(cls, *args, **kwargs) -> Self:
@@ -525,7 +525,7 @@ class SupportsTranscription(Protocol):
 
 @overload
 def supports_transcription(
-        model: Type[object]) -> TypeIs[Type[SupportsTranscription]]:
+        model: type[object]) -> TypeIs[type[SupportsTranscription]]:
     ...
 
 
@@ -535,8 +535,8 @@ def supports_transcription(model: object) -> TypeIs[SupportsTranscription]:
 
 
 def supports_transcription(
-    model: Union[Type[object], object],
-) -> Union[TypeIs[Type[SupportsTranscription]], TypeIs[SupportsTranscription]]:
+    model: Union[type[object], object],
+) -> Union[TypeIs[type[SupportsTranscription]], TypeIs[SupportsTranscription]]:
     if isinstance(model, type):
         return isinstance(model, SupportsTranscription)
 
@@ -551,7 +551,7 @@ class SupportsV0Only(Protocol):
 
 
 @overload
-def supports_v0_only(model: Type[object]) -> TypeIs[Type[SupportsV0Only]]:
+def supports_v0_only(model: type[object]) -> TypeIs[type[SupportsV0Only]]:
     ...
 
 
@@ -561,8 +561,8 @@ def supports_v0_only(model: object) -> TypeIs[SupportsV0Only]:
 
 
 def supports_v0_only(
-    model: Union[Type[object], object],
-) -> Union[TypeIs[Type[SupportsV0Only]], TypeIs[SupportsV0Only]]:
+    model: Union[type[object], object],
+) -> Union[TypeIs[type[SupportsV0Only]], TypeIs[SupportsV0Only]]:
     if isinstance(model, type):
         return isinstance(model, SupportsV0Only)
 

@@ -2,7 +2,7 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import List, Optional, Set, Tuple, TypedDict, Union
+from typing import Optional, TypedDict, Union
 
 import torch
 from torch import nn
@@ -382,7 +382,7 @@ class WhisperEncoder(nn.Module):
             self.embed_positions.weight.copy_(
                 sinusoids(*self.embed_positions.weight.shape))
 
-    def forward(self, input_features: Union[torch.Tensor, List[torch.Tensor]]):
+    def forward(self, input_features: Union[torch.Tensor, list[torch.Tensor]]):
         hidden_states = []
         for features in input_features:
             embeds = nn.functional.gelu(self.conv1(features))
@@ -460,7 +460,7 @@ class WhisperModel(nn.Module):
 
     def forward(
         self,
-        input_features: Optional[Union[torch.Tensor, List[torch.Tensor]]],
+        input_features: Optional[Union[torch.Tensor, list[torch.Tensor]]],
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
     ) -> torch.Tensor:
@@ -474,14 +474,14 @@ class WhisperModel(nn.Module):
 
     def get_encoder_outputs(
         self,
-        input_features: Optional[Union[torch.Tensor, List[torch.Tensor]]],
+        input_features: Optional[Union[torch.Tensor, list[torch.Tensor]]],
     ) -> Optional[torch.Tensor]:
         if input_features is None:
             return None
         return self.encoder(input_features)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".self_attn.qkv_proj", ".self_attn.q_proj", "q"),
@@ -491,7 +491,7 @@ class WhisperModel(nn.Module):
             (".encoder_attn.kv_proj", ".encoder_attn.v_proj", "v"),
         ]
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
@@ -722,8 +722,8 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
                                        sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self, skip_prefixes=["proj_out."])
 
         # add fake zeros bias for k_proj to state_dict
@@ -732,8 +732,8 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
 
 
 def _create_fake_bias_for_k_proj(
-    weights: Iterable[Tuple[str, torch.Tensor]]
-) -> Iterable[Tuple[str, torch.Tensor]]:
+    weights: Iterable[tuple[str, torch.Tensor]]
+) -> Iterable[tuple[str, torch.Tensor]]:
     """
     Create full zeros bias for k_proj weight in self-attn and x-attn layers.
     So that the bias for k_proj in qkv_proj can be initialized with zeros.

@@ -17,8 +17,8 @@
 # limitations under the License.
 """ PyTorch Ovis model."""
 import math
-from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
-                    TypedDict, Union)
+from collections.abc import Iterable, Mapping
+from typing import Literal, Optional, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -211,7 +211,7 @@ class OvisImagePatchInputs(TypedDict):
     `(batch_size * (num_patches + 1))`
     """
 
-    patches_per_image: List[int]
+    patches_per_image: list[int]
     """
     List of number of total patches for each image in the batch.
     This is used to restore the first two dimensions of `flat_data`.
@@ -545,8 +545,8 @@ class Ovis(nn.Module, SupportsMultiModal):
         logits = self.llm.compute_logits(hidden_states, sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 

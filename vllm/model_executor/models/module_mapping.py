@@ -4,7 +4,7 @@
 #  https://github.com/modelscope/ms-swift/blob/v2.4.2/swift/utils/module_mapping.py
 
 from dataclasses import dataclass, field
-from typing import List, Union
+from typing import Union
 
 
 @dataclass
@@ -46,17 +46,17 @@ class ModelKeys:
 
 @dataclass
 class MultiModelKeys(ModelKeys):
-    language_model: List[str] = field(default_factory=list)
-    connector: List[str] = field(default_factory=list)
+    language_model: list[str] = field(default_factory=list)
+    connector: list[str] = field(default_factory=list)
     # vision tower and audio tower
-    tower_model: List[str] = field(default_factory=list)
-    generator: List[str] = field(default_factory=list)
+    tower_model: list[str] = field(default_factory=list)
+    generator: list[str] = field(default_factory=list)
 
     @staticmethod
-    def from_string_field(language_model: Union[str, List[str]] = None,
-                          connector: Union[str, List[str]] = None,
-                          tower_model: Union[str, List[str]] = None,
-                          generator: Union[str, List[str]] = None,
+    def from_string_field(language_model: Union[str, list[str]] = None,
+                          connector: Union[str, list[str]] = None,
+                          tower_model: Union[str, list[str]] = None,
+                          generator: Union[str, list[str]] = None,
                           **kwargs) -> 'MultiModelKeys':
 
         def to_list(value):

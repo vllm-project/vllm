@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Inference-only GraniteMoeHybrid model."""
 # Added by the IBM Team, 2025
-from typing import Iterable, Optional, Set, Tuple
+from collections.abc import Iterable
+from typing import Optional
 
 import torch
 from torch import nn
@@ -381,10 +382,10 @@ class GraniteMoeHybridModel(nn.Module):
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
 
         def _load(n, p):
             param = params_dict[n]
@@ -538,7 +539,7 @@ class GraniteMoeHybridForCausalLM(nn.Module, HasInnerState, SupportsLoRA,
         return self.mamba_cache.get_seqlen_agnostic_capture_inputs(batch_size)
 
     def _get_mamba_cache_shape(
-            self) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+            self) -> tuple[tuple[int, int], tuple[int, int]]:
         world_size = get_tensor_model_parallel_world_size()
         hidden_size = self.config.hidden_size
 
@@ -578,7 +579,7 @@ class GraniteMoeHybridForCausalLM(nn.Module, HasInnerState, SupportsLoRA,
                                        sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

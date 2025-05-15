@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Iterable, Set, Tuple
+from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
@@ -92,8 +92,8 @@ class LlamaModel(nn.Module):
         hidden_states = hidden_states + residual
         return hidden_states, hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -103,7 +103,7 @@ class LlamaModel(nn.Module):
             (".gate_up_proj", ".up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
@@ -150,7 +150,7 @@ class EagleLlamaForCausalLM(LlamaForCausalLM):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.model(input_ids, positions, hidden_states)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=None,

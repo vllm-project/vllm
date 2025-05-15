@@ -21,10 +21,10 @@
 # limitations under the License.
 """Inference-only Qwen2.5-Omni model (thinker part)."""
 
+from collections.abc import Iterable, Mapping, Sequence
 from copy import copy
 from functools import partial
-from typing import (Any, Dict, Iterable, List, Mapping, Optional, Sequence,
-                    Set, Tuple, Union)
+from typing import Any, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -138,7 +138,7 @@ class Qwen2_5OmniThinkerProcessingInfo(Qwen2AudioProcessingInfo,
         min_pixels: Optional[int] = None,
         max_pixels: Optional[int] = None,
         size: Optional[dict[str, int]] = None,
-        fps: Optional[Union[float, List[float]]] = None,
+        fps: Optional[Union[float, list[float]]] = None,
         **kwargs: object,
     ) -> Qwen2_5OmniProcessor:
         if fps is not None:
@@ -550,7 +550,7 @@ class Qwen2_5OmniConditionalGenerationMixin:
 
     def _parse_and_validate_image_input(
         self,
-        **kwargs: Dict[str, Any],
+        **kwargs: dict[str, Any],
     ) -> Optional[Qwen2_5_VLImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
@@ -589,7 +589,7 @@ class Qwen2_5OmniConditionalGenerationMixin:
 
     def _parse_and_validate_video_input(
         self,
-        **kwargs: Dict[str, Any],
+        **kwargs: dict[str, Any],
     ) -> Optional[Qwen2_5_VLVideoInputs]:
         pixel_values_videos = kwargs.pop("pixel_values_videos", None)
         video_embeds = kwargs.pop("video_embeds", None)
@@ -627,7 +627,7 @@ class Qwen2_5OmniConditionalGenerationMixin:
     def _process_audio_input(
         self,
         audio_input: Qwen2AudioInputs,
-        audio_hashes: List[str] = None,
+        audio_hashes: list[str] = None,
         cached_audio_features: torch.Tensor = None,
     ) -> torch.Tensor:
 
@@ -676,7 +676,7 @@ class Qwen2_5OmniConditionalGenerationMixin:
     def _process_video_input(
             self,
             video_input: Qwen2_5_VLVideoInputs,
-            video_hashes: List[str] = None,
+            video_hashes: list[str] = None,
             cached_video_embeds: torch.Tensor = None) -> torch.Tensor:
         if video_input["type"] == "video_embeds":
             return video_input["video_embeds"].type(self.visual.dtype)
@@ -825,7 +825,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         if audio_input is None and image_input is None and video_input is None:
             return None
 
-        multimodal_embeddings: List[Tuple[NestedTensors, str]] = []
+        multimodal_embeddings: list[tuple[NestedTensors, str]] = []
 
         if audio_input is not None:
             audio_embeds = self._process_audio_input(audio_input)
@@ -891,8 +891,8 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=["talker.", "token2wav."],

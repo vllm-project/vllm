@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Iterable, Optional, Set, Tuple
+from collections.abc import Iterable
+from typing import Optional
 
 import torch
 from torch import nn
@@ -208,7 +209,7 @@ class NomicRouter(nn.Module):
 
     def forward(
         self, x: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.LongTensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.LongTensor]:
         weights = self.layer(x.view(-1, x.shape[-1]))[0].softmax(
             dim=-1, dtype=torch.float32)
         top_weights, top_experts = torch.topk(weights, self.moe_top_k, dim=-1)
@@ -428,8 +429,8 @@ class BertWithRope(nn.Module, SupportsV0Only, SupportsQuant):
                                             token_type_ids=token_type_ids)
         return self.encoder(positions, hidden_states)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         weights = self.hf_to_vllm_mapper.apply(weights)
 
         if self.config.hidden_act in ["silu", "geglu"]:
@@ -442,7 +443,7 @@ class BertWithRope(nn.Module, SupportsV0Only, SupportsQuant):
             stacked_params_mapping = []
 
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "pooler" in name:
                 continue
@@ -567,7 +568,7 @@ class GteNewModel(BertWithRope):
         }
         return config
 
-    def split_up_gate_proj(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def split_up_gate_proj(self, weights: Iterable[tuple[str, torch.Tensor]]):
         n = "mlp.up_gate_proj"
         for name, weight in weights:
             if n in name:
@@ -578,14 +579,14 @@ class GteNewModel(BertWithRope):
                 yield name, weight
 
     def ignore_unnecessary_layers(self,
-                                  weights: Iterable[Tuple[str, torch.Tensor]]):
+                                  weights: Iterable[tuple[str, torch.Tensor]]):
         for name, weight in weights:
             if name.startswith("classifier"):
                 continue
             yield name, weight
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         weights = self.ignore_unnecessary_layers(weights)
         weights = self.split_up_gate_proj(weights)
         return super().load_weights(weights)
@@ -664,7 +665,7 @@ class JinaRobertaModel(BertWithRope):
                                token_type_ids=token_type_ids)
 
     @torch.inference_mode()
-    def jina_merge_lora_weights(self, weights: Iterable[Tuple[str,
+    def jina_merge_lora_weights(self, weights: Iterable[tuple[str,
                                                               torch.Tensor]]):
         # use for jina-embeddings-v3
         # Merge Lora weights into a single weight tensor.
@@ -707,7 +708,7 @@ class JinaRobertaModel(BertWithRope):
 
         return [(name, weight) for name, weight in weights.items()]
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         weights = self.jina_merge_lora_weights(weights)
         return super().load_weights(weights)

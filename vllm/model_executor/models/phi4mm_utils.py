@@ -5,7 +5,7 @@
 # but implemented by the Phi-Speech team
 #!/usr/bin/env python3
 import math
-from typing import Optional, Tuple, Union
+from typing import Optional, Union
 
 import torch
 import torch.nn.functional as F
@@ -1586,7 +1586,7 @@ class AttModule(nn.Module):
         memory: Optional[Tensor] = None,
         pos_emb: Optional[Tensor] = None,
         att_mask: Optional[Tensor] = None,
-    ) -> Tuple[Tensor, Tensor, Optional[Tensor], Optional[Tensor]]:
+    ) -> tuple[Tensor, Tensor, Optional[Tensor], Optional[Tensor]]:
         """AttModule forward
 
         Args:

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 import torch
 
@@ -16,7 +16,7 @@ class ConstantSizeCache(ABC):
     def __init__(self, max_batch_size: int):
         # Maps between the request id and a dict that maps between the seq_id
         # and its index inside the cache
-        self.cache_indices_mapping: Dict[str, Dict[int, int]] = {}
+        self.cache_indices_mapping: dict[str, dict[int, int]] = {}
         self.free_cache_indices = list(range(max_batch_size))
 
     @property
@@ -30,7 +30,7 @@ class ConstantSizeCache(ABC):
         """Copy cache data from one index to another"""
         pass
 
-    def current_run_tensors(self, **kwargs) -> Tuple:
+    def current_run_tensors(self, **kwargs) -> tuple:
         """
         Return the tensors for the current run's conv and ssm state.
         """
@@ -117,8 +117,8 @@ class ConstantSizeCache(ABC):
             return self.cache_indices_mapping[cur_rid][seq_id]
 
     def _prepare_current_run_cache(
-            self, request_ids_to_seq_ids: Dict[str, list[int]],
-            finished_requests_ids: List[str]) -> List[int]:
+            self, request_ids_to_seq_ids: dict[str, list[int]],
+            finished_requests_ids: list[str]) -> list[int]:
         return [
             self._assign_seq_id_to_cache_index(req_id, seq_id,
                                                finished_requests_ids)
@@ -127,7 +127,7 @@ class ConstantSizeCache(ABC):
         ]
 
     def _release_finished_requests(self,
-                                   finished_seq_groups_req_ids: List[str]):
+                                   finished_seq_groups_req_ids: list[str]):
         for req_id in finished_seq_groups_req_ids:
             if req_id in self.cache_indices_mapping:
                 for seq_id in self.cache_indices_mapping[req_id]:
