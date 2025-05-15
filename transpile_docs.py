@@ -168,7 +168,7 @@ def transpile_myst_to_md(old_path: Path) -> None:
             content, attrs = parse_fence_block(lines[start + 1:end], indent)
             caption = attrs.pop("caption", "")
             content = [c_stripped for c in content if (c_stripped := c.strip())]
-            content = [f"- [{c.title()}](./{c}.md)\n" for c in content]
+            content = [f"- [{c.title()}]({c}.md)\n" for c in content]
             lines[start] = f"{caption}:\n\n" if caption else ""
             lines[start] += "".join(content)
             lines[start + 1:end] = ["" for _ in lines[start + 1:end]]
