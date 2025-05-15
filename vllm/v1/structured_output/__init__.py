@@ -8,12 +8,18 @@ from typing import TYPE_CHECKING, Optional
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
+from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import LazyLoader
-from vllm.v1.structured_output.backend_guidance import GuidanceBackend
-from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
-                                                     StructuredOutputGrammar)
-from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.structured_output.backend_guidance import (
+    GuidanceBackend, validate_guidance_grammar)
+from vllm.v1.structured_output.backend_types import (
+    StructuredOutputBackend, StructuredOutputBatchMetaData,
+    StructuredOutputGrammar)
+from vllm.v1.structured_output.backend_xgrammar import (
+    XgrammarBackend, validate_xgrammar_grammar)
+from vllm.v1.worker.gpu_input_batch import InputBatch
 
 if TYPE_CHECKING:
     import torch
@@ -40,7 +46,6 @@ class StructuredOutputManager:
         self.vllm_config = vllm_config
 
         self._grammar_bitmask: Optional[torch.Tensor] = None
-        self._full_mask = torch.tensor(-1, dtype=torch.int32)
 
         # The default max_workers if not specified is the number of CPUs * 5,
         # which is way too high since these tasks are CPU-bound, not I/O bound.
@@ -72,14 +77,21 @@ class StructuredOutputManager:
                 backend = self.vllm_config.decoding_config.backend
             else:
                 backend = "xgrammar"  # default to xgrammar
-
+        vocab_size = self.vllm_config.model_config.get_vocab_size()
         if backend == "xgrammar":
-            from vllm.v1.structured_output.backend_xgrammar import (
-                XgrammarBackend)
-
-            self.backend = XgrammarBackend(self.vllm_config)
+            self.backend = XgrammarBackend(
+                self.vllm_config,
+                tokenizer=self.tokenizer,
+                vocab_size=vocab_size,
+                reasoner=self.reasoner,
+            )
         elif backend == "guidance":
-            self.backend = GuidanceBackend(self.vllm_config)
+            self.backend = GuidanceBackend(
+                self.vllm_config,
+                tokenizer=self.tokenizer,
+                vocab_size=vocab_size,
+                reasoner=self.reasoner,
+            )
         else:
             raise ValueError(
                 f"Unsupported structured output backend: {backend}")
@@ -96,23 +108,8 @@ class StructuredOutputManager:
         # NOTE: We only support a single backend. We do NOT support different
         # backends on a per-request basis in V1 (for now, anyway...).
         if self.backend is None:
-            backend = request.sampling_params.guided_decoding.backend
-            vocab_size = self.vllm_config.model_config.get_vocab_size()
-            if backend == "xgrammar":
-                self.backend = XgrammarBackend(
-                    self.vllm_config,
-                    tokenizer=self.tokenizer,
-                    vocab_size=vocab_size,
-                )
-            elif backend == "guidance":
-                self.backend = GuidanceBackend(
-                    self.vllm_config,
-                    tokenizer=self.tokenizer,
-                    vocab_size=vocab_size,
-                )
-            else:
-                raise ValueError(
-                    f"Unsupported structured output backend: {backend}")
+            self.init_backend(request.sampling_params.guided_decoding.backend
+                              )  # type: ignore[union-attr]
 
         grammar = self.executor.submit(self._async_create_grammar, request)
         request.structured_output_request.grammar = grammar  # type: ignore[assignment]
@@ -187,79 +184,35 @@ class StructuredOutputManager:
     def init_batch(
         self, requests: dict[str, Request],
         structured_output_request_ids: dict[str, int],
-        scheduled_spec_decode_tokens: dict[str, list[int]],
-    ) -> Optional[npt.NDArray[np.int32]]:
-        # Prepare the structured output bitmask for this batch.
-        if not structured_output_request_ids:
-            return None
+        scheduled_spec_decode_tokens: dict[str, list[int]]
+    ) -> StructuredOutputBatchMetaData:
+        """
+        Called in the v1/core/sched/Scheduler.schedule to initialize
+        the batch of requests.
+        At this point, we have completed scheduling for the current step.
+        The `structured_output_request_ids` dictionary maps request IDs
+        that use structured output to their corresponding indices in the
+        running queue.
+        Args:
+            requests (dict[str, Request]): A dictionary mapping request IDs
+                to their corresponding `Request` objects.
+            structured_output_request_ids (dict[str, int]): A dictionary mapping
+                request IDs that use structured output to their respective 
+                indices in the running queue.
+            scheduled_spec_decode_tokens (dict[str, list[int]]): A dictionary
+                mapping request IDs to lists of token IDs that are scheduled
+                for decoding.
+        Returns:
+            StructuredOutputBatchMetaData: Metadata for the initialized batch
+            of structured output requests.
+        """
 
-        max_num_spec_tokens = 0
-        if self.vllm_config.speculative_config is not None:
-            max_num_spec_tokens = \
-                self.vllm_config.speculative_config.num_speculative_tokens
-
-        if self._grammar_bitmask is None:
-            assert self.backend is not None
-            max_batch_size = self.vllm_config.scheduler_config.max_num_seqs
-
-            # Allocate a bitmask for each token needing to be checked:
-            # one for each speculative position, and one more for the
-            # bonus token / non-speculative token.
-            self._grammar_bitmask = \
-                self.backend.allocate_token_bitmask(
-                    max_batch_size * (1 + max_num_spec_tokens))
-
-        bitmask_tensor = self._grammar_bitmask
-        # Generate a batched bitmask for all structured output requests.
-        # When speculative decoding is enabled, we need to include multiple
-        # masks for each request, one for each possible bonus token position.
-        # These are stored inline in the tensor and unpacked by the gpu runner.
-        cumulative_index = 0
-        ordered_seq = sorted(structured_output_request_ids.items(),
-                             key=lambda x: x[1])
-
-        # Note that for thinking support, we will need to
-        # reset the relevant part of the bitmask for consequent
-        # request here.
-        bitmask_tensor[:(len(ordered_seq) * (1 + max_num_spec_tokens))].fill_(
-            self._full_mask)
-
-        # NOTE: This outer loop can likely be parallelized to improve
-        # performance of bitmask generation for large batches.
-        for req_id, _ in ordered_seq:
-            request = requests[req_id].structured_output_request
-            if TYPE_CHECKING:
-                assert request is not None
-                assert request.grammar is not None
-
-            apply_bitmask = (
-                request.reasoning_ended if self.reasoner is not None else True
-            )  # noqa: E501
-
-            state_advancements = 0
-            req_tokens = scheduled_spec_decode_tokens.get(req_id, []) + [None]
-            for i, token in enumerate(req_tokens):
-                if apply_bitmask and not request.grammar.is_terminated():
-                    request.grammar.fill_bitmask(bitmask_tensor,
-                                                 cumulative_index)
-                    if token is not None:
-                        # In order to generate the correct bitmask for each
-                        # position in the speculative sequence, we advance
-                        # the FSM state for each speculative token and rollback
-                        # to restore the previous state when we are finished.
-                        assert request.grammar.accept_tokens(req_id, [token])
-                        state_advancements += 1
-                cumulative_index += 1
-            if state_advancements > 0:
-                request.grammar.rollback(state_advancements)
-
-        if cumulative_index < bitmask_tensor.shape[0]:
-            bitmask_tensor = bitmask_tensor[:cumulative_index]
-
-        # After finishing with the xgrammar operations, we convert to
-        # np.ndarray, because that is much more efficient for serialization
-        # and deserialization when sending this to the GPU workers.
-        return bitmask_tensor.numpy()
+        assert self.backend is not None
+        return self.backend.init_batch(
+            requests,
+            structured_output_request_ids,
+            scheduled_spec_decode_tokens,
+        )
 
     def should_advance(self, request: Request) -> bool:
         if not request.use_structured_output:

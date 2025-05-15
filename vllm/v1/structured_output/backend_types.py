@@ -7,16 +7,15 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    import torch
-
-    from vllm.config import VllmConfig
-    from vllm.transformers_utils.tokenizer import AnyTokenizer
-
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
 if TYPE_CHECKING:
+    import torch
+
+    from vllm.config import VllmConfig
+    from vllm.reasoning import ReasoningParser
+    from vllm.transformers_utils.tokenizer import AnyTokenizer
     from vllm.v1.request import Request
 
 
@@ -83,13 +82,15 @@ class StructuredOutputBatchMetaData:
     structured_output_request_ids: dict[str, int]
 
 
-@dataclass
 class StructuredOutputBackend(ABC):
     """Engine-level backend for structured output requests."""
 
-    vllm_config: VllmConfig
-    tokenizer: AnyTokenizer
-    vocab_size: int
+    def __init__(self, vllm_config: VllmConfig, tokenizer: AnyTokenizer,
+                 vocab_size: int, reasoner: ReasoningParser):
+        self.vllm_config = vllm_config
+        self.tokenizer = tokenizer
+        self.vocab_size = vocab_size
+        self.reasoner = reasoner
 
     @abstractmethod
     def compile_grammar(self, request_type: StructuredOutputOptions,
@@ -106,10 +107,12 @@ class StructuredOutputBackend(ABC):
             StructuredOutputGrammar: The compiled structured output grammar.
         """
 
-    @abstractmethod
-    def allocate_token_bitmask(self, max_num_seqs: int) -> torch.Tensor:
-        """
-        Allocates a token bitmask for the specified maximum number of sequences.
+    def init_batch(
+        self, requests: dict[str, Request],
+        structured_output_request_ids: dict[str, int],
+        scheduled_spec_decode_tokens: dict[str, list[int]]
+    ) -> StructuredOutputBatchMetaData:
+        return StructuredOutputBatchMetaData(structured_output_request_ids)
 
     def filter_logits(self, input_batch: InputBatch, device: torch.device,
                       scheduler_output: SchedulerOutput, logits: torch.Tensor,
