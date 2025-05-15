@@ -483,6 +483,10 @@ set(VLLM_MOE_EXT_SRC
   "csrc/moe/moe_align_sum_kernels.cu"
   "csrc/moe/topk_softmax_kernels.cu")
 
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  list(APPEND VLLM_MOE_EXT_SRC "csrc/moe/moe_wna16.cu")
+endif()
+
 # Apply gencode flags to base MOE extension sources
 set_gencode_flags_for_srcs(
   SRCS "${VLLM_MOE_EXT_SRC}"
@@ -495,7 +499,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     ARCHS "8.0;9.0+PTX"
     GEN_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/marlin_moe_wna16/generate_kernels.py"
     GEN_GLOB "csrc/moe/marlin_moe_wna16/*.cu"
-    SRCS "csrc/moe/moe_wna16.cu"
     OUT_SRCS_VAR VLLM_MOE_EXT_SRC
   )
 endif()
