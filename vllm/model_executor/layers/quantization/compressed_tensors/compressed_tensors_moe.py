@@ -9,6 +9,7 @@ from compressed_tensors import CompressionFormat
 from compressed_tensors.quantization import (ActivationOrdering,
                                              QuantizationStrategy)
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
@@ -20,10 +21,13 @@ from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_moe_marlin_supports_layer, marlin_make_workspace_new,
     marlin_moe_permute_scales)
+from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
+    prepare_moe_fp8_layer_for_marlin)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d, normalize_e4m3fn_to_e4m3fnuz, per_tensor_dequantize)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
 
@@ -114,9 +118,27 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 "For FP8 Fused MoE layer, we require either per tensor or "
                 "channelwise, dynamic per token quantization.")
 
+        # For GPUs that lack FP8 hardware support, we can leverage the Marlin
+        # kernel for fast weight-only FP8 quantization
+        self.use_marlin = (not current_platform.has_device_capability(89)
+                           or envs.VLLM_TEST_FORCE_FP8_MARLIN)
+        # Disable marlin for rocm
+        if current_platform.is_rocm():
+            self.use_marlin = False
+        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+            is_rocm_aiter_moe_enabled)
+
+        self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
+
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
+
+        layer.intermediate_size_per_partition = intermediate_size_per_partition
+        layer.hidden_size = hidden_size
+        layer.num_experts = num_experts
+        layer.orig_dtype = params_dtype
+        layer.weight_block_size = None
 
         params_dtype = torch.float8_e4m3fn
 
@@ -258,27 +280,31 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             layer.w13_weight_scale = torch.nn.Parameter(max_w13_scales,
                                                         requires_grad=False)
 
-        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-            is_rocm_aiter_moe_enabled)
-
         # Property to determine if AITER is used
-        if is_rocm_aiter_moe_enabled():
+        if self.rocm_aiter_moe_enabled:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa E501
                 rocm_aiter_fused_experts, shuffle_weights)
 
             # reshaping weights is required for aiter moe kernel.
-            shuffled_w13, shuffled_w2 = shuffle_weights(
-                layer.w13_weight.data, layer.w2_weight.data)
+            shuffled_w13, shuffled_w2 = shuffle_weights(layer.w13_weight.data,
+                                                        layer.w2_weight.data,
+                                                        layout=(16, 16))
 
             layer.w13_weight = torch.nn.Parameter(shuffled_w13,
                                                   requires_grad=False)
             layer.w2_weight = torch.nn.Parameter(shuffled_w2,
                                                  requires_grad=False)
 
-            self.fused_experts_func = rocm_aiter_fused_experts
+            self.rocm_aiter_fused_experts_func = rocm_aiter_fused_experts
         else:
             from vllm.model_executor.layers.fused_moe import fused_experts
             self.fused_experts_func = fused_experts
+
+        if self.use_marlin:
+            prepare_moe_fp8_layer_for_marlin(layer, False)
+            # Activations not quantized for marlin.
+            del layer.w13_input_scale
+            del layer.w2_input_scale
 
     def apply(
         self,
@@ -310,6 +336,40 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
+
+        if self.rocm_aiter_moe_enabled:
+            return self.rocm_aiter_fused_experts_func(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=activation,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                use_fp8_w8a8=True,
+                per_channel_quant=self.weight_quant.strategy ==
+                QuantizationStrategy.CHANNEL,
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+                a1_scale=layer.w13_input_scale,
+                a2_scale=layer.w2_input_scale)
+        if self.use_marlin:
+            assert activation == "silu", (
+                f"{activation} not supported for Marlin MoE.")
+            assert not apply_router_weight_on_input, (
+                "Apply router weight on input not supported for Marlin MoE.")
+            return torch.ops.vllm.fused_marlin_moe(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                layer.w13_weight_scale,
+                layer.w2_weight_scale,
+                router_logits,
+                topk_weights,
+                topk_ids,
+                quant_type_id=scalar_types.float8_e4m3fn.id,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map)
 
         return self.fused_experts_func(
             hidden_states=x,
@@ -517,7 +577,8 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
         activation: str = "silu",
     ) -> torch.Tensor:
 
-        assert activation == "silu"
+        assert activation == "silu", (
+            f"{activation} not supported for Cutlass MoE.")
 
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
@@ -942,11 +1003,10 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
     ) -> torch.Tensor:
-        assert activation == "silu", "Only SiLU activation is supported."
-        if apply_router_weight_on_input:
-            raise NotImplementedError(
-                "Apply router weight on input is not supported for "
-                "fused Marlin MoE method.")
+        assert activation == "silu", (
+            f"{activation} not supported for Marlin MoE.")
+        assert not apply_router_weight_on_input, (
+            "Apply router weight on input not supported for Marlin MoE.")
 
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,

@@ -3,7 +3,6 @@
 import enum
 from typing import TYPE_CHECKING, Any, Optional, Union
 
-from vllm.distributed.kv_transfer.kv_connector.v1 import KVTransferParams
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
@@ -49,11 +48,8 @@ class Request:
         self.events: list[EngineCoreEvent] = []
         self.stop_reason: Union[int, str, None] = None
 
-        # P/D: KV transfer parameters (raw and parsed).
-        self.raw_kv_transfer_params: Optional[dict[str, Any]] = None
-        # Each connector parses the raw dictionary and sets this
-        # attr the first time that the request is processed.
-        self.kv_transfer_params: Optional[KVTransferParams] = None
+        # P/D: Connector-specific KV transfer parameters.
+        self.kv_transfer_params: Optional[dict[str, Any]] = None
 
         if pooling_params is not None:
             self.max_tokens = 1
@@ -64,8 +60,8 @@ class Request:
                 self.status = RequestStatus.WAITING_FOR_FSM
 
             if sampling_params.extra_args is not None:
-                self.raw_kv_transfer_params = sampling_params.extra_args.get(
-                    "kv_transfer_params", None)
+                self.kv_transfer_params = \
+                    sampling_params.extra_args.get("kv_transfer_params")
         else:
             raise ValueError(
                 "sampling_params and pooling_params can't both be set")
@@ -92,7 +88,7 @@ class Request:
             assert len(self.mm_inputs) == len(self.mm_hashes)
 
         # Read-only views
-        # Prevent directly appending to the these lists since
+        # Prevent directly appending to these lists since
         # they should also be updated simultaneously.
         self.output_token_ids = ConstantList(self._output_token_ids)
         self.all_token_ids = ConstantList(self._all_token_ids)
@@ -117,8 +113,7 @@ class Request:
             arrival_time=request.arrival_time,
             lora_request=request.lora_request,
             structured_output_request=StructuredOutputRequest(
-                sampling_params=request.sampling_params) \
-                    if request.sampling_params else None,
+                sampling_params=request.sampling_params),
             cache_salt=request.cache_salt,
         )
 

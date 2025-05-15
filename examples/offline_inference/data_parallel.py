@@ -65,11 +65,17 @@ def parse_args():
                         type=int,
                         default=0,
                         help="Master node port")
+    parser.add_argument("--enforce-eager",
+                        action='store_true',
+                        help="Enforce eager mode execution.")
+    parser.add_argument("--trust-remote-code",
+                        action='store_true',
+                        help="Trust remote code.")
     return parser.parse_args()
 
 
 def main(model, dp_size, local_dp_rank, global_dp_rank, dp_master_ip,
-         dp_master_port, GPUs_per_dp_rank):
+         dp_master_port, GPUs_per_dp_rank, enforce_eager, trust_remote_code):
     os.environ["VLLM_DP_RANK"] = str(global_dp_rank)
     os.environ["VLLM_DP_RANK_LOCAL"] = str(local_dp_rank)
     os.environ["VLLM_DP_SIZE"] = str(dp_size)
@@ -109,10 +115,13 @@ def main(model, dp_size, local_dp_rank, global_dp_rank, dp_master_ip,
                                      max_tokens=[16, 20][global_dp_rank % 2])
 
     # Create an LLM.
-    llm = LLM(model=model,
-              tensor_parallel_size=GPUs_per_dp_rank,
-              enforce_eager=True,
-              enable_expert_parallel=True)
+    llm = LLM(
+        model=model,
+        tensor_parallel_size=GPUs_per_dp_rank,
+        enforce_eager=enforce_eager,
+        enable_expert_parallel=True,
+        trust_remote_code=trust_remote_code,
+    )
     outputs = llm.generate(prompts, sampling_params)
     # Print the outputs.
     for i, output in enumerate(outputs):
@@ -155,7 +164,8 @@ if __name__ == "__main__":
         proc = Process(target=main,
                        args=(args.model, dp_size, local_dp_rank,
                              global_dp_rank, dp_master_ip, dp_master_port,
-                             tp_size))
+                             tp_size, args.enforce_eager,
+                             args.trust_remote_code))
         proc.start()
         procs.append(proc)
     exit_code = 0
