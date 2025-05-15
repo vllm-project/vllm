@@ -4,7 +4,7 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields
 from functools import cached_property
-from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union
+from typing import Literal, Optional, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -438,18 +438,18 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
 
-        def is_vision_encoder_weights(weight: Tuple[str, torch.Tensor]):
+        def is_vision_encoder_weights(weight: tuple[str, torch.Tensor]):
             return weight[0].startswith("vision_encoder")
 
-        def is_vision_lang_adapter_weights(weight: Tuple[str, torch.Tensor]):
+        def is_vision_lang_adapter_weights(weight: tuple[str, torch.Tensor]):
             return weight[0].startswith("vision_language_adapter")
 
-        def is_patch_merger(weight: Tuple[str, torch.Tensor]):
+        def is_patch_merger(weight: tuple[str, torch.Tensor]):
             return weight[0].startswith("patch_merger")
 
-        def is_pre_mm_projector_norm(weight: Tuple[str, torch.Tensor]):
+        def is_pre_mm_projector_norm(weight: tuple[str, torch.Tensor]):
             return weight[0].startswith("pre_mm_projector_norm")
 
         # Get references to parameters for direct loading
@@ -566,7 +566,7 @@ def apply_rotary_emb_vit(
     xq: torch.Tensor,
     xk: torch.Tensor,
     freqs_cis: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
     xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
     assert freqs_cis.dtype == torch.complex64
@@ -671,7 +671,7 @@ class Transformer(nn.Module):
         return x
 
 
-def position_meshgrid(patch_embeds_list: List[torch.Tensor], ) -> torch.Tensor:
+def position_meshgrid(patch_embeds_list: list[torch.Tensor], ) -> torch.Tensor:
     positions = torch.cat([
         torch.stack(
             torch.meshgrid(
@@ -733,7 +733,7 @@ class VisionTransformer(nn.Module):
 
     def forward(
         self,
-        images: List[torch.Tensor],
+        images: list[torch.Tensor],
     ) -> torch.Tensor:
         """
         Args:
@@ -1023,7 +1023,7 @@ class PixtralHFAttention(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: torch.Tensor,
         position_embeddings: torch.Tensor,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         batch, patches, _ = hidden_states.size()
 
         qkv_states, _ = self.qkv_proj(hidden_states)
@@ -1249,8 +1249,8 @@ class PixtralHFVisionModel(nn.Module):
 
     # (TODO) Add prefix argument for filtering out weights to be loaded
     #        ref: https://github.com/vllm-project/vllm/pull/7186#discussion_r1734163986
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -1260,7 +1260,7 @@ class PixtralHFVisionModel(nn.Module):
             (".gate_up_proj", ".up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         layer_count = len(self.transformer.layers)
 
         for name, loaded_weight in weights:

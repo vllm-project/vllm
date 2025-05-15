@@ -74,6 +74,8 @@ Tensor parallelism (`tensor_parallel_size` option) can be used to split the mode
 The following code splits the model across 2 GPUs.
 
 ```python
+from vllm import LLM
+
 llm = LLM(model="ibm-granite/granite-3.1-8b-instruct",
           tensor_parallel_size=2)
 ```

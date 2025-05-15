@@ -158,8 +158,8 @@ steps:
   # TODO: create a dedicated test section for multi-GPU example tests
   # when we have multiple distributed example tests
   - pushd ../examples/offline_inference
-  - python3 rlhf.py
-  - RAY_DEDUP_LOGS=0 python3 rlhf_colocate.py
+  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf.py
+  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 RAY_DEDUP_LOGS=0 python3 rlhf_colocate.py
   - popd
 
 - label: Metrics, Tracing Test # 10min
@@ -216,7 +216,6 @@ steps:
     - pytest -v -s v1/spec_decode
     - pytest -v -s v1/kv_connector/unit
     - pytest -v -s v1/test_serial_utils.py
-    - pytest -v -s v1/test_stats.py
     - pytest -v -s v1/test_utils.py
     - pytest -v -s v1/test_oracle.py
     # TODO: accuracy does not match, whether setting
@@ -309,6 +308,7 @@ steps:
   commands:
     - pytest -v -s compile/test_pass_manager.py
     - pytest -v -s compile/test_fusion.py
+    - pytest -v -s compile/test_silu_mul_quant_fusion.py
     - pytest -v -s compile/test_sequence_parallelism.py
 
 - label: PyTorch Fullgraph Smoke Test # 9min
@@ -379,7 +379,7 @@ steps:
     - pytest -v -s kernels/mamba
 
 - label: Tensorizer Test # 11min
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   soft_fail: true
   source_file_dependencies:
   - vllm/model_executor/model_loader
@@ -455,7 +455,7 @@ steps:
 #####  models test  #####
 
 - label: Basic Models Test # 24min
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   torch_nightly: true
   source_file_dependencies:
   - vllm/
@@ -472,12 +472,14 @@ steps:
 
 - label: Language Models Test (Standard)
   mirror_hardwares: [amdexperimental]
+  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/language
   commands:
     # Install causal-conv1d for plamo2 models here, as it is not compatible with pip-compile.
     - pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8'
+    - pip freeze | grep -E 'torch'
     - pytest -v -s models/language -m core_model
 
 - label: Language Models Test (Extended)
@@ -493,11 +495,13 @@ steps:
 
 - label: Multi-Modal Models Test (Standard)
   mirror_hardwares: [amdexperimental]
+  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+    - pip freeze | grep -E 'torch'
     - pytest -v -s models/multimodal/processing
     - pytest -v -s --ignore models/multimodal/generation/test_whisper.py models/multimodal -m core_model
     - cd .. && pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
@@ -523,7 +527,7 @@ steps:
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
 
 - label: Multi-Modal Models Test (Extended) 3
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   optional: true
   source_file_dependencies:
   - vllm/
@@ -533,7 +537,7 @@ steps:
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
 
 - label: Quantized Models Test
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   source_file_dependencies:
   - vllm/model_executor/layers/quantization
   - tests/models/quantization

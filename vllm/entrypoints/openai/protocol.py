@@ -1602,6 +1602,10 @@ class TokenizeChatRequest(OpenAIBaseModel):
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
     )
+    tools: Optional[list[ChatCompletionToolsParam]] = Field(
+        default=None,
+        description=("A list of tools the model may call."),
+    )
 
     @model_validator(mode="before")
     @classmethod
