@@ -54,14 +54,11 @@ def find_fence_blocks(lines: list[str]) -> list[Block]:
 
 
 def parse_fence_block(lines: list[str],
-                      indent: str) -> tuple[list[str], list[str]]:
+                      indent: str) -> tuple[list[str], dict[str, str]]:
     option_pattern = re.compile(f"^.{{{len(indent)}}}:(.*): (.*)$")
-    option_matches = [option_pattern.match(l) for l in lines]
+    option_matches = [option_pattern.match(line) for line in lines]
     content = [b for o, b in zip(option_matches, lines) if o is None]
-    attrs = [
-        f"{m.group(1)}=\"{m.group(2)}\"" for m in option_matches
-        if m is not None
-    ]
+    attrs = {m.group(1): m.group(2) for m in option_matches if m is not None}
     return content, attrs
 
 
@@ -106,7 +103,7 @@ def transpile_myst_to_md(old_path: Path) -> None:
     """
     new_path = NEW_DIR / old_path.relative_to(OLD_DIR)
     new_path.parent.mkdir(parents=True, exist_ok=True)
-    logger.info(f"Transpiling from {old_path} to {new_path}")
+    logger.info("Transpiling from %s to %s", old_path, new_path)
 
     with open(old_path) as f:
         lines = f.readlines()
@@ -188,28 +185,30 @@ def transpile_myst_to_md(old_path: Path) -> None:
         # Handle images
         if block.type == "image":
             src = block.args
-            content, attrs = parse_fence_block(lines[start + 1:end], indent)
+            _, attrs = parse_fence_block(lines[start + 1:end], indent)
+            alt = attrs.pop("alt", "")
             if attrs:
                 logger.warning("Image attributes not handled: %s", attrs)
-            lines[start] = f"{indent}![]({src})\n"
+            lines[start] = f"{indent}![{alt}]({src})\n"
             lines[start + 1:end] = ["" for _ in lines[start + 1:end]]
             lines[end] = ""
             continue
         if block.type == "figure":
             src = block.args
-            caption, attrs = parse_fence_block(lines[start + 1:end], indent)
+            content, attrs = parse_fence_block(lines[start + 1:end], indent)
             lines[start] = f'{indent}<figure markdown="span">\n'
-            lines[start] += f"{indent}  ![]({src}){{ {' '.join(attrs)} }}\n"
-            if caption:
-                lines[
-                    start] += f"{indent}  <figcaption>{caption[0]}</figcaption>\n"
+            attr_list = " ".join(f'{k}="{v}"' for k, v in attrs.items())
+            lines[start] += f"{indent}  ![]({src}){{ {attr_list} }}\n"
+            if content:
+                figcaption = f"<figcaption>{content[0]}</figcaption>"
+                lines[start] += f"{indent}  {figcaption}\n"
             lines[start + 1:end] = ["" for _ in lines[start + 1:end]]
             lines[end] = f"{indent}</figure>\n"
             continue
 
         # Handle list table
         if block.type == "list-table":
-            content, attrs = parse_fence_block(lines[start + 1:end], indent)
+            content, _ = parse_fence_block(lines[start + 1:end], indent)
             row = []
             rows = []
             for c in content:
@@ -248,10 +247,8 @@ def transpile_myst_to_md(old_path: Path) -> None:
             # All the includes we use reference documentation files
             path = (new_path.parent / block.args).resolve()
             _, attrs = parse_fence_block(lines[start + 1:end], indent)
-            name = ""
-            if attrs:
-                attr = [a for a in attrs if "start-after" in a][0]
-                name = ":" + to_name(attr.split("=")[1].strip('"'))
+            attr = attrs.pop("start-after") if "start-after" in attrs else ""
+            name = f":{attr}" if attr else ""
             lines[start] = f'{indent}--8<-- "{path}{name}"\n'
             lines[start + 1:end] = ["" for _ in lines[start + 1:end]]
             lines[end] = ""
