@@ -43,8 +43,11 @@ from vllm.transformers_utils.config import (
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
 from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
-                        get_cpu_memory, get_open_port, is_torch_equal_or_newer,
-                        random_uuid, resolve_obj_by_qualname)
+                        get_cpu_memory, get_open_port, is_in_doc_build,
+                        is_torch_equal_or_newer, random_uuid,
+                        resolve_obj_by_qualname)
+
+IS_IN_DOC_BUILD = is_in_doc_build()
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
@@ -2207,7 +2210,9 @@ class DeviceConfig:
         return hash_str
 
     def __post_init__(self):
-        if self.device == "auto":
+        if IS_IN_DOC_BUILD:
+            self.device_type = "cpu"
+        elif self.device == "auto":
             # Automated device type detection
             from vllm.platforms import current_platform
             self.device_type = current_platform.device_type
