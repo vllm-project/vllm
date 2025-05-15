@@ -179,7 +179,7 @@ def test_eagle_e2e_greedy_correctness_cuda_graph(
 
 
 # TRACKING: https://github.com/vllm-project/vllm/issues/18166
-@pytest.mark.skip(reason="RE-ENABLE: Failing on main.")
+# @pytest.mark.skip(reason="RE-ENABLE: Failing on main.")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
