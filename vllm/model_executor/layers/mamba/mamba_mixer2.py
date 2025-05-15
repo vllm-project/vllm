@@ -142,7 +142,7 @@ def mamba_v2_sharded_weight_loader(
 ) -> LoaderFunction:
     """Create a weight loader for mamba v2. This ensures that the projections 
     are correctly sharded so that they can be split into x, B, C. It also 
-    ensures the the all the groups corresponding to a head shard is placed 
+    ensures that all the groups corresponding to a head shard is placed 
     together with it.
     """
 
