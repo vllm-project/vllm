@@ -256,8 +256,6 @@ async def test_engine_core_client_asyncio(monkeypatch: pytest.MonkeyPatch):
             client.shutdown()
 
 
-# TRACKING: https://github.com/vllm-project/vllm/issues/18167
-@pytest.mark.skip(reason="RE-ENABLE: this test is failing on main.")
 @pytest.mark.parametrize(
     "multiprocessing_mode,publisher_config",
     [(True, "tcp"), (False, "inproc")],
