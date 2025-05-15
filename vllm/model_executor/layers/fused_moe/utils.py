@@ -4,14 +4,16 @@ from typing import Optional, Union
 
 import torch
 
-from vllm.platforms import current_platform
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_group_quant_int8, per_token_quant_int8)
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    quant_dequant_mxfp4)
+from vllm.platforms import current_platform
 from vllm.utils import cdiv
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import quant_dequant_mxfp4
+
 
 def _resize_cache(x: torch.Tensor, v: tuple[int, ...]) -> torch.Tensor:
     """
@@ -71,6 +73,7 @@ def _int8_quantize(
 
     return A, A_scale
 
+
 def _mxfp4_quantize(
     A: torch.Tensor,
     A_scale: Optional[torch.Tensor],
@@ -82,7 +85,7 @@ def _mxfp4_quantize(
         A = quant_dequant_mxfp4(A)
     else:
         raise NotImplementedError()
-    
+
     return A, None
 
 

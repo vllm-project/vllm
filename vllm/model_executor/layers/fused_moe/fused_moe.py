@@ -19,7 +19,8 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache, moe_kernel_quantize_input)
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    dequant_mxfp4)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import direct_register_custom_op
@@ -985,12 +986,9 @@ def get_config_dtype_str(
 
 # TODO (bnell): use scalar_type instead of bools?
 def get_config_qtype(
-    use_fp8_w8a8: bool,
-    use_int8_w8a8: bool,
-    use_int8_w8a16: bool,
-    use_int4_w4a16: bool,
-    use_mxfp4_w4a4: bool
-) -> Optional[Union[torch.dtype, str]]:
+        use_fp8_w8a8: bool, use_int8_w8a8: bool, use_int8_w8a16: bool,
+        use_int4_w4a16: bool,
+        use_mxfp4_w4a4: bool) -> Optional[Union[torch.dtype, str]]:
     if use_fp8_w8a8:
         return torch.float8_e4m3fn
     elif use_int8_w8a8:
