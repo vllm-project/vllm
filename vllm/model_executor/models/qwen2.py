@@ -291,14 +291,14 @@ class Qwen2Model(nn.Module):
         # TODO (@robertgshaw2): see if this can be moved out
         if (cache_config.sliding_window is not None
                 and hasattr(config, "max_window_layers")):
-            raise ValueError("Sliding window for some but all layers is not "
-                             "supported. This model uses sliding window "
-                             "but `max_window_layers` = {} is less than "
-                             "`num_hidden_layers` = {}. Please open an issue "
-                             "to discuss this feature.".format(
-                                 config.max_window_layers,
-                                 config.num_hidden_layers,
-                             ))
+            assert config.max_window_layers == config.num_hidden_layers, (
+                "Sliding window for some but all layers is not supported. "
+                "This model uses sliding window but `max_window_layers` = {} "
+                "is less than `num_hidden_layers` = {}. Please open an issue "
+                "to discuss this feature.".format(
+                    config.max_window_layers,
+                    config.num_hidden_layers,
+                ))
 
         self.config = config
         self.quant_config = quant_config
