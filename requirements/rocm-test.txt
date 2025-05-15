@@ -22,4 +22,10 @@ decord==0.6.0
 #sentence-transformers # required by entrypoints/openai/test_score.py
 sentence-transformers==3.4.1
 
+# Basic Models Test
+matplotlib==3.10.3
+
+# Multi-Modal Models Test (Extended) 3
+blobfile==3.0.0
+
 

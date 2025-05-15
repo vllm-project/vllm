@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, Dict, Optional, Union
+from typing import Any, Optional, Union
 
 import torch
 import torch.distributed
@@ -32,7 +32,7 @@ def tensor_model_parallel_gather(input_: torch.Tensor,
     return get_tp_group().gather(input_, dst, dim)
 
 
-def broadcast_tensor_dict(tensor_dict: Optional[Dict[Any, Union[torch.Tensor,
+def broadcast_tensor_dict(tensor_dict: Optional[dict[Any, Union[torch.Tensor,
                                                                 Any]]] = None,
                           src: int = 0):
     if not torch.distributed.is_initialized():
