@@ -40,8 +40,7 @@ class StructuredOutputMixin(BaseModel):
     _guided_choice: Optional[list[str]] = PrivateAttr(default=None)
     _guided_grammar: Optional[str] = PrivateAttr(default=None)
     _structural_tag: Optional[str] = PrivateAttr(default=None)
-    _guided_decoding_backend: Optional[StructuredOutputBackend] = \
-        PrivateAttr(default=None)
+    _guided_decoding_backend: Optional[StructuredOutputBackend] = PrivateAttr(default=None)
     _guided_whitespace_pattern: Optional[str] = PrivateAttr(default=None)
 
     @property
@@ -704,7 +703,7 @@ class ChatCompletionRequest(OpenAIBaseModel, StructuredOutputMixin):
 
     @model_validator(mode='after')
     def construct_structured_output(self) -> Self:
-        if self.structured_output is not None:
+        if self.structured_output:
             return self
 
         # compat from deprecated fields over
@@ -1049,7 +1048,7 @@ class CompletionRequest(OpenAIBaseModel, StructuredOutputMixin):
 
     @model_validator(mode='after')
     def construct_structured_output(self) -> Self:
-        if self.structured_output is not None:
+        if self.structured_output:
             return self
 
         # compat from deprecated fields over
