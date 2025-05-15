@@ -14,8 +14,7 @@ import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
 from vllm.attention.layer import Attention
-from vllm.config import (VllmConfig, get_current_vllm_config,
-                         get_layers_from_vllm_config)
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
@@ -215,7 +214,7 @@ class FlashInferMetadataBuilder:
         # Global hyperparameters shared by all attention layers
         self.global_hyperparameters: Optional[PerLayerParameters] = None
 
-        self.vllm_config = get_current_vllm_config()
+        self.vllm_config = runner.vllm_config
         self.kv_cache_spec = kv_cache_spec
         self.block_table = block_table
 
