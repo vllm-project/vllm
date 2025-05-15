@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Iterable, Optional, Tuple
+from collections.abc import Iterable
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -183,7 +184,7 @@ class EAGLE(nn.Module):
 
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         # This implementation is incompitable with https://huggingface.co/yuhuili/EAGLE-LLaMA3-Instruct-8B
         # due to missing lm_head weights and its config being that of a
         # Llama model. Here's a compatible version with the same weights:

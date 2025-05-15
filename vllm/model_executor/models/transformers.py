@@ -15,7 +15,8 @@
 # limitations under the License.
 """Wrapper around `transformers` models"""
 import re
-from typing import Iterable, Literal, Optional, Union
+from collections.abc import Iterable
+from typing import Literal, Optional, Union
 
 import torch
 from torch import nn

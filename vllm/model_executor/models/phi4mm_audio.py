@@ -6,7 +6,7 @@
 #!/usr/bin/env python3
 import abc
 import math
-from typing import List, Literal, Optional
+from typing import Literal, Optional
 
 import numpy as np
 import torch
@@ -746,7 +746,7 @@ class ConformerEncoder(TransformerEncoderBase):
             attention_group_size = attenion_heads = Multi-Query Attention
     """
 
-    extra_multi_layer_output_idxs: List[int]
+    extra_multi_layer_output_idxs: list[int]
 
     def __init__(  # pylint: disable-all
         self,

@@ -23,7 +23,8 @@
 # limitations under the License.
 """Inference-only IBM Granite speeech model."""
 import math
-from typing import Iterable, Mapping, Optional, Set, Tuple, TypedDict, Union
+from collections.abc import Iterable, Mapping
+from typing import Optional, TypedDict, Union
 
 import torch
 import torch.nn.functional as F
@@ -763,8 +764,8 @@ class GraniteSpeechForConditionalGeneration(
 
     def load_weights(
         self,
-        weights: Iterable[Tuple[str, torch.Tensor]],
-    ) -> Set[str]:
+        weights: Iterable[tuple[str, torch.Tensor]],
+    ) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 

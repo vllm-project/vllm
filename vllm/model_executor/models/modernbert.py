@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Iterable, Optional, Set, Tuple
+from collections.abc import Iterable
+from typing import Optional
 
 import torch
 from torch import nn
@@ -212,11 +213,11 @@ class ModernBertModel(nn.Module):
                                        eps=config.norm_eps,
                                        bias=config.norm_bias)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         weights = self.hf_to_vllm_mapper.apply(weights)
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if name.endswith(".bias") and name not in params_dict:
                 continue
@@ -280,7 +281,7 @@ class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
         self._pooler = CrossEncodingPooler(config, self.classifier,
                                            ModernBertPooler(config))
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
 
         self_weights = []
 

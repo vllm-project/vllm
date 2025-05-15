@@ -4,7 +4,7 @@
 """Inference-only Deepseek-VL2 model compatible with HuggingFace weights."""
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union
+from typing import Literal, Optional, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -45,7 +45,7 @@ _IMAGE_TOKEN = "<image>"
 
 class DeepseekVL2ImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
-    data: Union[torch.Tensor, List[torch.Tensor]]
+    data: Union[torch.Tensor, list[torch.Tensor]]
     """
     Shape: `(batch_size * num_images, num_channels, height, width)`
     """
@@ -57,7 +57,7 @@ class DeepseekVL2ImagePixelInputs(TypedDict):
 
 class DeepseekVL2VImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
-    data: Union[torch.Tensor, List[torch.Tensor]]
+    data: Union[torch.Tensor, list[torch.Tensor]]
     """Shape: `(batch_size * num_images, image_feature_size, hidden_size)`
 
     `hidden_size` must match the hidden size of language model backbone.
@@ -394,8 +394,8 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return model
 
     def _validate_pixel_values(
-        self, data: Union[torch.Tensor, List[torch.Tensor]]
-    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+        self, data: Union[torch.Tensor, list[torch.Tensor]]
+    ) -> Union[torch.Tensor, list[torch.Tensor]]:
 
         h = w = self.vision_config.image_size
         expected_dims = (3, h, w)
@@ -415,8 +415,8 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return data
 
     def _validate_images_spatial_crop(
-        self, data: Union[torch.Tensor, List[torch.Tensor]]
-    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+        self, data: Union[torch.Tensor, list[torch.Tensor]]
+    ) -> Union[torch.Tensor, list[torch.Tensor]]:
         expected_dims = 2
 
         def _validate_shape(d: torch.Tensor):
@@ -640,8 +640,8 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
 
         loader = AutoWeightsLoader(self)
         autoloaded_weights = loader.load_weights(weights,

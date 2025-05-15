@@ -23,8 +23,9 @@
 # limitations under the License.
 """Inference-only OLMo2 model compatible with HuggingFace weights."""
 
+from collections.abc import Iterable
 from functools import partial
-from typing import Iterable, Optional, Tuple, Union
+from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -135,7 +136,7 @@ class Olmo2Attention(nn.Module):
         )
 
     def _apply_qk_norm(self, q: torch.Tensor,
-                       k: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+                       k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if self.tp_size > 1:
             q = tensor_model_parallel_all_gather(q.contiguous())
             k = tensor_model_parallel_all_gather(k.contiguous())
@@ -365,7 +366,7 @@ class Olmo2ForCausalLM(nn.Module, SupportsPP):
                                        sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
