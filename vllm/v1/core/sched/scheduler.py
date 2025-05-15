@@ -352,7 +352,6 @@ class Scheduler(SchedulerInterface):
                             request)
                 else:
                     # P/D: skip checking prefix cache if loaded from remote kvs.
-                    # TODO: add util function to create empty blocks
                     new_computed_blocks = KVCacheBlocks.create_empty(
                         self.kv_cache_manager.group_to_manager)
                     num_native_computed_tokens = 0

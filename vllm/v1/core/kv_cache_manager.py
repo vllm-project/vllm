@@ -7,7 +7,6 @@ from typing import Optional
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
 from vllm.utils import sha256
-from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import KVCacheCoordinator
 from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlockBundle,
                                          hash_request_tokens)
@@ -75,7 +74,6 @@ class KVCacheManager:
         log_stats: bool = False,
         enable_kv_cache_events: bool = False,
     ) -> None:
-        self.num_gpu_blocks = kv_cache_config.num_blocks
         self.max_model_len = max_model_len
 
         self.enable_caching = enable_caching
@@ -84,27 +82,25 @@ class KVCacheManager:
         self.log_stats = log_stats
         # FIXME: make prefix cache stats conditional on log_stats
         self.prefix_cache_stats = PrefixCacheStats() if log_stats else None
-        # TODO: remove hardcode num_managers
-        self.block_pool = BlockPool(self.num_gpu_blocks, enable_caching, 2,
-                                    enable_kv_cache_events)
 
         self.coordinator = KVCacheCoordinator(
             kv_cache_config=kv_cache_config,
-            block_pool=self.block_pool,
             max_model_len=self.max_model_len,
             use_eagle=self.use_eagle,
+            enable_caching=enable_caching,
             caching_hash_fn=self.caching_hash_fn,
+            enable_kv_cache_events=enable_kv_cache_events,
         )
         self.group_to_manager = self.coordinator.group_to_manager
+        self.block_pool = self.coordinator.block_pool
 
-        # Mapping from request ID to kv block hashes.
-        # This is to avoid recomputing the block hashes for each call of
-        # `get_computed_blocks` or `allocate_slots`.
-        # TODO: update comment
-        self.req_to_block_hashes: defaultdict[str, dict[
-            int, list[BlockHashType]]] = defaultdict(dict)
         self.all_block_sizes = set(g.kv_cache_spec.block_size
                                    for g in kv_cache_config.kv_cache_groups)
+        # Mapping from request ID to kv block hashes of all block sizes.
+        # This is to avoid recomputing the block hashes for each call of
+        # `get_computed_blocks` or `allocate_slots`.
+        self.req_to_block_hashes: defaultdict[str, dict[
+            int, list[BlockHashType]]] = defaultdict(dict)
 
     @property
     def usage(self) -> float:

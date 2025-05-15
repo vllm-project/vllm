@@ -16,16 +16,25 @@ class KVCacheCoordinator:
     Coordinator the KV cache of different KV cache groups.
     """
 
-    def __init__(self, kv_cache_config: KVCacheConfig, block_pool: BlockPool,
-                 max_model_len: int, use_eagle: bool,
-                 caching_hash_fn: Callable):
-        self.block_pool = block_pool
+    def __init__(
+        self,
+        kv_cache_config: KVCacheConfig,
+        max_model_len: int,
+        use_eagle: bool,
+        enable_caching: bool,
+        caching_hash_fn: Callable,
+        enable_kv_cache_events: bool,
+    ):
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
 
+        # One manager for each different kv_cache_spec, managing all kv cache
+        # groups with the same kv_cache_spec.
         self.manager_to_group, self.group_to_manager = (
             self.generate_group_manager_map())
-
+        self.block_pool = BlockPool(kv_cache_config.num_blocks, enable_caching,
+                                    len(self.manager_to_group),
+                                    enable_kv_cache_events)
         self.single_type_managers: list[SingleTypeKVCacheManager] = []
         for i in range(len(self.manager_to_group)):
             group_ids = self.manager_to_group[i]
@@ -174,9 +183,10 @@ class KVCacheCoordinator:
         ]
 
     def find_longest_cache_hit(
-        self, request: Request, block_hashes_dict: dict[int,
-                                                        list[BlockHashType]],
-        max_cache_hit_length: int
+        self,
+        request: Request,
+        block_hashes_dict: dict[int, list[BlockHashType]],
+        max_cache_hit_length: int,
     ) -> tuple[list[list[KVCacheBlockBundle]], int]:
         """
         Find the longest cache hit for the request.
@@ -184,7 +194,7 @@ class KVCacheCoordinator:
         Args:
             request: The request.
             block_hashes_dict: The block hashes of the request.
-            max_cache_hit_length: TODO(Chen): docstring
+            max_cache_hit_length: The maximum length of the cache hit.
 
         Returns:
             A tuple containing:
@@ -244,18 +254,18 @@ class KVCacheCoordinator:
             group_to_manager: list[tuple[int, int]], the manager id and the
                 index of the group in the manager for each kv cache group.
         """
-        gathered = defaultdict(list)
-        full_attention_type_ids = set()
+        groups_by_type_id: dict[str, list[int]] = defaultdict(list)
+        full_attention_type_ids: set[str] = set()
         for i, g in enumerate(self.kv_cache_config.kv_cache_groups):
-            gathered[g.kv_cache_spec.type_id].append(i)
+            groups_by_type_id[g.kv_cache_spec.type_id].append(i)
             if isinstance(g.kv_cache_spec, FullAttentionSpec):
                 full_attention_type_ids.add(g.kv_cache_spec.type_id)
 
         manager_to_group = []
         for type_id in full_attention_type_ids:
-            manager_to_group.append(gathered[type_id])
-        for type_id in gathered.keys() - full_attention_type_ids:
-            manager_to_group.append(gathered[type_id])
+            manager_to_group.append(groups_by_type_id[type_id])
+        for type_id in groups_by_type_id.keys() - full_attention_type_ids:
+            manager_to_group.append(groups_by_type_id[type_id])
 
         group_to_manager_dict = {
             group_id: (manager_id, group_id_in_manager)

@@ -244,7 +244,7 @@ class BlockPool:
         new_block_bundles: list[KVCacheBlockBundle] = []
         for i in range(num_block_bundle):
             blocks = new_blocks[i * bundle_size:(i + 1) * bundle_size]
-            # TODO: optimize the creation of KVCacheBlockBundle class
+            # TODO: avoid frequent creation of KVCacheBlockBundle class
             block_bundle = KVCacheBlockBundle.from_kv_cache_blocks(
                 tuple(blocks))
             block_bundle.incr_ref()
@@ -269,7 +269,7 @@ class BlockPool:
             cached_blocks = self.cached_block_hash_to_block[manager_id][
                 block_hash]
             cached_block = cached_blocks[block.block_id]
-            # The block is the master block of the KVCacheBlockBundle.
+            # The block is the master block of its KVCacheBlockBundle.
             # See comments in cache_full_blocks for details.
             assert cached_block.master_block_id == block.block_id
             assert cached_block.ref_cnt == 0

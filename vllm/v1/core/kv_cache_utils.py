@@ -748,7 +748,7 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
 
     if not is_hybrid(kv_cache_spec):
         return
-    # TODO: better warning message
+
     logger.warning("Hybrid KV cache manager is disabled for this hybrid model,"
                    "There can be some waste of KV cache memory.")
 
@@ -769,18 +769,15 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
                 )
 
     if not is_hybrid(kv_cache_spec):
-        # TODO: better error message
-        raise ValueError(
-            "Hybrid KV cache manager is disabled but we failed to "
-            "convert the KV cache specs to one type.")
+        raise ValueError("Hybrid KV cache manager is disabled but failed to "
+                         "convert the KV cache specs to one unified type.")
 
 
 def get_kv_cache_config(vllm_config: VllmConfig,
                         kv_cache_spec: dict[str, KVCacheSpec],
                         available_memory: int) -> KVCacheConfig:
     """
-    Generates the KV cache configuration for a model
-    TODO: support hybrid models with more than one type of KV cache.
+    Generates the KV cache configuration for a model.
 
     Args:
         vllm_config: The global VllmConfig
@@ -802,7 +799,8 @@ def get_kv_cache_config(vllm_config: VllmConfig,
         return _get_kv_cache_config_uniform_type(vllm_config, kv_cache_spec,
                                                  available_memory)
     elif is_kv_cache_page_size_uniform(kv_cache_spec):
-        # KV cache of all layers have the same page size. TODO more notes
+        # KV cache of all layers have the same page size. TODO notes about
+        # hybrid allocator
         return _get_kv_cache_config_uniform_page_size(vllm_config,
                                                       kv_cache_spec,
                                                       available_memory)

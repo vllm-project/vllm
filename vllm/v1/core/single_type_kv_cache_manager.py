@@ -197,11 +197,8 @@ class SingleTypeKVCacheManager(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def find_longest_cache_hit(
-        self,
-        block_hashes: list[BlockHashType],
-        max_length: int,
-    ) -> list[KVCacheBlockBundle]:
+    def find_longest_cache_hit(self, block_hashes: list[BlockHashType],
+                               max_length: int) -> list[KVCacheBlockBundle]:
         """
         Get the longest cache hit prefix of the blocks that is not longer than 
         `max_length`. If no cache hit is found, return an empty list. 
@@ -211,7 +208,7 @@ class SingleTypeKVCacheManager(ABC):
 
         Args:
             block_hashes: The block hashes of the request.
-            max_length: The maximum length of the cache hit.
+            max_length: The maximum length of the cache hit prefix.
 
         Returns:
             A list of cached blocks with skipped blocks replaced by null block.
@@ -241,13 +238,13 @@ class FullAttentionManager(SingleTypeKVCacheManager):
 
     def find_longest_cache_hit(self, block_hashes: list[BlockHashType],
                                max_length: int) -> list[KVCacheBlockBundle]:
-        computed_blocks = []
+        computed_blocks: list[KVCacheBlockBundle] = []
         max_num_blocks = max_length // self.block_size
         for i in range(max_num_blocks):
             block_hash = block_hashes[i]
-            # block_hashes is a chain of block hashes. If a block hash is
-            # not in the cached_block_hash_to_id, the following block hashes
-            # are not computed yet for sure.
+            # block_hashes is a chain of block hashes. If a block hash is not
+            # in the cached_block_hash_to_id, the following block hashes are
+            # not computed yet for sure.
             if cached_block := self.block_pool.get_cached_block(
                     block_hash, self.manager_id):
                 computed_blocks.append(cached_block)
@@ -294,11 +291,8 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         self._null_block = KVCacheBlockBundle.from_kv_cache_blocks(
             tuple([single_null_block] * self.num_kv_cache_groups))
 
-    def find_longest_cache_hit(
-        self,
-        block_hashes: list[BlockHashType],
-        max_length: int,
-    ) -> list[KVCacheBlockBundle]:
+    def find_longest_cache_hit(self, block_hashes: list[BlockHashType],
+                               max_length: int) -> list[KVCacheBlockBundle]:
         # TODO: reduce i by sliding_window_contiguous_blocks when cache miss, to
         # optimize the time complexity from O(len(block_hashes)) to
         # O(len(block_hashes) / sliding_window_contiguous_blocks +

@@ -1873,6 +1873,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """
         Initializes the KV cache buffer with the correct size. The buffer needs
         to be reshaped to the desired shape before being used by the models.
+
         Args:
             kv_cache_config: The KV cache config 
         Returns:
@@ -1901,6 +1902,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ) -> dict[str, torch.Tensor]:
         """
         Reshape the KV cache tensors to the desired shape.
+
         Args:
             kv_cache_config: The KV cache config 
             kv_cache_raw_tensors: The KV cache buffer of each layer, with 
@@ -1931,7 +1933,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def initialize_kv_cache_tensors(
             self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
-        # TODO: docstring
+        """
+        Initialize the memory buffer for KV cache.
+
+        Args:
+            kv_cache_config: The KV cache config
+        Returns:
+            Dict[str, torch.Tensor]: A map between layer names to their 
+            corresponding memory buffer for KV cache.
+        """
         # Initialize the memory buffer for KV cache
         kv_cache_raw_tensors = self._initialize_kv_cache_buffer(
             kv_cache_config)
