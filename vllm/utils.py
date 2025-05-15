@@ -1420,12 +1420,13 @@ class FlexibleArgumentParser(ArgumentParser):
             else:
                 processed_args.append(arg)
 
-        def nested_dict(keys: list[str], value: str):
+        def create_nested_dict(keys: list[str], value: str):
+            nested_dict: Any = value
             for key in reversed(keys):
-                value = {key: value}
-            return value
+                nested_dict = {key: nested_dict}
+            return nested_dict
 
-        dict_args = defaultdict(dict)
+        dict_args: dict[str, dict] = defaultdict(dict)
         for i, processed_arg in reversed(list(enumerate(processed_args))):
             if processed_arg.startswith("--") and "." in processed_arg:
                 if "=" in processed_arg:
@@ -1434,11 +1435,11 @@ class FlexibleArgumentParser(ArgumentParser):
                     value = processed_args[i + 1]
                     del processed_args[i + 1]
                 key, *keys = processed_arg.split(".")
-                dict_args[key].update(nested_dict(keys, value))
+                dict_args[key].update(create_nested_dict(keys, value))
                 del processed_args[i]
-        for key, value in dict_args.items():
-            processed_args.append(key)
-            processed_args.append(json.dumps(value))
+        for dict_arg, dict_value in dict_args.items():
+            processed_args.append(dict_arg)
+            processed_args.append(json.dumps(dict_value))
 
         return super().parse_args(processed_args, namespace)
 
