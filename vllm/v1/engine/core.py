@@ -1155,6 +1155,10 @@ class EngineCoreActor(DPEngineCoreProc):
             if input_socket is not None:
                 input_socket.close(linger=0)
 
+    def wait_for_init(self):
+        pass
+
+    def run(self):
         try:
             self.run_busy_loop()
         except SystemExit:

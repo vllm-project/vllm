@@ -179,7 +179,7 @@ class CoreEngineActorManager(CoreEngineProcManager):
         executor_class: type[Executor],
         log_stats: bool,
     ):
-        self.local_engine_actors = []
+        self.engine_actors = []
         self.remote_engine_actors = []
 
         # NOTE(rui): the key difference here for Ray is that we start
@@ -191,6 +191,7 @@ class CoreEngineActorManager(CoreEngineProcManager):
         import ray
 
         from vllm.v1.engine.core import EngineCoreActor
+        refs = []
         for index in range(local_engine_count):
             local_index = local_start_index + index
             global_index = start_index + index
@@ -198,18 +199,19 @@ class CoreEngineActorManager(CoreEngineProcManager):
                 f"global_index: {global_index}, local_index: {local_index}, "
                 f"input_address: {input_address}, output_address: {output_address}"
             )
-            self.local_engine_actors.append(
-                ray.remote(EngineCoreActor).remote(
-                    #name=f"EngineCore_{global_index}",
-                    vllm_config=vllm_config,
-                    executor_class=executor_class,
-                    log_stats=log_stats,
-                    input_address=input_address,
-                    output_address=output_address,
-                    on_head_node=True,
-                    engine_index=global_index,
-                    dp_rank=global_index,
-                    local_dp_rank=local_index))
+            actor = ray.remote(EngineCoreActor).remote(
+                #name=f"EngineCore_{global_index}",
+                vllm_config=vllm_config,
+                executor_class=executor_class,
+                log_stats=log_stats,
+                input_address=input_address,
+                output_address=output_address,
+                on_head_node=True,
+                engine_index=global_index,
+                dp_rank=global_index,
+                local_dp_rank=local_index)
+            self.engine_actors.append(actor)
+            refs.append(actor.wait_for_init.remote())
         # dp_size = vllm_config.parallel_config.data_parallel_size
         # for index in range(dp_size - local_engine_count):
         #     self.remote_engine_actors.append(
@@ -224,10 +226,13 @@ class CoreEngineActorManager(CoreEngineProcManager):
         #             dp_rank=global_index,
         #             local_dp_rank=local_index)
         #         )
+        ray.get(refs)
+        for actor in self.engine_actors:
+            actor.run.remote()
 
     def close(self):
         import ray
-        for actor in self.local_engine_actors:
+        for actor in self.engine_actors:
             ray.kill(actor)
 
 

@@ -58,8 +58,7 @@ async def generate(engine: AsyncLLM,
     return count, request_id
 
 
-@pytest.mark.parametrize(
-    "output_kind", [RequestOutputKind.DELTA])
+@pytest.mark.parametrize("output_kind", [RequestOutputKind.DELTA])
 @pytest.mark.asyncio
 async def test_load(output_kind: RequestOutputKind):
 
@@ -75,9 +74,6 @@ async def test_load(output_kind: RequestOutputKind):
         NUM_EXPECTED_TOKENS = 10
 
         request_ids = [f"request-{i}" for i in range(NUM_REQUESTS)]
-
-        import time
-        time.sleep(20)
 
         # Create concurrent requests.
         tasks = []
@@ -97,7 +93,7 @@ async def test_load(output_kind: RequestOutputKind):
             assert num_generated_tokens == NUM_EXPECTED_TOKENS, (
                 f"{request_id} generated {num_generated_tokens} but "
                 f"expected {NUM_EXPECTED_TOKENS}")
-            
+
         print("generate done")
 
         assert not engine.output_processor.has_unfinished_requests()
