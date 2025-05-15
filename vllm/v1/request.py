@@ -53,6 +53,8 @@ class Request:
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
         self.cache_salt: Optional[str] = cache_salt
+        # The number of tokens in the prefix cache that the request can hit.
+        self.num_cached_tokens = -1
 
         # Multi-modal related
         self.mm_positions = multi_modal_placeholders or []
