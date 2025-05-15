@@ -5,8 +5,8 @@ from typing import TYPE_CHECKING, Optional
 import numpy as np
 import torch
 
-from vllm.attention import get_attn_backend
-from vllm.attention.utils.fa_utils import get_flash_attn_version
+from vllm.attention.backends.abstract import (AttentionBackend,
+                                              AttentionMetadataBuilder)
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
@@ -19,7 +19,7 @@ from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
-from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 if TYPE_CHECKING:
@@ -87,34 +87,6 @@ class XPUModelRunner(GPUModelRunner):
         self.hidden_size = model_config.get_hidden_size()
         self.attention_chunk_size = model_config.attention_chunk_size
 
-        self.attn_backend = get_attn_backend(
-            self.head_size,
-            self.dtype,
-            self.kv_cache_dtype,
-            self.block_size,
-            self.model_config.is_attention_free,
-            use_mla=self.model_config.use_mla,
-        )
-        if self.attn_backend is None:
-            error_msg = (
-                f"Error with get_att_backend: {self.head_size=}, "
-                f"{self.dtype=}, {self.kv_cache_dtype=}, {self.block_size=}, "
-                f"{self.model_config.is_attention_free=}, "
-                f"{self.model_config.use_mla=}")
-            logger.error(error_msg)
-            raise NotImplementedError(
-                "Non-Attention backend is not supported by V1 XPUModelRunner.")
-
-        if self.vllm_config.compilation_config.full_cuda_graph:
-            attn_backend_name = self.attn_backend.__name__
-            flash_attn_version = get_flash_attn_version()
-            if attn_backend_name != "FlashAttentionBackend" or \
-                flash_attn_version != 3:
-                raise ValueError(
-                    f"full_cuda_graph is only supported with "
-                    f"FA3. Current attention backend is {attn_backend_name}, "
-                    f"FlashAttention version is {flash_attn_version}.")
-
         self.cascade_attn_enabled = False
 
         # Multi-modal data support
@@ -136,6 +108,8 @@ class XPUModelRunner(GPUModelRunner):
         # self.model: nn.Module  # Set after load_model
         # Initialize in initialize_kv_cache
         self.kv_caches: list[torch.Tensor] = []
+        self.attn_metadata_builders: list[AttentionMetadataBuilder] = []
+        self.attn_backends: list[type[AttentionBackend]] = []
         # self.kv_cache_config: KVCacheConfig
         # self.attn_metadata_builder: type[AttentionMetadataBuilder]
 
@@ -162,16 +136,6 @@ class XPUModelRunner(GPUModelRunner):
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
-        # Persistent batch.
-        self.input_batch = InputBatch(
-            max_num_reqs=self.max_num_reqs,
-            max_model_len=self.max_model_len,
-            max_num_blocks_per_req=self.max_num_blocks_per_req,
-            max_num_batched_tokens=self.max_num_tokens,
-            device=self.device,
-            pin_memory=self.pin_memory,
-            vocab_size=model_config.get_vocab_size(),
-        )
 
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE
