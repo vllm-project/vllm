@@ -305,7 +305,10 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
+        kv_sharing_target_layer_name: Optional[str] = None,
     ) -> None:
+        assert kv_sharing_target_layer_name is None, NotImplementedError(
+            "KV sharing is not supported in V0.")
         assert blocksparse_params is not None
         assert alibi_slopes is None, ValueError(
             "Alibi not support for blocksparse flash attention.")

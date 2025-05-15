@@ -49,6 +49,7 @@ class Attention(nn.Module):
         use_mla: bool = False,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
+        kv_sharing_target_layer_name: Optional[str] = None,
         **extra_impl_args,
     ) -> None:
         """
@@ -56,6 +57,28 @@ class Attention(nn.Module):
         `self.kv_cache`.
         """
         super().__init__()
+
+        if not envs.VLLM_USE_V1:
+            assert kv_sharing_target_layer_name is None, NotImplementedError(
+                "KV sharing is not supported in V0.")
+
+        # Verify target layer is valid for cross-layer KV sharing
+        if kv_sharing_target_layer_name is not None:
+            from vllm.model_executor.models.utils import extract_layer_index
+            current_layer_idx = extract_layer_index(prefix)
+            target_layer_idx = extract_layer_index(
+                kv_sharing_target_layer_name)
+            if current_layer_idx <= target_layer_idx:
+                comp_str = ("is equal to" if current_layer_idx
+                            == target_layer_idx else "comes after")
+                raise ValueError(
+                    f"Specified KV sharing target is not valid for "
+                    f"{prefix} because target layer "
+                    f"{kv_sharing_target_layer_name} {comp_str} it. "
+                    f"Ensure the target layer comes before {prefix}.")
+
+        self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
+
         if per_layer_sliding_window is not None:
             # per-layer sliding window
             sliding_window = per_layer_sliding_window
@@ -134,7 +157,7 @@ class Attention(nn.Module):
         self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
                              alibi_slopes, sliding_window, kv_cache_dtype,
                              blocksparse_params, logits_soft_cap, attn_type,
-                             **extra_impl_args)
+                             kv_sharing_target_layer_name, **extra_impl_args)
         self.backend = backend_name_to_enum(attn_backend.get_name())
         self.dtype = dtype
 
