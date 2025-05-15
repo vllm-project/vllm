@@ -24,7 +24,7 @@ from typing import (TYPE_CHECKING, Annotated, Any, Callable, ClassVar, Literal,
 import torch
 from torch.distributed import ProcessGroup, ReduceOp
 from transformers import PretrainedConfig
-from typing_extensions import deprecated
+from typing_extensions import Unpack, deprecated
 
 import vllm.envs as envs
 from vllm import version
@@ -3340,6 +3340,11 @@ class StructuredOutputConfig:
     """Select the reasoning parser depending on the model that you're using.
     This is used to parse the reasoning content into OpenAI API format."""
 
+    if TYPE_CHECKING:
+
+        def __init__(self, **kwargs: Unpack[StructuredOutputOptions]):
+            ...
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -3379,7 +3384,7 @@ class StructuredOutputConfig:
                              "for the guidance backend.")
 
     @deprecated(
-        "Passing guided decoding backend options inside backend in the format 'backend:...' is deprecated. This will be removed in v0.10.0. Please set specific arguments in `--structured-output-config '{}'` instead."  # noqa: E501
+        "Passing guided decoding backend options inside backend in the format 'backend:...' is deprecated. This will be removed in v0.10.0. Please set specific arguments in `--structured-output-config '{\"backend\": ...}'` instead."  # noqa: E501
     )
     def _extract_backend_options(self):
         """Extract backend options from the backend string."""
