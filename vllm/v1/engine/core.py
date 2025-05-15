@@ -125,6 +125,10 @@ class EngineCore:
             self.batch_queue = queue.Queue(self.batch_queue_size)
         self.vllm_config = vllm_config
 
+
+        self.step_fn = (self.step if self.batch_queue is None else
+                        self.step_with_batch_queue)
+
     def _initialize_kv_caches(
             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
         start = time.time()
@@ -228,6 +232,37 @@ class EngineCore:
             scheduler_output, model_output)  # type: ignore
 
         return engine_core_outputs
+    
+
+    # def step_concurrent_batches(self) -> EngineCoreOutputs:
+    #     """Schedule, execute, and make output."""
+
+    #     # Check for any requests remaining in the scheduler - unfinished,
+    #     # or finished and not yet removed from the batch.
+    #     if not self.scheduler.has_requests():
+    #         return EngineCoreOutputs(
+    #             outputs=[],
+    #             scheduler_stats=self.scheduler.make_stats(),
+    #         )
+    #     delayed_responses = []
+    #     scheduler_output = self.scheduler.schedule()
+    #     if not self.batch_queue.full():
+    #         scheduler_output = self.scheduler.schedule()
+    #         if scheduler_output.total_num_scheduled_tokens > 0:
+    #             future = self.model_executor.execute_model(scheduler_output)
+    #             print(f"future: {future}")
+    #             if future is not None:
+    #                 self.batch_queue.put_nowait(
+    #                     (future, scheduler_output))  # type: ignore
+    #             else:
+    #                 return None
+    #     delayed_model_output = self.execute_model(scheduler_output)
+    #     if isinstance(delayed_model_output, Future):
+    #         delayed_responses[i] = delayed_model_output
+    #     engine_core_outputs = self.scheduler.update_from_output(
+    #         scheduler_output, model_output)  # type: ignore
+
+    #     return engine_core_outputs
 
     def step_with_batch_queue(self) -> Optional[EngineCoreOutputs]:
         """Schedule and execute batches with the batch queue.
@@ -269,10 +304,10 @@ class EngineCore:
         if not scheduled_batch and not self.batch_queue.empty():
             future, scheduler_output = self.batch_queue.get_nowait()
             # Blocking until the first result is available.
-            model_output = future.result()
-            self.batch_queue.task_done()
-            engine_core_outputs = self.scheduler.update_from_output(
-                scheduler_output, model_output)
+            if future is not None:
+                model_output = future.result()
+                engine_core_outputs = self.scheduler.update_from_output(
+                    scheduler_output, model_output)
 
         return engine_core_outputs
 
