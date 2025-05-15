@@ -136,6 +136,9 @@ def get_wrapped_test_sizes(
             ImageSizeWrapper(type=SizeType.SIZE_FACTOR, data=factor)
             for factor in EMBEDDING_SIZE_FACTORS
         ])
+    # We don't need to do any resize for audio tests
+    elif test_type == VLMTestType.AUDIO:
+        return (1.0, )
     # Custom inputs have preprocessed inputs
     elif test_type == VLMTestType.CUSTOM_INPUTS:
         return tuple()

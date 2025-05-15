@@ -165,9 +165,9 @@ VLM_TEST_SETTINGS = {
         audio_idx_to_prompt=lambda idx: "<|audio|>",
         max_model_len=4096,
         max_num_seqs=2,
-        marks=[pytest.mark.core_model, pytest.mark.cpu_model],
         auto_cls=AutoModel,
-        image_size_factors=[(1.0,)],
+        hf_output_post_proc=model_utils.ultravox_trunc_hf_output,
+        marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
     #### Extended model tests
     "aria": VLMTestInfo(
