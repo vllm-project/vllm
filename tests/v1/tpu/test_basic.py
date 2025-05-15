@@ -62,7 +62,8 @@ def test_basic(
             vllm_outputs = vllm_model.generate_greedy(example_prompts,
                                                       max_tokens)
         output = vllm_outputs[0][1]
-
+        a = 'a'
+        assert a.startswith('b'), "I mean for this to fail"
         assert "1024" in output or "0, 1" in output
 
 

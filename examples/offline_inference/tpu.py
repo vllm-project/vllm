@@ -32,6 +32,8 @@ def main():
         print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
         assert generated_text.startswith(answer)
         print("-" * 50)
+        a = 'a'
+        assert a.startswith('b'), "I mean for this to fail"
 
 
 if __name__ == "__main__":
