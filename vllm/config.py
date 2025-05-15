@@ -3950,11 +3950,12 @@ class CompilationConfig:
             self.cudagraph_capture_sizes = cudagraph_capture_sizes
         else:
             # de-duplicate the sizes provided by the config
-            self.cudagraph_capture_sizes = list(
-                set(self.cudagraph_capture_sizes))
-            logger.info(("cudagraph sizes specified by model runner"
-                         " %s is overridden by config %s"),
-                        cudagraph_capture_sizes, self.cudagraph_capture_sizes)
+            dedup_sizes = list(set(self.cudagraph_capture_sizes))
+            if len(dedup_sizes) < len(self.cudagraph_capture_sizes):
+                logger.info(("cudagraph sizes specified by model runner"
+                             " %s is overridden by config %s"),
+                            cudagraph_capture_sizes, dedup_sizes)
+            self.cudagraph_capture_sizes = dedup_sizes
 
         computed_compile_sizes = []
         if self.compile_sizes is not None:
