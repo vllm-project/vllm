@@ -691,11 +691,10 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
         max_position_embeddings = 128_000
         try:
             trust_remote_code_val = kwargs.get("trust_remote_code", False)
-            hf_config = get_config(
-                model=model,
-                trust_remote_code=trust_remote_code_val,
-                revision=revision,
-                config_format=ConfigFormat.HF)
+            hf_config = get_config(model=model,
+                                   trust_remote_code=trust_remote_code_val,
+                                   revision=revision,
+                                   config_format=ConfigFormat.HF)
             if hf_value := hf_config.get_text_config().max_position_embeddings:
                 max_position_embeddings = hf_value
         except Exception as e:
