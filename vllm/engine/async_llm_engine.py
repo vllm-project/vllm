@@ -503,8 +503,8 @@ class _AsyncLLMEngine(LLMEngine):
             prompt_adapter_request=prompt_adapter_request,
         )
 
-        # yapf: disable
-        if isinstance(params, SamplingParams) and params.guided_decoding is not None:  # noqa: E501
+        if isinstance(params, SamplingParams) and \
+            params.guided_decoding is not None:
             # Guided decoding has an async implementation for building logits
             # processors in a separate threadpool.
             # We want to invoke that here instead of using the blocking
@@ -513,11 +513,10 @@ class _AsyncLLMEngine(LLMEngine):
                 sampling_params=params,
                 tokenizer=await self.get_tokenizer_async(lora_request),
                 default_guided_backend=self.structured_output_config.backend,
-                reasoning_backend=self.structured_output_config.reasoning_backend,
-                model_config=self.model_config,
-            )
+                reasoning_backend=self.structured_output_config.
+                reasoning_backend,
+                model_config=self.model_config)
 
-        # yapf: enable
         self._add_processed_request(
             request_id=request_id,
             processed_inputs=processed_inputs,
@@ -1104,7 +1103,7 @@ class AsyncLLMEngine(EngineClient):
         ```
         # Please refer to entrypoints/api_server.py for
         # the complete example.
-    
+
         # initialize the engine and the example input
         # note that engine_args here is AsyncEngineArgs instance
         engine = AsyncLLMEngine.from_engine_args(engine_args)
@@ -1112,13 +1111,13 @@ class AsyncLLMEngine(EngineClient):
             "input": "What is LLM?",
             "request_id": 0,
         }
-    
+
         # start the generation
         results_generator = engine.encode(
         example_input["input"],
         PoolingParams(),
         example_input["request_id"])
-    
+
         # get the results
         final_output = None
         async for request_output in results_generator:
@@ -1128,7 +1127,7 @@ class AsyncLLMEngine(EngineClient):
                 # Return or raise an error
                 ...
             final_output = request_output
-    
+
         # Process and return the final output
         ...
         ```
