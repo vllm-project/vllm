@@ -114,7 +114,6 @@ def run_audio_test(
     audio_assets: AudioTestAssets,
 ):
     assert test_case.size_wrapper is not None
-    assert test_case.num_video_frames is not None
     inputs = builders.build_audio_inputs_from_test_info(
         model_test_info, audio_assets)
 

@@ -8,7 +8,7 @@ from collections import defaultdict
 from pathlib import PosixPath
 
 import pytest
-from transformers import (AutoModelForImageTextToText,
+from transformers import (AutoModel, AutoModelForImageTextToText,
                           AutoModelForTextToWaveform, AutoModelForVision2Seq)
 
 from vllm.platforms import current_platform
@@ -161,10 +161,13 @@ VLM_TEST_SETTINGS = {
     "ultravox": VLMTestInfo(
         models = ["fixie-ai/ultravox-v0_5-llama-3_2-1b"],
         test_type=VLMTestType.AUDIO,
+        prompt_formatter=lambda audio_prompt: f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{audio_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n", # noqa: E501
         audio_idx_to_prompt=lambda idx: "<|audio|>",
         max_model_len=4096,
         max_num_seqs=2,
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+        auto_cls=AutoModel,
+        image_size_factors=[(1.0,)],
     ),
     #### Extended model tests
     "aria": VLMTestInfo(
