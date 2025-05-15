@@ -163,9 +163,8 @@ class NixlConnector(KVConnectorBase_V1):
         pass
 
     def wait_for_save(self):
-        assert self.connector_worker is not None
-        assert isinstance(self._connector_metadata, NixlConnectorMetadata)
-        self.connector_worker.wait_for_save(self._connector_metadata)
+        """NixlConnector does not save explicitly."""
+        pass
 
 
 class NixlConnectorScheduler:
