@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Literal, Optional, Set, Tuple, TypedDict
+from typing import Any, Literal, Optional, TypedDict
 
 import torch
 from torch import nn
@@ -701,8 +701,8 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 

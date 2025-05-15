@@ -43,6 +43,7 @@ if current_platform.is_cuda_alike():
         from .pplx_prepare_finalize import PplxPrepareAndFinalize
 else:
     fused_experts = None  # type: ignore
+    FusedMoEPrepareAndFinalize = None  # type: ignore
 if is_rocm_aiter_moe_enabled():
     from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
         rocm_aiter_biased_group_topk as grouped_topk)
