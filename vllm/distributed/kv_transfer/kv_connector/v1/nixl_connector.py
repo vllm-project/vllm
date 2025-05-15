@@ -21,7 +21,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
     get_tp_group)
 from vllm.logger import init_logger
-from vllm.utils import round_down
+from vllm.utils import make_zmq_path, make_zmq_socket, round_down
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
 
@@ -379,7 +379,7 @@ class NixlConnectorWorker:
         # hack to keeps us moving. We will switch when moving to etcd
         # or where we have a single ZMQ socket in the scheduler.
         port = envs.VLLM_NIXL_SIDE_CHANNEL_PORT + rank
-        path = f"tcp://{host}:{port}"
+        path = make_zmq_path("tcp", host, port)
         logger.debug("Starting listening on path: %s", path)
         with zmq_ctx(zmq.ROUTER, path) as sock:
             ready_event.set()
@@ -397,7 +397,7 @@ class NixlConnectorWorker:
         # NOTE(rob): we need each rank to have a unique port. This is
         # a hack to keep us moving. We will switch when moving to etcd
         # or where we have a single ZMQ socket in the scheduler.
-        path = f"tcp://{host}:{port + self.rank}"
+        path = make_zmq_path("tcp", host, port + self.rank)
         logger.debug("Querying metadata on path: %s", path)
         with zmq_ctx(zmq.REQ, path) as sock:
             # Send query for the request.
@@ -741,20 +741,16 @@ class NixlConnectorWorker:
 def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
     """Context manager for a ZMQ socket"""
 
+    if socket_type not in (zmq.ROUTER, zmq.REQ):
+        raise ValueError(f"Unexpected socket type: {socket_type}")
+
     ctx: Optional[zmq.Context] = None
     try:
         ctx = zmq.Context()  # type: ignore[attr-defined]
-
-        if socket_type == zmq.ROUTER:
-            socket = ctx.socket(zmq.ROUTER)
-            socket.bind(addr)
-        elif socket_type == zmq.REQ:
-            socket = ctx.socket(zmq.REQ)
-            socket.connect(addr)
-        else:
-            raise ValueError(f"Unexpected socket type: {socket_type}")
-
-        yield socket
+        yield make_zmq_socket(ctx=ctx,
+                              path=addr,
+                              socket_type=socket_type,
+                              bind=socket_type == zmq.ROUTER)
     finally:
         if ctx is not None:
             ctx.destroy(linger=0)
