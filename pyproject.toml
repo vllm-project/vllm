@@ -77,7 +77,6 @@ exclude = [
 "vllm/engine/**/*.py" = ["UP006", "UP035"]
 "vllm/executor/**/*.py" = ["UP006", "UP035"]
 "vllm/model_executor/model_loader/**/*.py" = ["UP006", "UP035"]
-"vllm/model_executor/models/**/*.py" = ["UP006", "UP035"]
 "vllm/prompt_adapter/**/*.py" = ["UP006", "UP035"]
 "vllm/spec_decode/**/*.py" = ["UP006", "UP035"]
 "vllm/worker/**/*.py" = ["UP006", "UP035"]
@@ -170,3 +169,9 @@ plugins.md013.enabled = false # line-length
 plugins.md041.enabled = false # first-line-h1
 plugins.md033.enabled = false # inline-html
 plugins.md024.allow_different_nesting = true # no-duplicate-headers
+
+[tool.ty]
+respect-ignore-files = true
+
+[tool.ty.environment]
+python = "./.venv"
