@@ -9,7 +9,6 @@ from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
-
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.entrypoints.openai.protocol import (DetokenizeRequest,
@@ -27,6 +26,7 @@ logger = init_logger(__name__)
 
 
 class OpenAIServingTokenization(OpenAIServing):
+
     def __init__(
         self,
         engine_client: EngineClient,
@@ -67,11 +67,8 @@ class OpenAIServingTokenization(OpenAIServing):
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
             if isinstance(request, TokenizeChatRequest):
-                tool_dicts = (
-                    None
-                    if request.tools is None
-                    else [tool.model_dump() for tool in request.tools]
-                )
+                tool_dicts = (None if request.tools is None else
+                              [tool.model_dump() for tool in request.tools])
 
                 (
                     _,
@@ -82,7 +79,8 @@ class OpenAIServingTokenization(OpenAIServing):
                     tokenizer,
                     request.messages,
                     chat_template=request.chat_template or self.chat_template,
-                    chat_template_content_format=self.chat_template_content_format,
+                    chat_template_content_format=self.
+                    chat_template_content_format,
                     add_generation_prompt=request.add_generation_prompt,
                     continue_final_message=request.continue_final_message,
                     tool_dicts=tool_dicts,
