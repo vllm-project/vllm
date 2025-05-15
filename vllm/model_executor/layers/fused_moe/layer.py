@@ -271,6 +271,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        num_share_fusion_replicas: int = 0,
+        routed_scaling_factor: Optional[float] = None,
     ) -> torch.Tensor:
         raise NotImplementedError
 
