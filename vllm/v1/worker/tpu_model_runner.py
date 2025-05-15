@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import bisect
 import gc
+import textwrap
 import time
 from typing import TYPE_CHECKING, Optional, cast
 from unittest.mock import patch
@@ -21,6 +22,7 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargs,
                                     PlaceholderRange)
@@ -439,6 +441,17 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                         dtype=attn_module.dtype,
                         use_mla=False,
                     )
+                if attn_module.kv_sharing_target_layer_idx is not None:
+                    layer_idx = extract_layer_index(layer_name)
+                    assert (
+                        attn_module.kv_sharing_target_layer_idx < layer_idx
+                    ), textwrap.dedent(
+                        "Cannot use KV cache from later layer! Ensure that"
+                        f" {layer_name}.kv_sharing_target_layer_idx "
+                        f"(set to {attn_module.kv_sharing_target_layer_idx})"
+                        f" is less than {layer_idx} (current layer)")
+                    kv_cache_spec[layer_name].kv_sharing_target_layer_idx = (
+                        attn_module.kv_sharing_target_layer_idx)
             elif attn_module.attn_type in (AttentionType.ENCODER,
                                            AttentionType.ENCODER_ONLY):
                 # encoder-only attention does not need KV cache.
@@ -1269,10 +1282,49 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         kv_caches: dict[str, torch.Tensor] = {}
 
         for kv_cache_group in kv_cache_config.kv_cache_groups:
+            kv_sharing_layer_mapping = kv_cache_group.kv_sharing_layer_mapping
+
+            # NOTE(sarckk) with cross-layer KV sharing, layers that share
+            # allocation with earlier layers need to be allocated after all
+            # layers that do not have any allocations. Sorting here ensures
+            # that we allocate all KV caches first
+            layer_names = kv_cache_group.layer_names
+            if kv_sharing_layer_mapping is not None:
+                layer_names = sorted(
+                    layer_names, key=lambda x: x in kv_sharing_layer_mapping)
+
             kv_cache_spec = kv_cache_group.kv_cache_spec
-            for layer_name in kv_cache_group.layer_names:
+
+            for layer_name in layer_names:
+                if (kv_sharing_layer_mapping is not None
+                        and layer_name in kv_sharing_layer_mapping):
+                    current_layer_idx = extract_layer_index(layer_name)
+                    target_layer_idx = kv_sharing_layer_mapping[layer_name]
+
+                    assert target_layer_idx is not None and \
+                        target_layer_idx < len(layer_names), \
+                        f"{target_layer_idx} is an invalid layer index!"
+
+                    target_layer_name = layer_name.replace(
+                        str(current_layer_idx),
+                        str(target_layer_idx),
+                    )
+
+                    error_msg = textwrap.dedent(
+                        f"{layer_name} cannot share KV cache"
+                        f" with {target_layer_name} which comes after it."
+                        " Check that the layer you are trying to reuse KV"
+                        " cache from is before the given layer.")
+                    assert target_layer_idx is not None and \
+                        current_layer_idx > target_layer_idx, error_msg
+
+                    # store reference to target layer's KV cache
+                    kv_caches[layer_name] = kv_caches[target_layer_name]
+                    continue
+
                 tensor_config = kv_cache_config.tensors[layer_name]
-                assert tensor_config.size % kv_cache_spec.page_size_bytes == 0
+                assert (tensor_config.size %
+                        kv_cache_spec.page_size_bytes == 0)
                 num_blocks = tensor_config.size // kv_cache_spec.page_size_bytes
                 if isinstance(kv_cache_spec, AttentionSpec):
                     kv_cache_shape = PallasAttentionBackend.get_kv_cache_shape(

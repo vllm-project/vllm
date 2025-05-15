@@ -49,6 +49,7 @@ class Attention(nn.Module):
         use_mla: bool = False,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
+        kv_sharing_target_layer_idx: Optional[int] = None,
         **extra_impl_args,
     ) -> None:
         """
@@ -102,6 +103,10 @@ class Attention(nn.Module):
         self.head_size = head_size
         self.num_kv_heads = num_kv_heads
         self.sliding_window = sliding_window
+        self.kv_sharing_target_layer_idx = kv_sharing_target_layer_idx
+        if kv_sharing_target_layer_idx is not None:
+            extra_impl_args['kv_sharing_target_layer_idx'] = (
+                kv_sharing_target_layer_idx)
 
         quant_method = quant_config.get_quant_method(
             self, prefix=prefix) if quant_config else None
