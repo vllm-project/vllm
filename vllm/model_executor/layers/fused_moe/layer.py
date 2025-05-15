@@ -650,7 +650,7 @@ def _construct_prepare_finalize(
 
     if moe.use_pplx_kernels:
         return PplxPrepareAndFinalize(
-            None,
+            None,  # will be set later in prepare_communication_buffer_for_model
             max_num_tokens=max_num_tokens,
             world_size=world_size,
             rank=rank,
