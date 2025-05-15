@@ -154,6 +154,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self.head_size = model_config.get_head_size()
         self.hidden_size = model_config.get_hidden_size()
         self.vocab_size = model_config.get_vocab_size()
+        if self.lora_config is not None:
+            self.vocab_size += self.lora_config.lora_extra_vocab_size
 
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
