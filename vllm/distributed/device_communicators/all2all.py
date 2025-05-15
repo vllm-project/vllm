@@ -146,6 +146,7 @@ class PPLXAll2All(All2AllBase):
         )
 
         if self.internode:
+            # inter-node communication needs nvshmem
             from pplx_kernels.nvshmem import (nvshmem_alloc_empty_unique_id,
                                               nvshmem_get_unique_id,
                                               nvshmem_init)
@@ -161,6 +162,7 @@ class PPLXAll2All(All2AllBase):
             nvshmem_init(uid, self.rank, self.world_size)
             self.pplx_handle = pplx.AllToAll.internode(**all_to_all_args)
         else:
+            # intra-node communication uses p2p mapping directly
             self.pplx_handle = pplx.AllToAll.intranode(**all_to_all_args)
 
         # TODO: refactor the initialization logic
