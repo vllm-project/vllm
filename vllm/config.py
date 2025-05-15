@@ -3289,14 +3289,17 @@ StructuredOutputBackendV1 = Literal["auto", "xgrammar", "guidance"]
 StructuredOutputBackend = Literal[StructuredOutputBackendV0,
                                   StructuredOutputBackendV1]
 
-
 # This class is purely to use for typing
-class StructuredOutputOptions(TypedDict, total=False):
-    backend: Annotated[str, StructuredOutputBackend]
-    reasoning_backend: Optional[str]
-    disable_fallback: bool
-    disable_any_whitespace: bool
-    disable_additional_properties: bool
+if TYPE_CHECKING:
+
+    class StructuredOutputOptions(TypedDict, total=False):
+        backend: Annotated[str, StructuredOutputBackend]
+        reasoning_backend: Optional[str]
+        disable_fallback: bool
+        disable_any_whitespace: bool
+        disable_additional_properties: bool
+else:
+    StructuredOutputOptions = dict
 
 
 @config

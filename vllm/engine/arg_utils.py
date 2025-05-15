@@ -9,7 +9,9 @@ import re
 import sys
 import threading
 import warnings
-from dataclasses import MISSING, dataclass, fields, is_dataclass
+from dataclasses import MISSING, dataclass
+from dataclasses import field as dataclass_field
+from dataclasses import fields, is_dataclass
 from itertools import permutations
 from typing import (Annotated, Any, Callable, Dict, List, Literal, Optional,
                     Type, TypeVar, Union, cast, get_args, get_origin)
@@ -370,11 +372,12 @@ class EngineArgs:
         bool] = SchedulerConfig.enable_chunked_prefill
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
 
-    structured_output_config: StructuredOutputOptions = None  # type: ignore
+    structured_output_config: StructuredOutputOptions = dataclass_field(
+        default_factory=StructuredOutputOptions)
 
     @property
     @deprecated(
-        "`guided_decoding_backend` is deprecated and has been renamed to `structured_output_config.backend`. This will be removed in v0.10.0. Please use the `backend` argument in `structured_output_config` instead."  # noqa: E501
+        "`guided_decoding_backend` is deprecated and has been renamed to `structured_output_config.backend`. This will be removed in v0.10.0. Please use the `backend` argument in `structured_output_config` instead."
     )
     def guided_decoding_backend(self) -> StructuredOutputBackend:
         return StructuredOutputConfig.backend
@@ -385,7 +388,7 @@ class EngineArgs:
 
     @property
     @deprecated(
-        "`guided_decoding_disable_fallback` is deprecated and has been renamed to `structured_output_config.disable_fallback`. This will be removed in v0.10.0. Please use the `disable_fallback` argument in `structured_output_config` instead."  # noqa: E501
+        "`guided_decoding_disable_fallback` is deprecated and has been renamed to `structured_output_config.disable_fallback`. This will be removed in v0.10.0. Please use the `disable_fallback` argument in `structured_output_config` instead."
     )
     def guided_decoding_disable_fallback(self) -> bool:
         return StructuredOutputConfig.disable_fallback
@@ -396,7 +399,7 @@ class EngineArgs:
 
     @property
     @deprecated(
-        "`guided_decoding_disable_any_whitespace` is deprecated and has been renamed to `structured_output_config.disable_any_whitespace`. This will be removed in v0.10.0. Please use the `disable_any_whitespace` argument in `structured_output_config` instead."  # noqa: E501
+        "`guided_decoding_disable_any_whitespace` is deprecated and has been renamed to `structured_output_config.disable_any_whitespace`. This will be removed in v0.10.0. Please use the `disable_any_whitespace` argument in `structured_output_config` instead."
     )
     def guided_decoding_disable_any_whitespace(self) -> bool:
         return StructuredOutputConfig.disable_any_whitespace
@@ -407,7 +410,7 @@ class EngineArgs:
 
     @property
     @deprecated(
-        "`guided_decoding_disable_additional_properties` is deprecated and has been renamed to `structured_output_config.disable_additional_properties`. This will be removed in v0.10.0. Please use the `disable_additional_properties` argument in `structured_output_config` instead."  # noqa: E501
+        "`guided_decoding_disable_additional_properties` is deprecated and has been renamed to `structured_output_config.disable_additional_properties`. This will be removed in v0.10.0. Please use the `disable_additional_properties` argument in `structured_output_config` instead."
     )
     def guided_decoding_disable_additional_properties(self) -> bool:
         return StructuredOutputConfig.disable_additional_properties
@@ -418,7 +421,7 @@ class EngineArgs:
 
     @property
     @deprecated(
-        "`enable_reasoning` is deprecated and has been renamed to `structured_output_config.enable_reasoning`. This will be removed in v0.10.0. Please check based on `reasoning_parser` instead."  # noqa: E501
+        "`enable_reasoning` is deprecated and has been renamed to `structured_output_config.enable_reasoning`. This will be removed in v0.10.0. Please check based on `reasoning_parser` instead."
     )
     def enable_reasoning(self) -> Optional[bool]:
         return None
@@ -429,7 +432,7 @@ class EngineArgs:
 
     @property
     @deprecated(
-        "`reasoning_parser` is deprecated and has been renamed to `structured_output_config.reasoning_backend`. This will be removed in v0.10.0. Please use the `reasoning_backend` argument in `structured_output_config` instead."  # noqa: E501
+        "`reasoning_parser` is deprecated and has been renamed to `structured_output_config.reasoning_backend`. This will be removed in v0.10.0. Please use the `reasoning_backend` argument in `structured_output_config` instead."
     )
     def reasoning_parser(self) -> str:
         return StructuredOutputConfig.reasoning_backend
@@ -500,7 +503,7 @@ class EngineArgs:
         else:
             # To be removed in v0.10.x
             self.structured_output_config.update(
-                dict(
+                StructuredOutputOptions(
                     backend=self.guided_decoding_backend,
                     disable_fallback=self.guided_decoding_disable_fallback,
                     disable_any_whitespace=self.
