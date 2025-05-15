@@ -11,6 +11,8 @@ import torch.distributed
 import torch.nn as nn
 
 from vllm.attention import AttentionType, get_attn_backend
+from vllm.attention.backends.abstract import (AttentionBackend,
+                                              AttentionMetadataBuilder)
 from vllm.attention.layer import Attention
 from vllm.attention.utils.fa_utils import get_flash_attn_version
 from vllm.config import (CompilationLevel, VllmConfig,
@@ -26,14 +28,14 @@ from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.pooling_params import PoolingParams
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        GiB_bytes, LayerBlockType, LazyLoader, cdiv,
-                        check_use_alibi, is_pin_memory_available)
-from vllm.v1.attention.backends.flash_attn import (
-    FlashAttentionMetadata, FlashAttentionMetadataBuilder)
+                        GiB_bytes, LazyLoader, cdiv, check_use_alibi,
+                        is_pin_memory_available)
+from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheSpec, SlidingWindowSpec)
+from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
+                                        KVCacheConfig, KVCacheSpec,
+                                        SlidingWindowSpec)
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.worker.gpu_pooling_input_batch import (CachedRequestState,
@@ -88,59 +90,18 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
                 cache_config.cache_dtype]
         self.kv_cache_dtype_str = str(self.kv_cache_dtype).split('.')[-1]
 
-        # NOTE(woosuk): sliding_window is None for models with interleaved
-        # attention. Use interleaved_sliding_window instead.
-        self.sliding_window = model_config.get_sliding_window()
-        self.interleaved_sliding_window = getattr(
-            model_config.hf_text_config, "interleaved_sliding_window", None)
-        self.window_size = (self.sliding_window
-                            or self.interleaved_sliding_window)
-
         self.is_multimodal_model = model_config.is_multimodal_model
 
-        self.block_size = cache_config.block_size
         self.max_model_len = model_config.max_model_len
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
 
         # Model-related.
-        self.num_attn_layers = model_config.get_num_layers_by_block_type(
-            parallel_config, LayerBlockType.attention)
         self.num_query_heads = model_config.get_num_attention_heads(
             parallel_config)
-        self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
-        self.head_size = model_config.get_head_size()
         self.hidden_size = model_config.get_hidden_size()
         assert model_config.attention_chunk_size is None
         self.attention_chunk_size = None
-
-        self.attn_backend = get_attn_backend(
-            self.head_size,
-            self.dtype,
-            self.kv_cache_dtype_str,
-            self.block_size,
-            self.model_config.is_attention_free,
-            use_mla=self.model_config.use_mla,
-        )
-        if self.attn_backend is None:
-            error_msg = (
-                f"Error with get_att_backend: {self.head_size=}, "
-                f"{self.dtype=}, {self.kv_cache_dtype=}, {self.block_size=}, "
-                f"{self.model_config.is_attention_free=}, "
-                f"{self.model_config.use_mla=}")
-            logger.error(error_msg)
-            raise NotImplementedError(
-                "Non-Attention backend is not supported by V1 GPUModelRunner.")
-
-        if self.vllm_config.compilation_config.full_cuda_graph:
-            attn_backend_name = self.attn_backend.__name__
-            flash_attn_version = get_flash_attn_version()
-            if attn_backend_name != "FlashAttentionBackend" or \
-                flash_attn_version != 3:
-                raise ValueError(
-                    f"full_cuda_graph is only supported with "
-                    f"FA3. Current attention backend is {attn_backend_name}, "
-                    f"FlashAttention version is {flash_attn_version}.")
 
         assert self.model_config.disable_cascade_attn
 
@@ -156,6 +117,14 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
         self.max_num_encoder_input_tokens = encoder_compute_budget
         self.encoder_cache_size = encoder_cache_size
 
+        # Lazy initializations
+        # self.model: nn.Module  # Set after load_model
+        # Initialize in initialize_kv_cache
+        self.attn_metadata_builders: list[AttentionMetadataBuilder] = []
+        self.attn_backends: list[type[AttentionBackend]] = []
+        # self.kv_cache_config: KVCacheConfig
+        # self.input_batch: InputBatch # Persistent batch.
+
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: dict[str, dict[int, torch.Tensor]] = {}
 
@@ -163,15 +132,6 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
-        # Persistent batch.
-        self.input_batch = InputBatch(
-            max_num_reqs=self.max_num_reqs,
-            max_model_len=self.max_model_len,
-            max_num_batched_tokens=self.max_num_tokens,
-            device=self.device,
-            pin_memory=self.pin_memory,
-            vocab_size=model_config.get_vocab_size(),
-        )
 
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE
@@ -274,6 +234,31 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
                                               dtype=torch.int8,
                                               device=self.device)
         return self.token_type_ids
+
+    def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> bool:
+        """
+        Update the order of requests in the batch based on the attention
+        backend's needs. For example, some attention backends (namely MLA) may 
+        want to separate requests based on if the attention computation will be
+        compute-bound or memory-bound.
+
+        Args:
+            scheduler_output: The scheduler output.
+
+        Returns:
+            True if the batch was reordered, False otherwise.
+        """
+        batch_reordered = self.attn_metadata_builders[0].reorder_batch(
+            self.input_batch, scheduler_output)
+
+        # For models with multiple KV cache groups, the groups should agree on
+        # the same order of requests. We ensure this by only allowing the first
+        # group to reorder the batch and asserting that all other groups do not
+        # reorder the batch.
+        for i in range(1, len(self.kv_cache_config.kv_cache_groups)):
+            assert not self.attn_metadata_builders[i].reorder_batch(
+                self.input_batch, scheduler_output)
+        return batch_reordered
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -409,11 +394,7 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
         if removed_req_indices:
             self.input_batch.condense(removed_req_indices)
 
-        # Some attention backends (namely MLA) may want to separate requests
-        # based on if the attention computation will be compute-bound or
-        # memory-bound. This gives them a hook to do that.
-        batch_reordered = self.attn_metadata_builder.reorder_batch(
-            self.input_batch, scheduler_output)
+        batch_reordered = self._may_reorder_batch(scheduler_output)
 
         if batch_changed or batch_reordered:
             self.input_batch.refresh_pooling_metadata()
@@ -523,15 +504,18 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
         attn_metadata: dict[str, FlashAttentionMetadata] = {}
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
+        for kv_cache_group_id, kv_cache_group_spec in enumerate(
+                self.kv_cache_config.kv_cache_groups):
 
-        attn_metadata_i = self.attn_metadata_builder.build(
-            num_reqs=num_reqs,
-            num_actual_tokens=total_num_scheduled_tokens,
-            max_query_len=max_num_scheduled_tokens,
-            common_prefix_len=0,
-            common_attn_metadata=common_attn_metadata)
-        for layer_name in self.kv_cache_group_spec.layer_names:
-            attn_metadata[layer_name] = attn_metadata_i
+            attn_metadata_i = (
+                self.attn_metadata_builders[kv_cache_group_id].build(
+                    num_reqs=num_reqs,
+                    num_actual_tokens=total_num_scheduled_tokens,
+                    max_query_len=max_num_scheduled_tokens,
+                    common_prefix_len=0,
+                    common_attn_metadata=common_attn_metadata))
+            for layer_name in kv_cache_group_spec.layer_names:
+                attn_metadata[layer_name] = attn_metadata_i
 
         # Hot-Swap lora model
         if self.lora_config:
@@ -870,7 +854,7 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
                                         dtype=np.int32)
 
         if skip_attn:
-            attn_metadata = None
+            attn_metadata: Optional[dict[str, FlashAttentionMetadata]] = None
         else:
             query_start_loc = self.query_start_loc[:num_reqs + 1]
             seq_lens = self.seq_lens[:num_reqs]
@@ -878,13 +862,19 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
             common_attn_metadata = CommonAttentionMetadata(
                 query_start_loc=query_start_loc, seq_lens=seq_lens)
 
-            attn_metadata = self.attn_metadata_builder.build(
-                num_reqs=num_tokens,
-                num_actual_tokens=num_tokens,
-                max_query_len=num_tokens,
-                common_prefix_len=0,
-                common_attn_metadata=common_attn_metadata,
-            )
+            attn_metadata = {}
+            for kv_cache_group_id, kv_cache_group_spec in enumerate(
+                    self.kv_cache_config.kv_cache_groups):
+                attn_metadata_i = (
+                    self.attn_metadata_builders[kv_cache_group_id].build(
+                        num_reqs=num_tokens,
+                        num_actual_tokens=num_tokens,
+                        max_query_len=num_tokens,
+                        common_prefix_len=0,
+                        common_attn_metadata=common_attn_metadata,
+                    ))
+                for layer_name in kv_cache_group_spec.layer_names:
+                    attn_metadata[layer_name] = attn_metadata_i
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
@@ -1067,6 +1057,55 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
         logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
                     elapsed_time, cuda_graph_size / (1 << 30))
 
+    def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
+        """
+        Initialize the attention backends and attention metadata builders.
+        """
+        assert len(self.attn_backends) == 0 and len(
+            self.attn_metadata_builders
+        ) == 0, "Attention backends are already initialized"
+        for i, kv_cache_group_spec in enumerate(
+                kv_cache_config.kv_cache_groups):
+            kv_cache_spec = kv_cache_group_spec.kv_cache_spec
+            if not isinstance(kv_cache_spec, AttentionSpec):
+                raise NotImplementedError(
+                    "Only AttentionSpec is supported for now.")
+            attn_backend_i = get_attn_backend(
+                kv_cache_spec.head_size,
+                self.dtype,
+                kv_cache_spec.dtype,
+                kv_cache_spec.block_size,
+                self.model_config.is_attention_free,
+                use_mla=kv_cache_spec.use_mla,
+            )
+            if attn_backend_i is None:
+                error_msg = (
+                    f"Error with get_attn_backend: {kv_cache_spec.head_size=}, "
+                    f"{self.dtype=}, {kv_cache_spec.dtype=}, "
+                    f"{kv_cache_spec.block_size=}, "
+                    f"{self.model_config.is_attention_free=}, "
+                    f"{kv_cache_spec.use_mla=}")
+                logger.error(error_msg)
+                raise NotImplementedError(
+                    "Non-Attention backend is not supported by V1 "
+                    "GPUModelRunner.")
+
+            if self.vllm_config.compilation_config.full_cuda_graph:
+                attn_backend_name = attn_backend_i.__name__
+                flash_attn_version = get_flash_attn_version()
+                if attn_backend_name != "FlashAttentionBackend" or \
+                    flash_attn_version != 3:
+                    raise ValueError(
+                        f"full_cuda_graph is only supported with "
+                        f"FA3. Current attention backend is "
+                        f"{attn_backend_name}, FlashAttention version is "
+                        f"{flash_attn_version}.")
+
+            attn_metadata_builder_i = attn_backend_i.get_builder_cls()(
+                weakref.proxy(self), None, None)
+            self.attn_backends.append(attn_backend_i)
+            self.attn_metadata_builders.append(attn_metadata_builder_i)
+
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
@@ -1078,11 +1117,16 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
             raise NotImplementedError(
                 "Hybrid models with more than one KV cache type are not "
                 "supported yet.")
-        self.kv_cache_group_spec = kv_cache_config.kv_cache_groups[0]
-
-        self.attn_metadata_builder = cast(type[FlashAttentionMetadataBuilder],
-                                          self.attn_backend.get_builder_cls())(
-                                              weakref.proxy(self), None, None)
+        self.kv_cache_config = kv_cache_config
+        self.input_batch = InputBatch(
+            max_num_reqs=self.max_num_reqs,
+            max_model_len=self.max_model_len,
+            max_num_batched_tokens=self.max_num_tokens,
+            device=self.device,
+            pin_memory=self.pin_memory,
+            vocab_size=self.model_config.get_vocab_size(),
+        )
+        self.initialize_attn_backend(kv_cache_config)
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """

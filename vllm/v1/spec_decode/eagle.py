@@ -5,6 +5,7 @@ import torch.nn as nn
 from vllm.attention.layer import Attention
 from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config, set_current_vllm_config)
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
@@ -306,12 +307,30 @@ class EagleProposer:
         self.attn_layer_name = next(iter(draft_attn_layer_names))
         loaded_weights = self.model.load_weights(
             loader.get_all_weights(draft_model_config, self.model))
-        if self.vllm_config.speculative_config.method == "eagle3":
-            if "model.embed_tokens.weight" not in loaded_weights:
-                logger.info(
-                    "Loading EAGLE embedding weights from the target model.")
-                self.model.model.embed_tokens = target_model.model.embed_tokens
+
+        # share embed_tokens with the target model if needed
+        if get_pp_group().world_size == 1:
+            assert "model.embed_tokens.weight" not in loaded_weights, \
+            "For PP = 1, Eagle draft should share embed with target model"
+            logger.info(
+                "The EAGLE head shares the same vocab embedding" \
+                " with the target model."
+            )
+            self.model.model.embed_tokens = target_model.model.embed_tokens
         else:
+            assert "model.embed_tokens.weight" in loaded_weights, \
+            "For PP > 1, Eagle draft checkpoint should its own copy of "
+            " the model.embed_tokens.weight"
+            logger.info(
+                "Since PP > 1, the EAGLE head loaded its own vocab embedding" \
+                " weights instead of sharing them with the target model."
+            )
+
+        # share lm_head with the target model if needed
+        # some model definition do not define lm_head explicitly
+        # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
+        if self.vllm_config.speculative_config.method != "eagle3" and \
+                hasattr(target_model, "lm_head"):
             logger.info("Loading EAGLE LM head weights from the target model.")
             self.model.lm_head = target_model.lm_head
 
