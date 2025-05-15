@@ -1992,12 +1992,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.initialize_attn_backend(kv_cache_config)
 
         kv_caches: dict[str, torch.Tensor] = {}
-        kv_cache_group_ids: dict[str, int] = {}
 
-        for id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+        for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
             kv_cache_spec = kv_cache_group.kv_cache_spec
             for layer_name in kv_cache_group.layer_names:
-                kv_cache_group_ids[layer_name] = id
                 tensor_config = kv_cache_config.tensors[layer_name]
                 assert tensor_config.size % kv_cache_spec.page_size_bytes == 0
                 num_blocks = tensor_config.size // kv_cache_spec.page_size_bytes
@@ -2024,12 +2022,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if self.speculative_config and self.speculative_config.use_eagle():
             assert isinstance(self.drafter, EagleProposer)
-            assert len(
-                set([
-                    kv_cache_group_ids[layer_name]
-                    for layer_name in self.drafter.attn_layer_names
-                ])) == 1, "For multi-layer eagle draft model, "
-            "all layers should belong to the same kv cache group"
+            # validate all draft model layers belong to the same kv cache
+            # group
+            self.drafter.validate_kv_cache_group(kv_cache_config)
 
         bind_kv_cache(
             kv_caches,
