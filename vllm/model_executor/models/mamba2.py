@@ -103,6 +103,7 @@ class Mamba2Model(nn.Module):
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
         )
+        self.mamba2_metadata = None
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -140,9 +141,10 @@ class Mamba2Model(nn.Module):
 
         attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
 
-        mamba2_metadata = prepare_mamba2_metadata(
+        self.mamba2_metadata = prepare_mamba2_metadata(
             chunk_size=self.config.chunk_size,
             attn_metadata=attn_metadata,
+            mamba2_metadata=self.mamba2_metadata,
         )
 
         for i in range(len(self.layers)):
@@ -154,7 +156,8 @@ class Mamba2Model(nn.Module):
                 residual=residual,
                 mamba_cache_params=mamba_cache_params.at_layer_idx(
                     i - self.start_layer),
-                mamba2_metadata=mamba2_metadata)
+                mamba2_metadata=self.mamba2_metadata,
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
