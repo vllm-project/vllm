@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 import importlib.util
+import threading
 from typing import TYPE_CHECKING
+from weakref import WeakValueDictionary
 
 import torch
 import torch.distributed as dist
@@ -14,6 +16,24 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 else:
     FusedMoE = None
+
+
+class Cache:
+
+    def __init__(self):
+        self._cache: WeakValueDictionary = WeakValueDictionary()
+        self._lock = threading.RLock()  # Reentrant lock for thread safety
+
+    def get_or_create(self, kwargs, func):
+        # Create a hashable key from the kwargs
+        key = tuple(sorted((k, v) for k, v in kwargs.items()))
+
+        with self._lock:
+            instance = self._cache.get(key)
+            if instance is None:
+                instance = func(**kwargs)
+                self._cache[key] = instance
+            return instance
 
 
 class All2AllBase:
@@ -117,36 +137,10 @@ class PPLXAll2All(All2AllBase):
         assert has_pplx, "pplx_kernels not found. Please follow https://github.com/vllm-project/vllm/blob/main/tools/ep_kernels/README.md to install pplx_kernels."  # noqa
         import pplx_kernels as pplx
         super().__init__(cpu_group, model)
-        moe_layer: FusedMoE = None
-        for module in model.modules():
-            if module.__class__.__name__ == "FusedMoE":
-                moe_layer = module
-                break
-        # assume all MoE layers have the same config
-        moe = moe_layer.moe_config
-        max_num_tokens = moe.max_num_tokens
-
-        all_to_all_args = dict(
-            max_num_tokens=max_num_tokens,
-            num_experts=moe.num_experts,
-            experts_per_token=moe.experts_per_token,  # topk
-            rank=self.rank,
-            world_size=self.world_size,
-            dp_size=self.tp_group.
-            world_size,  # dp_size actually means tp_size, bug in pplx kernels
-            hidden_dim=moe.hidden_dim,
-            hidden_dim_bytes=moe.hidden_dim * moe.in_dtype.itemsize,
-            # For blocked per token: set to
-            #   ceil_div(hidden_dim, block_size) * sizeof(float32)
-            # For per-token: set to sizeof(float32)
-            hidden_dim_scale_bytes=(0 if moe.in_dtype.itemsize != 1 else
-                                    ((moe.hidden_dim + moe.block_size - 1) //
-                                     moe.block_size * torch.float32.itemsize)),
-            group_name=self.cpu_group.group_name,
-        )
 
         if self.internode:
-            # inter-node communication needs nvshmem
+            # inter-node communication needs nvshmem,
+            # intra-node communication uses p2p mapping directly
             from pplx_kernels.nvshmem import (nvshmem_alloc_empty_unique_id,
                                               nvshmem_get_unique_id,
                                               nvshmem_init)
@@ -160,16 +154,43 @@ class PPLXAll2All(All2AllBase):
                            group=self.cpu_group)
             logger.debug("PPLX NVSHMEM UID = %s", uid)
             nvshmem_init(uid, self.rank, self.world_size)
-            self.pplx_handle = pplx.AllToAll.internode(**all_to_all_args)
-        else:
-            # intra-node communication uses p2p mapping directly
-            self.pplx_handle = pplx.AllToAll.intranode(**all_to_all_args)
 
-        # TODO: refactor the initialization logic
-        for module in model.modules():
-            if module.__class__.__name__ == "FusedMoE":
-                module.quant_method.fused_experts.prepare_finalize.a2a \
-                    = self.pplx_handle
+        self.handle_cache = Cache()
+
+        moe_modules = [
+            module for module in model.modules()
+            if module.__class__.__name__ == "FusedMoE"
+        ]
+        for module in moe_modules:
+            moe_layer = module
+            moe = moe_layer.moe_config
+            max_num_tokens = moe.max_num_tokens
+
+            all_to_all_args = dict(
+                max_num_tokens=max_num_tokens,
+                num_experts=moe.num_experts,
+                experts_per_token=moe.experts_per_token,  # topk
+                rank=self.rank,
+                world_size=self.world_size,
+                # dp_size actually means tp_size, bug in pplx kernels
+                dp_size=self.tp_group.world_size,
+                hidden_dim=moe.hidden_dim,
+                hidden_dim_bytes=moe.hidden_dim * moe.in_dtype.itemsize,
+                # For blocked per token: set to
+                #   ceil_div(hidden_dim, block_size) * sizeof(float32)
+                # For per-token: set to sizeof(float32)
+                hidden_dim_scale_bytes=(0 if moe.in_dtype.itemsize != 1 else (
+                    (moe.hidden_dim + moe.block_size - 1) // moe.block_size *
+                    torch.float32.itemsize)),
+                group_name=self.cpu_group.group_name,
+            )
+
+            pplx_handle = self.handle_cache.get_or_create(
+                all_to_all_args, pplx.AllToAll.internode
+                if self.internode else pplx.AllToAll.intranode)
+
+            moe_layer.quant_method.fused_experts.prepare_finalize.a2a \
+                = pplx_handle
 
     def dispatch(self, hidden_states: torch.Tensor,
                  router_logits: torch.Tensor):
@@ -179,7 +200,10 @@ class PPLXAll2All(All2AllBase):
         raise NotImplementedError
 
     def destroy(self):
-        self.pplx_handle.destroy()
+        with self.handle_cache._lock:
+            for _, handle in self.handle_cache._cache.items():
+                handle.destroy()
+
         if self.internode:
             from pplx_kernels.nvshmem import nvshmem_finalize
             logger.debug("PPLX NVSHMEM finalize")
