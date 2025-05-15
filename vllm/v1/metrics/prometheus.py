@@ -21,9 +21,6 @@ _prometheus_multiproc_dir: Optional[tempfile.TemporaryDirectory] = None
 def setup_multiprocess_prometheus():
     """Set up prometheus multiprocessing directory if not already configured.
     
-    Returns:
-        bool: True if a new directory was created, False if using existing 
-        config
     """
     global _prometheus_multiproc_dir
 
@@ -35,13 +32,11 @@ def setup_multiprocess_prometheus():
         os.environ["PROMETHEUS_MULTIPROC_DIR"] = _prometheus_multiproc_dir.name
         logger.debug("Created PROMETHEUS_MULTIPROC_DIR at %s",
                      _prometheus_multiproc_dir.name)
-        return True
     else:
         logger.warning("Found PROMETHEUS_MULTIPROC_DIR was set by user. "
                        "This directory must be wiped between vLLM runs or "
                        "you will find inaccurate metrics. Unset the variable "
                        "and vLLM will properly handle cleanup.")
-        return False
 
 
 def unregister_vllm_metrics():
