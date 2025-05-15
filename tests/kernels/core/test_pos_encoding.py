@@ -18,6 +18,7 @@ NUM_HEADS = [17]  # Arbitrary values for testing
 BATCH_SIZES = [5]  # Arbitrary values for testing
 SEQ_LENS = [11, 8192]  # Arbitrary values for testing
 SEEDS = [0]
+PADDING_LEN = 64
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
 ]
@@ -32,7 +33,7 @@ def _get_flat_tensor_shape(batch_size: int, seq_len: int, num_heads: int,
 # For testing sliced tensors
 def _get_padded_tensor_shape(batch_size: int, seq_len: int, num_heads: int,
                              head_size: int) -> tuple[int, ...]:
-    return (batch_size, seq_len, num_heads, head_size + 64)
+    return (batch_size, seq_len, num_heads, head_size + PADDING_LEN)
 
 
 def _get_batch_tensor_shape(batch_size: int, seq_len: int, num_heads: int,
@@ -74,7 +75,7 @@ def test_rotary_embedding(
 ) -> None:
     raw_input_head_size = head_size
     if tensor_shape_fn is _get_padded_tensor_shape:
-        head_size += 64
+        head_size += PADDING_LEN
     if rotary_dim is None:
         rotary_dim = head_size
 
@@ -146,7 +147,7 @@ def test_batched_rotary_embedding(
 
     raw_input_head_size = head_size
     if tensor_shape_fn is _get_padded_tensor_shape:
-        head_size += 64
+        head_size += PADDING_LEN
     if rotary_dim is None:
         rotary_dim = head_size
     rope = get_rope(head_size, rotary_dim, max_position, base, is_neox_style, {
