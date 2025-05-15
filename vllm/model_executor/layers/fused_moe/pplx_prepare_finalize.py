@@ -115,7 +115,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             bound_m=bound_m,
         )
 
-        return expert_x, expert_x_scale, expert_num_tokens
+        return expert_x, expert_x_scale, expert_num_tokens, None, None
 
     def finalize(
         self,

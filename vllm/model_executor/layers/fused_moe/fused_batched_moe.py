@@ -449,7 +449,7 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                  first_expert, :rows, :] = a1[:topks.numel()][topks]
             tokens_per_expert[expert_id - first_expert] = rows
 
-        return b_a1, a1_scale, tokens_per_expert
+        return b_a1, a1_scale, tokens_per_expert, None, None
 
     def finalize(
         self,

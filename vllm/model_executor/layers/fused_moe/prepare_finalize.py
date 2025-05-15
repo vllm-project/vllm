@@ -46,7 +46,7 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
                                                    self.per_channel_quant,
                                                    self.block_shape)
 
-        return a1q, a1q_scale, None
+        return a1q, a1q_scale, None, None, None
 
     def finalize(
         self,
