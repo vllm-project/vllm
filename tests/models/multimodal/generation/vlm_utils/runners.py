@@ -113,7 +113,6 @@ def run_audio_test(
     vllm_runner: type[VllmRunner],
     audio_assets: AudioTestAssets,
 ):
-    assert test_case.size_wrapper is not None
     inputs = builders.build_audio_inputs_from_test_info(
         model_test_info, audio_assets)
 
