@@ -164,6 +164,15 @@ class KVCacheCoordinator:
         for manager in self.single_type_managers:
             manager.remove_skipped_blocks(request_id, num_computed_tokens)
 
+    def get_block_ids(self, request_id: str) -> list[list[KVCacheBlockBundle]]:
+        """
+        Get the block IDs for the request.
+        """
+        return [
+            manager.req_to_blocks[request_id]
+            for manager in self.single_type_managers
+        ]
+
     def find_longest_cache_hit(
         self, request: Request, block_hashes_dict: dict[int,
                                                         list[BlockHashType]],

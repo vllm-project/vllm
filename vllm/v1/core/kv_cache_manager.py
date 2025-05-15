@@ -379,9 +379,5 @@ class KVCacheManager:
 
     def get_block_ids(self, request_id: str) -> list[list[int]]:
         """Get the block ids of a request."""
-        # TODO: implement this
-        return []
-        # assert request_id in self.single_type_manager.req_to_blocks
-        # return KVCacheBlocks(self.single_type_manager.req_to_blocks
-        # [request_id]
-        #                      ).get_block_ids()
+        return KVCacheBlocks(self.coordinator.get_block_ids(request_id),
+                             self.group_to_manager).get_block_ids()
