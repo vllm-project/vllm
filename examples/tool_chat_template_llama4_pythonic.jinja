@@ -1,10 +1,12 @@
 {{- bos_token }}
 {%- if custom_tools is defined and custom_tools%}
     {%- set tools = custom_tools %}
+{%- set tool_definition = tool_definition ~ (tools | tojson(indent=4)) ~ "\n" %}
 {%- endif %}
 {%- if not tools is defined %}
     {%- set tools = none %}
 {%- endif %}
+
 {#- This block extracts the system message, so we can slot it into the right place. #}
 {%- if messages[0]['role'] == 'system' %}
     {%- set user_provided_system_message = true %}
@@ -27,10 +29,12 @@
     {#- always use user provided system message to override default tool system message #}
     {{- "<|header_start|>system<|header_end|>\n\n" }}
     {{- system_message }}
-    {%- if tools is not none %}
-    {{- tools | tojson(indent=4) }}
-    {{- "\n" }}
-    {%- endif %}
+     {%- if user_provided_system_message and tools %}
+     {{- "\nHere is a list of functions in JSON format that you can invoke. Use exact format: [func_name1(param1=value1, param2=value2), func_name2(...)]\n" }}
+     {{- tool_definition -}}
+     {%- elif tool_definition %}
+     {{- tool_definition -}}
+     {%- endif %}
     {{- "<|eot|>" }}
 {%- endif %}
 {#- Now deal with all other messages #}
