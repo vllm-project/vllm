@@ -196,7 +196,7 @@ class MoEConfig:
     # TODO: add more quantization params, blocked, per-token, etc.
     block_size: int = 128
 
-    max_num_tokens: int
+    max_num_tokens: int = MOE_DP_CHUNK_SIZE
 
     @property
     def tp_size(self):
