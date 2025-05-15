@@ -1439,6 +1439,7 @@ class FlexibleArgumentParser(ArgumentParser):
                 else:
                     original[k] = v
 
+        delete = set()
         dict_args: dict[str, dict] = defaultdict(dict)
         for i, processed_arg in enumerate(processed_args):
             if processed_arg.startswith("--") and "." in processed_arg:
@@ -1449,14 +1450,16 @@ class FlexibleArgumentParser(ArgumentParser):
                         continue
                 else:
                     value = processed_args[i + 1]
-                    processed_args[i + 1] = ""
+                    delete.add(i + 1)
                 key, *keys = processed_arg.split(".")
                 # Merge all values with the same key into a single dict
                 arg_dict = create_nested_dict(keys, value)
                 recursive_dict_update(dict_args[key], arg_dict)
-                processed_args[i] = ""
-        # Filter out the dict args we set to empty strings
-        processed_args = [a for a in processed_args if a]
+                delete.add(i)
+        # Filter out the dict args we set to None
+        processed_args = [
+            a for i, a in enumerate(processed_args) if i not in delete
+        ]
         # Add the dict args back as if they were originally passed as JSON
         for dict_arg, dict_value in dict_args.items():
             processed_args.append(dict_arg)
