@@ -7,8 +7,6 @@ import torch
 
 import vllm.envs as envs
 from vllm.compilation.collective_fusion import AsyncTPPass
-from vllm.compilation.fx_utils import (find_specified_fn,
-                                       find_specified_fn_maybe)
 from vllm.config import (CompilationConfig, DeviceConfig, ModelConfig,
                          PassConfig, VllmConfig)
 from vllm.distributed import (tensor_model_parallel_all_gather,
@@ -93,7 +91,7 @@ class TestAGMMModel(torch.nn.Module):
 
 
 @multi_gpu_test(num_gpus=2)
-@pytest.mark.parametrize("test_model", ["TestMMRSModel", "TestAGMMModel"])
+@pytest.mark.parametrize("test_model", [TestMMRSModel, TestAGMMModel])
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("seq_len", [16])
 @pytest.mark.parametrize("hidden_size", [16])
@@ -117,7 +115,8 @@ def test_async_tp_pass_replace(test_model: str, batch_size: int, seq_len: int,
 
 
 def async_tp_pass_on_test_model(local_rank: int, world_size: int,
-                                test_model: str, batch_size: int, seq_len: int,
+                                test_model_cls: torch.nn.Module,
+                                batch_size: int, seq_len: int,
                                 hidden_size: int, dtype: torch.dtype):
     current_platform.seed_everything(0)
 
@@ -158,12 +157,7 @@ def async_tp_pass_on_test_model(local_rank: int, world_size: int,
     async_tp_pass = AsyncTPPass(vllm_config)
     backend = TestBackend(async_tp_pass)
 
-    if test_model == "TestMMRSModel":
-        model = TestMMRSModel(hidden_size)
-    elif test_model == "TestAGMMModel":
-        model = TestAGMMModel(hidden_size)
-    else:
-        raise ValueError(f"Unknown model: {test_model}")
+    model = test_model_cls(hidden_size)
 
     hidden_states = torch.randn((batch_size * seq_len, hidden_size),
                                 dtype=dtype,
@@ -172,21 +166,14 @@ def async_tp_pass_on_test_model(local_rank: int, world_size: int,
     compiled_model = torch.compile(model, backend=backend)
     compiled_model(hidden_states)
 
-    # Check substitution worked
-    pre_nodes = backend.graph_pre_pass.nodes
-    post_nodes = backend.graph_post_pass.nodes
-
-    # In pre-nodes, all reduce should exist,
+    # In pre-nodes, all gather or reduce scatter should exist,
     # fused_matmul_reduce_scatter or fused_all_gather_matmul should not
-    for op in model.ops_in_model_before():
-        find_specified_fn(pre_nodes, op)
-    for op in model.ops_in_model_after():
-        assert find_specified_fn_maybe(pre_nodes, op) is None
+    backend.check_before_ops(model.ops_in_model_before(),
+                             ops_fully_replaced=False)
 
     # In post-nodes, fused_matmul_reduce_scatter or \
     # fused_all_gather_matmul should exist
-    for op in model.ops_in_model_after():
-        find_specified_fn(post_nodes, op)
+    backend.check_after_ops(model.ops_in_model_after())
 
 
 @create_new_process_for_each_test()
@@ -258,12 +245,9 @@ def test_async_tp_pass_correctness(
         "mp",
     ]
 
-    try:
-        compare_two_settings(model_id,
-                             aysnc_tp_args,
-                             tp_args,
-                             async_tp_env,
-                             tp_env,
-                             method="generate")
-    except Exception:
-        raise
+    compare_two_settings(model_id,
+                         aysnc_tp_args,
+                         tp_args,
+                         async_tp_env,
+                         tp_env,
+                         method="generate")

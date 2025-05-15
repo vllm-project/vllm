@@ -106,10 +106,11 @@ class AsyncTPPass(VllmInductorPass):
         enable_symm_mem_for_group(get_tp_group().device_group.group_name)
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="async_tp_pass")
-        GEMMReduceScatterPattern(self.dtype,
+        GEMMReduceScatterPattern(self.model_dtype,
                                  self.device).register(self.patterns)
 
-        AllGatherGEMMPattern(self.dtype, self.device).register(self.patterns)
+        AllGatherGEMMPattern(self.model_dtype,
+                             self.device).register(self.patterns)
 
     def is_applicable_for_shape(self, shape: Optional[int]) -> bool:
         # only do replace for specific shapes

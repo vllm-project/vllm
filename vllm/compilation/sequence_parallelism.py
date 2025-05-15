@@ -243,12 +243,12 @@ class SequenceParallelismPass(VllmInductorPass):
             pass_name="sequence_parallelism_pass")
         for epsilon in [1e-5, 1e-6]:
             EmbeddingAllReduceRMSNormPattern(
-                epsilon, self.dtype, self.device).register(self.patterns)
+                epsilon, self.model_dtype, self.device).register(self.patterns)
 
-            MiddleAllReduceRMSNormPattern(epsilon, self.dtype,
+            MiddleAllReduceRMSNormPattern(epsilon, self.model_dtype,
                                           self.device).register(self.patterns)
 
-            LastAllReduceRMSNormPattern(epsilon, self.dtype,
+            LastAllReduceRMSNormPattern(epsilon, self.model_dtype,
                                         self.device).register(self.patterns)
             # WARNING: This is a hack to clear the pattern matcher cache
             # and allow multiple values of epsilon.
