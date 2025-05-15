@@ -186,8 +186,8 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
         json_tip = """\n\nShould either be a valid JSON string or JSON keys
         passed individually. For example, the following sets of arguments are
         equivalent:\n\n
-        - --json-arg '{"key1": "value1", "key2": {"key3": "value2"}}'\n
-        - --json-arg.key1 value1 --json-arg.key2.key3 value2\n\n"""
+        - `--json-arg '{"key1": "value1", "key2": {"key3": "value2"}}'`\n
+        - `--json-arg.key1 value1 --json-arg.key2.key3 value2`\n\n"""
         if dataclass_cls is not None:
             dataclass_init = lambda x, f=dataclass_cls: f(**json.loads(x))
             # Special case for configs with a from_cli method
