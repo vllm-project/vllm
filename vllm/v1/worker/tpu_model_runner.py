@@ -31,6 +31,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils import LayerBlockType, cdiv, is_pin_memory_available
 from vllm.v1.attention.backends.pallas import (PallasAttentionBackend,
                                                PallasMetadata)
+from vllm.v1.attention.backends.utils import validate_kv_target_layer
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
                                         KVCacheConfig, KVCacheSpec,
@@ -236,6 +237,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self.arange_np = np.arange(self.max_num_tokens, dtype=np.int64)
         self.num_reqs_paddings = _get_req_paddings(
             min_req_size=MIN_NUM_SEQS, max_req_size=self.max_num_reqs)
+
+        self.shared_kv_cache_layers: dict[str, str] = {}
 
         # tensors for structured decoding
         self.grammar_bitmask_cpu = torch.zeros(
@@ -454,6 +457,13 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         block_size = self.vllm_config.cache_config.block_size
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         for layer_name, attn_module in layers.items():
+            if (kv_tgt_layer :=
+                    attn_module.kv_sharing_target_layer_name) is not None:
+                validate_kv_target_layer(layer_name, kv_tgt_layer, layers)
+                # KV cache is shared with earlier layer, don't create a spec
+                self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
+                continue
+
             if attn_module.attn_type == AttentionType.DECODER:
                 if attn_module.sliding_window is not None:
                     kv_cache_spec[layer_name] = SlidingWindowSpec(
@@ -1346,8 +1356,9 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             0].get_cpu_tensor().dtype
 
         kv_caches: dict[str, torch.Tensor] = {}
+        layer_to_kv_cache_group_idx: dict[str, int] = {}
 
-        for kv_cache_group in kv_cache_config.kv_cache_groups:
+        for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
             kv_cache_spec = kv_cache_group.kv_cache_spec
             for layer_name in kv_cache_group.layer_names:
                 tensor_config = kv_cache_config.tensors[layer_name]
@@ -1371,9 +1382,19 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                     tpu_kv_cache = torch.zeros(kv_cache_shape,
                                                dtype=dtype).to(self.device)
 
+                    layer_to_kv_cache_group_idx[layer_name] = i
                     kv_caches[layer_name] = tpu_kv_cache
                 else:
                     raise NotImplementedError
+
+        # with KV sharing, some layers can share KV caches with earlier layers
+        for layer_name, target_layer_name in self.shared_kv_cache_layers.items(
+        ):
+            kv_caches[layer_name] = kv_caches[target_layer_name]
+            group_idx = layer_to_kv_cache_group_idx[target_layer_name]
+            # attention metadata is assigned for each layer in layer_names
+            kv_cache_config.kv_cache_groups[group_idx].layer_names.append(
+                layer_name)
 
         bind_kv_cache(
             kv_caches,

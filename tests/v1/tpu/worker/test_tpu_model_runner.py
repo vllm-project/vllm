@@ -3,8 +3,12 @@ import unittest.mock as mock
 
 import pytest
 
+from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.sampling_params import SamplingParams
+from vllm.utils import GiB_bytes
+from vllm.v1.core.kv_cache_utils import (estimate_max_model_len,
+                                         get_kv_cache_config)
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
 from vllm.v1.worker.tpu_model_runner import (
@@ -362,3 +366,165 @@ def test_get_req_paddings():
     assert _get_req_paddings(1, 32) == [8, 16, 32]
     assert _get_req_paddings(8, 32) == [8, 16, 32]
     assert _get_req_paddings(8, 36) == [8, 16, 32, 36]
+
+
+def test_init_kv_cache_with_kv_sharing_target_layer_not_exist(model_runner):
+    layer_0 = "model.layers.0.self_attn.attn"
+    layer_1 = "model.layers.1.self_attn.attn"
+    invalid_layer = "model.layers.0.cross_attn.attn"
+    fwd_context = {
+        layer_0:
+        Attention(
+            num_heads=8,
+            head_size=64,
+            scale=1.0,
+            prefix=layer_0,
+        ),
+        layer_1:
+        Attention(
+            num_heads=8,
+            head_size=64,
+            scale=1.0,
+            prefix=layer_1,
+            # invalid layer: cross_attn.atn doesn't exist!
+            kv_sharing_target_layer_name=invalid_layer,
+        )
+    }
+    model_runner.vllm_config.compilation_config.static_forward_context = (
+        fwd_context)
+    error_msg = f"{invalid_layer} is not a Attention layer in the model"
+    with pytest.raises(ValueError, match=error_msg):
+        model_runner.get_kv_cache_spec()
+
+
+def test_init_kv_cache_without_kv_sharing(model_runner):
+    layer_0 = "model.layers.0.self_attn.attn"
+    layer_1 = "model.layers.1.self_attn.attn"
+    fwd_context = {
+        layer_0: Attention(
+            num_heads=8,
+            head_size=64,
+            scale=1.0,
+        ),
+        layer_1: Attention(
+            num_heads=8,
+            head_size=64,
+            scale=1.0,
+        )
+    }
+    vllm_config = model_runner.vllm_config
+    # Set high context length to test max context length estimation
+    model_runner.vllm_config.model_config.max_model_len = 3_000_000
+    # Hacky way to initialize forward context without initializing the model.
+    model_runner.vllm_config.compilation_config.static_forward_context = (
+        fwd_context)
+    vllm_ctx = (
+        model_runner.vllm_config.compilation_config.static_forward_context)
+    kv_cache_spec = model_runner.get_kv_cache_spec()
+    assert len(kv_cache_spec) == 2
+    assert len(model_runner.shared_kv_cache_layers) == 0
+
+    available_memory = 20 * GiB_bytes
+    # page size for layer 0's kv_cache_spec is 32KB
+    num_expected_blocks = 327680  # 20GB / 32KB / 2 (num layers)
+    kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
+                                          available_memory)
+    assert kv_cache_config.num_blocks == num_expected_blocks
+    assert len(kv_cache_config.tensors) == 2
+    assert kv_cache_config.tensors[layer_0].size == available_memory // 2
+    assert kv_cache_config.tensors[layer_1].size == available_memory // 2
+
+    max_context_len =\
+        estimate_max_model_len(vllm_config, kv_cache_spec, 5 * GiB_bytes)
+    # max context len with KV sharing should be 2x as large as without
+    assert max_context_len == 1310720
+
+    # important: override tensor size to prevent large mem alloc during test
+    # this will only allocate 2 block worth of memory (2 * 32kb)
+    kv_cache_config.num_blocks = 1
+    for layer in kv_cache_config.tensors:
+        kv_cache_config.tensors[layer].size =\
+            kv_cache_spec[layer].page_size_bytes
+
+    model_runner.initialize_kv_cache(kv_cache_config)
+
+    layer_0_kv = vllm_ctx[layer_0].kv_cache[0]
+    layer_1_kv = vllm_ctx[layer_1].kv_cache[0]
+    # check layer 1 kv cache does NOT share memory with layer 0
+    assert id(layer_1_kv) != id(layer_0_kv)
+
+    # check layer 1 added to kv cache group's layer names
+    assert len(kv_cache_config.kv_cache_groups) == 1
+    assert len(kv_cache_config.kv_cache_groups[0].layer_names) == 2
+    assert kv_cache_config.kv_cache_groups[0].layer_names[0] == layer_0
+    assert kv_cache_config.kv_cache_groups[0].layer_names[1] == layer_1
+
+
+def test_init_kv_cache_with_kv_sharing_valid(model_runner):
+    layer_0 = "model.layers.0.self_attn.attn"
+    layer_1 = "model.layers.1.self_attn.attn"
+    fwd_context = {
+        layer_0:
+        Attention(
+            num_heads=8,
+            head_size=64,
+            scale=1.0,
+            prefix=layer_0,
+        ),
+        layer_1:
+        Attention(
+            num_heads=8,
+            head_size=64,
+            scale=1.0,
+            prefix=layer_1,
+            kv_sharing_target_layer_name="model.layers.0.self_attn.attn",
+        )
+    }
+    vllm_config = model_runner.vllm_config
+    # Set high context length to test max context length estimation
+    model_runner.vllm_config.model_config.max_model_len = 3_000_000
+    model_runner.vllm_config.compilation_config.static_forward_context = (
+        fwd_context)
+    vllm_ctx = (
+        model_runner.vllm_config.compilation_config.static_forward_context)
+    kv_cache_spec = model_runner.get_kv_cache_spec()
+    assert len(kv_cache_spec) == 1
+    assert layer_0 in kv_cache_spec
+    assert model_runner.shared_kv_cache_layers[layer_1] == layer_0
+
+    available_memory = 20 * GiB_bytes
+    # page size for layer 0's kv_cache_spec is 32KB
+    # with KV sharing, we can allocate (available_mem//page_size//1) blocks
+    # which is twice as many as without KV sharing
+    num_expected_blocks = 655360  # 20GB / 32KB
+    kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
+                                          available_memory)
+    assert kv_cache_config.num_blocks == num_expected_blocks
+    assert len(kv_cache_config.tensors) == 1
+    # Each layer now has twice the available memory for KV cache
+    # compared to no KV sharing
+    assert kv_cache_config.tensors[layer_0].size == available_memory
+
+    max_context_len =\
+        estimate_max_model_len(vllm_config, kv_cache_spec, 5 * GiB_bytes)
+    # max context len with KV sharing should be 2x as large as without
+    assert max_context_len == 2 * 1310720
+
+    # important: override tensor size to prevent large mem alloc during test
+    # this will only allocate 1 block worth of memory (32kb)
+    kv_cache_config.num_blocks = 1
+    kv_cache_config.tensors[layer_0].size =\
+        kv_cache_spec[layer_0].page_size_bytes
+
+    model_runner.initialize_kv_cache(kv_cache_config)
+
+    layer_0_kv = vllm_ctx[layer_0].kv_cache[0]
+    layer_1_kv = vllm_ctx[layer_1].kv_cache[0]
+    # check layer 1 kv cache shares memory with layer 0
+    assert id(layer_1_kv) == id(layer_0_kv)
+
+    # check layer 1 added to kv cache group's layer names
+    assert len(kv_cache_config.kv_cache_groups) == 1
+    assert len(kv_cache_config.kv_cache_groups[0].layer_names) == 2
+    assert kv_cache_config.kv_cache_groups[0].layer_names[0] == layer_0
+    assert kv_cache_config.kv_cache_groups[0].layer_names[1] == layer_1
