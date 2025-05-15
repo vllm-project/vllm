@@ -132,9 +132,8 @@ class BitmaskStructuredOutputBackend(StructuredOutputBackend):
             require_struct_decoding, grammar_bitmask_padded, arange = \
             self.prepare_structured_decoding_input_tpu(logits,
                                                 scheduler_output, input_batch)
-            logits = self.structured_decode_tpu(require_struct_decoding,
-                                                grammar_bitmask_padded, logits,
-                                                arange)
+            self.structured_decode_tpu(require_struct_decoding,
+                                       grammar_bitmask_padded, logits, arange)
 
     @abstractmethod
     def allocate_token_bitmask(self, max_num_seqs: int) -> torch.Tensor:
@@ -227,7 +226,7 @@ class BitmaskStructuredOutputBackend(StructuredOutputBackend):
                 self.vllm_config.scheduler_config.max_num_seqs, MIN_NUM_SEQS)
             pin_memory = is_pin_memory_available()
             self.require_structured_out_cpu = torch.zeros(
-                (self.max_num_reqs, 1),
+                (self.max_num_reqs),
                 dtype=torch.bool,
                 device="cpu",
                 pin_memory=pin_memory)
@@ -285,26 +284,36 @@ class BitmaskStructuredOutputBackend(StructuredOutputBackend):
     @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def structured_decode_tpu(self, require_struct_decoding: torch.Tensor,
                               grammar_bitmask: torch.Tensor,
-                              logits: torch.Tensor,
-                              arange: torch.Tensor) -> torch.Tensor:
-        return torch.where(
-            require_struct_decoding,
-            self.apply_grammar_bitmask_tpu(logits, grammar_bitmask, arange),
-            logits)
-
-    def apply_grammar_bitmask_tpu(self, logits: torch.Tensor,
-                                  grammar_bitmask: torch.Tensor,
-                                  arange: torch.Tensor):
+                              logits: torch.Tensor, arange: torch.Tensor):
+        """Applies structured decoding by modifying logits in-place 
+        where required.
+        
+        Args:
+            require_struct_decoding: [B] boolean tensor indicating 
+                which batch items need structured decoding
+            grammar_bitmask: [B, vocab_size//32] packed bit tensor 
+                containing valid token masks
+            logits: [B, vocab_size] tensor to modify in-place
+            arange: [32] tensor for bit unpacking, contains values [0..31]
+        """
         assert (logits.shape[0] == grammar_bitmask.shape[0])
-        logits_cloned = logits.clone()
-        for i in range(logits.shape[0]):
-            unpacked_bitmask = (torch.bitwise_right_shift(
-                grammar_bitmask[i][:, None], arange[None, :]) & 1) == 0
-            unpacked_bitmask = unpacked_bitmask.reshape(
-                -1)[:self.tpu_vocab_size]
-            logits_cloned[i] = logits_cloned[i].masked_fill(
-                unpacked_bitmask, -float("inf"))
-        return logits_cloned
+
+        # Unpack bits for all batch items at once
+        unpacked_bitmask = (
+            torch.bitwise_right_shift(
+                grammar_bitmask[:, :, None],  # [B, vocab_size//32, 1]
+                arange[None, None, :]  # [1, 1, 32]
+            ) & 1) == 0  # Result: [B, vocab_size//32, 32]
+
+        unpacked_bitmask = unpacked_bitmask.reshape(
+            logits.shape[0], -1)[:, :self.tpu_vocab_size]  # [B, vocab_size]
+
+        # Only apply mask where require_struct_decoding is True
+        mask_to_apply = unpacked_bitmask & \
+            require_struct_decoding[:,None]  # [B, vocab_size]
+
+        # Apply mask in-place
+        logits.masked_fill_(mask_to_apply, -float("inf"))
 
     def precompile(self, num_reqs_paddings: list[int], device: torch.device,
                    hidden_states_dtype: torch.dtype):
