@@ -9,7 +9,7 @@ import importlib
 import multiprocessing
 import os
 import shutil
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -46,7 +46,7 @@ TORCH_DTYPE_TO_NEURON_AMP = {
 }
 
 # Models supported by Neuronx distributed for inference.
-_NEURON_SUPPORTED_MODELS: Dict[str, Tuple[str, str]] = {
+_NEURON_SUPPORTED_MODELS: dict[str, tuple[str, str]] = {
     "LlamaForCausalLM":
     ("neuronx_distributed_inference.models.llama.modeling_llama",
      "NeuronLlamaForCausalLM"),
@@ -365,7 +365,7 @@ class NeuronSpeculationCausalLM(nn.Module):
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[list[SamplerOutput]]:
         batch_size, num_steps = logits.shape
         seq_ids = [
             seq_id for sg in sampling_metadata.seq_groups
