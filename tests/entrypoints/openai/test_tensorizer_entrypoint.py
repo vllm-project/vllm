@@ -17,8 +17,8 @@ from vllm.model_executor.model_loader.tensorizer import (
 from ...conftest import VllmRunner
 from ...utils import RemoteOpenAIServer
 
-MODEL_NAME = "meta-llama/Llama-2-7b-hf"
-LORA_PATH = "yard1/llama-2-7b-sql-lora-test"
+MODEL_NAME = "unsloth/llama-3.2-1b-Instruct"
+LORA_PATH = "davzoku/finqa_adapter_1b"
 
 
 def _cleanup():
