@@ -1431,19 +1431,29 @@ class FlexibleArgumentParser(ArgumentParser):
                 nested_dict = {key: nested_dict}
             return nested_dict
 
+        def recursive_dict_update(original: dict, update: dict):
+            """Recursively updates a dictionary with another dictionary."""
+            for k, v in update.items():
+                if isinstance(v, dict) and isinstance(original.get(k), dict):
+                    recursive_dict_update(original[k], v)
+                else:
+                    original[k] = v
+
         dict_args: dict[str, dict] = defaultdict(dict)
-        # Loop in reverse because we are modifying the list
-        for i, processed_arg in reversed(list(enumerate(processed_args))):
+        for i, processed_arg in enumerate(processed_args):
             if processed_arg.startswith("--") and "." in processed_arg:
                 if "=" in processed_arg:
                     processed_arg, value = processed_arg.split("=", 1)
                 else:
                     value = processed_args[i + 1]
-                    del processed_args[i + 1]
+                    processed_args[i + 1] = ""
                 key, *keys = processed_arg.split(".")
                 # Merge all values with the same key into a single dict
-                dict_args[key].update(create_nested_dict(keys, value))
-                del processed_args[i]
+                arg_dict = create_nested_dict(keys, value)
+                recursive_dict_update(dict_args[key], arg_dict)
+                processed_args[i] = ""
+        # Filter out the dict args we set to empty strings
+        processed_args = [a for a in processed_args if a]
         # Add the dict args back as if they were originally passed as JSON
         for dict_arg, dict_value in dict_args.items():
             processed_args.append(dict_arg)
