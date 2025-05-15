@@ -315,8 +315,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       "csrc/quantization/gptq_marlin/gptq_marlin.cu"
       "csrc/quantization/gptq_marlin/gptq_marlin_repack.cu"
       "csrc/quantization/gptq_marlin/awq_marlin_repack.cu"
-    NO_ARCH_MSG
-      "Not building Marlin kernels as no compatible archs found in CUDA target architectures"
   )
 
   # AllSpark kernels
@@ -326,7 +324,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     SRCS
       "csrc/quantization/gptq_allspark/allspark_repack.cu"
       "csrc/quantization/gptq_allspark/allspark_qgemm_w8a16.cu"
-    NO_ARCH_MSG "Not building AllSpark kernels as no compatible archs found in CUDA target architectures"
   )
 
 
@@ -405,7 +402,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       "csrc/quantization/fp4/nvfp4_scaled_mm_kernels.cu"
       "csrc/quantization/fp4/nvfp4_blockwise_moe_kernel.cu"
     FLAGS "-DENABLE_NVFP4=1"
-    NO_ARCH_MSG "Not building NVFP4 as no compatible archs were found."
   )
 
   # CUTLASS MLA Archs and flags
@@ -415,7 +411,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     ARCHS "10.0a"
     SRCS "csrc/attention/mla/cutlass_mla_kernels.cu"
     FLAGS "-DENABLE_CUTLASS_MLA=1"
-    NO_ARCH_MSG "Not building CUTLASS MLA as no compatible archs were found."
   )
   # Add MLA-specific include directories only to MLA source files
   set_source_files_properties(
@@ -450,8 +445,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     VERSION_MSG
       "Not building Machete kernels as CUDA Compiler version is less than 12.0."
       "We recommend upgrading to CUDA 12.0 or later to run w4a16 quantized models on Hopper."
-    NO_ARCH_MSG
-      "Not building Machete kernels as no compatible archs found in CUDA target architectures"
   )
 # if CUDA endif
 endif()
@@ -497,7 +490,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     GEN_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/marlin_moe_wna16/generate_kernels.py"
     GEN_GLOB "csrc/moe/marlin_moe_wna16/*.cu"
     SRCS "csrc/moe/moe_wna16.cu"
-    NO_ARCH_MSG "Not building Marlin MOE kernels as no compatible archs found in CUDA target architectures"
     OUT_SRCS_VAR VLLM_MOE_EXT_SRC
   )
 endif()
