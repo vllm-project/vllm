@@ -611,7 +611,7 @@ class MQLLMEngineClient(EngineClient):
         # it here to avoid contending with cpu resources and the GIL on the
         # backend process.
         if isinstance(params, SamplingParams) and \
-            params.guided_decoding is not None:
+            params.structured_output is not None:
             params = await \
                 build_guided_decoding_logits_processor_async(
                     sampling_params=params,

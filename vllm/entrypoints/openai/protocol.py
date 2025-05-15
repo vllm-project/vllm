@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 # SPDX-License-Identifier: Apache-2.0
 
 # Adapted from
@@ -12,15 +13,18 @@ import torch
 from fastapi import HTTPException, UploadFile
 from pydantic import (BaseModel, ConfigDict, Field, TypeAdapter,
                       ValidationInfo, field_validator, model_validator)
-from typing_extensions import TypeAlias
+from typing_extensions import Self, TypeAlias, deprecated
 
 from vllm import envs
+from vllm.config import StructuredOutputBackend
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          random_tool_call_id)
 from vllm.logger import init_logger
 from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
-                                  RequestOutputKind, SamplingParams)
+from vllm.sampling_params import (AnyStructuredOutputJsonFormat,
+                                  BeamSearchParams, RequestOutputKind,
+                                  SamplingParams, StructuredOutputParams,
+                                  StructuredOutputParamsDict)
 from vllm.sequence import Logprob
 from vllm.utils import random_uuid, resolve_obj_by_qualname
 
@@ -326,43 +330,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
     )
-    guided_json: Optional[Union[str, dict, BaseModel]] = Field(
+    structured_output: Optional[StructuredOutputParamsDict] = Field(
         default=None,
-        description=("If specified, the output will follow the JSON schema."),
-    )
-    guided_regex: Optional[str] = Field(
-        default=None,
-        description=(
-            "If specified, the output will follow the regex pattern."),
-    )
-    guided_choice: Optional[list[str]] = Field(
-        default=None,
-        description=(
-            "If specified, the output will be exactly one of the choices."),
-    )
-    guided_grammar: Optional[str] = Field(
-        default=None,
-        description=(
-            "If specified, the output will follow the context free grammar."),
-    )
-    structural_tag: Optional[str] = Field(
-        default=None,
-        description=(
-            "If specified, the output will follow the structural tag schema."),
-    )
-    guided_decoding_backend: Optional[str] = Field(
-        default=None,
-        description=(
-            "If specified, will override the default guided decoding backend "
-            "of the server for this specific request. If set, must be either "
-            "'outlines' / 'lm-format-enforcer'"),
-    )
-    guided_whitespace_pattern: Optional[str] = Field(
-        default=None,
-        description=(
-            "If specified, will override the default whitespace pattern "
-            "for guided json decoding."),
-    )
+        description="Additional configuration for structured outputs.")
     priority: int = Field(
         default=0,
         description=(
@@ -417,6 +387,85 @@ class ChatCompletionRequest(OpenAIBaseModel):
         "top_k": 0,
         "min_p": 0.0,
     }
+
+    @property
+    @deprecated(
+        """`guided_json` is deprecated and renamed to `structured_output.json`. `guided_json` will be removed in v0.10.0. Please specify the json with `extra_body={"structured_output": {"json": ...}}` instead."""
+    )
+    def guided_json(self) -> Optional[AnyStructuredOutputJsonFormat]:
+        return None
+
+    @guided_json.setter
+    def guided_json(self,
+                    value: Optional[AnyStructuredOutputJsonFormat]) -> None:
+        self.guided_json = value
+
+    @property
+    @deprecated(
+        """`guided_regex` is deprecated and renamed to `structured_output.regex`. `guided_regex` will be removed in v0.10.0. Please specify the regex with `extra_body={"structured_output": {"regex": ...}}` instead."""
+    )
+    def guided_regex(self) -> Optional[str]:
+        return None
+
+    @guided_regex.setter
+    def guided_regex(self, value: Optional[str]) -> None:
+        self.guided_regex = value
+
+    @property
+    @deprecated(
+        """`guided_choice` is deprecated and renamed to `structured_output.choice`. `guided_choice` will be removed in v0.10.0. Please specify the choice with `extra_body={"structured_output": {"choice": ...}}` instead."""
+    )
+    def guided_choice(self) -> Optional[list[str]]:
+        return None
+
+    @guided_choice.setter
+    def guided_choice(self, value: Optional[list[str]]) -> None:
+        self.guided_choice = value
+
+    @property
+    @deprecated(
+        """`guided_grammar` is deprecated and renamed to `structured_output.grammar`. `guided_grammar` will be removed in v0.10.0. Please specify the grammar with `extra_body={"structured_output": {"grammar": ...}}` instead."""
+    )
+    def guided_grammar(self) -> Optional[str]:
+        return None
+
+    @guided_grammar.setter
+    def guided_grammar(self, value: Optional[str]) -> None:
+        self.guided_grammar = value
+
+    @property
+    @deprecated(
+        """`structural_tag` is deprecated and will be removed in v0.10.0. Please specify the structural tag via `response_format` instead."""
+    )
+    def structural_tag(self) -> Optional[str]:
+        return None
+
+    @structural_tag.setter
+    def structural_tag(self, value: Optional[str]) -> None:
+        self.structural_tag = value
+
+    @property
+    @deprecated(
+        """`guided_decoding_backend` is deprecated and won't be able to configure per-request. `guided_decoding_backend` will be removed in v0.10.0. Please remove it and specify the backend at `vllm serve` instead."""
+    )
+    def guided_decoding_backend(self) -> Optional[StructuredOutputBackend]:
+        return None
+
+    @guided_decoding_backend.setter
+    def guided_decoding_backend(
+            self, value: Optional[StructuredOutputBackend]) -> None:
+        self.guided_decoding_backend = value
+
+    @property
+    @deprecated(
+        """`guided_whitespace_pattern` is deprecated and renamed to `structured_output.whitespace_pattern`. `guided_whitespace_pattern` will be removed in v0.10.0. Please specify the whitespace pattern with `extra_body={"structured_output": {"whitespace_pattern": ...}}` instead."""
+    )
+    def guided_whitespace_pattern(self) -> Optional[str]:
+        return None
+
+    @guided_whitespace_pattern.setter
+    def guided_whitespace_pattern(self, value: Optional[str]) -> None:
+        self.guided_whitespace_pattern = value
 
     def to_beam_search_params(
             self,
@@ -490,32 +539,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if prompt_logprobs is None and self.echo:
             prompt_logprobs = self.top_logprobs
 
-        guided_json_object = None
-        if self.response_format is not None:
-            if self.response_format.type == "json_object":
-                guided_json_object = True
-            elif self.response_format.type == "json_schema":
-                json_schema = self.response_format.json_schema
-                assert json_schema is not None
-                self.guided_json = json_schema.json_schema
-            elif self.response_format.type == "structural_tag":
-                structural_tag = self.response_format
-                assert structural_tag is not None and isinstance(
-                    structural_tag, StructuralTagResponseFormat)
-                s_tag_obj = structural_tag.model_dump(by_alias=True)
-                self.structural_tag = json.dumps(s_tag_obj)
-
-        guided_decoding = GuidedDecodingParams.from_optional(
-            json=self._get_guided_json_from_tool() or self.guided_json,
-            regex=self.guided_regex,
-            choice=self.guided_choice,
-            grammar=self.guided_grammar,
-            json_object=guided_json_object,
-            backend=self.guided_decoding_backend,
-            whitespace_pattern=self.guided_whitespace_pattern,
-            structural_tag=self.structural_tag,
-        )
-
         return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
@@ -542,13 +565,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             output_kind=RequestOutputKind.DELTA if self.stream \
                 else RequestOutputKind.FINAL_ONLY,
-            guided_decoding=guided_decoding,
+            structured_output=StructuredOutputParams.from_optional(**(self.structured_output or {})),
             logit_bias=self.logit_bias,
             extra_args=({"kv_transfer_params": self.kv_transfer_params}
                         if self.kv_transfer_params else None))
 
-    def _get_guided_json_from_tool(
-            self) -> Optional[Union[str, dict, BaseModel]]:
+    def _get_structured_output_from_tool(
+            self) -> Optional[AnyStructuredOutputJsonFormat]:
         # user has chosen to not use any tool
         if self.tool_choice == "none" or self.tools is None:
             return None
@@ -633,20 +656,22 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def check_guided_decoding_count(cls, data):
+    def check_structured_output_count(cls, data):
         if isinstance(data, ValueError):
             raise data
 
         guide_count = sum([
             "guided_json" in data and data["guided_json"] is not None,
             "guided_regex" in data and data["guided_regex"] is not None,
-            "guided_choice" in data and data["guided_choice"] is not None
+            "guided_choice" in data and data["guided_choice"] is not None,
+            "guided_grammar" in data and data["guided_grammar"] is not None
         ])
         # you can only use one kind of guided decoding
         if guide_count > 1:
             raise ValueError(
-                "You can only use one kind of guided decoding "
-                "('guided_json', 'guided_regex' or 'guided_choice').")
+                "You can only use one kind of structured output "
+                "('guided_json', 'guided_regex', 'guided_grammar', or 'guided_choice')."
+            )
         # you can only either use guided decoding or tools, not both
         if guide_count > 1 and data.get("tool_choice", "none") not in (
                 "none",
@@ -655,7 +680,49 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ):
             raise ValueError(
                 "You can only either use guided decoding or tools, not both.")
+        # shouldn't set both structured_output and guided_*
+        if "structured_output" in data \
+                and data["structured_output"] is not None \
+                and (guide_count > 0 or any(i in data for i in ["guided_whitespace_pattern", "structural_tag"])):
+            raise ValueError(
+                "You should only specify 'structured_output' instead of deprecated fields."
+            )
         return data
+
+    @model_validator(mode='after')
+    def construct_structured_output(self) -> Self:
+        if self.structured_output is not None:
+            return self
+
+        # compat from deprecated fields over
+        json_object = None
+        if self.response_format is not None:
+            if self.response_format.type == "json_object":
+                json_object = True
+            elif self.response_format.type == "json_schema":
+                json_schema = self.response_format.json_schema
+                assert json_schema is not None
+                self.guided_json = json_schema.json_schema
+            elif self.response_format.type == "structural_tag":
+                structural_tag = self.response_format
+                assert structural_tag is not None and isinstance(
+                    structural_tag, StructuralTagResponseFormat)
+                s_tag_obj = structural_tag.model_dump(by_alias=True)
+                self.structural_tag = json.dumps(s_tag_obj)
+
+        structured_output = StructuredOutputParamsDict(
+            json=self._get_structured_output_from_tool() or self.guided_json,
+            regex=self.guided_regex,
+            choice=self.guided_choice,
+            grammar=self.guided_grammar,
+            json_object=json_object,
+            backend=self.guided_decoding_backend,
+            whitespace_pattern=self.guided_whitespace_pattern,
+            structural_tag=self.structural_tag,
+        )
+
+        self.structured_output = structured_output
+        return self
 
     @model_validator(mode="before")
     @classmethod
@@ -795,38 +862,9 @@ class CompletionRequest(OpenAIBaseModel):
             ", {'type': 'structural_tag'}, or {'type': 'text' } is supported."
         ),
     )
-    guided_json: Optional[Union[str, dict, BaseModel]] = Field(
+    structured_output: Optional[StructuredOutputParamsDict] = Field(
         default=None,
-        description="If specified, the output will follow the JSON schema.",
-    )
-    guided_regex: Optional[str] = Field(
-        default=None,
-        description=(
-            "If specified, the output will follow the regex pattern."),
-    )
-    guided_choice: Optional[list[str]] = Field(
-        default=None,
-        description=(
-            "If specified, the output will be exactly one of the choices."),
-    )
-    guided_grammar: Optional[str] = Field(
-        default=None,
-        description=(
-            "If specified, the output will follow the context free grammar."),
-    )
-    guided_decoding_backend: Optional[str] = Field(
-        default=None,
-        description=(
-            "If specified, will override the default guided decoding backend "
-            "of the server for this specific request. If set, must be one of "
-            "'outlines' / 'lm-format-enforcer'"),
-    )
-    guided_whitespace_pattern: Optional[str] = Field(
-        default=None,
-        description=(
-            "If specified, will override the default whitespace pattern "
-            "for guided json decoding."),
-    )
+        description="Additional configuration for structured outputs.")
     priority: int = Field(
         default=0,
         description=(
@@ -858,6 +896,85 @@ class CompletionRequest(OpenAIBaseModel):
         description="KVTransfer parameters used for disaggregated serving.")
 
     # doc: end-completion-extra-params
+
+    @property
+    @deprecated(
+        """`guided_json` is deprecated and renamed to `structured_output.json`. `guided_json` will be removed in v0.10.0. Please specify the json with `extra_body={"structured_output": {"json": ...}}` instead."""
+    )
+    def guided_json(self) -> Optional[AnyStructuredOutputJsonFormat]:
+        return None
+
+    @guided_json.setter
+    def guided_json(self,
+                    value: Optional[AnyStructuredOutputJsonFormat]) -> None:
+        self.guided_json = value
+
+    @property
+    @deprecated(
+        """`guided_regex` is deprecated and renamed to `structured_output.regex`. `guided_regex` will be removed in v0.10.0. Please specify the regex with `extra_body={"structured_output": {"regex": ...}}` instead."""
+    )
+    def guided_regex(self) -> Optional[str]:
+        return None
+
+    @guided_regex.setter
+    def guided_regex(self, value: Optional[str]) -> None:
+        self.guided_regex = value
+
+    @property
+    @deprecated(
+        """`guided_choice` is deprecated and renamed to `structured_output.choice`. `guided_choice` will be removed in v0.10.0. Please specify the choice with `extra_body={"structured_output": {"choice": ...}}` instead."""
+    )
+    def guided_choice(self) -> Optional[list[str]]:
+        return None
+
+    @guided_choice.setter
+    def guided_choice(self, value: Optional[list[str]]) -> None:
+        self.guided_choice = value
+
+    @property
+    @deprecated(
+        """`guided_grammar` is deprecated and renamed to `structured_output.grammar`. `guided_grammar` will be removed in v0.10.0. Please specify the grammar with `extra_body={"structured_output": {"grammar": ...}}` instead."""
+    )
+    def guided_grammar(self) -> Optional[str]:
+        return None
+
+    @guided_grammar.setter
+    def guided_grammar(self, value: Optional[str]) -> None:
+        self.guided_grammar = value
+
+    @property
+    @deprecated(
+        """`structural_tag` is deprecated and will be removed in v0.10.0. Please specify the structural tag via `response_format` instead."""
+    )
+    def structural_tag(self) -> Optional[str]:
+        return None
+
+    @structural_tag.setter
+    def structural_tag(self, value: Optional[str]) -> None:
+        self.structural_tag = value
+
+    @property
+    @deprecated(
+        """`guided_decoding_backend` is deprecated and becomes no-op in V1 engine. `guided_decoding_backend` will be removed in v0.10.0. Please remove it and specify the backend at `vllm serve` instead."""
+    )
+    def guided_decoding_backend(self) -> Optional[StructuredOutputBackend]:
+        return None
+
+    @guided_decoding_backend.setter
+    def guided_decoding_backend(
+            self, value: Optional[StructuredOutputBackend]) -> None:
+        self.guided_decoding_backend = value
+
+    @property
+    @deprecated(
+        """`guided_whitespace_pattern` is deprecated and renamed to `structured_output.whitespace_pattern`. `guided_whitespace_pattern` will be removed in v0.10.0. Please specify the whitespace pattern with `extra_body={"structured_output": {"whitespace_pattern": ...}}` instead."""
+    )
+    def guided_whitespace_pattern(self) -> Optional[str]:
+        return None
+
+    @guided_whitespace_pattern.setter
+    def guided_whitespace_pattern(self, value: Optional[str]) -> None:
+        self.guided_whitespace_pattern = value
 
     # Default sampling parameters for completion requests
     _DEFAULT_SAMPLING_PARAMS: dict = {
@@ -944,7 +1061,7 @@ class CompletionRequest(OpenAIBaseModel):
                 and self.response_format.type == "json_object"):
             guided_json_object = True
 
-        guided_decoding = GuidedDecodingParams.from_optional(
+        structured_output = StructuredOutputParams.from_optional(
             json=self.guided_json,
             regex=self.guided_regex,
             choice=self.guided_choice,
@@ -980,7 +1097,7 @@ class CompletionRequest(OpenAIBaseModel):
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             output_kind=RequestOutputKind.DELTA if self.stream \
                 else RequestOutputKind.FINAL_ONLY,
-            guided_decoding=guided_decoding,
+            structured_output=structured_output,
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=({"kv_transfer_params": self.kv_transfer_params}

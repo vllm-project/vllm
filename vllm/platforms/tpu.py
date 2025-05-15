@@ -188,7 +188,7 @@ class TpuPlatform(Platform):
     ) -> None:
         """Raises if this request is unsupported on this platform"""
         if isinstance(params, SamplingParams):
-            if params.guided_decoding is not None and not envs.VLLM_USE_V1:
+            if params.structured_output is not None and not envs.VLLM_USE_V1:
                 raise ValueError("Structured output is not supported on "
                                  f"{cls.device_name} V0.")
             if params.sampling_type == SamplingType.RANDOM_SEED:

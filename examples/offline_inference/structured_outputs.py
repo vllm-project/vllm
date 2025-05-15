@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-This file demonstrates the example usage of guided decoding 
-to generate structured outputs using vLLM. It shows how to apply 
-different guided decoding techniques such as Choice, Regex, JSON schema, 
-and Grammar to produce structured and formatted results 
+This file demonstrates the example usage of guided decoding
+to generate structured outputs using vLLM. It shows how to apply
+different guided decoding techniques such as Choice, Regex, JSON schema,
+and Grammar to produce structured and formatted results
 based on specific prompts.
 """
 
@@ -12,19 +12,17 @@ from enum import Enum
 from pydantic import BaseModel
 
 from vllm import LLM, SamplingParams
-from vllm.sampling_params import GuidedDecodingParams
+from vllm.sampling_params import StructuredOutputParams
 
 # Guided decoding by Choice (list of possible options)
-guided_decoding_params_choice = GuidedDecodingParams(
-    choice=["Positive", "Negative"])
 sampling_params_choice = SamplingParams(
-    guided_decoding=guided_decoding_params_choice)
+    structured_output=StructuredOutputParams(choice=["Positive", "Negative"]))
 prompt_choice = "Classify this sentiment: vLLM is wonderful!"
 
 # Guided decoding by Regex
-guided_decoding_params_regex = GuidedDecodingParams(regex=r"\w+@\w+\.com\n")
 sampling_params_regex = SamplingParams(
-    guided_decoding=guided_decoding_params_regex, stop=["\n"])
+    structured_output=StructuredOutputParams(regex=r"\w+@\w+\.com\n"),
+    stop=["\n"])
 prompt_regex = (
     "Generate an email address for Alan Turing, who works in Enigma."
     "End in .com and new line. Example result:"
@@ -46,9 +44,8 @@ class CarDescription(BaseModel):
 
 
 json_schema = CarDescription.model_json_schema()
-guided_decoding_params_json = GuidedDecodingParams(json=json_schema)
-sampling_params_json = SamplingParams(
-    guided_decoding=guided_decoding_params_json)
+sampling_params_json = SamplingParams(structured_output=StructuredOutputParams(
+    json=json_schema))
 prompt_json = ("Generate a JSON with the brand, model and car_type of"
                "the most iconic car from the 90's")
 
@@ -61,10 +58,8 @@ table ::= "table_1 " | "table_2 "
 condition ::= column "= " number
 number ::= "1 " | "2 "
 """
-guided_decoding_params_grammar = GuidedDecodingParams(
-    grammar=simplified_sql_grammar)
 sampling_params_grammar = SamplingParams(
-    guided_decoding=guided_decoding_params_grammar)
+    structured_output=StructuredOutputParams(grammar=simplified_sql_grammar))
 prompt_grammar = ("Generate an SQL query to show the 'username' and 'email'"
                   "from the 'users' table.")
 

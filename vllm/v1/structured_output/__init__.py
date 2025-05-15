@@ -61,14 +61,14 @@ class StructuredOutputManager:
             return
 
         if TYPE_CHECKING:
-            assert request.sampling_params.guided_decoding is not None
+            assert request.sampling_params.structured_output is not None
 
         # Initialize the backend the first time it is needed.
         #
         # NOTE: We only support a single backend. We do NOT support different
         # backends on a per-request basis in V1 (for now, anyway...).
         if self.backend is None:
-            backend = request.sampling_params.guided_decoding.backend
+            backend = request.sampling_params.structured_output.backend
             vocab_size = self.vllm_config.model_config.get_vocab_size()
             if backend == "xgrammar":
                 self.backend = XgrammarBackend(

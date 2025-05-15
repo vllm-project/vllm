@@ -744,7 +744,7 @@ class LLMEngine:
                              "Priority scheduling is not enabled.")
 
         if isinstance(params, SamplingParams) \
-            and (params.guided_decoding or params.logits_processors) \
+            and (params.structured_output or params.logits_processors) \
             and self.scheduler_config.num_scheduler_steps > 1:
             raise ValueError(
                 "Guided decoding and logits processors are not supported "
@@ -2079,11 +2079,11 @@ class LLMEngine:
 
         logits_processors = []
 
-        if sampling_params.guided_decoding is not None:
+        if sampling_params.structured_output is not None:
             # Defensively copy sampling params since guided decoding logits
             # processors can have different state for each request
             sampling_params = copy.copy(sampling_params)
-            guided_decoding = sampling_params.guided_decoding
+            guided_decoding = sampling_params.structured_output
 
             logger.debug(
                 "Building guided decoding logits processor in "
@@ -2108,7 +2108,7 @@ class LLMEngine:
                 logits_processors.append(processor)
 
             # Unset so this doesn't get passed down to the model
-            sampling_params.guided_decoding = None
+            sampling_params.structured_output = None
 
         if (sampling_params.logit_bias or sampling_params.allowed_token_ids):
             tokenizer = self.get_tokenizer(lora_request=lora_request)

@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.entrypoints.llm import LLM
 from vllm.outputs import RequestOutput
-from vllm.sampling_params import GuidedDecodingParams, SamplingParams
+from vllm.sampling_params import SamplingParams, StructuredOutputParams
 
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
 GUIDED_DECODING_BACKENDS = [
@@ -44,7 +44,7 @@ def test_guided_regex(sample_regex, llm, guided_decoding_backend: str,
     sampling_params = SamplingParams(
         temperature=0.8,
         top_p=0.95,
-        guided_decoding=GuidedDecodingParams(
+        structured_output=StructuredOutputParams(
             regex=sample_regex,
             backend=guided_decoding_backend,
             disable_any_whitespace=disable_any_whitespace))
@@ -75,7 +75,7 @@ def test_guided_json_completion(sample_json_schema, llm,
     sampling_params = SamplingParams(
         temperature=1.0,
         max_tokens=1000,
-        guided_decoding=GuidedDecodingParams(
+        structured_output=StructuredOutputParams(
             json=sample_json_schema,
             backend=guided_decoding_backend,
             disable_any_whitespace=disable_any_whitespace))
@@ -109,7 +109,7 @@ def test_guided_complex_json_completion(sample_complex_json_schema, llm,
     sampling_params = SamplingParams(
         temperature=1.0,
         max_tokens=1000,
-        guided_decoding=GuidedDecodingParams(
+        structured_output=StructuredOutputParams(
             json=sample_complex_json_schema,
             backend=guided_decoding_backend,
             disable_any_whitespace=disable_any_whitespace))
@@ -144,7 +144,7 @@ def test_guided_definition_json_completion(sample_definition_json_schema, llm,
     sampling_params = SamplingParams(
         temperature=1.0,
         max_tokens=1000,
-        guided_decoding=GuidedDecodingParams(
+        structured_output=StructuredOutputParams(
             json=sample_definition_json_schema,
             backend=guided_decoding_backend,
             disable_any_whitespace=disable_any_whitespace))
@@ -179,7 +179,7 @@ def test_guided_enum_json_completion(sample_enum_json_schema, llm,
     sampling_params = SamplingParams(
         temperature=1.0,
         max_tokens=1000,
-        guided_decoding=GuidedDecodingParams(
+        structured_output=StructuredOutputParams(
             json=sample_enum_json_schema,
             backend=guided_decoding_backend,
             disable_any_whitespace=disable_any_whitespace))
@@ -224,7 +224,7 @@ def test_guided_choice_completion(sample_guided_choice, llm,
     sampling_params = SamplingParams(
         temperature=0.8,
         top_p=0.95,
-        guided_decoding=GuidedDecodingParams(
+        structured_output=StructuredOutputParams(
             choice=sample_guided_choice,
             backend=guided_decoding_backend,
             disable_any_whitespace=disable_any_whitespace))
@@ -255,7 +255,7 @@ def test_guided_grammar(sample_sql_statements, llm,
         temperature=0.8,
         top_p=0.95,
         max_tokens=1000,
-        guided_decoding=GuidedDecodingParams(
+        structured_output=StructuredOutputParams(
             grammar=sample_sql_statements,
             backend=guided_decoding_backend,
             disable_any_whitespace=disable_any_whitespace))
@@ -304,7 +304,7 @@ def test_validation_against_both_guided_decoding_options(sample_regex, llm):
     sampling_params = SamplingParams(
         temperature=0.8,
         top_p=0.95,
-        guided_decoding=GuidedDecodingParams(regex=sample_regex))
+        structured_output=StructuredOutputParams(regex=sample_regex))
 
     with pytest.raises(ValueError, match="Cannot set both"):
         llm.generate(prompts="This should fail",
@@ -327,7 +327,7 @@ def test_disable_guided_decoding_fallback(sample_regex, llm):
     }
     sampling_params = SamplingParams(temperature=0.8,
                                      top_p=0.95,
-                                     guided_decoding=GuidedDecodingParams(
+                                     structured_output=StructuredOutputParams(
                                          json=unsupported_json,
                                          backend="xgrammar",
                                          disable_fallback=True))
@@ -350,7 +350,7 @@ def test_guided_json_object(llm, guided_decoding_backend: str,
         temperature=1.0,
         max_tokens=100,
         n=2,
-        guided_decoding=GuidedDecodingParams(
+        structured_output=StructuredOutputParams(
             json_object=True,
             backend=guided_decoding_backend,
             disable_any_whitespace=disable_any_whitespace))
@@ -401,7 +401,7 @@ def test_guided_json_completion_with_enum(llm, guided_decoding_backend: str,
     sampling_params = SamplingParams(
         temperature=1.0,
         max_tokens=1000,
-        guided_decoding=GuidedDecodingParams(
+        structured_output=StructuredOutputParams(
             json=json_schema,
             backend=guided_decoding_backend,
             disable_any_whitespace=disable_any_whitespace))
@@ -452,7 +452,7 @@ def test_guided_number_range_json_completion(llm, guided_decoding_backend: str,
     sampling_params = SamplingParams(
         temperature=1.0,
         max_tokens=1000,
-        guided_decoding=GuidedDecodingParams(
+        structured_output=StructuredOutputParams(
             json=sample_output_schema,
             backend=guided_decoding_backend,
             disable_any_whitespace=disable_any_whitespace),
@@ -508,14 +508,14 @@ def test_guidance_no_additional_properties(llm):
         "<|im_end|>\n<|im_start|>assistant\n")
 
     def generate_with_backend(backend, disable_additional_properties):
-        guided_params = GuidedDecodingParams(
+        guided_params = StructuredOutputParams(
             json=schema,
             backend=backend,
             disable_any_whitespace=True,
             disable_additional_properties=disable_additional_properties)
         sampling_params = SamplingParams(temperature=0,
                                          max_tokens=256,
-                                         guided_decoding=guided_params)
+                                         structured_output=guided_params)
 
         outputs = llm.generate(prompts=prompt, sampling_params=sampling_params)
         assert outputs is not None

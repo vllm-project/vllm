@@ -1,15 +1,18 @@
+# ruff: noqa: E501
 # SPDX-License-Identifier: Apache-2.0
 """Sampling parameters for text generation."""
 import copy
-from dataclasses import dataclass
+import dataclasses
+import json as json_lib
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Annotated, Any, Optional, Union
+from typing import Annotated, Any, Optional, TypedDict, Union
 
 import msgspec
 from pydantic import BaseModel
 from typing_extensions import deprecated
 
+from vllm.config import StructuredOutputBackend
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -26,50 +29,93 @@ class SamplingType(IntEnum):
     RANDOM_SEED = 2
 
 
-# maybe make msgspec?
-@dataclass
-class GuidedDecodingParams:
-    """One of these fields will be used to build a logit processor."""
-    json: Optional[Union[str, dict]] = None
+AnyStructuredOutputJsonFormat = Union[dict[str, Any], BaseModel,
+                                      type[BaseModel], str]
+
+
+class StructuredOutputParamsDict(TypedDict, total=False):
+    json: Optional[AnyStructuredOutputJsonFormat]
+    regex: Optional[str]
+    choice: Optional[list[str]]
+    grammar: Optional[str]
+    json_object: Optional[bool]
+    structural_tag: Optional[str]
+    backend: Optional[StructuredOutputBackend]
+    whitespace_pattern: Optional[str]
+
+
+@dataclasses.dataclass
+class StructuredOutputParams:
+    json: Optional[AnyStructuredOutputJsonFormat] = None
     regex: Optional[str] = None
     choice: Optional[list[str]] = None
     grammar: Optional[str] = None
     json_object: Optional[bool] = None
-    """These are other options that can be set"""
-    backend: Optional[str] = None
-    backend_was_auto: bool = False
-    disable_fallback: bool = False
-    disable_any_whitespace: bool = False
-    disable_additional_properties: bool = False
-    whitespace_pattern: Optional[str] = None
     structural_tag: Optional[str] = None
 
-    @staticmethod
+    backend: Optional[StructuredOutputBackend] = None
+    whitespace_pattern: Optional[str] = None
+
+    # internal fields
+    backend_was_auto: bool = dataclasses.field(default=False, init=False)
+
+    @property
+    @deprecated(
+        """`disable_fallback` is deprecated and will be removed in v0.10.0. Specifying `disable_fallback` per request won't be supported in V1. Please specify this option in `--structured-output-config '{"disable_fallback": true}'` instead."""
+    )
+    def disable_fallback(self) -> bool:
+        return False
+
+    @disable_fallback.setter
+    def disable_fallback(self, value: bool) -> None:
+        self.disable_fallback = value
+
+    @property
+    @deprecated(
+        """`disable_any_whitespace` is deprecated and will be removed in v0.10.0. Specifying `disable_any_whitespace` per request won't be supported in V1. Please specify this option in `--structured-output-config '{"disable_any_whitespace": true}'` instead."""
+    )
+    def disable_any_whitespace(self) -> bool:
+        return False
+
+    @disable_any_whitespace.setter
+    def disable_any_whitespace(self, value: bool) -> None:
+        self.disable_any_whitespace = value
+
+    @property
+    @deprecated(
+        """`disable_additional_properties` is deprecated and will be removed in v0.10.0. Specifying `disable_additional_properties` per request won't be supported in V1. Please specify this option in `--structured-output-config '{"disable_additional_properties": true}'` instead."""
+    )
+    def disable_additional_properties(self) -> bool:
+        return False
+
+    @disable_additional_properties.setter
+    def disable_additional_properties(self, value: bool) -> None:
+        self.disable_additional_properties = value
+
+    @classmethod
     def from_optional(
-        json: Optional[Union[dict, BaseModel, str]] = None,
+        cls,
+        json: Optional[AnyStructuredOutputJsonFormat] = None,
         regex: Optional[str] = None,
         choice: Optional[list[str]] = None,
         grammar: Optional[str] = None,
         json_object: Optional[bool] = None,
-        backend: Optional[str] = None,
+        backend: Optional[StructuredOutputBackend] = None,
         whitespace_pattern: Optional[str] = None,
         structural_tag: Optional[str] = None,
-    ) -> Optional["GuidedDecodingParams"]:
+    ) -> Optional["StructuredOutputParams"]:
         if all(arg is None for arg in (json, regex, choice, grammar,
                                        json_object, structural_tag)):
             return None
-        # Extract json schemas from pydantic models
-        if isinstance(json, (BaseModel, type(BaseModel))):
-            json = json.model_json_schema()
-        return GuidedDecodingParams(
+        return cls(
             json=json,
             regex=regex,
             choice=choice,
             grammar=grammar,
             json_object=json_object,
+            structural_tag=structural_tag,
             backend=backend,
             whitespace_pattern=whitespace_pattern,
-            structural_tag=structural_tag,
         )
 
     def __post_init__(self):
@@ -85,6 +131,11 @@ class GuidedDecodingParams:
 
         if self.backend is not None and ":" in self.backend:
             self._extract_backend_options()
+
+        if isinstance(self.json, (BaseModel, type(BaseModel))):
+            self.json = self.json.model_json_schema()
+        if self.json is not None and not isinstance(self.json, str):
+            self.json = json_lib.dumps(self.json)
 
     @deprecated(
         "Passing guided decoding backend options inside backend in the format "
@@ -238,7 +289,7 @@ class SamplingParams(
     _all_stop_token_ids: set[int] = msgspec.field(default_factory=set)
 
     # Fields used to construct logits processors
-    guided_decoding: Optional[GuidedDecodingParams] = None
+    structured_output: Optional[StructuredOutputParams] = None
     logit_bias: Optional[dict[int, float]] = None
     allowed_token_ids: Optional[list[int]] = None
     extra_args: Optional[dict[str, Any]] = None
@@ -247,8 +298,20 @@ class SamplingParams(
     bad_words: Optional[list[str]] = None
     _bad_words_token_ids: Optional[list[list[int]]] = None
 
-    @staticmethod
+    @property
+    @deprecated(
+        """`guided_decoding` is deprecated and has been renamed to `structured_output`. `guided_decoding` will be removed in v0.10.0. Please use 'structured_output' instead."""
+    )
+    def guided_decoding(self) -> Optional[StructuredOutputParams]:
+        return self.structured_output
+
+    @guided_decoding.setter
+    def guided_decoding(self, value: Optional[StructuredOutputParams]) -> None:
+        self.disable_fallback = value
+
+    @classmethod
     def from_optional(
+        cls,
         n: Optional[int] = 1,
         best_of: Optional[int] = None,
         presence_penalty: Optional[float] = 0.0,
@@ -275,7 +338,7 @@ class SamplingParams(
         truncate_prompt_tokens: Optional[Annotated[int,
                                                    msgspec.Meta(ge=1)]] = None,
         output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
-        guided_decoding: Optional[GuidedDecodingParams] = None,
+        structured_output: Optional[StructuredOutputParams] = None,
         logit_bias: Optional[Union[dict[int, float], dict[str, float]]] = None,
         allowed_token_ids: Optional[list[int]] = None,
         extra_args: Optional[dict[str, Any]] = None,
@@ -288,7 +351,7 @@ class SamplingParams(
                 for token, bias in logit_bias.items()
             }
 
-        return SamplingParams(
+        return cls(
             n=1 if n is None else n,
             best_of=best_of,
             presence_penalty=0.0
@@ -317,7 +380,7 @@ class SamplingParams(
             logits_processors=logits_processors,
             truncate_prompt_tokens=truncate_prompt_tokens,
             output_kind=output_kind,
-            guided_decoding=guided_decoding,
+            structured_output=structured_output,
             logit_bias=logit_bias,
             allowed_token_ids=allowed_token_ids,
             extra_args=extra_args,
@@ -572,7 +635,7 @@ class SamplingParams(
             "spaces_between_special_tokens="
             f"{self.spaces_between_special_tokens}, "
             f"truncate_prompt_tokens={self.truncate_prompt_tokens}, "
-            f"guided_decoding={self.guided_decoding}, "
+            f"structured_output={self.structured_output}, "
             f"extra_args={self.extra_args})")
 
 

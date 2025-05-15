@@ -56,7 +56,7 @@ def test_sampling_params_from_request_with_no_guided_decoding_backend(
     )
     # we do not expect any backend to be present and the default
     # guided_decoding_backend at engine level will be used.
-    assert sampling_params.guided_decoding.backend is None
+    assert sampling_params.structured_output.backend is None
 
 
 @pytest.mark.parametrize("request_level_guided_decoding_backend,expected",
@@ -86,4 +86,4 @@ def test_sampling_params_from_request_with_guided_decoding_backend(
         model_config.logits_processor_pattern,
     )
     # backend correctly identified in resulting sampling_params
-    assert sampling_params.guided_decoding.backend == expected
+    assert sampling_params.structured_output.backend == expected

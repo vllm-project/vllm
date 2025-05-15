@@ -15,15 +15,15 @@ if TYPE_CHECKING:
 
     from vllm.config import ModelConfig
     from vllm.logits_process import LogitsProcessor
-    from vllm.sampling_params import GuidedDecodingParams
+    from vllm.sampling_params import StructuredOutputParams
 
 logger = init_logger(__name__)
 
 
 def maybe_backend_fallback(
-        guided_params: GuidedDecodingParams) -> GuidedDecodingParams:
+        guided_params: StructuredOutputParams) -> StructuredOutputParams:
 
-    def fallback_or_error(guided_params: GuidedDecodingParams, message: str,
+    def fallback_or_error(guided_params: StructuredOutputParams, message: str,
                           fallback: str) -> None:
         """Change the backend to the specified fallback with a warning log,
         or raise a ValueError if the `disable_fallback` option is specified."""
@@ -97,7 +97,7 @@ def maybe_backend_fallback(
 
 
 async def get_guided_decoding_logits_processor(
-        guided_params: GuidedDecodingParams,
+        guided_params: StructuredOutputParams,
         tokenizer: PreTrainedTokenizer,
         model_config: ModelConfig,
         reasoning_backend: str | None = None) -> LogitsProcessor | None:
@@ -139,7 +139,7 @@ async def get_guided_decoding_logits_processor(
 
 
 def get_local_guided_decoding_logits_processor(
-        guided_params: GuidedDecodingParams,
+        guided_params: StructuredOutputParams,
         tokenizer: PreTrainedTokenizer,
         model_config: ModelConfig,
         reasoning_backend: str | None = None) -> LogitsProcessor | None:

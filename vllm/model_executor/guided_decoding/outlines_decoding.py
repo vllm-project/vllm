@@ -13,7 +13,7 @@ from transformers import PreTrainedTokenizerBase
 from vllm.model_executor.guided_decoding.outlines_logits_processors import (
     CFGLogitsProcessor, JSONLogitsProcessor, RegexLogitsProcessor)
 from vllm.reasoning import ReasoningParser
-from vllm.sampling_params import GuidedDecodingParams
+from vllm.sampling_params import StructuredOutputParams
 
 
 class GuidedDecodingMode(Enum):
@@ -59,7 +59,7 @@ _MAX_THREADPOOL_WORKERS = 16
 
 
 async def get_outlines_guided_decoding_logits_processor(
-    guided_params: GuidedDecodingParams,
+    guided_params: StructuredOutputParams,
     tokenizer: PreTrainedTokenizerBase,
     reasoner: Optional[ReasoningParser],
 ) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, CFGLogitsProcessor,
@@ -90,7 +90,7 @@ async def get_outlines_guided_decoding_logits_processor(
 
 
 def get_local_outlines_guided_decoding_logits_processor(
-    guided_params: GuidedDecodingParams,
+    guided_params: StructuredOutputParams,
     tokenizer: PreTrainedTokenizerBase,
     reasoner: Optional[ReasoningParser],
 ) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, CFGLogitsProcessor,
@@ -110,7 +110,7 @@ def get_local_outlines_guided_decoding_logits_processor(
 
 
 def _get_guide_and_mode(
-    guided_params: GuidedDecodingParams
+    guided_params: StructuredOutputParams
 ) -> Union[tuple[str, GuidedDecodingMode], tuple[None, None]]:
     if guided_params.json:
         if isinstance(guided_params.json, dict):

@@ -39,7 +39,7 @@ class Request:
         self.structured_output_request = structured_output_request
 
         self.status = (RequestStatus.WAITING_FOR_FSM
-                       if sampling_params.guided_decoding is not None else
+                       if sampling_params.structured_output is not None else
                        RequestStatus.WAITING)
         self.events: list[EngineCoreEvent] = []
         self.stop_reason: Union[int, str, None] = None
@@ -135,7 +135,7 @@ class Request:
 
     @property
     def use_structured_output(self) -> bool:
-        return self.sampling_params.guided_decoding is not None
+        return self.sampling_params.structured_output is not None
 
     def record_event(
         self,

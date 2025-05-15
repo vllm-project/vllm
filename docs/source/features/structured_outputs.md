@@ -44,7 +44,7 @@ completion = client.chat.completions.create(
     messages=[
         {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"}
     ],
-    extra_body={"guided_choice": ["positive", "negative"]},
+    extra_body={"structured_output": {"choice": ["positive", "negative"]}},
 )
 print(completion.choices[0].message.content)
 ```
@@ -60,7 +60,7 @@ completion = client.chat.completions.create(
             "content": "Generate an example email address for Alan Turing, who works in Enigma. End in .com and new line. Example result: alan.turing@enigma.com\n",
         }
     ],
-    extra_body={"guided_regex": r"\w+@\w+\.com\n", "stop": ["\n"]},
+    extra_body={"structured_output": {"regex": r"\w+@\w+\.com\n", "stop": ["\n"]}},
 )
 print(completion.choices[0].message.content)
 ```
@@ -100,7 +100,7 @@ completion = client.chat.completions.create(
             "content": "Generate a JSON with the brand, model and car_type of the most iconic car from the 90's",
         }
     ],
-    extra_body={"guided_json": json_schema},
+    extra_body={"structured_output": {"json": json_schema}},
 )
 print(completion.choices[0].message.content)
 ```
@@ -139,7 +139,7 @@ completion = client.chat.completions.create(
             "content": "Generate an SQL query to show the 'username' and 'email' from the 'users' table.",
         }
     ],
-    extra_body={"guided_grammar": simplified_sql_grammar},
+    extra_body={"structured_output": {"grammar": simplified_sql_grammar}},
 )
 print(completion.choices[0].message.content)
 ```
@@ -174,7 +174,6 @@ completion = client.beta.chat.completions.parse(
         {"role": "user", "content": "My name is Cameron, I'm 28. What's my name and age?"},
     ],
     response_format=Info,
-    extra_body=dict(guided_decoding_backend="outlines"),
 )
 
 message = completion.choices[0].message
@@ -218,7 +217,6 @@ completion = client.beta.chat.completions.parse(
         {"role": "user", "content": "Solve 8x + 31 = 2."},
     ],
     response_format=MathResponse,
-    extra_body=dict(guided_decoding_backend="outlines"),
 )
 
 message = completion.choices[0].message
@@ -244,8 +242,8 @@ An example of using `structural_tag` can be found here: <gh-file:examples/online
 ## Offline Inference
 
 Offline inference allows for the same types of guided decoding.
-To use it, we´ll need to configure the guided decoding using the class `GuidedDecodingParams` inside `SamplingParams`.
-The main available options inside `GuidedDecodingParams` are:
+To use it, we´ll need to configure the guided decoding using the class `StructuredOutputParams` inside `SamplingParams`.
+The main available options inside `StructuredOutputParams` are:
 
 - `json`
 - `regex`
@@ -259,12 +257,13 @@ shown below:
 
 ```python
 from vllm import LLM, SamplingParams
-from vllm.sampling_params import GuidedDecodingParams
+from vllm.sampling_params import StructuredOutputParams
 
 llm = LLM(model="HuggingFaceTB/SmolLM2-1.7B-Instruct")
 
-guided_decoding_params = GuidedDecodingParams(choice=["Positive", "Negative"])
-sampling_params = SamplingParams(guided_decoding=guided_decoding_params)
+sampling_params = SamplingParams(
+  structured_output=StructuredOutputParams(choice=["Positive", "Negative"]),
+)
 outputs = llm.generate(
     prompts="Classify this sentiment: vLLM is wonderful!",
     sampling_params=sampling_params,

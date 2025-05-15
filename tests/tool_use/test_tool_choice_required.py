@@ -67,7 +67,7 @@ EXAMPLE_TOOLS = [
 def _compile_and_check(tools: list[ChatCompletionToolsParam], sample_output,
                        should_match: bool):
     self = MagicMock(tool_choice="required", tools=tools)
-    schema = ChatCompletionRequest._get_guided_json_from_tool(self)
+    schema = ChatCompletionRequest._get_structured_output_from_tool(self)
     assert isinstance(schema, dict)
 
     # use build_regex_from_schema used in JSONLogitsProcessor to create Guide

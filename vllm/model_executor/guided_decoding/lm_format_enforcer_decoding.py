@@ -12,11 +12,11 @@ from lmformatenforcer.integrations.vllm import (
 from transformers import PreTrainedTokenizerBase
 
 from vllm.logits_process import LogitsProcessor
-from vllm.sampling_params import GuidedDecodingParams
+from vllm.sampling_params import StructuredOutputParams
 
 
 def get_local_lm_format_enforcer_guided_decoding_logits_processor(
-        guided_params: GuidedDecodingParams,
+        guided_params: StructuredOutputParams,
         tokenizer) -> Optional[LogitsProcessor]:
     """
     Given an OpenAI-compatible request, check for guided decoding parameters

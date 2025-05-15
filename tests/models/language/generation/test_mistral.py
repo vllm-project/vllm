@@ -8,7 +8,7 @@ import pytest
 
 from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (
     MistralToolCall, MistralToolParser)
-from vllm.sampling_params import GuidedDecodingParams, SamplingParams
+from vllm.sampling_params import SamplingParams, StructuredOutputParams
 
 from ...utils import check_logprobs_close
 
@@ -285,11 +285,11 @@ def test_mistral_structured_output(
             tokenizer_mode="mistral",
             structured_output_config=dict(backend=structured_output_backend),
     ) as vllm_model:
-        guided_decoding = GuidedDecodingParams(json=SAMPLE_JSON_SCHEMA)
+        guided_decoding = StructuredOutputParams(json=SAMPLE_JSON_SCHEMA)
         params = SamplingParams(
             max_tokens=512,
             temperature=0.7,
-            guided_decoding=guided_decoding,
+            structured_output=guided_decoding,
         )
 
         messages = [

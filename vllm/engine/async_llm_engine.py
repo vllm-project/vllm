@@ -504,7 +504,7 @@ class _AsyncLLMEngine(LLMEngine):
         )
 
         if isinstance(params, SamplingParams) and \
-            params.guided_decoding is not None:
+            params.structured_output is not None:
             # Guided decoding has an async implementation for building logits
             # processors in a separate threadpool.
             # We want to invoke that here instead of using the blocking
@@ -548,13 +548,13 @@ async def build_guided_decoding_logits_processor_async(
     those fields and adds the constructed logits processors to the
     logits_processors field. Modifies sampling params in-place and returns
     the modified sampling params."""
-    if sampling_params.guided_decoding is None:
+    if sampling_params.structured_output is None:
         return sampling_params
 
     # Defensively copy sampling params since guided decoding logits
     # processors can have different state for each request
     sampling_params = copy.copy(sampling_params)
-    guided_decoding = sampling_params.guided_decoding
+    guided_decoding = sampling_params.structured_output
 
     logger.debug(
         "Building guided decoding logits processor. "
@@ -576,7 +576,7 @@ async def build_guided_decoding_logits_processor_async(
         sampling_params.logits_processors.append(processor)
 
     # Unset guided decoding params after constructing the lp from them
-    sampling_params.guided_decoding = None
+    sampling_params.structured_output = None
 
     return sampling_params
 
