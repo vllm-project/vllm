@@ -95,9 +95,9 @@ fi
 
 if ! command -v nixl_test &> /dev/null || [ "$FORCE" = true ]; then
     echo "Installing NIXL"
-    wget https://github.com/ai-dynamo/nixl/archive/refs/tags/0.1.1.tar.gz
-    tar xzf 0.1.1.tar.gz; rm 0.1.1.tar.gz
-    cd nixl-0.1.1
+    wget https://github.com/ai-dynamo/nixl/archive/refs/tags/0.2.0.tar.gz
+    tar xzf 0.2.0.tar.gz; rm 0.2.0.tar.gz
+    cd nixl-0.2.0
     meson setup build --prefix=$NIXL_HOME -Ducx_path=$UCX_HOME
     cd build
     ninja
