@@ -131,7 +131,7 @@ class SingleTypeKVCacheManager(ABC):
         if num_new_blocks <= 0:
             return []
         else:
-            new_blocks = self.block_pool.get_new_blocks(
+            new_blocks = self.block_pool.get_new_block_bundles(
                 num_new_blocks, self.num_kv_cache_groups)
             req_blocks.extend(new_blocks)
             return new_blocks

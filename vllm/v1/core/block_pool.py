@@ -178,6 +178,18 @@ class BlockPool:
 
             # Update and added the full block to the cache.
             blk.init_block_hash(block_hash, manager_id)
+            # We make all blocks in the same KVCacheBlockBundle cached &
+            # uncached together. This is achieved by:
+            # 1. Here, use the master_block_id as the representative of the
+            #    KVCacheBlockBundle in the cache.
+            # 2. In `free_blocks`, add the master block to the free list before
+            #    adding the other blocks in the bundle.
+            # 3. In `_maybe_evict_cached_block`, as the master block is in front
+            # of other blocks in the bundle, it will be the first evicted block
+            # in the bundle. When a master block needs to be evicted, we remove
+            # the full bundle from cached_block_hash_to_block and remove the
+            # master block from free_block_queue. The other blocks are still in
+            # the free_block_queue but won't be hit by get_cached_block.
             self.cached_block_hash_to_block[manager_id][block_hash][
                 blk.master_block_id] = blk
             if new_hashes is not None:
@@ -197,9 +209,9 @@ class BlockPool:
                     if request.lora_request else None,
                 ))
 
-    def get_new_blocks(self, num_block_bundle: int,
-                       bundle_size: int) -> list[KVCacheBlockBundle]:
-        """Get new blocks from the free block pool.
+    def get_new_block_bundles(self, num_block_bundle: int,
+                              bundle_size: int) -> list[KVCacheBlockBundle]:
+        """Get new block bundles from the free block pool.
 
         Note that we do not check block cache in this function.
 
@@ -215,7 +227,7 @@ class BlockPool:
             raise ValueError(
                 f"Cannot get {num_total_blocks} free blocks from the pool")
 
-        flat_new_blocks: list[KVCacheBlock] = []
+        new_blocks: list[KVCacheBlock] = []
         idx = 0
         while idx < num_total_blocks:
             # First allocate blocks.
@@ -226,17 +238,18 @@ class BlockPool:
                 self._maybe_evict_cached_block(curr_block)
 
             assert curr_block.block_hash is None
-            flat_new_blocks.append(curr_block)
+            new_blocks.append(curr_block)
             idx += 1
 
-        new_blocks = []
+        new_block_bundles: list[KVCacheBlockBundle] = []
         for i in range(num_block_bundle):
-            blocks = flat_new_blocks[i * bundle_size:(i + 1) * bundle_size]
+            blocks = new_blocks[i * bundle_size:(i + 1) * bundle_size]
+            # TODO: optimize the creation of KVCacheBlockBundle class
             block_bundle = KVCacheBlockBundle.from_kv_cache_blocks(
                 tuple(blocks))
             block_bundle.incr_ref()
-            new_blocks.append(block_bundle)
-        return new_blocks
+            new_block_bundles.append(block_bundle)
+        return new_block_bundles
 
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
         """
@@ -253,10 +266,11 @@ class BlockPool:
         manager_id = block.manager_id
         if block_hash and block_hash in self.cached_block_hash_to_block[
                 manager_id]:
-            cached_blocks = (
-                self.cached_block_hash_to_block[manager_id][block_hash])
+            cached_blocks = self.cached_block_hash_to_block[manager_id][
+                block_hash]
             cached_block = cached_blocks[block.block_id]
-            # TODO: add notes
+            # The block is the master block of the KVCacheBlockBundle.
+            # See comments in cache_full_blocks for details.
             assert cached_block.master_block_id == block.block_id
             assert cached_block.ref_cnt == 0
             cached_block.reset_hash()
@@ -296,11 +310,14 @@ class BlockPool:
             ordered_blocks: A list of blocks to free ordered by their eviction
                 priority.
         """
-        # TODO: make sure blocks in the first group are evicted first
         for block_bundle in ordered_blocks:
             block_bundle.decr_ref()
             if block_bundle.ref_cnt > 0:
                 continue
+            # NOTE: should add the master block to the free list before adding
+            # the other blocks. See the comment in `cache_full_blocks`
+            # for the reason. The following loop implicitly achieves it because
+            # the master block is the first block in the bundle.
             for block in block_bundle.blocks:
                 # null_block should not be added to the free list.
                 if block != self.null_block:
