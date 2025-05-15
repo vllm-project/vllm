@@ -118,7 +118,7 @@ def build_single_image_inputs(
     #
     # NOTE: rescaling preserves the image aspect ratio.
     return [
-        PromptWithMultiModalInput.create(
+        PromptWithMultiModalInput(
             prompts=[prompt for _ in size_wrapper.data],
             image_data=[
                 apply_image_size_scaling(image, size, size_wrapper.type)
@@ -166,7 +166,7 @@ def build_multi_image_inputs(
         image_lists, model_prompts,
         size_wrapper: ImageSizeWrapper) -> list[PromptWithMultiModalInput]:
     return [
-        PromptWithMultiModalInput.create(
+        PromptWithMultiModalInput(
             prompts=[prompt for _ in size_wrapper.data],
             image_data=[[
                 apply_image_size_scaling(image, size, size_wrapper.type)
@@ -235,7 +235,7 @@ def build_video_inputs_from_test_info(
                     else rescale_video_size)
 
     return [
-        PromptWithMultiModalInput.create(
+        PromptWithMultiModalInput(
             prompts=[prompt for _ in size_wrapper.data],
             video_data=[
                 video_scaler(video, size) for size in size_wrapper.data
@@ -290,8 +290,8 @@ def build_audio_inputs_from_test_info(
     ) for audio, sr in audios]
 
     return [
-        PromptWithMultiModalInput.create(
+        PromptWithMultiModalInput(
             prompts=model_prompts,
-            audio_data=list(resampled_audios),
+            audio_data=resampled_audios,
         )
     ]

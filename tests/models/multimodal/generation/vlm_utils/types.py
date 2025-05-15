@@ -47,29 +47,9 @@ RunnerOutput = tuple[list[int], str, Optional[SampleLogprobs]]
 class PromptWithMultiModalInput(NamedTuple):
     """Holds the multimodal input for a single test case."""
     prompts: list[str]
-    image_data: Union[PromptImageInput, list[None]]
-    video_data: Union[PromptVideoInput, list[None]]
-    audio_data: Union[PromptAudioInput, list[None]]
-
-    @classmethod
-    def create(
-        cls,
-        prompts: list[str],
-        image_data: Optional[PromptImageInput] = None,
-        video_data: Optional[PromptVideoInput] = None,
-        audio_data: Optional[PromptAudioInput] = None,
-    ) -> "PromptWithMultiModalInput":
-        """
-        Constructs a multimodal input from a prompt and optional mm_data.
-        This method will pad unprovided inputs with None values to 
-        match the length of prompts for parameterization automatically.
-        """
-        return cls(
-            prompts,
-            image_data if image_data is not None else [None] * len(prompts),
-            video_data if video_data is not None else [None] * len(prompts),
-            audio_data if audio_data is not None else [None] * len(prompts),
-        )
+    image_data: Optional[PromptImageInput] = None
+    video_data: Optional[PromptVideoInput] = None
+    audio_data: Optional[PromptAudioInput] = None
 
 
 class VLMTestType(Enum):

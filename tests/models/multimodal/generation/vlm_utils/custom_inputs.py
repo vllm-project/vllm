@@ -49,7 +49,7 @@ def multi_image_multi_aspect_ratio_inputs(formatter: Callable[[str], str]):
     ]
 
     return [
-        PromptWithMultiModalInput.create(
+        PromptWithMultiModalInput(
             prompts=formatted_prompts,
             image_data=aspect_ratio_images,
         )
@@ -89,7 +89,7 @@ def multi_video_multi_aspect_ratio_inputs(formatter: Callable[[str], str],
     ]
 
     return [
-        PromptWithMultiModalInput.create(
+        PromptWithMultiModalInput(
             prompts=formatted_prompts,
             video_data=aspect_ratio_videos,
         )
