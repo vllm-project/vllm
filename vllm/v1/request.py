@@ -72,7 +72,7 @@ class Request:
             assert len(self.mm_inputs) == len(self.mm_hashes)
 
         # Read-only views
-        # Prevent directly appending to the these lists since
+        # Prevent directly appending to these lists since
         # they should also be updated simultaneously.
         self.output_token_ids = ConstantList(self._output_token_ids)
         self.all_token_ids = ConstantList(self._all_token_ids)

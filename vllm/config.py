@@ -297,7 +297,7 @@ class ModelConfig:
     - 1K -> 1024\n
     - 25.6k -> 25,600"""
     spec_target_max_model_len: Optional[int] = None
-    """Specify the the maximum length for spec decoding draft models."""
+    """Specify the maximum length for spec decoding draft models."""
     quantization: Optional[QuantizationMethods] = None
     """Method used to quantize the weights. If `None`, we first check the
     `quantization_config` attribute in the model config file. If that is
