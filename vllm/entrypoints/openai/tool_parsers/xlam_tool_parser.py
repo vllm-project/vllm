@@ -183,9 +183,8 @@ class xLAMToolParser(ToolParser):
         """
         Extract tool calls for streaming mode.
         """
-        # Simplify detection: if it begins with "[{" treat it as a function call
-        is_function_call = (current_text.strip().startswith("[{")
-                            and "name" in current_text)
+        # Simplify detection: if it begins with "[" treat it as a function call
+        is_function_call = (current_text.strip().startswith("["))
 
         # If not a function call, return normal content
         if not is_function_call:
