@@ -23,7 +23,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Qwen2 model compatible with HuggingFace weights."""
-from typing import Any, Iterable, Optional, Set, Tuple, Union
+from collections.abc import Iterable
+from typing import Any, Optional, Union
 
 import torch
 from torch import nn
@@ -100,19 +101,19 @@ class Qwen2MLP(nn.Module):
 class Qwen2Attention(nn.Module):
 
     def __init__(
-            self,
-            hidden_size: int,
-            num_heads: int,
-            num_kv_heads: int,
-            max_position: int = 4096 * 32,
-            rope_theta: float = 10000,
-            cache_config: Optional[CacheConfig] = None,
-            quant_config: Optional[QuantizationConfig] = None,
-            rope_scaling: Optional[Tuple] = None,
-            prefix: str = "",
-            attn_type: str = AttentionType.DECODER,
-            dual_chunk_attention_config: Optional[dict[str,
-                                                       Any]] = None) -> None:
+        self,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        max_position: int = 4096 * 32,
+        rope_theta: float = 10000,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        rope_scaling: Optional[tuple] = None,
+        prefix: str = "",
+        attn_type: str = AttentionType.DECODER,
+        dual_chunk_attention_config: Optional[dict[str, Any]] = None,
+    ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -245,7 +246,7 @@ class Qwen2DecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -290,14 +291,14 @@ class Qwen2Model(nn.Module):
         # TODO (@robertgshaw2): see if this can be moved out
         if (cache_config.sliding_window is not None
                 and hasattr(config, "max_window_layers")):
-            raise ValueError("Sliding window for some but all layers is not "
-                             "supported. This model uses sliding window "
-                             "but `max_window_layers` = {} is less than "
-                             "`num_hidden_layers` = {}. Please open an issue "
-                             "to discuss this feature.".format(
-                                 config.max_window_layers,
-                                 config.num_hidden_layers,
-                             ))
+            assert config.max_window_layers == config.num_hidden_layers, (
+                "Sliding window for some but all layers is not supported. "
+                "This model uses sliding window but `max_window_layers` = {} "
+                "is less than `num_hidden_layers` = {}. Please open an issue "
+                "to discuss this feature.".format(
+                    config.max_window_layers,
+                    config.num_hidden_layers,
+                ))
 
         self.config = config
         self.quant_config = quant_config
@@ -367,8 +368,8 @@ class Qwen2Model(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -378,7 +379,7 @@ class Qwen2Model(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -490,8 +491,8 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                        sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head."]
@@ -559,7 +560,7 @@ class Qwen2EmbeddingModel(nn.Module, SupportsLoRA, SupportsPP):
     ) -> Optional[PoolerOutput]:
         return self._pooler(hidden_states, pooling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         weights = self.hf_to_vllm_mapper.apply(weights)
         weights = ((name, data) for name, data in weights
                    if not name.startswith("lm_head."))

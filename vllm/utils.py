@@ -613,6 +613,10 @@ def is_valid_ipv6_address(address: str) -> bool:
 
 
 def get_distributed_init_method(ip: str, port: int) -> str:
+    return get_tcp_uri(ip, port)
+
+
+def get_tcp_uri(ip: str, port: int) -> str:
     # Brackets are not permitted in ipv4 addresses,
     # see https://github.com/python/cpython/issues/103848
     return f"tcp://[{ip}]:{port}" if ":" in ip else f"tcp://{ip}:{port}"
@@ -2344,6 +2348,24 @@ def split_zmq_path(path: str) -> Tuple[str, str, str]:
         raise ValueError(f"Invalid zmq path: {path}")
 
     return scheme, host, port
+
+
+def make_zmq_path(scheme: str, host: str, port: Optional[int] = None) -> str:
+    """Make a ZMQ path from its parts.
+
+    Args:
+        scheme: The ZMQ transport scheme (e.g. tcp, ipc, inproc).
+        host: The host - can be an IPv4 address, IPv6 address, or hostname.
+        port: Optional port number, only used for TCP sockets.
+
+    Returns:
+        A properly formatted ZMQ path string.
+    """
+    if not port:
+        return f"{scheme}://{host}"
+    if is_valid_ipv6_address(host):
+        return f"{scheme}://[{host}]:{port}"
+    return f"{scheme}://{host}:{port}"
 
 
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L783 # noqa: E501
