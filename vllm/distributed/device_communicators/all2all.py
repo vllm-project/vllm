@@ -12,6 +12,8 @@ logger = init_logger()
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+else:
+    FusedMoE = None
 
 
 class All2AllBase:
