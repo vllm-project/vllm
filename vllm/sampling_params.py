@@ -6,16 +6,20 @@ import dataclasses
 import json as json_lib
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Annotated, Any, Optional, TypedDict, Union
+from typing import TYPE_CHECKING, Annotated, Any, Optional, TypedDict, Union
 
 import msgspec
 from pydantic import BaseModel
 from typing_extensions import deprecated
 
-from vllm.config import StructuredOutputBackend
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+
+if TYPE_CHECKING:
+    from vllm.config import StructuredOutputBackend
+else:
+    StructuredOutputBackend = Any
 
 logger = init_logger(__name__)
 
@@ -40,7 +44,7 @@ class StructuredOutputParamsDict(TypedDict, total=False):
     grammar: Optional[str]
     json_object: Optional[bool]
     structural_tag: Optional[str]
-    backend: Optional[StructuredOutputBackend]
+    backend: Optional["StructuredOutputBackend"]
     whitespace_pattern: Optional[str]
 
 
@@ -53,7 +57,7 @@ class StructuredOutputParams:
     json_object: Optional[bool] = None
     structural_tag: Optional[str] = None
 
-    backend: Optional[StructuredOutputBackend] = None
+    backend: Optional["StructuredOutputBackend"] = None
     whitespace_pattern: Optional[str] = None
 
     # internal fields
@@ -100,7 +104,7 @@ class StructuredOutputParams:
         choice: Optional[list[str]] = None,
         grammar: Optional[str] = None,
         json_object: Optional[bool] = None,
-        backend: Optional[StructuredOutputBackend] = None,
+        backend: Optional["StructuredOutputBackend"] = None,
         whitespace_pattern: Optional[str] = None,
         structural_tag: Optional[str] = None,
     ) -> Optional["StructuredOutputParams"]:

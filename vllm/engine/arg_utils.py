@@ -373,7 +373,7 @@ class EngineArgs:
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
 
     structured_output_config: StructuredOutputOptions = dataclass_field(
-        default_factory=StructuredOutputOptions)
+        default_factory=dict)
 
     @property
     @deprecated(
@@ -496,7 +496,9 @@ class EngineArgs:
                 stacklevel=2,
             )
         # StructuredOutputConfig setup
-        if self.structured_output_config is not None:
+        if self.structured_output_config is None:
+            self.structured_output_config = {}
+        if self.structured_output_config:
             logger.info_once(
                 "'structured_output_config' is specified. Other structured outputs related arguments will be ignored"
             )
