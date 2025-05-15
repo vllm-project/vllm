@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
-from typing import TYPE_CHECKING, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 import torch.nn.functional as F
@@ -90,8 +90,8 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                                  self._get_token_lora_indices(x), y_offset,
                                  y_slice_size, add_inputs)
 
-    def add_shrink(self, y: Union[Tuple[torch.Tensor, ...], torch.Tensor],
-                   x: torch.Tensor, lora_a_stacked: Tuple[torch.Tensor, ...],
+    def add_shrink(self, y: Union[tuple[torch.Tensor, ...], torch.Tensor],
+                   x: torch.Tensor, lora_a_stacked: tuple[torch.Tensor, ...],
                    scale: float, **kwargs) -> Optional[torch.Tensor]:
         """
         Performs GEMM for multiple slices of lora_a.
@@ -101,9 +101,9 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             y[i] += (x @ lora_a_stacked[i]) * scale
 
         Args:
-            y (Union[Tuple[torch.Tensor, ...], torch.Tensor]): Output tensors
+            y (Union[tuple[torch.Tensor, ...], torch.Tensor]): Output tensors
             x (torch.Tensor): Input tensor
-            lora_a_stacked (Tuple[torch.Tensor, ...]): lora_a's weights
+            lora_a_stacked (tuple[torch.Tensor, ...]): lora_a's weights
             scale (float): Scaling factor for the operation
         """
 
@@ -118,10 +118,10 @@ class PunicaWrapperTPU(PunicaWrapperBase):
 
     def add_expand(self,
                    y: torch.Tensor,
-                   x: Union[Tuple[torch.Tensor, ...], torch.Tensor],
-                   lora_b_stacked: Tuple[torch.Tensor, ...],
-                   lora_bias_stacked: Optional[Tuple[torch.Tensor, ...]],
-                   output_slices: Tuple[int, ...],
+                   x: Union[tuple[torch.Tensor, ...], torch.Tensor],
+                   lora_b_stacked: tuple[torch.Tensor, ...],
+                   lora_bias_stacked: Optional[tuple[torch.Tensor, ...]],
+                   output_slices: tuple[int, ...],
                    offset_start: int = 0,
                    add_inputs=True,
                    **kwargs) -> torch.Tensor:
@@ -137,11 +137,11 @@ class PunicaWrapperTPU(PunicaWrapperBase):
 
         Args:
             y (torch.Tensor): Output tensor.
-            x (Union[Tuple[torch.Tensor, ...], torch.Tensor]): Input tensors
-            lora_b_stacked (Tuple[torch.Tensor, ...]): lora_b's weight
-            lora_bias_stacked (Optional[Tuple[torch.Tensor, ...]]):
+            x (Union[tuple[torch.Tensor, ...], torch.Tensor]): Input tensors
+            lora_b_stacked (tuple[torch.Tensor, ...]): lora_b's weight
+            lora_bias_stacked (Optional[tuple[torch.Tensor, ...]]):
                 bias's weight
-            output_slices (Tuple[int, ...]): Every slice's size
+            output_slices (tuple[int, ...]): Every slice's size
             add_inputs (bool):  Defaults to True.
         """
         y_org = y
@@ -186,13 +186,13 @@ class PunicaWrapperTPU(PunicaWrapperBase):
     def add_lora_linear(self,
                         y: torch.Tensor,
                         x: torch.Tensor,
-                        lora_a_stacked: Tuple[torch.Tensor, ...],
-                        lora_b_stacked: Tuple[torch.Tensor, ...],
-                        lora_bias_stacked: Optional[Tuple[torch.Tensor, ...]],
+                        lora_a_stacked: tuple[torch.Tensor, ...],
+                        lora_b_stacked: tuple[torch.Tensor, ...],
+                        lora_bias_stacked: Optional[tuple[torch.Tensor, ...]],
                         scale: float,
-                        output_slices: Tuple[int, ...],
+                        output_slices: tuple[int, ...],
                         *,
-                        buffer: Optional[Tuple[torch.Tensor, ...]] = None,
+                        buffer: Optional[tuple[torch.Tensor, ...]] = None,
                         **kwargs) -> torch.Tensor:
         """
         Applicable to linear-related lora.
@@ -209,12 +209,12 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         Args:
             y (torch.Tensor): Output tensor. Will not be changed in-place.
             x (torch.Tensor): Input tensor (T, E)
-            lora_a_stacked (Tuple[torch.Tensor, ...]): lora_a's weight.
-            lora_b_stacked (Tuple[torch.Tensor, ...]): lora_b's weight.
-            lora_bias_stacked (Optional[Tuple[torch.Tensor, ...]]): lora's bias.
+            lora_a_stacked (tuple[torch.Tensor, ...]): lora_a's weight.
+            lora_b_stacked (tuple[torch.Tensor, ...]): lora_b's weight.
+            lora_bias_stacked (Optional[tuple[torch.Tensor, ...]]): lora's bias.
             scale (float): Scaling factor.
-            output_slices (Tuple[int, ...]): Every slice's size.
-            buffer (Optional[Tuple[torch.Tensor, ...]]): Defaults to None.
+            output_slices (tuple[int, ...]): Every slice's size.
+            buffer (Optional[tuple[torch.Tensor, ...]]): Defaults to None.
         """
 
         assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
@@ -281,8 +281,8 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         self,
         indices: torch.Tensor,
         output: torch.Tensor,
-        output_slices: Tuple[int, ...],
-        lora_bias_stacked: Tuple[Optional[torch.Tensor], ...],
+        output_slices: tuple[int, ...],
+        lora_bias_stacked: tuple[Optional[torch.Tensor], ...],
     ):
         """Applies bias to output
 
@@ -318,7 +318,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
     def _update_base_metadata(
         self,
         mapping: "LoRAMapping",
-        lora_index_to_id: List[Optional[int]],
+        lora_index_to_id: list[Optional[int]],
         max_loras: int,
         vocab_size: int,
         extra_vocab_size: int,
@@ -380,7 +380,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                                                                      batch_size]
 
     def _pad_prompt_mapping(
-            self, prompt_mapping: Tuple[int, ...]) -> Tuple[int, ...]:
+            self, prompt_mapping: tuple[int, ...]) -> tuple[int, ...]:
         num_reqs = len(prompt_mapping)
 
         # From vllm/v1/worker/tpu_model_runner:51, but need to avoid a circular

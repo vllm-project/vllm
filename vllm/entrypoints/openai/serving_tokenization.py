@@ -91,7 +91,7 @@ class OpenAIServingTokenization(OpenAIServing):
                  )
         except (ValueError, TypeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(str(e))
+            return self.create_error_response(f"{e} {e.__cause__}")
 
         input_ids: list[int] = []
         for i, engine_prompt in enumerate(engine_prompts):
