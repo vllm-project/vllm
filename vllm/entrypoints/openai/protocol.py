@@ -320,10 +320,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
     )
     chat_template_kwargs: Optional[dict[str, Any]] = Field(
         default=None,
-        description=(
-            "Additional kwargs to pass to the template renderer. "
-            "Will be accessible by the chat template."
-        ),
+        description=("Additional kwargs to pass to the template renderer. "
+                     "Will be accessible by the chat template."),
     )
     mm_processor_kwargs: Optional[dict[str, Any]] = Field(
         default=None,
@@ -346,8 +344,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     guided_grammar: Optional[str] = Field(
         default=None,
         description=(
-            "If specified, the output will follow the context free grammar."
-        ),
+            "If specified, the output will follow the context free grammar."),
     )
     structural_tag: Optional[str] = Field(
         default=None,
@@ -550,8 +547,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
             if self.stream else RequestOutputKind.FINAL_ONLY,
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias,
-            extra_args=({"kv_transfer_params": self.kv_transfer_params}
-                        if self.kv_transfer_params else None))
+            extra_args=({
+                "kv_transfer_params": self.kv_transfer_params
+            } if self.kv_transfer_params else None))
 
     def _get_guided_json_from_tool(
         self, ) -> Optional[Union[str, dict, BaseModel]]:
@@ -725,12 +723,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @classmethod
     def check_generation_prompt(cls, data):
         if data.get("continue_final_message") and data.get(
-            "add_generation_prompt"
-        ):
-            raise ValueError(
-                "Cannot set both `continue_final_message` and "
-                "`add_generation_prompt` to True."
-            )
+                "add_generation_prompt"):
+            raise ValueError("Cannot set both `continue_final_message` and "
+                             "`add_generation_prompt` to True.")
         return data
 
     @model_validator(mode="before")
@@ -851,8 +846,7 @@ class CompletionRequest(OpenAIBaseModel):
             "'args' and 'kwargs' fields containing positional and keyword "
             "arguments. For example: {'qualname': "
             "'my_module.MyLogitsProcessor', 'args': [1, 2], 'kwargs': "
-            "{'param': 'value'}}."
-        ),
+            "{'param': 'value'}}."),
     )
 
     return_tokens_as_token_ids: Optional[bool] = Field(
@@ -994,8 +988,9 @@ class CompletionRequest(OpenAIBaseModel):
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
-            extra_args=({"kv_transfer_params": self.kv_transfer_params}
-                        if self.kv_transfer_params else None))
+            extra_args=({
+                "kv_transfer_params": self.kv_transfer_params
+            } if self.kv_transfer_params else None))
 
     @model_validator(mode="before")
     @classmethod
@@ -1106,10 +1101,8 @@ class EmbeddingChatRequest(OpenAIBaseModel):
     )
     chat_template_kwargs: Optional[dict[str, Any]] = Field(
         default=None,
-        description=(
-            "Additional kwargs to pass to the template renderer. "
-            "Will be accessible by the chat template."
-        ),
+        description=("Additional kwargs to pass to the template renderer. "
+                     "Will be accessible by the chat template."),
     )
     mm_processor_kwargs: Optional[dict[str, Any]] = Field(
         default=None,
@@ -1603,7 +1596,7 @@ class TokenizeChatRequest(OpenAIBaseModel):
                      "Will be accessible by the chat template."),
     )
 
-    tools: Optional[List[ChatCompletionToolsParam]] = Field(
+    tools: Optional[list[ChatCompletionToolsParam]] = Field(
         default=None,
         description=("A list of tools the model may call."),
     )
