@@ -8,7 +8,7 @@ import torch.distributed as dist
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 
-logger = init_logger()
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.layer import FusedMoE
