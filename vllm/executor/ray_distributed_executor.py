@@ -380,6 +380,14 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
         # Initialize the actual workers inside worker wrapper.
         all_kwargs = []
+        # DeepSeek uses a lot of environment variables that arent gettings copied properly (VLLM_EP_SIZE) to other ray processes.
+        # This is just a workaround. Adding them to envs.py likely is a better fix.
+        vllm_envs = {}
+        for envv in os.environ:
+            if envv.startswith("VLLM_"):
+                vllm_envs[envv] = os.environ[envv]
+            if envv.startswith("PT_"):
+                vllm_envs[envv] = os.environ[envv]
         for rank, (node_id, _) in enumerate(worker_node_and_gpu_ids):
             local_rank = node_workers[node_id].index(rank)
             kwargs = dict(
@@ -389,6 +397,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 distributed_init_method=distributed_init_method,
                 is_driver_worker=(not self.parallel_config)
                 or (rank % self.parallel_config.tensor_parallel_size == 0),
+                vllm_envs=vllm_envs,
             )
             all_kwargs.append(kwargs)
         self._run_workers("init_worker", all_kwargs)

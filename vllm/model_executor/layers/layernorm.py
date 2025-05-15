@@ -114,10 +114,12 @@ class RMSNorm(CustomOp):
             return self.forward_native(x, residual)
         if residual is not None:
             orig_shape = x.shape
+            # NOTE(Tanner): Required to resolve empty tensor RTE on DeepSeek with PP>1
+            # According to Xinyu this can be removed once we are on 1.22.0.
             if orig_shape != residual.shape:
-                residual += x.view(residual.shape)
+                residual = residual + x.view(residual.shape)
             else:
-                residual += x
+                residual = residual + x
             # Note: HPUFusedRMSNorm requires 3D tensors as inputs
             x = HPUFusedRMSNorm.apply(residual, self.weight,
                                       self.variance_epsilon)

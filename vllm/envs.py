@@ -605,6 +605,13 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Port of the master node in the data parallel setting
     "VLLM_DP_MASTER_PORT":
     lambda: int(os.getenv("VLLM_DP_MASTER_PORT", "0")),
+
+    # When running pipeline parallelism on multiple nodes the primary communication channel
+    # for parralel communications may not be able to communicate. This would result in hangs
+    # after all_reduce/send/recv operations which PP group uses. To resolve this issue
+    # VLLM_PP_USE_CPU_COMS can be used to force PP communications through GLOO on the CPU.
+    "VLLM_PP_USE_CPU_COMS":
+    lambda: bool(int(os.getenv("VLLM_PP_USE_CPU_COMS", "0"))),
 }
 
 # end-env-vars-definition
