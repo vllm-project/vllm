@@ -281,13 +281,13 @@ def build_audio_inputs_from_test_info(
         method="librosa",
     )
     audios = [asset.audio_and_sample_rate for asset in audio_assets]
-    resampled_audios = [[(
+    resampled_audios = [(
         resampler.resample(
             audio,
             orig_sr=sr,
         ),
         int(resampler.target_sr),
-    )] for audio, sr in audios]
+    ) for audio, sr in audios]
 
     return [
         PromptWithMultiModalInput.create(

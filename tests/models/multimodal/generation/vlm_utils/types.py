@@ -47,17 +47,17 @@ RunnerOutput = tuple[list[int], str, Optional[SampleLogprobs]]
 class PromptWithMultiModalInput(NamedTuple):
     """Holds the multimodal input for a single test case."""
     prompts: list[str]
-    image_data: list[Optional[PromptImageInput]]
-    video_data: list[Optional[PromptVideoInput]]
-    audio_data: list[Optional[PromptAudioInput]]
+    image_data: Union[PromptImageInput, list[None]]
+    video_data: Union[PromptVideoInput, list[None]]
+    audio_data: Union[PromptAudioInput, list[None]]
 
     @classmethod
     def create(
         cls,
         prompts: list[str],
-        image_data: Optional[list[Optional[PromptImageInput]]] = None,
-        video_data: Optional[list[Optional[PromptVideoInput]]] = None,
-        audio_data: Optional[list[Optional[PromptAudioInput]]] = None,
+        image_data: Optional[PromptImageInput] = None,
+        video_data: Optional[PromptVideoInput] = None,
+        audio_data: Optional[PromptAudioInput] = None,
     ) -> "PromptWithMultiModalInput":
         """
         Constructs a multimodal input from a prompt and optional mm_data.
