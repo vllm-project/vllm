@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import logging
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -21,25 +22,34 @@ ADMONITIONS = {
 }
 
 
-def find_fence_blocks(lines: list[str]) -> list[dict]:
+@dataclass
+class Block:
+    indent: str
+    fence: str
+    type: str
+    args: str
+    start: int
+    end: int
+
+
+def find_fence_blocks(lines: list[str]) -> list[Block]:
     blocks = []
     pattern = re.compile("^([^:`]*)([:`]{3,}){(.*)} ?(.*)?$")
 
     for i, line in enumerate(lines):
         if match := pattern.match(line):
             indent, fence, block_type, block_args = match.groups()
-            for j, l in enumerate(lines[i:]):
-                if re.match(f"^.{{{len(indent)}}}{fence}$", l):
+            for j, line in enumerate(lines[i:]):
+                if re.match(f"^.{{{len(indent)}}}{fence}$", line):
                     break
-            blocks.append({
-                "indent": indent,
-                "fence": fence,
-                "type": block_type,
-                "args": block_args,
-                "start": i,
-                "end": i + j,
-                "handled": False,
-            })
+            blocks.append(Block(
+                indent=indent,
+                fence=fence,
+                type=block_type,
+                args=block_args,
+                start=i,
+                end=i + j,
+            ))
     return blocks
 
 
@@ -81,7 +91,12 @@ def indent_lines(lines: list[str], indent: int) -> list[str]:
     return [(" " * indent) + line for line in lines]
 
 
-handled_blocks = 0
+def to_name(heading: str) -> str:
+    return heading.strip("# \n").replace(" ", "-").lower()
+
+
+
+total_blocks = 0
 unhandled_blocks = 0
 
 
@@ -95,6 +110,20 @@ def transpile_myst_to_md(old_path: Path) -> None:
 
     with open(old_path) as f:
         lines = f.readlines()
+
+    snippets = {}
+    template = OLD_DIR / "getting_started/installation/device.template.md"
+    if old_path.parent.parent == template.parent:
+        with open(template) as f:
+            headings = [line for line in f.readlines() if line.strip()]
+            snippets = {
+                h: {
+                    "start": to_name(h),
+                    "end": to_name(headings[i-1]) if i else None
+                } 
+                for i, h 
+                in enumerate(headings)
+            }
 
     for i, line in enumerate(lines):
         # Replace MyST links with regular markdown links
@@ -112,53 +141,62 @@ def transpile_myst_to_md(old_path: Path) -> None:
         if any(delete in line for delete in deletes):
             line = ""
 
+        # Replace headings with snippet names
+        if line in snippets:
+            snippet = snippets[line]
+            line = f"# --8<-- [start:{snippet['start']}]\n"
+            if snippet["end"]:
+                line = f"# --8<-- [end:{snippet['end']}]\n{line}"
+        if snippets and i == len(lines) - 1:
+            line += f"# --8<-- [end:{snippets[headings[-1]]['start']}]\n"
+
         lines[i] = line
 
     # Get all fenced blocks and sort them so we process the inner blocks first
     blocks = find_fence_blocks(lines)
-    blocks = sorted(blocks, key=lambda x: len(x["fence"]))
+    blocks = sorted(blocks, key=lambda x: len(x.fence))
 
     # Process each block
     for block in blocks:
-        indent = block["indent"]
-        start = block["start"]
-        end = block["end"]
+        indent = block.indent
+        start = block.start
+        end = block.end
 
-        block["type"] = maybe_update_admonition(block["type"])
+        block.type = maybe_update_admonition(block.type)
 
         # Handle contents
-        if block["type"] == "contents":
+        if block.type == "contents":
             lines[start] = f"{indent}[TOC]\n"
             lines[start + 1:end] = ["" for _ in lines[start + 1:end]]
             lines[end] = ""
-            block["handled"] = True
+            continue
 
         # Handle admonitions
-        if block["type"] in ADMONITIONS:
-            args = f" \"{block['args']}\"" if block["args"] else ""
-            lines[start] = f"!!! {block['type']}{args}\n"
+        if block.type in ADMONITIONS:
+            args = f" \"{block.args}\"" if block.args else ""
+            lines[start] = f"!!! {block.type}{args}\n"
             lines[start + 1:end] = indent_lines(lines[start + 1:end], 4)
             lines[end] = ""
-            block["handled"] = True
+            continue
 
         # Handle raw HTML
-        if block["type"] == "raw" and block["args"] == "html":
+        if block.type == "raw" and block.args == "html":
             lines[start] = ""
             lines[end] = ""
-            block["handled"] = True
+            continue
 
         # Handle images
-        if block["type"] == "image":
-            src = block["args"]
+        if block.type == "image":
+            src = block.args
             content, attrs = parse_fence_block(lines[start + 1:end], indent)
             if attrs:
                 logger.warning("Image attributes not handled: %s", attrs)
             lines[start] = f"{indent}![]({src})\n"
             lines[start + 1:end] = ["" for _ in lines[start + 1:end]]
             lines[end] = ""
-            block["handled"] = True
-        if block["type"] == "figure":
-            src = block["args"]
+            continue
+        if block.type == "figure":
+            src = block.args
             caption, attrs = parse_fence_block(lines[start + 1:end], indent)
             lines[start] = f'{indent}<figure markdown="span">\n'
             lines[start] += f"{indent}  ![]({src}){{ {' '.join(attrs)} }}\n"
@@ -167,10 +205,10 @@ def transpile_myst_to_md(old_path: Path) -> None:
                     start] += f"{indent}  <figcaption>{caption[0]}</figcaption>\n"
             lines[start + 1:end] = ["" for _ in lines[start + 1:end]]
             lines[end] = f"{indent}</figure>\n"
-            block["handled"] = True
+            continue
 
         # Handle list table
-        if block["type"] == "list-table":
+        if block.type == "list-table":
             content, attrs = parse_fence_block(lines[start + 1:end], indent)
             row = []
             rows = []
@@ -187,51 +225,57 @@ def transpile_myst_to_md(old_path: Path) -> None:
             lines[start] = "\n".join(
                 indent_lines(table.splitlines(),
                              len(indent))) + "\n"
-            if block["args"]:
+            if block.args:
                 lines[
-                    start] += f"{indent}  <figcaption>{block['args']}</figcaption>\n"
+                    start] += f"{indent}  <figcaption>{block.args}</figcaption>\n"
             lines[start + 1:end] = ["" for _ in lines[start + 1:end]]
             lines[end] = ""
-            block["handled"] = True
+            continue
 
         # Handle literal includes
-        if block["type"] == "literalinclude":
-            path = (old_path.parent / block["args"]).resolve()
-            lines[
-                start] = f'{indent}``` title="{path}"\n'
+        if block.type == "literalinclude":
+            # All the literal includes we use reference library files
+            path = (old_path.parent / block.args).resolve()
+            lines[start] = f'{indent}``` title="{path}"\n'
             lines[start] += f'{indent}--8<-- "{path}"\n'
             # lines[start + 1:end] = ["" for _ in lines[start + 1:end]]
             lines[end] = f"{indent}```\n"
-            block["handled"] = True
             logger.warning("Literal include only partially handled")
+            continue
 
         # Handle includes
-        if block["type"] == "include":
-            content, attrs = parse_fence_block(lines[start + 1:end], indent)
-            if not attrs:
-                lines[start] = f'--8<-- "{block["args"]}"\n'
-                lines[end] = ""
-                block["handled"] = True
+        if block.type == "include":
+            # All the includes we use reference documentation files
+            path = (new_path.parent / block.args).resolve()
+            _, attrs = parse_fence_block(lines[start + 1:end], indent)
+            name = ""
+            if attrs:
+                attr = [a for a in attrs if "start-after" in a][0]
+                name = ":" + to_name(attr.split("=")[1].strip('"'))
+            lines[start] = f'{indent}--8<-- "{path}{name}"\n'
+            lines[start + 1:end] = ["" for _ in lines[start + 1:end]]
+            lines[end] = ""
+            continue
 
         # Handle tabs
-        if block["type"] == "tab-item":
-            content, attrs = parse_fence_block(lines[start + 1:end], indent)
-            lines[start] = f"=== \"{block['args']}\"\n"
+        if block.type == "tab-item":
+            content, _ = parse_fence_block(lines[start + 1:end], indent)
+            lines[start] = f"=== \"{block.args}\"\n"
             lines[start] += "".join(indent_lines(content, 4))
             lines[start + 1:end] = ["" for _ in lines[start + 1:end]]
             lines[end] = ""
-            block["handled"] = True
-        if block["type"] == "tab-set":
+            continue
+        if block.type == "tab-set":
             lines[start] = ""
             lines[end] = ""
-            block["handled"] = True
+            continue
 
-        if not block["handled"]:
-            logger.warning("Unhandled block: %s", block)
+        global unhandled_blocks
+        unhandled_blocks += 1
+        logger.warning("Unhandled block: %s", block)
 
-    global handled_blocks, unhandled_blocks
-    handled_blocks += len([b for b in blocks if b["handled"]])
-    unhandled_blocks += len([b for b in blocks if not b["handled"]])
+    global total_blocks
+    total_blocks += len(blocks)
 
     # Write the content to the new file
     content = "".join(lines)
@@ -252,10 +296,12 @@ def main():
                 content = f.read()
             with open(new_path, "wb") as f:
                 f.write(content)
+        elif path.suffix == ".py":
+            logger.info("Skipping %s", path)
         else:
             logger.warning("Skipping %s", path)
     logger.info(
-        f"Handled {handled_blocks} blocks, unhandled {unhandled_blocks} blocks"
+        "%d blocks in total, %d unhandled", total_blocks, unhandled_blocks
     )
 
 
