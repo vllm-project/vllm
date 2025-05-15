@@ -248,6 +248,9 @@ def transpile_myst_to_md(old_path: Path) -> None:
             path = (new_path.parent / block.args).resolve()
             _, attrs = parse_fence_block(lines[start + 1:end], indent)
             attr = attrs.pop("start-after") if "start-after" in attrs else ""
+            attrs.pop("end-before", None)
+            if attrs:
+                logger.warning("Include attributes not handled: %s", attrs)
             name = f":{attr}" if attr else ""
             lines[start] = f'{indent}--8<-- "{path}{name}"\n'
             lines[start + 1:end] = ["" for _ in lines[start + 1:end]]
