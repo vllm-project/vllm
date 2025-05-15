@@ -179,6 +179,8 @@ class PPLXAll2All(All2AllBase):
 
     def destroy(self):
         self.pplx_handle.destroy()
+        torch.cuda.synchronize()
+        torch.distributed.barrier(self.cpu_group)
         from pplx_kernels.nvshmem import nvshmem_finalize
         logger.debug("PPLX NVSHMEM finalize")
         nvshmem_finalize()
