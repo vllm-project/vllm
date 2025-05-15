@@ -65,6 +65,8 @@ class OpenAIServingTokenization(OpenAIServing):
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
             if isinstance(request, TokenizeChatRequest):
+                tool_dicts = (None if request.tools is None else
+                              [tool.model_dump() for tool in request.tools])
                 (
                     _,
                     request_prompts,
@@ -73,6 +75,7 @@ class OpenAIServingTokenization(OpenAIServing):
                     request,
                     tokenizer,
                     request.messages,
+                    tool_dicts=tool_dicts,
                     chat_template=request.chat_template or self.chat_template,
                     chat_template_content_format=self.
                     chat_template_content_format,
