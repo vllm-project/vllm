@@ -13,6 +13,7 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 
+ROOT_DIR = Path(__file__).parent
 OLD_DIR = Path("docs/source")
 EXAMPLES_DIR = OLD_DIR / "getting_started/examples"
 NEW_DIR = Path("docs")
@@ -160,6 +161,29 @@ def transpile_myst_to_md(old_path: Path) -> None:
         end = block.end
 
         block.type = maybe_update_admonition(block.type)
+
+        # Handle code blocks
+        if block.type == "code-block":
+            content, attrs = parse_fence_block(lines[start + 1:end], indent)
+            caption = attrs.pop("caption", "")
+            title = f' title="{caption}"' if caption else ""
+            if attrs:
+                logger.warning("Code block attributes not handled: %s", attrs)
+            lines[start] = f"{indent}```{block.args}{title}\n"
+            lines[start] += "".join(content)
+            lines[start + 1:end] = ["" for _ in lines[start + 1:end]]
+            lines[end] = f"{indent}```\n"
+            continue
+
+        # Handle math blocks
+        if block.type == "math":
+            content, _ = parse_fence_block(lines[start + 1:end], indent)
+            math = [c for c in content if c.strip()]
+            lines[start] = f"{indent}$$\n"
+            lines[start] += "".join(math)
+            lines[start + 1:end] = ["" for _ in lines[start + 1:end]]
+            lines[end] = f"{indent}$$\n"
+            continue
 
         # Handle contents
         if block.type == "contents":
