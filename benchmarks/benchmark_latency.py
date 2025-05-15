@@ -7,10 +7,9 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
-import torch
 from tqdm import tqdm
 
 from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
@@ -36,8 +35,19 @@ def save_to_pytorch_benchmark_format(
 
 def main(args: argparse.Namespace):
     print(args)
-
     engine_args = EngineArgs.from_cli_args(args)
+    if args.profile:
+        profile_dir = args.profile_result_dir
+        if not profile_dir:
+            profile_dir = (
+                Path(".") / "vllm_benchmark_result" / f"latency_result_{time.time()}"
+            )
+
+        assert profile_dir is not None
+        os.environ["VLLM_TORCH_PROFILER_DIR"] = str(profile_dir)
+    else:
+        profile_dir = None
+        os.environ.pop("VLLM_TORCH_PROFILER_DIR", None)
 
     # NOTE(woosuk): If the request cannot be processed in a single batch,
     # the engine will automatically process the request in multiple batches.
@@ -78,19 +88,11 @@ def main(args: argparse.Namespace):
                 ),
             )
 
-    def run_to_completion(profile_dir: Optional[str] = None):
-        if profile_dir:
-            with torch.profiler.profile(
-                activities=[
-                    torch.profiler.ProfilerActivity.CPU,
-                    torch.profiler.ProfilerActivity.CUDA,
-                ],
-                on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                    str(profile_dir)
-                ),
-            ) as p:
-                llm_generate()
-            print(p.key_averages().table(sort_by="self_cuda_time_total"))
+    def run_to_completion(profile: bool = False):
+        if profile:
+            llm.start_profile()
+            llm_generate()
+            llm.stop_profile()
         else:
             start_time = time.perf_counter()
             llm_generate()
@@ -100,22 +102,17 @@ def main(args: argparse.Namespace):
 
     print("Warming up...")
     for _ in tqdm(range(args.num_iters_warmup), desc="Warmup iterations"):
-        run_to_completion(profile_dir=None)
+        run_to_completion()
 
     if args.profile:
-        profile_dir = args.profile_result_dir
-        if not profile_dir:
-            profile_dir = (
-                Path(".") / "vllm_benchmark_result" / f"latency_result_{time.time()}"
-            )
         print(f"Profiling (results will be saved to '{profile_dir}')...")
-        run_to_completion(profile_dir=profile_dir)
+        run_to_completion(profile=True)
         return
 
     # Benchmark.
     latencies = []
-    for _ in tqdm(range(args.num_iters), desc="Profiling iterations"):
-        latencies.append(run_to_completion(profile_dir=None))
+    for _ in tqdm(range(args.num_iters), desc="Benchmarking iterations"):
+        latencies.append(run_to_completion())
     latencies = np.array(latencies)
     percentages = [10, 25, 50, 75, 90, 99]
     percentiles = np.percentile(latencies, percentages)
