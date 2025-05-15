@@ -62,7 +62,8 @@
 {#- Now deal with all other messages #}
 
 {%- for message in messages %}
-    {%- if not (message.role == 'ipython' or message.role == 'tool' or 'tool_calls' in message) %}
+{#- Base case: messages that are not from tool role and has empty tool_call list  #}
+    {%- if not (message.role == 'ipython' or message.role == 'tool' or ('tool_calls' in message and  message.tool_calls|length != 0 )) %}
     {{- '<|header_start|>' + message['role'] + '<|header_end|>\n\n' }}
         {%- if message['content'] is string %}
             {{- message['content'] }}
@@ -91,31 +92,32 @@
                 {%- endif %}
             {%- endfor %}
         {%- endif %}
+         {{- "[" }}
         {%- for tool_call in message.tool_calls %}
             {%- if tool_call.function is defined %}
                 {%- set tool_call = tool_call.function %}
             {%- endif %}
-            {{- '[' + tool_call.name + '(' -}}
+            {{-  tool_call.name + '(' -}}
             {%- for param in tool_call.arguments %}
                 {{- param + '="' -}}
                 {{- "%s" | format(tool_call.arguments[param]) -}}
                {{- '"' -}}
                 {% if not loop.last %}, {% endif %}
             {%- endfor %}
-            {{- ')]' -}}
+            {{- ')' -}}
             {% if not loop.last %}, {% endif %}
         {%- endfor %}
-        {{- "<|eot|>" }}
+        {{- "]<|eot|>" }}
 {%- endif %}
 
     {%- elif message.role == "tool" or message.role == "ipython" %}
         {{- "<|header_start|>ipython<|header_end|>\n\n" }}
         {%- if message.content is string %}
-            {{- { "tool_output": message.content } | tojson }}
+            {{-  message.content   }}
         {%- else %}
             {%- for content in message['content']  %}
                 {%- if content['type']  == 'text' %}
-                    {{- { "tool_output": content['text']  } | tojson }}
+                    {{-  content['text'] }}
                 {%- endif %}
             {%- endfor %}
         {%- endif %}
