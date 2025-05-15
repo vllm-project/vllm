@@ -31,6 +31,7 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCIsSleepingResponse,
                                          RPCLoadAdapterRequest,
                                          RPCProcessRequest,
+                                         RPCResetMultiModalCacheRequest,
                                          RPCResetPrefixCacheRequest,
                                          RPCSleepRequest, RPCStartupRequest,
                                          RPCStartupResponse,
@@ -491,7 +492,7 @@ class MQLLMEngineClient(EngineClient):
         from the LLMEngine to the caller.
 
         Args:
-            prompt: The prompt to the LLM. See :class:`~vllm.inputs.PromptType`
+            prompt: The prompt to the LLM. See {class}`~vllm.inputs.PromptType`
                 for more details about the format of each input.
             sampling_params: The sampling parameters of the request.
             request_id: The unique id of the request.
@@ -560,7 +561,7 @@ class MQLLMEngineClient(EngineClient):
         from the LLMEngine to the caller.
 
         Args:
-            prompt: The prompt to the LLM. See :class:`~vllm.inputs.PromptType`
+            prompt: The prompt to the LLM. See {class}`~vllm.inputs.PromptType`
                 for more details about the format of each input.
             pooling_params: The pooling parameters of the request.
             request_id: The unique id of the request.
@@ -686,6 +687,13 @@ class MQLLMEngineClient(EngineClient):
 
         await self._send_one_way_rpc_request(
             request=RPCUProfileRequest.STOP_PROFILE, socket=self.input_socket)
+
+    async def reset_mm_cache(self) -> None:
+        """Reset the multi-modal cache"""
+
+        await self._send_one_way_rpc_request(
+            request=RPCResetMultiModalCacheRequest.RESET,
+            socket=self.input_socket)
 
     async def reset_prefix_cache(self,
                                  device: Optional[Device] = None) -> None:

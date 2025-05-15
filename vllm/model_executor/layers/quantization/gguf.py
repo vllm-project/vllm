@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Optional
 
 import gguf
 import torch
@@ -35,7 +35,7 @@ class GGUFConfig(QuantizationConfig):
     def get_name(self) -> QuantizationMethods:
         return "gguf"
 
-    def get_supported_act_dtypes(self) -> List[torch.dtype]:
+    def get_supported_act_dtypes(self) -> list[torch.dtype]:
         return [torch.half, torch.bfloat16, torch.float32]
 
     @classmethod
@@ -43,11 +43,11 @@ class GGUFConfig(QuantizationConfig):
         return 60
 
     @classmethod
-    def get_config_filenames(cls) -> List[str]:
+    def get_config_filenames(cls) -> list[str]:
         return []  # no extra configs.
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "GGUFConfig":
+    def from_config(cls, config: dict[str, Any]) -> "GGUFConfig":
         return cls()
 
     def get_quant_method(self, layer: torch.nn.Module,
@@ -145,7 +145,9 @@ def _fused_moe_gguf(
         moe_align_block_size)
 
     out_hidden_states = torch.empty_like(x)
-    if qweight_type2 in MMQ_QUANT_TYPES and qweight_type in MMQ_QUANT_TYPES:
+    # unless we decent expert reuse we are better off running moe_vec kernel
+    if (qweight_type2 in MMQ_QUANT_TYPES and qweight_type in MMQ_QUANT_TYPES
+            and x.shape[0] > 64):
         num_tokens, _ = x.shape
         E, N, _ = w1.shape
         top_k = topk_ids.shape[1]
@@ -160,6 +162,20 @@ def _fused_moe_gguf(
         out = ops.ggml_moe_a8(out, w2, sorted_token_ids, expert_ids,
                               num_tokens_post_padded, qweight_type2,
                               w2.shape[1], 1, num_tokens * top_k)
+        out = out.reshape(num_tokens, top_k, w2.shape[1]).mul_(
+            topk_weights.view(num_tokens, top_k, 1))
+        ops.moe_sum(out, out_hidden_states)
+    elif qweight_type2 in MMVQ_QUANT_TYPES and qweight_type in MMVQ_QUANT_TYPES:
+        num_tokens, _ = x.shape
+        E, N, _ = w1.shape
+        top_k = topk_ids.shape[1]
+
+        out = ops.ggml_moe_a8_vec(x, w1, topk_ids, top_k, qweight_type, N,
+                                  num_tokens)
+        out = act(out)
+
+        out = ops.ggml_moe_a8_vec(out, w2, topk_ids, 1, qweight_type2,
+                                  w2.shape[1], num_tokens * top_k)
         out = out.reshape(num_tokens, top_k, w2.shape[1]).mul_(
             topk_weights.view(num_tokens, top_k, 1))
         ops.moe_sum(out, out_hidden_states)
@@ -199,7 +215,7 @@ class GGUFLinearMethod(LinearMethodBase):
 
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
-                       output_partition_sizes: List[int], input_size: int,
+                       output_partition_sizes: list[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
         self.params_dtype = params_dtype
@@ -390,7 +406,7 @@ class GGUFEmbeddingMethod(GGUFLinearMethod):
 
 class GGUFUninitializedParameter(UninitializedParameter):
     cls_to_become = Parameter
-    data_container: List[torch.Tensor]
+    data_container: list[torch.Tensor]
 
     def materialize_nested(self) -> Parameter:
         dtype = {data.dtype for data in self.data_container}

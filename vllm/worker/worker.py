@@ -71,7 +71,11 @@ class Worker(LocalOrDistributedWorkerBase):
             or (speculative_config.draft_model_config.hf_config.model_type ==
                 model_config.hf_config.model_type) \
             or (speculative_config.draft_model_config.hf_config.model_type
-                not in ("medusa", "mlp_speculator", "eagle", "deepseek_mtp")) \
+                not in ("medusa",
+                        "mlp_speculator",
+                        "eagle",
+                        "deepseek_mtp",
+                         "mimo_mtp")) \
                     else {"return_hidden_states": True}
 
         ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
@@ -230,9 +234,10 @@ class Worker(LocalOrDistributedWorkerBase):
         Then, it calculate the maximum possible number of GPU and CPU blocks
         that can be allocated with the remaining free memory.
 
-        .. tip::
-            You may limit the usage of GPU memory
-            by adjusting the `gpu_memory_utilization` parameter.
+        :::{tip}
+        You may limit the usage of GPU memory
+        by adjusting the `gpu_memory_utilization` parameter.
+        :::
         """
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
@@ -525,7 +530,8 @@ def init_worker_distributed_environment(
     init_distributed_environment(parallel_config.world_size, rank,
                                  distributed_init_method, local_rank)
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
-                                      parallel_config.pipeline_parallel_size)
+                                      parallel_config.pipeline_parallel_size,
+                                      parallel_config.enable_expert_parallel)
 
     ensure_kv_transfer_initialized(vllm_config)
 

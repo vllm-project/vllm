@@ -68,6 +68,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_RPC_TIMEOUT: int = 10000  # ms
     VLLM_PLUGINS: Optional[list[str]] = None
+    VLLM_LORA_RESOLVER_CACHE_DIR: Optional[str] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
@@ -84,6 +85,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_CUSTOM_PAGED_ATTN: bool = True
+    VLLM_QUARK_EMU_MEM_OPT: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -110,6 +112,10 @@ if TYPE_CHECKING:
     VLLM_USE_DEEP_GEMM: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
+    VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
+    VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
+    VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5557
+    VLLM_ALL2ALL_BACKEND: str = "naive"
 
 
 def get_default_cache_root():
@@ -260,6 +266,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE":
     lambda: bool(
         os.environ.get("VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE", "1") != "0"),
+
+    # Internal flag to enable/disable Inductor standalone compile
+    "VLLM_TEST_STANDALONE_COMPILE":
+    lambda: os.environ.get("VLLM_TEST_STANDALONE_COMPILE", "0") != "0",
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
@@ -495,6 +505,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: None if "VLLM_PLUGINS" not in os.environ else os.environ[
         "VLLM_PLUGINS"].split(","),
 
+    # a local directory to look in for unrecognized LoRA adapters.
+    # only works if plugins are enabled and
+    # VLLM_ALLOW_RUNTIME_LORA_UPDATING is enabled.
+    "VLLM_LORA_RESOLVER_CACHE_DIR":
+    lambda: os.getenv("VLLM_LORA_RESOLVER_CACHE_DIR", None),
+
     # Enables torch profiler if set. Path to the directory where torch profiler
     # traces are saved. Note that it must be an absolute path.
     "VLLM_TORCH_PROFILER_DIR":
@@ -582,6 +598,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_CUSTOM_PAGED_ATTN":
     lambda: (os.getenv("VLLM_ROCM_CUSTOM_PAGED_ATTN", "True").lower() in
              ("true", "1")),
+
+    # If set, when running in Quark emulation mode, do not dequantize the
+    # weights at load time. Instead, dequantize weights on-the-fly during
+    # kernel execution.
+    # This allows running larger models at the cost of slower inference.
+    # This flag has no effect when not running in Quark emulation mode.
+    "VLLM_QUARK_EMU_MEM_OPT":
+    lambda: bool(int(os.getenv("VLLM_QUARK_EMU_MEM_OPT", "0"))),
 
     # Divisor for dynamic query scale factor calculation for FP8 KV Cache
     "Q_SCALE_CONSTANT":
@@ -727,6 +751,24 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # limit will actually be zero-copy decoded.
     "VLLM_MSGPACK_ZERO_COPY_THRESHOLD":
     lambda: int(os.getenv("VLLM_MSGPACK_ZERO_COPY_THRESHOLD", "256")),
+
+    # If set, allow insecure serialization using pickle.
+    # This is useful for environments where it is deemed safe to use the
+    # insecure method and it is needed for some reason.
+    "VLLM_ALLOW_INSECURE_SERIALIZATION":
+    lambda: bool(int(os.getenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "0"))),
+
+    # IP address used for NIXL handshake between remote agents.
+    "VLLM_NIXL_SIDE_CHANNEL_HOST":
+    lambda: os.getenv("VLLM_NIXL_SIDE_CHANNEL_HOST", "localhost"),
+
+    # Port used for NIXL handshake between remote agents.
+    "VLLM_NIXL_SIDE_CHANNEL_PORT":
+    lambda: int(os.getenv("VLLM_NIXL_SIDE_CHANNEL_PORT", "5557")),
+
+    # all2all backend for vllm's expert parallel communication
+    "VLLM_ALL2ALL_BACKEND":
+    lambda: os.getenv("VLLM_ALL2ALL_BACKEND", "naive"),
 }
 
 # end-env-vars-definition
@@ -789,6 +831,7 @@ def compute_hash() -> str:
         "VLLM_USE_TRITON_AWQ",
         "VLLM_DP_RANK",
         "VLLM_DP_SIZE",
+        "VLLM_TEST_STANDALONE_COMPILE",
     ]
     for key in environment_variables_to_hash:
         if key in environment_variables:

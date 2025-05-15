@@ -11,7 +11,7 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
-    deep_gemm_moe_fp8)
+    _valid_deep_gemm_shape, deep_gemm_moe_fp8)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size)
@@ -29,6 +29,10 @@ except ImportError:
 if current_platform.get_device_capability() < (9, 0):
     pytest.skip("FP8 Triton requires CUDA 9.0 or higher",
                 allow_module_level=True)
+
+vllm_config = VllmConfig()
+vllm_config.scheduler_config.max_num_seqs = 128
+vllm_config.scheduler_config.max_model_len = 8192
 
 # Test configurations
 DTYPES = [torch.bfloat16]  # [torch.half, torch.bfloat16, torch.float32]
@@ -210,7 +214,6 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
     score = torch.randn((M, E), dtype=dtype)
 
     # Set the context to avoid lots of warning spam.
-    vllm_config = VllmConfig()
     with set_current_vllm_config(vllm_config):
         out = fused_moe(
             a,
@@ -258,6 +261,7 @@ def per_block_cast_to_fp8(
 @pytest.mark.parametrize(
     "M,N,K,block_size,out_dtype,seed",
     itertools.product(M, N, K, BLOCK_SIZE, OUT_DTYPES, SEEDS))
+@pytest.mark.skipif(not dg_available, reason="DeepGemm kernels not available.")
 @torch.inference_mode()
 def test_w8a8_block_fp8_deep_gemm_matmul(M, N, K, block_size, out_dtype, seed):
     # only aligned sizes
@@ -338,7 +342,8 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
     M, K = a.shape
     N = w2.shape[-1]
 
-    topk_weight, topk_ids = fused_topk(a, score.float(), topk, False)
+    topk_weight, topk_ids, token_expert_indices = fused_topk(
+        a, score.float(), topk, False)
 
     block_m = deep_gemm.get_m_alignment_for_contiguous_layout()
 
@@ -380,15 +385,11 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
     block_size = [block_m, block_m]
     dtype = torch.bfloat16
 
-    # only aligned sizes
-    if (N % block_m != 0 or K % block_m != 0 or topk > E):
-        pytest.skip(
-            f"Skipping test; bad size m={M}, n={N}, k={K}, topk={topk}, E={E}")
+    if topk > E:
+        pytest.skip(f"Skipping test: topk={topk} > E={E}")
 
-    if N <= 512:
-        pytest.skip("Skipping N <= 512 until performance issues solved.")
-
-    vllm_config = VllmConfig()
+    if not _valid_deep_gemm_shape(M, N, K):
+        pytest.skip(f"Skipping test: invalid size m={M}, n={N}, k={K}")
 
     torch.manual_seed(seed)
     fp8_info = torch.finfo(torch.float8_e4m3fn)
@@ -435,7 +436,8 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
             ref_out = torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score,
                                                topk, block_size)
 
-        topk_weights, topk_ids = fused_topk(a, score.float(), topk, False)
+        topk_weights, topk_ids, token_expert_indices = fused_topk(
+            a, score.float(), topk, False)
 
         out = deep_gemm_moe_fp8(a, w1, w2, w1_s, w2_s, topk_weights, topk_ids)
 

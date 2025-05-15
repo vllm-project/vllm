@@ -31,9 +31,7 @@ from transformers import PretrainedConfig
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
-from vllm.distributed import (get_pp_group,
-                              get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_reduce)
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -143,7 +141,8 @@ class DeepseekV2MoE(nn.Module):
                 intermediate_size=intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                reduce_results=False,
+                reduce_results=self.experts.must_reduce_shared_expert_outputs(
+                ),
                 prefix=f"{prefix}.shared_experts",
             )
 
@@ -154,6 +153,7 @@ class DeepseekV2MoE(nn.Module):
             shared_output = self.shared_experts(hidden_states)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
+
         if hidden_states.dtype != torch.float16:
             final_hidden_states = self.experts(
                 hidden_states=hidden_states,
@@ -171,9 +171,11 @@ class DeepseekV2MoE(nn.Module):
                 # See DeepseekV2DecoderLayer for more details.
                 final_hidden_states = final_hidden_states + shared_output \
                     * (1. / self.routed_scaling_factor)
+
         if self.tp_size > 1:
-            final_hidden_states = tensor_model_parallel_all_reduce(
-                final_hidden_states)
+            final_hidden_states = (
+                self.experts.maybe_all_reduce_tensor_model_parallel(
+                    final_hidden_states))
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 
@@ -453,10 +455,7 @@ class DeepseekV2MLAAttention(nn.Module):
             qk_rope_head_dim=self.qk_rope_head_dim,
             qk_head_dim=self.qk_head_dim,
             v_head_dim=self.v_head_dim,
-            rotary_emb=self.rotary_emb,
-            q_proj=self.q_proj if self.q_lora_rank is None else self.q_b_proj,
             kv_b_proj=self.kv_b_proj,
-            o_proj=self.o_proj,
         )
 
         self.prefix = prefix
@@ -468,17 +467,29 @@ class DeepseekV2MLAAttention(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         if self.q_lora_rank is not None:
-            ckq = self.q_a_proj(hidden_states)[0]
-            hidden_states_or_q_c = self.q_a_layernorm(ckq)
+            q_c = self.q_a_proj(hidden_states)[0]
+            q_c = self.q_a_layernorm(q_c)
+            q = self.q_b_proj(q_c)[0]
         else:
-            hidden_states_or_q_c = hidden_states
+            q = self.q_proj(hidden_states)[0]
         kv_c, k_pe = self.kv_a_proj_with_mqa(hidden_states)[0].split(
             [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
-        return self.mla_attn(hidden_states_or_q_c,
-                             kv_c_normed,
-                             k_pe,
-                             output_shape=hidden_states.shape)
+
+        q = q.view(-1, self.num_local_heads, self.qk_head_dim)
+        # Add head dim of 1 to k_pe
+        k_pe = k_pe.unsqueeze(1)
+
+        q[..., self.qk_nope_head_dim:], k_pe = self.rotary_emb(
+            positions, q[..., self.qk_nope_head_dim:], k_pe)
+
+        attn_out = self.mla_attn(
+            q,
+            kv_c_normed,
+            k_pe,
+            output_shape=(hidden_states.shape[0],
+                          self.num_local_heads * self.v_head_dim))
+        return self.o_proj(attn_out)[0]
 
 
 class DeepseekV2DecoderLayer(nn.Module):

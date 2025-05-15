@@ -79,7 +79,6 @@ class DbrxExperts(FusedMoE):
             prefix=prefix,
         )
         self.config = config
-        self.tp_size = get_tensor_model_parallel_world_size()
         self.d_model = config.d_model
         self.intermediate_size = (self.config.ffn_config.ffn_hidden_size //
                                   self.tp_size)
@@ -451,13 +450,9 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
                 break
 
             else:
-                # Remapping the name of FP8 kv-scale.
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
-                    continue
-
                 if is_pp_missing_parameter(name, self):
                     continue
+                # Remapping the name of FP8 kv-scale.
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name is None:
                     continue

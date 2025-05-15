@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from contextlib import suppress
-from typing import Any, Dict, List, Literal, Optional, Tuple, cast
+from typing import Any, Literal, Optional, cast
 
 import torch
 from compressed_tensors.config import (CompressionFormat,
@@ -23,9 +23,10 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsMoEMethod)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     W4A16SPARSE24_SUPPORTED_BITS, WNA16_SUPPORTED_BITS, CompressedTensors24,
-    CompressedTensorsScheme, CompressedTensorsW4A16Sparse24,
-    CompressedTensorsW8A8Fp8, CompressedTensorsW8A8Int8,
-    CompressedTensorsW8A16Fp8, CompressedTensorsWNA16)
+    CompressedTensorsScheme, CompressedTensorsW4A16Fp4,
+    CompressedTensorsW4A16Sparse24, CompressedTensorsW8A8Fp8,
+    CompressedTensorsW8A8Int8, CompressedTensorsW8A16Fp8,
+    CompressedTensorsWNA16)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target, is_activation_quantization_format,
     should_ignore_layer)
@@ -37,20 +38,20 @@ logger = init_logger(__name__)
 __all__ = ["CompressedTensorsLinearMethod"]
 
 SPARSITY_CONFIG_NAME: Literal["sparsity_config"] = "sparsity_config"
-QUANTIZATION_SCHEME_MAP_TYPE = Dict[str, Optional[Dict[str, QuantizationArgs]]]
+QUANTIZATION_SCHEME_MAP_TYPE = dict[str, Optional[dict[str, QuantizationArgs]]]
 
 
 class CompressedTensorsConfig(QuantizationConfig):
 
     def __init__(
         self,
-        target_scheme_map: Dict[str, Any],
-        ignore: List[str],
+        target_scheme_map: dict[str, Any],
+        ignore: list[str],
         quant_format: str,
-        sparsity_scheme_map: Dict[str, SparsityCompressionConfig],
-        sparsity_ignore_list: List[str],
-        kv_cache_scheme: Optional[Dict[str, Any]] = None,
-        config: Optional[Dict[str, Any]] = None,
+        sparsity_scheme_map: dict[str, SparsityCompressionConfig],
+        sparsity_ignore_list: list[str],
+        kv_cache_scheme: Optional[dict[str, Any]] = None,
+        config: Optional[dict[str, Any]] = None,
     ):
         super().__init__()
         self.ignore = ignore
@@ -65,7 +66,7 @@ class CompressedTensorsConfig(QuantizationConfig):
     def get_linear_method(self) -> "CompressedTensorsLinearMethod":
         return CompressedTensorsLinearMethod(self)
 
-    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
         return [torch.float16, torch.bfloat16]
 
     @classmethod
@@ -101,8 +102,8 @@ class CompressedTensorsConfig(QuantizationConfig):
         return None
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "CompressedTensorsConfig":
-        ignore: List[str] = cast(List[str], config.get("ignore", []))
+    def from_config(cls, config: dict[str, Any]) -> "CompressedTensorsConfig":
+        ignore: list[str] = cast(list[str], config.get("ignore", []))
         quant_format = cast(str, config.get("format"))
         target_scheme_map = cls._quantization_scheme_map_from_config(
             config=config)
@@ -120,8 +121,8 @@ class CompressedTensorsConfig(QuantizationConfig):
 
     @classmethod
     def _parse_sparsity_config(
-        cls, config: Dict[str, Any]
-    ) -> Tuple[Dict[str, SparsityCompressionConfig], List[str]]:
+        cls, config: dict[str, Any]
+    ) -> tuple[dict[str, SparsityCompressionConfig], list[str]]:
         """
         :param config: The `quantization_config` dictionary from config.json
         :return: A tuple with two elements
@@ -134,7 +135,7 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         sparsity_config = SparsityCompressionConfig.model_validate(
             sparsity_config)
-        sparse_scheme_map: Dict[str, SparsityCompressionConfig] = {
+        sparse_scheme_map: dict[str, SparsityCompressionConfig] = {
             target: sparsity_config
             for target in sparsity_config.targets or list()
         }
@@ -143,13 +144,13 @@ class CompressedTensorsConfig(QuantizationConfig):
 
     @classmethod
     def _quantization_scheme_map_from_config(
-            cls, config: Dict[str, Any]) -> QUANTIZATION_SCHEME_MAP_TYPE:
+            cls, config: dict[str, Any]) -> QUANTIZATION_SCHEME_MAP_TYPE:
         """
         :param config: The `quantization_config` dictionary from config.json
         :return: A dictionary mapping target layer names to their corresponding
             quantization_args for weights and input activations
         """
-        target_scheme_map: Dict[str, Any] = dict()
+        target_scheme_map: dict[str, Any] = dict()
         quant_format = cast(str, config.get("format"))
 
         # The quant_config has multiple config_groups, each containing
@@ -187,7 +188,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         return target_scheme_map
 
     @classmethod
-    def get_config_filenames(cls) -> List[str]:
+    def get_config_filenames(cls) -> list[str]:
         return []
 
     def _check_scheme_supported(self,
@@ -215,6 +216,21 @@ class CompressedTensorsConfig(QuantizationConfig):
             return supported
         else:
             return False
+
+    def _is_fp4a16_nvfp4(self, weight_quant: BaseModel,
+                         input_quant: BaseModel):
+
+        is_weight_only = weight_quant is not None and input_quant is None
+        is_group_quant = (
+            weight_quant.strategy == QuantizationStrategy.GROUP.value)
+        is_symmetric = weight_quant.symmetric
+
+        is_group_size_16 = weight_quant.group_size == 16
+        is_float_type = weight_quant.type == QuantizationType.FLOAT
+        is_4_bits = weight_quant.num_bits == 4
+
+        return (is_weight_only and is_group_quant and is_float_type
+                and is_4_bits and is_group_size_16 and is_symmetric)
 
     def _is_static_tensor_w8a8(self, weight_quant: BaseModel,
                                input_quant: BaseModel) -> bool:
@@ -315,6 +331,9 @@ class CompressedTensorsConfig(QuantizationConfig):
             input_quant: BaseModel) -> "CompressedTensorsScheme":
 
         # Detect If Mixed Precision
+        if self._is_fp4a16_nvfp4(weight_quant, input_quant):
+            return CompressedTensorsW4A16Fp4()
+
         if self._is_wNa16_group_channel(weight_quant, input_quant):
             if (self.quant_format == CompressionFormat.marlin_24.value
                     and weight_quant.num_bits in W4A16SPARSE24_SUPPORTED_BITS):
@@ -546,7 +565,7 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
 
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
-                       output_partition_sizes: List[int], input_size: int,
+                       output_partition_sizes: list[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
         """
@@ -592,7 +611,7 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         super().__init__(quant_config)
 
     @staticmethod
-    def validate_kv_cache_scheme(kv_cache_scheme: Optional[Dict[str, Any]]):
+    def validate_kv_cache_scheme(kv_cache_scheme: Optional[dict[str, Any]]):
         """
         Validator for the kv cache scheme. Useful for controlling the
         kv cache quantization schemes, that are being supported in vLLM
