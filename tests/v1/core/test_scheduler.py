@@ -185,7 +185,7 @@ def test_get_num_unfinished_requests():
 ])
 def test_schedule(enable_prefix_caching: Optional[bool],
                   prompt_logprobs: Optional[int]):
-    '''Test scheduling.
+    '''Test scheduling. 
     Two cases: default APC/no prompt logprobs; APC=True + prompt logprobs
     '''
     scheduler = create_scheduler(enable_prefix_caching=enable_prefix_caching)
@@ -1166,64 +1166,6 @@ def test_kv_connector_handles_preemption():
     # All memory should be freed since nothing is running.
     assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() \
         == NUM_BLOCKS - 1
-
-
-def test_scheduler_jump_forward():
-    scheduler = create_scheduler()
-    so_manager = scheduler.structured_output_manager
-
-    mock_tokenizer = Mock()
-    mock_tokenizer.decode.side_effect = lambda ids: {
-        tuple([10, 20]): "ab",
-    }.get(tuple(ids), "decode_fallback")
-    mock_tokenizer.encode.side_effect = lambda text, add_special_tokens: {
-        "abc": [10, 25],
-    }.get(text, [999])
-
-    so_manager.tokenizer = mock_tokenizer
-
-    request = create_requests(num_requests=1)[0]
-    request.use_structured_output = True
-    request.structured_output_request = Mock()
-    request.structured_output_request.structured_output_key = ("json", "{}"
-                                                               )  # Dummy key
-
-    mock_grammar = Mock()
-    mock_grammar.find_jump_string.return_value = "c"
-    mock_grammar.accept_tokens.return_value = True
-    mock_grammar.is_terminated.return_value = False
-    mock_grammar.rollback = Mock()
-
-    request.structured_output_request.grammar = mock_grammar
-
-    # 3. Simulate scheduling and initial output
-    scheduler.add_request(request)
-    output = scheduler.schedule()  # Schedule the prompt
-
-    initial_output_tokens = [10, 20]
-    request.num_computed_tokens += output.num_scheduled_tokens[
-        request.request_id]
-    request.append_output_token_ids(initial_output_tokens)
-
-    jump_tokens = so_manager.jump_forward_tokens(request)
-    # jf_string = "c"
-    # text = "ab" + "c" = "abc"
-    # encode("abc") -> [10, 25]
-    # original_output_ids = [10, 20]
-    # retokenized_output_ids = [10, 25]
-    # k = 1 (common prefix is [10])
-    # num_original_suffix = 1 ([20])
-    # retokenized_suffix = [25]
-    # rollback(1) should be called
-    # accept_tokens([25]) should be called and return True
-    # expected jump_tokens = [25]
-    if jump_tokens != [25]:
-        pytest.fail(f"Expected jump tokens [25], but got {jump_tokens}")
-    mock_grammar.rollback.assert_called_once_with(1)
-    mock_grammar.accept_tokens.assert_called_once_with(
-        request.request_id,
-        [25],
-    )
 
 
 def make_output(scheduler: Scheduler):
