@@ -11,7 +11,7 @@ from typing import Annotated, Any, ClassVar, Literal, Optional, Union
 
 import torch
 from fastapi import HTTPException, UploadFile
-from pydantic import (BaseModel, ConfigDict, Field, TypeAdapter,
+from pydantic import (BaseModel, ConfigDict, Field, PrivateAttr, TypeAdapter,
                       ValidationInfo, field_validator, model_validator)
 from typing_extensions import Self, TypeAlias, deprecated
 
@@ -31,6 +31,97 @@ from vllm.utils import random_uuid, resolve_obj_by_qualname
 logger = init_logger(__name__)
 
 _LONG_INFO = torch.iinfo(torch.long)
+
+
+class StructuredOutputMixin(BaseModel):
+    _guided_json: Optional[AnyStructuredOutputJsonFormat] = PrivateAttr(
+        default=None)
+    _guided_regex: Optional[str] = PrivateAttr(default=None)
+    _guided_choice: Optional[list[str]] = PrivateAttr(default=None)
+    _guided_grammar: Optional[str] = PrivateAttr(default=None)
+    _structural_tag: Optional[str] = PrivateAttr(default=None)
+    _guided_decoding_backend: Optional[StructuredOutputBackend] = \
+        PrivateAttr(default=None)
+    _guided_whitespace_pattern: Optional[str] = PrivateAttr(default=None)
+
+    @property
+    @deprecated(
+        """`guided_json` is deprecated and renamed to `structured_output.json`. `guided_json` will be removed in v0.10.0. Please specify the json with `extra_body={"structured_output": {"json": ...}}` instead."""
+    )
+    def guided_json(self) -> Optional[AnyStructuredOutputJsonFormat]:
+        return self._guided_json
+
+    @guided_json.setter
+    def guided_json(self,
+                    value: Optional[AnyStructuredOutputJsonFormat]) -> None:
+        self._guided_json = value
+
+    @property
+    @deprecated(
+        """`guided_regex` is deprecated and renamed to `structured_output.regex`. `guided_regex` will be removed in v0.10.0. Please specify the regex with `extra_body={"structured_output": {"regex": ...}}` instead."""
+    )
+    def guided_regex(self) -> Optional[str]:
+        return self._guided_regex
+
+    @guided_regex.setter
+    def guided_regex(self, value: Optional[str]) -> None:
+        self._guided_regex = value
+
+    @property
+    @deprecated(
+        """`guided_choice` is deprecated and renamed to `structured_output.choice`. `guided_choice` will be removed in v0.10.0. Please specify the choice with `extra_body={"structured_output": {"choice": ...}}` instead."""
+    )
+    def guided_choice(self) -> Optional[list[str]]:
+        return self._guided_choice
+
+    @guided_choice.setter
+    def guided_choice(self, value: Optional[list[str]]) -> None:
+        self._guided_choice = value
+
+    @property
+    @deprecated(
+        """`guided_grammar` is deprecated and renamed to `structured_output.grammar`. `guided_grammar` will be removed in v0.10.0. Please specify the grammar with `extra_body={"structured_output": {"grammar": ...}}` instead."""
+    )
+    def guided_grammar(self) -> Optional[str]:
+        return self._guided_grammar
+
+    @guided_grammar.setter
+    def guided_grammar(self, value: Optional[str]) -> None:
+        self._guided_grammar = value
+
+    @property
+    @deprecated(
+        """`structural_tag` is deprecated and will be removed in v0.10.0. Please specify the structural tag via `response_format` instead."""
+    )
+    def structural_tag(self) -> Optional[str]:
+        return self._structural_tag
+
+    @structural_tag.setter
+    def structural_tag(self, value: Optional[str]) -> None:
+        self._structural_tag = value
+
+    @property
+    @deprecated(
+        """`guided_decoding_backend` is deprecated and won't be able to configure per-request. `guided_decoding_backend` will be removed in v0.10.0. Please remove it and specify the backend at `vllm serve` instead."""
+    )
+    def guided_decoding_backend(self) -> Optional[StructuredOutputBackend]:
+        return self._guided_decoding_backend
+
+    @guided_decoding_backend.setter
+    def guided_decoding_backend(
+            self, value: Optional[StructuredOutputBackend]) -> None:
+        self._guided_decoding_backend = value
+
+    @property
+    @deprecated(
+        """`guided_whitespace_pattern` is deprecated and renamed to `structured_output.whitespace_pattern`. `guided_whitespace_pattern` will be removed in v0.10.0. Please specify the whitespace pattern with `extra_body={"structured_output": {"whitespace_pattern": ...}}` instead."""
+    )
+    def guided_whitespace_pattern(self) -> Optional[str]:
+        return self._guided_whitespace_pattern
+
+    @guided_whitespace_pattern.setter
+    def guided_whitespace_pattern(self, value: Optional[str]) -> None:
+        self._guided_whitespace_pattern = value
 
 
 class OpenAIBaseModel(BaseModel):
@@ -219,7 +310,7 @@ def get_logits_processors(processors: Optional[LogitsProcessors],
     return None
 
 
-class ChatCompletionRequest(OpenAIBaseModel):
+class ChatCompletionRequest(OpenAIBaseModel, StructuredOutputMixin):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/chat/create
     messages: list[ChatCompletionMessageParam]
@@ -330,9 +421,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
     )
-    structured_output: Optional[StructuredOutputParamsDict] = Field(
+    structured_output: StructuredOutputParamsDict = Field(  # type: ignore
         default=None,
-        description="Additional configuration for structured outputs.")
+        description="Additional configuration for structured outputs.",
+    )
     priority: int = Field(
         default=0,
         description=(
@@ -387,85 +479,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
         "top_k": 0,
         "min_p": 0.0,
     }
-
-    @property
-    @deprecated(
-        """`guided_json` is deprecated and renamed to `structured_output.json`. `guided_json` will be removed in v0.10.0. Please specify the json with `extra_body={"structured_output": {"json": ...}}` instead."""
-    )
-    def guided_json(self) -> Optional[AnyStructuredOutputJsonFormat]:
-        return None
-
-    @guided_json.setter
-    def guided_json(self,
-                    value: Optional[AnyStructuredOutputJsonFormat]) -> None:
-        self.guided_json = value
-
-    @property
-    @deprecated(
-        """`guided_regex` is deprecated and renamed to `structured_output.regex`. `guided_regex` will be removed in v0.10.0. Please specify the regex with `extra_body={"structured_output": {"regex": ...}}` instead."""
-    )
-    def guided_regex(self) -> Optional[str]:
-        return None
-
-    @guided_regex.setter
-    def guided_regex(self, value: Optional[str]) -> None:
-        self.guided_regex = value
-
-    @property
-    @deprecated(
-        """`guided_choice` is deprecated and renamed to `structured_output.choice`. `guided_choice` will be removed in v0.10.0. Please specify the choice with `extra_body={"structured_output": {"choice": ...}}` instead."""
-    )
-    def guided_choice(self) -> Optional[list[str]]:
-        return None
-
-    @guided_choice.setter
-    def guided_choice(self, value: Optional[list[str]]) -> None:
-        self.guided_choice = value
-
-    @property
-    @deprecated(
-        """`guided_grammar` is deprecated and renamed to `structured_output.grammar`. `guided_grammar` will be removed in v0.10.0. Please specify the grammar with `extra_body={"structured_output": {"grammar": ...}}` instead."""
-    )
-    def guided_grammar(self) -> Optional[str]:
-        return None
-
-    @guided_grammar.setter
-    def guided_grammar(self, value: Optional[str]) -> None:
-        self.guided_grammar = value
-
-    @property
-    @deprecated(
-        """`structural_tag` is deprecated and will be removed in v0.10.0. Please specify the structural tag via `response_format` instead."""
-    )
-    def structural_tag(self) -> Optional[str]:
-        return None
-
-    @structural_tag.setter
-    def structural_tag(self, value: Optional[str]) -> None:
-        self.structural_tag = value
-
-    @property
-    @deprecated(
-        """`guided_decoding_backend` is deprecated and won't be able to configure per-request. `guided_decoding_backend` will be removed in v0.10.0. Please remove it and specify the backend at `vllm serve` instead."""
-    )
-    def guided_decoding_backend(self) -> Optional[StructuredOutputBackend]:
-        return None
-
-    @guided_decoding_backend.setter
-    def guided_decoding_backend(
-            self, value: Optional[StructuredOutputBackend]) -> None:
-        self.guided_decoding_backend = value
-
-    @property
-    @deprecated(
-        """`guided_whitespace_pattern` is deprecated and renamed to `structured_output.whitespace_pattern`. `guided_whitespace_pattern` will be removed in v0.10.0. Please specify the whitespace pattern with `extra_body={"structured_output": {"whitespace_pattern": ...}}` instead."""
-    )
-    def guided_whitespace_pattern(self) -> Optional[str]:
-        return None
-
-    @guided_whitespace_pattern.setter
-    def guided_whitespace_pattern(self, value: Optional[str]) -> None:
-        self.guided_whitespace_pattern = value
 
     def to_beam_search_params(
             self,
@@ -565,7 +578,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             output_kind=RequestOutputKind.DELTA if self.stream \
                 else RequestOutputKind.FINAL_ONLY,
-            structured_output=StructuredOutputParams.from_optional(**(self.structured_output or {})),
+            structured_output=StructuredOutputParams.from_optional(**self.structured_output),
             logit_bias=self.logit_bias,
             extra_args=({"kv_transfer_params": self.kv_transfer_params}
                         if self.kv_transfer_params else None))
@@ -710,7 +723,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 s_tag_obj = structural_tag.model_dump(by_alias=True)
                 self.structural_tag = json.dumps(s_tag_obj)
 
-        structured_output = StructuredOutputParamsDict(
+        self.structured_output = StructuredOutputParamsDict(
             json=self._get_structured_output_from_tool() or self.guided_json,
             regex=self.guided_regex,
             choice=self.guided_choice,
@@ -720,8 +733,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
             whitespace_pattern=self.guided_whitespace_pattern,
             structural_tag=self.structural_tag,
         )
-
-        self.structured_output = structured_output
         return self
 
     @model_validator(mode="before")
@@ -808,7 +819,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         return data
 
 
-class CompletionRequest(OpenAIBaseModel):
+class CompletionRequest(OpenAIBaseModel, StructuredOutputMixin):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/completions/create
     model: Optional[str] = None
@@ -862,9 +873,10 @@ class CompletionRequest(OpenAIBaseModel):
             ", {'type': 'structural_tag'}, or {'type': 'text' } is supported."
         ),
     )
-    structured_output: Optional[StructuredOutputParamsDict] = Field(
+    structured_output: StructuredOutputParamsDict = Field(  # type: ignore
         default=None,
-        description="Additional configuration for structured outputs.")
+        description="Additional configuration for structured outputs.",
+    )
     priority: int = Field(
         default=0,
         description=(
@@ -896,85 +908,6 @@ class CompletionRequest(OpenAIBaseModel):
         description="KVTransfer parameters used for disaggregated serving.")
 
     # doc: end-completion-extra-params
-
-    @property
-    @deprecated(
-        """`guided_json` is deprecated and renamed to `structured_output.json`. `guided_json` will be removed in v0.10.0. Please specify the json with `extra_body={"structured_output": {"json": ...}}` instead."""
-    )
-    def guided_json(self) -> Optional[AnyStructuredOutputJsonFormat]:
-        return None
-
-    @guided_json.setter
-    def guided_json(self,
-                    value: Optional[AnyStructuredOutputJsonFormat]) -> None:
-        self.guided_json = value
-
-    @property
-    @deprecated(
-        """`guided_regex` is deprecated and renamed to `structured_output.regex`. `guided_regex` will be removed in v0.10.0. Please specify the regex with `extra_body={"structured_output": {"regex": ...}}` instead."""
-    )
-    def guided_regex(self) -> Optional[str]:
-        return None
-
-    @guided_regex.setter
-    def guided_regex(self, value: Optional[str]) -> None:
-        self.guided_regex = value
-
-    @property
-    @deprecated(
-        """`guided_choice` is deprecated and renamed to `structured_output.choice`. `guided_choice` will be removed in v0.10.0. Please specify the choice with `extra_body={"structured_output": {"choice": ...}}` instead."""
-    )
-    def guided_choice(self) -> Optional[list[str]]:
-        return None
-
-    @guided_choice.setter
-    def guided_choice(self, value: Optional[list[str]]) -> None:
-        self.guided_choice = value
-
-    @property
-    @deprecated(
-        """`guided_grammar` is deprecated and renamed to `structured_output.grammar`. `guided_grammar` will be removed in v0.10.0. Please specify the grammar with `extra_body={"structured_output": {"grammar": ...}}` instead."""
-    )
-    def guided_grammar(self) -> Optional[str]:
-        return None
-
-    @guided_grammar.setter
-    def guided_grammar(self, value: Optional[str]) -> None:
-        self.guided_grammar = value
-
-    @property
-    @deprecated(
-        """`structural_tag` is deprecated and will be removed in v0.10.0. Please specify the structural tag via `response_format` instead."""
-    )
-    def structural_tag(self) -> Optional[str]:
-        return None
-
-    @structural_tag.setter
-    def structural_tag(self, value: Optional[str]) -> None:
-        self.structural_tag = value
-
-    @property
-    @deprecated(
-        """`guided_decoding_backend` is deprecated and becomes no-op in V1 engine. `guided_decoding_backend` will be removed in v0.10.0. Please remove it and specify the backend at `vllm serve` instead."""
-    )
-    def guided_decoding_backend(self) -> Optional[StructuredOutputBackend]:
-        return None
-
-    @guided_decoding_backend.setter
-    def guided_decoding_backend(
-            self, value: Optional[StructuredOutputBackend]) -> None:
-        self.guided_decoding_backend = value
-
-    @property
-    @deprecated(
-        """`guided_whitespace_pattern` is deprecated and renamed to `structured_output.whitespace_pattern`. `guided_whitespace_pattern` will be removed in v0.10.0. Please specify the whitespace pattern with `extra_body={"structured_output": {"whitespace_pattern": ...}}` instead."""
-    )
-    def guided_whitespace_pattern(self) -> Optional[str]:
-        return None
-
-    @guided_whitespace_pattern.setter
-    def guided_whitespace_pattern(self, value: Optional[str]) -> None:
-        self.guided_whitespace_pattern = value
 
     # Default sampling parameters for completion requests
     _DEFAULT_SAMPLING_PARAMS: dict = {
@@ -1056,21 +989,6 @@ class CompletionRequest(OpenAIBaseModel):
 
         echo_without_generation = self.echo and self.max_tokens == 0
 
-        guided_json_object = None
-        if (self.response_format is not None
-                and self.response_format.type == "json_object"):
-            guided_json_object = True
-
-        structured_output = StructuredOutputParams.from_optional(
-            json=self.guided_json,
-            regex=self.guided_regex,
-            choice=self.guided_choice,
-            grammar=self.guided_grammar,
-            json_object=guided_json_object,
-            backend=self.guided_decoding_backend,
-            whitespace_pattern=self.guided_whitespace_pattern,
-        )
-
         return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
@@ -1097,7 +1015,7 @@ class CompletionRequest(OpenAIBaseModel):
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             output_kind=RequestOutputKind.DELTA if self.stream \
                 else RequestOutputKind.FINAL_ONLY,
-            structured_output=structured_output,
+            structured_output=StructuredOutputParams.from_optional(**self.structured_output),
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=({"kv_transfer_params": self.kv_transfer_params}
@@ -1105,17 +1023,62 @@ class CompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def check_guided_decoding_count(cls, data):
+    def check_structured_output_count(cls, data):
+        if isinstance(data, ValueError):
+            raise data
+
         guide_count = sum([
             "guided_json" in data and data["guided_json"] is not None,
             "guided_regex" in data and data["guided_regex"] is not None,
-            "guided_choice" in data and data["guided_choice"] is not None
+            "guided_choice" in data and data["guided_choice"] is not None,
+            "guided_grammar" in data and data["guided_grammar"] is not None
         ])
         if guide_count > 1:
             raise ValueError(
-                "You can only use one kind of guided decoding "
-                "('guided_json', 'guided_regex' or 'guided_choice').")
+                "You can only use one kind of structured output "
+                "('guided_json', 'guided_regex', 'guided_grammar', or 'guided_choice')."
+            )
+        # shouldn't set both structured_output and guided_*
+        if "structured_output" in data \
+                and data["structured_output"] is not None \
+                and (guide_count > 0 or any(i in data for i in ["guided_whitespace_pattern", "structural_tag"])):
+            raise ValueError(
+                "You should only specify 'structured_output' instead of deprecated fields."
+            )
         return data
+
+    @model_validator(mode='after')
+    def construct_structured_output(self) -> Self:
+        if self.structured_output is not None:
+            return self
+
+        # compat from deprecated fields over
+        json_object = None
+        if self.response_format is not None:
+            if self.response_format.type == "json_object":
+                json_object = True
+            elif self.response_format.type == "json_schema":
+                json_schema = self.response_format.json_schema
+                assert json_schema is not None
+                self.guided_json = json_schema.json_schema
+            elif self.response_format.type == "structural_tag":
+                structural_tag = self.response_format
+                assert structural_tag is not None and isinstance(
+                    structural_tag, StructuralTagResponseFormat)
+                s_tag_obj = structural_tag.model_dump(by_alias=True)
+                self.structural_tag = json.dumps(s_tag_obj)
+
+        self.structured_output = StructuredOutputParamsDict(
+            json=self.guided_json,
+            regex=self.guided_regex,
+            choice=self.guided_choice,
+            grammar=self.guided_grammar,
+            json_object=json_object,
+            backend=self.guided_decoding_backend,
+            whitespace_pattern=self.guided_whitespace_pattern,
+            structural_tag=self.structural_tag,
+        )
+        return self
 
     @model_validator(mode="before")
     @classmethod
