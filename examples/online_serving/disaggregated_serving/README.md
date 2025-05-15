@@ -4,5 +4,5 @@ This example contains scripts that demonstrate the disaggregated serving feature
 
 ## Files
 
-- [disagg_proxy_demo.py](disagg_proxy_demo.py) - Demonstrates XpYd (X prefill instances, Y decode instances).
-- [kv_events.sh](kv_events.sh) - Demonstrates KV cache event publishing.
+- `disagg_proxy_demo.py` - Demonstrates XpYd (X prefill instances, Y decode instances).
+- `kv_events.sh` - Demonstrates KV cache event publishing.
