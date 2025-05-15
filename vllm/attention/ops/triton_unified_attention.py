@@ -268,6 +268,10 @@ def unified_attention(
     assert causal, "Only causal attention is supported"
     assert q_descale is None, "Q scales not supported"
 
+    block_size = v.shape[1]
+    assert q.element_size() >= 2 or block_size >= 32, \
+        "Block size must be at least 32 for fp8"
+
     use_alibi_slopes = alibi_slopes is not None
 
     block_size = v.shape[1]
