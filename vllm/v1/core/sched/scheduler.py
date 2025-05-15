@@ -851,12 +851,8 @@ class Scheduler(SchedulerInterface):
             # Request is already finished.
             if request is None:
                 # Abort pending free kv reqs depending on connector impl.
-                should_free = (
-                    self.connector is None
-                    or self.connector.should_free_pending_on_abort(req_id))
-                if should_free and req_id in self.pending_kv_free_req_ids:
-                    self.pending_kv_free_req_ids.remove(req_id)
-                    self._free_blocks(req_id)
+                if (self.connector and req_id in self.pending_kv_free_req_ids):
+                    self.connector.notify_aborted(req_id)
                 continue
 
             if request.status == RequestStatus.RUNNING:
