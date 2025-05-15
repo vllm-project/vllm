@@ -1444,6 +1444,9 @@ class FlexibleArgumentParser(ArgumentParser):
             if processed_arg.startswith("--") and "." in processed_arg:
                 if "=" in processed_arg:
                     processed_arg, value = processed_arg.split("=", 1)
+                    if "." not in processed_arg:
+                        # False positive, . was only in the value
+                        continue
                 else:
                     value = processed_args[i + 1]
                     processed_args[i + 1] = ""
