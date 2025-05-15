@@ -257,7 +257,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
     # TESTING: install FlashInfer from source to test 2.7.0 final RC
     FLASHINFER_ENABLE_AOT=1 TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0 10.0+PTX' \
-    uv pip install --system --no-build-isolation "git+https://github.com/flashinfer-ai/flashinfer@948a14622bd624773918d738b0f66137a9ac4784" ; \
+    uv pip install --system --no-build-isolation "git+https://github.com/flashinfer-ai/flashinfer@e00e8cedbfcb220f328fd36aa8f529f869b01e6b" ; \
 fi
 COPY examples examples
 COPY benchmarks benchmarks
