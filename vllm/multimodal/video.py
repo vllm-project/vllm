@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import base64
+from abc import abstractmethod
 from functools import partial
 from io import BytesIO
 from pathlib import Path
@@ -8,6 +9,8 @@ from pathlib import Path
 import numpy as np
 import numpy.typing as npt
 from PIL import Image
+
+from vllm import envs
 
 from .base import MediaIO
 from .image import ImageMediaIO
@@ -48,10 +51,35 @@ def sample_frames_from_video(frames: npt.NDArray,
 class VideoLoader:
 
     @classmethod
-    def load_bytes(self, data: bytes, num_frames: int = -1) -> npt.NDArray:
+    @abstractmethod
+    def load_bytes(cls, data: bytes, num_frames: int = -1) -> npt.NDArray:
         raise NotImplementedError
 
 
+class VideoLoaderRegistry:
+
+    def __init__(self) -> None:
+        self.name2class: dict[str, type] = {}
+
+    def register(self, name: str):
+
+        def wrap(cls_to_register):
+            self.name2class[name] = cls_to_register
+            return cls_to_register
+
+        return wrap
+
+    @staticmethod
+    def load(cls_name: str) -> VideoLoader:
+        cls = VIDEO_LOADER_REGISTRY.name2class.get(cls_name)
+        assert cls is not None, f"VideoLoader class {cls_name} not found"
+        return cls()
+
+
+VIDEO_LOADER_REGISTRY = VideoLoaderRegistry()
+
+
+@VIDEO_LOADER_REGISTRY.register("opencv")
 class OpenCVVideoBackend(VideoLoader):
 
     def get_cv2_video_api(self):
@@ -122,7 +150,8 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
 
         self.image_io = image_io
         self.num_frames = num_frames
-        self.video_loader = OpenCVVideoBackend
+        video_loader_backend = envs.VLLM_VIDEO_LOADER_BACKEND
+        self.video_loader = VIDEO_LOADER_REGISTRY.load(video_loader_backend)
 
     def load_bytes(self, data: bytes) -> npt.NDArray:
         return self.video_loader.load_bytes(data, self.num_frames)
