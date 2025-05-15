@@ -8,6 +8,7 @@ from functools import wraps
 from typing import TYPE_CHECKING, Callable, Optional, TypeVar, Union
 
 import torch
+from packaging.version import Version
 from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
@@ -205,7 +206,11 @@ class CudaPlatformBase(Platform):
                         return ("vllm.attention.backends."
                                 "flashmla.FlashMLABackend")
         if use_v1:
-            if selected_backend == _Backend.FLASHINFER:
+            # Skip FlashInfer on CUDA 11.8 on Hopper
+            flash_infer_supported = (torch.version.cuda >= Version("12.0")
+                                     and not cls.has_device_capability(90))
+            if (selected_backend == _Backend.FLASHINFER
+                    and flash_infer_supported):
                 logger.info_once("Using FlashInfer backend on V1 engine.")
                 return "vllm.v1.attention.backends.flashinfer.FlashInferBackend"
             if selected_backend == _Backend.TRITON_ATTN_VLLM_V1:
