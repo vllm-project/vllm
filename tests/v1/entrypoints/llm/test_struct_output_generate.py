@@ -124,13 +124,13 @@ def test_structured_output(
         temperature=1.0,
         max_tokens=4096,
         guided_decoding=GuidedDecodingParams(json=sample_json_schema))
-    outputs = llm.generate(
-        [
-            f"Give an example JSON for an employee profile that fits this schema: {sample_json_schema}"  # noqa: E501
-        ] * 2,
-        sampling_params=sampling_params,
-        use_tqdm=True,
-    )
+    outputs = llm.generate(prompts=[
+        (f"Give an example JSON for an employee profile that fits this "
+         f"schema. Make the response as short as possible. Schema: "
+         f"{sample_json_schema}")
+    ] * 2,
+                           sampling_params=sampling_params,
+                           use_tqdm=True)
 
     assert outputs is not None
 
@@ -617,12 +617,10 @@ def test_structured_output_auto_mode(
 ):
     monkeypatch.setenv("VLLM_USE_V1", "1")
 
-    llm = LLM(
-        model=model_name,
-        max_model_len=1024,
-        structured_output_config={"backend": "auto"},
-        tokenizer_mode=tokenizer_mode,
-    )
+    llm = LLM(model=model_name,
+              max_model_len=1024,
+              tokenizer_mode=tokenizer_mode,
+              structured_output_config={"backend": "auto"})
 
     sampling_params = SamplingParams(
         temperature=1.0,
@@ -662,15 +660,13 @@ def test_structured_output_auto_mode(
 def test_guidance_no_additional_properties(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_V1", "1")
 
-    llm = LLM(
-        model="Qwen/Qwen2.5-1.5B-Instruct",
-        max_model_len=1024,
-        structured_output_config={
-            'backend': 'guidance',
-            'disable_any_whitespace': True,
-            'disable_additional_properties': True
-        },
-    )
+    llm = LLM(model="Qwen/Qwen2.5-1.5B-Instruct",
+              max_model_len=1024,
+              structured_output_config={
+                  'backend': 'guidance',
+                  'disable_any_whitespace': True,
+                  'disable_additional_properties': True
+              })
 
     schema = {
         'type': 'object',
@@ -705,7 +701,7 @@ def test_guidance_no_additional_properties(monkeypatch: pytest.MonkeyPatch):
                                          max_tokens=256,
                                          guided_decoding=guided_params)
 
-        outputs = llm.generate(prompt, sampling_params=sampling_params)
+        outputs = llm.generate(prompts=prompt, sampling_params=sampling_params)
         assert outputs is not None
         generated_text = outputs[0].outputs[0].text
         assert generated_text is not None
