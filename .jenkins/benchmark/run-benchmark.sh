@@ -165,3 +165,9 @@ EOF
 EOF
 
 fi
+
+if [ "$throughput_fail" -eq 1 ] || [ "$warmup_fail" -eq 1 ]; then
+    exit 1
+else
+    exit 0
+fi
