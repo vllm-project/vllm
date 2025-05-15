@@ -1429,7 +1429,7 @@ class FlexibleArgumentParser(ArgumentParser):
         for i, processed_arg in reversed(list(enumerate(processed_args))):
             if processed_arg.startswith("--") and "." in processed_arg:
                 if "=" in processed_arg:
-                    processed_arg, value = processed_arg.rsplit("=", 1)
+                    processed_arg, value = processed_arg.split("=", 1)
                 else:
                     value = processed_args[i + 1]
                     del processed_args[i + 1]
