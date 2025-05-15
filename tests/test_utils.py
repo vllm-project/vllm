@@ -261,6 +261,7 @@ def test_dict_args(parser):
         "val2",
         "--hf-overrides.key2.key4",
         "val3",
+        "--hf-overrides.key5=val4",
     ]
     parsed_args = parser.parse_args(args)
     assert parsed_args.hf_overrides == {
@@ -269,6 +270,7 @@ def test_dict_args(parser):
             "key3": "val2",
             "key4": "val3",
         },
+        "key5": "val4",
     }
 
 
