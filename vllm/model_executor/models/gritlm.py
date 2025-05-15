@@ -1,22 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from array import array
-from typing import Optional, Union
+from typing import Optional
 
 import torch
 import torch.nn as nn
-from xformers.ops.fmha.attn_bias import BlockDiagonalMask
 
-from vllm.attention.backends.xformers import XFormersImpl
 from vllm.config import ModelConfig, VllmConfig
-from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.pooler import PoolerHead
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.pooling_metadata import (PoolingMetadata,
                                                   PoolingTensors)
-from vllm.sequence import (IntermediateTensors, PoolerOutput,
-                           PoolingSequenceGroupOutput)
+from vllm.sequence import PoolerOutput, PoolingSequenceGroupOutput
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
 from .interfaces import SupportsV0Only
@@ -204,38 +200,20 @@ class GritLM(LlamaForCausalLM, SupportsV0Only):
         prefix: str = "",
         **kwargs,
     ) -> None:
+        # Use full attention for pooling
+        if vllm_config.model_config.runner_type == "pooling":
+            hf_config = vllm_config.model_config.hf_config
+            hf_config.is_causal = False
+
+            vllm_config.cache_config.sliding_window = None
+
+            for attr in ("sliding_window", "interleaved_sliding_window"):
+                if hasattr(hf_config, attr):
+                    delattr(hf_config, attr)
+
         super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
 
-        self.runner_type = vllm_config.model_config.runner_type
-
         self._pooler = GritLMPooler(vllm_config.model_config)
-
-        for layer in self.model.layers:
-            if self.runner_type == "pooling" and hasattr(layer, "self_attn"):
-                assert isinstance(layer.self_attn.attn.impl, XFormersImpl), (
-                    "GritLM embedding is only supported by XFormers backend, "
-                    "which can be forced by VLLM_ATTENTION_BACKEND=XFORMERS")
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        **kwargs,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
-
-        # Change attention to non-causal for pooling tasks.
-        if self.runner_type == "pooling":
-            attn_metadata = get_forward_context().attn_metadata
-            assert attn_metadata.prefill_metadata.attn_bias is None
-            attn_metadata.prefill_metadata.attn_bias = [
-                BlockDiagonalMask.from_seqlens(attn_metadata.seq_lens)
-            ]
-
-        return super().forward(
-            input_ids=input_ids,
-            positions=positions,
-            **kwargs,
-        )
 
     def pooler(
         self,
