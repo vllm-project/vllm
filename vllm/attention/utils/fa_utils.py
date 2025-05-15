@@ -11,6 +11,8 @@ logger = init_logger(__name__)
 def get_flash_attn_version(requires_alibi: bool = False) -> Optional[int]:
     # import here to avoid circular dependencies
     from vllm.platforms import current_platform
+    if current_platform.is_xpu():
+        return 2
     try:
         from vllm.vllm_flash_attn.flash_attn_interface import (
             fa_version_unsupported_reason, is_fa_version_supported)
@@ -47,10 +49,6 @@ def get_flash_attn_version(requires_alibi: bool = False) -> Optional[int]:
         return fa_version
     except (ImportError, AssertionError):
         return None
-
-
-def get_flash_attn_version_xpu() -> Optional[int]:
-    return 2
 
 
 def flash_attn_supports_fp8() -> bool:

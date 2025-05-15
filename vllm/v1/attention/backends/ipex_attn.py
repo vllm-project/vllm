@@ -18,7 +18,7 @@ from vllm.v1.worker.block_table import BlockTable
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+    from vllm.v1.worker.xpu_model_runner import XPUModelRunner
 
 
 @dataclass
@@ -40,9 +40,11 @@ class IPEXAttentionMetadata(FlashAttentionMetadata):
 
 class IPEXAttentionMetadataBuilder(FlashAttentionMetadataBuilder):
 
-    def __init__(self, runner: "GPUModelRunner", kv_cache_spec: AttentionSpec,
+    def __init__(self, runner: "XPUModelRunner", kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):
         super().__init__(runner, kv_cache_spec, block_table)
+        # avoid “GPUModelerunner” has no attribute
+        self.runner: XPUModelRunner = runner
         self.aot_schedule = (get_flash_attn_version() == 3)
 
     def reorder_batch(self, input_batch: "InputBatch",
