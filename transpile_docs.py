@@ -163,6 +163,18 @@ def transpile_myst_to_md(old_path: Path) -> None:
 
         block.type = maybe_update_admonition(block.type)
 
+        # Handle toctree
+        if block.type == "toctree":
+            content, attrs = parse_fence_block(lines[start + 1:end], indent)
+            caption = attrs.pop("caption", "")
+            content = [c_stripped for c in content if (c_stripped := c.strip())]
+            content = [f"- [{c.title()}](./{c}.md)\n" for c in content]
+            lines[start] = f"{caption}:\n\n" if caption else ""
+            lines[start] += "".join(content)
+            lines[start + 1:end] = ["" for _ in lines[start + 1:end]]
+            lines[end] = ""
+            continue
+
         # Handle code blocks
         if block.type == "code-block":
             content, attrs = parse_fence_block(lines[start + 1:end], indent)
