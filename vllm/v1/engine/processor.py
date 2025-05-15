@@ -54,6 +54,10 @@ class Processor:
         self.use_hash = self.mm_input_cache_client.use_cache or \
             self.cache_config.enable_prefix_caching
 
+    @property
+    def mm_registry(self):
+        return self.input_preprocessor.mm_registry
+
     def _validate_logprobs(
         self,
         params: SamplingParams,
@@ -188,8 +192,10 @@ class Processor:
                 validate_xgrammar_grammar(params)
                 params.guided_decoding.backend = "xgrammar"
             except ValueError:
-                # The request includes some jsonschema feature(s) that
+                # The request either failed validation
+                # or includes some jsonschema feature(s) that
                 # are not supported in xgrammar. Fall back to guidance.
+                validate_guidance_grammar(params, tokenizer=None)
                 params.guided_decoding.backend = "guidance"
             # Remember that this backend was set automatically
             params.guided_decoding.backend_was_auto = True

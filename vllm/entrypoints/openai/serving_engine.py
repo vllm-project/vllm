@@ -1,17 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import sys
 import time
 from collections.abc import (AsyncGenerator, Iterable, Iterator, Mapping,
                              Sequence)
 from concurrent.futures.thread import ThreadPoolExecutor
 from http import HTTPStatus
 from typing import (Annotated, Any, Callable, ClassVar, Generic, Optional,
-                    TypedDict, TypeVar, Union)
+                    TypeVar, Union)
 
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.datastructures import Headers
+
+if sys.version_info >= (3, 12):
+    from typing import TypedDict
+else:
+    from typing_extensions import TypedDict
 
 import vllm.envs as envs
 from vllm.config import ModelConfig
@@ -664,11 +670,11 @@ class OpenAIServing:
         model_config = self.model_config
 
         resolved_content_format = resolve_chat_template_content_format(
-            model_config,
             chat_template,
             tool_dicts,
             chat_template_content_format,
             tokenizer,
+            model_config=model_config,
         )
         conversation, mm_data_future = parse_chat_messages_futures(
             messages,
@@ -695,9 +701,9 @@ class OpenAIServing:
             )
         else:
             request_prompt = apply_hf_chat_template(
-                model_config,
-                tokenizer,
+                tokenizer=tokenizer,
                 conversation=conversation,
+                model_config=model_config,
                 **_chat_template_kwargs,
             )
 
