@@ -48,34 +48,38 @@ async def print_stream_response(
     title: str,
     args: argparse.Namespace,
 ):
-    print(f"{title} (Streaming):\n")
-    full_content = ""
+    print(f"\n\n{title} (Streaming):")
 
-    # Reasoning specific
-    full_reasoning_text = ""
-    reasoning_header_printed = False
+    local_reasoning_header_printed = False
+    local_content_header_printed = False
 
     async for chunk in stream_response:
         delta = chunk.choices[0].delta
 
+        reasoning_chunk_text = getattr(delta, "reasoning_content", None)
+        content_chunk_text = delta.content
+
         if args.reasoning:
-            reasoning_chunk = getattr(delta, "reasoning_content", None)
-            if reasoning_chunk:
-                if not reasoning_header_printed:
-                    if full_content and not full_content.endswith('\n'):
+            if reasoning_chunk_text:
+                if not local_reasoning_header_printed:
+                    print("  Reasoning: ", end="")
+                    local_reasoning_header_printed = True
+                print(reasoning_chunk_text, end="", flush=True)
+
+            if content_chunk_text:
+                if not local_content_header_printed:
+                    if local_reasoning_header_printed:
                         print()
-                    print(f"[Reasoning for {title}]:")
-                    reasoning_header_printed = True
-                print(reasoning_chunk, end="", flush=True)
-                full_reasoning_text += str(reasoning_chunk)
-            else:
-                content_chunk = delta.content or ""
-                print(content_chunk, end="", flush=True)
-                full_content += content_chunk
+                    print("  Content: ", end="")
+                    local_content_header_printed = True
+                print(content_chunk_text, end="", flush=True)
         else:
-            content_chunk = delta.content or ""
-            print(content_chunk, end="", flush=True)
-            full_content += content_chunk
+            if content_chunk_text:
+                if not local_content_header_printed:
+                    print("  Content: ", end="")
+                    local_content_header_printed = True
+                print(content_chunk_text, end="", flush=True)
+    print()
 
 
 class CarType(str, Enum):
@@ -91,8 +95,13 @@ class CarDescription(BaseModel):
     car_type: CarType
 
 
-ConstraintsFormat = Literal["choice", "regex", "json", "grammar",
-                            "structural_tag"]
+ConstraintsFormat = Literal[
+    "choice",
+    "regex",
+    "json",
+    "grammar",
+    "structural_tag",
+]
 
 PARAMS: dict[ConstraintsFormat, Any] = {
     "choice": {
@@ -109,11 +118,10 @@ PARAMS: dict[ConstraintsFormat, Any] = {
             "role":
             "user",
             "content":
-            "Generate an email address for Alan Turing, who works in Enigma. End in .com and new line. Example result: 'alan.turing@enigma.com\\n'"
+            "Generate an email address for Alan Turing, who works in Enigma.End in .com and new line. Example result: 'alan.turing@enigma.com\n'"
         }],
         "extra_body": {
-            "guided_regex": r"\\w+@\\w+\\.com\\n",
-            "stop": ["\\n"],
+            "guided_regex": r"[a-z0-9.]{1,20}@\w{6,10}\.com\n",
         },
     },
     "json": {
@@ -125,7 +133,10 @@ PARAMS: dict[ConstraintsFormat, Any] = {
         }],
         "response_format": {
             "type": "json_schema",
-            "json_schema": CarDescription.model_json_schema(),
+            "json_schema": {
+                "name": "car-description",
+                "schema": CarDescription.model_json_schema()
+            },
         },
     },
     "grammar": {
@@ -136,7 +147,8 @@ PARAMS: dict[ConstraintsFormat, Any] = {
             "Generate an SQL query to show the 'username' and 'email'from the 'users' table."
         }],
         "extra_body": {
-            "guided_grammar": """
+            "guided_grammar":
+            """
 root ::= select_statement
 
 select_statement ::= "SELECT " column " from " table " where " condition
@@ -149,7 +161,6 @@ condition ::= column "= " number
 
 number ::= "1 " | "2 "
 """,
-            "guided_decoding_disable_any_whitespace": True,
         }
     },
     "structural_tag": {
@@ -258,6 +269,7 @@ async def main():
         *[
             client.chat.completions.create(
                 model=model,
+                max_tokens=1024,
                 stream=args.stream,
                 **PARAMS[name],
             ) for name in constraints
@@ -268,8 +280,9 @@ async def main():
     if args.stream:
         for constraint_name, stream_or_exc in zip(constraints, results):
             if isinstance(stream_or_exc, Exception):
-                print(f"Error for {constraint_name}: {stream_or_exc}\n")
+                print(f"Error for {constraint_name}: {stream_or_exc!r}")
             else:
+                assert isinstance(stream_or_exc, AsyncStream)
                 await print_stream_response(
                     stream_or_exc,
                     title=str(constraint_name),
@@ -278,13 +291,14 @@ async def main():
     else:
         for constraint_name, response_or_exc in zip(constraints, results):
             if isinstance(response_or_exc, Exception):
-                print(f"Error:\n  {response_or_exc}")
+                print(f"{constraint_name}:\n  {response_or_exc!r}")
             else:
                 assert isinstance(response_or_exc, ChatCompletion)
+                print(f"\n\n{constraint_name}:")
                 message = response_or_exc.choices[0].message
                 if args.reasoning and hasattr(message, "reasoning_content"):
-                    print(f"Reasoning:\n  {message.reasoning_content or ''}")
-                print(f"Output:\n  {message.content!r}")
+                    print(f"  Reasoning: {message.reasoning_content or ''}")
+                print(f"  Content: {message.content!r}")
 
 
 if __name__ == "__main__":
