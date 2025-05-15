@@ -817,7 +817,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # all2all backend for vllm's expert parallel communication
     "VLLM_ALL2ALL_BACKEND":
     lambda: os.getenv("VLLM_ALL2ALL_BACKEND", "naive"),
-    
+
     # Enable Share Expert Fusion by setting this > 0, disable by setting = 0
     # The value here will be the Shared Expert relicas copied into MoE
     # Set a larger value will consume more GPU memory
