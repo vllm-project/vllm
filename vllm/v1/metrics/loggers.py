@@ -3,7 +3,7 @@
 import logging
 import time
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import Callable, Optional
 
 import numpy as np
 import prometheus_client
@@ -15,9 +15,6 @@ from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
-
-if TYPE_CHECKING:
-    pass
 
 logger = init_logger(__name__)
 
@@ -360,7 +357,7 @@ class PrometheusStatLogger(StatLoggerBase):
                         self.labelname_waiting_lora_adapters,
                         self.labelname_running_lora_adapters,
                     ],
-                    multiprocess_mode="livemostrecent"
+                    multiprocess_mode="sum"
                 )
 
     def log_metrics_info(self, type: str, config_obj: SupportsMetricsInfo):
