@@ -159,6 +159,7 @@ def test_load_model(mock_set_config, mock_set_dtype, mock_get_loader,
     # Make mock_get_layers return different values for each call
     mock_get_layers.side_effect = [target_attn_layers, all_attn_layers]
 
+    # Setup mock for pp group to return the appropriate value for world size
     mock_pp_group = mock.MagicMock()
     mock_pp_group.world_size = 2 if method == "eagle" else 1
     mock_get_pp_group.return_value = mock_pp_group
