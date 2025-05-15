@@ -58,7 +58,6 @@ def process_for_additional_properties(
 class GuidanceBackend(StructuredOutputBackend):
 
     def __post_init__(self):
-        self.no_additional_properties = False
         self.disable_any_whitespace = \
             self.vllm_config.decoding_config.disable_any_whitespace
         self.disable_additional_properties = \
