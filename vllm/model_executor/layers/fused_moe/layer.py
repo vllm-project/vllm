@@ -196,6 +196,8 @@ class MoEConfig:
     # TODO: add more quantization params, blocked, per-token, etc.
     block_size: int = 128
 
+    max_num_tokens: int
+
     @property
     def tp_size(self):
         return self.moe_parallel_config.tp_size
@@ -643,7 +645,6 @@ def determine_expert_map(
 def _construct_prepare_finalize(
     moe: MoEConfig, quant_config: Optional[QuantizationConfig]
 ) -> Optional[FusedMoEPrepareAndFinalize]:
-    max_num_tokens = MOE_DP_CHUNK_SIZE
     world_size = moe.ep_size
     dp_size = moe.ep_size // moe.dp_size  # dp_size actually means TP.
     rank = moe.ep_rank
@@ -651,7 +652,7 @@ def _construct_prepare_finalize(
     if moe.use_pplx_kernels:
         return PplxPrepareAndFinalize(
             None,  # will be set later in prepare_communication_buffer_for_model
-            max_num_tokens=max_num_tokens,
+            max_num_tokens=moe.max_num_tokens,
             world_size=world_size,
             rank=rank,
             dp_size=dp_size,
@@ -774,6 +775,7 @@ class FusedMoE(torch.nn.Module):
             moe_parallel_config=self.moe_parallel_config,
             # TODO (bnell): this needs to be fixed for quantized types.
             in_dtype=params_dtype,
+            max_num_tokens=MOE_DP_CHUNK_SIZE,
         )
         self.moe_config = moe
 

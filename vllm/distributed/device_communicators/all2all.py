@@ -124,8 +124,7 @@ class PPLXAll2All(All2AllBase):
                 break
         # assume all MoE layers have the same config
         moe = moe_layer.moe_config
-        MOE_DP_CHUNK_SIZE = 256
-        max_num_tokens = MOE_DP_CHUNK_SIZE
+        max_num_tokens = moe.max_num_tokens
 
         all_to_all_args = dict(
             max_num_tokens=max_num_tokens,
