@@ -163,8 +163,8 @@ if current_platform.is_rocm():
 
     direct_register_custom_op("flash_attn_varlen_func",
                               flash_attn_varlen_func_impl, ["out"],
-                              flash_attn_varlen_func_fake)
-    flash_attn_varlen_func = torch.ops.vllm.flash_attn_varlen_func
+                              flash_attn_varlen_func_fake,
+                              dispatch_key=current_platform.dispatch_key)
 
 logger = init_logger(__name__)
 
@@ -550,7 +550,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             if max_seqlen_q > 1:
                 cu_seq_lens = attn_metadata.cu_seq_lens
                 total_tokens = attn_metadata.total_tokens
-                flash_attn_varlen_func(
+                torch.ops.vllm.flash_attn_varlen_func(
                     query[:num_actual_tokens],
                     key_cache,
                     value_cache,

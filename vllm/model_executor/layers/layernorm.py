@@ -61,17 +61,13 @@ if is_rocm_aiter_rmsnorm_enabled():
                                  variance_epsilon: float) -> torch.Tensor:
         return input.clone()
 
-    try:
-        direct_register_custom_op(
-            op_name="rocm_aiter_rms_norm",
-            op_func=rocm_aiter_rms_norm_impl,
-            mutates_args=[],
-            fake_impl=rocm_aiter_rms_norm_fake,
-        )
-        rocm_aiter_rms_norm = torch.ops.vllm.rocm_aiter_rms_norm
-
-    except AttributeError:
-        rocm_aiter_rms_norm = rocm_aiter_rms_norm_impl
+    direct_register_custom_op(
+        op_name="rocm_aiter_rms_norm",
+        op_func=rocm_aiter_rms_norm_impl,
+        mutates_args=[],
+        fake_impl=rocm_aiter_rms_norm_fake,
+        dispatch_key=current_platform.dispatch_key,
+    )
 
     def rocm_aiter_fused_add_rms_norm_impl(
             x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
@@ -95,28 +91,23 @@ if is_rocm_aiter_rmsnorm_enabled():
             variance_epsilon: float) -> tuple[torch.Tensor, torch.Tensor]:
         return x.clone(), residual.clone()
 
-    try:
-        direct_register_custom_op(
-            op_name="rocm_aiter_fused_add_rms_norm",
-            op_func=rocm_aiter_fused_add_rms_norm_impl,
-            mutates_args=[],
-            fake_impl=rocm_aiter_fused_add_rms_norm_fake,
-        )
-        rocm_aiter_fused_add_rms_norm = \
-            torch.ops.vllm.rocm_aiter_fused_add_rms_norm
-
-    except AttributeError:
-        rocm_aiter_fused_add_rms_norm = rocm_aiter_fused_add_rms_norm_impl
+    direct_register_custom_op(
+        op_name="rocm_aiter_fused_add_rms_norm",
+        op_func=rocm_aiter_fused_add_rms_norm_impl,
+        mutates_args=[],
+        fake_impl=rocm_aiter_fused_add_rms_norm_fake,
+        dispatch_key=current_platform.dispatch_key,
+    )
 
 
 def dispatch_cuda_rmsnorm_func(add_residual: bool):
     if add_residual:
         if is_rocm_aiter_rmsnorm_enabled():
-            return rocm_aiter_fused_add_rms_norm
+            return torch.ops.vllm.rocm_aiter_fused_add_rms_norm
         return fused_add_rms_norm
 
     if is_rocm_aiter_rmsnorm_enabled():
-        return rocm_aiter_rms_norm
+        return torch.ops.vllm.rocm_aiter_rms_norm
     return rms_norm
 
 
