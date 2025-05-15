@@ -362,3 +362,7 @@ class RocmPlatform(Platform):
     def get_cu_count(cls, device_id: int = 0) -> int:
         return torch.cuda.get_device_properties(
             device_id).multi_processor_count
+
+    @classmethod
+    def get_piecewise_backend_cls(cls) -> str:
+        return "vllm.compilation.cuda_piecewise_backend.CUDAPiecewiseBackend"  # noqa
