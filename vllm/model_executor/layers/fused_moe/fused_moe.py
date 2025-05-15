@@ -3,7 +3,7 @@
 import functools
 import json
 import os
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 
 import torch
 
@@ -19,8 +19,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache, moe_kernel_quantize_input)
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-    dequant_mxfp4, quant_dequant_mxfp4)
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import direct_register_custom_op
@@ -967,13 +966,16 @@ def get_config_dtype_str(
         dtype: torch.dtype,
         use_int4_w4a16: Optional[bool] = False,
         use_int8_w8a16: Optional[bool] = False,
-        use_fp8_w8a8: Optional[bool] = False) -> Optional[str]:
+        use_fp8_w8a8: Optional[bool] = False,
+        use_mxfp4_w4a4: Optional[bool] = False) -> Optional[str]:
     if use_fp8_w8a8:
         return "fp8_w8a8"
     elif use_int8_w8a16:
         return "int8_w8a16"
     elif use_int4_w4a16:
         return "int4_w4a16"
+    elif use_mxfp4_w4a4:
+        return "mxfp4_w4a4"
     elif dtype == torch.float:
         # avoiding cases where kernel fails when float32 MoE
         # use fp16/bfloat16 configs
@@ -987,11 +989,15 @@ def get_config_qtype(
     use_int8_w8a8: bool,
     use_int8_w8a16: bool,
     use_int4_w4a16: bool,
-) -> Optional[torch.dtype]:
+    use_mxfp4_w4a4: bool
+) -> Optional[Union[torch.dtype, str]]:
     if use_fp8_w8a8:
         return torch.float8_e4m3fn
     elif use_int8_w8a8:
         return torch.int8
+    elif use_mxfp4_w4a4:
+        # TODO: replay by a torch.dtype once PyTorch natively supports mxfp4.
+        return "mxfp4"
     return None
 
 
@@ -1227,6 +1233,7 @@ def fused_experts_impl(
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     use_int4_w4a16: bool = False,
+    use_mxfp4_w4a4: bool = False,
     per_channel_quant: bool = False,
     global_num_experts: int = -1,
     expert_map: Optional[torch.Tensor] = None,
@@ -1276,12 +1283,14 @@ def fused_experts_impl(
     config_dtype = get_config_dtype_str(use_fp8_w8a8=use_fp8_w8a8,
                                         use_int8_w8a16=use_int8_w8a16,
                                         use_int4_w4a16=use_int4_w4a16,
+                                        use_mxfp4_w4a4=use_mxfp4_w4a4,
                                         dtype=hidden_states.dtype)
 
     qtype = get_config_qtype(use_fp8_w8a8=use_fp8_w8a8,
                              use_int8_w8a8=use_int8_w8a8,
                              use_int8_w8a16=use_int8_w8a16,
-                             use_int4_w4a16=use_int4_w4a16)
+                             use_int4_w4a16=use_int4_w4a16,
+                             use_mxfp4_w4a4=use_mxfp4_w4a4)
 
     get_config_func = functools.partial(
         try_get_optimal_moe_config,
@@ -1357,7 +1366,6 @@ def fused_experts_impl(
             A=curr_hidden_states,
             A_scale=a1_scale,
             qtype=qtype,
-            use_mxfp4_w4a4=use_mxfp4_w4a4,
             per_channel_quant=per_channel_quant,
             block_shape=block_shape)
 
@@ -1399,7 +1407,6 @@ def fused_experts_impl(
             A=intermediate_cache2,
             A_scale=a2_scale,
             qtype=qtype,
-            use_mxfp4_w4a4=use_mxfp4_w4a4,
             per_channel_quant=per_channel_quant,
             block_shape=block_shape)
 
@@ -1489,6 +1496,9 @@ def fused_moe(
     - use_int4_w4a16 (bool): If True, use matmul of int4 weight and bf16/fp16
         activation to compute the inner products for w1 and w2.
         Defaults to False.
+    - use_mxfp4_w4a4 (bool): If True, use matmul of OCP MXFP4 weight and
+        OCP MXFP4 activation to compute the inner products for w1 and w2.
+        Defaults to False.
     - global_num_experts (int): The total number of experts in the global
         expert space.
     - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices 
@@ -1532,6 +1542,7 @@ def fused_moe(
                          use_int8_w8a8=use_int8_w8a8,
                          use_int8_w8a16=use_int8_w8a16,
                          use_int4_w4a16=use_int4_w4a16,
+                         use_mxfp4_w4a4=use_mxfp4_w4a4,
                          per_channel_quant=per_channel_quant,
                          global_num_experts=global_num_experts,
                          expert_map=expert_map,
@@ -1552,6 +1563,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         use_int8_w8a8: bool,
         use_int8_w8a16: bool,
         use_int4_w4a16: bool,
+        use_mxfp4_w4a4: bool,
         per_channel_quant: bool,
         block_shape: Optional[list[int]] = None,
         block_m: Optional[int] = None,
@@ -1561,12 +1573,14 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.use_int4_w4a16 = use_int4_w4a16
         self.use_int8_w8a8 = use_int8_w8a8
         self.use_int8_w8a16 = use_int8_w8a16
+        self.use_mxfp4_w4a4 = use_mxfp4_w4a4
         self.block_shape = block_shape
         self.block_m = block_m
         self.qtype = get_config_qtype(use_fp8_w8a8=use_fp8_w8a8,
                                       use_int8_w8a8=use_int8_w8a8,
                                       use_int8_w8a16=use_int8_w8a16,
-                                      use_int4_w4a16=use_int4_w4a16)
+                                      use_int4_w4a16=use_int4_w4a16,
+                                      use_mxfp4_w4a4=use_mxfp4_w4a4)
         self.per_channel_quant = per_channel_quant
 
     def workspace_shapes(
@@ -1629,6 +1643,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         config_dtype = get_config_dtype_str(use_fp8_w8a8=self.use_fp8_w8a8,
                                             use_int8_w8a16=self.use_int8_w8a16,
                                             use_int4_w4a16=self.use_int4_w4a16,
+                                            use_mxfp4_w4a4=self.use_mxfp4_w4a4,
                                             dtype=hidden_states.dtype)
 
         config = try_get_optimal_moe_config(
@@ -1724,6 +1739,7 @@ def modular_triton_fused_moe(
     use_int8_w8a8: bool,
     use_int8_w8a16: bool,
     use_int4_w4a16: bool,
+    use_mxfp4_w4a4: bool,
     per_channel_quant: bool,
     block_shape: Optional[list[int]] = None,
 ) -> mk.FusedMoEModularKernel:
@@ -1732,6 +1748,7 @@ def modular_triton_fused_moe(
         use_int8_w8a8=use_int8_w8a8,
         use_int8_w8a16=use_int8_w8a16,
         use_int4_w4a16=use_int4_w4a16,
+        use_mxfp4_w4a4=use_mxfp4_w4a4,
     )
     return mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(
@@ -1744,6 +1761,7 @@ def modular_triton_fused_moe(
             use_int8_w8a8=use_int8_w8a8,
             use_int8_w8a16=use_int8_w8a16,
             use_int4_w4a16=use_int4_w4a16,
+            use_mxfp4_w4a4=use_mxfp4_w4a4,
             per_channel_quant=per_channel_quant,
             block_shape=block_shape,
         ),
