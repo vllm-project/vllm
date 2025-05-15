@@ -171,12 +171,6 @@ class EagleProposer:
                                            hidden_states, attn_metadata,
                                            batch_size)
 
-            # Increment the sequence lengths.
-            attn_metadata.max_seq_len += 1
-            # Consider max model length.
-            attn_metadata.max_seq_len = min(attn_metadata.max_seq_len,
-                                            self.max_model_len)
-
             # copy inputs to buffer for cudagraph
             # Run the model.
             with set_forward_context(attn_metadata,
@@ -230,6 +224,12 @@ class EagleProposer:
             batch_size,
             BLOCK_SIZE=1024,
             PADDING_SLOT_ID=PADDING_SLOT_ID)
+
+        # Increment the sequence lengths.
+        attn_metadata.max_seq_len += 1
+        # Consider max model length.
+        attn_metadata.max_seq_len = min(attn_metadata.max_seq_len,
+                                        self.max_model_len)
 
     @staticmethod
     def prepare_inputs(
