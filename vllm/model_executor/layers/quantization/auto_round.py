@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from fractions import Fraction
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Optional, Union
 
 import torch
 
@@ -35,8 +35,8 @@ class AutoRoundConfig(QuantizationConfig):
         group_size: int,
         sym: bool = True,
         packing_format: str = "auto_round:auto_gptq",
-        block_name_to_quantize: Optional[Union[str, List[str]]] = None,
-        extra_config: Optional[Dict[str, Any]] = None,
+        block_name_to_quantize: Optional[Union[str, list[str]]] = None,
+        extra_config: Optional[dict[str, Any]] = None,
         data_type: str = "int",
         backend: str = "auto",
     ) -> None:
@@ -78,7 +78,7 @@ class AutoRoundConfig(QuantizationConfig):
         return "auto-round"
 
     @classmethod
-    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
         return [torch.half, torch.bfloat16]
 
     @classmethod
@@ -86,11 +86,11 @@ class AutoRoundConfig(QuantizationConfig):
         return 60
 
     @classmethod
-    def get_config_filenames(cls) -> List[str]:
+    def get_config_filenames(cls) -> list[str]:
         return ["quantization_config.json"]
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "AutoRoundConfig":
+    def from_config(cls, config: dict[str, Any]) -> "AutoRoundConfig":
         return cls(
             weight_bits=cls.get_from_keys(config, ["bits"]),
             group_size=cls.get_from_keys(config, ["group_size"]),
