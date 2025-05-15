@@ -455,20 +455,23 @@ class MambaMixer2(CustomOp):
                     mamba2_metadata.stride_w_dim, mamba2_metadata.stride_w_width = conv_weights.stride(
                     )
                     _, width = conv_weights.shape
-                    state_len = width - 1
+                    final_states = mamba_cache_params.conv_state
+                    mamba2_metadata.num_cache_lines = final_states.size(0)
+                    mamba2_metadata.num_cache_lines, mamba2_metadata.dim, state_len = final_states.size()
+                    # mamba2_metadata.num_cache_lines, mamba2_metadata.dim, mamba2_metadata.state_len = final_states.size()
+                    # state_len = width - 1
                     mamba2_metadata.width = width
                     mamba2_metadata.np2_statelen = triton.next_power_of_2(
                         state_len)
-                    final_states = mamba_cache_params.conv_state
-                    mamba2_metadata.num_cache_lines = final_states.size(0)
                     mamba2_metadata.stride_istate_seq, mamba2_metadata.stride_istate_dim, mamba2_metadata.stride_istate_token = final_states.stride(
                     )
 
                 if mamba2_metadata.cu_seqlen is None:
                     dim, cu_seqlen = x.shape
                     out = torch.zeros_like(x)
-                    mamba2_metadata.dim = dim
+                    # mamba2_metadata.dim = dim
                     mamba2_metadata.cu_seqlen = cu_seqlen
+                    mamba2_metadata.stride_x_seq = 0
                     mamba2_metadata.stride_x_dim, mamba2_metadata.stride_x_token = x.stride(
                     )
                     mamba2_metadata.out = out
@@ -544,8 +547,20 @@ class MambaMixer2(CustomOp):
 
         else:
             if True:  #self.conv_in_triton:
+                x = hidden_states_B_C
+                unsqueeze = x.dim() == 2
+                if unsqueeze:
+                    # make it (batch, dim, seqlen) with seqlen == 1
+                    x = x.unsqueeze(-1)
+                if mamba2_metadata.cu_seqlen is None:
+                    # dim, cu_seqlen = x.shape
+                    # mamba2_metadata.dim = dim
+                    #mamba2_metadata.cu_seqlen = cu_seqlen
+                    mamba2_metadata.cu_seqlen = 1
+                    mamba2_metadata.stride_x_seq, mamba2_metadata.stride_x_dim, mamba2_metadata.stride_x_token = x.stride(
+                    )
                 hidden_states_B_C = causal_conv1d_update_triton(
-                    hidden_states_B_C,
+                    x, #hidden_states_B_C,
                     mamba_cache_params.conv_state,
                     conv_weights,
                     self.conv1d.bias,
@@ -553,6 +568,8 @@ class MambaMixer2(CustomOp):
                     conv_state_indices=mamba_cache_params.state_indices_tensor,
                     metadata=mamba2_metadata,
                 )
+                if unsqueeze:
+                    hidden_states_B_C = hidden_states_B_C.squeeze(-1)
 
         # - get hidden_states, B and C after depthwise convolution.
         hidden_states, B, C = torch.split(

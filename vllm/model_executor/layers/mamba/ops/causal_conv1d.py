@@ -135,8 +135,7 @@ def _causal_conv1d_update_kernel(
     # Strides
     stride_x_seq: tl.constexpr,  # stride to get to next sequence,
     stride_x_dim: tl.constexpr,  # stride to get to next feature-value,
-    stride_x_token: tl.
-    constexpr,  # stride to get to next token (same feature-index, same sequence-index)
+    stride_x_token: tl.constexpr,  # stride to get to next token (same feature-index, same sequence-index)
     stride_w_dim: tl.constexpr,  # stride to get to next dim-axis value
     stride_w_width: tl.constexpr,  # stride to get to next width-axis value
     stride_conv_state_seq: tl.constexpr,
@@ -402,8 +401,7 @@ def causal_conv1d_update_triton(
         stride_istate_token = metadata.stride_istate_token
         np2_statelen = metadata.np2_statelen
     else:
-        stride_w_dim = weight.stride(0)
-        stride_w_width = weight.stride(1)
+        stride_w_dim, stride_w_width = weight.stride()
 
         stride_x_seq, stride_x_dim, stride_x_token = x.stride(
         )  # X (batch, dim, seqlen)
@@ -974,7 +972,6 @@ def causal_conv1d_fn_triton(
             assert conv_states is not None, "ERROR: `has_initial_states` is used, which needs also `conv_states`"
         assert weight.stride(1) == 1
         assert (dim, width) == weight.shape
-        assert return_final_states is False
         assert is_channel_last, "Need to run in channel-last layout"
 
     if metadata is None:
