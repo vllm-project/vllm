@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Benchmark offline inference throughput."""
+
 import argparse
 import dataclasses
 import json
@@ -15,12 +16,12 @@ import torch
 import uvloop
 from PIL import Image
 from tqdm import tqdm
-from transformers import (AutoModelForCausalLM, AutoTokenizer,
-                          PreTrainedTokenizerBase)
+from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase
 
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.entrypoints.openai.api_server import (
-    build_async_engine_client_from_engine_args)
+    build_async_engine_client_from_engine_args,
+)
 from vllm.inputs import TextPrompt
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
@@ -42,6 +43,7 @@ class SampleRequest:
             images).
         lora_request: Optional LoRARequest specifying the LoRA to use.
     """
+
     prompt: str
     prompt_len: int
     expected_output_len: int
@@ -79,21 +81,23 @@ lora_tokenizer_cache: dict[int, AnyTokenizer] = {}
 
 
 def get_random_lora_request(
-        args: argparse.Namespace
+    args: argparse.Namespace,
 ) -> tuple[LoRARequest, Optional[AnyTokenizer]]:
     global lora_tokenizer_cache
     lora_id = random.randint(1, args.max_loras)
-    lora_request = LoRARequest(lora_name=str(lora_id),
-                               lora_int_id=lora_id,
-                               lora_path=lora_path_on_disk(args.lora_path))
+    lora_request = LoRARequest(
+        lora_name=str(lora_id),
+        lora_int_id=lora_id,
+        lora_path=lora_path_on_disk(args.lora_path),
+    )
     if lora_id not in lora_tokenizer_cache:
         lora_tokenizer_cache[lora_id] = get_lora_tokenizer(lora_request)
     return lora_request, lora_tokenizer_cache[lora_id]
 
 
-def sample_requests(tokenizer: PreTrainedTokenizerBase,
-                    args: argparse.Namespace) -> list[SampleRequest]:
-
+def sample_requests(
+    tokenizer: PreTrainedTokenizerBase, args: argparse.Namespace
+) -> list[SampleRequest]:
     dataset_path: str = args.dataset
     num_requests: int = args.num_prompts
     fixed_output_len: Optional[int] = args.output_len
@@ -111,9 +115,7 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
 
     # Filter out sequences that are too long or too short
     filtered_dataset: list[SampleRequest] = []
-    for data in tqdm(dataset,
-                     total=len(filtered_dataset),
-                     desc="sampling requests"):
+    for data in tqdm(dataset, total=len(filtered_dataset), desc="sampling requests"):
         if len(filtered_dataset) == num_requests:
             break
 
@@ -126,11 +128,9 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
             multi_modal_data = multi_modal_data or {}
             image_path = data["image"]
             # TODO(vllm-project/vllm/issues/9778): Support multiple images.
-            assert isinstance(image_path,
-                              str), "Only support single image input"
+            assert isinstance(image_path, str), "Only support single image input"
             try:
-                multi_modal_data["image"] = Image.open(image_path).convert(
-                    "RGB")
+                multi_modal_data["image"] = Image.open(image_path).convert("RGB")
             except FileNotFoundError:
                 # Ignore datapoint where asset is missing
                 continue
@@ -147,8 +147,9 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
         prompt_token_ids = request_tokenizer(prompt).input_ids
         completion_token_ids = request_tokenizer(completion).input_ids
         prompt_len = len(prompt_token_ids)
-        output_len = len(completion_token_ids
-                         ) if fixed_output_len is None else fixed_output_len
+        output_len = (
+            len(completion_token_ids) if fixed_output_len is None else fixed_output_len
+        )
         if prompt_len < 4 or output_len < 4:
             # Prune too short sequences.
             continue
@@ -156,11 +157,14 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
             # Prune too long sequences.
             continue
         filtered_dataset.append(
-            SampleRequest(prompt=prompt,
-                          prompt_len=prompt_len,
-                          expected_output_len=output_len,
-                          multi_modal_data=multi_modal_data,
-                          lora_request=lora_request))
+            SampleRequest(
+                prompt=prompt,
+                prompt_len=prompt_len,
+                expected_output_len=output_len,
+                multi_modal_data=multi_modal_data,
+                lora_request=lora_request,
+            )
+        )
 
     return filtered_dataset
 
@@ -175,6 +179,7 @@ def run_vllm(
     @contextmanager
     def rpd_profiler_context():
         from rpdTracerControl import rpdTracerControl as rpd
+
         llm.start_profile()
         yield
         llm.stop_profile()
@@ -187,16 +192,15 @@ def run_vllm(
                 torch.profiler.ProfilerActivity.CPU,
                 torch.profiler.ProfilerActivity.CUDA,
             ],
-            on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                str(profile_dir)))
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(str(profile_dir)),
+        )
         p.start()
         try:
             with torch.no_grad():
                 yield p
         finally:
             p.stop()
-            print(p.key_averages().table(sort_by="self_cuda_time_total",
-                                         row_limit=-1))
+            print(p.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1))
 
     def get_profiling_context(profile_dir: Optional[str] = None):
         if args.profile_torch:
@@ -207,13 +211,13 @@ def run_vllm(
             return nullcontext()
 
     if args.profile_torch or args.profile_rpd:
-        profile_dir = Path(args.profile_dir
-                           or "./vllm_benchmark_throughput_result")
+        profile_dir = Path(args.profile_dir or "./vllm_benchmark_throughput_result")
         profile_dir.mkdir(parents=True, exist_ok=True)
         name = os.path.basename(os.path.normpath(args.model))
         model_trace_name = (
             f"{name}_in_{args.input_len}_out_{args.output_len}_"
-            f"tp_{args.tensor_parallel_size}")
+            f"tp_{args.tensor_parallel_size}"
+        )
         print(f"Profiling (results will be saved to '{profile_dir}')...")
         if args.profile_rpd:
             profile_dir /= f"{model_trace_name}.rpd"
@@ -226,8 +230,8 @@ def run_vllm(
     sampling_params: list[SamplingParams] = []
     for request in requests:
         prompts.append(
-            TextPrompt(prompt=request.prompt,
-                       multi_modal_data=request.multi_modal_data))
+            TextPrompt(prompt=request.prompt, multi_modal_data=request.multi_modal_data)
+        )
         sampling_params.append(
             SamplingParams(
                 n=n,
@@ -235,7 +239,8 @@ def run_vllm(
                 top_p=1.0,
                 ignore_eos=True,
                 max_tokens=request.expected_output_len,
-            ))
+            )
+        )
     lora_requests: Optional[list[LoRARequest]] = None
     if engine_args.enable_lora:
         lora_requests = [request.lora_request for request in requests]
@@ -243,10 +248,9 @@ def run_vllm(
     use_beam_search = False
 
     if not use_beam_search:
-        execute = lambda: llm.generate(prompts,
-                                       sampling_params,
-                                       lora_request=lora_requests,
-                                       use_tqdm=True)
+        execute = lambda: llm.generate(
+            prompts, sampling_params, lora_request=lora_requests, use_tqdm=True
+        )
     else:
         assert lora_requests is None, "BeamSearch API does not support LoRA"
         prompts = [request.prompt for request in requests]
@@ -260,7 +264,8 @@ def run_vllm(
                 beam_width=n,
                 max_tokens=output_len,
                 ignore_eos=True,
-            ))
+            ),
+        )
 
     if args.profile_torch or args.profile_rpd:
         with get_profiling_context(profile_dir):
@@ -282,16 +287,18 @@ async def run_vllm_async(
     from vllm import SamplingParams
 
     async with build_async_engine_client_from_engine_args(
-            engine_args, disable_frontend_multiprocessing) as llm:
-
+        engine_args, disable_frontend_multiprocessing
+    ) as llm:
         # Add the requests to the engine.
         prompts: list[TextPrompt] = []
         sampling_params: list[SamplingParams] = []
         lora_requests: list[Optional[LoRARequest]] = []
         for request in requests:
             prompts.append(
-                TextPrompt(prompt=request.prompt,
-                           multi_modal_data=request.multi_modal_data))
+                TextPrompt(
+                    prompt=request.prompt, multi_modal_data=request.multi_modal_data
+                )
+            )
             sampling_params.append(
                 SamplingParams(
                     n=n,
@@ -299,17 +306,16 @@ async def run_vllm_async(
                     top_p=1.0,
                     ignore_eos=True,
                     max_tokens=request.lora_requests,
-                ))
+                )
+            )
             lora_requests.append(request.lora_request)
 
         generators = []
         start = time.perf_counter()
-        for i, (prompt, sp,
-                lr) in enumerate(zip(prompts, sampling_params, lora_requests)):
-            generator = llm.generate(prompt,
-                                     sp,
-                                     lora_request=lr,
-                                     request_id=f"test{i}")
+        for i, (prompt, sp, lr) in enumerate(
+            zip(prompts, sampling_params, lora_requests)
+        ):
+            generator = llm.generate(prompt, sp, lora_request=lr, request_id=f"test{i}")
             generators.append(generator)
         all_gens = merge_async_iterators(*generators)
         async for i, res in all_gens:
@@ -327,7 +333,8 @@ def run_hf(
     trust_remote_code: bool,
 ) -> float:
     llm = AutoModelForCausalLM.from_pretrained(
-        model, torch_dtype=torch.float16, trust_remote_code=trust_remote_code)
+        model, torch_dtype=torch.float16, trust_remote_code=trust_remote_code
+    )
     if llm.config.model_type == "llama":
         # To enable padding in the HF backend.
         tokenizer.pad_token = tokenizer.eos_token
@@ -347,14 +354,15 @@ def run_hf(
         if len(batch) < max_batch_size and i != len(requests) - 1:
             # Check if we can add more requests to the batch.
             _, next_prompt_len, next_output_len = requests[i + 1]
-            if (max(max_prompt_len, next_prompt_len) +
-                    max(max_output_len, next_output_len)) <= 2048:
+            if (
+                max(max_prompt_len, next_prompt_len)
+                + max(max_output_len, next_output_len)
+            ) <= 2048:
                 # We can add more requests to the batch.
                 continue
 
         # Generate the sequences.
-        input_ids = tokenizer(batch, return_tensors="pt",
-                              padding=True).input_ids
+        input_ids = tokenizer(batch, return_tensors="pt", padding=True).input_ids
         llm_outputs = llm.generate(
             input_ids=input_ids.cuda(),
             do_sample=True,
@@ -383,6 +391,7 @@ def run_mii(
     output_len: int,
 ) -> float:
     from mii import client, serve
+
     llm = serve(model, tensor_parallel=tensor_parallel_size)
     prompts = [request.prompt for request in requests]
 
@@ -400,12 +409,12 @@ def main(args: argparse.Namespace):
 
     # Sample the requests.
     tokenizer = AutoTokenizer.from_pretrained(
-        args.tokenizer, trust_remote_code=args.trust_remote_code)
+        args.tokenizer, trust_remote_code=args.trust_remote_code
+    )
     if args.dataset is None:
         vocab_size = tokenizer.vocab_size
         requests = []
         for _ in range(args.num_prompts):
-
             request_tokenizer = tokenizer
             lora_request: Optional[LoRARequest] = None
             if args.enable_lora:
@@ -415,8 +424,7 @@ def main(args: argparse.Namespace):
 
             # Synthesize a prompt with the given input length.
             candidate_ids = [
-                random.randint(0, vocab_size - 1)
-                for _ in range(args.input_len)
+                random.randint(0, vocab_size - 1) for _ in range(args.input_len)
             ]
             # As tokenizer may add additional tokens like BOS, we need to try
             # different lengths to get the desired input length.
@@ -430,22 +438,23 @@ def main(args: argparse.Namespace):
                 # Adjust length based on difference
                 diff = args.input_len - tokenized_len
                 if diff > 0:
-                    candidate_ids.extend([
-                        random.randint(100, vocab_size - 100)
-                        for _ in range(diff)
-                    ])
+                    candidate_ids.extend(
+                        [random.randint(100, vocab_size - 100) for _ in range(diff)]
+                    )
                 else:
                     candidate_ids = candidate_ids[:diff]
             requests.append(
-                SampleRequest(prompt=candidate_prompt,
-                              prompt_len=args.input_len,
-                              expected_output_len=args.output_len,
-                              lora_request=lora_request))
+                SampleRequest(
+                    prompt=candidate_prompt,
+                    prompt_len=args.input_len,
+                    expected_output_len=args.output_len,
+                    lora_request=lora_request,
+                )
+            )
     else:
         requests = sample_requests(tokenizer, args)
 
-    is_multi_modal = any(request.multi_modal_data is not None
-                         for request in requests)
+    is_multi_modal = any(request.multi_modal_data is not None for request in requests)
 
     if args.backend == "vllm":
         if args.async_engine:
@@ -455,23 +464,30 @@ def main(args: argparse.Namespace):
                     args.n,
                     AsyncEngineArgs.from_cli_args(args),
                     args.disable_frontend_multiprocessing,
-                ))
+                )
+            )
         else:
-            elapsed_time = run_vllm(requests, args.n,
-                                    EngineArgs.from_cli_args(args))
+            elapsed_time = run_vllm(requests, args.n, EngineArgs.from_cli_args(args))
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
-        elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
-                              args.hf_max_batch_size, args.trust_remote_code)
+        elapsed_time = run_hf(
+            requests,
+            args.model,
+            tokenizer,
+            args.n,
+            args.hf_max_batch_size,
+            args.trust_remote_code,
+        )
     elif args.backend == "mii":
-        elapsed_time = run_mii(requests, args.model, args.tensor_parallel_size,
-                               args.output_len)
+        elapsed_time = run_mii(
+            requests, args.model, args.tensor_parallel_size, args.output_len
+        )
     else:
         raise ValueError(f"Unknown backend: {args.backend}")
-    total_num_tokens = sum(request.prompt_len + request.expected_output_len
-                           for request in requests)
-    total_output_tokens = sum(request.expected_output_len
-                              for request in requests)
+    total_num_tokens = sum(
+        request.prompt_len + request.expected_output_len for request in requests
+    )
+    total_output_tokens = sum(request.expected_output_len for request in requests)
 
     if args.profile_torch or args.profile_rpd:
         # Profiling complete
@@ -481,11 +497,14 @@ def main(args: argparse.Namespace):
             print(
                 "\033[91mWARNING\033[0m: Multi-modal request detected. The "
                 "following metrics are not accurate because image tokens are"
-                " not counted. See vllm-project/vllm/issues/9778 for details.")
+                " not counted. See vllm-project/vllm/issues/9778 for details."
+            )
         # TODO(vllm-project/vllm/issues/9778): Count molti-modal token length.
-        print(f"Throughput: {len(requests) / elapsed_time:.2f} requests/s, "
-              f"{total_num_tokens / elapsed_time:.2f} total tokens/s, "
-              f"{total_output_tokens / elapsed_time:.2f} output tokens/s")
+        print(
+            f"Throughput: {len(requests) / elapsed_time:.2f} requests/s, "
+            f"{total_num_tokens / elapsed_time:.2f} total tokens/s, "
+            f"{total_output_tokens / elapsed_time:.2f} output tokens/s"
+        )
 
         # Output JSON results if specified
         if args.output_json:
@@ -502,69 +521,82 @@ def main(args: argparse.Namespace):
 
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(description="Benchmark the throughput.")
-    parser.add_argument("--backend",
-                        type=str,
-                        choices=["vllm", "hf", "mii"],
-                        default="vllm")
-    parser.add_argument("--dataset",
-                        type=str,
-                        default=None,
-                        help="Path to the dataset.")
-    parser.add_argument("--input-len",
-                        type=int,
-                        default=None,
-                        help="Input prompt length for each request")
-    parser.add_argument("--output-len",
-                        type=int,
-                        default=None,
-                        help="Output length for each request. Overrides the "
-                        "output length from the dataset.")
-    parser.add_argument("--n",
-                        type=int,
-                        default=1,
-                        help="Number of generated sequences per prompt.")
-    parser.add_argument("--num-prompts",
-                        type=int,
-                        default=1000,
-                        help="Number of prompts to process.")
-    parser.add_argument("--hf-max-batch-size",
-                        type=int,
-                        default=None,
-                        help="Maximum batch size for HF backend.")
     parser.add_argument(
-        '--output-json',
+        "--backend", type=str, choices=["vllm", "hf", "mii"], default="vllm"
+    )
+    parser.add_argument(
+        "--dataset", type=str, default=None, help="Path to the dataset."
+    )
+    parser.add_argument(
+        "--input-len",
+        type=int,
+        default=None,
+        help="Input prompt length for each request",
+    )
+    parser.add_argument(
+        "--output-len",
+        type=int,
+        default=None,
+        help="Output length for each request. Overrides the "
+        "output length from the dataset.",
+    )
+    parser.add_argument(
+        "--n", type=int, default=1, help="Number of generated sequences per prompt."
+    )
+    parser.add_argument(
+        "--num-prompts", type=int, default=1000, help="Number of prompts to process."
+    )
+    parser.add_argument(
+        "--hf-max-batch-size",
+        type=int,
+        default=None,
+        help="Maximum batch size for HF backend.",
+    )
+    parser.add_argument(
+        "--output-json",
         type=str,
         default=None,
-        help='Path to save the throughput results in JSON format.')
-    parser.add_argument("--async-engine",
-                        action='store_true',
-                        default=False,
-                        help="Use vLLM async engine rather than LLM class.")
-    parser.add_argument("--disable-frontend-multiprocessing",
-                        action='store_true',
-                        default=False,
-                        help="Disable decoupled async engine frontend.")
+        help="Path to save the throughput results in JSON format.",
+    )
+    parser.add_argument(
+        "--async-engine",
+        action="store_true",
+        default=False,
+        help="Use vLLM async engine rather than LLM class.",
+    )
+    parser.add_argument(
+        "--disable-frontend-multiprocessing",
+        action="store_true",
+        default=False,
+        help="Disable decoupled async engine frontend.",
+    )
     # LoRA
     parser.add_argument(
         "--lora-path",
         type=str,
         default=None,
         help="Path to the lora adapters to use. This can be an absolute path, "
-        "a relative path, or a Hugging Face model identifier.")
+        "a relative path, or a Hugging Face model identifier.",
+    )
     parser.add_argument(
-        '--profile-torch',
-        action='store_true',
-        help='profile the generation process of a single batch')
+        "--profile-torch",
+        action="store_true",
+        help="profile the generation process of a single batch",
+    )
     parser.add_argument(
-        '--profile-rpd',
-        action='store_true',
-        help='profile the generation process of a single batch')
+        "--profile-rpd",
+        action="store_true",
+        help="profile the generation process of a single batch",
+    )
     parser.add_argument(
-        '--profile-dir',
+        "--profile-dir",
         type=str,
         default=None,
-        help=('path to save the profiler output. Can be visualized '
-              'with ui.perfetto.dev or Tensorboard.'))
+        help=(
+            "path to save the profiler output. Can be visualized "
+            "with ui.perfetto.dev or Tensorboard."
+        ),
+    )
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
@@ -587,8 +619,7 @@ if __name__ == "__main__":
         if args.quantization is not None:
             raise ValueError("Quantization is only for vLLM backend.")
         if args.enable_lora is not None:
-            raise ValueError("LoRA benchmarking is only supported for vLLM"
-                             " backend")
+            raise ValueError("LoRA benchmarking is only supported for vLLM backend")
     elif args.backend == "mii":
         if args.dtype != "auto":
             raise ValueError("dtype must be auto for MII backend.")
@@ -599,9 +630,7 @@ if __name__ == "__main__":
         if args.hf_max_batch_size is not None:
             raise ValueError("HF max batch size is only for HF backend.")
         if args.tokenizer != args.model:
-            raise ValueError("Tokenizer must be the same as the model for MII "
-                             "backend.")
+            raise ValueError("Tokenizer must be the same as the model for MII backend.")
         if args.enable_lora is not None:
-            raise ValueError("LoRA benchmarking is only supported for vLLM"
-                             " backend")
+            raise ValueError("LoRA benchmarking is only supported for vLLM backend")
     main(args)
