@@ -16,8 +16,7 @@ vllm serve Qwen/Qwen2.5-3B-Instruct
 
 To serve a reasoning model, you can use the following command:
 ```bash
-vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
-    --reasoning-parser deepseek_r1
+vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B --reasoning-parser deepseek_r1
 ```
 
 Examples:
@@ -25,21 +24,20 @@ Examples:
 Run all constraints, non-streaming:
 python {__file__}
 
-Run only regex constraint, streaming:
-python {__file__} --constraint regex --stream
+Run all constraints, streaming:
+python {__file__} --stream
 
-Run json and choice constraints, non-streaming:
-python {__file__} --constraint json choice
+Run all constraints, with reasoning models and streaming:
+python {__file__} --reasoning --stream
 """  # noqa: E501
 
 import argparse
 import asyncio
-import os
 from enum import Enum
-from typing import Any, Literal, get_args
+from typing import Any, Literal
 
 from openai import AsyncOpenAI, AsyncStream
-from openai.types.chat import ChatCompletion, ChatCompletionChunk
+from openai.types.chat import ChatCompletionChunk
 from pydantic import BaseModel
 
 
@@ -236,14 +234,6 @@ async def main():
         "Run OpenAI Chat Completion with various structured outputs capabilities",
     )
     _ = parser.add_argument(
-        "--constraint",
-        type=str,
-        nargs="+",
-        choices=[*get_args(ConstraintsFormat), "all"],
-        default=["all"],
-        help="Specify which constraint(s) to run.",
-    )
-    _ = parser.add_argument(
         "--stream",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -257,48 +247,29 @@ async def main():
     )
     args = parser.parse_args()
 
-    base_url = os.getenv("OPENAI_BASE_URL", "http://localhost:8000/v1")
-    client = AsyncOpenAI(base_url=base_url, api_key="EMPTY")
+    client = AsyncOpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+    constraints = list(PARAMS)
     model = (await client.models.list()).data[0].id
 
-    constraints: list[ConstraintsFormat] = list(get_args(ConstraintsFormat)) \
-        if "all" in args.constraint \
-        else list(set(args.constraint))
-
-    results = await asyncio.gather(
-        *[
-            client.chat.completions.create(
-                model=model,
-                max_tokens=1024,
-                stream=args.stream,
-                **PARAMS[name],
-            ) for name in constraints
-        ],
-        return_exceptions=True,
-    )
+    results = await asyncio.gather(*[
+        client.chat.completions.create(
+            model=model,
+            max_tokens=1024,
+            stream=args.stream,
+            **PARAMS[name],
+        ) for name in constraints
+    ])
 
     if args.stream:
-        for constraint_name, stream_or_exc in zip(constraints, results):
-            if isinstance(stream_or_exc, Exception):
-                print(f"Error for {constraint_name}: {stream_or_exc!r}")
-            else:
-                assert isinstance(stream_or_exc, AsyncStream)
-                await print_stream_response(
-                    stream_or_exc,
-                    title=str(constraint_name),
-                    args=args,
-                )
+        for constraint_name, stream in zip(constraints, results):
+            await print_stream_response(stream, constraint_name, args)
     else:
         for constraint_name, response_or_exc in zip(constraints, results):
-            if isinstance(response_or_exc, Exception):
-                print(f"{constraint_name}:\n  {response_or_exc!r}")
-            else:
-                assert isinstance(response_or_exc, ChatCompletion)
-                print(f"\n\n{constraint_name}:")
-                message = response_or_exc.choices[0].message
-                if args.reasoning and hasattr(message, "reasoning_content"):
-                    print(f"  Reasoning: {message.reasoning_content or ''}")
-                print(f"  Content: {message.content!r}")
+            print(f"\n\n{constraint_name}:")
+            message = response_or_exc.choices[0].message
+            if args.reasoning and hasattr(message, "reasoning_content"):
+                print(f"  Reasoning: {message.reasoning_content or ''}")
+            print(f"  Content: {message.content!r}")
 
 
 if __name__ == "__main__":
