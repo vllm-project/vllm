@@ -435,7 +435,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             routed_scaling_factor=routed_scaling_factor,
         )
 
-
     def set_prepare_finalize(
         self,
         dp_size: int,
@@ -790,9 +789,6 @@ class FusedMoE(torch.nn.Module):
                 vllm_parallel_config=vllm_config.parallel_config))
 
         self.global_num_experts = num_experts
-
-        use_ep = (vllm_config.parallel_config.enable_expert_parallel
-                  and self.tp_size * self.dp_size > 1)
         num_share_fusion_replicas = \
             vllm_config.parallel_config.num_share_fusion_replicas
 
@@ -807,12 +803,10 @@ class FusedMoE(torch.nn.Module):
 
         # Determine expert maps
         if self.use_ep:
-            # Set TP size to 1 to adjust for EP and adjust EP size and rank
-            # for DP attention.
-            self.ep_rank = tp_rank + self.tp_size * self.dp_rank
-            self.tp_rank = 0
-            self.ep_size = self.tp_size * self.dp_size
-            self.tp_size = 1
+            self.local_num_experts, self.expert_map = determine_expert_map(
+                ep_size=self.ep_size,
+                ep_rank=self.ep_rank,
+                global_num_experts=self.global_num_experts)
             if (num_share_fusion_replicas > 0
                     and self.ep_size != num_share_fusion_replicas):
                 logger.warning(
@@ -820,10 +814,6 @@ class FusedMoE(torch.nn.Module):
                     ", share expert replica should be same as ep_size"
                     "got share expert replica = %d"
                     "and ep_size = %d", num_share_fusion_replicas, ep_size)
-            self.local_num_experts, self.expert_map = determine_expert_map(
-                ep_size=self.ep_size,
-                ep_rank=self.ep_rank,
-                global_num_experts=self.global_num_experts)
         else:
             self.local_num_experts, self.expert_map = (self.global_num_experts,
                                                        None)
@@ -1228,6 +1218,7 @@ class FusedMoE(torch.nn.Module):
                        num_share_fusion_replicas: int = 0,
                        routed_scaling_factor: Optional[float] = None):
         from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
+
         # DeekSeekv2 uses grouped_top_k
         if use_grouped_topk:
             assert topk_group is not None
