@@ -8,6 +8,7 @@ from transformers import LlamaConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear
@@ -91,11 +92,15 @@ class LlamaModel(nn.Module):
         self.config = vllm_config. \
             speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
-        self.embed_tokens = VocabParallelEmbedding(
-            self.config.vocab_size,
-            self.config.hidden_size,
-            prefix=maybe_prefix(prefix, "embed_tokens"),
-        )
+
+        # if PP disabled then draft will share embed with target
+        if get_pp_group().world_size > 1:
+            self.embed_tokens = VocabParallelEmbedding(
+                self.config.vocab_size,
+                self.config.hidden_size,
+                prefix=maybe_prefix(prefix, "embed_tokens"),
+            )
+
         self.layers = nn.ModuleList([
             LlamaDecoderLayer(
                 self.config,

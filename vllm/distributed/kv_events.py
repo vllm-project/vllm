@@ -5,6 +5,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections import deque
+from dataclasses import asdict
 from itertools import count
 from queue import Queue
 from typing import Any, Callable, Optional, Union
@@ -129,6 +130,7 @@ class ZmqEventPublisher(EventPublisher):
         self._endpoint = endpoint
         self._replay_endpoint = replay_endpoint
         self._hwm = hwm
+        self._socket_setup()
 
         # Payload
         self._seq_gen = count()
@@ -206,7 +208,6 @@ class ZmqEventPublisher(EventPublisher):
     def _publisher_thread(self) -> None:
         """Background thread that processes the event queue."""
         self._pack = msgspec.msgpack.Encoder()
-        self._socket_setup()
 
         assert self._pub is not None  # narrows type for mypy
 
@@ -284,7 +285,7 @@ class EventPublisherFactory:
         if not config:
             return NullEventPublisher()
 
-        config_dict = config.model_dump()
+        config_dict = asdict(config)
 
         kind = config_dict.pop("publisher", "null")
         config_dict.pop("enable_kv_cache_events")

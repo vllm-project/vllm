@@ -105,6 +105,13 @@ def main():
     outputs = llm.generate(prompt_token_ids=prompt_ids,
                            sampling_params=sampling_params)
 
+    # print the generated text
+    for output in outputs:
+        print("-" * 50)
+        print(f"prompt: {output.prompt}")
+        print(f"generated text: {output.outputs[0].text}")
+        print("-" * 50)
+
     if not hasattr(outputs, "metrics") or outputs.metrics is None:
         return
 
@@ -118,8 +125,8 @@ def main():
             acceptance_counts[step] += count
 
     print("-" * 50)
-    print(f"mean acceptance length: \
-        {sum(acceptance_counts) / acceptance_counts[0]:.2f}")
+    print(f"mean acceptance length (including bonus tokens): \
+        {1 + (sum(acceptance_counts) / acceptance_counts[0]):.2f}")
     print("-" * 50)
 
     # print acceptance at each token position

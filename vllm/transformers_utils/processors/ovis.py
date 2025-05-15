@@ -22,7 +22,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List, Union
+from functools import cached_property
+from typing import Union
 
 import PIL
 import torch
@@ -32,7 +33,7 @@ from transformers.processing_utils import (ProcessingKwargs, ProcessorMixin,
                                            Unpack)
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 
-__all__ = [ 'OvisProcessor']
+__all__ = ['OvisProcessor']
 IGNORE_ID = -100
 
 class OvisProcessorKwargs(ProcessingKwargs, total=False):   # type: ignore[call-arg]
@@ -64,18 +65,29 @@ class OvisProcessor(ProcessorMixin):
     """
 
     attributes = ["image_processor", "tokenizer"]
-    valid_kwargs = ["chat_template"]
+    valid_kwargs = ["chat_template", "image_pad_token", "image_segement_len"]
 
     image_processor_class = "AutoImageProcessor"
-    tokenizer_class = "Qwen2Tokenizer"
+    tokenizer_class = "AutoTokenizer"
 
-    def __init__(self, image_processor=None, tokenizer=None, chat_template=None, image_pad_token=None, **kwargs):
+    def __init__(
+        self,
+        image_processor=None,
+        tokenizer=None,
+        chat_template=None,
+        image_pad_token=None,
+        image_segment_len=255,
+        **kwargs,
+    ):
         self.image_token = "<image>"
-        self.image_pad_token = "<|image_pad|>" if image_pad_token is None else image_pad_token
+        self.image_pad_token = image_pad_token
+        self.image_segment_len = image_segment_len
         super().__init__(image_processor, tokenizer, chat_template=chat_template)
 
-        self.image_pad_token_id = self.tokenizer.get_vocab()[self.image_pad_token]
-        self.extra_special_tokens = {
+    @cached_property
+    def extra_special_tokens(self):
+        image_pad_token_id = self.tokenizer.get_vocab()[self.image_pad_token]
+        extra_special_tokens = {
             "image_token": -200,
             "image_atom": -300,
             "image_start": -301,
@@ -83,13 +95,14 @@ class OvisProcessor(ProcessorMixin):
             "image_col_sep": -303,
             "image_row_sep": -304,
             "image_end": -305,
-            'image_pad': self.image_pad_token_id,
+            'image_pad': image_pad_token_id,
         }
+        return extra_special_tokens
 
     def __call__(
         self,
         images: ImageInput = None,
-        text: Union[TextInput, PreTokenizedInput, List[TextInput], List[PreTokenizedInput]] = None,
+        text: Union[TextInput, PreTokenizedInput, list[TextInput], list[PreTokenizedInput]] = None,
         **kwargs: Unpack[OvisProcessorKwargs],
     ) -> BatchFeature:
         """
@@ -98,14 +111,14 @@ class OvisProcessor(ProcessorMixin):
         the text. To prepare the vision inputs, this method forwards the `vision_infos` and `kwrags` arguments to
         Qwen2VLImageProcessor's [`~Qwen2VLImageProcessor.__call__`] if `vision_infos` is not `None`.
             Args:
-                images (`PIL.Image.Image`, `np.ndarray`, `torch.Tensor`, `List[PIL.Image.Image]`, `List[np.ndarray]`, `List[torch.Tensor]`):
+                images (`PIL.Image.Image`, `np.ndarray`, `torch.Tensor`, `list[PIL.Image.Image]`, `list[np.ndarray]`, `list[torch.Tensor]`):
                     The image or batch of images to be prepared. Each image can be a PIL image, NumPy array or PyTorch
                     tensor. Both channels-first and channels-last formats are supported.
-                text (`str`, `List[str]`, `List[List[str]]`):
+                text (`str`, `list[str]`, `list[list[str]]`):
                     The sequence or batch of sequences to be encoded. Each sequence can be a string or a list of strings
                     (pretokenized string). If the sequences are provided as list of strings (pretokenized), you must set
                     `is_split_into_words=True` (to lift the ambiguity with a batch of sequences).
-                videos (`np.ndarray`, `torch.Tensor`, `List[np.ndarray]`, `List[torch.Tensor]`):
+                videos (`np.ndarray`, `torch.Tensor`, `list[np.ndarray]`, `list[torch.Tensor]`):
                     The image or batch of videos to be prepared. Each video can be a 4D NumPy array or PyTorch
                     tensor, or a nested list of 3D frames. Both channels-first and channels-last formats are supported.
                 return_tensors (`str` or [`~utils.TensorType`], *optional*):
@@ -224,8 +237,14 @@ class OvisProcessor(ProcessorMixin):
         return torch.tensor(batch_token_ids, dtype=torch.long)
 
     def get_image_size(self):
-        height = self.image_processor.crop_size["height"]
-        width = self.image_processor.crop_size["width"]
+        size = self.image_processor.size
+        if 'shortest_edge' in size:
+            width = height = size['shortest_edge']
+        elif "height" in size and "width" in size:
+            width = size['width']
+            height = size['height']
+        else:
+            raise ValueError( "Can't parse image size from image_processor config.")
         return height, width
 
     def get_token_value(self, tok):
@@ -259,8 +278,7 @@ class OvisProcessor(ProcessorMixin):
         for token in image_placeholders:
             padded_placeholder_tokens.append(image_padding_token_id)
             if token == image_atom_token_id:
-                # Add 255 padding tokens after each image atom token
-                padded_placeholder_tokens.extend([image_padding_token_id] * 255)
+                padded_placeholder_tokens.extend([image_padding_token_id] * self.image_segment_len)
         return padded_placeholder_tokens
 
     def preprocess_image(self, image: PIL.Image.Image, max_partition, covering_threshold, convert_to_rgb, return_tensors):
@@ -382,7 +400,7 @@ class OvisProcessor(ProcessorMixin):
                 The output of the model `generate` function. The output is expected to be a tensor of shape `(batch_size, sequence_length)`
                 or `(sequence_length,)`.
         Returns:
-            `List[str]`: The decoded text.
+            `list[str]`: The decoded text.
         """
         return self.tokenizer.batch_decode(
             generated_outputs, skip_special_tokens=True, clean_up_tokenization_spaces=False

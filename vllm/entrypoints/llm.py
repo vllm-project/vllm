@@ -13,7 +13,8 @@ from typing_extensions import TypeVar, deprecated
 
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence, get_beam_search_score)
-from vllm.config import CompilationConfig, ModelDType, TokenizerMode
+from vllm.config import (CompilationConfig, ModelDType, TokenizerMode,
+                         is_init_field)
 from vllm.engine.arg_utils import (EngineArgs, HfOverrides, PoolerConfig,
                                    TaskOption)
 from vllm.engine.llm_engine import LLMEngine
@@ -204,9 +205,13 @@ class LLM:
                 kwargs["worker_cls"] = cloudpickle.dumps(worker_cls)
 
         if compilation_config is not None:
-            if isinstance(compilation_config, (int, dict)):
-                compilation_config_instance = CompilationConfig.from_cli(
-                    str(compilation_config))
+            if isinstance(compilation_config, int):
+                compilation_config_instance = CompilationConfig(
+                    level=compilation_config)
+            elif isinstance(compilation_config, dict):
+                predicate = lambda x: is_init_field(CompilationConfig, x[0])
+                compilation_config_instance = CompilationConfig(
+                    **dict(filter(predicate, compilation_config.items())))
             else:
                 compilation_config_instance = compilation_config
         else:
@@ -726,11 +731,11 @@ class LLM:
         tokenizer = self.get_tokenizer(lora_request)
         model_config = self.llm_engine.get_model_config()
         resolved_content_format = resolve_chat_template_content_format(
-            model_config,
             chat_template,
             tools,
             chat_template_content_format,
             tokenizer,
+            model_config=model_config,
         )
 
         _chat_template_kwargs: dict[str, Any] = dict(
@@ -762,9 +767,9 @@ class LLM:
                 )
             else:
                 prompt_str = apply_hf_chat_template(
-                    model_config,
-                    tokenizer,
+                    tokenizer=tokenizer,
                     conversation=conversation,
+                    model_config=model_config,
                     **_chat_template_kwargs,
                 )
                 # Special tokens are already included in chat templates so
