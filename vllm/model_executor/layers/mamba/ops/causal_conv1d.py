@@ -17,9 +17,9 @@ MAX_NUM_PROGRAMS = 1024
 
 batch_ptr = torch.full(
     (MAX_NUM_PROGRAMS, ), PAD_SLOT_ID, dtype=torch.int32,
-    device='cuda')  # tracking which seq-idx the Triton program is handling
+    device='cpu')  # tracking which seq-idx the Triton program is handling
 token_chunk_offset_ptr = torch.full(
-    (MAX_NUM_PROGRAMS, ), PAD_SLOT_ID, dtype=torch.int32, device='cuda'
+    (MAX_NUM_PROGRAMS, ), PAD_SLOT_ID, dtype=torch.int32, device='cpu'
 )  # tracking BLOCK_M-based index in the sequence the Triton program is handling
 
 
@@ -1048,6 +1048,9 @@ def causal_conv1d_fn_triton(
         )
 
     global batch_ptr, token_chunk_offset_ptr
+    if batch_ptr.device != x.device:
+        batch_ptr = batch_ptr.to(x.device)
+        token_chunk_offset_ptr = token_chunk_offset_ptr.to(x.device)
 
     _causal_conv1d_fwd_kernel_contbatch[grid](
         # Pointers to matrices

@@ -560,7 +560,7 @@ class MambaMixer2(CustomOp):
                     mamba2_metadata.stride_x_seq, mamba2_metadata.stride_x_dim, mamba2_metadata.stride_x_token = x.stride(
                     )
                 hidden_states_B_C = causal_conv1d_update_triton(
-                    x, #hidden_states_B_C,
+                    x,
                     mamba_cache_params.conv_state,
                     conv_weights,
                     self.conv1d.bias,
