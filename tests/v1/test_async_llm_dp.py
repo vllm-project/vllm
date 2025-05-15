@@ -16,11 +16,12 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core_client import DPAsyncMPClient
 
 engine_args = AsyncEngineArgs(
-    model="Qwen/Qwen2.5-0.5B-Instruct",
+    model="ibm-research/PowerMoE-3b",
     enforce_eager=True,
     disable_log_requests=True,
     tensor_parallel_size=int(os.getenv("TP_SIZE", 1)),
     data_parallel_size=int(os.getenv("DP_SIZE", 2)),
+    data_parallel_size_local=0
 )
 
 if not current_platform.supports_v1(engine_args.create_model_config()):

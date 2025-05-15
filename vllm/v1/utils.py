@@ -212,20 +212,29 @@ class CoreEngineActorManager(CoreEngineProcManager):
                 local_dp_rank=local_index)
             self.engine_actors.append(actor)
             refs.append(actor.wait_for_init.remote())
-        # dp_size = vllm_config.parallel_config.data_parallel_size
-        # for index in range(dp_size - local_engine_count):
-        #     self.remote_engine_actors.append(
-        #         ray.remote(EngineCoreActor).remote(
-        #             vllm_config=vllm_config,
-        #             executor_class=executor_class,
-        #             log_stats=log_stats,
-        #             input_address=input_address,
-        #             output_address=output_address,
-        #             on_head_node=False,
-        #             engine_index=global_index,
-        #             dp_rank=global_index,
-        #             local_dp_rank=local_index)
-        #         )
+
+        dp_size = vllm_config.parallel_config.data_parallel_size
+        for index in range(dp_size - local_engine_count):
+            # FIXME(rui): correct the indexes
+            local_index = index
+            global_index = local_engine_count +index
+            logger.info(
+                f"global_index: {global_index}, local_index: {local_index}, "
+                f"input_address: {input_address}, output_address: {output_address}"
+            )
+            actor = ray.remote(EngineCoreActor).remote(
+                vllm_config=vllm_config,
+                executor_class=executor_class,
+                log_stats=log_stats,
+                input_address=input_address,
+                output_address=output_address,
+                on_head_node=False,
+                engine_index=global_index,
+                dp_rank=global_index,
+                local_dp_rank=local_index)
+            self.engine_actors.append(actor)
+            refs.append(actor.wait_for_init.remote())
+
         ray.get(refs)
         for actor in self.engine_actors:
             actor.run.remote()
