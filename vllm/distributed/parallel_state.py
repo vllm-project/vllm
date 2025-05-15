@@ -979,7 +979,6 @@ def pplx_finalize():
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
-    enable_expert_parallel: bool = False,
     backend: Optional[str] = None,
 ) -> None:
     """
@@ -1012,10 +1011,12 @@ def initialize_model_parallel(
         get_world_group().device_group)
 
     data_parallel_size = 1
+    enable_expert_parallel = False
     from vllm.config import get_current_vllm_config
     config = get_current_vllm_config()
     if config is not None:
         data_parallel_size = config.parallel_config.data_parallel_size
+        enable_expert_parallel = config.parallel_config.enable_expert_parallel
 
     # the layout order is: ExternalDP x DP x PP x TP
     # ExternalDP is the data parallel group that is not part of the model,
@@ -1089,7 +1090,6 @@ def initialize_model_parallel(
 def ensure_model_parallel_initialized(
     tensor_model_parallel_size: int,
     pipeline_model_parallel_size: int,
-    enable_expert_parallel: bool = False,
     backend: Optional[str] = None,
 ) -> None:
     """Helper to initialize model parallel groups if they are not initialized,
@@ -1100,8 +1100,7 @@ def ensure_model_parallel_initialized(
         get_world_group().device_group)
     if not model_parallel_is_initialized():
         initialize_model_parallel(tensor_model_parallel_size,
-                                  pipeline_model_parallel_size,
-                                  enable_expert_parallel, backend)
+                                  pipeline_model_parallel_size, backend)
         return
 
     assert (

@@ -390,8 +390,7 @@ class CPUWorker(LocalOrDistributedWorkerBase):
 
         ensure_model_parallel_initialized(
             parallel_config.tensor_parallel_size,
-            parallel_config.pipeline_parallel_size,
-            parallel_config.enable_expert_parallel)
+            parallel_config.pipeline_parallel_size)
 
     def get_cache_block_size_bytes(self) -> int:
         """Return the size in bytes of a single KV cache block.
