@@ -1421,12 +1421,18 @@ class FlexibleArgumentParser(ArgumentParser):
                 processed_args.append(arg)
 
         def create_nested_dict(keys: list[str], value: str):
+            """Creates a nested dictionary from a list of keys and a value.
+
+            For example, `keys = ["a", "b", "c"]` and `value = 1` will create:
+            `{"a": {"b": {"c": 1}}}`
+            """
             nested_dict: Any = value
             for key in reversed(keys):
                 nested_dict = {key: nested_dict}
             return nested_dict
 
         dict_args: dict[str, dict] = defaultdict(dict)
+        # Loop in reverse because we are modifying the list
         for i, processed_arg in reversed(list(enumerate(processed_args))):
             if processed_arg.startswith("--") and "." in processed_arg:
                 if "=" in processed_arg:
@@ -1435,8 +1441,10 @@ class FlexibleArgumentParser(ArgumentParser):
                     value = processed_args[i + 1]
                     del processed_args[i + 1]
                 key, *keys = processed_arg.split(".")
+                # Merge all values with the same key into a single dict
                 dict_args[key].update(create_nested_dict(keys, value))
                 del processed_args[i]
+        # Add the dict args back as if they were originally passed as JSON
         for dict_arg, dict_value in dict_args.items():
             processed_args.append(dict_arg)
             processed_args.append(json.dumps(dict_value))
