@@ -455,7 +455,7 @@ steps:
 #####  models test  #####
 
 - label: Basic Models Test # 24min
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   torch_nightly: true
   source_file_dependencies:
   - vllm/
@@ -527,7 +527,7 @@ steps:
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
 
 - label: Multi-Modal Models Test (Extended) 3
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   optional: true
   source_file_dependencies:
   - vllm/
@@ -537,7 +537,7 @@ steps:
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
 
 - label: Quantized Models Test
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   source_file_dependencies:
   - vllm/model_executor/layers/quantization
   - tests/models/quantization
