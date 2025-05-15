@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 import math
 from dataclasses import dataclass
+from typing import Optional
 
+import numpy as np
 import torch
 
 from vllm.attention.backends.abstract import AttentionMetadata
@@ -9,9 +11,7 @@ from vllm.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.attention.backends.placeholder_attn import (
     PlaceholderAttentionMetadata)
 from vllm.attention.backends.xformers import XFormersMetadata
-import numpy as np
 
-from typing import Optional
 
 @dataclass
 class Mamba2Metadata:
@@ -24,12 +24,12 @@ class Mamba2Metadata:
     chunk_indices: torch.Tensor
     chunk_offsets: torch.Tensor
 
-    num_cache_lines : Optional[int] = None
+    num_cache_lines: Optional[int] = None
     stride_istate_seq: Optional[int] = None
     stride_istate_dim: Optional[int] = None
     stride_istate_token: Optional[int] = None
-    seqlens:  Optional[np.ndarray] = None
-    padded_batch : Optional[int] = None
+    seqlens: Optional[np.ndarray] = None
+    padded_batch: Optional[int] = None
     nums_dict: Optional[dict] = None
     is_channel_last: bool = True
     stride_w_dim: Optional[int] = None
@@ -37,10 +37,10 @@ class Mamba2Metadata:
     width: Optional[int] = None
     np2_statelen: Optional[int] = None
     stride_x_seq: Optional[int] = 0
-    stride_x_dim : Optional[int] = None
+    stride_x_dim: Optional[int] = None
     stride_x_token: Optional[int] = None
     dim: Optional[int] = None
-    cu_seqlen : Optional[int] = None
+    cu_seqlen: Optional[int] = None
     out: Optional[torch.Tensor] = None
     stride_o_seq: Optional[int] = 0
     stride_o_dim: Optional[int] = None
@@ -89,7 +89,7 @@ def _query_start_loc_to_chunk_indices_offsets(query_start_loc: torch.Tensor,
 def prepare_mamba2_metadata(
     chunk_size: int,
     attn_metadata: AttentionMetadata,
-    mamba2_metadata = None,
+    mamba2_metadata=None,
 ) -> Mamba2Metadata:
 
     # compute number of prefill and decode requests
@@ -138,18 +138,19 @@ def prepare_mamba2_metadata(
                 query_start_loc, chunk_size, num_prefill_tokens)
 
     if mamba2_metadata is not None:
-        mamba2_metadata.has_initial_states=has_initial_states
-        mamba2_metadata.prep_initial_states=prep_initial_states
-        mamba2_metadata.chunk_size=chunk_size
-        mamba2_metadata.seq_idx=seq_idx
-        mamba2_metadata.chunk_indices=chunk_indices
-        mamba2_metadata.chunk_offsets=chunk_offsets
+        mamba2_metadata.has_initial_states = has_initial_states
+        mamba2_metadata.prep_initial_states = prep_initial_states
+        mamba2_metadata.chunk_size = chunk_size
+        mamba2_metadata.seq_idx = seq_idx
+        mamba2_metadata.chunk_indices = chunk_indices
+        mamba2_metadata.chunk_offsets = chunk_offsets
         # We use 2 reset flags:
         #  * mamba2_metadata.width is None # update config at first run (never change whole session for a given model)
         #                                    (become available at first layer, e.g. conv_weights)
         #  * mamba2_metadata.cu_seqlen is None # update config specific to (each input)
         #                                    (become available at first layer, e.g. conv_weights)
-        mamba2_metadata.cu_seqlen = None # suppose to be updated at each input
+        mamba2_metadata.cu_seqlen = None  # suppose to be updated at each input
+
         return mamba2_metadata
     return Mamba2Metadata(has_initial_states=has_initial_states,
                           prep_initial_states=prep_initial_states,

@@ -301,6 +301,7 @@ class GraniteMoeHybridModel(nn.Module):
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
         )
+
         self.mamba2_metadata = None
         self.embedding_multiplier = config.embedding_multiplier
 

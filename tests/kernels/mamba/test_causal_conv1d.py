@@ -11,9 +11,8 @@ from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops  # noqa: F401
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
-    causal_conv1d_fn, causal_conv1d_update)
-from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
-    causal_conv1d_fn_triton, causal_conv1d_update_triton)
+    causal_conv1d_fn, causal_conv1d_fn_triton, causal_conv1d_update,
+    causal_conv1d_update_triton)
 from vllm.platforms import current_platform
 
 
@@ -450,9 +449,10 @@ def test_causal_conv1d_varlen(with_padding, dim, seqlen, width, has_bias,
 # tests correctness in case subset of the sequences are padded
 @pytest.mark.parametrize("with_padding", [True, False])
 @pytest.mark.parametrize("batch_size", [3])
-def test_causal_conv1d_update_with_batch_gather_vllm(batch_size, with_padding, dim, width,
-                                                seqlen, has_bias,
-                                                silu_activation, itype):
+def test_causal_conv1d_update_with_batch_gather_vllm(batch_size, with_padding,
+                                                     dim, width, seqlen,
+                                                     has_bias, silu_activation,
+                                                     itype):
     device = "cuda"
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (3e-3, 5e-3)
     if itype == torch.bfloat16:
@@ -468,10 +468,18 @@ def test_causal_conv1d_update_with_batch_gather_vllm(batch_size, with_padding, d
 
     channel_last = True
     if not channel_last:
-        x = torch.randn(padded_batch_size, dim, seqlen, device=device, dtype=itype)
+        x = torch.randn(padded_batch_size,
+                        dim,
+                        seqlen,
+                        device=device,
+                        dtype=itype)
     else:
         # x will be (batch, dim, seqlen) with contiguous along dim-axis
-        x = torch.randn(padded_batch_size, seqlen, dim, device=device, dtype=itype).transpose(1, 2)
+        x = torch.randn(padded_batch_size,
+                        seqlen,
+                        dim,
+                        device=device,
+                        dtype=itype).transpose(1, 2)
 
     x_ref = x.clone()
 
@@ -490,17 +498,17 @@ def test_causal_conv1d_update_with_batch_gather_vllm(batch_size, with_padding, d
 
     if not channel_last:
         conv_state = torch.randn(total_entries,
-                             dim,
-                             width - 1,
-                             device=device,
-                             dtype=itype)
+                                 dim,
+                                 width - 1,
+                                 device=device,
+                                 dtype=itype)
     else:
         # conv_state will be (cache_lines, dim, state_len) with contiguous along dim-axis
         conv_state = torch.randn(total_entries,
-                             width - 1,
-                             dim,
-                             device=device,
-                             dtype=itype).transpose(1, 2)
+                                 width - 1,
+                                 dim,
+                                 device=device,
+                                 dtype=itype).transpose(1, 2)
 
     conv_state_for_padding_test = conv_state.clone()
     conv_state_origin = conv_state.clone()
@@ -511,12 +519,12 @@ def test_causal_conv1d_update_with_batch_gather_vllm(batch_size, with_padding, d
     activation = None if not silu_activation else "silu"
 
     out = causal_conv1d_update_triton(x,
-                               conv_state,
-                               weight,
-                               bias,
-                               activation=activation,
-                               conv_state_indices=padded_state_indices,
-                               pad_slot_id=PAD_SLOT_ID)
+                                      conv_state,
+                                      weight,
+                                      bias,
+                                      activation=activation,
+                                      conv_state_indices=padded_state_indices,
+                                      pad_slot_id=PAD_SLOT_ID)
     out_ref = causal_conv1d_update_ref(x_ref[:batch_size],
                                        conv_state_ref,
                                        weight,
@@ -533,13 +541,12 @@ def test_causal_conv1d_update_with_batch_gather_vllm(batch_size, with_padding, d
 @pytest.mark.parametrize("silu_activation", [True])
 @pytest.mark.parametrize("has_bias", [True])
 @pytest.mark.parametrize("width", [4])
-@pytest.mark.parametrize(
-    'seqlen', [8, 16, 784, 1024, 2048, 2049, 4096])
+@pytest.mark.parametrize('seqlen', [8, 16, 784, 1024, 2048, 2049, 4096])
 @pytest.mark.parametrize('dim', [64, 4096])
 @pytest.mark.parametrize('with_padding', [True, False])
 @pytest.mark.parametrize('batch', [4])
-def test_causal_conv1d_varlen_vllm(batch, with_padding, dim, seqlen, width, has_bias,
-                              silu_activation, itype):
+def test_causal_conv1d_varlen_vllm(batch, with_padding, dim, seqlen, width,
+                                   has_bias, silu_activation, itype):
     device = "cuda"
     torch.cuda.empty_cache()
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (3e-3, 5e-3)
@@ -572,7 +579,8 @@ def test_causal_conv1d_varlen_vllm(batch, with_padding, dim, seqlen, width, has_
         x = torch.randn(1, 4096 + dim + 64, seqlen, device=device,
                         dtype=itype)[:, 4096:4096 + dim, :]
     else:
-        x = rearrange(torch.randn(1, seqlen, 4096 + dim + 64, device=device,
+        x = rearrange(
+            torch.randn(1, seqlen, 4096 + dim + 64, device=device,
                         dtype=itype), "b s d -> b d s")[:, 4096:4096 + dim, :]
 
     weight = torch.randn(dim, width, device=device, dtype=itype)
@@ -584,16 +592,16 @@ def test_causal_conv1d_varlen_vllm(batch, with_padding, dim, seqlen, width, has_
     activation = None if not silu_activation else "silu"
     if not channel_last:
         final_states = torch.randn(total_entries,
-                               dim,
-                               width - 1,
-                               device=x.device,
-                               dtype=x.dtype)
+                                   dim,
+                                   width - 1,
+                                   device=x.device,
+                                   dtype=x.dtype)
     else:
         final_states = torch.randn(total_entries,
-                               width - 1,
-                               dim,
-                               device=x.device,
-                               dtype=x.dtype).transpose(1, 2)
+                                   width - 1,
+                                   dim,
+                                   device=x.device,
+                                   dtype=x.dtype).transpose(1, 2)
     final_states_ref = final_states.clone()
     has_initial_states = torch.randint(0,
                                        2, (cumsum.shape[0] - 1, ),
@@ -608,16 +616,15 @@ def test_causal_conv1d_varlen_vllm(batch, with_padding, dim, seqlen, width, has_
             [PAD_SLOT_ID] * padding, dtype=torch.int32, device=device),
     ],
                                         dim=-1)
-    out = causal_conv1d_fn_triton(
-        x.squeeze(0),
-        weight,
-        bias,
-        conv_states=final_states,
-        query_start_loc=cumsum.cuda(),
-        cache_indices=padded_state_indices,
-        has_initial_states=has_initial_states,
-        activation=activation,
-        pad_slot_id=PAD_SLOT_ID)
+    out = causal_conv1d_fn_triton(x.squeeze(0),
+                                  weight,
+                                  bias,
+                                  conv_states=final_states,
+                                  query_start_loc=cumsum.cuda(),
+                                  cache_indices=padded_state_indices,
+                                  has_initial_states=has_initial_states,
+                                  activation=activation,
+                                  pad_slot_id=PAD_SLOT_ID)
 
     out_ref = []
     out_ref_b = []
@@ -643,20 +650,24 @@ def test_causal_conv1d_varlen_vllm(batch, with_padding, dim, seqlen, width, has_
 
     try:
         assert torch.allclose(final_states[state_indices],
-                          final_states_ref[state_indices],
-                          rtol=rtol,
-                          atol=atol)
+                              final_states_ref[state_indices],
+                              rtol=rtol,
+                              atol=atol)
         print("Passed conv_state")
     except Exception as e:
         print("FAILED conv_state")
         raise e
     unpadded_out = out[:, :out_ref_tensor.shape[-1]]
     try:
-        assert torch.allclose(unpadded_out, out_ref_tensor, rtol=rtol, atol=atol)
+        assert torch.allclose(unpadded_out,
+                              out_ref_tensor,
+                              rtol=rtol,
+                              atol=atol)
     except Exception as e:
-        input("Passed conv_state, but failed output: Press Enter to continue...")
+        input(
+            "Passed conv_state, but failed output: Press Enter to continue...")
 
-        nz = out_ref_tensor.squeeze(0)-unpadded_out
+        nz = out_ref_tensor.squeeze(0) - unpadded_out
         non_zero_indices = torch.nonzero(nz)
         print('nonzero indices :', non_zero_indices)
         raise e
