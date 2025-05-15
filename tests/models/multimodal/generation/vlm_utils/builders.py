@@ -7,15 +7,17 @@ from typing import Callable, Optional, Union
 
 import torch
 
+from vllm.multimodal.audio import AudioResampler
 from vllm.multimodal.image import rescale_image_size
 from vllm.multimodal.video import (rescale_video_size, resize_video,
                                    sample_frames_from_video)
 
 from .....conftest import AudioTestAssets, ImageTestAssets, VideoTestAssets
-from .types import (SINGLE_IMAGE_BASE_PROMPTS, TEST_AUDIO_PLACEHOLDER,
-                    TEST_IMG_PLACEHOLDER, TEST_VIDEO_PLACEHOLDER,
-                    VIDEO_BASE_PROMPT, ImageSizeWrapper,
-                    PromptWithMultiModalInput, SizeType, VLMTestInfo)
+from .types import (SINGLE_AUDIO_BASE_PROMPT, SINGLE_IMAGE_BASE_PROMPTS,
+                    TEST_AUDIO_PLACEHOLDER, TEST_IMG_PLACEHOLDER,
+                    TEST_VIDEO_PLACEHOLDER, VIDEO_BASE_PROMPT,
+                    ImageSizeWrapper, PromptWithMultiModalInput, SizeType,
+                    VLMTestInfo)
 
 
 def replace_test_placeholder(prompt: str, mm_idx_to_prompt: Callable[[int],
@@ -268,17 +270,24 @@ def build_audio_inputs_from_test_info(
     if test_info.prompt_formatter is None:
         raise ValueError("Prompt formatter must be set to build audio inputs")
     model_prompts = get_model_prompts(
-        [test_info.audio_idx_to_prompt(0)],
+        SINGLE_AUDIO_BASE_PROMPT,
         test_info.img_idx_to_prompt,
         test_info.video_idx_to_prompt,
         test_info.audio_idx_to_prompt,
         test_info.prompt_formatter,
     )
+    resampler = AudioResampler(
+        target_sr=16000,
+        method="librosa",
+    )
     audios = [asset.audio_and_sample_rate for asset in audio_assets]
+    resampled_audios = [(resampler.resample(audio,
+                                            orig_sr=sr), resampler.target_sr)
+                        for audio, sr in audios]
 
     return [
         PromptWithMultiModalInput.create(
-            prompts=[prompt],
-            audio_data=[audio],
-        ) for audio, prompt in zip(audios, model_prompts)
+            prompts=model_prompts,
+            audio_data=resampled_audios,
+        )
     ]
