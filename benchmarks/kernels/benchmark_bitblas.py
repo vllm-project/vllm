@@ -3,27 +3,33 @@
 # Licensed under the MIT License.
 
 from vllm.model_executor.layers.quantization.utils.bitblas_utils import (
-    MINIMUM_BITBLAS_VERSION)
+    MINIMUM_BITBLAS_VERSION,
+)
 
 try:
     import bitblas
+
     if bitblas.__version__ < MINIMUM_BITBLAS_VERSION:
-        raise ImportError("bitblas version is wrong. Please "
-                          f"install bitblas>={MINIMUM_BITBLAS_VERSION}")
+        raise ImportError(
+            "bitblas version is wrong. Please "
+            f"install bitblas>={MINIMUM_BITBLAS_VERSION}"
+        )
 except ImportError as e:
     bitblas_import_exception = e
-    raise ValueError("Trying to use the bitblas backend, but could not import"
-                     f"with the following error: {bitblas_import_exception}. "
-                     "Please install bitblas through the following command: "
-                     f"`pip install bitblas>={MINIMUM_BITBLAS_VERSION}`"
-                     ) from bitblas_import_exception
+    raise ValueError(
+        "Trying to use the bitblas backend, but could not import"
+        f"with the following error: {bitblas_import_exception}. "
+        "Please install bitblas through the following command: "
+        f"`pip install bitblas>={MINIMUM_BITBLAS_VERSION}`"
+    ) from bitblas_import_exception
 
 from bitblas import Matmul, MatmulConfig, auto_detect_nvidia_target
 
 from vllm.utils import FlexibleArgumentParser
 
 parser = FlexibleArgumentParser(
-    description="Benchmark BitBLAS int4 on a specific target.")
+    description="Benchmark BitBLAS int4 on a specific target."
+)
 
 # Add arguments to the parser
 parser.add_argument(
@@ -32,10 +38,9 @@ parser.add_argument(
     default=auto_detect_nvidia_target(),
     help="Specify the target device for benchmarking.",
 )
-parser.add_argument("--group_size",
-                    type=int,
-                    default=None,
-                    help="Group size for grouped quantization.")
+parser.add_argument(
+    "--group_size", type=int, default=None, help="Group size for grouped quantization."
+)
 parser.add_argument(
     "--A_dtype",
     type=str,
@@ -82,17 +87,17 @@ parser.add_argument(
     choices=["nt", "nn"],
     help="Matrix layout, 'nt' for non-transpose A and transpose W.",
 )
-parser.add_argument("--with_bias",
-                    action="store_true",
-                    help="Include bias in the benchmark.")
+parser.add_argument(
+    "--with_bias", action="store_true", help="Include bias in the benchmark."
+)
 parser.add_argument(
     "--with_scaling",
     action="store_true",
     help="Include scaling factor in the quantization.",
 )
-parser.add_argument("--with_zeros",
-                    action="store_true",
-                    help="Include zeros in the quantization.")
+parser.add_argument(
+    "--with_zeros", action="store_true", help="Include zeros in the quantization."
+)
 parser.add_argument(
     "--zeros_mode",
     type=str,
@@ -170,8 +175,7 @@ shapes = [
 ]
 
 # Build test shapes with all the shared arguments
-test_shapes = [(MatmulConfig, Matmul, (*shape, *shared_args))
-               for shape in shapes]
+test_shapes = [(MatmulConfig, Matmul, (*shape, *shared_args)) for shape in shapes]
 
 benchmark_sets = []
 benchmark_sets.extend(test_shapes)
@@ -206,12 +210,12 @@ for config_key, values in benchmark_results.items():
     func_name = args_split[0]
     input_args_str = "-".join(args_split[1:])
     col_widths[0] = max(col_widths[0], len(func_name) + 2, len(headers[0]) + 2)
-    col_widths[1] = max(col_widths[1],
-                        len(input_args_str) + 2,
-                        len(headers[1]) + 2)
-    col_widths[2] = max(col_widths[2],
-                        len(f"{values['BitBLAS_top20_latency']:.3f} ms") + 2,
-                        len(headers[2]) + 2)
+    col_widths[1] = max(col_widths[1], len(input_args_str) + 2, len(headers[1]) + 2)
+    col_widths[2] = max(
+        col_widths[2],
+        len(f"{values['BitBLAS_top20_latency']:.3f} ms") + 2,
+        len(headers[2]) + 2,
+    )
     # break only if you want to measure widths from a single example;
     # otherwise, let it loop over all items.
 
@@ -232,5 +236,6 @@ for config_key, values in benchmark_results.items():
         f"{values['BitBLAS_top20_latency']:.3f} ms",
     ]
     row_str = "".join(
-        [str(cell).ljust(col_widths[idx]) for idx, cell in enumerate(row)])
+        [str(cell).ljust(col_widths[idx]) for idx, cell in enumerate(row)]
+    )
     print(row_str)

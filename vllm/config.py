@@ -297,7 +297,7 @@ class ModelConfig:
     - 1K -> 1024\n
     - 25.6k -> 25,600"""
     spec_target_max_model_len: Optional[int] = None
-    """Specify the the maximum length for spec decoding draft models."""
+    """Specify the maximum length for spec decoding draft models."""
     quantization: Optional[QuantizationMethods] = None
     """Method used to quantize the weights. If `None`, we first check the
     `quantization_config` attribute in the model config file. If that is
@@ -611,28 +611,35 @@ class ModelConfig:
 
     def maybe_pull_model_tokenizer_for_s3(self, model: str,
                                           tokenizer: str) -> None:
-        """
-        Pull the model config or tokenizer to a temporary
-        directory in case of S3.
-
+        """Pull model/tokenizer from S3 to temporary directory when needed.
+        
         Args:
-            model: The model name or path.
-            tokenizer: The tokenizer name or path.
-
+            model: Model name or path
+            tokenizer: Tokenizer name or path
         """
-        if is_s3(model) or is_s3(tokenizer):
-            if is_s3(model):
-                s3_model = S3Model()
-                s3_model.pull_files(
-                    model, allow_pattern=["*.model", "*.py", "*.json"])
-                self.model_weights = self.model
-                self.model = s3_model.dir
+        if not (is_s3(model) or is_s3(tokenizer)):
+            return
 
-            if is_s3(tokenizer):
-                s3_tokenizer = S3Model()
-                s3_tokenizer.pull_files(
+        if is_s3(model):
+            s3_model = S3Model()
+            s3_model.pull_files(model,
+                                allow_pattern=["*.model", "*.py", "*.json"])
+            self.model_weights = model
+            self.model = s3_model.dir
+
+            # If tokenizer is same as model, download to same directory
+            if model == tokenizer:
+                s3_model.pull_files(
                     model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
-                self.tokenizer = s3_tokenizer.dir
+                self.tokenizer = s3_model.dir
+                return
+
+        # Only download tokenizer if needed and not already handled
+        if is_s3(tokenizer):
+            s3_tokenizer = S3Model()
+            s3_tokenizer.pull_files(
+                model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
+            self.tokenizer = s3_tokenizer.dir
 
     def _init_multimodal_config(self) -> Optional["MultiModalConfig"]:
         if self.registry.is_multimodal_model(self.architectures):
@@ -899,12 +906,17 @@ class ModelConfig:
     def _verify_cuda_graph(self) -> None:
         self.max_seq_len_to_capture = min(self.max_seq_len_to_capture,
                                           self.max_model_len)
+        # CUDAGraph capture not supported for enc-dec models and mllama on ROCm
         ROCM_UNSUPPORTED_MODELS = ['mllama']
-        if (self.hf_config.model_type in ROCM_UNSUPPORTED_MODELS
-                and not self.enforce_eager and current_platform.is_rocm()):
+        unsupported_rocm = (self.hf_config.model_type
+                            in ROCM_UNSUPPORTED_MODELS
+                            or self.is_encoder_decoder)
+
+        if (unsupported_rocm and not self.enforce_eager
+                and current_platform.is_rocm()):
             logger.warning(
                 "CUDA graph is not supported for %s on ROCm yet, fallback "
-                "to the eager mode.", self.hf_config.model_type)
+                "to eager mode.", self.hf_config.model_type)
             self.enforce_eager = True
 
     def _verify_bnb_config(self) -> None:
@@ -1668,25 +1680,17 @@ class ParallelConfig:
     data_parallel_size: int = 1
     """Number of data parallel groups. MoE layers will be sharded according to
     the product of the tensor parallel size and data parallel size."""
+    data_parallel_size_local: int = 1
+    """Number of local data parallel groups."""
     data_parallel_rank: int = 0
     """Rank of the data parallel group."""
-    _data_parallel_rank_local: Optional[int] = field(default=None, init=False)
-    """Private field to store the local rank of the data parallel group."""
-
-    @property
-    def data_parallel_rank_local(self) -> int:
-        """Local rank of the data parallel group, defaults to global rank."""
-        if self._data_parallel_rank_local is None:
-            return self.data_parallel_rank
-        return self._data_parallel_rank_local
-
-    @data_parallel_rank_local.setter
-    def data_parallel_rank_local(self, value: int) -> None:
-        """Set the local rank of the data parallel group."""
-        self._data_parallel_rank_local = value
-
+    data_parallel_rank_local: Optional[int] = None
+    """Local rank of the data parallel group,
+    set only in SPMD mode."""
     data_parallel_master_ip: str = "127.0.0.1"
     """IP of the data parallel master."""
+    data_parallel_rpc_port: int = 29550
+    """Port for data parallel messaging."""
     data_parallel_master_port: int = 29500
     """Port of the data parallel master."""
     enable_expert_parallel: bool = False
@@ -1734,12 +1738,15 @@ class ParallelConfig:
 
     world_size: int = field(init=False)
     """world_size is TPxPP, it affects the number of workers we create."""
-    world_size_across_dp: int = field(init=False)
-    """world_size_across_dp is TPxPPxDP, it is the size of the world
-    including data parallelism."""
 
     rank: int = 0
     """Global rank in distributed setup."""
+
+    @property
+    def world_size_across_dp(self) -> int:
+        """world_size_across_dp is TPxPPxDP, it is the size of the world
+        including data parallelism."""
+        return self.world_size * self.data_parallel_size
 
     def get_next_dp_init_port(self) -> int:
         """
@@ -1800,10 +1807,14 @@ class ParallelConfig:
         self.world_size = self.pipeline_parallel_size * \
             self.tensor_parallel_size
 
-        if self.data_parallel_size > 1:
+        if self.data_parallel_size_local > self.data_parallel_size:
+            raise ValueError(
+                f"data_parallel_size_local ({self.data_parallel_size_local}) "
+                f"must be <= data_parallel_size ({self.data_parallel_size})")
+
+        if self.data_parallel_size > 1 or self.data_parallel_size_local == 0:
             # Data parallel was specified in the engine args.
             self.data_parallel_master_port = get_open_port()
-            # TODO multi-node
         else:
             # Otherwise fall back to env vars (e.g. for offline SPMD case).
             self.data_parallel_size = envs.VLLM_DP_SIZE
@@ -1811,8 +1822,6 @@ class ParallelConfig:
             self.data_parallel_rank_local = envs.VLLM_DP_RANK_LOCAL
             self.data_parallel_master_ip = envs.VLLM_DP_MASTER_IP
             self.data_parallel_master_port = envs.VLLM_DP_MASTER_PORT
-
-        self.world_size_across_dp = self.world_size * self.data_parallel_size
 
         if self.distributed_executor_backend == "external_launcher":
             import os
@@ -2328,7 +2337,7 @@ class SpeculativeConfig:
     `TypicalAcceptanceSampler`."""
 
     speculative_token_tree: Optional[str] = None
-    """Specifies the tree structure for speculative token generation. 
+    """Specifies the tree structure for speculative token generation.
     """
     # required configuration params passed from engine
     target_model_config: ModelConfig = field(default=None,
@@ -4020,7 +4029,7 @@ class VllmConfig:
     """LoRA configuration."""
     speculative_config: Optional[SpeculativeConfig] = None
     """Speculative decoding configuration."""
-    decoding_config: Optional[DecodingConfig] = None
+    decoding_config: DecodingConfig = field(default_factory=DecodingConfig)
     """Decoding configuration."""
     observability_config: Optional[ObservabilityConfig] = None
     """Observability configuration."""
