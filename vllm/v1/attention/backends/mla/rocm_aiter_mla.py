@@ -67,13 +67,13 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         max_model_len = self.runner.model_config.max_model_len
         assert max_model_len == 32768,\
             "AITER MLA requires max_model_len=32768"
-        assert self.runner.block_size == 1, "AITER MLA" \
+        assert self.kv_cache_spec.block_size == 1, "AITER MLA" \
             "only supports block size 1."
 
     def _get_paged_kv_tensors(
             self, block_table: torch.Tensor,
             seq_lens: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        page_size = self.runner.block_size
+        page_size = self.kv_cache_spec.block_size
         block_table_bounds = (seq_lens + page_size - 1) // page_size
 
         mask = (torch.arange(block_table.size(1),

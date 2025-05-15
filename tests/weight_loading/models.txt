@@ -2,7 +2,7 @@ gptq_marlin, robertgshaw2/zephyr-7b-beta-channelwise-gptq, main
 gptq_marlin, TheBloke/Llama-2-7B-GPTQ, main
 gptq_marlin, TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ, main
 gptq_marlin, TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ, gptq-8bit--1g-actorder_True
-gptq_marlin, TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ, gptq-8bit-32g-actorder_True
+#gptq_marlin, TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ, gptq-8bit-32g-actorder_True
 gptq_marlin, TechxGenus/gemma-1.1-2b-it-GPTQ, main
 gptq, robertgshaw2/zephyr-7b-beta-channelwise-gptq, main
 gptq, TheBloke/Llama-2-7B-GPTQ, main
