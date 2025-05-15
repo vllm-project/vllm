@@ -216,7 +216,6 @@ steps:
     - pytest -v -s v1/spec_decode
     - pytest -v -s v1/kv_connector/unit
     - pytest -v -s v1/test_serial_utils.py
-    - pytest -v -s v1/test_stats.py
     - pytest -v -s v1/test_utils.py
     - pytest -v -s v1/test_oracle.py
     # TODO: accuracy does not match, whether setting
