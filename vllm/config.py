@@ -3384,7 +3384,7 @@ class StructuredOutputConfig:
                              "for the guidance backend.")
 
     @deprecated(
-        "Passing guided decoding backend options inside backend in the format 'backend:...' is deprecated. This will be removed in v0.10.0. Please set specific arguments in `--structured-output-config '{\"backend\": ...}'` instead."  # noqa: E501
+        """Passing guided decoding backend options inside backend in the format 'backend:...' is deprecated. This will be removed in v0.10.0. Please set specific arguments in `--structured-output-config '{"backend": ...}'` instead."""  # noqa: E501
     )
     def _extract_backend_options(self):
         """Extract backend options from the backend string."""
@@ -3400,7 +3400,6 @@ class StructuredOutputConfig:
 
 
 # For backward compatibility, should remove in v0.10.0
-# given that vllm.config is considered public
 @deprecated(
     "DecodingConfig is deprecated and has been renamed to StructuredOutputConfig. This will be removed in v0.10.0. Please use 'from vllm.config import StructuredOutputConfig' instead"  # noqa: E501
 )
@@ -4049,6 +4048,7 @@ class VllmConfig:
     """Speculative decoding configuration."""
     structured_output_config: StructuredOutputConfig = field(
         default_factory=StructuredOutputConfig)
+    """Structured output configuration."""
     observability_config: Optional[ObservabilityConfig] = None
     """Observability configuration."""
     prompt_adapter_config: Optional[PromptAdapterConfig] = None
