@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import contextlib
+import contextvars
 import dataclasses
 import io
 import json
 import os
 import re
+import threading
 import time
 from collections.abc import Generator
 from dataclasses import dataclass
@@ -57,6 +60,78 @@ __all__ = [
 ]
 
 logger = init_logger(__name__)
+
+from torch.utils._python_dispatch import TorchDispatchMode
+
+
+class MetaTensorMode(TorchDispatchMode):
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        kwargs = kwargs or {}
+
+        if func._schema.name == "aten::empty" and "device" not in kwargs:
+            kwargs["device"] = "meta"
+
+        return func(*args, **kwargs)
+
+
+def meta_tensor_mode(loading_code=None, ):
+
+    if loading_code is None:
+        return _NoInitOrTensorImpl.context_manager()
+    elif callable(loading_code):
+        with _NoInitOrTensorImpl.context_manager():
+            return loading_code()
+    else:
+        raise TypeError(
+            "expected a callable to evaluate,"
+            " or None if being used as a context manager;"
+            f' got an object of type "{type(loading_code).__name__}" instead.')
+
+
+class _NoInitOrTensorImpl:
+    _MODULES = (torch.nn.Linear, torch.nn.Embedding, torch.nn.LayerNorm)
+    _MODULE_ORIGINALS = tuple((m, m.reset_parameters) for m in _MODULES)
+
+    is_active = contextvars.ContextVar("_NoInitOrTensorImpl.is_active",
+                                       default=False)
+    _count_active: int = 0
+    _count_active_lock = threading.Lock()
+
+    @classmethod
+    @contextlib.contextmanager
+    def context_manager(cls):
+        if cls.is_active.get():
+            yield
+            return
+
+        with cls._count_active_lock:
+            cls._count_active += 1
+            if cls._count_active == 1:
+                for mod in cls._MODULES:
+                    mod.reset_parameters = cls._disable(mod.reset_parameters)
+
+        reset_token = cls.is_active.set(True)
+
+        try:
+            with MetaTensorMode():
+                yield
+        finally:
+            cls.is_active.reset(reset_token)
+            with cls._count_active_lock:
+                cls._count_active -= 1
+                if cls._count_active == 0:
+                    for mod, original in cls._MODULE_ORIGINALS:
+                        mod.reset_parameters = original
+
+    @staticmethod
+    def _disable(func):
+
+        def wrapper(*args, **kwargs):
+            if not _NoInitOrTensorImpl.is_active.get():
+                return func(*args, **kwargs)
+
+        return wrapper
 
 
 @dataclass
@@ -308,8 +383,8 @@ class TensorizerAgent:
         model_args.torch_dtype = self.tensorizer_config.dtype
         assert self.tensorizer_config.model_class is not None
         # TODO: Do we need to consider old-style model class?
-        with torch.device("meta"), set_current_vllm_config(self.vllm_config,
-                                                           check_compile=True):
+        with meta_tensor_mode(), set_current_vllm_config(self.vllm_config,
+                                                         check_compile=True):
             return self.tensorizer_config.model_class(
                 vllm_config=self.vllm_config)
 
