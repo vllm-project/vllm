@@ -29,6 +29,8 @@ def test_engine_log_metrics_ray(
     dtype: str,
     max_tokens: int,
 ) -> None:
+    """ Simple smoke test, verifying this can be used without exceptions.
+    Need to start a Ray cluster in order to verify outputs."""
 
     @ray.remote(num_gpus=1)
     class EngineTestActor:

@@ -2,8 +2,6 @@
 import time
 from typing import Optional, Union
 
-import prometheus_client
-
 from vllm.config import VllmConfig
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.spec_decode.metrics import SpecDecodingProm
@@ -102,7 +100,7 @@ class RaySpecDecodingProm(SpecDecodingProm):
     util.metrics library.
     """
 
-    _counter_cls = prometheus_client.Counter
+    _counter_cls = RayCounterWrapper
 
 
 class RayPrometheusStatLogger(PrometheusStatLogger):
