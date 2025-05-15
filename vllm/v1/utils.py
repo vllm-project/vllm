@@ -165,6 +165,7 @@ class CoreEngineProcManager:
 
 
 class CoreEngineActorManager(CoreEngineProcManager):
+
     def __init__(
         self,
         target_fn: Callable,
@@ -188,12 +189,15 @@ class CoreEngineActorManager(CoreEngineProcManager):
         # 2) use proper placement strategy (pick local node and remote nodes)
 
         import ray
+
         from vllm.v1.engine.core import EngineCoreActor
         for index in range(local_engine_count):
             local_index = local_start_index + index
             global_index = start_index + index
-            logger.info(f"global_index: {global_index}, local_index: {local_index}, "
-                        f"input_address: {input_address}, output_address: {output_address}")
+            logger.info(
+                f"global_index: {global_index}, local_index: {local_index}, "
+                f"input_address: {input_address}, output_address: {output_address}"
+            )
             self.local_engine_actors.append(
                 ray.remote(EngineCoreActor).remote(
                     #name=f"EngineCore_{global_index}",
@@ -205,8 +209,7 @@ class CoreEngineActorManager(CoreEngineProcManager):
                     on_head_node=True,
                     engine_index=global_index,
                     dp_rank=global_index,
-                    local_dp_rank=local_index)
-            )
+                    local_dp_rank=local_index))
         # dp_size = vllm_config.parallel_config.data_parallel_size
         # for index in range(dp_size - local_engine_count):
         #     self.remote_engine_actors.append(
@@ -221,7 +224,12 @@ class CoreEngineActorManager(CoreEngineProcManager):
         #             dp_rank=global_index,
         #             local_dp_rank=local_index)
         #         )
-        
+
+    def close(self):
+        import ray
+        for actor in self.local_engine_actors:
+            ray.kill(actor)
+
 
 # Note(rob): shutdown function cannot be a bound method,
 # else the gc cannot collect the objedecoupct.
