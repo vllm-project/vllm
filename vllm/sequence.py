@@ -1534,17 +1534,17 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
     def maybe_assemble_group(
             self, seq_group: SequenceGroup) -> Optional[SequenceGroup]:
 
-        # in the streaming mode, we will return the assembled sequence for the
-        # last remaining sequence, and return None for the rest of sequences
-        if self.streaming:
-            last_remaining_id = list(self.to_be_finished)[-1]
-            if seq_group.request_id == last_remaining_id:
+        # in the streaming mode, we will return the assembled sequence while
+        # sequences are still processing, but must choose only one of the
+        # remaining sequences
+        if self.streaming and not seq_group.is_finished():
+            first_remaining_id = next(iter(self.to_be_finished))
+            if seq_group.request_id == first_remaining_id:
                 return self.assembled_seq_group
             return None
 
-        # in the non-streaming mode, we will return the assembled sequence
-        # when the last sequences finishes, and then return None for the
-        # rest of the time
+        # for non-streaming and when finishing streaming, we will return the
+        # assembled sequence when the last sequence finishes
         if (len(self.to_be_finished) == 1
                 and seq_group.request_id in self.to_be_finished
                 and seq_group.is_finished()):
