@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Test the functionality of the Transformers backend."""
 import pytest
+
 from vllm.platforms import current_platform
 
 from ..conftest import HfRunner, VllmRunner
 from ..utils import multi_gpu_test
 from .utils import check_logprobs_close
-
 
 
 def check_implementation(
@@ -34,7 +34,9 @@ def check_implementation(
         name_1="vllm",
     )
 
-@pytest.mark.skipif(current_platform.is_rocm(),
+
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
     reason="Llama-3.2-1B-Instruct, Ilama-3.2-1B produce memory access fault.")
 @pytest.mark.parametrize(
     "model,model_impl",
@@ -66,7 +68,9 @@ def test_distributed(
     check_implementation(hf_runner, vllm_runner, example_prompts,
                          "meta-llama/Llama-3.2-1B-Instruct", **kwargs)
 
-@pytest.mark.skipif(current_platform.is_rocm(),
+
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
     reason="bitsandbytes quantization is currently not supported in rocm.")
 @pytest.mark.parametrize("model, quantization_kwargs", [
     (
