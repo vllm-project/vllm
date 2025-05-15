@@ -15,6 +15,7 @@ import importlib.metadata
 import importlib.util
 import inspect
 import ipaddress
+import json
 import multiprocessing
 import os
 import pickle
@@ -1418,6 +1419,26 @@ class FlexibleArgumentParser(ArgumentParser):
                 processed_args.append(arg[2:])
             else:
                 processed_args.append(arg)
+
+        def nested_dict(keys: list[str], value: str):
+            for key in reversed(keys):
+                value = {key: value}
+            return value
+
+        dict_args = defaultdict(dict)
+        for i, processed_arg in reversed(list(enumerate(processed_args))):
+            if processed_arg.startswith("--") and "." in processed_arg:
+                if "=" in processed_arg:
+                    processed_arg, value = processed_arg.rsplit("=", 1)
+                else:
+                    value = processed_args[i + 1]
+                    del processed_args[i + 1]
+                key, *keys = processed_arg.split(".")
+                dict_args[key].update(nested_dict(keys, value))
+                del processed_args[i]
+        for key, value in dict_args.items():
+            processed_args.append(key)
+            processed_args.append(json.dumps(value))
 
         return super().parse_args(processed_args, namespace)
 
