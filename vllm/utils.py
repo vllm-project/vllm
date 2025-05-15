@@ -2350,6 +2350,24 @@ def split_zmq_path(path: str) -> Tuple[str, str, str]:
     return scheme, host, port
 
 
+def make_zmq_path(scheme: str, host: str, port: Optional[int] = None) -> str:
+    """Make a ZMQ path from its parts.
+
+    Args:
+        scheme: The ZMQ transport scheme (e.g. tcp, ipc, inproc).
+        host: The host - can be an IPv4 address, IPv6 address, or hostname.
+        port: Optional port number, only used for TCP sockets.
+
+    Returns:
+        A properly formatted ZMQ path string.
+    """
+    if not port:
+        return f"{scheme}://{host}"
+    if is_valid_ipv6_address(host):
+        return f"{scheme}://[{host}]:{port}"
+    return f"{scheme}://{host}:{port}"
+
+
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L783 # noqa: E501
 def make_zmq_socket(
     ctx: Union[zmq.asyncio.Context, zmq.Context],  # type: ignore[name-defined]
