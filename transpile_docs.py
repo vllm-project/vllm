@@ -93,7 +93,6 @@ def to_name(heading: str) -> str:
     return heading.strip("# \n").replace(" ", "-").lower()
 
 
-
 total_blocks = 0
 unhandled_blocks = 0
 
@@ -261,8 +260,8 @@ def transpile_myst_to_md(old_path: Path) -> None:
             path = (old_path.parent / block.args).resolve()
             _, attrs = parse_fence_block(lines[start + 1:end], indent)
             language = attrs.pop("language", "")
-            name = attrs.pop("start-after") if "start-after" in attrs else ""
-            name = f":{name.replace('begin-', '')}" if name else ""
+            name = attrs.pop("start-after", "").replace('begin-', '')
+            name = f":{name}" if name else ""
             attrs.pop("end-before", None)
             if attrs:
                 logger.warning("Literal include attributes not handled: %s", attrs)
@@ -278,11 +277,11 @@ def transpile_myst_to_md(old_path: Path) -> None:
             # All the includes we use reference documentation files
             path = (new_path.parent / block.args).resolve()
             _, attrs = parse_fence_block(lines[start + 1:end], indent)
-            attr = attrs.pop("start-after") if "start-after" in attrs else ""
+            name = to_name(attrs.pop("start-after", "").strip('"'))
+            name = f":{name}" if name else ""
             attrs.pop("end-before", None)
             if attrs:
                 logger.warning("Include attributes not handled: %s", attrs)
-            name = f":{attr}" if attr else ""
             lines[start] = f'{indent}--8<-- "{path}{name}"\n'
             lines[start + 1:end] = ["" for _ in lines[start + 1:end]]
             lines[end] = ""
