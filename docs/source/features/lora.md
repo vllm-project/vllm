@@ -66,7 +66,7 @@ The commit ID `0dfa347e8877a4d4ed19ee56c140fa518470028c` may change over time. P
 
 The server entrypoint accepts all other LoRA configuration parameters (`max_loras`, `max_lora_rank`, `max_cpu_loras`,
 etc.), which will apply to all forthcoming requests. Upon querying the `/models` endpoint, we should see our LoRA along
-with its base model:
+with its base model (if `jq` is not installed, you can follow [this guide](https://jqlang.org/download/) to install it.):
 
 ```bash
 curl localhost:8000/v1/models | jq .
@@ -134,13 +134,15 @@ curl -X POST http://localhost:8000/v1/load_lora_adapter \
 }'
 ```
 
-Upon a successful request, the API will respond with a 200 OK status code. If an error occurs, such as if the adapter
+Upon a successful request, the API will respond with a `200 OK` status code from `vllm serve`, and `curl` returns the response body: `Success: LoRA adapter 'sql_adapter' added successfully`. If an error occurs, such as if the adapter
 cannot be found or loaded, an appropriate error message will be returned.
 
 Unloading a LoRA Adapter:
 
 To unload a LoRA adapter that has been previously loaded, send a POST request to the `/v1/unload_lora_adapter` endpoint
 with the name or ID of the adapter to be unloaded.
+
+Upon a successful request, the API responds with a `200 OK` status code from `vllm serve`, and `curl` returns the response body: `Success: LoRA adapter 'sql_adapter' removed successfully`.
 
 Example request to unload a LoRA adapter:
 
@@ -157,9 +159,12 @@ Alternatively, you can use the LoRAResolver plugin to dynamically load LoRA adap
 
 You can set up multiple LoRAResolver plugins if you want to load LoRA adapters from different sources. For example, you might have one resolver for local files and another for S3 storage. vLLM will load the first LoRA adapter that it finds.
 
-You can either install existing plugins or implement your own.
+You can either install existing plugins or implement your own. By default, vLLM comes with a [resolver plugin to load LoRA adapters from a local directory.](https://github.com/vllm-project/vllm/tree/main/vllm/plugins/lora_resolvers)
+To enable this resolver, set `VLLM_ALLOW_RUNTIME_LORA_UPDATING` to True, set `VLLM_PLUGINS` to include `lora_filesystem_resolver`, and then set `VLLM_LORA_RESOLVER_CACHE_DIR` to a local directory. When vLLM receives a request using a LoRA adapter `foobar`,
+it will first look in the local directory for a directory `foobar`, and attempt to load the contents of that directory as a LoRA adapter. If successful, the request will complete as normal and
+that adapter will then be available for normal use on the server.
 
-Steps to implement your own LoRAResolver plugin:
+Alternatively, follow these example steps to implement your own plugin:
 1. Implement the LoRAResolver interface.
 
     Example of a simple S3 LoRAResolver implementation:

@@ -10,7 +10,7 @@ import torch
 
 from vllm.logger import init_logger
 
-from .interface import Platform, PlatformEnum, _Backend
+from .interface import CpuArchEnum, Platform, PlatformEnum, _Backend
 
 logger = init_logger(__name__)
 
@@ -25,6 +25,20 @@ class CpuPlatform(Platform):
     device_name: str = "cpu"
     device_type: str = "cpu"
     dispatch_key: str = "CPU"
+
+    @property
+    def supported_dtypes(self) -> list:
+        if self.get_cpu_architecture() == CpuArchEnum.POWERPC:
+            return [torch.bfloat16, torch.float32]
+        elif sys.platform.startswith(
+                "darwin") and self.get_cpu_architecture() == CpuArchEnum.ARM:
+            # TODO: change this condition to check if the platform support bf16
+            # instead of checking the OS. For instance M2 shall supports bf16
+            # already. But we need to modify `cpu_extension.cmake` to activate
+            # the feature in the build.
+            return [torch.bfloat16, torch.float32]
+        # x86/aarch64 CPU has supported both bf16 and fp16 natively.
+        return [torch.bfloat16, torch.float16, torch.float32]
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
