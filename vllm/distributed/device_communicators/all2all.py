@@ -140,7 +140,9 @@ class PPLXAll2All(All2AllBase):
             # For per-token: set to sizeof(float32)
             hidden_dim_scale_bytes=(0 if moe.in_dtype.itemsize != 1 else
                                     ((moe.hidden_dim + moe.block_size - 1) //
-                                     moe.block_size * torch.float32.itemsize)))
+                                     moe.block_size * torch.float32.itemsize)),
+            group_name=self.cpu_group.group_name,
+        )
 
         if self.internode:
             from pplx_kernels.nvshmem import (nvshmem_alloc_empty_unique_id,
