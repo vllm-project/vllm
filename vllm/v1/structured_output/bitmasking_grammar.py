@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+from __future__ import annotations
 
 from abc import abstractmethod
 from dataclasses import dataclass
@@ -21,6 +22,8 @@ from vllm.v1.worker.gpu_input_batch import InputBatch
 if TYPE_CHECKING:
     import xgrammar as xgr
 
+    from vllm.reasoning import ReasoningParser
+    from vllm.transformers_utils.tokenizer import AnyTokenizer
     from vllm.v1.request import Request
 
 else:
@@ -41,15 +44,16 @@ class BitmaskSOBatchMetaData(StructuredOutputBatchMetaData):
 
 class BitmaskStructuredOutputBackend(StructuredOutputBackend):
 
-    def __init__(self, vllm_config: VllmConfig):
-        super().__init__()
-        self.vllm_config = vllm_config
+    def __init__(self, vllm_config: VllmConfig, tokenizer: AnyTokenizer,
+                 vocab_size: int, reasoner: ReasoningParser):
+        super().__init__(vllm_config, tokenizer, vocab_size, reasoner)
         # Reuse our bitmask - this will also be assigned to batches
         self._grammar_bitmask: Optional[torch.Tensor] = None
         self.tpu_vocab_size: Optional[int] = None
         self.max_num_reqs: Optional[int] = None
         if current_platform.is_tpu():
             self.init_tpu()
+        self._full_mask = torch.tensor(-1, dtype=torch.int32)
 
     @staticmethod
     def apply_grammar_bitmask(
@@ -137,11 +141,18 @@ class BitmaskStructuredOutputBackend(StructuredOutputBackend):
 
     @abstractmethod
     def allocate_token_bitmask(self, max_num_seqs: int) -> torch.Tensor:
+        """
+        Allocates a token bitmask for the specified maximum number of sequences.
+
+        Args:
+            max_num_seqs (int): The maximum number of sequences for which
+              to allocate the bitmask.
+        """
         pass
 
     def grammar_bitmask(
         self,
-        requests: dict[str, "Request"],
+        requests: dict[str, Request],
         structured_output_request_ids: dict[str, int],
         scheduled_spec_decode_tokens: dict[str, list[int]],
     ) -> Optional[npt.NDArray[np.int32]]:
@@ -153,20 +164,21 @@ class BitmaskStructuredOutputBackend(StructuredOutputBackend):
         if not structured_output_request_ids:
             return None
 
+        max_num_spec_tokens = 0
+        if self.vllm_config.speculative_config is not None:
+            max_num_spec_tokens = \
+                self.vllm_config.speculative_config.num_speculative_tokens
+
         if self._grammar_bitmask is None:
             max_batch_size = self.vllm_config.scheduler_config.max_num_seqs
-            if self.vllm_config.speculative_config is not None:
-                max_num_spec_tokens = self.vllm_config.\
-                    speculative_config.num_speculative_tokens
-            else:
-                max_num_spec_tokens = 0
-
             # Allocate a bitmask for each token needing to be checked:
             # one for each speculative position, and one more for the
             # bonus token / non-speculative token.
             self._grammar_bitmask = \
                 self.allocate_token_bitmask(
                     max_batch_size * (1 + max_num_spec_tokens))
+
+        bitmask_tensor = self._grammar_bitmask
         # Generate a batched bitmask for all structured output requests.
         # When speculative decoding is enabled, we need to include multiple
         # masks for each request, one for each possible bonus token position.
@@ -174,17 +186,31 @@ class BitmaskStructuredOutputBackend(StructuredOutputBackend):
         cumulative_index = 0
         ordered_seq = sorted(structured_output_request_ids.items(),
                              key=lambda x: x[1])
+
+        # Note that for thinking support, we will need to
+        # reset the relevant part of the bitmask for consequent
+        # request here.
+        bitmask_tensor[:(len(ordered_seq) * (1 + max_num_spec_tokens))].fill_(
+            self._full_mask)
+
         # NOTE: This outer loop can likely be parallelized to improve
         # performance of bitmask generation for large batches.
         for req_id, _ in ordered_seq:
             request = requests[req_id].structured_output_request
-            assert request is not None and isinstance(request.grammar,
-                                                      BitmaskGrammar)
+            if TYPE_CHECKING:
+                assert request is not None
+                assert request.grammar is not None
+                assert isinstance(request.grammar, BitmaskGrammar)
+
+            apply_bitmask = (
+                request.reasoning_ended if self.reasoner is not None else True
+            )  # noqa: E501
+
             state_advancements = 0
             req_tokens = scheduled_spec_decode_tokens.get(req_id, []) + [None]
             for i, token in enumerate(req_tokens):
-                if not request.grammar.is_terminated():
-                    request.grammar.fill_bitmask(self._grammar_bitmask,
+                if apply_bitmask and not request.grammar.is_terminated():
+                    request.grammar.fill_bitmask(bitmask_tensor,
                                                  cumulative_index)
                     if token is not None:
                         # In order to generate the correct bitmask for each
@@ -197,9 +223,8 @@ class BitmaskStructuredOutputBackend(StructuredOutputBackend):
             if state_advancements > 0:
                 request.grammar.rollback(state_advancements)
 
-        bitmask_tensor = self._grammar_bitmask
-        if cumulative_index < self._grammar_bitmask.shape[0]:
-            bitmask_tensor = self._grammar_bitmask[:cumulative_index]
+        if cumulative_index < bitmask_tensor.shape[0]:
+            bitmask_tensor = bitmask_tensor[:cumulative_index]
 
         # After finishing with the xgrammar operations, we convert to
         # np.ndarray, because that is much more efficient for serialization
@@ -207,7 +232,7 @@ class BitmaskStructuredOutputBackend(StructuredOutputBackend):
         return bitmask_tensor.numpy()
 
     def init_batch(
-        self, requests: dict[str, "Request"],
+        self, requests: dict[str, Request],
         structured_output_request_ids: dict[str, int],
         scheduled_spec_decode_tokens: dict[str, list[int]]
     ) -> StructuredOutputBatchMetaData:
@@ -241,7 +266,7 @@ class BitmaskStructuredOutputBackend(StructuredOutputBackend):
                 pin_memory=pin_memory)
 
     def prepare_structured_decoding_input_tpu(
-        self, logits: torch.Tensor, scheduler_output: "SchedulerOutput",
+        self, logits: torch.Tensor, scheduler_output: SchedulerOutput,
         input_batch: InputBatch
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         meta = cast(BitmaskSOBatchMetaData,

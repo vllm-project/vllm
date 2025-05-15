@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Optional, Union
 
 import torch
 
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.utils import LazyLoader
@@ -23,6 +24,10 @@ if TYPE_CHECKING:
     import llguidance
     import llguidance.hf as llguidance_hf
     import llguidance.torch as llguidance_torch
+
+    from vllm.reasoning import ReasoningParser
+    from vllm.transformers_utils.tokenizer import AnyTokenizer
+
 else:
     llguidance = LazyLoader("llguidance", globals(), "llguidance")
     llguidance_hf = LazyLoader("llguidance.hf", globals(), "llguidance.hf")
@@ -55,10 +60,13 @@ def process_for_additional_properties(
     return guide_json_obj
 
 
-@dataclass
-class GuidanceBackend(StructuredOutputBackend):
+class GuidanceBackend(BitmaskStructuredOutputBackend):
 
-    def __post_init__(self):
+    def __init__(self, vllm_config: VllmConfig, tokenizer: AnyTokenizer,
+                 vocab_size: int, reasoner: ReasoningParser):
+        super().__init__(vllm_config, tokenizer, vocab_size, reasoner)
+        self.vocab_size = self.vllm_config.model_config.get_vocab_size()
+
         self.disable_any_whitespace = \
             self.vllm_config.decoding_config.disable_any_whitespace
         self.disable_additional_properties = \
