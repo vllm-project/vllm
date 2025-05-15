@@ -254,13 +254,21 @@ def test_no_model_tag(parser_with_config, cli_config_file):
 
 
 def test_dict_args(parser):
-    args = ["--hf-overrides.key1", "val1", "--hf-overrides.key2.key3", "val2"]
+    args = [
+        "--hf-overrides.key1",
+        "val1",
+        "--hf-overrides.key2.key3",
+        "val2",
+        "--hf-overrides.key2.key4",
+        "val3",
+    ]
     parsed_args = parser.parse_args(args)
     assert parsed_args.hf_overrides == {
         "key1": "val1",
         "key2": {
-            "key3": "val2"
-        }
+            "key3": "val2",
+            "key4": "val3",
+        },
     }
 
 
