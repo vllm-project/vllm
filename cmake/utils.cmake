@@ -114,22 +114,22 @@ function (hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
   set(${OUT_SRCS} ${HIP_SRCS} PARENT_SCOPE)
 endfunction()
 
-## Macro to conditionally include CUDA sources based on architecture and CUDA
-## compiler version, optionally generating sources via a Python script.
-## Usage:
-##   optional_cuda_sources(
-##     NAME <name>
-##     [MIN_VERSION <version>]
-##     ARCHS <arch1;arch2;...>
-##     SRCS <static_source1> [<static_source2> ...]
-##     [FLAGS <flag1> ...]
-##     [VERSION_MSG <line1> [<line2> ...]]
-##     [NO_ARCH_MSG <line1> [<line2> ...]]
-##     [GEN_SCRIPT <path/to/generate_script.py>]
-##     [GEN_GLOB <glob_pattern_for_generated_sources>]
-##     [APPEND_ARCHS <var_to_append_archs>]
-## This will run GEN_SCRIPT once when version and arch checks pass, globbing
-## sources matching GEN_GLOB and appending them alongside SRCS.
+# Macro to conditionally include CUDA sources based on architecture and CUDA
+# compiler version, optionally generating sources via a Python script.
+# Usage:
+#   optional_cuda_sources(
+#     NAME <name>
+#     [MIN_VERSION <version>]
+#     ARCHS <arch1;arch2;...>
+#     SRCS <static_source1> [<static_source2> ...]
+#     [FLAGS <flag1> ...]
+#     [VERSION_MSG <line1> [<line2> ...]]
+#     [NO_ARCH_MSG <line1> [<line2> ...]]
+#     [GEN_SCRIPT <path/to/generate_script.py>]
+#     [GEN_GLOB <glob_pattern_for_generated_sources>]
+#     [APPEND_ARCHS <var_to_append_archs>]
+# This will run GEN_SCRIPT once when version and arch checks pass, globbing
+# sources matching GEN_GLOB and appending them alongside SRCS.
 macro(optional_cuda_sources)
   set(oneValueArgs NAME MIN_VERSION APPEND_ARCHS GEN_SCRIPT GEN_GLOB OUT_SRCS_VAR)
   set(multiValueArgs ARCHS SRCS FLAGS VERSION_MSG NO_ARCH_MSG)
