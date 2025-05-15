@@ -72,6 +72,9 @@ def test_rotary_embedding(
     max_position: int = 8192,
     base: int = 10000,
 ) -> None:
+    raw_input_head_size = head_size
+    if tensor_shape_fn is _get_padded_tensor_shape:
+        head_size += 64
     if rotary_dim is None:
         rotary_dim = head_size
 
@@ -83,7 +86,8 @@ def test_rotary_embedding(
     rope = rope.to(dtype=dtype, device=torch.get_default_device())
 
     positions = torch.randint(0, max_position, (batch_size, seq_len))
-    query_shape = tensor_shape_fn(batch_size, seq_len, num_heads, head_size)
+    query_shape = tensor_shape_fn(batch_size, seq_len, num_heads,
+                                  raw_input_head_size)
     query = torch.randn(query_shape, dtype=dtype)
     key = torch.randn_like(query) if use_key else None
 
@@ -139,6 +143,10 @@ def test_batched_rotary_embedding(
 ) -> None:
     current_platform.seed_everything(seed)
     torch.set_default_device(device)
+
+    raw_input_head_size = head_size
+    if tensor_shape_fn is _get_padded_tensor_shape:
+        head_size += 64
     if rotary_dim is None:
         rotary_dim = head_size
     rope = get_rope(head_size, rotary_dim, max_position, base, is_neox_style, {
@@ -148,7 +156,8 @@ def test_batched_rotary_embedding(
     rope = rope.to(dtype=dtype, device=torch.get_default_device())
 
     positions = torch.randint(0, max_position, (batch_size, seq_len))
-    query_shape = tensor_shape_fn(batch_size, seq_len, num_heads, head_size)
+    query_shape = tensor_shape_fn(batch_size, seq_len, num_heads,
+                                  raw_input_head_size)
     query = torch.randn(query_shape, dtype=dtype)
     key = torch.randn_like(query) if use_key else None
 
