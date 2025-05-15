@@ -4,25 +4,16 @@
 
 vLLM supports the following hardware platforms:
 
-:::{toctree}
-:maxdepth: 1
-:hidden:
-
-installation/gpu
-installation/cpu
-installation/ai_accelerator
-:::
-
-- <project:installation/gpu.md>
-  - NVIDIA CUDA
-  - AMD ROCm
-  - Intel XPU
-- <project:installation/cpu.md>
-  - Intel/AMD x86
-  - ARM AArch64
-  - Apple silicon
-  - IBM Z (S390X)
-- <project:installation/ai_accelerator.md>
-  - Google TPU
-  - Intel Gaudi
-  - AWS Neuron
+- [GPU](gpu.md)
+    - [NVIDIA CUDA](gpu.md#nvidia-cuda)
+    - [AMD ROCm](gpu.md#amd-rocm)
+    - [Intel XPU](gpu.md#intel-xpu)
+- [CPU](cpu.md)
+    - [Intel/AMD x86](cpu.md#intelamd-x86)
+    - [ARM AArch64](cpu.md#arm-aarch64)
+    - [Apple silicon](cpu.md#apple-silicon)
+    - [IBM Z (S390X)](cpu.md#ibm-z-s390x)
+- [Other AI accelerators](ai_accelerator.md)
+    - [Google TPU](ai_accelerator.md#google-tpu)
+    - [Intel Gaudi](ai_accelerator.md#intel-gaudi)
+    - [AWS Neuron](ai_accelerator.md#aws-neuron)
