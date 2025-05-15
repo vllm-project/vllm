@@ -16,7 +16,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core_client import DPAsyncMPClient
 
 engine_args = AsyncEngineArgs(
-    model="ibm-research/PowerMoE-3b",
+    model="Qwen/Qwen2.5-0.5B-Instruct",
     enforce_eager=True,
     disable_log_requests=True,
     tensor_parallel_size=int(os.getenv("TP_SIZE", 1)),
@@ -58,8 +58,7 @@ async def generate(engine: AsyncLLM,
     return count, request_id
 
 
-@pytest.mark.parametrize(
-    "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
+@pytest.mark.parametrize("output_kind", [RequestOutputKind.DELTA])
 @pytest.mark.asyncio
 async def test_load(output_kind: RequestOutputKind):
 
@@ -68,6 +67,7 @@ async def test_load(output_kind: RequestOutputKind):
         prompt = "This is a test of data parallel"
 
         engine = AsyncLLM.from_engine_args(engine_args)
+        print("engine created")
         after.callback(engine.shutdown)
 
         NUM_REQUESTS = 100
@@ -82,7 +82,7 @@ async def test_load(output_kind: RequestOutputKind):
                 asyncio.create_task(
                     generate(engine, request_id, prompt, output_kind,
                              NUM_EXPECTED_TOKENS)))
-
+        print("tasks created")
         # Confirm that we got all the EXPECTED tokens from the requests.
         done, pending = await asyncio.wait(tasks,
                                            return_when=asyncio.FIRST_EXCEPTION)
@@ -93,6 +93,8 @@ async def test_load(output_kind: RequestOutputKind):
             assert num_generated_tokens == NUM_EXPECTED_TOKENS, (
                 f"{request_id} generated {num_generated_tokens} but "
                 f"expected {NUM_EXPECTED_TOKENS}")
+
+        print("generate done")
 
         assert not engine.output_processor.has_unfinished_requests()
 

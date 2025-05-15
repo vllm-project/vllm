@@ -65,6 +65,7 @@ class EngineCore:
 
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
+        print(f"model_executor: {self.model_executor}")
         if executor_fail_callback is not None:
             self.model_executor.register_failure_callback(
                 executor_fail_callback)
@@ -120,6 +121,7 @@ class EngineCore:
                         self.batch_queue_size)
             self.batch_queue = queue.Queue(self.batch_queue_size)
         self.vllm_config = vllm_config
+        logger.info("EngineCore init done")
 
     def _initialize_kv_caches(
             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
@@ -131,6 +133,7 @@ class EngineCore:
         # Profiles the peak memory usage of the model to determine how much
         # memory can be allocated for kv cache.
         available_gpu_memory = self.model_executor.determine_available_memory()
+        logger.info(f"available_gpu_memory: {available_gpu_memory}")
 
         assert len(kv_cache_specs) == len(available_gpu_memory)
         # Get the kv cache tensor size
@@ -596,10 +599,103 @@ class EngineCoreProc(EngineCore):
         add_request_decoder = MsgpackDecoder(EngineCoreRequest)
         generic_decoder = MsgpackDecoder()
 
+        logger.info("Starting process_input_socket thread")
+        logger.info(f"Socket type: {input_socket.type}")
+        logger.info(
+            f"Socket identity: {input_socket.getsockopt(zmq.IDENTITY)}")
+        logger.info(f"Socket events: {input_socket.getsockopt(zmq.EVENTS)}")
+        logger.info(f"Socket linger: {input_socket.getsockopt(zmq.LINGER)}")
+
+        # Set up a poller for the socket
+        poller = zmq.Poller()
+        poller.register(input_socket, zmq.POLLIN)
+
+        try:
+            while True:
+                # Poll with timeout to avoid completely blocking
+                logger.info("Waiting for messages on input socket...")
+                events = poller.poll(timeout=30000)  # 30-second timeout
+
+                if not events:
+                    logger.warning("No messages received within 30 seconds")
+                    continue
+
+                logger.info("Message available, receiving...")
+
+                try:
+                    # (RequestType, RequestData)
+                    message_parts = input_socket.recv_multipart(copy=False)
+                    logger.info(
+                        f"Received message with {len(message_parts)} parts")
+
+                    if not message_parts:
+                        logger.warning("Received empty message!")
+                        continue
+
+                    type_frame, *data_frames = message_parts
+
+                    logger.info(
+                        f"Received type frame: {type_frame} and data frames: {data_frames}"
+                    )
+                    request_type = EngineCoreRequestType(
+                        bytes(type_frame.buffer))
+                    logger.info(f"Received message of type: {request_type}")
+
+                    # Deserialize the request data.
+                    decoder = add_request_decoder if (
+                        request_type
+                        == EngineCoreRequestType.ADD) else generic_decoder
+                    request = decoder.decode(data_frames)
+
+                    # Push to input queue for core busy loop.
+                    logger.info(
+                        f"Adding request to input queue: {request_type}")
+                    self.input_queue.put_nowait((request_type, request))
+                    logger.info(
+                        f"Successfully processed message: {request_type}")
+
+                except zmq.error.ZMQError as e:
+                    logger.error(f"ZMQ error receiving message: {e}",
+                                 exc_info=True)
+                    if "Host unreachable" in str(e):
+                        logger.error(
+                            "Host unreachable error detected. Check network connectivity."
+                        )
+                        # Sleep to avoid tight error loop
+                        time.sleep(1)
+                    continue
+                except Exception as e:
+                    logger.error(f"Error processing message: {e}",
+                                 exc_info=True)
+                    continue
+        except Exception as e:
+            logger.critical(f"Fatal error in process_input_socket thread: {e}",
+                            exc_info=True)
+            # Signal main thread that we've encountered a fatal error
+            self.input_queue.put_nowait(
+                (EngineCoreRequestType.EXECUTOR_FAILED, None))
+
+    def process_input_address(self, input_address: str, engine_index: int):
+        """Input socket IO thread."""
+
+        # Create input socket.
+        input_ctx = zmq.Context()
+        identity = engine_index.to_bytes(length=2, byteorder="little")
+        input_socket = make_zmq_socket(input_ctx,
+                                       input_address,
+                                       zmq.DEALER,
+                                       identity=identity,
+                                       bind=False)
+
+        # Msgpack serialization decoding.
+        add_request_decoder = MsgpackDecoder(EngineCoreRequest)
+        generic_decoder = MsgpackDecoder()
+
         while True:
             # (RequestType, RequestData)
-            type_frame, *data_frames = input_socket.recv_multipart(copy=False)
+            type_frame, *data_frames = input_socket.recv_multipart(copy=True)
             request_type = EngineCoreRequestType(bytes(type_frame.buffer))
+            logger.info(f"process_input_address: {request_type}")
 
             # Deserialize the request data.
             decoder = add_request_decoder if (
@@ -788,3 +884,322 @@ class DPEngineCoreProc(EngineCoreProc):
 
         return ParallelConfig.has_unfinished_dp(self.dp_group,
                                                 local_unfinished)
+
+
+class EngineCoreActor(DPEngineCoreProc):
+    """Actor for running EngineCore."""
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        on_head_node: bool,
+        input_address: str,
+        output_address: str,
+        executor_class: type[Executor],
+        log_stats: bool,
+        engine_index: int = 0,
+        dp_rank: int = 0,
+        local_dp_rank: int = 0,
+    ):
+        logger.info(
+            f"EngineCoreActor init: {on_head_node}, {input_address}, {output_address}, {engine_index}, {dp_rank}, {local_dp_rank}"
+        )
+
+        # Check socket permissions for debugging
+        def check_socket_permissions(address: str):
+            """Check permissions and status of a ZMQ socket file."""
+            try:
+                # Extract the file path from the ZMQ address
+                if "://" not in address:
+                    logger.warning(f"Invalid address format: {address}")
+                    return
+
+                protocol, path = address.split("://")
+                if protocol != "ipc":
+                    logger.info(
+                        f"Not an IPC socket ({protocol}), skipping permission check"
+                    )
+                    return
+
+                import grp
+                import os
+                import pwd
+                import stat
+                from pathlib import Path
+
+                socket_path = Path(path)
+
+                # Check if the file exists
+                if not socket_path.exists():
+                    logger.warning(f"Socket file {path} does not exist.")
+
+                    # Check if the parent directory exists and its permissions
+                    parent = socket_path.parent
+                    if not parent.exists():
+                        logger.error(
+                            f"Parent directory {parent} does not exist.")
+                        return
+
+                    # Check parent directory permissions
+                    parent_stat = parent.stat()
+                    parent_mode = stat.filemode(parent_stat.st_mode)
+                    try:
+                        parent_owner = pwd.getpwuid(parent_stat.st_uid).pw_name
+                    except KeyError:
+                        parent_owner = f"Unknown UID: {parent_stat.st_uid}"
+                    try:
+                        parent_group = grp.getgrgid(parent_stat.st_gid).gr_name
+                    except KeyError:
+                        parent_group = f"Unknown GID: {parent_stat.st_gid}"
+
+                    logger.info(f"Parent directory permissions: {parent_mode}")
+                    logger.info(f"Parent directory owner: {parent_owner}")
+                    logger.info(f"Parent directory group: {parent_group}")
+
+                    # Check if current process can write to parent directory
+                    if os.access(parent, os.W_OK):
+                        logger.info(
+                            "Current process CAN write to parent directory.")
+                    else:
+                        logger.error(
+                            "Current process CANNOT write to parent directory."
+                        )
+
+                    return
+
+                # Get file stats
+                file_stat = socket_path.stat()
+
+                # Get file mode as a string (like 'srwxrwxrwx')
+                file_mode = stat.filemode(file_stat.st_mode)
+
+                # Get owner and group names
+                try:
+                    owner = pwd.getpwuid(file_stat.st_uid).pw_name
+                except KeyError:
+                    owner = f"Unknown UID: {file_stat.st_uid}"
+
+                try:
+                    group = grp.getgrgid(file_stat.st_gid).gr_name
+                except KeyError:
+                    group = f"Unknown GID: {file_stat.st_gid}"
+
+                # Get current process info
+                current_uid = os.getuid()
+                current_user = pwd.getpwuid(current_uid).pw_name
+                current_gids = os.getgroups()
+                current_groups = [
+                    grp.getgrgid(gid).gr_name for gid in current_gids
+                ]
+
+                # Check if it's actually a socket
+                is_socket = stat.S_ISSOCK(file_stat.st_mode)
+
+                # Check permissions
+                can_read = os.access(socket_path, os.R_OK)
+                can_write = os.access(socket_path, os.W_OK)
+
+                # Print all information
+                logger.info(f"Socket file: {path}")
+                logger.info("Exists: Yes")
+                logger.info(
+                    f"Is socket: {'Yes' if is_socket else 'No - THIS IS A PROBLEM'}"
+                )
+                logger.info(f"File mode: {file_mode}")
+                logger.info(f"Owner: {owner} (UID: {file_stat.st_uid})")
+                logger.info(f"Group: {group} (GID: {file_stat.st_gid})")
+                logger.info(f"Size: {file_stat.st_size} bytes")
+                logger.info(
+                    f"Current user: {current_user} (UID: {current_uid})")
+                logger.info(
+                    f"Current user groups: {', '.join(current_groups)}")
+                logger.info(
+                    f"Current process can read: {'Yes' if can_read else 'No - THIS IS A PROBLEM'}"
+                )
+                logger.info(
+                    f"Current process can write: {'Yes' if can_write else 'No - THIS IS A PROBLEM'}"
+                )
+
+                # Check for sticky socket file
+                if socket_path.exists() and not is_socket:
+                    logger.warning(
+                        "File exists but is not a socket. It may be a stale socket file."
+                    )
+                    logger.warning(
+                        f"Attempting to remove stale socket file: {socket_path}"
+                    )
+                    try:
+                        socket_path.unlink()
+                        logger.info(
+                            f"Successfully removed stale socket file: {socket_path}"
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to remove stale socket file: {e}")
+                        logger.warning(
+                            f"Try manually removing it: rm {socket_path}")
+
+            except Exception as e:
+                logger.error(f"Error checking socket permissions: {str(e)}",
+                             exc_info=True)
+
+        # Check socket permissions
+        logger.info(f"Checking permissions for input address: {input_address}")
+        check_socket_permissions(input_address)
+        # logger.info(f"Checking permissions for output address: {output_address}")
+        # check_socket_permissions(output_address)
+
+        # Signal handler used for graceful termination.
+        # SystemExit exception is only raised once to allow this and worker
+        # processes to terminate without error
+        shutdown_requested = False
+
+        # Ensure we can serialize transformer config after spawning
+        maybe_register_config_serialize_by_value()
+
+        # FIXME(rui): adapt for Ray
+        # def signal_handler(signum, frame):
+        #     nonlocal shutdown_requested
+        #     if not shutdown_requested:
+        #         shutdown_requested = True
+        #         raise SystemExit()
+
+        # # Either SIGTERM or SIGINT will terminate the engine_core
+        # signal.signal(signal.SIGTERM, signal_handler)
+        # signal.signal(signal.SIGINT, signal_handler
+
+        parallel_config: ParallelConfig = vllm_config.parallel_config
+        assert parallel_config.data_parallel_size > 1 or dp_rank > 0
+        # Set data parallel rank for this engine process.
+        parallel_config.data_parallel_rank = dp_rank
+        parallel_config.data_parallel_rank_local = local_dp_rank
+
+        input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
+
+        executor_fail_callback = lambda: input_queue.put_nowait(
+            (EngineCoreRequestType.EXECUTOR_FAILED, b''))
+
+        # Create input socket.
+        input_ctx = zmq.Context()
+        identity = engine_index.to_bytes(length=2, byteorder="little")
+        input_socket = make_zmq_socket(input_ctx,
+                                       input_address,
+                                       zmq.DEALER,
+                                       identity=identity,
+                                       bind=False)
+
+        try:
+            # Register engine with front-end.
+            # output_address = self.startup_handshake(
+            #     input_socket, on_head_node, vllm_config.parallel_config)
+
+            # Update config which may have changed from the handshake.
+            vllm_config.__post_init__()
+
+            # Set up data parallel environment.
+            self._init_data_parallel(vllm_config)
+
+            # Counts forward-passes of the model so that we can synchronize
+            # finished with DP peers every N steps.
+            self.counter = 0
+
+            # Initialize engine core and model.
+            EngineCore.__init__(self, vllm_config, executor_class, log_stats,
+                                executor_fail_callback)
+
+            self.step_fn = (self.step if self.batch_queue is None else
+                            self.step_with_batch_queue)
+            self.engines_running = False
+
+            # Send ready message.
+            # num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks
+            # input_socket.send(
+            #     msgspec.msgpack.encode({
+            #         "status": "READY",
+            #         "local": on_head_node,
+            #         "num_gpu_blocks": num_gpu_blocks,
+            #     }))
+
+            # Background Threads and Queues for IO. These enable us to
+            # overlap ZMQ socket IO with GPU since they release the GIL,
+            # and to overlap some serialization/deserialization with the
+            # model forward pass.
+            # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
+            self.input_queue = input_queue
+            self.output_queue = queue.Queue[Union[EngineCoreOutputs, bytes]]()
+
+            # FIXME(rui): use Ray-specific approach to start these "threads"
+
+            import os
+            os.environ["ZMQ_TRACE"] = "1"
+
+            threading.Thread(target=self.process_input_socket,
+                             args=(input_socket, ),
+                             daemon=True).start()
+            threading.Thread(target=self.process_input_address,
+                             args=(input_address, engine_index),
+                             daemon=True).start()
+            input_socket = None
+            self.output_thread = threading.Thread(
+                target=self.process_output_socket,
+                args=(output_address, engine_index),
+                daemon=True)
+            self.output_thread.start()
+            # self.test_thread = threading.Thread(target=self.test_thread_fn, daemon=True)
+            # self.test_thread.start()
+        finally:
+            if input_socket is not None:
+                input_socket.close(linger=0)
+
+    def wait_for_init(self):
+        pass
+
+    def run(self):
+        try:
+            self.run_busy_loop()
+        except SystemExit:
+            logger.debug("EngineCore exiting.")
+            raise
+        except Exception:
+            logger.exception("EngineCore encountered a fatal error.")
+            raise
+        finally:
+            self.shutdown()
+
+    def _init_data_parallel(self, vllm_config: VllmConfig):
+
+        # Configure GPUs and stateless process group for data parallel.
+        dp_rank = vllm_config.parallel_config.data_parallel_rank
+        dp_size = vllm_config.parallel_config.data_parallel_size
+        local_dp_rank = vllm_config.parallel_config.data_parallel_rank_local
+        print(
+            f"dp_rank: {dp_rank}, dp_size: {dp_size}, local_dp_rank: {local_dp_rank}"
+        )
+        import time
+        time.sleep(10)
+
+        assert dp_size > 1
+        assert 0 <= local_dp_rank <= dp_rank < dp_size
+
+        key = 'CUDA_VISIBLE_DEVICES'
+        if key in os.environ:
+            del os.environ[key]
+
+        from vllm.platforms import current_platform
+        device_control_env_var = current_platform.device_control_env_var
+        world_size = vllm_config.parallel_config.world_size
+        os.environ[device_control_env_var] = ",".join(
+            str(current_platform.device_id_to_physical_device_id(i))
+            for i in range(local_dp_rank * world_size, (local_dp_rank + 1) *
+                           world_size))
+
+        logger.info("Before stateless_init_dp_group()")
+        self.local_dp_rank = local_dp_rank
+        self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
+        logger.info("After stateless_init_dp_group()")
+        self.current_wave = 0
+
+    def test_thread_fn(self):
+        while True:
+            logger.info("test_thread_fn")
+            time.sleep(1)

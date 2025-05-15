@@ -322,6 +322,7 @@ def download_safetensors_index_file_from_hf(
             weights. If None, will use HF defaults.
         revision (Optional[str]): The revision of the model.
     """
+    logger.info(f"download_safetensors_index_file_from_hf: {model_name_or_path}")
     # Use file lock to prevent multiple processes from
     # downloading the same model weights at the same time.
     with get_lock(model_name_or_path, cache_dir):

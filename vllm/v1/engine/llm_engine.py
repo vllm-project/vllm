@@ -95,6 +95,7 @@ class LLMEngine:
             vllm_config=vllm_config,
             executor_class=executor_class,
             log_stats=False,  # FIXME: implement
+            use_ray_client=True, # FIXME: derive from vllm_config
         )
 
         if not multiprocess_mode:

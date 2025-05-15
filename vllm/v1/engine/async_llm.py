@@ -25,7 +25,7 @@ from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Device, cdiv
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.core_client import AsyncMPClient, DPAsyncMPClient
+from vllm.v1.engine.core_client import AsyncMPClient, DPAsyncMPClient, RayClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.engine.output_processor import (OutputProcessor,
                                              RequestOutputCollector)
@@ -86,6 +86,7 @@ class AsyncLLM(EngineClient):
         self.log_stats = log_stats
 
         # Set up stat loggers; independent set for each DP rank.
+        logger.info("custom_stat_loggers: %s", stat_loggers)
         self.stat_loggers: list[list[StatLoggerBase]] = setup_default_loggers(
             vllm_config=vllm_config,
             log_stats=self.log_stats,
@@ -113,7 +114,7 @@ class AsyncLLM(EngineClient):
         # EngineCore (starts the engine in background process).
         core_client_class = AsyncMPClient if (
             vllm_config.parallel_config.data_parallel_size
-            == 1) else DPAsyncMPClient
+            == 1) else RayClient
 
         self.engine_core = core_client_class(
             vllm_config=vllm_config,
@@ -249,11 +250,12 @@ class AsyncLLM(EngineClient):
         self.output_processor.add_request(request, prompt, parent_req, index,
                                           queue)
 
+        logger.info("Adding request to engine_core")
         # Add the EngineCoreRequest to EngineCore (separate process).
         await self.engine_core.add_request_async(request)
 
-        if self.log_requests:
-            logger.info("Added request %s.", request.request_id)
+        #if self.log_requests:
+        logger.info("Added request %s.", request.request_id)
 
     # TODO: we should support multiple prompts in one call, as you
     # can do with LLM.generate. So that for multi-prompt completion
@@ -300,6 +302,8 @@ class AsyncLLM(EngineClient):
                 prompt_adapter_request=prompt_adapter_request,
                 priority=priority,
             )
+
+            logger.info("add_request done")
 
             # The output_handler task pushes items into the queue.
             # This task pulls from the queue and yields to caller.
@@ -357,8 +361,10 @@ class AsyncLLM(EngineClient):
         async def output_handler():
             try:
                 while True:
+                    logger.info("Getting outputs from engine_core")
                     # 1) Pull EngineCoreOutputs from the EngineCore.
                     outputs = await engine_core.get_output_async()
+                    logger.info("Got outputs from engine_core %s", outputs)
                     num_outputs = len(outputs.outputs)
 
                     iteration_stats = IterationStats() if (
@@ -404,6 +410,7 @@ class AsyncLLM(EngineClient):
                 output_processor.propagate_error(e)
 
         self.output_handler = asyncio.create_task(output_handler())
+        logger.info("output_handler created")
 
     async def abort(self, request_id: str) -> None:
         """Abort RequestId in OutputProcessor and EngineCore."""
