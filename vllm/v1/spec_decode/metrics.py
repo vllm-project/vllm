@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
-import prometheus_client
 
 from vllm.config import SpeculativeConfig
 from vllm.logger import init_logger
@@ -125,6 +124,9 @@ class SpecDecodingProm:
         self.spec_decoding_enabled = speculative_config is not None
         if not self.spec_decoding_enabled:
             return
+
+        # Lazy import prometheus_client
+        import prometheus_client
 
         self.counter_spec_decode_num_drafts = \
             prometheus_client.Counter(

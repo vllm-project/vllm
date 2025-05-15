@@ -198,9 +198,13 @@ class AsyncLLM(EngineClient):
     def shutdown(self):
         """Shutdown, cleaning up the background proc and IPC."""
 
-        # Upon shutdown of this process, we should mark the process as dead
-        # See https://prometheus.github.io/client_python/multiprocess/
         try:
+            # In case of using prometheus, we should mark the process as dead
+            # in the multiprocess mode (multi api servers)
+            # See https://prometheus.github.io/client_python/multiprocess/
+            # This part of the shutdown logic is a no-op in other scenarios
+            # (single api server or not using prometheus) so it is safe to call
+            # either way.
             import os
 
             from prometheus_client import multiprocess

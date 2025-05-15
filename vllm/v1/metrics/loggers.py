@@ -3,10 +3,9 @@
 import logging
 import time
 from abc import ABC, abstractmethod
-from typing import Callable, Optional, Union
+from typing import TYPE_CHECKING, Callable, Optional, Union
 
 import numpy as np
-import prometheus_client
 
 from vllm.config import SupportsMetricsInfo, VllmConfig
 from vllm.logger import init_logger
@@ -15,9 +14,10 @@ from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
 
-logger = init_logger(__name__)
+if TYPE_CHECKING:
+    pass
 
-_LOCAL_LOGGING_INTERVAL_SEC = 5.0
+logger = init_logger(__name__)
 
 StatLoggerFactory = Callable[[VllmConfig, int], "StatLoggerBase"]
 
@@ -143,6 +143,9 @@ class LoggingStatLogger(StatLoggerBase):
 class PrometheusStatLogger(StatLoggerBase):
 
     def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
+        # Lazy import prometheus_client
+        import prometheus_client
+
         self._unregister_vllm_metrics()
         self.vllm_config = vllm_config
         self.engine_index = engine_index
@@ -165,32 +168,34 @@ class PrometheusStatLogger(StatLoggerBase):
         #
         # Scheduler state
         #
-        self.gauge_scheduler_running = self._create_gauge(
+        self.gauge_scheduler_running = prometheus_client.Gauge(
             name="vllm:num_requests_running",
             documentation="Number of requests in model execution batches.",
             labelnames=labelnames,
-            multiprocess_mode="all").labels(*labelvalues)
+            multiprocess_mode="mostrecent").labels(*labelvalues)
 
-        self.gauge_scheduler_waiting = self._create_gauge(
+        self.gauge_scheduler_waiting = prometheus_client.Gauge(
             name="vllm:num_requests_waiting",
             documentation="Number of requests waiting to be processed.",
-            labelnames=labelnames).labels(*labelvalues)
+            labelnames=labelnames,
+            multiprocess_mode="mostrecent").labels(*labelvalues)
 
         #
         # GPU cache
         #
-        self.gauge_gpu_cache_usage = self._create_gauge(
+        self.gauge_gpu_cache_usage = prometheus_client.Gauge(
             name="vllm:gpu_cache_usage_perc",
             documentation="GPU KV-cache usage. 1 means 100 percent usage.",
-            labelnames=labelnames).labels(*labelvalues)
+            labelnames=labelnames,
+            multiprocess_mode="mostrecent").labels(*labelvalues)
 
-        self.counter_gpu_prefix_cache_queries = self._create_counter(
+        self.counter_gpu_prefix_cache_queries = prometheus_client.Counter(
             name="vllm:gpu_prefix_cache_queries",
             documentation=
             "GPU prefix cache queries, in terms of number of queried tokens.",
             labelnames=labelnames).labels(*labelvalues)
 
-        self.counter_gpu_prefix_cache_hits = self._create_counter(
+        self.counter_gpu_prefix_cache_hits = prometheus_client.Counter(
             name="vllm:gpu_prefix_cache_hits",
             documentation=
             "GPU prefix cache hits, in terms of number of cached tokens.",
@@ -199,24 +204,24 @@ class PrometheusStatLogger(StatLoggerBase):
         #
         # Counters
         #
-        self.counter_num_preempted_reqs = self._create_counter(
+        self.counter_num_preempted_reqs = prometheus_client.Counter(
             name="vllm:num_preemptions_total",
             documentation="Cumulative number of preemption from the engine.",
             labelnames=labelnames).labels(*labelvalues)
 
-        self.counter_prompt_tokens = self._create_counter(
+        self.counter_prompt_tokens = prometheus_client.Counter(
             name="vllm:prompt_tokens_total",
             documentation="Number of prefill tokens processed.",
             labelnames=labelnames).labels(*labelvalues)
 
-        self.counter_generation_tokens = self._create_counter(
+        self.counter_generation_tokens = prometheus_client.Counter(
             name="vllm:generation_tokens_total",
             documentation="Number of generation tokens processed.",
             labelnames=labelnames).labels(*labelvalues)
 
         self.counter_request_success: dict[FinishReason,
                                            prometheus_client.Counter] = {}
-        counter_request_success_base = self._create_counter(
+        counter_request_success_base = prometheus_client.Counter(
             name="vllm:request_success_total",
             documentation="Count of successfully processed requests.",
             labelnames=labelnames + ["finished_reason"])
@@ -229,21 +234,21 @@ class PrometheusStatLogger(StatLoggerBase):
         # Histograms of counts
         #
         self.histogram_num_prompt_tokens_request = \
-            self._create_histogram(
+            prometheus_client.Histogram(
                 name="vllm:request_prompt_tokens",
                 documentation="Number of prefill tokens processed.",
                 buckets=build_1_2_5_buckets(max_model_len),
                 labelnames=labelnames).labels(*labelvalues)
 
         self.histogram_num_generation_tokens_request = \
-            self._create_histogram(
+            prometheus_client.Histogram(
                 name="vllm:request_generation_tokens",
                 documentation="Number of generation tokens processed.",
                 buckets=build_1_2_5_buckets(max_model_len),
                 labelnames=labelnames).labels(*labelvalues)
 
         self.histogram_iteration_tokens = \
-            self._create_histogram(
+            prometheus_client.Histogram(
                 name="vllm:iteration_tokens_total",
                 documentation="Histogram of number of tokens per engine_step.",
                 buckets=[
@@ -253,7 +258,7 @@ class PrometheusStatLogger(StatLoggerBase):
                 labelnames=labelnames).labels(*labelvalues)
 
         self.histogram_max_num_generation_tokens_request = \
-            self._create_histogram(
+            prometheus_client.Histogram(
                 name="vllm:request_max_num_generation_tokens",
                 documentation=
                 "Histogram of maximum number of requested generation tokens.",
@@ -261,14 +266,14 @@ class PrometheusStatLogger(StatLoggerBase):
                 labelnames=labelnames).labels(*labelvalues)
 
         self.histogram_n_request = \
-            self._create_histogram(
+            prometheus_client.Histogram(
                 name="vllm:request_params_n",
                 documentation="Histogram of the n request parameter.",
                 buckets=[1, 2, 5, 10, 20],
                 labelnames=labelnames).labels(*labelvalues)
 
         self.histogram_max_tokens_request = \
-            self._create_histogram(
+            prometheus_client.Histogram(
                 name="vllm:request_params_max_tokens",
                 documentation="Histogram of the max_tokens request parameter.",
                 buckets=build_1_2_5_buckets(max_model_len),
@@ -278,7 +283,7 @@ class PrometheusStatLogger(StatLoggerBase):
         # Histogram of timing intervals
         #
         self.histogram_time_to_first_token = \
-            self._create_histogram(
+            prometheus_client.Histogram(
                 name="vllm:time_to_first_token_seconds",
                 documentation="Histogram of time to first token in seconds.",
                 buckets=[
@@ -289,7 +294,7 @@ class PrometheusStatLogger(StatLoggerBase):
                 labelnames=labelnames).labels(*labelvalues)
 
         self.histogram_time_per_output_token = \
-            self._create_histogram(
+            prometheus_client.Histogram(
                 name="vllm:time_per_output_token_seconds",
                 documentation="Histogram of time per output token in seconds.",
                 buckets=[
@@ -303,34 +308,34 @@ class PrometheusStatLogger(StatLoggerBase):
             40.0, 50.0, 60.0, 120.0, 240.0, 480.0, 960.0, 1920.0, 7680.0
         ]
         self.histogram_e2e_time_request = \
-            self._create_histogram(
+            prometheus_client.Histogram(
                 name="vllm:e2e_request_latency_seconds",
                 documentation="Histogram of e2e request latency in seconds.",
                 buckets=request_latency_buckets,
                 labelnames=labelnames).labels(*labelvalues)
         self.histogram_queue_time_request = \
-            self._create_histogram(
+            prometheus_client.Histogram(
                 name="vllm:request_queue_time_seconds",
                 documentation=
                 "Histogram of time spent in WAITING phase for request.",
                 buckets=request_latency_buckets,
                 labelnames=labelnames).labels(*labelvalues)
         self.histogram_inference_time_request = \
-            self._create_histogram(
+            prometheus_client.Histogram(
                 name="vllm:request_inference_time_seconds",
                 documentation=
                 "Histogram of time spent in RUNNING phase for request.",
                 buckets=request_latency_buckets,
                 labelnames=labelnames).labels(*labelvalues)
         self.histogram_prefill_time_request = \
-            self._create_histogram(
+            prometheus_client.Histogram(
                 name="vllm:request_prefill_time_seconds",
                 documentation=
                 "Histogram of time spent in PREFILL phase for request.",
                 buckets=request_latency_buckets,
                 labelnames=labelnames).labels(*labelvalues)
         self.histogram_decode_time_request = \
-            self._create_histogram(
+            prometheus_client.Histogram(
                 name="vllm:request_decode_time_seconds",
                 documentation=
                 "Histogram of time spent in DECODE phase for request.",
@@ -347,7 +352,7 @@ class PrometheusStatLogger(StatLoggerBase):
             self.labelname_running_lora_adapters = "running_lora_adapters"
             self.max_lora = vllm_config.lora_config.max_loras
             self.gauge_lora_info = \
-                self._create_gauge(
+                prometheus_client.Gauge(
                     name="vllm:lora_requests_info",
                     documentation="Running stats on lora requests.",
                     labelnames=[
@@ -358,48 +363,24 @@ class PrometheusStatLogger(StatLoggerBase):
                     multiprocess_mode="livemostrecent"
                 )
 
-    def _create_gauge(self,
-                      name: str,
-                      documentation: Optional[str],
-                      labelnames: list[str],
-                      multiprocess_mode: str = "all"):
-        return prometheus_client.Gauge(name=name,
-                                       documentation=documentation,
-                                       labelnames=labelnames,
-                                       multiprocess_mode=multiprocess_mode)
-
-    def _create_counter(self, name: str, documentation: Optional[str],
-                        labelnames: list[str]):
-        return prometheus_client.Counter(name=name,
-                                         documentation=documentation,
-                                         labelnames=labelnames)
-
-    def _create_histogram(self, name: str, documentation: Optional[str],
-                          buckets: list[Union[int,
-                                              float]], labelnames: list[str]):
-        return prometheus_client.Histogram(
-            name=name,
-            documentation=documentation,
-            buckets=buckets,
-            labelnames=labelnames,
-        )
-
     def log_metrics_info(self, type: str, config_obj: SupportsMetricsInfo):
+        # Lazy import prometheus_client
+        import prometheus_client
+
         metrics_info = config_obj.metrics_info()
         metrics_info["engine"] = self.engine_index
 
         name, documentation = None, None
-        multiprocess_mode = "all"
+        multiprocess_mode = "mostrecent"
         if type == "cache_config":
             name = "vllm:cache_config_info"
             documentation = "Information of the LLMEngine CacheConfig"
-            multiprocess_mode = "mostrecent"
         assert name is not None, f"Unknown metrics info type {type}"
 
         # Info type metrics are syntactic sugar for a gauge permanently set to 1
         # Since prometheus multiprocessing mode does not support Info, emulate
         # info here with a gauge.
-        info_gauge = self._create_gauge(
+        info_gauge = prometheus_client.Gauge(
             name=name,
             documentation=documentation,
             labelnames=metrics_info.keys(),
@@ -479,6 +460,9 @@ class PrometheusStatLogger(StatLoggerBase):
 
     @staticmethod
     def _unregister_vllm_metrics():
+        # Lazy import prometheus_client
+        import prometheus_client
+
         # Unregister any existing vLLM collectors (for CI/CD
         for collector in list(prometheus_client.REGISTRY._collector_to_names):
             if hasattr(collector, "_name") and "vllm" in collector._name:

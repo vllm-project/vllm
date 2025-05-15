@@ -169,6 +169,15 @@ def run_multi_api_server(args: argparse.Namespace):
 
     assert num_api_servers > 1
     if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
+
+        # prometheus_client should always be imported lazily, because
+        # PROMETHEUS_MULTIPROC_DIR cannot be set after the import.
+        # See https://prometheus.github.io/client_python/multiprocess/
+        if "prometheus_client" in sys.modules:
+            raise RuntimeError("prometheus_client is already imported, "
+                               "PROMETHEUS_MULTIPROC_DIR should be set before "
+                               "importing prometheus_client.")
+
         # Make TemporaryDirectory for prometheus multiprocessing
         # Note: global TemporaryDirectory will be automatically
         #   cleaned up upon exit.
