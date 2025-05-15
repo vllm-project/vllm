@@ -22,9 +22,9 @@ enum QuickReduceAlgo {
   ONESHOT_FP16 = 0,
   TWOSHOT_FP16 = 1,
   TWOSHOT_Q8 = 2,
-  TWOSHOT_Q6 = 3,
-  TWOSHOT_Q4 = 4,
-  TWOSHOT_MAX_MIN_Q8 = 5,
+  TWOSHOT_Q4 = 3,
+  TWOSHOT_MAX_MIN_Q8 = 4,
+  TWOSHOT_MAX_MIN_Q4 = 5,
 };
 
 // ============================================================
@@ -200,11 +200,11 @@ struct DeviceComms {
       case QuickReduceAlgo::TWOSHOT_MAX_MIN_Q8:
         TWOSHOT_DISPATCH(TwoshotMaxMinQ8LineCodec)
         break;
-      case QuickReduceAlgo::TWOSHOT_Q6:
-        TWOSHOT_DISPATCH(TwoshotQ6LineCodec)
-        break;
       case QuickReduceAlgo::TWOSHOT_Q4:
         TWOSHOT_DISPATCH(TwoshotQ4LineCodec)
+        break;
+      case QuickReduceAlgo::TWOSHOT_MAX_MIN_Q4:
+        TWOSHOT_DISPATCH(TwoshotMaxMinQ4LineCodec)
         break;
       default:
         TWOSHOT_DISPATCH(TwoshotFP16LineCodec)

@@ -387,10 +387,10 @@ struct TwoshotQ4LineCodec {
 };
 
 template <typename T, int world_size>
-struct TwoshotQ6LineCodec {
+struct TwoshotMaxMinQ4LineCodec {
   /*
-      Int6-blocking Line codec for Twoshot collectives.
-      We quantize the FP16/BF16 data to block-scaled Int64 in blocks of 32.
+      Int4-blocking Line codec for Twoshot collectives.
+      We quantize the FP16/BF16 data to block-scaled Int4 in blocks of 32.
   */
 
   static int constexpr kAtoms = 8;
@@ -399,11 +399,13 @@ struct TwoshotQ6LineCodec {
 
   // Codec tile size process by this workgroup.
   // Each threads processes a fragment of f16x8_t (16B),
-  // into a int6x8_t (4B + 2B) and a fp16 scale shared among 32 values.
+  // into a int4x8_t (4B) and a 2 f16 scale shared among 32 values.
   static int constexpr kRankAtoms = kAtoms / kWorldSize;
-  static int constexpr kRankTileStride = 1664;
-  static int constexpr kRankTileQ2Offset = 1024;
-  static int constexpr kRankTileScaleOffset = 1536;
+
+  // 1024 + 128 + 128
+  static int constexpr kRankTileStride = 1280;
+  static int constexpr kRankTileScaleOffset = 1024;
+  static int constexpr kRankTileZeroOffset = 1152;
   static int constexpr kRankTileSize = kRankTileStride * kRankAtoms;
 
   static int constexpr kRankBufferTileStride =
@@ -413,30 +415,29 @@ struct TwoshotQ6LineCodec {
   static int constexpr kTileSize = kRankTileSize * kWorldSize;
 
   // Constants configuration
-  // {-1/32.0h, -1/32.0h}, f16x2_t
+
+  // {-1/16.0h, -1/16.0h}, f16x2_t
   static int constexpr kScaleFactor =
-      std::is_same<T, half>::value ? 0xA800A800 : 0xBD00BD00;
+      std::is_same<T, half>::value ? 0xAC00AC00 : 0xBD80BD80;
 
   // {1e-7, 1e-7}, f16x2_t
   static int constexpr kScaleEpsilon =
       std::is_same<T, half>::value ? 0x00010001 : 0x33D733D7;
 
-  // {-32, -32}, fp16x2_t
-  static int constexpr kRangeMin =
-      std::is_same<T, half>::value ? 0xD000D000 : 0xC200C200;
+  // {0, 0}, f16x2_t
+  static int constexpr kRangeMin = 0x00000000;
 
-  // {+31, +31}, fp16x2_t
+  // {+15, +15}, f16x2_t
   static int constexpr kRangeMax =
-      std::is_same<T, half>::value ? 0x4FC04FC0 : 0x41F841F8;
+      std::is_same<T, half>::value ? 0x4B804B80 : 0x41704170;
 
-  // {+32, +32}, int16x2_t
-  static int constexpr kRangeBias = 0x00200020;
+  static unsigned char constexpr kMask0F = 0x0F;
 
   int const thread;
   int const rank;
   int const group_leader;
 
-  __device_inline__ TwoshotQ6LineCodec(int thread, int rank)
+  __device_inline__ TwoshotMaxMinQ4LineCodec(int thread, int rank)
       : thread(thread), rank(rank), group_leader((threadIdx.x / 8) * 8) {
     static_assert(kRankTileSize % 16 == 0,
                   "kRankTileSize must be 16B aligned.");
@@ -449,7 +450,7 @@ struct TwoshotQ6LineCodec {
       int32x4_t const atom = data[k];
 
       // max(w), min(w)
-      int wmax, wmin, wblockmax;
+      int wmax, wmin, wblockmax, wblockmin;
       {
         int a, b;
         a = packed_max<T>(atom[0], atom[1]);
@@ -460,7 +461,7 @@ struct TwoshotQ6LineCodec {
         b = packed_min<T>(atom[2], atom[3]);
         wmin = packed_min<T>(a, b);
 
-        // Reduce the max among a group of 8 threads
+        // Reduce the max and min among a group of 8 threads
         // Note: This is basically 2 blocks of 32 values setup as the
         // upper/lower halves of the fp16x2_t
         for (int i = 1; i < 8; i <<= 1) {
@@ -470,50 +471,39 @@ struct TwoshotQ6LineCodec {
           int y = __shfl_down(wmin, i);
           wmin = packed_min<T>(wmin, y);
         }
-        wblockmax = packed_abs_max<T>(wmax, wmin);
 
         // Share with the cohort
-        wblockmax = __shfl(wblockmax, group_leader);
+        wblockmax = __shfl(wmax, group_leader);
+        wblockmin = __shfl(wmin, group_leader);
       }
 
-      // Derive scales
+      // Derive zeros and scales
+      int decoding_zero = wblockmin;
       int decoding_scale;
       int encoding_scale;
-      decoding_scale = packed_mul<T>(wblockmax, kScaleFactor);
+
+      decoding_scale = packed_sub<T>(wblockmax, decoding_zero);
+      decoding_scale = packed_mul<T>(decoding_scale, kScaleFactor);
       encoding_scale = packed_add<T>(decoding_scale, kScaleEpsilon);
       encoding_scale = packed_rcp<T>(encoding_scale);
 
       // Apply scales to get quantized values
       int32x4_t w;
       for (int i = 0; i < 4; i++) {
-        w[i] = packed_mul<T>(atom[i], encoding_scale);
+        w[i] = packed_sub<T>(atom[i], decoding_zero);
+        w[i] = packed_mul<T>(w[i], encoding_scale);
         w[i] = packed_max<T>(w[i], kRangeMin);
         w[i] = packed_min<T>(w[i], kRangeMax);
       }
 
-      // Convert from fp16x2_t to uint16x2_t
-      int32x4_t q;
+      // Convert from f16x2_t to uint16x2_t
+      int32_t qw = 0;
       {
-        int16_t* qi = reinterpret_cast<int16_t*>(&q);
+        unsigned char* qi = reinterpret_cast<unsigned char*>(&qw);
         T* wh = reinterpret_cast<T*>(&w);
-        for (int i = 0; i < 8; i++)
-          qi[i] = (int16_t)rintf(T2float_cast<T>(wh[i]));
-
-        for (int i = 0; i < 4; i++) {
-          q[i] = packed_add<int16_t>(q[i], kRangeBias);
-        }
-      }
-
-      // Pack 8 x q6 into int32_t + int16_t
-      uint32_t q4w;
-      uint16_t q2w = 0;
-      q4w = (q[0] & 0x000F000F) | ((q[1] & 0x000F000F) << 4) |
-            ((q[2] & 0x000F000F) << 8) | ((q[3] & 0x000F000F) << 12);
-      {
-        int16_t* tw = reinterpret_cast<int16_t*>(&q);
-#pragma unroll
         for (int i = 0; i < 8; i++) {
-          q2w |= (tw[i] >> 4) << (i * 2);
+          auto val = (unsigned char)T2float_cast<T>(wh[i]) & kMask0F;
+          qi[i / 2] |= val << (4 * (i & 1));
         }
       }
 
@@ -521,16 +511,16 @@ struct TwoshotQ6LineCodec {
       // note: only the group leader stores the scale
       uint8_t* atom_ptr =
           reinterpret_cast<uint8_t*>(send_buffer + k * kRankBufferTileStride);
-      uint32_t* q4w_ptr = reinterpret_cast<uint32_t*>(atom_ptr) + thread;
-      uint16_t* q2w_ptr =
-          reinterpret_cast<uint16_t*>(atom_ptr + kRankTileQ2Offset) + thread;
+      int32_t* qw_ptr = reinterpret_cast<int32_t*>(atom_ptr) + thread;
       int* qs_ptr = reinterpret_cast<int*>(atom_ptr + kRankTileScaleOffset) +
                     (thread / 8);
+      int* qz_ptr =
+          reinterpret_cast<int*>(atom_ptr + kRankTileZeroOffset) + (thread / 8);
 
-      __builtin_nontemporal_store(q4w, q4w_ptr);
-      __builtin_nontemporal_store(q2w, q2w_ptr);
+      __builtin_nontemporal_store(qw, qw_ptr);
       if (threadIdx.x == group_leader) {
         __builtin_nontemporal_store(decoding_scale, qs_ptr);
+        __builtin_nontemporal_store(decoding_zero, qz_ptr);
       }
     }
   }
@@ -540,44 +530,35 @@ struct TwoshotQ6LineCodec {
     for (int k = 0; k < kRankAtoms; k++) {
       // Directly read quantized atom from recv_buffer
       uint8_t* atom_ptr = reinterpret_cast<uint8_t*>(*recv_buffer);
-      uint32_t* q4w_ptr = reinterpret_cast<uint32_t*>(atom_ptr) + thread;
-      uint16_t* q2w_ptr =
-          reinterpret_cast<uint16_t*>(atom_ptr + kRankTileQ2Offset) + thread;
+      int32_t* qw_ptr = reinterpret_cast<int32_t*>(atom_ptr) + thread;
       int* qs_ptr = reinterpret_cast<int*>(atom_ptr + kRankTileScaleOffset) +
                     (thread / 8);
+      int* qz_ptr =
+          reinterpret_cast<int*>(atom_ptr + kRankTileZeroOffset) + (thread / 8);
 
-      uint32_t q4w = __builtin_nontemporal_load(q4w_ptr);
-      uint16_t q2w = __builtin_nontemporal_load(q2w_ptr);
+      int32_t qw = __builtin_nontemporal_load(qw_ptr);
       int qs = __builtin_nontemporal_load(qs_ptr);
+      int qz = __builtin_nontemporal_load(qz_ptr);
 
       *recv_buffer += kRankBufferTileStride;
 
-      // Unpack q6 into fp16x8_t
+      // Unpack 8xq4 into f16x8_t
       int32x4_t w;
       {
-        static uint constexpr kMask000F = 0x000F000F;
-        // {1024.0, 1024.0}, f16x2_t
-        static uint constexpr kf162_1024 =
-            std::is_same<T, half>::value ? 0x64006400 : 0x44804480;
-        // {-1056.0, -1056.0}, f16x2_t
-        static uint constexpr kF162_1056 =
-            std::is_same<T, half>::value ? 0xE420E420 : 0xC484C484;
+        T* wh = reinterpret_cast<T*>(&w);
+        unsigned char* qi = reinterpret_cast<unsigned char*>(&qw);
 
 #pragma unroll
-        for (int i = 0; i < 4; i++) {
-          int32_t q4 = q4w & kMask000F;
-          int32_t q2 = (q2w & 0x3) | ((q2w & 0xC) << 14);
-          q4w >>= 4;
-          q2w >>= 4;
-
-          int32_t q6 = q4 | (q2 << 4) | kf162_1024;
-          w[i] = packed_add<T>(q6, kF162_1056);
+        for (int i = 0; i < 8; i++) {
+          auto val = (qi[i / 2] >> (4 * (i & 1))) & kMask0F;
+          wh[i] = float2T_cast<T>((float)val);
         }
       }
 
       // Apply decoding scales
       for (int i = 0; i < 4; i++) {
         w[i] = packed_mul<T>(w[i], qs);
+        w[i] = packed_add<T>(w[i], qz);
       }
 
       // That's pretty much it...

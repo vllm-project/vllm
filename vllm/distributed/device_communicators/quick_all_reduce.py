@@ -24,9 +24,9 @@ class QuickReduceAlgo(Enum):
     OneShot = 0
     TwoShot = 1
     TwoShot_Q8 = 2
-    TwoShot_Q6 = 3
-    TwoShot_Q4 = 4
-    TwoShot_MAX_MIN_Q8 = 5
+    TwoShot_Q4 = 3
+    TwoShot_MAX_MIN_Q8 = 4
+    TwoShot_MAX_MIN_Q4 = 5
 
 
 class QuickAllReduce:
