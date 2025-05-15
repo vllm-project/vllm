@@ -21,7 +21,6 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.lora.layers import BaseLayerWithLoRA
-from vllm.lora.ops.xla_ops import LORA_RANK_BLOCK_SIZE
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -243,12 +242,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             pin_memory=self.pin_memory)
         self.structured_decode_arange = torch.arange(
             0, 32, device="cpu", pin_memory=self.pin_memory)
-
-        if self.lora_config is not None:
-            # This makes us pad at initialisation time so we can avoid padding
-            # at runtime, which introduces long stalls
-            self.lora_config.max_lora_rank = _get_padded_lora_rank(
-                self.lora_config.max_lora_rank, self.lora_config.max_loras)
 
         # Get maximum number of mm items per modality (batch size).
         self.max_num_mm_items_by_modality = dict()
@@ -1572,16 +1565,6 @@ def _get_padded_token_len(paddings: list[int], x: int) -> int:
     index = bisect.bisect_left(paddings, x)
     assert index < len(paddings)
     return paddings[index]
-
-
-def _get_padded_lora_rank(max_lora_rank: int, max_num_loras: int) -> int:
-    max_num_loras += 1
-
-    # If we have enough LoRAs to use laning without padding
-    if max_lora_rank * max_num_loras >= LORA_RANK_BLOCK_SIZE:
-        return max_lora_rank
-
-    return 1 << (LORA_RANK_BLOCK_SIZE // max_num_loras).bit_length()
 
 
 def replace_set_lora(model):

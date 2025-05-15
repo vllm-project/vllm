@@ -7,8 +7,7 @@ import torch
 import torch.nn.functional as F
 import torch_xla.core.xla_model as xm
 
-from vllm.lora.ops.xla_ops import (LORA_RANK_BLOCK_SIZE, bgmv_expand,
-                                   bgmv_expand_slice, bgmv_shrink)
+from vllm.lora.ops.xla_ops import bgmv_expand, bgmv_expand_slice, bgmv_shrink
 from vllm.lora.punica_wrapper.utils import convert_mapping
 
 if TYPE_CHECKING:
@@ -225,7 +224,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                                  output_slices, lora_bias_stacked)
 
         if buffer is None:
-            r = max(lora_b_stacked[0].size(-1), LORA_RANK_BLOCK_SIZE)
+            r = lora_b_stacked[0].size(-1)
             T = x.size(0)
             buffer = torch.zeros(
                 (len(output_slices), T, r),
