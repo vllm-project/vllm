@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # ruff: noqa: SIM117
 import copy
-from typing import Generator, Tuple
+from collections.abc import Generator
 
 import torch
 from torch import nn
@@ -36,7 +36,7 @@ class TensorizerLoader(BaseModelLoader):
         self.tensorizer_config.verify_with_parallel_config(parallel_config)
 
     def _get_weights_iterator(
-        self, ) -> Generator[Tuple[str, torch.Tensor], None, None]:
+        self, ) -> Generator[tuple[str, torch.Tensor], None, None]:
         tensorizer_args = self.tensorizer_config._construct_tensorizer_args()
         return tensorizer_weights_iterator(tensorizer_args)
 

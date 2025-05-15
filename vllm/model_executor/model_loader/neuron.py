@@ -5,7 +5,7 @@ import ast
 import copy
 import importlib
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -33,7 +33,7 @@ TORCH_DTYPE_TO_NEURON_AMP = {
 }
 
 # Models supported by Neuron.
-_NEURON_SUPPORTED_MODELS: Dict[str, Tuple[str, str, str]] = {
+_NEURON_SUPPORTED_MODELS: dict[str, tuple[str, str, str]] = {
     "LlamaForCausalLM": ("transformers_neuronx.llama.model",
                          "LlamaForSampling", "LlamaForCausalLM"),
     "MistralForCausalLM": ("transformers_neuronx.mistral.model",
@@ -146,7 +146,7 @@ class NeuronSpeculationCausalLM(nn.Module):
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[list[SamplerOutput]]:
         batch_size, num_steps = logits.shape
         seq_ids = [
             seq_id for sg in sampling_metadata.seq_groups
@@ -188,7 +188,7 @@ def _get_model_architecture(config: PretrainedConfig) -> str:
         f"{list(_NEURON_SUPPORTED_MODELS.keys())}")
 
 
-def _get_buckets(env: str, default_value: List[int]) -> List[int]:
+def _get_buckets(env: str, default_value: list[int]) -> list[int]:
     env_value = os.getenv(env)
     if env_value is None:
         return default_value
@@ -464,7 +464,7 @@ def get_neuron_eagle_speculation_model(model_config: ModelConfig,
 
     draft_model.eval()
 
-    token_tree: Dict[int, List[int]] = ast.literal_eval(
+    token_tree: dict[int, list[int]] = ast.literal_eval(
         speculation_config.speculative_token_tree)
 
     speculation_model = EagleSpeculativeDecoder(draft_model.model,
