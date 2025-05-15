@@ -102,6 +102,8 @@ def transpile_myst_to_md(old_path: Path) -> None:
     Transpile MyST markdown files to standard markdown.
     """
     new_path = NEW_DIR / old_path.relative_to(OLD_DIR)
+    if old_path.stem == "index":
+        new_path = new_path.with_stem("README")
     new_path.parent.mkdir(parents=True, exist_ok=True)
     logger.info("Transpiling from %s to %s", old_path, new_path)
 
