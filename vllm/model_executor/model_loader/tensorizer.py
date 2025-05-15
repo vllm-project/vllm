@@ -13,11 +13,11 @@ import time
 from collections.abc import Generator
 from dataclasses import dataclass
 from functools import partial
-from typing import BinaryIO, Optional, Union, Any
-import json
+from typing import Any, BinaryIO, Optional, Union
 
 import torch
 from torch import nn
+from torch.utils._python_dispatch import TorchDispatchMode
 from transformers import PretrainedConfig
 
 import vllm.envs as envs
@@ -60,8 +60,6 @@ __all__ = [
 ]
 
 logger = init_logger(__name__)
-
-from torch.utils._python_dispatch import TorchDispatchMode
 
 
 class MetaTensorMode(TorchDispatchMode):
