@@ -102,8 +102,8 @@ class AutoRoundConfig(QuantizationConfig):
                 None),
             extra_config=cls.get_from_keys_or(config, ["extra_config"], None),
             data_type=cls.get_from_keys_or(config, ["data_type"], "int"),
-            backend=cls.get_from_keys_or(config, ["backend","vllm_backend"],
-                                  "auto"),
+            backend=cls.get_from_keys_or(config, ["backend", "vllm_backend"],
+                                         "auto"),
         )
 
     def get_layer_config(self, layer, layer_name: str):
@@ -302,4 +302,3 @@ class AutoRoundConfig(QuantizationConfig):
             return self.apply_gptq_quant_layer(layer, prefix)
         if "awq" in self.packing_format or "awq" in self.backend:
             return self.apply_awq_quant_layer(layer, prefix)
-
