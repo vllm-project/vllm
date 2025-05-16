@@ -494,8 +494,7 @@ class MambaMixer2(CustomOp):
                         nums_dict[BLOCK_M]['mlist_len'] = mlist_len
                         # type: ignore
                         mamba2_metadata.MAX_NUM_PROGRAMS = max(
-                            mamba2_metadata.MAX_NUM_PROGRAMS,
-                            mlist_len)
+                            mamba2_metadata.MAX_NUM_PROGRAMS, mlist_len)
                         offsetlist = []
                         for idx, num in enumerate(nums):
                             offsetlist.extend(range(num))
