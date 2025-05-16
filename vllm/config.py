@@ -1682,6 +1682,8 @@ class ParallelConfig:
     the product of the tensor parallel size and data parallel size."""
     data_parallel_size_local: int = 1
     """Number of local data parallel groups."""
+    data_parallel_size_per_node: int = 1
+    """Number of data parallel groups per node."""
     data_parallel_rank: int = 0
     """Rank of the data parallel group."""
     data_parallel_rank_local: Optional[int] = None

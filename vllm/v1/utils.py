@@ -191,40 +191,64 @@ class CoreEngineActorManager:
         self.local_engine_actors: list[ray.ActorHandle] = []
         self.remote_engine_actors: list[ray.ActorHandle] = []
 
-        # TODO(rui): use proper placement strategy to put engine actors
-        # on the desired nodes.
+        dp_size = vllm_config.parallel_config.data_parallel_size
+        remote_engine_count = dp_size - local_engine_count
+        data_parallel_size_per_node = \
+            vllm_config.parallel_config.data_parallel_size_per_node
+        assert dp_size % data_parallel_size_per_node == 0, (
+            "data_parallel_size must be divisible by "
+            "data_parallel_size_per_node")
+        node_count = dp_size // data_parallel_size_per_node
+
+        bundles = [{"CPU": 1.0}] * node_count
+        if local_engine_count > 0:
+            head_node_ip = \
+                vllm_config.parallel_config.data_parallel_master_ip
+            bundles[0]["node_ip:" + head_node_ip] = 0.001
+
+        placement_group = ray.util.placement_group(
+            name="dp_engine_actors",
+            strategy="STRICT_SPREAD",
+            bundles=bundles,
+        )
+
         refs = []
         for index in range(local_engine_count):
             local_index = local_start_index + index
             global_index = start_index + index
-            actor = ray.remote(DPEngineCoreActor).remote(
-                vllm_config=vllm_config,
-                executor_class=executor_class,
-                log_stats=log_stats,
-                input_address=input_address,
-                output_address=output_address,
-                on_head_node=True,
-                engine_index=global_index,
-                dp_rank=global_index,
-                local_dp_rank=local_index)
+            actor = ray.remote(DPEngineCoreActor).options(
+                placement_group=placement_group,
+                placement_group_bundle_index=0,
+            ).remote(vllm_config=vllm_config,
+                     executor_class=executor_class,
+                     log_stats=log_stats,
+                     input_address=input_address,
+                     output_address=output_address,
+                     on_head_node=True,
+                     engine_index=global_index,
+                     dp_rank=global_index,
+                     local_dp_rank=local_index)
             self.local_engine_actors.append(actor)
             refs.append(actor.wait_for_init.remote())
 
-        dp_size = vllm_config.parallel_config.data_parallel_size
-        for index in range(dp_size - local_engine_count):
+        for index in range(remote_engine_count):
             local_index = index
             global_index = local_engine_count + index
-            actor = ray.remote(DPEngineCoreActor).remote(
-                vllm_config=vllm_config,
-                executor_class=executor_class,
-                log_stats=log_stats,
-                input_address=input_address,
-                output_address=output_address,
-                on_head_node=False,
-                engine_index=global_index,
-                dp_rank=global_index,
-                local_dp_rank=local_index)
-            self.local_engine_actors.append(actor)
+            bundle_index = (local_engine_count +
+                            index) // data_parallel_size_per_node
+            actor = ray.remote(DPEngineCoreActor).options(
+                placement_group=placement_group,
+                placement_group_bundle_index=bundle_index,
+            ).remote(vllm_config=vllm_config,
+                     executor_class=executor_class,
+                     log_stats=log_stats,
+                     input_address=input_address,
+                     output_address=output_address,
+                     on_head_node=False,
+                     engine_index=global_index,
+                     dp_rank=global_index,
+                     local_dp_rank=local_index)
+            self.remote_engine_actors.append(actor)
             refs.append(actor.wait_for_init.remote())
 
         ray.get(refs)

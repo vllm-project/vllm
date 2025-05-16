@@ -288,6 +288,7 @@ class EngineArgs:
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     data_parallel_size: int = ParallelConfig.data_parallel_size
     data_parallel_size_local: Optional[int] = None
+    data_parallel_size_per_node: Optional[int] = None
     data_parallel_address: Optional[str] = None
     data_parallel_rpc_port: Optional[int] = None
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
@@ -609,6 +610,11 @@ class EngineArgs:
                                     type=int,
                                     help='Number of data parallel replicas '
                                     'to run on this node.')
+        parallel_group.add_argument('--data-parallel-size-per-node',
+                                    '-dpsn',
+                                    type=int,
+                                    help='Number of data parallel replicas '
+                                    'to run on each node.')
         parallel_group.add_argument('--data-parallel-address',
                                     '-dpa',
                                     type=str,
@@ -1054,6 +1060,23 @@ class EngineArgs:
             self.data_parallel_size_local
             is None) else self.data_parallel_size_local
 
+        if self.data_parallel_size_per_node is None:
+            assert data_parallel_size_local != 0, (
+                "data_parallel_size_per_node must be set")
+            logger.info(
+                "Setting data_parallel_size_per_node to "
+                "data_parallel_size_local: %d", data_parallel_size_local)
+            data_parallel_size_per_node = data_parallel_size_local
+        else:
+            data_parallel_size_per_node = self.data_parallel_size_per_node
+
+        assert self.data_parallel_size % data_parallel_size_per_node == 0, (
+            "data_parallel_size must be divisible by "
+            "data_parallel_size_per_node")
+        assert data_parallel_size_local == data_parallel_size_per_node, (
+            "data_parallel_size_local must be equal to "
+            "data_parallel_size_per_node")
+
         # DP address, used in multi-node case for torch distributed group
         # and ZMQ sockets.
         data_parallel_address = self.data_parallel_address if (
@@ -1073,6 +1096,7 @@ class EngineArgs:
             tensor_parallel_size=self.tensor_parallel_size,
             data_parallel_size=self.data_parallel_size,
             data_parallel_size_local=data_parallel_size_local,
+            data_parallel_size_per_node=data_parallel_size_per_node,
             data_parallel_master_ip=data_parallel_address,
             data_parallel_rpc_port=data_parallel_rpc_port,
             data_parallel_backend=data_parallel_backend,
