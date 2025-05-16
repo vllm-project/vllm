@@ -8,12 +8,13 @@ import ray
 import torch
 from transformers import AutoConfig
 
-from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
+from vllm.model_executor.layers.fused_moe.fused_moe import *
+from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     _moe_permute,
     _moe_unpermute_and_reduce,
+    moe_permute,
+    moe_unpermute,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import *
-from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import *
 from vllm.model_executor.layers.fused_moe.utils import _fp8_quantize
 from vllm.platforms import current_platform
 from vllm.utils import FlexibleArgumentParser
@@ -63,14 +64,20 @@ def benchmark_permute(
 
     def run():
         if use_customized_permute:
-            (permuted_hidden_states, first_token_off, inv_perm_idx,
-             permuted_idx,
-             m_indices) = moe_permute(qhidden_states,
-                                      topk_ids=topk_ids,
-                                      topk=topk,
-                                      n_expert=num_experts,
-                                      expert_map=None,
-                                      align_block_size=align_block_size)
+            (
+                permuted_hidden_states,
+                first_token_off,
+                inv_perm_idx,
+                permuted_idx,
+                m_indices,
+            ) = moe_permute(
+                qhidden_states,
+                topk_ids=topk_ids,
+                topk=topk,
+                n_expert=num_experts,
+                expert_map=None,
+                align_block_size=align_block_size,
+            )
         else:
             (
                 permuted_hidden_states,
@@ -145,14 +152,20 @@ def benchmark_unpermute(
 
     def prepare():
         if use_customized_permute:
-            (permuted_hidden_states, first_token_off, inv_perm_idx,
-             permuted_idx,
-             m_indices) = moe_permute(qhidden_states,
-                                      topk_ids=topk_ids,
-                                      topk=topk,
-                                      n_expert=num_experts,
-                                      expert_map=None,
-                                      align_block_size=align_block_size)
+            (
+                permuted_hidden_states,
+                first_token_off,
+                inv_perm_idx,
+                permuted_idx,
+                m_indices,
+            ) = moe_permute(
+                qhidden_states,
+                topk_ids=topk_ids,
+                topk=topk,
+                n_expert=num_experts,
+                expert_map=None,
+                align_block_size=align_block_size,
+            )
             # convert to fp16/bf16 as gemm output
             return (
                 permuted_hidden_states.to(dtype),
@@ -182,10 +195,22 @@ def benchmark_unpermute(
 
     def run(input: tuple):
         if use_customized_permute:
-            (permuted_hidden_states, first_token_off, inv_perm_idx,
-             permuted_idx, m_indices) = input
-            moe_unpermute(permuted_hidden_states, topk_weights, inv_perm_idx,
-                          first_token_off, topk)
+            (
+                permuted_hidden_states,
+                first_token_off,
+                inv_perm_idx,
+                permuted_idx,
+                m_indices,
+            ) = input
+            output = torch.empty_like(hidden_states)
+            moe_unpermute(
+                output,
+                permuted_hidden_states,
+                topk_weights,
+                inv_perm_idx,
+                topk,
+                first_token_off,
+            )
         else:
             (
                 permuted_hidden_states,
@@ -195,7 +220,11 @@ def benchmark_unpermute(
                 inv_perm,
             ) = input
             _moe_unpermute_and_reduce(
-                output_hidden_states, permuted_hidden_states, inv_perm, topk_weights
+                output_hidden_states,
+                permuted_hidden_states,
+                inv_perm,
+                topk_weights,
+                True,
             )
 
     # JIT compilation & warmup

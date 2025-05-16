@@ -96,10 +96,11 @@ void moe_permute(
 }
 
 void moe_unpermute(
-    const torch::Tensor& permuted_hidden_states,     // [n_token * topk, hidden]
-    const torch::Tensor& topk_weights,               //[n_token, topk]
-    const torch::Tensor& inv_permuted_idx,           // [n_token, topk]
-    const torch::Tensor& expert_first_token_offset,  // [n_local_expert+1]
+    const torch::Tensor& permuted_hidden_states,  // [n_token * topk, hidden]
+    const torch::Tensor& topk_weights,            // [n_token, topk]
+    const torch::Tensor& inv_permuted_idx,        // [n_token, topk]
+    const std::optional<torch::Tensor>&
+        expert_first_token_offset,  // [n_local_expert+1]
     int64_t topk,
     torch::Tensor& hidden_states  // [n_token, hidden]
 ) {
@@ -109,9 +110,14 @@ void moe_unpermute(
   auto n_token = hidden_states.size(0);
   auto n_hidden = hidden_states.size(1);
   auto stream = at::cuda::getCurrentCUDAStream().stream();
-  int n_local_expert = expert_first_token_offset.size(0) - 1;
-  const int64_t* valid_ptr =
-      get_ptr<int64_t>(expert_first_token_offset) + n_local_expert;
+
+  int64_t const* valid_ptr = nullptr;
+  if (expert_first_token_offset.has_value()) {
+    int n_local_expert = expert_first_token_offset.value().size(0) - 1;
+    valid_ptr =
+        get_ptr<int64_t>(expert_first_token_offset.value()) + n_local_expert;
+  }
+
   MOE_DISPATCH(hidden_states.scalar_type(), [&] {
     finalizeMoeRoutingKernelLauncher<scalar_t, scalar_t>(
         get_ptr<scalar_t>(permuted_hidden_states),

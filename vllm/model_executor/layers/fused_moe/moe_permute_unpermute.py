@@ -82,7 +82,7 @@ def moe_permute(
     expert_map: Optional[torch.Tensor] = None,
     align_block_size: Optional[int] = None,
     fill_invalid_expert: int = -1
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
            torch.Tensor]:
     """
     This function expands and permutes activation to gather uncontinuous tokens
@@ -138,7 +138,6 @@ def moe_permute(
     expert_first_token_offset = torch.empty(n_local_expert + 1,
                                             dtype=torch.int64,
                                             device=hidden_states.device)
-    # todo clamp (0, n_token * topk - 1) to avoid out of bound ?
     permuted_idx = torch.full((permuted_row_size, ),
                               n_token * topk,
                               dtype=torch.int32,
@@ -156,38 +155,70 @@ def moe_permute(
 
 
 def moe_unpermute(
+    out: torch.Tensor,
     permuted_hidden_states: torch.Tensor,
     topk_weights: torch.Tensor,
     inv_permuted_idx: torch.Tensor,
-    expert_first_token_offset: torch.Tensor,
     topk: int,
+    expert_first_token_offset: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     This function expands and permutes activation to gathering uncontinuous
       tokens for each expert.
     Parameters:
+    - out (torch.Tensor): output tensor
     - permuted_hidden_states (torch.Tensor): permuted activation.
     - topk_weights (torch.Tensor): topk expert route weight for each token.
     - inv_permuted_idx (torch.Tensor): row idx map for moe_unpermute.
-    - expert_first_token_offset (torch.Tensor): offset of the first token
-       of each expert for grouped gemm.
     - topk (int): The number of top-k experts to select.
+    - expert_first_token_offset (Optional[torch.Tensor]): offset of the first 
+      token of each expert for grouped gemm.
     Returns:
     - hidden_states (torch.Tensor): The reduced and unpermuted activation
       tensor.
     """
-    n_token, n_hidden = topk_weights.size(0), permuted_hidden_states.size(-1)
+    n_hidden = permuted_hidden_states.size(-1)
     assert (n_hidden * permuted_hidden_states.element_size()
             ) % 16 == 0, "unpermue kernel need hidden dim align to 16B"
-    hidden_states = torch.empty((n_token, n_hidden),
-                                dtype=permuted_hidden_states.dtype,
-                                device=permuted_hidden_states.device)
-
     torch.ops._moe_C.moe_unpermute(permuted_hidden_states, topk_weights,
                                    inv_permuted_idx, expert_first_token_offset,
-                                   topk, hidden_states)
-    return hidden_states
+                                   topk, out)
 
+
+def _customized_moe_permute(
+    curr_hidden_states: torch.Tensor,
+    a1q_scale: Optional[torch.Tensor],
+    curr_topk_ids: torch.Tensor,
+    global_num_experts: int,
+    expert_map: Optional[torch.Tensor],
+    block_m: int,
+):
+    fill_invalid_expert = -1
+    topk = curr_topk_ids.shape[1]
+    tokens_in_chunk, _ = curr_hidden_states.shape
+    num_tokens = topk * tokens_in_chunk
+    (permuted_hidden_states, expert_first_token_offset, inv_permuted_idx,
+     permuted_idx, m_indices) = moe_permute(curr_hidden_states, curr_topk_ids,
+                                            topk, global_num_experts,
+                                            expert_map, block_m,
+                                            fill_invalid_expert)
+    permuted_idx = permuted_idx.clamp(max=num_tokens - 1)
+    if a1q_scale is not None:
+        a1q_scale = a1q_scale[permuted_idx // topk]
+    return (permuted_hidden_states, a1q_scale, permuted_idx, m_indices,
+            inv_permuted_idx, expert_first_token_offset)
+
+
+def _customized_moe_unpermute_and_reduce(
+    curr_hidden: torch.Tensor,
+    inv_perm: Optional[torch.Tensor],
+    topk_weight: torch.Tensor,
+    first_token_offset: torch.Tensor,
+) -> torch.Tensor:
+    M, topk = topk_weight.shape
+    output = moe_unpermute(curr_hidden, topk_weight, inv_perm,
+                           first_token_offset, topk)
+    return output
 
 def moe_permute_unpermute_supported():
     return torch.ops._moe_C.moe_permute_unpermute_supported()
