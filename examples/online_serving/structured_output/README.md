@@ -19,31 +19,37 @@ vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B --reasoning-parser deepseek
 If you want to run this script standalone with `uv`, you can use the following:
 
 ```bash
-
+uvx --from git+https://github.com/vllm-project/vllm#subdirectory=examples/online_serving/structured_output structured-output
 ```
 
-Examples:
+See <project:#structured-outputs> feature docs for more information.
+
+:::{tip}
+If vLLM is running remotely, then set `OPENAI_BASE_URL=<remote_url>` before running the script.
+:::
+
+## Usage
 
 Run all constraints, non-streaming:
 
 ```bash
-uv run <file>
+uv run structured_outputs.py
 ```
 
 Run all constraints, streaming:
 
 ```bash
-uv run <file> --stream
+uv run structured_outputs.py --stream
 ```
 
 Run certain constraints, for example `structural_tag` and `regex`, streaming:
 
 ```bash
-uv run <file> --constraint structural_tags regex --stream
+uv run structured_outputs.py --constraint structural_tags regex --stream
 ```
 
 Run all constraints, with reasoning models and streaming:
 
 ```bash
-uv run <file> --reasoning --stream
+uv run structured_outputs.py --reasoning --stream
 ```

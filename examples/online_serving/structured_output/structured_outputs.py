@@ -1,11 +1,3 @@
-# /// script
-# requires-python = ">=3.9"
-# dependencies = [
-#   "openai==1.78.1",
-#   "pydantic==2.11.4",
-# ]
-# ///
-
 # ruff: noqa: E501
 # SPDX-License-Identifier: Apache-2.0
 
@@ -211,7 +203,7 @@ and San Francisco?""",
 class Args(TypedDict):
   constraint: list[ConstraintsFormat | Literal['all']]
 
-async def main():
+async def cli():
     parser = argparse.ArgumentParser(
         description=
         "Run OpenAI Chat Completion with various structured outputs capabilities",
@@ -267,7 +259,9 @@ async def main():
                 print(f"  Reasoning: {message.reasoning_content or ''}")
             print(f"  Content: {message.content!r}")
 
+def main():
+    asyncio.run(cli())
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
 
