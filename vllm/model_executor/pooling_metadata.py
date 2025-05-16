@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
+
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -29,6 +30,7 @@ class PoolingMetadata:
         seq_data: Dict[int, Any],  # Specific data related to sequences
         prompt_lens: List[int],
         prompt_offsets: Optional[List[int]] = None,
+
     ) -> None:
         self.seq_groups = seq_groups
         self.seq_data = seq_data
