@@ -239,6 +239,8 @@ class FusedMoeWeightScaleSupported(Enum):
 
 
 class FusedMoEMethodBase(QuantizeMethodBase):
+    moe: Optional[MoEConfig] = None
+    quant_config: Optional[QuantizationConfig] = None
 
     @abstractmethod
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
