@@ -74,7 +74,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
 
   m.def(
       "moe_unpermute(Tensor permuted_hidden_states, Tensor topk_weights,"
-      "Tensor inv_permuted_idx, Tensor expert_first_token_offset, "
+      "Tensor inv_permuted_idx, Tensor? expert_first_token_offset, "
       "int topk, Tensor! hidden_states)->()");
 
   m.def("moe_permute_unpermute_supported() -> bool");
