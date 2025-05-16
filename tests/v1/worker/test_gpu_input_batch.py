@@ -177,6 +177,11 @@ def _create_sampling_params():
     return SamplingParams(
         top_k=np.random.randint(1, 10),
         top_p=np.random.uniform(0.0, 1.0),
+        # During the InputBatch.add_request process,
+        # if the SamplingParam.min_p attribute is not set,
+        # the InputBatch.min_p_reqs will not be processed correctly,
+        # consequently leading to the InputBatch.min_p not being assigned the correct value.
+        min_p=np.random.uniform(0.0, 1.0),
         presence_penalty=np.random.uniform(-2.0, 2.0),
         repetition_penalty=np.random.uniform(0.0, 2.0),
         frequency_penalty=np.random.uniform(-2.0, 2.0),
