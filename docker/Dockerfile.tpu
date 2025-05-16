@@ -19,11 +19,14 @@ RUN --mount=type=bind,source=.git,target=.git \
 RUN pip uninstall -y torch torch_xla torchvision
 
 ENV VLLM_TARGET_DEVICE="tpu"
+# First install with --no-deps to avoid the hash verification issue
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,source=.git,target=.git \
     python3 -m pip install \
-        -r requirements/tpu.txt
-RUN python3 -m pip install -e .
+        -r requirements/tpu.txt --no-cache-dir
+
+# Install vLLM without building dependencies
+RUN python3 -m pip install -e . --no-build-isolation
 
 # install development dependencies (for testing)
 RUN python3 -m pip install -e tests/vllm_test_utils
