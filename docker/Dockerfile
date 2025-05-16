@@ -252,11 +252,12 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 # $ ls dist
 # $ # upload the wheel to a public location, e.g. https://wheels.vllm.ai/flashinfer/524304395bd1d8cd7d07db083859523fcaa246a4/flashinfer_python-0.2.1.post1+cu124torch2.5-cp38-abi3-linux_x86_64.whl
 
+ARG FLASHINFER_ENABLE_AOT=1
 RUN --mount=type=cache,target=/root/.cache/uv \
 . /etc/environment && \
 if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
     # TESTING: install FlashInfer from source to test 2.7.0 final RC
-    FLASHINFER_ENABLE_AOT=1 TORCH_CUDA_ARCH_LIST='7.5 8.0 8.6 8.9 9.0+PTX' \
+    FLASHINFER_ENABLE_AOT=$FLASHINFER_ENABLE_AOT TORCH_CUDA_ARCH_LIST='7.5 8.0 8.6 8.9 9.0+PTX' \
     uv pip install --system --no-build-isolation "git+https://github.com/flashinfer-ai/flashinfer@v0.2.2.post1" ; \
 fi
 COPY examples examples
