@@ -138,7 +138,8 @@ class AutoRoundConfig(QuantizationConfig):
             else:
                 return None
 
-        logger.debug(prefix, layer.__class__.__name__, weight_bits, group_size,
+        logger.debug("[%s] Type: %s, Bits: %s, Group Size: %s, Sym: %s",
+                     prefix, layer.__class__.__name__, weight_bits, group_size,
                      sym)
         if backend == "auto" or "marlin" in backend:
             if isinstance(layer, FusedMoE):
@@ -208,7 +209,8 @@ class AutoRoundConfig(QuantizationConfig):
             else:
                 return None
 
-        logger.debug(prefix, layer.__class__.__name__, weight_bits, group_size,
+        logger.debug("[%s] Type: %s, Bits: %s, Group Size: %s, Sym: %s",
+                     prefix, layer.__class__.__name__, weight_bits, group_size,
                      sym)
         if backend == "auto" or "marlin" in backend:
             if isinstance(layer, FusedMoE):
