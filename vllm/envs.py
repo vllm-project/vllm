@@ -139,6 +139,39 @@ def maybe_convert_int(value: Optional[str]) -> Optional[int]:
     return int(value)
 
 
+def get_vllm_port() -> Optional[int]:
+    """Get the port from VLLM_PORT environment variable.
+    
+    Returns:
+        The port number as an integer if VLLM_PORT is set, None otherwise.
+        
+    Raises:
+        ValueError: If VLLM_PORT is a URI, suggest k8s service discovery issue.
+    """
+    if 'VLLM_PORT' not in os.environ:
+        return None
+
+    port = os.getenv('VLLM_PORT', '0')
+
+    try:
+        return int(port)
+    except ValueError as err:
+        from urllib.parse import urlparse
+        try:
+            parsed = urlparse(port)
+            if parsed.scheme:
+                raise ValueError(
+                    f"VLLM_PORT '{port}' appears to be a URI. "
+                    "This may be caused by a Kubernetes service discovery issue"
+                    "check the warning in: https://docs.vllm.ai/en/stable/serving/env_vars.html"
+                )
+        except Exception:
+            pass
+
+        raise ValueError(
+            f"VLLM_PORT '{port}' must be a valid integer") from err
+
+
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
 
@@ -219,10 +252,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Note: if VLLM_PORT is set, and some code asks for multiple ports, the
     # VLLM_PORT will be used as the first port, and the rest will be generated
     # by incrementing the VLLM_PORT value.
-    # '0' is used to make mypy happy
     'VLLM_PORT':
-    lambda: int(os.getenv('VLLM_PORT', '0'))
-    if 'VLLM_PORT' in os.environ else None,
+    get_vllm_port,
 
     # path used for ipc when the frontend api server is running in
     # multi-processing mode to communicate with the backend engine process.
