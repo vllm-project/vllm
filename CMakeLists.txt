@@ -332,8 +332,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       "csrc/quantization/gptq_allspark/allspark_qgemm_w8a16.cu"
   )
 
-
-  set(SCALED_MM_3X_ARCHS)
   # The cutlass_scaled_mm kernels for Hopper (c3x, i.e. CUTLASS 3.x) require CUDA 12.0 or later
   optional_cuda_sources(
     NAME scaled_mm_c3x_sm90
@@ -346,7 +344,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_azp_sm90_int8.cu"
       "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_blockwise_sm90_fp8.cu"
     FLAGS "-DENABLE_SCALED_MM_SM90=1"
-    APPEND_ARCHS SCALED_MM_3X_ARCHS
     VERSION_MSG
       "Not building scaled_mm_c3x_sm90: CUDA Compiler version is not >= 12.0.\n"
       "Please upgrade to CUDA 12.0 or later to run FP8 quantized models on Hopper."
@@ -362,22 +359,15 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_sm100_fp8.cu"
       "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_blockwise_sm100_fp8.cu"
     FLAGS "-DENABLE_SCALED_MM_SM100=1"
-    APPEND_ARCHS SCALED_MM_3X_ARCHS
     VERSION_MSG
       "Not building scaled_mm_c3x_sm100: CUDA Compiler version is not >= 12.8.\n"
       "Please upgrade to CUDA 12.8 or later to run FP8 quantized models on Blackwell."
   )
 
-  # For the cutlass_scaled_mm kernels we want to build the c2x (CUTLASS 2.x)
-  # kernels for the remaining archs that are not already built for 3x.
-  # (Build 8.9 for FP8)
-  cuda_archs_loose_intersection(SCALED_MM_2X_ARCHS
-    "7.5;8.0;8.9+PTX" "${CUDA_ARCHS}")
-  # subtract out the archs that are already built for 3x
-  list(REMOVE_ITEM SCALED_MM_2X_ARCHS ${SCALED_MM_3X_ARCHS})
+  # For the cutlass_scaled_mm kernels for Pre-hopper (c2x, i.e. CUTLASS 2.x)
   optional_cuda_sources(
     NAME scaled_mm_c2x
-    ARCHS "${SCALED_MM_2X_ARCHS}"
+    ARCHS "7.5;8.0;8.9+PTX"
     SRCS "csrc/quantization/cutlass_w8a8/scaled_mm_c2x.cu"
     FLAGS "-DENABLE_SCALED_MM_C2X=1"
     NO_ARCH_MSG "Not building scaled_mm_c2x as no compatible archs found in CUDA target architectures, "

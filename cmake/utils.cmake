@@ -127,11 +127,10 @@ endfunction()
 #     [NO_ARCH_MSG <line1> [<line2> ...]]
 #     [GEN_SCRIPT <path/to/generate_script.py>]
 #     [GEN_GLOB <glob_pattern_for_generated_sources>]
-#     [APPEND_ARCHS <var_to_append_archs>]
 # This will run GEN_SCRIPT once when version and arch checks pass, globbing
 # sources matching GEN_GLOB and appending them alongside SRCS.
 macro(optional_cuda_sources)
-  set(oneValueArgs NAME MIN_VERSION APPEND_ARCHS GEN_SCRIPT GEN_GLOB OUT_SRCS_VAR)
+  set(oneValueArgs NAME MIN_VERSION GEN_SCRIPT GEN_GLOB OUT_SRCS_VAR)
   set(multiValueArgs ARCHS SRCS FLAGS VERSION_MSG NO_ARCH_MSG)
   cmake_parse_arguments(OCS "" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
   if(NOT OCS_NAME)
@@ -163,9 +162,6 @@ macro(optional_cuda_sources)
       endif()
       if(OCS_FLAGS)
         list(APPEND VLLM_GPU_FLAGS ${OCS_FLAGS})
-      endif()
-      if(OCS_APPEND_ARCHS)
-        list(APPEND ${OCS_APPEND_ARCHS} ${_OCS_ARCHS})
       endif()
       message(STATUS "Building ${OCS_NAME} for archs: ${_OCS_ARCHS}")
     else()
