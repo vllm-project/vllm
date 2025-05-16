@@ -343,6 +343,10 @@ def transpile_myst_to_md(old_path: Path) -> None:
         unhandled_blocks += 1
         logger.warning("Unhandled block: %s", block)
 
+        # Comment out unhandled block
+        lines[start] = "<!-- " + lines[start]
+        lines[end] += " -->\n"
+
     global total_blocks
     total_blocks += len(blocks)
 
