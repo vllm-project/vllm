@@ -22,7 +22,6 @@ from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
 
 import torch
 from pydantic import ConfigDict, SkipValidation, TypeAdapter, model_validator
-from pydantic.dataclasses import dataclass
 from torch.distributed import ProcessGroup, ReduceOp
 from transformers import PretrainedConfig
 from typing_extensions import deprecated, runtime_checkable
@@ -50,6 +49,16 @@ from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
                         resolve_obj_by_qualname)
 
 IS_IN_DOC_BUILD = is_in_doc_build()
+
+if IS_IN_DOC_BUILD:
+
+    def dataclass(*args, **kwargs):
+        """A non-Pydantic dataclass for docs builds."""
+        kwargs.pop("config", None)
+        from dataclasses import dataclass as _dataclass
+        return _dataclass(*args, **kwargs)
+else:
+    from pydantic.dataclasses import dataclass
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
