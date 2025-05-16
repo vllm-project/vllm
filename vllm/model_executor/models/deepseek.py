@@ -106,8 +106,8 @@ class DeepseekMoE(nn.Module):
         self.ep_group = get_ep_group()
         self.ep_rank = self.ep_group.rank
         self.ep_size = self.ep_group.world_size
-        self.n_routed_experts = config.n_routed_experts
-        self.n_shared_experts = config.n_shared_experts
+        self.n_routed_experts: int = config.n_routed_experts
+        self.n_shared_experts: int = config.n_shared_experts
         self.top_k = config.num_experts_per_tok
         if self.tp_size > self.n_routed_experts:
             raise ValueError(
@@ -115,12 +115,12 @@ class DeepseekMoE(nn.Module):
                 f"the number of experts {self.n_routed_experts}.")
 
         # Load balancing settings.
-        # Currently, `n_redundancy_expers` equals to `n_extra_experts`.
+        # Currently, `n_redundant_experts` equals to `n_extra_experts`.
         vllm_config = get_current_vllm_config()
         self.n_extra_experts = vllm_config.parallel_config.num_extra_experts
         self.n_physical_experts = self.n_routed_experts + self.n_extra_experts
         self.n_logical_experts = self.n_routed_experts
-        self.n_redundancy_expers = (self.n_physical_experts -
+        self.n_redundant_experts = (self.n_physical_experts -
                                     self.n_logical_experts)
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
@@ -489,6 +489,20 @@ class DeepseekForCausalLM(nn.Module, SupportsPP, IsMixtureOfExperts):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
         self.expert_weights = []
+
+        # Set MoE hyperparameters
+        # TODO(bowen): Add support for MTP layers
+        self.num_moe_layers = (config.num_hidden_layers -
+                               config.first_k_dense_replace)
+
+        example_moe = typing.cast(
+            DeepseekMoE, self.model.layers[config.num_hidden_layers - 1].mlp)
+        self.num_logical_experts = example_moe.n_logical_experts
+        self.num_physical_experts = example_moe.n_physical_experts
+        self.num_local_physical_experts = example_moe.n_local_physical_experts
+        self.num_routed_experts = example_moe.n_routed_experts
+        self.num_shared_experts = example_moe.n_shared_experts
+        self.num_redundant_experts = example_moe.n_redundant_experts
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)

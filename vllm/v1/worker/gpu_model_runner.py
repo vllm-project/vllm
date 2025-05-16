@@ -16,6 +16,7 @@ from vllm.attention.layer import Attention
 from vllm.attention.utils.fa_utils import get_flash_attn_version
 from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config)
+from vllm.distributed.eplb.states import EplbState
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
@@ -25,6 +26,7 @@ from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.models.interfaces import is_mixture_of_experts
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.multimodal.utils import group_mm_inputs_by_modality
@@ -66,6 +68,17 @@ logger = init_logger(__name__)
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
+
+    enable_eplb: bool = False
+    """
+    Whether the expert parallelism load balancer is enabled.
+    """
+    eplb_state: EplbState
+    """
+    State of the expert parallelism load balancer.
+
+    Will be lazily initialized when the model is loaded.
+    """
 
     def __init__(
         self,
@@ -1459,6 +1472,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.model_memory_usage / GiB_bytes,
                     time_after_load - time_before_load)
         prepare_communication_buffer_for_model(self.model)
+
+        if is_mixture_of_experts(
+                self.model) and self.parallel_config.enable_eplb:
+            self.enable_eplb = True
+            logger.info("EPLB is enabled for model %s.",
+                        self.model_config.model)
+            self.eplb_state = EplbState.build(
+                self.model,
+                self.device,
+                self.parallel_config,
+            )
 
     def _get_prompt_logprobs_dict(
         self,

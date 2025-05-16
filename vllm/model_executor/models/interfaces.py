@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from typing import (TYPE_CHECKING, ClassVar, Dict, List, Literal,
                     MutableSequence, Optional, Protocol, Type, Union, overload,
                     runtime_checkable)
@@ -431,12 +431,6 @@ class IsMixtureOfExperts(Protocol):
     Check if the model is a mixture of experts (MoE) model.
     """
 
-    is_mixture_of_experts: ClassVar[Literal[True]] = True
-    """
-    A flag that indicates this model is a mixture of experts (MoE) model.
-    Used for expert parallel load balancing (EPLB) now.
-    """
-
     expert_weights: MutableSequence[Iterable[Tensor]]
     """
     Expert weights saved in this rank.
@@ -445,30 +439,29 @@ class IsMixtureOfExperts(Protocol):
     parameters in the layer, e.g. up/down projection weights.
     """
 
+    num_moe_layers: int
+    """Number of MoE layers in this model."""
 
-@runtime_checkable
-class _IsMixtureOfExpertsType(Protocol):
-    is_mixture_of_experts: ClassVar[Literal[True]]
-    expert_weights: Sequence[Iterable[Tensor]]
+    num_logical_experts: int
+    """Number of logical experts in this model."""
+
+    num_physical_experts: int
+    """Number of physical experts in this model."""
+
+    num_local_physical_experts: int
+    """Number of local physical experts in this model."""
+
+    num_routed_experts: int
+    """Number of routed experts in this model."""
+
+    num_shared_experts: int
+    """Number of shared experts in this model."""
+
+    num_redundant_experts: int
+    """Number of redundant experts in this model."""
 
 
-@overload
 def is_mixture_of_experts(model: object) -> TypeIs[IsMixtureOfExperts]:
-    ...
-
-
-@overload
-def is_mixture_of_experts(
-        model: Type[object]) -> TypeIs[Type[IsMixtureOfExperts]]:
-    ...
-
-
-def is_mixture_of_experts(
-    model: Union[Type[object], object]
-) -> Union[TypeIs[Type[IsMixtureOfExperts]], TypeIs[IsMixtureOfExperts]]:
-    if isinstance(model, type):
-        return isinstance(model, _IsMixtureOfExpertsType)
-
     return isinstance(model, IsMixtureOfExperts)
 
 
