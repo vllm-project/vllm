@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     VLLM_USE_TRITON_FLASH_ATTN: bool = True
     VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT: bool = True
     VLLM_USE_ROCM_FP8_FLASH_ATTN: bool = False
+    VLLM_V1_USE_PREFILL_DECODE_ATTENTION: bool = False
     VLLM_FLASH_ATTN_VERSION: Optional[int] = None
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: Optional[str] = None
@@ -330,6 +331,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_ROCM_FP8_FLASH_ATTN":
     lambda: (os.getenv("VLLM_USE_ROCM_FP8_FLASH_ATTN", "False").lower() in
              ("true", "1")),
+
+    # Use separate prefill and decode kernels for V1 attention instead of
+    # the unified triton kernel.
+    "VLLM_V1_USE_PREFILL_DECODE_ATTENTION":
+    lambda:
+    (os.getenv("VLLM_V1_USE_PREFILL_DECODE_ATTENTION", "False").lower() in
+     ("true", "1")),
 
     # Internal flag to enable/disable Inductor standalone compile
     "VLLM_TEST_STANDALONE_COMPILE":
