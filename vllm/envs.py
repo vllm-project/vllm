@@ -116,7 +116,7 @@ if TYPE_CHECKING:
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5557
     VLLM_ALL2ALL_BACKEND: str = "naive"
-    VLLM_MODELOPT_MAX_TOKENS_PER_EXPERT: int = 163840
+    VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
 
 
 def get_default_cache_root():
@@ -775,8 +775,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # NVFP4 MoE CUTLASS Kernel. This value is used to create a buffer for
     # the blockscale tensor of activations NVFP4 Quantization.
     # This is used to prevent the kernel from running out of memory.
-    "VLLM_MODELOPT_MAX_TOKENS_PER_EXPERT":
-    lambda: int(os.getenv("VLLM_MODELOPT_MAX_TOKENS_PER_EXPERT", "163840")),
+    "VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE":
+    lambda: int(os.getenv("VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE", "163840")),
 }
 
 # end-env-vars-definition

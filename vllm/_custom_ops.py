@@ -1123,12 +1123,12 @@ def scaled_fp4_experts_quant(
     # NVFP4 MoE Expert Quantization. This is used to prevent the kernel
     # from running out of memory. This value can also be increased to support
     # larger models.
-    MAX_TOKENS_PER_EXPERT = envs.VLLM_MODELOPT_MAX_TOKENS_PER_EXPERT
+    MAX_TOKENS_PER_EXPERT = envs.VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE
     assert (m_numtopk <= MAX_TOKENS_PER_EXPERT * topk), (
         f"m_numtopk must be less than MAX_TOKENS_PER_EXPERT("
         f"{MAX_TOKENS_PER_EXPERT})"
         f" for cutlass_moe_fp4, observed m_numtopk = {m_numtopk}. Use"
-        f" VLLM_MODELOPT_MAX_TOKENS_PER_EXPERT to set this value.")
+        f" VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE to set this value.")
     scales_k = k // 16
     padded_k = (scales_k + (4 - 1)) // 4
 
