@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Iterable, Optional, Set, Tuple, Union
+from collections.abc import Iterable
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -79,7 +80,6 @@ class DbrxExperts(FusedMoE):
             prefix=prefix,
         )
         self.config = config
-        self.tp_size = get_tensor_model_parallel_world_size()
         self.d_model = config.d_model
         self.intermediate_size = (self.config.ffn_config.ffn_hidden_size //
                                   self.tp_size)
@@ -415,14 +415,14 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
                                        sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         expert_params_mapping = [(
             "w13" if weight_name in ["w1", "v1"] else "w2",
             f"mlp.{weight_name}",
         ) for weight_name in ["w1", "v1", "w2"]]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
             if (self.quant_config is not None and
