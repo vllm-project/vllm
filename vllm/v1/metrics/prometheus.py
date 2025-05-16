@@ -35,18 +35,6 @@ def setup_multiprocess_prometheus():
                        "and vLLM will properly handle cleanup.")
 
 
-def unregister_vllm_metrics():
-    """Unregister any existing vLLM collectors from the prometheus registry.
-    
-    This is useful for testing and CI/CD where metrics may be registered
-    multiple times across test runs.
-    """
-    # Unregister any existing vLLM collectors
-    for collector in list(REGISTRY._collector_to_names):
-        if hasattr(collector, "_name") and "vllm" in collector._name:
-            REGISTRY.unregister(collector)
-
-
 def get_prometheus_registry():
     """Get the appropriate prometheus registry based on multiprocessing 
     configuration.
@@ -61,6 +49,19 @@ def get_prometheus_registry():
         return registry
 
     return REGISTRY
+
+
+def unregister_vllm_metrics():
+    """Unregister any existing vLLM collectors from the prometheus registry.
+    
+    This is useful for testing and CI/CD where metrics may be registered
+    multiple times across test runs.
+    """
+    registry = get_prometheus_registry()
+    # Unregister any existing vLLM collectors
+    for collector in list(registry._collector_to_names):
+        if hasattr(collector, "_name") and "vllm" in collector._name:
+            registry.unregister(collector)
 
 
 def shutdown_prometheus():
