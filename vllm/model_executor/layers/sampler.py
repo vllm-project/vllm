@@ -31,6 +31,10 @@ if envs.VLLM_USE_FLASHINFER_SAMPLER and find_spec("flashinfer"):
 else:
     flashinfer_top_k_top_p_sampling = None
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 
 def get_sampler() -> torch.nn.Module:
     if envs.VLLM_USE_V1:
@@ -687,19 +691,14 @@ def _sample_with_torch(
                               seq_groups)
 
             if flashinfer_top_k_top_p_sampling is not None:
-                multinomial_samples[
-                    sampling_type] = _top_k_top_p_multinomial_with_flashinfer(
-                        probs[long_sample_indices],
-                        sampling_tensors.top_ks[long_sample_indices],
-                        sampling_tensors.top_ps[long_sample_indices],
-                        max_n_in_batch,
-                        seq_groups_arg,
-                    )
-            else:
-                multinomial_samples[sampling_type] = _multinomial(
-                    probs[long_sample_indices],
-                    max_n_in_batch,
-                    seq_groups=seq_groups_arg)
+                logger.warning("FlashInfer 0.2.3+ does not support "
+                               "per-request generators. Falling back to "
+                               "PyTorch-native implementation.")
+
+            multinomial_samples[sampling_type] = _multinomial(
+                probs[long_sample_indices],
+                max_n_in_batch,
+                seq_groups=seq_groups_arg)
 
             if sampled_token_ids_tensor is not None:
                 # Store sampled tokens in output tensor.
