@@ -8,14 +8,13 @@ import re
 import sys
 import threading
 import warnings
-from dataclasses import MISSING, dataclass, fields
+from dataclasses import MISSING, dataclass, fields, is_dataclass
 from itertools import permutations
 from typing import (Annotated, Any, Callable, Dict, List, Literal, Optional,
                     Type, TypeVar, Union, cast, get_args, get_origin)
 
 import torch
-from pydantic import TypeAdapter, ValidationError
-from pydantic.dataclasses import is_pydantic_dataclass
+from pydantic import SkipValidation, TypeAdapter, ValidationError
 from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
@@ -43,6 +42,8 @@ from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
                         GiB_bytes, is_in_doc_build, is_in_ray_actor)
 
 # yapf: enable
+
+IS_IN_DOC_BUILD = is_in_doc_build()
 
 logger = init_logger(__name__)
 
@@ -158,20 +159,20 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
         # Get the set of possible types for the field
         type_hints: set[TypeHint] = set()
         if get_origin(field.type) in {Union, Annotated}:
-            type_hints.update(get_args(field.type))
+            predicate = lambda arg: not isinstance(arg, SkipValidation)
+            type_hints.update(filter(predicate, get_args(field.type)))
         else:
             type_hints.add(field.type)
 
         # If the field is a dataclass, we can use the model_validate_json
-        generator = (th for th in type_hints if is_pydantic_dataclass(th))
+        generator = (th for th in type_hints if is_dataclass(th))
         dataclass_cls = next(generator, None)
 
         # Get the default value of the field
         if field.default is not MISSING:
             default = field.default
         elif field.default_factory is not MISSING:
-            if (is_pydantic_dataclass(field.default_factory)
-                    and is_in_doc_build()):
+            if IS_IN_DOC_BUILD and is_dataclass(field.default_factory):
                 default = {}
             else:
                 default = field.default_factory()
