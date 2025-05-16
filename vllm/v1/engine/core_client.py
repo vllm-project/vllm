@@ -835,9 +835,13 @@ class DPAsyncMPClient(AsyncMPClient):
         self.reqs_in_flight: dict[str, CoreEngine] = {}
 
         super().__init__(vllm_config, executor_class, log_stats)
-
         assert len(self.core_engines) > 1
 
+        # A semaphore is created, the concurrency isn't optimized.
+        # The next step is to design an algorithm to control concurrency nums.
+        # self.semaphore = asyncio.Semaphore(vllm_config.parallel_config.data_parallel_size * 256)
+        # logger.info(f"Create semaphore: {self.semaphore}, semaphore's value:{self.semaphore._value}.")
+        # self.reqs_in_engines:list[int] = [0] * len(self.core_engines)
     def _init_core_engines(
         self,
         vllm_config: VllmConfig,
@@ -861,12 +865,15 @@ class DPAsyncMPClient(AsyncMPClient):
         ]))[0]
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
-        request.current_wave = self.current_wave
+        # logger.info(f"Current semaphore value: {self.semaphore._value}."
+        #             " If value equal to 0, req is block.")
+        # await self.semaphore.acquire()
 
+        request.current_wave = self.current_wave
         chosen_engine = self.get_core_engine_for_request()
         self.reqs_in_flight[request.request_id] = chosen_engine
         chosen_engine.num_reqs_in_flight += 1
-
+        # self.reqs_in_engines[chosen_engine.index] += 1
         to_await = self._send_input(EngineCoreRequestType.ADD, request,
                                     chosen_engine)
         if not self.engines_running:
@@ -891,7 +898,9 @@ class DPAsyncMPClient(AsyncMPClient):
             for req_id in outputs.finished_requests or ():
                 if engine := self.reqs_in_flight.pop(req_id, None):
                     engine.num_reqs_in_flight -= 1
-
+                    
+                    # self.semaphore.release()
+                    # logger.info(f"Semaphore release, current value:{self.semaphore._value}")
         if outputs.wave_complete is not None:
             # Current wave is complete, move to next wave number
             # and mark engines as paused.
