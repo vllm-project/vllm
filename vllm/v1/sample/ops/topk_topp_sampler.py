@@ -95,6 +95,11 @@ class TopKTopPSampler(nn.Module):
             # not needed. This is because `random_sample` does not require
             # CPU-GPU synchronization while `flashinfer_sample` does.
             return random_sample(probs, generators)
+        if generators:
+            logger.warning("FlashInfer 0.2.3+ does not support "
+                           "per-request generators. Falling back to "
+                           "PyTorch-native implementation.")
+            return self.forward_native(logits, generators, k, p)
         return flashinfer_sample(probs, k, p, generators)
 
     def forward_tpu(
