@@ -495,7 +495,7 @@ class MambaMixer2(CustomOp):
                         # type: ignore
                         mamba2_metadata.MAX_NUM_PROGRAMS = max(
                             mamba2_metadata.MAX_NUM_PROGRAMS, mlist_len)
-                        offsetlist = []
+                        offsetlist = []  # type: ignore
                         for idx, num in enumerate(nums):
                             offsetlist.extend(range(num))
                         offsetlist = torch.tensor(offsetlist,
