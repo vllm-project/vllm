@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import multiprocessing
 import socket
 import threading
 import time
@@ -184,4 +185,76 @@ def test_normal_completion(api_server_args):
     finally:
         # Clean up just in case
         manager.close()
+        time.sleep(0.2)
+
+
+@patch("vllm.entrypoints.cli.serve.run_api_server_worker",
+       mock_run_api_server_worker)
+@pytest.mark.timeout(30)
+def test_external_process_monitoring(api_server_args):
+    """Test that wait_for_completion_or_failure detects failures in monitored 
+    external processes."""
+    global WORKER_RUNTIME_SECONDS
+    WORKER_RUNTIME_SECONDS = 100
+
+    # Create and start the external process
+    spawn_context = multiprocessing.get_context("spawn")
+    external_proc = spawn_context.Process(target=mock_run_api_server_worker,
+                                          name="MockExternalProcess")
+    external_proc.start()
+
+    # Create the manager with the external process to monitor
+    manager = APIServerProcessManager(**api_server_args,
+                                      extra_processes_to_healthcheck=[
+                                          external_proc
+                                      ])
+
+    try:
+        # Verify manager initialization
+        assert len(manager.processes) == 3
+        assert len(manager.extra_processes_to_healthcheck) == 1
+
+        # Create a result capture for the thread
+        result = {"exception": None}
+
+        def run_with_exception_capture():
+            try:
+                manager.wait_for_completion_or_failure()
+            except Exception as e:
+                result["exception"] = e
+
+        # Start a thread to run wait_for_completion_or_failure
+        wait_thread = threading.Thread(target=run_with_exception_capture,
+                                       daemon=True)
+        wait_thread.start()
+
+        # Terminate the external process
+        external_proc.terminate()
+
+        # Wait for the external process to fail and
+        # wait_for_completion_or_failure to detect it
+        wait_thread.join(timeout=1.0)
+
+        # Verify that the wait thread has completed
+        assert not wait_thread.is_alive(
+        ), "wait_for_completion_or_failure thread still running"
+
+        # Verify that an exception was raised with appropriate error message
+        assert result["exception"] is not None, "No exception was raised"
+        error_message = str(result["exception"])
+        assert "died with exit code" in error_message, \
+            f"Unexpected error message: {error_message}"
+        assert "MockExternalProcess" in error_message, \
+            f"Error doesn't mention external process: {error_message}"
+
+        # Verify that all API server processes were terminated as a result
+        for i, proc in enumerate(manager.processes):
+            assert not proc.is_alive(
+            ), f"API server process {i} was not terminated"
+
+    finally:
+        # Clean up
+        manager.close()
+        if external_proc.is_alive():
+            external_proc.terminate()
         time.sleep(0.2)
