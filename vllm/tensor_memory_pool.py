@@ -81,8 +81,8 @@ class TensorMemoryPool:
         raise MemoryError("Insufficient memory")
 
     def _split_block(self, block: MemoryBlock, required_size: int):
-        while (block.size > required_size and
-               block.size // 2 >= self.min_block_size):
+        while (block.size > required_size
+               and block.size // 2 >= self.min_block_size):
             buddy_size = block.size // 2
             buddy_addr = block.addr + buddy_size
 
@@ -129,8 +129,7 @@ class TensorMemoryPool:
             self.free(addr)
             raise MemoryError(
                 f"Allocated block size {block.size} is smaller than "
-                f"required size {size}"
-            )
+                f"required size {size}")
 
         try:
             buffer = (ctypes.c_byte * block.size).from_address(block.addr)
