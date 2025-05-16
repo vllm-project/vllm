@@ -151,7 +151,7 @@ class APIServerProcessManager:
                     if proc.exitcode != 0:
                         logger.error(
                             "Process %s (PID: %d) "
-                            "died with exit code %d", proc.name, proc.pid,
+                            "died with exit code %s", proc.name, proc.pid,
                             proc.exitcode)
                         raise RuntimeError(
                             f"Process {proc.name} (PID: {proc.pid}) "

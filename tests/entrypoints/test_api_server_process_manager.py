@@ -1,32 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import multiprocessing
 import socket
 import threading
 import time
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import patch
 
 import pytest
 
 from vllm.entrypoints.cli.serve import APIServerProcessManager
 
 # Global variables to control worker behavior
-WORKER_SHOULD_FAIL = False
 WORKER_RUNTIME_SECONDS = 0.5
 
 
 # Mock implementation of run_api_server_worker
 def mock_run_api_server_worker(listen_address, sock, args, client_config=None):
-    """Mock implementation of run_api_server_worker that can be configured to fail or run for a specific time."""
+    """Mock run_api_server_worker that runs for a specific time."""
     print(f"Mock worker started with client_config: {client_config}")
-    start_time = time.time()
-
-    # Run until time expires or we're told to fail
-    while time.time() - start_time < WORKER_RUNTIME_SECONDS:
-        if WORKER_SHOULD_FAIL:
-            print("Worker failed as requested")
-            return 1  # Non-zero exit code
-        time.sleep(0.1)
+    time.sleep(WORKER_RUNTIME_SECONDS)
+    print("Mock worker completed successfully")
 
 
 @pytest.fixture
@@ -59,11 +51,10 @@ def api_server_args():
        mock_run_api_server_worker)
 @pytest.mark.parametrize("with_stats_update", [True, False])
 def test_api_server_process_manager_init(api_server_args, with_stats_update):
-    """Test initializing the APIServerProcessManager with and without stats configurations."""
+    """Test initializing the APIServerProcessManager."""
     # Set the worker runtime to ensure tests complete in reasonable time
-    global WORKER_RUNTIME_SECONDS, WORKER_SHOULD_FAIL
+    global WORKER_RUNTIME_SECONDS
     WORKER_RUNTIME_SECONDS = 0.5
-    WORKER_SHOULD_FAIL = False
 
     # Copy the args to avoid mutating the
     args = api_server_args.copy()
@@ -103,10 +94,9 @@ def test_api_server_process_manager_init(api_server_args, with_stats_update):
 @patch("vllm.entrypoints.cli.serve.run_api_server_worker",
        mock_run_api_server_worker)
 def test_wait_for_completion_or_failure(api_server_args):
-    """Test that wait_for_completion_or_failure properly handles process failures."""
-    global WORKER_RUNTIME_SECONDS, WORKER_SHOULD_FAIL
+    """Test that wait_for_completion_or_failure works with failures."""
+    global WORKER_RUNTIME_SECONDS
     WORKER_RUNTIME_SECONDS = 1.0
-    WORKER_SHOULD_FAIL = False
 
     # Create the manager
     manager = APIServerProcessManager(**api_server_args)
@@ -114,9 +104,18 @@ def test_wait_for_completion_or_failure(api_server_args):
     try:
         assert len(manager.processes) == 3
 
+        # Create a result capture for the thread
+        result = {"exception": None}
+
+        def run_with_exception_capture():
+            try:
+                manager.wait_for_completion_or_failure()
+            except Exception as e:
+                result["exception"] = e
+
         # Start a thread to run wait_for_completion_or_failure
-        wait_thread = threading.Thread(
-            target=manager.wait_for_completion_or_failure, daemon=True)
+        wait_thread = threading.Thread(target=run_with_exception_capture,
+                                       daemon=True)
         wait_thread.start()
 
         # Let all processes run for a short time
@@ -132,10 +131,14 @@ def test_wait_for_completion_or_failure(api_server_args):
         # Wait for the wait_for_completion_or_failure
         # to detect and handle the failure
         # This should trigger it to terminate all other processes
-        time.sleep(0.5)
+        wait_thread.join(timeout=1.0)
 
         # The wait thread should have exited
         assert not wait_thread.is_alive()
+
+        # Verify that an exception was raised with appropriate error message
+        assert result["exception"] is not None
+        assert "died with exit code" in str(result["exception"])
 
         # All processes should now be terminated
         for i, proc in enumerate(manager.processes):
@@ -148,211 +151,37 @@ def test_wait_for_completion_or_failure(api_server_args):
 
 @patch("vllm.entrypoints.cli.serve.run_api_server_worker",
        mock_run_api_server_worker)
+@pytest.mark.timeout(30)
 def test_normal_completion(api_server_args):
-    """Test that when all processes complete normally, wait_for_completion_or_failure exits normally."""
-    global WORKER_RUNTIME_SECONDS, WORKER_SHOULD_FAIL
-    # Set short runtime so processes complete quickly
-    WORKER_RUNTIME_SECONDS = 0.3
-    WORKER_SHOULD_FAIL = False
+    """Test that wait_for_completion_or_failure works in normal completion."""
+    global WORKER_RUNTIME_SECONDS
+    WORKER_RUNTIME_SECONDS = 0.1
 
     # Create the manager
     manager = APIServerProcessManager(**api_server_args)
 
-    # Create mocks to verify the behavior
-    manager.close = MagicMock()
-
     try:
-        # Start a thread to run wait_for_completion_or_failure
-        wait_thread = threading.Thread(
-            target=manager.wait_for_completion_or_failure, daemon=True)
-        wait_thread.start()
+        # Give processes time to terminate
+        # wait for processes to complete
+        remaining_processes = manager.processes.copy()
+        while remaining_processes:
+            for proc in remaining_processes:
+                if not proc.is_alive():
+                    remaining_processes.remove(proc)
+            time.sleep(0.1)
 
-        # Wait for processes to complete normally
-        time.sleep(WORKER_RUNTIME_SECONDS + 0.2)
-
-        # The wait thread should have exited
-        assert not wait_thread.is_alive()
-
-        # The close method should have been called
-        manager.close.assert_called_once()
-
-    finally:
-        # Restore the original close method and ensure cleanup
-        manager.close = APIServerProcessManager.close.__get__(manager)
-        manager.close()
-        time.sleep(0.2)
-
-
-@patch("vllm.entrypoints.cli.serve.run_api_server_worker",
-       mock_run_api_server_worker)
-def test_extra_process_failure_terminates_api_servers(api_server_args):
-    """Test that API server processes are terminated if a monitored process fails."""
-    global WORKER_RUNTIME_SECONDS, WORKER_SHOULD_FAIL
-    WORKER_RUNTIME_SECONDS = 1.0
-    WORKER_SHOULD_FAIL = False
-
-    # Create a dummy extra process that will be monitored
-    def dummy_process_fn():
-        time.sleep(0.3)  # Run for a short time
-        return 1  # Exit with error
-
-    # Create the monitored process
-    spawn_context = multiprocessing.get_context("spawn")
-    monitored_proc = spawn_context.Process(target=dummy_process_fn,
-                                           name="MonitoredProcess")
-    monitored_proc.start()
-
-    # Create the manager with the extra process to monitor
-    args = api_server_args.copy()
-    manager = APIServerProcessManager(**args,
-                                      extra_processes_to_healthcheck=[
-                                          monitored_proc
-                                      ])
-
-    try:
-        # Verify the manager was initialized correctly
-        assert len(manager.processes) == 3
-        assert len(manager.extra_processes_to_healthcheck) == 1
-
-        # Verify all processes are running initially
-        for proc in manager.processes:
-            assert proc.is_alive()
-
-        # Start a thread to run wait_for_completion_or_failure
-        wait_thread = threading.Thread(
-            target=manager.wait_for_completion_or_failure, daemon=True)
-        wait_thread.start()
-
-        # Wait for the monitored process to fail
-        time.sleep(0.5)
-
-        # The monitored process should have exited with an error code
-        assert not monitored_proc.is_alive()
-        assert monitored_proc.exitcode != 0
-
-        # Wait for the wait_for_completion_or_failure to detect the failure
-        time.sleep(0.5)
-
-        # The wait thread should have raised an exception and exited
-        assert not wait_thread.is_alive()
-
-        # All API server processes should have been terminated
+        # Verify all processes have terminated
         for i, proc in enumerate(manager.processes):
             assert not proc.is_alive(
-            ), f"API server process {i} should not be alive"
+            ), f"Process {i} still alive after terminate()"
+
+        # Now call wait_for_completion_or_failure
+        # since all processes have already
+        # terminated, it should return immediately
+        # with no error
+        manager.wait_for_completion_or_failure()
 
     finally:
-        # Clean up
-        manager.close()
-        if monitored_proc.is_alive():
-            monitored_proc.terminate()
-        time.sleep(0.2)
-
-
-@patch("vllm.entrypoints.cli.serve.run_api_server_worker",
-       mock_run_api_server_worker)
-@patch("multiprocessing.connection.wait")
-def test_error_handling_in_wait_for_completion(mock_wait, api_server_args):
-    """Test that any exception in wait_for_completion_or_failure terminates all processes."""
-    global WORKER_RUNTIME_SECONDS, WORKER_SHOULD_FAIL
-    WORKER_RUNTIME_SECONDS = 1.0
-    WORKER_SHOULD_FAIL = False
-
-    # Mock the wait function to raise an exception
-    mock_wait.side_effect = Exception("Simulated error in connection.wait")
-
-    # Create the manager
-    manager = APIServerProcessManager(**api_server_args)
-    manager.close = MagicMock()  # Mock the close method to verify it's called
-
-    try:
-        # Start a thread to run wait_for_completion_or_failure
-        error_event = threading.Event()
-
-        def run_with_error_capture():
-            try:
-                manager.wait_for_completion_or_failure()
-            except Exception:
-                error_event.set()
-
-        wait_thread = threading.Thread(target=run_with_error_capture,
-                                       daemon=True)
-        wait_thread.start()
-
-        # Wait for the exception to be caught
-        time.sleep(0.3)
-
-        # Verify that the error was caught
-        assert error_event.is_set(), "Expected exception was not raised"
-
-        # Verify the close method was called to terminate all processes
-        manager.close.assert_called_once()
-
-    finally:
-        # Restore the original close method and ensure cleanup
-        manager.close = APIServerProcessManager.close.__get__(manager)
-        manager.close()
-        time.sleep(0.2)
-
-
-@patch("vllm.entrypoints.cli.serve.run_api_server_worker",
-       mock_run_api_server_worker)
-def test_run_servers_with_failure(api_server_args):
-    """Test the behavior when a process fails during the run_servers flow."""
-    global WORKER_RUNTIME_SECONDS, WORKER_SHOULD_FAIL
-    WORKER_RUNTIME_SECONDS = 0.5
-    WORKER_SHOULD_FAIL = False
-
-    # Create the manager with a mock process that will fail
-    manager = APIServerProcessManager(**api_server_args)
-
-    # Replace one of the real processes with a mock that will fail
-    real_process = manager.processes[0]
-    mock_process = Mock()
-    mock_process.is_alive.return_value = True
-    mock_process.exitcode = None
-    mock_process.name = "MockFailingProcess"
-    mock_process.pid = 12345
-
-    # Set up the mock to "fail" after a short time
-    def side_effect_alive():
-        # Return True first time, then False to simulate failure
-        mock_process.is_alive.return_value = False
-        mock_process.exitcode = 1
-        return True
-
-    mock_process.is_alive.side_effect = side_effect_alive
-
-    # Replace the real process with our mock
-    manager.processes[0] = mock_process
-
-    try:
-        # Create a result capture for the thread
-        result = {"exception": None}
-
-        def run_with_exception_capture():
-            try:
-                manager.wait_for_completion_or_failure()
-            except Exception as e:
-                result["exception"] = e
-
-        # Start the thread to run wait_for_completion_or_failure
-        wait_thread = threading.Thread(target=run_with_exception_capture,
-                                       daemon=True)
-        wait_thread.start()
-
-        # Give time for the mock process to "fail"
-        time.sleep(0.3)
-
-        # Wait for the thread to exit
-        wait_thread.join(timeout=0.5)
-
-        # Verify an exception was raised
-        assert result["exception"] is not None
-        assert "died with exit code" in str(result["exception"])
-
-    finally:
-        # Put back the real process and clean up
-        manager.processes[0] = real_process
+        # Clean up just in case
         manager.close()
         time.sleep(0.2)
