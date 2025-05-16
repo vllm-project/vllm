@@ -1690,6 +1690,8 @@ class ParallelConfig:
     """Port of the data parallel master."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
+    num_extra_experts: int = 0
+    """Number of redundant experts to use for expert parallelism."""
 
     max_parallel_loading_workers: Optional[int] = None
     """Maximum number of parallel loading workers when loading model

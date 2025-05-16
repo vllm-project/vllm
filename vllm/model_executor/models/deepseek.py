@@ -22,17 +22,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Deepseek model."""
-from typing import Any, Dict, Iterable, Optional, Set, Tuple, Union
+import typing
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
+from vllm.distributed.parallel_state import get_ep_group
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -49,7 +51,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsPP
+from .interfaces import IsMixtureOfExperts, SupportsPP
 from .utils import (AutoWeightsLoader, extract_layer_index,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
@@ -101,12 +103,26 @@ class DeepseekMoE(nn.Module):
         self.config = config
         self.rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
+        self.ep_group = get_ep_group()
+        self.ep_rank = self.ep_group.rank
+        self.ep_size = self.ep_group.world_size
         self.n_routed_experts = config.n_routed_experts
+        self.n_shared_experts = config.n_shared_experts
         self.top_k = config.num_experts_per_tok
         if self.tp_size > self.n_routed_experts:
             raise ValueError(
                 f"Tensor parallel size {self.tp_size} is greater than "
                 f"the number of experts {self.n_routed_experts}.")
+
+        # Load balancing settings.
+        # Currently, `n_redundancy_expers` equals to `n_extra_experts`.
+        vllm_config = get_current_vllm_config()
+        self.n_extra_experts = vllm_config.parallel_config.num_extra_experts
+        self.n_physical_experts = self.n_routed_experts + self.n_extra_experts
+        self.n_logical_experts = self.n_routed_experts
+        self.n_redundancy_expers = (self.n_physical_experts -
+                                    self.n_logical_experts)
+        self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
         self.experts = nn.ModuleList([
             DeepseekMLP(hidden_size=config.hidden_size,
@@ -133,6 +149,24 @@ class DeepseekMoE(nn.Module):
                 quant_config=quant_config,
                 reduce_results=False,
             )
+
+    def get_weights(self) -> List[torch.Tensor]:
+        ret: List[torch.Tensor] = []
+        for weight in [self.gate_proj_weight, self.down_proj_weight]:
+            weight = typing.cast(
+                Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], weight)
+            if isinstance(weight, torch.Tensor):
+                assert weight.is_contiguous()
+                ret.append(weight.view(self.n_local_physical_experts, -1))
+            else:
+                # FP8 weights
+                assert weight[0].element_size() == 1
+                assert weight[0].is_contiguous()
+                assert weight[1].is_contiguous()
+                ret.append(weight[0].view(torch.int8).view(
+                    self.n_local_physical_experts, -1))
+                ret.append(weight[1].view(self.n_local_physical_experts, -1))
+        return ret
 
     def pack_params(self):
         w1 = []
@@ -436,7 +470,7 @@ class DeepseekModel(nn.Module):
         return loaded_params
 
 
-class DeepseekForCausalLM(nn.Module, SupportsPP):
+class DeepseekForCausalLM(nn.Module, SupportsPP, IsMixtureOfExperts):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -454,6 +488,7 @@ class DeepseekForCausalLM(nn.Module, SupportsPP):
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
+        self.expert_weights = []
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -481,4 +516,14 @@ class DeepseekForCausalLM(nn.Module, SupportsPP):
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        loaded_weights = loader.load_weights(weights)
+
+        # Register the expert weights.
+        for layer in self.model.layers:
+            assert isinstance(layer, DeepseekDecoderLayer)
+            if isinstance(layer.mlp, DeepseekMoE):
+                self.expert_weights.append(layer.mlp.get_weights())
+
+        # TODO(bowen): Add support for MTP layers
+
+        return loaded_weights

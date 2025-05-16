@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import (TYPE_CHECKING, ClassVar, Dict, List, Literal, Optional,
-                    Protocol, Type, Union, overload, runtime_checkable)
+from collections.abc import Iterable, Sequence
+from typing import (TYPE_CHECKING, ClassVar, Dict, List, Literal,
+                    MutableSequence, Optional, Protocol, Type, Union, overload,
+                    runtime_checkable)
 
 import torch
 from torch import Tensor
@@ -421,6 +423,53 @@ def is_hybrid(
         return isinstance(model, _IsHybridType)
 
     return isinstance(model, IsHybrid)
+
+
+@runtime_checkable
+class IsMixtureOfExperts(Protocol):
+    """
+    Check if the model is a mixture of experts (MoE) model.
+    """
+
+    is_mixture_of_experts: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model is a mixture of experts (MoE) model.
+    Used for expert parallel load balancing (EPLB) now.
+    """
+
+    expert_weights: MutableSequence[Iterable[Tensor]]
+    """
+    Expert weights saved in this rank.
+
+    The first dimension is the layer, and the second dimension is different
+    parameters in the layer, e.g. up/down projection weights.
+    """
+
+
+@runtime_checkable
+class _IsMixtureOfExpertsType(Protocol):
+    is_mixture_of_experts: ClassVar[Literal[True]]
+    expert_weights: Sequence[Iterable[Tensor]]
+
+
+@overload
+def is_mixture_of_experts(model: object) -> TypeIs[IsMixtureOfExperts]:
+    ...
+
+
+@overload
+def is_mixture_of_experts(
+        model: Type[object]) -> TypeIs[Type[IsMixtureOfExperts]]:
+    ...
+
+
+def is_mixture_of_experts(
+    model: Union[Type[object], object]
+) -> Union[TypeIs[Type[IsMixtureOfExperts]], TypeIs[IsMixtureOfExperts]]:
+    if isinstance(model, type):
+        return isinstance(model, _IsMixtureOfExpertsType)
+
+    return isinstance(model, IsMixtureOfExperts)
 
 
 @runtime_checkable
