@@ -181,8 +181,8 @@ def test_get_kwargs():
     # literals of literals should have merged choices
     assert kwargs["literal_literal"]["choices"] == [1, 2]
     # dict should have json tip in help
-    json_tip = "\n\nShould be a valid JSON string."
-    assert kwargs["json_tip"]["help"].endswith(json_tip)
+    json_tip = "Should either be a valid JSON string or JSON keys"
+    assert json_tip in kwargs["json_tip"]["help"]
     # nested config should should construct the nested config
     assert kwargs["nested_config"]["type"]('{"field": 2}') == NestedConfig(2)
     # from_cli configs should be constructed with the correct method
