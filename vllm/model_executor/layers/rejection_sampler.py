@@ -123,12 +123,13 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         # for rejection sampling
         if self.use_flashinfer and chain_speculative_sampling is not None:
             batch_size, k, _ = draft_probs.shape
-            uniform_samples = self._create_uniform_samples(
-                seeded_seqs, batch_size, k, draft_probs.device)
-            output_token_ids, accepted_token_num, emitted_token_num \
-                = chain_speculative_sampling(
-                draft_probs, draft_token_ids, uniform_samples,
-                target_with_bonus_probs)
+
+            (output_token_ids, accepted_token_num,
+             emitted_token_num) = chain_speculative_sampling(
+                 draft_probs,
+                 draft_token_ids,
+                 target_with_bonus_probs,
+             )
 
             # num_emitted_tokens returned by flashinfer
             # does not include the bonus token
