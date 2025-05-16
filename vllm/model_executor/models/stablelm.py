@@ -342,7 +342,7 @@ class StablelmForCausalLM(nn.Module, SupportsPP):
             self,
             # Models trained using ColossalAI may include these tensors in
             # the checkpoint. Skip them.
-            skip_prefixes=[
+            skip_substrs=[
                 "rotary_emb.inv_freq", "rotary_emb.cos_cached",
                 "rotary_emb.sin_cached"
             ],

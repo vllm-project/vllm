@@ -85,12 +85,14 @@ class AutoWeightsLoader:
         module: nn.Module,
         *,
         skip_prefixes: Optional[list[str]] = None,
+        skip_substrs: Optional[list[str]] = None,
         ignore_unexpected_prefixes: Optional[list[str]] = None,
     ) -> None:
         super().__init__()
 
         self.module = module
         self.skip_prefixes = skip_prefixes or []
+        self.skip_substrs = skip_substrs or []
         self.ignore_unexpected_prefixes = ignore_unexpected_prefixes or []
 
     def _groupby_prefix(
@@ -119,7 +121,8 @@ class AutoWeightsLoader:
         return ".".join((prefix, rest))
 
     def _can_skip(self, qualname: str) -> bool:
-        return any(qualname.startswith(p) for p in self.skip_prefixes)
+        return (any(qualname.startswith(p) for p in self.skip_prefixes)
+                or any(substr in qualname for substr in self.skip_substrs))
 
     def _can_ignore_unexpected(self, qualname: str) -> bool:
         return any(

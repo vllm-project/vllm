@@ -346,7 +346,7 @@ class OrionForCausalLM(nn.Module, SupportsPP):
                                                    torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
-            skip_prefixes=([
+            skip_substrs=([
                 "rotary_emb.inv_freq",
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.

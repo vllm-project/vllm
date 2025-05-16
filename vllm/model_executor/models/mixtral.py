@@ -482,5 +482,5 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["rotary_emb.inv_freq"])
+        loader = AutoWeightsLoader(self, skip_substrs=["rotary_emb.inv_freq"])
         return loader.load_weights(weights)

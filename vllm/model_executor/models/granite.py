@@ -478,7 +478,7 @@ class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        skip_prefixes = [
+        skip_substrs = [
             "rotary_emb.inv_freq",
             # Models trained using ColossalAI may include these tensors in
             # the checkpoint. Skip them.
@@ -488,8 +488,12 @@ class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         # With tie_word_embeddings, we can skip lm_head.weight
         # The weight might appear unnecessarily in the files if the model is
         # processed with quantization, LoRA, fine-tuning, etc.
-        if self.config.tie_word_embeddings:
-            skip_prefixes.append("lm_head.weight")
+        skip_prefixes = (["lm_head."]
+                         if self.config.tie_word_embeddings else None)
 
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=skip_prefixes,
+            skip_substrs=skip_substrs,
+        )
         return loader.load_weights(weights)
