@@ -168,14 +168,14 @@ class PrometheusStatLogger(StatLoggerBase):
         self.gauge_scheduler_running = prometheus_client.Gauge(
             name="vllm:num_requests_running",
             documentation="Number of requests in model execution batches.",
-            labelnames=labelnames,
-            multiprocess_mode="mostrecent").labels(*labelvalues)
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames).labels(*labelvalues)
 
         self.gauge_scheduler_waiting = prometheus_client.Gauge(
             name="vllm:num_requests_waiting",
             documentation="Number of requests waiting to be processed.",
-            labelnames=labelnames,
-            multiprocess_mode="mostrecent").labels(*labelvalues)
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames).labels(*labelvalues)
 
         #
         # GPU cache
@@ -183,8 +183,8 @@ class PrometheusStatLogger(StatLoggerBase):
         self.gauge_gpu_cache_usage = prometheus_client.Gauge(
             name="vllm:gpu_cache_usage_perc",
             documentation="GPU KV-cache usage. 1 means 100 percent usage.",
-            labelnames=labelnames,
-            multiprocess_mode="mostrecent").labels(*labelvalues)
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames).labels(*labelvalues)
 
         self.counter_gpu_prefix_cache_queries = prometheus_client.Counter(
             name="vllm:gpu_prefix_cache_queries",
@@ -342,6 +342,9 @@ class PrometheusStatLogger(StatLoggerBase):
         #
         # LoRA metrics
         #
+
+        # TODO: This metric might be incorrect in case of using multiple
+        # api_server counts which uses prometheus mp.
         self.gauge_lora_info: Optional[prometheus_client.Gauge] = None
         if vllm_config.lora_config is not None:
             self.labelname_max_lora = "max_lora"
@@ -352,12 +355,12 @@ class PrometheusStatLogger(StatLoggerBase):
                 prometheus_client.Gauge(
                     name="vllm:lora_requests_info",
                     documentation="Running stats on lora requests.",
+                    multiprocess_mode="sum",
                     labelnames=[
                         self.labelname_max_lora,
                         self.labelname_waiting_lora_adapters,
                         self.labelname_running_lora_adapters,
                     ],
-                    multiprocess_mode="sum"
                 )
 
     def log_metrics_info(self, type: str, config_obj: SupportsMetricsInfo):
@@ -377,8 +380,9 @@ class PrometheusStatLogger(StatLoggerBase):
         info_gauge = prometheus_client.Gauge(
             name=name,
             documentation=documentation,
+            multiprocess_mode="mostrecent",
             labelnames=metrics_info.keys(),
-            multiprocess_mode="mostrecent").labels(**metrics_info)
+        ).labels(**metrics_info)
         info_gauge.set(1)
 
     def record(self, scheduler_stats: Optional[SchedulerStats],
