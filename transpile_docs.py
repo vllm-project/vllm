@@ -69,6 +69,18 @@ def replace_links(line: str) -> str:
     # Fix references to these anchors
     line = re.sub(r"\[(.*?)\]\(#(.*?)\)", r"[\1](\2)", line)
     line = re.sub(r"<project:#(.*?)>", r"[\1](\1)", line)
+    # Replace autodoc links with mkdocstrings links
+    autodoc_pattern = re.compile(r"\{(mod|class|meth|func)\}`(?P<object>[^\s]+?)`")
+
+    def replace_autodoc_link(match: re.Match) -> str:
+        title = match.group("object")
+        link = ""
+        if title.startswith("~"):
+            link = title[1:]
+            title = title.rsplit(".", 1)[-1]
+        return f"[{title}][{link}]"
+
+    line = autodoc_pattern.sub(replace_autodoc_link, line)
     return line
 
 
