@@ -4,31 +4,14 @@
 
 Engine arguments control the behavior of the vLLM engine.
 
-- For [offline inference](#offline-inference), they are part of the arguments to `LLM` class.
-- For [online serving](#openai-compatible-server), they are part of the arguments to `vllm serve`.
+- For [offline inference][#offline-inference], they are part of the arguments to [LLM][vllm.LLM] class.
+- For [online serving][#openai-compatible-server], they are part of the arguments to `vllm serve`.
 
-Below, you can find an explanation of every engine argument:
+You can look at [vllm.engine.arg_utils.EngineArgs][] and [vllm.engine.arg_utils.AsyncEngineArgs][] to see the available engine arguments.
 
-<!--- pyml disable-num-lines 7 no-space-in-emphasis -->
-```{eval-rst}
-.. argparse::
-    :module: vllm.engine.arg_utils
-    :func: _engine_args_parser
-    :prog: vllm serve
-    :nodefaultconst:
-    :markdownhelp:
-```
+However, these classes are a combination of the configuration classes defined in [vllm.config][]. Therefore, we would recommend you read about them there where they are best documented.
 
-## Async Engine Arguments
+For offline inference you will have access to these configuration classes and for online serving you can cross-reference the configs with `vllm serve --help`, which has its arguments grouped by config.
 
-Additional arguments are available to the asynchronous engine which is used for online serving:
-
-<!--- pyml disable-num-lines 7 no-space-in-emphasis -->
-```{eval-rst}
-.. argparse::
-    :module: vllm.engine.arg_utils
-    :func: _async_engine_args_parser
-    :prog: vllm serve
-    :nodefaultconst:
-    :markdownhelp:
-```
+!!! note
+    Additional arguments are available to the [AsyncLLMEngine][vllm.engine.async_llm_engine.AsyncLLMEngine] which is used for online serving. These can be found by running `vllm serve --help`
