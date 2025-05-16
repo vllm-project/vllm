@@ -93,9 +93,8 @@ class TpuPlatform(Platform):
         from vllm.config import CompilationLevel
 
         cache_config = vllm_config.cache_config
-        # For v0, the default block size is 16.
-        if cache_config and cache_config.block_size is None:
-            cache_config.block_size = cast(BlockSize, 16)
+        assert cache_config is not None
+
         compilation_config = vllm_config.compilation_config
 
         # TPU only supports DYNAMO_ONCE compilation level
@@ -118,8 +117,12 @@ class TpuPlatform(Platform):
         if envs.VLLM_USE_V1:
             from vllm.v1.attention.backends.pallas import (
                 PallasAttentionBackend)
-            cache_config.block_size = PallasAttentionBackend.get_page_size(
-                vllm_config)  # type: ignore[assignment]
+            # For v1, the default block size is calculated from vllm_config.
+            cache_config.block_size = (
+                cache_config.block_size
+                or PallasAttentionBackend.get_page_size(vllm_config)  # type: ignore[assignment]
+            )
+
             min_page_size = PallasAttentionBackend.get_min_page_size(
                 vllm_config)
             if min_page_size > cache_config.block_size:
@@ -130,7 +133,11 @@ class TpuPlatform(Platform):
                     min_page_size,
                 )
                 cache_config.block_size = min_page_size  # type: ignore[assignment]
-
+        else:
+            # For v0, the default block size is 16.
+            cache_config.block_size = (
+                cache_config.block_size or cast(BlockSize, 16)
+            )
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
         if parallel_config.worker_cls == "auto":
