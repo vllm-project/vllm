@@ -168,24 +168,19 @@ completion = client.completions.create(
 print(completion._request_id)
 ```
 
-## CLI Reference
+## CLI
 
 (vllm-serve)=
 
 ### `vllm serve`
 
 The `vllm serve` command is used to launch the OpenAI-compatible server.
+To see the available CLI arguments, run `vllm serve --help`!
 
 :::{tip}
 The vast majority of command-line arguments are based on those for offline inference.
 
 See [here](configuration-options) for some common options.
-:::
-
-:::{argparse}
-:module: vllm.entrypoints.openai.cli_args
-:func: create_parser_for_docs
-:prog: vllm serve
 :::
 
 #### Configuration file
