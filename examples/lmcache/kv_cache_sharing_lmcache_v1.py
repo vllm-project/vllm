@@ -47,7 +47,7 @@ def run_store(store_done, prompts):
     # We use GPU 0 for KV cache store process.
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
-    sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=10)
+    sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=1)
 
     ktc = KVTransferConfig(kv_connector="LMCacheConnectorV1",
                            kv_role="kv_both")
