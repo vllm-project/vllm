@@ -1598,7 +1598,8 @@ __global__ void Marlin(
         }
         int last_group_id = g_idx[last_g_idx];
         if (last_group_id >= sh_first_group_id + sh_num_groups) {
-          fetch_act_order_scales_to_shared(false, first_group_id, last_group_id);
+          fetch_act_order_scales_to_shared(false, first_group_id,
+                                           last_group_id);
           __syncthreads();
         }
       }
