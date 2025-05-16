@@ -14,15 +14,12 @@ def main(model, cachedir):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Download and save Hugging Face tokenizer")
-    parser.add_argument("--model",
-                        type=str,
-                        required=True,
-                        help="Name of the model")
-    parser.add_argument("--cachedir",
-                        type=str,
-                        required=True,
-                        help="Directory to save the tokenizer")
+        description="Download and save Hugging Face tokenizer"
+    )
+    parser.add_argument("--model", type=str, required=True, help="Name of the model")
+    parser.add_argument(
+        "--cachedir", type=str, required=True, help="Directory to save the tokenizer"
+    )
 
     args = parser.parse_args()
     main(args.model, args.cachedir)

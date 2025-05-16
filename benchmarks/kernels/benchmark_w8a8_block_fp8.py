@@ -14,14 +14,16 @@ import tqdm
 import triton
 
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    _w8a8_block_fp8_matmul)
+    _w8a8_block_fp8_matmul,
+)
 from vllm.platforms import current_platform
 from vllm.utils import FlexibleArgumentParser
 
 mp.set_start_method("spawn", force=True)
 
-assert current_platform.is_cuda(
-), "Only support tune w8a8 block fp8 kernel on CUDA device."
+assert current_platform.is_cuda(), (
+    "Only support tune w8a8 block fp8 kernel on CUDA device."
+)
 
 DTYPE_MAP = {
     "float32": torch.float32,
@@ -40,7 +42,7 @@ def w8a8_block_matmul(
     config: dict[str, Any],
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
-    """This function performs matrix multiplication with 
+    """This function performs matrix multiplication with
     block-wise quantization.
 
     It takes two input tensors `A` and `B` with scales `As` and `Bs`.
@@ -51,7 +53,7 @@ def w8a8_block_matmul(
         B: The input tensor, e.g., weight.
         As: The per-token-group quantization scale for `A`.
         Bs: The per-block quantization scale for `B`.
-        block_size: The block size for per-block quantization. 
+        block_size: The block size for per-block quantization.
                     It should be 2-dim, e.g., [128, 128].
         output_dytpe: The dtype of the returned tensor.
 
@@ -71,18 +73,18 @@ def w8a8_block_matmul(
     assert triton.cdiv(N, block_n) == Bs.shape[0]
     assert triton.cdiv(K, block_k) == Bs.shape[1]
 
-    C_shape = A.shape[:-1] + (N, )
+    C_shape = A.shape[:-1] + (N,)
     C = A.new_empty(C_shape, dtype=output_dtype)
 
     def grid(META):
-        return (triton.cdiv(M, META["BLOCK_SIZE_M"]) *
-                triton.cdiv(N, META["BLOCK_SIZE_N"]), )
+        return (
+            triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
+        )
 
     if A.dtype == torch.float8_e4m3fn:
         kernel = _w8a8_block_fp8_matmul
     else:
-        raise RuntimeError(
-            "Currently, only support tune w8a8 block fp8 kernel.")
+        raise RuntimeError("Currently, only support tune w8a8 block fp8 kernel.")
 
     kernel[grid](
         A,
@@ -119,14 +121,16 @@ def get_configs_compute_bound():
                 for block_n in [32, 64, 128, 256]:
                     for num_warps in [4, 8]:
                         for group_size in [1, 16, 32, 64]:
-                            configs.append({
-                                "BLOCK_SIZE_M": block_m,
-                                "BLOCK_SIZE_N": block_n,
-                                "BLOCK_SIZE_K": block_k,
-                                "GROUP_SIZE_M": group_size,
-                                "num_warps": num_warps,
-                                "num_stages": num_stages,
-                            })
+                            configs.append(
+                                {
+                                    "BLOCK_SIZE_M": block_m,
+                                    "BLOCK_SIZE_N": block_n,
+                                    "BLOCK_SIZE_K": block_k,
+                                    "GROUP_SIZE_M": group_size,
+                                    "num_warps": num_warps,
+                                    "num_stages": num_stages,
+                                }
+                            )
     return configs
 
 
@@ -165,15 +169,9 @@ def get_weight_shapes(tp_size):
     return weight_shapes
 
 
-def benchmark_config(A,
-                     B,
-                     As,
-                     Bs,
-                     block_size,
-                     config,
-                     out_dtype=torch.float16,
-                     num_iters=10):
-
+def benchmark_config(
+    A, B, As, Bs, block_size, config, out_dtype=torch.float16, num_iters=10
+):
     def run():
         w8a8_block_matmul(A, B, As, Bs, block_size, config, out_dtype)
 
@@ -206,26 +204,26 @@ def tune(M, N, K, block_size, out_dtype, search_space, input_type):
         fp8_max, fp8_min = fp8_info.max, fp8_info.min
 
         A_fp32 = (
-            (torch.rand(M, K, dtype=torch.float32, device="cuda") - 0.5) * 2 *
-            fp8_max)
+            (torch.rand(M, K, dtype=torch.float32, device="cuda") - 0.5) * 2 * fp8_max
+        )
         A = A_fp32.clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
 
         B_fp32 = (
-            (torch.rand(N, K, dtype=torch.float32, device="cuda") - 0.5) * 2 *
-            fp8_max)
+            (torch.rand(N, K, dtype=torch.float32, device="cuda") - 0.5) * 2 * fp8_max
+        )
         B = B_fp32.clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
     else:
-        raise RuntimeError(
-            "Currently, only support tune w8a8 block fp8 kernel.")
+        raise RuntimeError("Currently, only support tune w8a8 block fp8 kernel.")
 
     block_n, block_k = block_size[0], block_size[1]
     n_tiles = (N + block_n - 1) // block_n
     k_tiles = (K + block_k - 1) // block_k
 
-    As = torch.rand(M, k_tiles, dtype=torch.float32,
-                    device="cuda") * factor_for_scale
-    Bs = (torch.rand(n_tiles, k_tiles, dtype=torch.float32, device="cuda") *
-          factor_for_scale)
+    As = torch.rand(M, k_tiles, dtype=torch.float32, device="cuda") * factor_for_scale
+    Bs = (
+        torch.rand(n_tiles, k_tiles, dtype=torch.float32, device="cuda")
+        * factor_for_scale
+    )
 
     best_config = None
     best_time = float("inf")
@@ -267,7 +265,8 @@ def save_configs(
     device_name = current_platform.get_device_name().replace(" ", "_")
     json_file_name = (
         f"N={N},K={K},device_name={device_name},dtype={input_type}_w8a8,"
-        f"block_shape=[{block_n},{block_k}].json")
+        f"block_shape=[{block_n},{block_k}].json"
+    )
 
     config_file_path = os.path.join(save_path, json_file_name)
     print(f"Writing best config to {config_file_path}...")
@@ -295,8 +294,7 @@ def tune_on_gpu(args_dict):
 
     search_space = get_configs_compute_bound()
     search_space = [
-        config for config in search_space
-        if block_k % config["BLOCK_SIZE_K"] == 0
+        config for config in search_space if block_k % config["BLOCK_SIZE_K"] == 0
     ]
 
     start = time.time()
@@ -312,15 +310,11 @@ def tune_on_gpu(args_dict):
                 out_dtype,
                 search_space,
                 input_type,
-            ) for batch_size in tqdm(batch_sizes,
-                                     desc=f"GPU {gpu_id} - Batch sizes")
+            )
+            for batch_size in tqdm(batch_sizes, desc=f"GPU {gpu_id} - Batch sizes")
         ]
-        best_configs = {
-            M: config
-            for M, config in zip(batch_sizes, benchmark_results)
-        }
-        save_configs(N, K, block_n, block_k, best_configs, save_path,
-                     input_type)
+        best_configs = {M: config for M, config in zip(batch_sizes, benchmark_results)}
+        save_configs(N, K, block_n, block_k, best_configs, save_path, input_type)
 
     end = time.time()
     print(f"Tuning on GPU {gpu_id} took {end - start:.2f} seconds")
@@ -376,13 +370,14 @@ def main(args):
 
     process_args = []
     for gpu_id in range(num_gpus):
-        process_args.append({
-            "gpu_id": gpu_id,
-            "batch_sizes": batches_per_gpu[gpu_id],
-            "weight_shapes":
-            weight_shapes,  # Each GPU processes all weight shapes
-            "args": args,
-        })
+        process_args.append(
+            {
+                "gpu_id": gpu_id,
+                "batch_sizes": batches_per_gpu[gpu_id],
+                "weight_shapes": weight_shapes,  # Each GPU processes all weight shapes
+                "args": args,
+            }
+        )
 
     ctx = mp.get_context("spawn")
     with ctx.Pool(num_gpus) as pool:
@@ -398,13 +393,11 @@ Tune triton w8a8 block fp8 for DeepSeek-V3/DeepSeek-R1:
     python3 benchmark_w8a8_block_fp8.py --tp-size 8 --input-type fp8
 Then copy to model_executor/layers/quantization/utils/configs
         """,
-        formatter_class=argparse.RawTextHelpFormatter)
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
 
     parser.add_argument("--tp-size", "-tp", type=int, default=8)
-    parser.add_argument("--input-type",
-                        type=str,
-                        choices=["fp8"],
-                        default="fp8")
+    parser.add_argument("--input-type", type=str, choices=["fp8"], default="fp8")
     parser.add_argument(
         "--out-dtype",
         type=str,

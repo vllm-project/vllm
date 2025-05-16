@@ -17,11 +17,12 @@ sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=1)
 llm = LLM(model="meta-llama/Llama-3.2-1B-Instruct",
           enforce_eager=True,
           gpu_memory_utilization=0.8,
-          kv_transfer_config=KVTransferConfig.from_cli(
-              '{"kv_connector":"SharedStorageConnector","kv_role":"kv_both", '
-              '"kv_connector_extra_config": '
-              '{"shared_storage_path": "local_storage"}}')
-          )  #, max_model_len=2048, max_num_batched_tokens=2048)
+          kv_transfer_config=KVTransferConfig(
+              kv_connector="SharedStorageConnector",
+              kv_role="kv_both",
+              kv_connector_extra_config={
+                  "shared_storage_path": "local_storage"
+              }))  #, max_model_len=2048, max_num_batched_tokens=2048)
 
 # 1ST generation (prefill instance)
 outputs = llm.generate(

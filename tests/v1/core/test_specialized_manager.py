@@ -17,8 +17,9 @@ def get_sliding_window_manager(sliding_window_spec, block_pool):
 
 
 def test_sliding_window_possible_cached_prefix():
+    block_size = 2
     sliding_window_spec = SlidingWindowSpec(
-        block_size=2,
+        block_size=block_size,
         num_kv_heads=1,
         head_size=1,
         dtype=torch.float32,
@@ -44,7 +45,9 @@ def test_sliding_window_possible_cached_prefix():
                     i: block_pool.blocks[i + 10]
                 }
 
-        computed_blocks = manager.find_longest_cache_hit(block_hash_list)
+        computed_blocks = manager.find_longest_cache_hit(
+            block_hash_list,
+            len(block_hash_list) * block_size)
         assert len(computed_blocks) == expect_length
 
         assert all(block == block_pool.null_block

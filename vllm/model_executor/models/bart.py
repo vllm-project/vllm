@@ -19,7 +19,8 @@
 # limitations under the License.
 """PyTorch BART model."""
 import math
-from typing import Iterable, Optional, Tuple
+from collections.abc import Iterable
+from typing import Optional
 
 import torch
 from torch import nn
@@ -859,14 +860,14 @@ class BartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
     def _rename_stacked_param(
         self,
         name: str,
-    ) -> Tuple[str, Optional[str]]:
+    ) -> tuple[str, Optional[str]]:
         for key, mapping in self.stacked_params_mapping.items():
             if key in name:
                 name = name.replace(key, mapping["param_name"])
                 return name, mapping["shard_id"]
         return name, None
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
 
         model_params_dict = dict(self.model.named_parameters())
         top_params_dict = dict(self.named_parameters())

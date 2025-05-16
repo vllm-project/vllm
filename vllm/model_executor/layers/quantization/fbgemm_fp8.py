@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import torch
 from torch.nn import Module
@@ -28,7 +28,7 @@ logger = init_logger(__name__)
 class FBGEMMFp8Config(QuantizationConfig):
     """Config class for FBGEMM Fp8."""
 
-    def __init__(self, ignore_list: List[str], input_scale_ub: float):
+    def __init__(self, ignore_list: list[str], input_scale_ub: float):
         super().__init__()
         self.ignore_list = ignore_list if ignore_list else []
         self.input_scale_ub = input_scale_ub
@@ -43,7 +43,7 @@ class FBGEMMFp8Config(QuantizationConfig):
         return "fbgemm_fp8"
 
     @classmethod
-    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
         return [torch.bfloat16, torch.float16]
 
     @classmethod
@@ -51,11 +51,11 @@ class FBGEMMFp8Config(QuantizationConfig):
         return 80
 
     @classmethod
-    def get_config_filenames(cls) -> List[str]:
+    def get_config_filenames(cls) -> list[str]:
         return []
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "FBGEMMFp8Config":
+    def from_config(cls, config: dict[str, Any]) -> "FBGEMMFp8Config":
         ignore_list = cls.get_from_keys(config, ["modules_to_not_convert"])
         input_scale_ub = cls.get_from_keys(config, ["activation_scale_ub"])
         return cls(ignore_list=ignore_list, input_scale_ub=input_scale_ub)
@@ -63,7 +63,9 @@ class FBGEMMFp8Config(QuantizationConfig):
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         if isinstance(layer, LinearBase):
-            if is_layer_skipped(prefix, self.ignore_list):
+            if is_layer_skipped(prefix=prefix,
+                                ignored_layers=self.ignore_list,
+                                fused_mapping=self.packed_modules_mapping):
                 return UnquantizedLinearMethod()
             return FBGEMMFp8LinearMethod(self)
         return None
@@ -80,7 +82,7 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         input_size_per_partition: int,
-        output_partition_sizes: List[int],
+        output_partition_sizes: list[int],
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,

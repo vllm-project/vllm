@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from abc import ABC, abstractmethod
-from typing import Any, Optional, Set
+from typing import Any, Optional
 
 import torch
 
@@ -17,7 +17,7 @@ class AbstractWorkerManager(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def set_active_adapters(self, requests: Set[Any],
+    def set_active_adapters(self, requests: set[Any],
                             mapping: Optional[Any]) -> None:
         raise NotImplementedError
 
@@ -34,5 +34,5 @@ class AbstractWorkerManager(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def list_adapters(self) -> Set[int]:
+    def list_adapters(self) -> set[int]:
         raise NotImplementedError

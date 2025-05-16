@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 
 from vllm import SamplingParams
 from vllm.config import (CacheConfig, DeviceConfig, KVTransferConfig,
                          ModelConfig, SchedulerConfig, VllmConfig)
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
-    NixlKVTransferParams)
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec)
@@ -124,20 +122,20 @@ def create_request(
 ) -> Request:
     """Make dummy request for testing."""
 
+    kv_transfer_params: Optional[dict[str, Any]] = None
+
     if do_remote_decode:
         assert not do_remote_prefill
-        kv_transfer_params = NixlKVTransferParams(do_remote_prefill=False,
-                                                  do_remote_decode=True)
+        kv_transfer_params = dict(do_remote_prefill=False,
+                                  do_remote_decode=True)
     elif do_remote_prefill:
-        kv_transfer_params = NixlKVTransferParams(
-            do_remote_prefill=True,
-            do_remote_decode=False,
-            remote_engine_id="my-engine-id",
-            remote_block_ids=list(range(num_remote_blocks)),
-            remote_host="my-host",
-            remote_port=1234)
-    else:
-        kv_transfer_params = None
+        kv_transfer_params = dict(do_remote_prefill=True,
+                                  do_remote_decode=False,
+                                  remote_engine_id="my-engine-id",
+                                  remote_block_ids=list(
+                                      range(num_remote_blocks)),
+                                  remote_host="my-host",
+                                  remote_port=1234)
 
     max_tokens = 1 if do_remote_decode else max_tokens
     sampling_params = SamplingParams(max_tokens=max_tokens)

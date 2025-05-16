@@ -577,14 +577,12 @@ def create_kv_cache_group_specs(
      """
     kv_cache_groups = []
     for layer_names_one_group in grouped_layer_names:
-        layer_spec = kv_cache_spec[layer_names_one_group[0]]
-        assert all(
-            kv_cache_spec[layer_name] == layer_spec
-            for layer_name in layer_names_one_group[1:]), (
-                "All layers in the same KV cache group must share the same "
-                "KVCacheSpec.")
+        layer_specs = [
+            kv_cache_spec[layer_name] for layer_name in layer_names_one_group
+        ]
+        merged_layer_spec = layer_specs[0].merge(layer_specs)
         kv_cache_groups.append(
-            KVCacheGroupSpec(layer_names_one_group, layer_spec))
+            KVCacheGroupSpec(layer_names_one_group, merged_layer_spec))
     return kv_cache_groups
 
 
@@ -683,6 +681,7 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
                     head_size=spec.head_size,
                     dtype=spec.dtype,
                     use_mla=spec.use_mla,
+                    sliding_window=spec.sliding_window,
                 )
 
 

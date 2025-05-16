@@ -10,40 +10,43 @@ from typing import (TYPE_CHECKING, Any, Literal, Optional, TypedDict, TypeVar,
                     Union, cast, final)
 
 import numpy as np
-import torch
-import torch.types
-from PIL.Image import Image
-from transformers import BatchFeature
 from typing_extensions import NotRequired, TypeAlias
 
 from vllm.jsontree import JSONTree, json_map_leaves
-from vllm.utils import full_groupby, is_list_of
+from vllm.utils import LazyLoader, full_groupby, is_list_of
 
 if TYPE_CHECKING:
+    import torch
+    import torch.types
+    from PIL.Image import Image
+    from transformers.feature_extraction_utils import BatchFeature
+
     from .hasher import MultiModalHashDict
+else:
+    torch = LazyLoader("torch", globals(), "torch")
 
 _T = TypeVar("_T")
 
-HfImageItem: TypeAlias = Union[Image, np.ndarray, torch.Tensor]
+HfImageItem: TypeAlias = Union["Image", np.ndarray, "torch.Tensor"]
 """
 A {class}`transformers.image_utils.ImageInput` representing a single image
 item, which can be passed to a HuggingFace `ImageProcessor`.
 """
 
-HfVideoItem: TypeAlias = Union[list[Image], np.ndarray, torch.Tensor,
-                               list[np.ndarray], list[torch.Tensor]]
+HfVideoItem: TypeAlias = Union[list["Image"], np.ndarray, "torch.Tensor",
+                               list[np.ndarray], list["torch.Tensor"]]
 """
 A {class}`transformers.image_utils.VideoInput` representing a single video
 item, which can be passed to a HuggingFace `VideoProcessor`.
 """
 
-HfAudioItem: TypeAlias = Union[list[float], np.ndarray, torch.Tensor]
+HfAudioItem: TypeAlias = Union[list[float], np.ndarray, "torch.Tensor"]
 """
 Represents a single audio
 item, which can be passed to a HuggingFace `AudioProcessor`.
 """
 
-ImageItem: TypeAlias = Union[HfImageItem, torch.Tensor]
+ImageItem: TypeAlias = Union[HfImageItem, "torch.Tensor"]
 """
 A {class}`transformers.image_utils.ImageInput` representing a single image
 item, which can be passed to a HuggingFace `ImageProcessor`.
@@ -53,7 +56,7 @@ which are treated as image embeddings;
 these are directly passed to the model without HF processing.
 """
 
-VideoItem: TypeAlias = Union[HfVideoItem, torch.Tensor]
+VideoItem: TypeAlias = Union[HfVideoItem, "torch.Tensor"]
 """
 A {class}`transformers.image_utils.VideoInput` representing a single video
 item, which can be passed to a HuggingFace `VideoProcessor`.
@@ -64,7 +67,7 @@ these are directly passed to the model without HF processing.
 """
 
 AudioItem: TypeAlias = Union[HfAudioItem, tuple[np.ndarray, float],
-                             torch.Tensor]
+                             "torch.Tensor"]
 """
 Represents a single audio
 item, which can be passed to a HuggingFace `AudioProcessor`.
@@ -132,7 +135,7 @@ class PlaceholderRange:
     length: int
     """The length of the placeholder."""
 
-    is_embed: Optional[torch.Tensor] = None
+    is_embed: Optional["torch.Tensor"] = None
     """
     A boolean mask of shape `(length,)` indicating which positions
     between `offset` and `offset + length` to assign embeddings to.
@@ -158,8 +161,8 @@ class PlaceholderRange:
         return nested_tensors_equal(self.is_embed, other.is_embed)
 
 
-NestedTensors = Union[list["NestedTensors"], list[torch.Tensor], torch.Tensor,
-                      tuple[torch.Tensor, ...]]
+NestedTensors: TypeAlias = Union[list["NestedTensors"], list["torch.Tensor"],
+                                 "torch.Tensor", tuple["torch.Tensor", ...]]
 """
 Uses a list instead of a tensor if the dimensions of each element do not match.
 """
@@ -261,7 +264,7 @@ class BaseMultiModalField(ABC):
         """
         Construct {class}`MultiModalFieldElem` instances to represent
         the provided data.
-        
+
         This is the inverse of {meth}`reduce_data`.
         """
         raise NotImplementedError
@@ -422,7 +425,7 @@ class MultiModalFieldConfig:
             modality: The modality of the multi-modal item that uses this
                 keyword argument.
             slices: For each multi-modal item, a slice (dim=0) or a tuple of
-                slices (dim>0) that is used to extract the data corresponding 
+                slices (dim>0) that is used to extract the data corresponding
                 to it.
             dim: The dimension to extract data, default to 0.
 
@@ -465,7 +468,7 @@ class MultiModalFieldConfig:
 
     @staticmethod
     def flat_from_sizes(modality: str,
-                        size_per_item: torch.Tensor,
+                        size_per_item: "torch.Tensor",
                         dim: int = 0):
         """
         Defines a field where an element in the batch is obtained by
@@ -602,7 +605,7 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
 
     @staticmethod
     def from_hf_inputs(
-        hf_inputs: BatchFeature,
+        hf_inputs: "BatchFeature",
         config_by_key: Mapping[str, MultiModalFieldConfig],
     ):
         # NOTE: This skips fields in `hf_inputs` that are not in `config_by_key`
@@ -792,7 +795,7 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
         return self._items_by_modality[modality]
 
 
-MultiModalPlaceholderDict = Mapping[str, Sequence[PlaceholderRange]]
+MultiModalPlaceholderDict: TypeAlias = Mapping[str, Sequence[PlaceholderRange]]
 """
 A dictionary containing placeholder ranges for each modality.
 """
@@ -823,7 +826,7 @@ class MultiModalInputs(TypedDict):
     mm_hashes: Optional["MultiModalHashDict"]
     """The hashes of the multi-modal data."""
 
-    mm_placeholders: MultiModalPlaceholderDict
+    mm_placeholders: "MultiModalPlaceholderDict"
     """
     For each modality, information about the placeholder tokens in
     `prompt_token_ids`.

@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
+from typing_extensions import Self
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -53,6 +56,16 @@ class KVCacheSpec:
         """
         raise NotImplementedError
 
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        """
+        Merge a list of KVCacheSpec objects into a single KVCacheSpec object.
+        """
+        assert all(spec.type_id == specs[0].type_id for spec in specs[1:]), (
+            "All layers in the same KV cache group must share the same "
+            "type_id.")
+        return copy.deepcopy(specs[0])
+
 
 @dataclass
 class AttentionSpec(KVCacheSpec):
@@ -71,6 +84,16 @@ class AttentionSpec(KVCacheSpec):
 
 @dataclass
 class FullAttentionSpec(AttentionSpec):
+    sliding_window: Optional[int] = None
+    """
+    When hybrid allocator is disabled and the model contains both full 
+    attention layers and sliding window attention layers, sliding 
+    window attention are regarded as full attention in KV cache manager 
+    (blocks are allocated for all tokens), while computed as sliding window 
+    attention in model runner.
+    In this case, we use FullAttentionSpec and record the sliding window size.
+    Default to None for not using sliding window attention.
+    """
 
     @property
     def type_id(self) -> str:
@@ -79,6 +102,25 @@ class FullAttentionSpec(AttentionSpec):
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_model_len = vllm_config.model_config.max_model_len
         return cdiv(max_model_len, self.block_size) * self.page_size_bytes
+
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        """
+        Merge a list of FullAttentionSpec objects into a single 
+        FullAttentionSpec object.
+        """
+        merged_spec = super().merge(specs)
+        sliding_window = set(spec.sliding_window for spec in specs
+                             if spec.sliding_window is not None)
+        if len(sliding_window) == 0:
+            merged_spec.sliding_window = None
+        elif len(sliding_window) == 1:
+            merged_spec.sliding_window = sliding_window.pop()
+        else:
+            raise ValueError(
+                "All sliding window layers in the same KV cache group "
+                "must have the same window size.")
+        return merged_spec
 
 
 @dataclass

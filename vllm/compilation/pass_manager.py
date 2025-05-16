@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List
-
 from torch import fx as fx
 
 from vllm.config import VllmConfig
@@ -34,7 +32,7 @@ class PostGradPassManager(CustomGraphPass):
     """
 
     def __init__(self):
-        self.passes: List[VllmInductorPass] = []
+        self.passes: list[VllmInductorPass] = []
 
     def __call__(self, graph: fx.Graph):
         shape = get_pass_context().runtime_shape

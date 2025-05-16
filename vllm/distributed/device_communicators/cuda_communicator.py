@@ -5,6 +5,9 @@ from typing import Optional
 import torch
 from torch.distributed import ProcessGroup
 
+import vllm.envs as envs
+
+from .all2all import All2AllBase
 from .base_device_communicator import DeviceCommunicatorBase
 
 
@@ -23,9 +26,13 @@ class CudaCommunicator(DeviceCommunicatorBase):
             from vllm.distributed.parallel_state import (
                 _ENABLE_CUSTOM_ALL_REDUCE)
             use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
-        use_pynccl = True
+
+        # ep does not use pynccl
+        use_pynccl = "ep" not in unique_name
 
         self.use_pynccl = use_pynccl
+        self.use_all2all = "ep" in unique_name
+        self.all2all_impl: Optional[All2AllBase] = None
         self.use_custom_allreduce = use_custom_allreduce
 
         # lazy import to avoid documentation build error
@@ -129,3 +136,31 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.pynccl_comm = None
         if self.ca_comm is not None:
             self.ca_comm = None
+        if self.all2all_impl is not None:
+            self.all2all_impl.destroy()
+            self.all2all_impl = None
+
+    def prepare_communication_buffer_for_model(self,
+                                               model: torch.nn.Module) -> None:
+        """
+        Prepare the communication buffer for the model.
+        """
+        if not self.use_all2all:
+            return
+        all2all_backend = envs.VLLM_ALL2ALL_BACKEND
+        if all2all_backend == "naive":
+            from .all2all import NaiveAll2All
+            self.all2all_impl = NaiveAll2All(self.cpu_group, model)
+
+    def dispatch(
+            self, hidden_states: torch.Tensor,
+            router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        assert self.all2all_impl is not None
+        hidden_states, router_logits = self.all2all_impl.dispatch(
+            hidden_states, router_logits)
+        return hidden_states, router_logits
+
+    def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        assert self.all2all_impl is not None
+        hidden_states = self.all2all_impl.combine(hidden_states)
+        return hidden_states

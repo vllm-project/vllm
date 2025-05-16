@@ -26,8 +26,7 @@ import math
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
-from typing import (Any, Callable, Literal, Optional, Set, Tuple, TypedDict,
-                    Union)
+from typing import Any, Callable, Literal, Optional, TypedDict, Union
 
 import numpy as np
 import torch
@@ -118,7 +117,7 @@ class Resampler2_5(BaseResampler):
                  num_heads: int,
                  kv_dim: Optional[int] = None,
                  norm_layer: Callable[[int], nn.LayerNorm] = DEFAULT_LN,
-                 max_size: Tuple[int, int] = (70, 70),
+                 max_size: tuple[int, int] = (70, 70),
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = "") -> None:
         super().__init__(num_queries,
@@ -133,7 +132,7 @@ class Resampler2_5(BaseResampler):
         self._set_2d_pos_cache(self.max_size)
 
     def _set_2d_pos_cache(self,
-                          max_size: Tuple[int, int],
+                          max_size: tuple[int, int],
                           device: torch.types.Device = "cpu") -> None:
         pos_embed_arr = get_2d_sincos_pos_embed(self.embed_dim,
                                                 max_size,
@@ -203,7 +202,7 @@ class Resampler2_5(BaseResampler):
         return x
 
 
-def get_version_by_config(config: PretrainedConfig) -> Tuple[int, ...]:
+def get_version_by_config(config: PretrainedConfig) -> tuple[int, ...]:
     version_float = getattr(config, "version", None)
 
     # The old configs do not include version number
@@ -938,8 +937,8 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> Optional[torch.Tensor]:
         return self.llm.compute_logits(hidden_states, sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 

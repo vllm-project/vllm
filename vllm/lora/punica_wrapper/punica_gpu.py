@@ -6,7 +6,7 @@ Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
-from typing import TYPE_CHECKING, List, Optional, Tuple, Union, final
+from typing import TYPE_CHECKING, Optional, Union, final
 
 import torch
 
@@ -57,7 +57,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
     def update_metadata(
             self,
             mapping: LoRAMapping,
-            lora_index_to_id: List[Optional[int]],
+            lora_index_to_id: list[Optional[int]],
             max_loras: int,
             vocab_size: int,
             extra_vocab_size: int,
@@ -74,7 +74,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
 
     def add_shrink(self, y: torch.Tensor, x: torch.Tensor,
-                   lora_a_stacked: Tuple[torch.Tensor,
+                   lora_a_stacked: tuple[torch.Tensor,
                                          ...], scale: float, **kwargs):
         """
         Performs GEMM  for multiple slices of lora_a.
@@ -86,7 +86,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         Args:
             y (torch.Tensor): Output tensors
             x (torch.Tensor): Input tensor
-            lora_a_stacked (Tuple[torch.Tensor, ...]): lora_a's weights
+            lora_a_stacked (tuple[torch.Tensor, ...]): lora_a's weights
             scale (float): Scaling factor for the operation
         """
 
@@ -102,9 +102,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
     def add_expand(self,
                    y: torch.Tensor,
                    x: torch.Tensor,
-                   lora_b_stacked: Tuple[torch.Tensor, ...],
-                   lora_bias_stacked: Optional[Tuple[torch.Tensor, ...]],
-                   output_slices: Tuple[int, ...],
+                   lora_b_stacked: tuple[torch.Tensor, ...],
+                   lora_bias_stacked: Optional[tuple[torch.Tensor, ...]],
+                   output_slices: tuple[int, ...],
                    offset_start: int = 0,
                    add_inputs=True,
                    **kwargs) -> None:
@@ -121,10 +121,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         Args:
             y (torch.Tensor): Output tensor.
             x (torch.Tensor): Input tensors
-            lora_b_stacked (Tuple[torch.Tensor, ...]): lora_b's weight
-            lora_bias_stacked (Optional[Tuple[torch.Tensor, ...]]): 
+            lora_b_stacked (tuple[torch.Tensor, ...]): lora_b's weight
+            lora_bias_stacked (Optional[tuple[torch.Tensor, ...]]): 
                 bias's weight
-            output_slices (Tuple[int, ...]): Every slice's size
+            output_slices (tuple[int, ...]): Every slice's size
             add_inputs (bool): Defaults to True.
         """
         y_org = y
@@ -181,11 +181,11 @@ class PunicaWrapperGPU(PunicaWrapperBase):
     def add_lora_linear(self,
                         y: torch.Tensor,
                         x: torch.Tensor,
-                        lora_a_stacked: Tuple[torch.Tensor, ...],
-                        lora_b_stacked: Tuple[torch.Tensor, ...],
-                        lora_bias_stacked: Optional[Tuple[torch.Tensor, ...]],
+                        lora_a_stacked: tuple[torch.Tensor, ...],
+                        lora_b_stacked: tuple[torch.Tensor, ...],
+                        lora_bias_stacked: Optional[tuple[torch.Tensor, ...]],
                         scale: float,
-                        output_slices: Tuple[int, ...],
+                        output_slices: tuple[int, ...],
                         *,
                         buffer: Optional[torch.Tensor] = None,
                         **kwargs) -> None:
@@ -204,11 +204,11 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         Args:
             y (torch.Tensor): Output tensor. Will be changed in-place.
             x (torch.Tensor): Input tensor
-            lora_a_stacked (Tuple[torch.Tensor, ...]): lora_a's weight.
-            lora_b_stacked (Tuple[torch.Tensor, ...]): lora_b's weight.
-            lora_bias_stacked (Optional[Tuple[torch.Tensor, ...]]): lora's bias.
+            lora_a_stacked (tuple[torch.Tensor, ...]): lora_a's weight.
+            lora_b_stacked (tuple[torch.Tensor, ...]): lora_b's weight.
+            lora_bias_stacked (Optional[tuple[torch.Tensor, ...]]): lora's bias.
             scale (float): Scaling factor.
-            output_slices (Tuple[int, ...]): Every slice's size.
+            output_slices (tuple[int, ...]): Every slice's size.
             buffer (Optional[torch.Tensor]): Defaults to None.
         """
 

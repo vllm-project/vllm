@@ -108,9 +108,17 @@ __launch_bounds__(TPB) __global__
     }
 }
 
-template <int TPB>
-__launch_bounds__(TPB) __global__ void moeTopK(const float* inputs_after_softmax, const bool* finished, float* output,
-    int* indices, int* source_rows, const int num_experts, const int k, const int start_expert, const int end_expert)
+template <int TPB, typename IndType>
+__launch_bounds__(TPB) __global__ void moeTopK(
+    const float* inputs_after_softmax,
+    const bool* finished,
+    float* output,
+    IndType* indices,
+    int* source_rows,
+    const int num_experts,
+    const int k,
+    const int start_expert,
+    const int end_expert)
 {
 
     using cub_kvp = cub::KeyValuePair<int, float>;
@@ -182,9 +190,9 @@ __launch_bounds__(TPB) __global__ void moeTopK(const float* inputs_after_softmax
   2) This implementation assumes k is small, but will work for any k.
 */
 
-template <int VPT, int NUM_EXPERTS, int WARPS_PER_CTA, int BYTES_PER_LDG>
+template <int VPT, int NUM_EXPERTS, int WARPS_PER_CTA, int BYTES_PER_LDG, typename IndType>
 __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
-    void topkGatingSoftmax(const float* input, const bool* finished, float* output, const int num_rows, int* indices,
+    void topkGatingSoftmax(const float* input, const bool* finished, float* output, const int num_rows, IndType* indices,
         int* source_rows, const int k, const int start_expert, const int end_expert)
 {
     // We begin by enforcing compile time assertions and setting up compile time constants.
@@ -397,8 +405,8 @@ struct TopkConstants
 };
 } // namespace detail
 
-template <int EXPERTS, int WARPS_PER_TB>
-void topkGatingSoftmaxLauncherHelper(const float* input, const bool* finished, float* output, int* indices,
+template <int EXPERTS, int WARPS_PER_TB, typename IndType>
+void topkGatingSoftmaxLauncherHelper(const float* input, const bool* finished, float* output, IndType* indices,
     int* source_row, const int num_rows, const int k, const int start_expert, const int end_expert, cudaStream_t stream)
 {
     static constexpr std::size_t MAX_BYTES_PER_LDG = 16;
@@ -421,10 +429,11 @@ void topkGatingSoftmaxLauncherHelper(const float* input, const bool* finished, f
         token_expert_indices, num_tokens, topk, 0, num_experts,         \
         stream);
 
+template <typename IndType>
 void topkGatingSoftmaxKernelLauncher(
     const float* gating_output,
     float* topk_weights,
-    int* topk_indicies,
+    IndType* topk_indicies,
     int* token_expert_indices,
     float* softmax_workspace,
     const int num_tokens,
@@ -493,14 +502,32 @@ void topk_softmax(
     const at::cuda::OptionalCUDAGuard device_guard(device_of(gating_output));
     const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     torch::Tensor softmax_workspace = torch::empty({workspace_size}, gating_output.options());
-    vllm::moe::topkGatingSoftmaxKernelLauncher(
-        gating_output.data_ptr<float>(),
-        topk_weights.data_ptr<float>(),
-        topk_indices.data_ptr<int>(),
-        token_expert_indices.data_ptr<int>(),
-        softmax_workspace.data_ptr<float>(),
-        num_tokens,
-        num_experts,
-        topk,
-        stream);
+
+    if(topk_indices.scalar_type() == at::ScalarType::Int)
+    {
+        vllm::moe::topkGatingSoftmaxKernelLauncher(
+            gating_output.data_ptr<float>(),
+            topk_weights.data_ptr<float>(),
+            topk_indices.data_ptr<int>(),
+            token_expert_indices.data_ptr<int>(),
+            softmax_workspace.data_ptr<float>(),
+            num_tokens,
+            num_experts,
+            topk,
+            stream);
+    }
+    else
+    {
+        assert(topk_indices.scalar_type() == at::ScalarType::UInt32);
+        vllm::moe::topkGatingSoftmaxKernelLauncher(
+            gating_output.data_ptr<float>(),
+            topk_weights.data_ptr<float>(),
+            topk_indices.data_ptr<uint32_t>(),
+            token_expert_indices.data_ptr<int>(),
+            softmax_workspace.data_ptr<float>(),
+            num_tokens,
+            num_experts,
+            topk,
+            stream);
+    }
 }

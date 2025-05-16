@@ -10,15 +10,17 @@ from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, FlexibleArgumentParser
 
 
 @torch.inference_mode()
-def main(num_tokens: int,
-         hidden_size: int,
-         static_scale: bool,
-         quant_dtype: torch.dtype,
-         dtype: torch.dtype,
-         seed: int = 0,
-         do_profile: bool = False,
-         num_warmup_iters: int = 5,
-         num_iters: int = 100) -> None:
+def main(
+    num_tokens: int,
+    hidden_size: int,
+    static_scale: bool,
+    quant_dtype: torch.dtype,
+    dtype: torch.dtype,
+    seed: int = 0,
+    do_profile: bool = False,
+    num_warmup_iters: int = 5,
+    num_iters: int = 100,
+) -> None:
     current_platform.seed_everything(seed)
     torch.set_default_device("cuda")
 
@@ -56,7 +58,7 @@ def main(num_tokens: int,
     print(f"Kernel running time: {latency * 1000000:.3f} us")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
 
     def to_torch_dtype(dt):
         if dt == "int8":
@@ -66,37 +68,40 @@ if __name__ == '__main__':
         raise ValueError(f"Unsupported dtype: {dt}")
 
     parser = FlexibleArgumentParser(
-        description="Benchmark the quantization (fp8 or int8) kernel.")
+        description="Benchmark the quantization (fp8 or int8) kernel."
+    )
     parser.add_argument("--num-tokens", type=int, default=4096)
     parser.add_argument("--hidden-size", type=int, default=8192)
     parser.add_argument("--static-scale", action="store_true")
-    parser.add_argument("--quant-dtype",
-                        type=str,
-                        choices=["fp8", "int8"],
-                        default="int8")
-    parser.add_argument("--dtype",
-                        type=str,
-                        choices=["half", "bfloat16", "float"],
-                        default="half")
+    parser.add_argument(
+        "--quant-dtype", type=str, choices=["fp8", "int8"], default="int8"
+    )
+    parser.add_argument(
+        "--dtype", type=str, choices=["half", "bfloat16", "float"], default="half"
+    )
 
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--profile", action="store_true")
     parser.add_argument("--num-warmup-iters", type=int, default=5)
-    parser.add_argument("--num-iters",
-                        type=int,
-                        default=100,
-                        help="Number of benchmark iterations. "
-                        "If --profile is set, this number is ignored")
+    parser.add_argument(
+        "--num-iters",
+        type=int,
+        default=100,
+        help="Number of benchmark iterations. "
+        "If --profile is set, this number is ignored",
+    )
 
     args = parser.parse_args()
     print(args)
 
-    main(num_tokens=args.num_tokens,
-         hidden_size=args.hidden_size,
-         static_scale=args.static_scale,
-         quant_dtype=to_torch_dtype(args.quant_dtype),
-         dtype=STR_DTYPE_TO_TORCH_DTYPE[args.dtype],
-         seed=args.seed,
-         do_profile=args.profile,
-         num_warmup_iters=args.num_warmup_iters,
-         num_iters=args.num_iters)
+    main(
+        num_tokens=args.num_tokens,
+        hidden_size=args.hidden_size,
+        static_scale=args.static_scale,
+        quant_dtype=to_torch_dtype(args.quant_dtype),
+        dtype=STR_DTYPE_TO_TORCH_DTYPE[args.dtype],
+        seed=args.seed,
+        do_profile=args.profile,
+        num_warmup_iters=args.num_warmup_iters,
+        num_iters=args.num_iters,
+    )

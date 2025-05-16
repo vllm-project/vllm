@@ -9,10 +9,9 @@ import copy
 import math
 import re
 import unicodedata
-from collections.abc import Collection, Mapping, Sequence
-from collections.abc import Set as AbstractSet
+from collections.abc import Collection, Mapping, Sequence, Set
 from functools import lru_cache, partial
-from typing import Callable, List, Literal, Optional, TypedDict, Union
+from typing import Callable, Literal, Optional, TypedDict, Union
 
 import torch
 from torch import nn
@@ -395,7 +394,7 @@ def _get_tokenizer_without_image_pad(
         def tokenize(
             self,
             text: str,
-            allowed_special: Union[AbstractSet[str], str] = "all",
+            allowed_special: Union[Set[str], str] = "all",
             disallowed_special: Union[Collection[str], str] = (),
             **kwargs,
         ) -> list[Union[bytes, str]]:
@@ -411,7 +410,7 @@ def _get_tokenizer_without_image_pad(
 
         def _decode(
             self,
-            token_ids: Union[int, List[int]],
+            token_ids: Union[int, list[int]],
             skip_special_tokens: bool = False,
             errors: Optional[str] = None,
             **kwargs,

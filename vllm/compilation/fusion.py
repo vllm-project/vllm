@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
+from typing import Callable, NamedTuple, Optional
 
 import torch
 import torch._inductor.pattern_matcher as pm
@@ -57,7 +57,7 @@ kFp8StaticTensorSym = QuantKey(FP8_DTYPE, True, True, True)
 kFp8DynamicTensorSym = QuantKey(FP8_DTYPE, False, True, True)
 kFp8DynamicTokenSym = QuantKey(FP8_DTYPE, False, False, True)
 
-QUANT_OPS: Dict[QuantKey, OpOverload] = {
+QUANT_OPS: dict[QuantKey, OpOverload] = {
     kFp8StaticTensorSym: torch.ops._C.static_scaled_fp8_quant.default,  # noqa
     kFp8DynamicTensorSym:
     torch.ops._C.dynamic_scaled_fp8_quant.default,  # noqa
@@ -80,7 +80,7 @@ class FusedRMSQuantKey(NamedTuple):
                 f"{'' if self.fused_add else 'out'} residual)")
 
 
-FUSED_OPS: Dict[FusedRMSQuantKey, OpOverload] = {
+FUSED_OPS: dict[FusedRMSQuantKey, OpOverload] = {
     FusedRMSQuantKey(kFp8StaticTensorSym, False):
     torch.ops._C.rms_norm_static_fp8_quant.default,  # noqa
     FusedRMSQuantKey(kFp8StaticTensorSym, True):
@@ -101,7 +101,7 @@ class QuantMultiOutputMatch(MultiOutputMatch):
         self.QUANT_OP = quant_op  # in-place quant op
         self.FUSED_OP = fused_op  # in-place fused quant op
 
-    def insert_fused_node(self, fused_return_mapping: Dict[int, Tuple[fx.Node,
+    def insert_fused_node(self, fused_return_mapping: dict[int, tuple[fx.Node,
                                                                       int]],
                           **kwargs):
         """
@@ -548,7 +548,7 @@ class FusionPass(VllmInductorPass):
             "FusionPass singleton instance already exists"
         super().__init__(config)
 
-        self.matches: List[MultiOutputMatch] = []
+        self.matches: list[MultiOutputMatch] = []
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="fusion_pass")
 

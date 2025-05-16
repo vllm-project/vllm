@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # pylint: disable=unused-argument
-from typing import TYPE_CHECKING, List, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Optional, Union, cast
 
 import torch
 import torch.nn as nn
@@ -118,7 +118,7 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
         cls,
         source_layer: nn.Module,
         lora_config: LoRAConfig,
-        packed_modules_list: List,
+        packed_modules_list: list,
         model_config: Optional[PretrainedConfig],
     ) -> bool:
         # specifying kwargs so they can be easily accessed in decorator
@@ -141,8 +141,8 @@ class MergedColumnParallelLinearWithShardedLoRA(
     """
 
     def slice_lora_a(
-        self, lora_a: List[Union[torch.Tensor, None]]
-    ) -> List[Union[torch.Tensor, None]]:
+        self, lora_a: list[Union[torch.Tensor, None]]
+    ) -> list[Union[torch.Tensor, None]]:
         #NOTE: lora_a contains 2 subloras, and each sublora could be None.
         output_shard_size = self.lora_a_stacked[0].shape[2]
         output_start_idx = self.tp_rank * output_shard_size
@@ -165,7 +165,7 @@ class MergedColumnParallelLinearWithShardedLoRA(
         cls,
         source_layer: nn.Module,
         lora_config: LoRAConfig,
-        packed_modules_list: List,
+        packed_modules_list: list,
         model_config: Optional[PretrainedConfig],
     ) -> bool:
         # specifying kwargs so they can be easily accessed in decorator
@@ -201,7 +201,7 @@ class QKVParallelLinearWithShardedLoRA(QKVParallelLinearWithLoRA):
     @classmethod
     @_fully_sharded_can_replace
     def can_replace_layer(cls, source_layer: nn.Module,
-                          lora_config: LoRAConfig, packed_modules_list: List,
+                          lora_config: LoRAConfig, packed_modules_list: list,
                           model_config: Optional[PretrainedConfig]) -> bool:
         # specifying kwargs so they can be easily accessed in decorator
         return super().can_replace_layer(
@@ -222,8 +222,8 @@ class MergedQKVParallelLinearWithShardedLoRA(MergedQKVParallelLinearWithLoRA):
     """
 
     def slice_lora_a(
-        self, lora_a: List[Union[torch.Tensor, None]]
-    ) -> List[Union[torch.Tensor, None]]:
+        self, lora_a: list[Union[torch.Tensor, None]]
+    ) -> list[Union[torch.Tensor, None]]:
         # NOTE: lora_a contains 3 subloras, and each sublora could be None.
         shard_size = [self.lora_a_stacked[i].shape[2] for i in range(3)]
         start_idx = [self.tp_rank * shard_size[i] for i in range(3)]
@@ -248,7 +248,7 @@ class MergedQKVParallelLinearWithShardedLoRA(MergedQKVParallelLinearWithLoRA):
         cls,
         source_layer: nn.Module,
         lora_config: LoRAConfig,
-        packed_modules_list: List,
+        packed_modules_list: list,
         model_config: Optional[PretrainedConfig],
     ) -> bool:
         # specifying kwargs so they can be easily accessed in decorator
@@ -281,7 +281,7 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
     def slice_bias(self, bias: torch.Tensor) -> torch.Tensor:
         if bias is None:
             return bias
-        self.lora_bias_stacked = cast(Tuple[torch.Tensor, ...],
+        self.lora_bias_stacked = cast(tuple[torch.Tensor, ...],
                                       self.lora_bias_stacked)
         shard_size = self.lora_bias_stacked[0].shape[2]
         start_idx = self.tp_rank * shard_size
@@ -341,7 +341,7 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         cls,
         source_layer: nn.Module,
         lora_config: LoRAConfig,
-        packed_modules_list: List,
+        packed_modules_list: list,
         model_config: Optional[PretrainedConfig],
     ) -> bool:
         # specifying kwargs so they can be easily accessed in decorator

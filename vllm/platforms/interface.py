@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 import enum
+import os
 import platform
 import random
 from platform import uname
-from typing import TYPE_CHECKING, NamedTuple, Optional, Tuple, Union
+from typing import TYPE_CHECKING, NamedTuple, Optional, Union
 
 import numpy as np
 import torch
@@ -50,6 +51,7 @@ class _Backend(enum.Enum):
     PALLAS_VLLM_V1 = enum.auto()
     IPEX = enum.auto()
     BLOCK_SPARSE_FLASH_ATTN = enum.auto()
+    DUAL_CHUNK_FLASH_ATTN = enum.auto()
     NO_ATTENTION = enum.auto()
 
 
@@ -162,6 +164,24 @@ class Platform:
         return self._enum == PlatformEnum.CUDA
 
     @classmethod
+    def device_id_to_physical_device_id(cls, device_id: int):
+        if cls.device_control_env_var in os.environ:
+            device_ids = os.environ[cls.device_control_env_var].split(",")
+            if device_ids == [""]:
+                msg = (f"{cls.device_control_env_var} is set to empty string, "
+                       "which means current platform support is disabled. If "
+                       "you are using ray, please unset the environment "
+                       f"variable `{cls.device_control_env_var}` inside the "
+                       "worker/actor. Check "
+                       "https://github.com/vllm-project/vllm/issues/8402 for "
+                       "more information.")
+                raise RuntimeError(msg)
+            physical_device_id = device_ids[device_id]
+            return int(physical_device_id)
+        else:
+            return device_id
+
+    @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool,
@@ -180,7 +200,7 @@ class Platform:
     @classmethod
     def has_device_capability(
         cls,
-        capability: Union[Tuple[int, int], int],
+        capability: Union[tuple[int, int], int],
         device_id: int = 0,
     ) -> bool:
         """
@@ -342,7 +362,7 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
-    def get_infinity_values(cls, dtype: torch.dtype) -> Tuple[float, float]:
+    def get_infinity_values(cls, dtype: torch.dtype) -> tuple[float, float]:
         """
         Return the platform specific values for (-inf, inf)
         """

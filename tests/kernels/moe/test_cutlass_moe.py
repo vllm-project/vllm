@@ -30,6 +30,11 @@ MNK_FACTORS = [
     (224, 3072, 1536),
 ]
 
+vllm_config = VllmConfig(parallel_config=ParallelConfig(
+    pipeline_parallel_size=1))
+vllm_config.scheduler_config.max_num_seqs = 128
+vllm_config.scheduler_config.max_model_len = 8192
+
 
 @dataclasses.dataclass
 class MOETensors:
@@ -190,7 +195,7 @@ def run_8_bit(moe_tensors: MOETensors8Bit,
         'w1_q': moe_tensors.w1_q.transpose(1, 2),  # type: ignore[union-attr]
         'w2_q': moe_tensors.w2_q.transpose(1, 2),  # type: ignore[union-attr]
         'topk_weights': topk_weights,
-        'topk_ids_': topk_ids,
+        'topk_ids': topk_ids,
         'ab_strides1': moe_tensors.ab_strides1,
         'c_strides1': moe_tensors.c_strides1,
         'ab_strides2': moe_tensors.ab_strides2,
@@ -231,18 +236,15 @@ def test_cutlass_moe_8_bit_no_graph(
     per_out_ch: bool,
 ):
     current_platform.seed_everything(7)
-    with set_current_vllm_config(
-            VllmConfig(parallel_config=ParallelConfig(
-                pipeline_parallel_size=1))):
-
+    with set_current_vllm_config(vllm_config):
         mt = MOETensors8Bit.make_moe_tensors_8bit(m, k, n, e, per_act_token,
                                                   per_out_ch)
 
         score = torch.randn((m, e), device="cuda", dtype=torch.half)
-        topk_weights, topk_ids = fused_topk(mt.a,
-                                            score,
-                                            topk,
-                                            renormalize=False)
+        topk_weights, topk_ids, _ = fused_topk(mt.a,
+                                               score,
+                                               topk,
+                                               renormalize=False)
 
         # Note that we are using the dequantized versions of the tensors.
         # Using a, w1 and w2 directly results in minor output differences.
@@ -276,20 +278,17 @@ def test_cutlass_moe_8_bit_cuda_graph(
     per_out_ch: bool,
 ):
     current_platform.seed_everything(7)
-    with set_current_vllm_config(
-            VllmConfig(parallel_config=ParallelConfig(
-                pipeline_parallel_size=1))):
-
+    with set_current_vllm_config(vllm_config):
         dtype = torch.half
 
         mt = MOETensors8Bit.make_moe_tensors_8bit(m, k, n, e, per_act_token,
                                                   per_out_ch)
 
         score = torch.randn((m, e), device="cuda", dtype=dtype)
-        topk_weights, topk_ids = fused_topk(mt.a,
-                                            score,
-                                            topk,
-                                            renormalize=False)
+        topk_weights, topk_ids, _ = fused_topk(mt.a,
+                                               score,
+                                               topk,
+                                               renormalize=False)
 
         # Note that we are using the dequantized versions of the tensors.
         # Using a, w1 and w2 directly results in minor output differences.
@@ -334,18 +333,15 @@ def test_cutlass_moe_8_bit_EP(
     ep_size: int,
 ):
     current_platform.seed_everything(7)
-    with set_current_vllm_config(
-            VllmConfig(parallel_config=ParallelConfig(
-                pipeline_parallel_size=1))):
-
+    with set_current_vllm_config(vllm_config):
         mt = MOETensors8Bit.make_moe_tensors_8bit(m, k, n, e, per_act_token,
                                                   per_out_channel)
 
         score = torch.randn((m, e), device="cuda", dtype=torch.half)
-        topk_weights, topk_ids = fused_topk(mt.a,
-                                            score,
-                                            topk,
-                                            renormalize=False)
+        topk_weights, topk_ids, _ = fused_topk(mt.a,
+                                               score,
+                                               topk,
+                                               renormalize=False)
 
         # Note that we are using the dequantized versions of the tensors.
         # Using a, w1 and w2 directly results in minor output differences.

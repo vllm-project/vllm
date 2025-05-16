@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import torch
 from torch.nn.parameter import Parameter
@@ -32,7 +32,7 @@ class PTPCFp8Config(Fp8Config):
     def __init__(
         self,
         activation_scheme: str = "dynamic",
-        ignored_layers: Optional[List[str]] = None,
+        ignored_layers: Optional[list[str]] = None,
     ) -> None:
         if not current_platform.is_rocm():
             raise ValueError(
@@ -55,7 +55,7 @@ class PTPCFp8Config(Fp8Config):
         return "ptpc_fp8"
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "PTPCFp8Config":
+    def from_config(cls, config: dict[str, Any]) -> "PTPCFp8Config":
         activation_scheme = cls.get_from_keys(config, ["activation_scheme"])
         ignored_layers = cls.get_from_keys_or(config, ["ignored_layers"], None)
         return cls(activation_scheme=activation_scheme,

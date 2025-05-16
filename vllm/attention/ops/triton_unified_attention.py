@@ -56,11 +56,11 @@ def kernel_unified_attention_2d(
     stride_k_cache_0: tl.int64,  # int
     stride_k_cache_1: tl.int64,  # int
     stride_k_cache_2: tl.int64,  # int
-    stride_k_cache_3: tl.int64,  # int
+    stride_k_cache_3: tl.constexpr,  # int
     stride_v_cache_0: tl.int64,  # int
     stride_v_cache_1: tl.int64,  # int
     stride_v_cache_2: tl.int64,  # int
-    stride_v_cache_3: tl.int64,  # int
+    stride_v_cache_3: tl.constexpr,  # int
     query_start_len_ptr,  # [num_seqs+1]
     BLOCK_Q: tl.constexpr,  # int
     num_seqs: tl.int32,
@@ -267,6 +267,10 @@ def unified_attention(
 ):
     assert causal, "Only causal attention is supported"
     assert q_descale is None, "Q scales not supported"
+
+    block_size = v.shape[1]
+    assert q.element_size() >= 2 or block_size >= 32, \
+        "Block size must be at least 32 for fp8"
 
     use_alibi_slopes = alibi_slopes is not None
 

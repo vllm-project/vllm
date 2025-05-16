@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Optional
 
 import torch
 
@@ -25,7 +25,7 @@ class ExpertsInt8Config(QuantizationConfig):
         return "experts_int8"
 
     @classmethod
-    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
         return [torch.bfloat16, torch.half]
 
     @classmethod
@@ -33,11 +33,11 @@ class ExpertsInt8Config(QuantizationConfig):
         return 80
 
     @classmethod
-    def get_config_filenames(cls) -> List[str]:
+    def get_config_filenames(cls) -> list[str]:
         return []
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "ExpertsInt8Config":
+    def from_config(cls, config: dict[str, Any]) -> "ExpertsInt8Config":
         return cls()
 
     def get_quant_method(self, layer: torch.nn.Module,

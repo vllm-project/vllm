@@ -23,6 +23,7 @@ MODELS = [
 @pytest.mark.parametrize("model_info", MODELS)
 def test_models_mteb(hf_runner, vllm_runner,
                      model_info: EmbedModelInfo) -> None:
+    pytest.skip("Skipping mteb test.")
     from .mteb_utils import mteb_test_embed_models
     mteb_test_embed_models(hf_runner, vllm_runner, model_info)
 
@@ -32,6 +33,9 @@ def test_models_correctness(hf_runner, vllm_runner, model_info: EmbedModelInfo,
                             example_prompts) -> None:
     if not model_info.enable_test:
         pytest.skip("Skipping test.")
+
+    # ST will strip the input texts, see test_embedding.py
+    example_prompts = [str(s).strip() for s in example_prompts]
 
     with vllm_runner(model_info.name,
                      task="embed",

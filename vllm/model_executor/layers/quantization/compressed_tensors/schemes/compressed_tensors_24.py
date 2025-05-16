@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Optional
 
 import torch
 from compressed_tensors import CompressionFormat, ModelCompressor
@@ -31,7 +31,7 @@ class CompressedTensors24(CompressedTensorsScheme):
         quantized: bool = False,
         weight_quant: Optional[QuantizationArgs] = None,
         input_quant: Optional[QuantizationArgs] = None,
-        model_compression_config: Optional[Dict[str, Any]] = None,
+        model_compression_config: Optional[dict[str, Any]] = None,
     ):
         self.quantized = quantized
         self.weight_quant = weight_quant
@@ -53,7 +53,7 @@ class CompressedTensors24(CompressedTensorsScheme):
         self,
         layer: torch.nn.Module,
         input_size: int,
-        output_partition_sizes: List[int],
+        output_partition_sizes: list[int],
         input_size_per_partition: int,
         params_dtype: torch.dtype,
         weight_loader: Callable,
@@ -327,9 +327,9 @@ class CompressedTensors24(CompressedTensorsScheme):
             )
             return sparsity_compressor.decompress_weight(weight_data)
 
-        split_weights: List[torch.Tensor] = []
-        split_bitmask: List[torch.Tensor] = []
-        split_shape: List[Tuple[int, int]] = []
+        split_weights: list[torch.Tensor] = []
+        split_bitmask: list[torch.Tensor] = []
+        split_shape: list[tuple[int, int]] = []
 
         if isinstance(layer, (QKVParallelLinear, MergedColumnParallelLinear)):
             split_weights = torch.split(compressed, layer.logical_widths)

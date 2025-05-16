@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from tests.models.utils import EmbedModelInfo
+from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 
 # Most models on the STS12 task (See #17175):
 # - Model implementation and minor changes in tensor dtype
@@ -77,16 +78,22 @@ def run_mteb_embed_task_st(model_name, tasks):
     return run_mteb_embed_task(model, tasks)
 
 
-def mteb_test_embed_models(hf_runner, vllm_runner, model_info: EmbedModelInfo):
+def mteb_test_embed_models(hf_runner,
+                           vllm_runner,
+                           model_info: EmbedModelInfo,
+                           vllm_extra_kwargs=None):
     if not model_info.enable_test:
         # A model family has many models with the same architecture,
         # and we don't need to test each one.
         pytest.skip("Skipping test.")
 
+    vllm_extra_kwargs = vllm_extra_kwargs or {}
+
     with vllm_runner(model_info.name,
                      task="embed",
                      max_model_len=None,
-                     dtype=model_info.dtype) as vllm_model:
+                     dtype=model_info.dtype,
+                     **vllm_extra_kwargs) as vllm_model:
 
         if model_info.architecture:
             assert (model_info.architecture
@@ -99,9 +106,9 @@ def mteb_test_embed_models(hf_runner, vllm_runner, model_info: EmbedModelInfo):
             vllm_model.model.llm_engine.model_config.hf_config, "torch_dtype",
             vllm_dtype)
 
-    with hf_runner(model_info.name,
-                   is_sentence_transformer=True,
-                   dtype=model_dtype) as hf_model:
+    with set_default_torch_dtype(model_dtype) and hf_runner(
+            model_info.name, is_sentence_transformer=True,
+            dtype=model_dtype) as hf_model:
         st_main_score = run_mteb_embed_task(hf_model, MTEB_EMBED_TASKS)
 
     print("VLLM:", vllm_dtype, vllm_main_score)
