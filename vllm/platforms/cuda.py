@@ -158,6 +158,8 @@ class CudaPlatformBase(Platform):
                 "currently not supported with CUDA Graphs.")
             vllm_config.model_config.enforce_eager = True
             compilation_config.use_cudagraph = False
+            # FIXME: inductor breaks cudagraph (from @bnell)
+            compilation_config.use_inductor = False
 
     @classmethod
     def get_current_memory_usage(cls,
