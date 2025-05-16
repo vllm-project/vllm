@@ -95,7 +95,7 @@ class PPLXAll2AllManager(All2AllManagerBase):
             uid = nvshmem_get_unique_id(
             ) if self.rank == 0 else nvshmem_alloc_empty_unique_id()
             dist.broadcast(uid,
-                           src=self.ep_group.ranks[0],
+                           src=dist.get_process_group_ranks(self.cpu_group)[0],
                            group=self.cpu_group)
             logger.debug("PPLX NVSHMEM UID = %s", uid)
             nvshmem_init(uid, self.rank, self.world_size)
