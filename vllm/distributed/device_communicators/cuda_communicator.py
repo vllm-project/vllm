@@ -151,6 +151,15 @@ class CudaCommunicator(DeviceCommunicatorBase):
         elif all2all_backend == "pplx":
             from .all2all import PPLXAll2All
             self.all2all_impl = PPLXAll2All(self.cpu_group, model)
+        else:
+            raise ValueError(f"Unknown all2all backend: {all2all_backend}")
+
+        moe_modules = [
+            module for module in model.modules()
+            if module.__class__.__name__ == "FusedMoE"
+        ]
+        for module in moe_modules:
+            module.quant_method.init_prepare_finalize()
 
     def dispatch(
             self, hidden_states: torch.Tensor,

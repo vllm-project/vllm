@@ -102,13 +102,6 @@ class PPLXAll2All(All2AllBase):
 
         self.handle_cache = Cache()
 
-        moe_modules = [
-            module for module in model.modules()
-            if module.__class__.__name__ == "FusedMoE"
-        ]
-        for module in moe_modules:
-            module.quant_method.init_prepare_finalize()
-
     def get_handle(self, kwargs):
         import pplx_kernels as pplx
         return self.handle_cache.get_or_create(
