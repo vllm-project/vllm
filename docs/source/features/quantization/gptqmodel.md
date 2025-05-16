@@ -18,7 +18,7 @@ for more details on this and other advanced features.
 
 ## Installation
 
-You can quantize your own models by installing [GPTQModel](https://github.com/ModelCloud/GPTQModel) or picking one of the [5000+ models on Huggingface](https://huggingface.co/models?sort=trending&search=gptq).
+You can quantize your own models by installing [GPTQModel](https://github.com/ModelCloud/GPTQModel) or picking one of the [5000+ models on Huggingface](https://huggingface.co/models?search=gptq).
 
 ```console
 pip install -U gptqmodel --no-build-isolation -v
@@ -58,7 +58,7 @@ model.save(quant_path)
 To run an GPTQModel quantized model with vLLM, you can use [DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2](https://huggingface.co/ModelCloud/DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2) with the following command:
 
 ```console
-python examples/offline_inference/llm_engine_example.py --model DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2
+python examples/offline_inference/llm_engine_example.py --model ModelCloud/DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2
 ```
 
 ## Using GPTQModel with vLLM's Python API
@@ -80,15 +80,17 @@ prompts = [
 sampling_params = SamplingParams(temperature=0.6, top_p=0.9)
 
 # Create an LLM.
-llm = LLM(model="DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2")
+llm = LLM(model="ModelCloud/DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2")
 
 # Generate texts from the prompts. The output is a list of RequestOutput objects
 # that contain the prompt, generated text, and other information.
 outputs = llm.generate(prompts, sampling_params)
 
 # Print the outputs.
+print("-"*50)
 for output in outputs:
     prompt = output.prompt
     generated_text = output.outputs[0].text
-    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
+    print("-"*50)
 ```

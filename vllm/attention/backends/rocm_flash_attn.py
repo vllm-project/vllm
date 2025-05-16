@@ -767,6 +767,9 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                             query.dtype,
                             seq_lens,
                             make_attn_mask=causal_mask)  # type: ignore
+
+                    # TODO: envs.VLLM_USE_ROCM_FP8_FLASH_ATTN
+                    # could cause performance degradation
                     full_scales = (
                         layer._q_scale.item(), layer._k_scale.item(),
                         layer._v_scale.item(), layer._prob_scale.item()) if (

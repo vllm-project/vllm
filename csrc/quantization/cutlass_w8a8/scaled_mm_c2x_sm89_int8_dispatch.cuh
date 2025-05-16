@@ -321,7 +321,7 @@ inline void cutlass_gemm_sm89_int8_dispatch(torch::Tensor& out,
 
   uint32_t const m = a.size(0);
   uint32_t const mp2 =
-      std::max(static_cast<uint32_t>(32), next_pow_2(m));  // next power of 2
+      std::max(static_cast<uint32_t>(16), next_pow_2(m));  // next power of 2
 
   if (mp2 <= 16) {
     // M in [1, 16]

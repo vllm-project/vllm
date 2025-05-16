@@ -30,7 +30,7 @@ def test_load_checkpoints_from_huggingface(lora_fixture_name, request):
 
     lora_path = get_adapter_absolute_path(lora_name)
 
-    # lora loading should work for either absolute path and hugggingface id.
+    # lora loading should work for either absolute path and huggingface id.
     peft_helper = PEFTHelper.from_local_dir(lora_path, 4096)
     lora_model = LoRAModel.from_local_checkpoint(
         lora_path,

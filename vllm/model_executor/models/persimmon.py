@@ -21,7 +21,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only persimmon model compatible with HuggingFace weights."""
-from typing import Iterable, Optional, Set, Tuple, Union
+from collections.abc import Iterable
+from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -115,9 +116,10 @@ class PersimmonAttention(nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=int(self.partial_rotary_factor * self.head_dim),
+            rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
             base=self.rope_theta,
+            partial_rotary_factor=self.partial_rotary_factor,
         )
         self.scaling = self.head_dim**-0.5
         self.attn = Attention(self.num_heads,
@@ -259,10 +261,10 @@ class PersimmonModel(nn.Module):
         hidden_states = self.final_layernorm(hidden_states)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if is_pp_missing_parameter(name, self):
                 continue
@@ -335,7 +337,7 @@ class PersimmonForCausalLM(nn.Module, SupportsPP):
                                        sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
