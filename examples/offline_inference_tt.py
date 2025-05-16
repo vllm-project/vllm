@@ -207,16 +207,14 @@ def run_inference(
         sampling_params = sampling_params[:max_seqs_in_batch] if isinstance(sampling_params, list) else sampling_params
         sampling_params.max_tokens = max_tokens
 
-        max_model_len = engine_kw_args["max_model_len"]
-        assert_str = f"prompt length ({perf_prompt_len}) + num generated tokens ({sampling_params.max_tokens}) will exceed max_model_len ({max_model_len})"
-        assert perf_prompt_len + sampling_params.max_tokens <= max_model_len, assert_str
-
     # Create and run LLM
     if not async_engine:
         llm = LLM(**engine_kw_args)
         if not measure_perf:
             generate_tokens(llm, prompts, sampling_params, print_output=True)
         else:
+            max_model_len = llm.llm_engine.model_config.max_model_len
+            check_valid_perf_prompt_len(max_model_len, perf_prompt_len, sampling_params)
             run_inference_perf(llm, prompts, sampling_params)
     else:
         print("Using async engine")
@@ -226,8 +224,15 @@ def run_inference(
                 if not measure_perf:
                     await generate_tokens_async(llm, prompts, sampling_params, print_output=True)
                 else:
+                    max_model_len = llm.model_config.max_model_len
+                    check_valid_perf_prompt_len(max_model_len, perf_prompt_len, sampling_params)
                     await run_inference_perf_async(llm, prompts, sampling_params)
         uvloop.run(_run_inference_async())
+
+
+def check_valid_perf_prompt_len(max_model_len, perf_prompt_len, sampling_params):
+    assert_str = f"prompt length ({perf_prompt_len}) + num generated tokens ({sampling_params.max_tokens}) will exceed max_model_len ({max_model_len})"
+    assert perf_prompt_len + sampling_params.max_tokens <= max_model_len, assert_str
 
 
 def run_inference_perf(
