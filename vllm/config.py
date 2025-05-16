@@ -22,6 +22,7 @@ from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
 
 import torch
 from pydantic import ConfigDict, SkipValidation, TypeAdapter, model_validator
+from pydantic.dataclasses import dataclass
 from torch.distributed import ProcessGroup, ReduceOp
 from transformers import PretrainedConfig
 from typing_extensions import deprecated, runtime_checkable
@@ -52,7 +53,6 @@ IS_IN_DOC_BUILD = is_in_doc_build()
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
-    from pydantic.dataclasses import dataclass
     from ray.util.placement_group import PlacementGroup
 
     from vllm.executor.executor_base import ExecutorBase
@@ -62,13 +62,6 @@ if TYPE_CHECKING:
 
     ConfigType = type[DataclassInstance]
 else:
-
-    def dataclass(*args, **kwargs):
-        """A non-Pydantic dataclass for docs builds."""
-        kwargs.pop("config", None)
-        from dataclasses import dataclass as _dataclass
-        return _dataclass(*args, **kwargs)
-
     PlacementGroup = Any
     ExecutorBase = Any
     QuantizationConfig = Any
