@@ -678,7 +678,6 @@ Is XNNPACK available         : {is_xnnpack_available}
 ==============================
 {cpu_info}
 
-
 ==============================
 Versions of relevant libraries
 ==============================
