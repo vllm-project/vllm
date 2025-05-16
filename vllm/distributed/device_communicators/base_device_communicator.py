@@ -33,18 +33,18 @@ class All2AllManagerBase:
 
         # compute some common properties
         from vllm.distributed.parallel_state import (get_dp_group,
-                                                     get_ep_group,
                                                      get_tp_group,
                                                      in_the_same_node_as)
 
         # all2all lives in ep group, which is merged from dp and tp group
         self.dp_group = get_dp_group()
         self.tp_group = get_tp_group()
-        self.ep_group = get_ep_group()
+        # no self.ep_group since self.ep_group is still in construction
+        # when we create this object
         self.dp_rank = self.dp_group.rank_in_group
         self.dp_world_size = self.dp_group.world_size
-        self.rank = self.ep_group.rank_in_group
-        self.world_size = self.ep_group.world_size
+        self.rank = dist.get_rank(cpu_group)
+        self.world_size = dist.get_world_size(cpu_group)
 
         # all2all communication often has separate implementations for
         # intra-node and inter-node communication
