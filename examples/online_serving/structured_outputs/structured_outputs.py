@@ -3,14 +3,14 @@
 
 from __future__ import annotations
 
-import os
 import argparse
 import asyncio
-import pydantic
 import enum
-import openai
-from typing import Literal, Protocol, cast, TYPE_CHECKING, Any
+import os
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
+import openai
+import pydantic
 
 if TYPE_CHECKING:
     from openai.types.chat import ChatCompletionChunk
@@ -87,7 +87,7 @@ PARAMS: dict[ConstraintsFormat, dict[str, Any]] = {
     "choice": {
         "messages": [{
             "role": "user",
-            "content": "Classify this sentiment: vLLM is wonderful!"
+            "content": "Classify this sentiment: vLLM is wonderful!",
         }],
         "extra_body": {
             "guided_choice": ["positive", "negative"]
@@ -98,7 +98,7 @@ PARAMS: dict[ConstraintsFormat, dict[str, Any]] = {
             "role":
             "user",
             "content":
-            "Generate an email address for Alan Turing, who works in Enigma.End in .com and new line. Example result: 'alan.turing@enigma.com\n'"
+            "Generate an email address for Alan Turing, who works in Enigma.End in .com and new line. Example result: 'alan.turing@enigma.com\n'",
         }],
         "extra_body": {
             "guided_regex": r"[a-z0-9.]{1,20}@\w{6,10}\.com\n",
@@ -109,13 +109,13 @@ PARAMS: dict[ConstraintsFormat, dict[str, Any]] = {
             "role":
             "user",
             "content":
-            "Generate a JSON with the brand, model and car_type of the most iconic car from the 90's"
+            "Generate a JSON with the brand, model and car_type of the most iconic car from the 90's",
         }],
         "response_format": {
             "type": "json_schema",
             "json_schema": {
                 "name": "car-description",
-                "schema": CarDescription.model_json_schema()
+                "schema": CarDescription.model_json_schema(),
             },
         },
     },
@@ -124,7 +124,7 @@ PARAMS: dict[ConstraintsFormat, dict[str, Any]] = {
             "role":
             "user",
             "content":
-            "Generate an SQL query to show the 'username' and 'email'from the 'users' table."
+            "Generate an SQL query to show the 'username' and 'email'from the 'users' table.",
         }],
         "extra_body": {
             "guided_grammar":
@@ -141,7 +141,7 @@ condition ::= column "= " number
 
 number ::= "1 " | "2 "
 """,
-        }
+        },
     },
     "structural_tag": {
         "messages": [
@@ -202,9 +202,9 @@ and San Francisco?""",
                     },
                     "required": ["city"],
                 },
-                "end": "</function>"
+                "end": "</function>",
             }],
-            "triggers": ["<function="]
+            "triggers": ["<function="],
         },
     },
 }
@@ -222,7 +222,7 @@ async def cli():
         choices=[*list(PARAMS), "*"],
         default=["*"],
         help="Specify which constraint(s) to run.",
-      )
+    )
     _ = parser.add_argument(
         "--stream",
         action=argparse.BooleanOptionalAction,
@@ -273,9 +273,10 @@ async def cli():
                 print(f"  Reasoning: {message.reasoning_content or ''}")
             print(f"  Content: {message.content!r}")
 
+
 def main():
     asyncio.run(cli())
 
+
 if __name__ == "__main__":
     main()
-
