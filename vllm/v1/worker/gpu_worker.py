@@ -198,6 +198,18 @@ class Worker(WorkerBase):
         # gpu outside of `torch`. NCCL operations, for example, can use a few
         # GB during a forward pass
         torch.cuda.empty_cache()
+        torch_allocated_bytes = torch.cuda.memory_stats(
+        )["allocated_bytes.all.current"]
+        total_allocated_bytes = torch.cuda.mem_get_info(
+        )[1] - torch.cuda.mem_get_info()[0]
+        non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
+        if non_torch_allocations > 0:
+            # note that result.non_torch_increase is not the same as
+            # non_torch_allocations result.non_torch_increase doesn't
+            # include the usage before baseline_snapshot or that of
+            # torch initialisation
+            peak_memory += non_torch_allocations
+
         available_kv_cache_memory = (
             total_gpu_memory * self.cache_config.gpu_memory_utilization -
             peak_memory)
@@ -214,7 +226,7 @@ class Worker(WorkerBase):
                "model weights take "
                f"{(result.weights_memory / GiB_bytes):.2f}GiB;"
                " non_torch_memory takes "
-               f"{(result.non_torch_increase / GiB_bytes):.2f}GiB;"
+               f"{(non_torch_allocations / GiB_bytes):.2f}GiB;"
                " PyTorch activation peak memory takes "
                f"{(result.torch_peak_increase / GiB_bytes):.2f}GiB;"
                " the rest of the memory reserved for KV Cache is "
