@@ -166,6 +166,16 @@ def transpile_myst_to_md(old_path: Path) -> None:
 
         block.type = maybe_update_admonition(block.type)
 
+        # Handle autodoc2-summary
+        if block.type == "autodoc2-summary":
+            content, _ = parse_fence_block(lines[start + 1:end], indent)
+            links = [f"- [{c.strip()}][]\n" for c in content]
+            lines[start] = ""
+            lines[start] += "".join(links)
+            lines[start + 1:end] = ["" for _ in lines[start + 1:end]]
+            lines[end] = ""
+            continue
+
         # Handle toctree
         if block.type == "toctree":
             content, attrs = parse_fence_block(lines[start + 1:end], indent)
