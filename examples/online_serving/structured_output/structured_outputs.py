@@ -1,40 +1,21 @@
+# /// script
+# requires-python = ">=3.9"
+# dependencies = [
+#   "openai==1.78.1",
+#   "pydantic==2.11.4",
+# ]
+# ///
+
 # ruff: noqa: E501
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
 
-__doc__ = f"""
-This script demonstrates various structured output capabilities of vLLM's OpenAI-compatible server.
-It can run individual constraint types or all of them.
-It supports both streaming responses and concurrent non-streaming requests.
-
-To use this example, you must start an vLLM server with any model of your choice.
-
-```bash
-vllm serve Qwen/Qwen2.5-3B-Instruct
-```
-
-To serve a reasoning model, you can use the following command:
-```bash
-vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B --reasoning-parser deepseek_r1
-```
-
-Examples:
-
-Run all constraints, non-streaming:
-python {__file__}
-
-Run all constraints, streaming:
-python {__file__} --stream
-
-Run all constraints, with reasoning models and streaming:
-python {__file__} --reasoning --stream
-"""  # noqa: E501
-
+import os
 import argparse
 import asyncio
 from enum import Enum
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict
 
 from openai import AsyncOpenAI, AsyncStream
 from openai.types.chat import ChatCompletionChunk
@@ -227,12 +208,22 @@ and San Francisco?""",
     },
 }
 
+class Args(TypedDict):
+  constraint: list[ConstraintsFormat | Literal['all']]
 
 async def main():
     parser = argparse.ArgumentParser(
         description=
         "Run OpenAI Chat Completion with various structured outputs capabilities",
     )
+    _ = parser.add_argument(
+        "--constraint",
+        type=str,
+        nargs="+",
+        choices=[*list(PARAMS), "all"],
+        default=["all"],
+        help="Specify which constraint(s) to run.",
+      )
     _ = parser.add_argument(
         "--stream",
         action=argparse.BooleanOptionalAction,
@@ -247,8 +238,13 @@ async def main():
     )
     args = parser.parse_args()
 
-    client = AsyncOpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
-    constraints = list(PARAMS)
+    base_url = os.getenv("OPENAI_BASE_URL", "http://localhost:8000/v1")
+    client = AsyncOpenAI(base_url=base_url, api_key="EMPTY")
+    constraints = []
+    if "all" in args.constraint:
+        constraints = list(PARAMS)
+    else:
+        constraints = list(set(args.constraint))
     model = (await client.models.list()).data[0].id
 
     results = await asyncio.gather(*[
@@ -261,12 +257,12 @@ async def main():
     ])
 
     if args.stream:
-        for constraint_name, stream in zip(constraints, results):
-            await print_stream_response(stream, constraint_name, args)
+        for constraint, stream in zip(constraints, results):
+            await print_stream_response(stream, constraint, args)
     else:
-        for constraint_name, response_or_exc in zip(constraints, results):
-            print(f"\n\n{constraint_name}:")
-            message = response_or_exc.choices[0].message
+        for constraint, response in zip(constraints, results):
+            print(f"\n\n{constraint}:")
+            message = response.choices[0].message
             if args.reasoning and hasattr(message, "reasoning_content"):
                 print(f"  Reasoning: {message.reasoning_content or ''}")
             print(f"  Content: {message.content!r}")
@@ -274,3 +270,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
