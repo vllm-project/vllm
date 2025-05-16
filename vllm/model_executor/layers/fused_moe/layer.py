@@ -239,8 +239,6 @@ class FusedMoeWeightScaleSupported(Enum):
 
 
 class FusedMoEMethodBase(QuantizeMethodBase):
-    moe: Optional[MoEConfig] = None
-    quant_config: Optional[QuantizationConfig] = None
 
     @abstractmethod
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
@@ -248,11 +246,10 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                        params_dtype: torch.dtype, **extra_weight_attrs):
         raise NotImplementedError
 
-    def init_prepare_finalize(self):
+    def init_prepare_finalize(self, moe: MoEConfig,
+                              quant_config: Optional[QuantizationConfig]):
         all2all_manager = get_ep_group().device_communicator.all2all_manager
         assert all2all_manager is not None
-
-        moe: MoEConfig = self.moe
 
         prepare_finalize = None
         if moe.use_pplx_kernels:
@@ -800,6 +797,7 @@ class FusedMoE(torch.nn.Module):
             max_num_tokens=MOE_DP_CHUNK_SIZE,
         )
         self.moe_config = moe
+        self.quant_config = quant_config
 
         # Note: get_quant_method will look at the layer's local_num_experts
         # for heuristic purposes, so it must be initialized first.
