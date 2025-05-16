@@ -19,17 +19,17 @@ pillow  # Required for image processing
 prometheus-fastapi-instrumentator >= 7.0.0
 tiktoken >= 0.6.0  # Required for DBRX tokenizer
 lm-format-enforcer >= 0.10.11, < 0.11
-llguidance >= 0.7.9, < 0.8.0; platform_machine == "x86_64" or platform_machine == "arm64" or platform_machine == "aarch64"
+llguidance >= 0.7.11, < 0.8.0; platform_machine == "x86_64" or platform_machine == "arm64" or platform_machine == "aarch64"
 outlines == 0.1.11
 lark == 1.2.2
-xgrammar == 0.1.18; platform_machine == "x86_64" or platform_machine == "aarch64"
+xgrammar == 0.1.19; platform_machine == "x86_64" or platform_machine == "aarch64"
 typing_extensions >= 4.10
 filelock >= 3.16.1 # need to contain https://github.com/tox-dev/filelock/pull/317
 partial-json-parser # used for parsing partial JSON outputs
 pyzmq >= 25.0.0
 msgspec
 gguf >= 0.13.0
-importlib_metadata
+importlib_metadata; python_version < '3.10'
 mistral_common[opencv] >= 1.5.4
 opencv-python-headless >= 4.11.0    # required for video IO
 pyyaml
@@ -43,7 +43,7 @@ watchfiles # required for http server to monitor the updates of TLS files
 python-json-logger # Used by logging as per examples/other/logging_configuration.md
 scipy # Required for phi-4-multimodal-instruct
 ninja # Required for xgrammar, rocm, tpu, xpu
-opentelemetry-sdk>=1.26.0,<1.27.0  # vllm.tracing
-opentelemetry-api>=1.26.0,<1.27.0  # vllm.tracing
-opentelemetry-exporter-otlp>=1.26.0,<1.27.0  # vllm.tracing
-opentelemetry-semantic-conventions-ai>=0.4.1,<0.5.0  # vllm.tracing
+opentelemetry-sdk>=1.26.0  # vllm.tracing
+opentelemetry-api>=1.26.0  # vllm.tracing
+opentelemetry-exporter-otlp>=1.26.0  # vllm.tracing
+opentelemetry-semantic-conventions-ai>=0.4.1  # vllm.tracing

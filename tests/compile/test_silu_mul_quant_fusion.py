@@ -6,7 +6,7 @@ import vllm.envs as envs
 from vllm._custom_ops import scaled_fp8_quant
 from vllm.compilation.activation_quant_fusion import ActivationQuantFusionPass
 from vllm.compilation.fx_utils import find_auto_fn, find_auto_fn_maybe
-from vllm.config import CompilationConfig, VllmConfig
+from vllm.config import CompilationConfig, PassConfig, VllmConfig
 from vllm.model_executor.layers.activation import SiluAndMul
 
 from .backend import TestBackend
@@ -27,8 +27,8 @@ class TestModel(torch.nn.Module):
 
 @pytest.mark.parametrize("num_tokens", [256])
 @pytest.mark.parametrize("hidden_size", [64])
-@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE != "cuda",
-                    reason="Only test on CUDA")
+@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda", "rocm"],
+                    reason="Only test on CUDA and ROCm")
 def test_fusion_silu_and_mul_quant(num_tokens, hidden_size):
     torch.set_default_device("cuda")
     torch.set_default_dtype(torch.float16)
@@ -36,8 +36,7 @@ def test_fusion_silu_and_mul_quant(num_tokens, hidden_size):
     # Reshape pass is needed for the fusion pass to work
     config = VllmConfig()
     config.compilation_config = CompilationConfig(
-        pass_config=CompilationConfig.PassConfig(enable_fusion=True,
-                                                 enable_reshape=True))
+        pass_config=PassConfig(enable_fusion=True, enable_noop=True))
     fusion_pass = ActivationQuantFusionPass(config)
 
     backend = TestBackend(fusion_pass)

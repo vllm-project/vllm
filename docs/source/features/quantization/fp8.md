@@ -117,7 +117,7 @@ Here's an example of the resulting scores:
 
 ## Troubleshooting and Support
 
-If you encounter any issues or have feature requests, please open an issue on the `vllm-project/llm-compressor` GitHub repository.
+If you encounter any issues or have feature requests, please open an issue on the [vllm-project/llm-compressor](https://github.com/vllm-project/llm-compressor/issues) GitHub repository.
 
 ## Online Dynamic Quantization
 

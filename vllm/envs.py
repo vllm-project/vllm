@@ -18,9 +18,9 @@ if TYPE_CHECKING:
     VLLM_ROCM_PREFER_TRITON: bool = True
     VLLM_USE_SDPA_ATTENTION: bool = False
     VLLM_USE_TRITON_FLASH_ATTN: bool = True
-    VLLM_USE_ROCM_SKINNY_GEMM: bool = True
     VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT: bool = True
     VLLM_USE_ROCM_FP8_FLASH_ATTN: bool = False
+    VLLM_V1_USE_PREFILL_DECODE_ATTENTION: bool = False
     VLLM_FLASH_ATTN_VERSION: Optional[int] = None
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: Optional[str] = None
@@ -61,6 +61,7 @@ if TYPE_CHECKING:
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_VIDEO_FETCH_TIMEOUT: int = 30
     VLLM_AUDIO_FETCH_TIMEOUT: int = 10
+    VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MM_INPUT_CACHE_GIB: int = 8
     VLLM_TARGET_DEVICE: str = "cuda"
     MAX_JOBS: Optional[str] = None
@@ -74,6 +75,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_RPC_TIMEOUT: int = 10000  # ms
     VLLM_PLUGINS: Optional[list[str]] = None
+    VLLM_LORA_RESOLVER_CACHE_DIR: Optional[str] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
     VLLM_RPD_PROFILER_DIR: Optional[str] = None
     VLLM_USE_TRITON_AWQ: bool = False
@@ -85,13 +87,13 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_MOE: bool = True
-    VLLM_ROCM_USE_AITER_2STAGE_MOE: bool = True
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_CUSTOM_PAGED_ATTN: bool = True
+    VLLM_QUARK_EMU_MEM_OPT: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -118,6 +120,10 @@ if TYPE_CHECKING:
     VLLM_USE_DEEP_GEMM: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
+    VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
+    VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
+    VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5557
+    VLLM_ALL2ALL_BACKEND: str = "naive"
 
 
 def get_default_cache_root():
@@ -138,6 +144,39 @@ def maybe_convert_int(value: Optional[str]) -> Optional[int]:
     if value is None:
         return None
     return int(value)
+
+
+def get_vllm_port() -> Optional[int]:
+    """Get the port from VLLM_PORT environment variable.
+    
+    Returns:
+        The port number as an integer if VLLM_PORT is set, None otherwise.
+        
+    Raises:
+        ValueError: If VLLM_PORT is a URI, suggest k8s service discovery issue.
+    """
+    if 'VLLM_PORT' not in os.environ:
+        return None
+
+    port = os.getenv('VLLM_PORT', '0')
+
+    try:
+        return int(port)
+    except ValueError as err:
+        from urllib.parse import urlparse
+        try:
+            parsed = urlparse(port)
+            if parsed.scheme:
+                raise ValueError(
+                    f"VLLM_PORT '{port}' appears to be a URI. "
+                    "This may be caused by a Kubernetes service discovery issue"
+                    "check the warning in: https://docs.vllm.ai/en/stable/serving/env_vars.html"
+                )
+        except Exception:
+            pass
+
+        raise ValueError(
+            f"VLLM_PORT '{port}' must be a valid integer") from err
 
 
 # The begin-* and end* here are used by the documentation generator
@@ -220,10 +259,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Note: if VLLM_PORT is set, and some code asks for multiple ports, the
     # VLLM_PORT will be used as the first port, and the rest will be generated
     # by incrementing the VLLM_PORT value.
-    # '0' is used to make mypy happy
     'VLLM_PORT':
-    lambda: int(os.getenv('VLLM_PORT', '0'))
-    if 'VLLM_PORT' in os.environ else None,
+    get_vllm_port,
 
     # path used for ipc when the frontend api server is running in
     # multi-processing mode to communicate with the backend engine process.
@@ -284,11 +321,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: bool(
         os.environ.get("VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE", "1") != "0"),
 
-    # small gemms custom implementation for MI3* cards
-    "VLLM_USE_ROCM_SKINNY_GEMM":
-    lambda: (os.getenv("VLLM_USE_ROCM_SKINNY_GEMM", "True").lower() in
-             ("true", "1")),
-
     # have custom paged attention implemented for MI3* cards write out fp8
     "VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT":
     lambda:
@@ -299,6 +331,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_ROCM_FP8_FLASH_ATTN":
     lambda: (os.getenv("VLLM_USE_ROCM_FP8_FLASH_ATTN", "False").lower() in
              ("true", "1")),
+
+    # Use separate prefill and decode kernels for V1 attention instead of
+    # the unified triton kernel.
+    "VLLM_V1_USE_PREFILL_DECODE_ATTENTION":
+    lambda:
+    (os.getenv("VLLM_V1_USE_PREFILL_DECODE_ATTENTION", "False").lower() in
+     ("true", "1")),
+
+    # Internal flag to enable/disable Inductor standalone compile
+    "VLLM_TEST_STANDALONE_COMPILE":
+    lambda: os.environ.get("VLLM_TEST_STANDALONE_COMPILE", "0") != "0",
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
@@ -475,6 +518,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_AUDIO_FETCH_TIMEOUT":
     lambda: int(os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "10")),
 
+    # Backend for Video IO
+    # - "opencv": Default backend that uses OpenCV stream buffered backend.
+    #
+    # Custom backend implementations can be registered
+    # via `@VIDEO_LOADER_REGISTRY.register("my_custom_video_loader")` and
+    # imported at runtime.
+    # If a non-existing backend is used, an AssertionError will be thrown.
+    "VLLM_VIDEO_LOADER_BACKEND":
+    lambda: os.getenv("VLLM_VIDEO_LOADER_BACKEND", "opencv"),
+
     # Cache size (in GiB) for multimodal input cache
     # Default is 4 GiB
     "VLLM_MM_INPUT_CACHE_GIB":
@@ -533,6 +586,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_PLUGINS":
     lambda: None if "VLLM_PLUGINS" not in os.environ else os.environ[
         "VLLM_PLUGINS"].split(","),
+
+    # a local directory to look in for unrecognized LoRA adapters.
+    # only works if plugins are enabled and
+    # VLLM_ALLOW_RUNTIME_LORA_UPDATING is enabled.
+    "VLLM_LORA_RESOLVER_CACHE_DIR":
+    lambda: os.getenv("VLLM_LORA_RESOLVER_CACHE_DIR", None),
 
     # Enables torch profiler if set. Path to the directory where torch profiler
     # traces are saved. Note that it must be an absolute path.
@@ -600,11 +659,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: (os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in
              ("true", "1")),
 
-    # use aiter ck fused moe op if ater ops are enabled
-    "VLLM_ROCM_USE_AITER_2STAGE_MOE":
-    lambda: (os.getenv("VLLM_ROCM_USE_AITER_2STAGE_MOE", "True").lower() in
-             ("true", "1")),
-
     # use aiter rms norm op if aiter ops are enabled.
     "VLLM_ROCM_USE_AITER_RMSNORM":
     lambda: (os.getenv("VLLM_ROCM_USE_AITER_RMSNORM", "True").lower() in
@@ -632,6 +686,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_CUSTOM_PAGED_ATTN":
     lambda: (os.getenv("VLLM_ROCM_CUSTOM_PAGED_ATTN", "True").lower() in
              ("true", "1")),
+
+    # If set, when running in Quark emulation mode, do not dequantize the
+    # weights at load time. Instead, dequantize weights on-the-fly during
+    # kernel execution.
+    # This allows running larger models at the cost of slower inference.
+    # This flag has no effect when not running in Quark emulation mode.
+    "VLLM_QUARK_EMU_MEM_OPT":
+    lambda: bool(int(os.getenv("VLLM_QUARK_EMU_MEM_OPT", "0"))),
 
     # Divisor for dynamic query scale factor calculation for FP8 KV Cache
     "Q_SCALE_CONSTANT":
@@ -780,6 +842,24 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # limit will actually be zero-copy decoded.
     "VLLM_MSGPACK_ZERO_COPY_THRESHOLD":
     lambda: int(os.getenv("VLLM_MSGPACK_ZERO_COPY_THRESHOLD", "256")),
+
+    # If set, allow insecure serialization using pickle.
+    # This is useful for environments where it is deemed safe to use the
+    # insecure method and it is needed for some reason.
+    "VLLM_ALLOW_INSECURE_SERIALIZATION":
+    lambda: bool(int(os.getenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "0"))),
+
+    # IP address used for NIXL handshake between remote agents.
+    "VLLM_NIXL_SIDE_CHANNEL_HOST":
+    lambda: os.getenv("VLLM_NIXL_SIDE_CHANNEL_HOST", "localhost"),
+
+    # Port used for NIXL handshake between remote agents.
+    "VLLM_NIXL_SIDE_CHANNEL_PORT":
+    lambda: int(os.getenv("VLLM_NIXL_SIDE_CHANNEL_PORT", "5557")),
+
+    # all2all backend for vllm's expert parallel communication
+    "VLLM_ALL2ALL_BACKEND":
+    lambda: os.getenv("VLLM_ALL2ALL_BACKEND", "naive"),
 }
 
 # end-env-vars-definition
@@ -842,6 +922,7 @@ def compute_hash() -> str:
         "VLLM_USE_TRITON_AWQ",
         "VLLM_DP_RANK",
         "VLLM_DP_SIZE",
+        "VLLM_TEST_STANDALONE_COMPILE",
     ]
     for key in environment_variables_to_hash:
         if key in environment_variables:

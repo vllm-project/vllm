@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 import enum
+import os
 import platform
 import random
 from platform import uname
-from typing import TYPE_CHECKING, NamedTuple, Optional, Tuple, Union
+from typing import TYPE_CHECKING, NamedTuple, Optional, Union
 
 import numpy as np
 import torch
@@ -39,7 +40,8 @@ class _Backend(enum.Enum):
     TRITON_ATTN_VLLM_V1 = enum.auto()
     XFORMERS = enum.auto()
     ROCM_FLASH = enum.auto()
-    ROCM_AITER_MLA = enum.auto()
+    ROCM_AITER_MLA = enum.auto()  # Supported by V1
+    ROCM_AITER_MLA_VLLM_V1 = enum.auto()
     TORCH_SDPA = enum.auto()
     FLASHINFER = enum.auto()
     TRITON_MLA = enum.auto()  # Supported by V1
@@ -49,6 +51,7 @@ class _Backend(enum.Enum):
     PALLAS_VLLM_V1 = enum.auto()
     IPEX = enum.auto()
     BLOCK_SPARSE_FLASH_ATTN = enum.auto()
+    DUAL_CHUNK_FLASH_ATTN = enum.auto()
     NO_ATTENTION = enum.auto()
 
 
@@ -121,6 +124,14 @@ class Platform:
 
     additional_env_vars: list[str] = []
 
+    @property
+    def supported_dtypes(self) -> list[torch.dtype]:
+        """Returns the supported dtypes for the current platform."""
+        # Be careful with the order of the dtypes. The first dtype will
+        # be used as the default dtype fallback for the current platform,
+        # when encountering unsupported dtypes in "auto" dtype.
+        return [torch.bfloat16, torch.float16, torch.float32]
+
     def is_cuda(self) -> bool:
         return self._enum == PlatformEnum.CUDA
 
@@ -153,6 +164,24 @@ class Platform:
         return self._enum == PlatformEnum.CUDA
 
     @classmethod
+    def device_id_to_physical_device_id(cls, device_id: int):
+        if cls.device_control_env_var in os.environ:
+            device_ids = os.environ[cls.device_control_env_var].split(",")
+            if device_ids == [""]:
+                msg = (f"{cls.device_control_env_var} is set to empty string, "
+                       "which means current platform support is disabled. If "
+                       "you are using ray, please unset the environment "
+                       f"variable `{cls.device_control_env_var}` inside the "
+                       "worker/actor. Check "
+                       "https://github.com/vllm-project/vllm/issues/8402 for "
+                       "more information.")
+                raise RuntimeError(msg)
+            physical_device_id = device_ids[device_id]
+            return int(physical_device_id)
+        else:
+            return device_id
+
+    @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool,
@@ -171,7 +200,7 @@ class Platform:
     @classmethod
     def has_device_capability(
         cls,
-        capability: Union[Tuple[int, int], int],
+        capability: Union[tuple[int, int], int],
         device_id: int = 0,
     ) -> bool:
         """
@@ -333,11 +362,39 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
+    def get_infinity_values(cls, dtype: torch.dtype) -> tuple[float, float]:
+        """
+        Return the platform specific values for (-inf, inf)
+        """
+        return float("-inf"), float("inf")
+
+    @classmethod
+    def can_update_inplace(cls) -> bool:
+        """
+        Checks if the platform allows inplace memory updates
+        """
+        return True
+
+    @classmethod
+    def get_lora_vocab_padding_size(cls) -> int:
+        """
+        Returns how much padding the LoRA logits need for kernels
+        """
+        return 256
+
+    @classmethod
     def get_device_communicator_cls(cls) -> str:
         """
         Get device specific communicator class for distributed communication.
         """
         return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
+
+    @classmethod
+    def supports_mx(cls) -> bool:
+        """
+        Returns whether the current platform supports MX types.
+        """
+        return False
 
     @classmethod
     def supports_fp8(cls) -> bool:

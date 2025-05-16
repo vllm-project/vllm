@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 
@@ -22,7 +22,7 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
 
     @classmethod
     def can_implement(
-            cls, c: ScaledMMLinearLayerConfig) -> Tuple[bool, Optional[str]]:
+            cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, Optional[str]]:
 
         if (not current_platform.is_cuda() and not current_platform.is_cpu()):
             return False, "CutlassScaledMM requires running on CUDA or CPU."

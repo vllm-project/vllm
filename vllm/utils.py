@@ -15,6 +15,7 @@ import importlib.metadata
 import importlib.util
 import inspect
 import ipaddress
+import json
 import multiprocessing
 import os
 import pickle
@@ -33,7 +34,7 @@ import uuid
 import warnings
 import weakref
 from argparse import (Action, ArgumentDefaultsHelpFormatter, ArgumentParser,
-                      ArgumentTypeError)
+                      ArgumentTypeError, _ArgumentGroup)
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import UserDict, defaultdict
 from collections.abc import (AsyncGenerator, Awaitable, Generator, Hashable,
@@ -70,6 +71,8 @@ import vllm.triton_utils  # noqa: F401
 from vllm.logger import enable_trace_function_call, init_logger
 
 if TYPE_CHECKING:
+    from argparse import Namespace
+
     from vllm.config import ModelConfig, VllmConfig
 
 logger = init_logger(__name__)
@@ -151,6 +154,7 @@ STR_TORCH_SDPA_ATTN_VAL: str = "TORCH_SDPA"
 STR_ROCM_FLASH_ATTN_VAL: str = "ROCM_FLASH"
 STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
 STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
+STR_DUAL_CHUNK_FLASH_ATTN_VAL: str = "DUAL_CHUNK_FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
 
 GB_bytes = 1_000_000_000
@@ -759,6 +763,10 @@ def is_valid_ipv6_address(address: str) -> bool:
 
 
 def get_distributed_init_method(ip: str, port: int) -> str:
+    return get_tcp_uri(ip, port)
+
+
+def get_tcp_uri(ip: str, port: int) -> str:
     # Brackets are not permitted in ipv4 addresses,
     # see https://github.com/python/cpython/issues/103848
     return f"tcp://[{ip}]:{port}" if ":" in ip else f"tcp://{ip}:{port}"
@@ -851,6 +859,13 @@ def chunk_list(lst: list[T], chunk_size: int):
 def cdiv(a: int, b: int) -> int:
     """Ceiling division."""
     return -(a // -b)
+
+
+def next_power_of_2(n) -> int:
+    """The next power of 2 (inclusive)"""
+    if n < 1:
+        return 1
+    return 1 << (n - 1).bit_length()
 
 
 def round_up(x: int, y: int) -> int:
@@ -1475,13 +1490,51 @@ class SortedHelpFormatter(ArgumentDefaultsHelpFormatter):
 class FlexibleArgumentParser(ArgumentParser):
     """ArgumentParser that allows both underscore and dash in names."""
 
+    _deprecated: set[Action] = set()
+
     def __init__(self, *args, **kwargs):
         # Set the default 'formatter_class' to SortedHelpFormatter
         if 'formatter_class' not in kwargs:
             kwargs['formatter_class'] = SortedHelpFormatter
         super().__init__(*args, **kwargs)
 
-    def parse_args(self, args=None, namespace=None):
+    if sys.version_info < (3, 13):
+        # Enable the deprecated kwarg for Python 3.12 and below
+
+        def parse_known_args(self, args=None, namespace=None):
+            namespace, args = super().parse_known_args(args, namespace)
+            for action in FlexibleArgumentParser._deprecated:
+                if (hasattr(namespace, dest := action.dest)
+                        and getattr(namespace, dest) != action.default):
+                    logger.warning_once("argument '%s' is deprecated", dest)
+            return namespace, args
+
+        def add_argument(self, *args, **kwargs):
+            deprecated = kwargs.pop("deprecated", False)
+            action = super().add_argument(*args, **kwargs)
+            if deprecated:
+                FlexibleArgumentParser._deprecated.add(action)
+            return action
+
+        class _FlexibleArgumentGroup(_ArgumentGroup):
+
+            def add_argument(self, *args, **kwargs):
+                deprecated = kwargs.pop("deprecated", False)
+                action = super().add_argument(*args, **kwargs)
+                if deprecated:
+                    FlexibleArgumentParser._deprecated.add(action)
+                return action
+
+        def add_argument_group(self, *args, **kwargs):
+            group = self._FlexibleArgumentGroup(self, *args, **kwargs)
+            self._action_groups.append(group)
+            return group
+
+    def parse_args(  # type: ignore[override]
+        self,
+        args: list[str] | None = None,
+        namespace: Namespace | None = None,
+    ):
         if args is None:
             args = sys.argv[1:]
 
@@ -1515,6 +1568,51 @@ class FlexibleArgumentParser(ArgumentParser):
                 processed_args.append(arg[2:])
             else:
                 processed_args.append(arg)
+
+        def create_nested_dict(keys: list[str], value: str):
+            """Creates a nested dictionary from a list of keys and a value.
+
+            For example, `keys = ["a", "b", "c"]` and `value = 1` will create:
+            `{"a": {"b": {"c": 1}}}`
+            """
+            nested_dict: Any = value
+            for key in reversed(keys):
+                nested_dict = {key: nested_dict}
+            return nested_dict
+
+        def recursive_dict_update(original: dict, update: dict):
+            """Recursively updates a dictionary with another dictionary."""
+            for k, v in update.items():
+                if isinstance(v, dict) and isinstance(original.get(k), dict):
+                    recursive_dict_update(original[k], v)
+                else:
+                    original[k] = v
+
+        delete = set()
+        dict_args: dict[str, dict] = defaultdict(dict)
+        for i, processed_arg in enumerate(processed_args):
+            if processed_arg.startswith("--") and "." in processed_arg:
+                if "=" in processed_arg:
+                    processed_arg, value = processed_arg.split("=", 1)
+                    if "." not in processed_arg:
+                        # False positive, . was only in the value
+                        continue
+                else:
+                    value = processed_args[i + 1]
+                    delete.add(i + 1)
+                key, *keys = processed_arg.split(".")
+                # Merge all values with the same key into a single dict
+                arg_dict = create_nested_dict(keys, value)
+                recursive_dict_update(dict_args[key], arg_dict)
+                delete.add(i)
+        # Filter out the dict args we set to None
+        processed_args = [
+            a for i, a in enumerate(processed_args) if i not in delete
+        ]
+        # Add the dict args back as if they were originally passed as JSON
+        for dict_arg, dict_value in dict_args.items():
+            processed_args.append(dict_arg)
+            processed_args.append(json.dumps(dict_value))
 
         return super().parse_args(processed_args, namespace)
 
@@ -1942,6 +2040,14 @@ def get_cuda_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
     """
     assert cpu_tensor.is_pinned(), "CPU tensor must be pinned"
     return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
+
+
+def is_in_doc_build() -> bool:
+    try:
+        from sphinx.ext.autodoc.mock import _MockModule
+        return isinstance(zmq, _MockModule)
+    except ModuleNotFoundError:
+        return False
 
 
 def import_from_path(module_name: str, file_path: Union[str, os.PathLike]):
@@ -2459,6 +2565,24 @@ def split_zmq_path(path: str) -> Tuple[str, str, str]:
         raise ValueError(f"Invalid zmq path: {path}")
 
     return scheme, host, port
+
+
+def make_zmq_path(scheme: str, host: str, port: Optional[int] = None) -> str:
+    """Make a ZMQ path from its parts.
+
+    Args:
+        scheme: The ZMQ transport scheme (e.g. tcp, ipc, inproc).
+        host: The host - can be an IPv4 address, IPv6 address, or hostname.
+        port: Optional port number, only used for TCP sockets.
+
+    Returns:
+        A properly formatted ZMQ path string.
+    """
+    if not port:
+        return f"{scheme}://{host}"
+    if is_valid_ipv6_address(host):
+        return f"{scheme}://[{host}]:{port}"
+    return f"{scheme}://{host}:{port}"
 
 
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L783 # noqa: E501
