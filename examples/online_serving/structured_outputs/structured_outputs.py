@@ -6,18 +6,35 @@ from __future__ import annotations
 import os
 import argparse
 import asyncio
-from enum import Enum
-from typing import Any, Literal, TypedDict
+import pydantic
+import enum
+import openai
+from typing import Literal, Protocol, cast, TYPE_CHECKING, Any
 
-from openai import AsyncOpenAI, AsyncStream
-from openai.types.chat import ChatCompletionChunk
-from pydantic import BaseModel
+
+if TYPE_CHECKING:
+    from openai.types.chat import ChatCompletionChunk
+
+
+class Args(Protocol):
+    constraint: list[ConstraintsFormat]
+    stream: Literal[True] | Literal[False]
+    reasoning: Literal[True] | Literal[False]
+
+
+ConstraintsFormat = Literal[
+    "choice",
+    "regex",
+    "json",
+    "grammar",
+    "structural_tag",
+]
 
 
 async def print_stream_response(
-    stream_response: AsyncStream[ChatCompletionChunk],
+    stream_response: openai.AsyncStream[ChatCompletionChunk],
     title: str,
-    args: argparse.Namespace,
+    args: Args,
 ):
     print(f"\n\n{title} (Streaming):")
 
@@ -53,28 +70,20 @@ async def print_stream_response(
     print()
 
 
-class CarType(str, Enum):
-    sedan = "sedan"
-    suv = "SUV"
-    truck = "Truck"
-    coupe = "Coupe"
+class CarType(str, enum.Enum):
+    SEDAN = "SEDAN"
+    SUV = "SUV"
+    TRUCK = "TRUCK"
+    COUPE = "COUPE"
 
 
-class CarDescription(BaseModel):
+class CarDescription(pydantic.BaseModel):
     brand: str
     model: str
     car_type: CarType
 
 
-ConstraintsFormat = Literal[
-    "choice",
-    "regex",
-    "json",
-    "grammar",
-    "structural_tag",
-]
-
-PARAMS: dict[ConstraintsFormat, Any] = {
+PARAMS: dict[ConstraintsFormat, dict[str, Any]] = {
     "choice": {
         "messages": [{
             "role": "user",
@@ -200,8 +209,6 @@ and San Francisco?""",
     },
 }
 
-class Args(TypedDict):
-  constraint: list[ConstraintsFormat | Literal['all']]
 
 async def cli():
     parser = argparse.ArgumentParser(
@@ -212,8 +219,8 @@ async def cli():
         "--constraint",
         type=str,
         nargs="+",
-        choices=[*list(PARAMS), "all"],
-        default=["all"],
+        choices=[*list(PARAMS), "*"],
+        default=["*"],
         help="Specify which constraint(s) to run.",
       )
     _ = parser.add_argument(
@@ -228,30 +235,37 @@ async def cli():
         default=False,
         help="Enable printing of reasoning traces if available.",
     )
-    args = parser.parse_args()
+    args = cast(Args, parser.parse_args())
 
     base_url = os.getenv("OPENAI_BASE_URL", "http://localhost:8000/v1")
-    client = AsyncOpenAI(base_url=base_url, api_key="EMPTY")
-    constraints = []
-    if "all" in args.constraint:
+    client = openai.AsyncOpenAI(base_url=base_url, api_key="EMPTY")
+    constraints: list[ConstraintsFormat] = []
+    if "*" in args.constraint:
         constraints = list(PARAMS)
     else:
         constraints = list(set(args.constraint))
     model = (await client.models.list()).data[0].id
 
-    results = await asyncio.gather(*[
-        client.chat.completions.create(
-            model=model,
-            max_tokens=1024,
-            stream=args.stream,
-            **PARAMS[name],
-        ) for name in constraints
-    ])
-
     if args.stream:
+        results = await asyncio.gather(*[
+            client.chat.completions.create(
+                model=model,
+                max_tokens=1024,
+                stream=True,
+                **PARAMS[name],
+            ) for name in constraints
+        ])
         for constraint, stream in zip(constraints, results):
             await print_stream_response(stream, constraint, args)
     else:
+        results = await asyncio.gather(*[
+            client.chat.completions.create(
+                model=model,
+                max_tokens=1024,
+                stream=False,
+                **PARAMS[name],
+            ) for name in constraints
+        ])
         for constraint, response in zip(constraints, results):
             print(f"\n\n{constraint}:")
             message = response.choices[0].message
