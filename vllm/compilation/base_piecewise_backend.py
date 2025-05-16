@@ -10,7 +10,7 @@ from vllm.config import VllmConfig
 
 class AbstractPiecewiseBackend(Protocol):
     """
-    PiecewiseBackend interface that allows oot devices of vLLM to extend 
+    PiecewiseBackend interface that allows platforms to extend 
     piecewise static graph.
     """
 
@@ -23,7 +23,7 @@ class AbstractPiecewiseBackend(Protocol):
         Initializes the PiecewiseBackend class with compilation and 
         execution-related configurations.
 
-        This class handles piecewise compilation, CUDA graph capturing, 
+        This class handles piecewise compilation, graph capturing, 
         and dispatching for specific input shapes.
 
         Args:
