@@ -460,7 +460,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 logger.warning_once(
                     "DeepGemm not supported on the current platform.")
 
-        self.fused_experts = functools.partial(
+        self.fused_experts = functools.partial(  # noqa
             fused_experts,
             block_shape=self.quant_config.weight_block_size,
             allow_deep_gemm=self.allow_deep_gemm)

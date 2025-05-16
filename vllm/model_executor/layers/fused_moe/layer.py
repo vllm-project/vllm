@@ -326,7 +326,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def __init__(self, moe: MoEConfig):
         super().__init__()
-        self.fused_experts = fused_experts
+        self.fused_experts = fused_experts  # noqa
         self.moe = moe
 
         self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
