@@ -2,7 +2,7 @@
 
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Tuple
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -140,8 +140,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
                     dst_kv_cache_layer[slot_mapping[:num_token],
                                        ...] = src_kv_cache
                     logger.warning(
-                        "🚧src_kv_cache does not match, num_slot:%d, num_token:%d",
-                        len(slot_mapping), num_token)
+                        "🚧src_kv_cache does not match, num_slot:%d, "
+                        "num_token:%d", len(slot_mapping), num_token)
 
                 dst_kv_cache_layer.reshape(dst_kv_cache_layer_shape)
             else:
@@ -156,8 +156,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
                     dst_kv_cache_layer[:, slot_mapping[:num_token],
                                        ...] = src_kv_cache
                     logger.warning(
-                        "🚧src_kv_cache does not match, num_slot:%d, num_token:%d",
-                        len(slot_mapping), num_token)
+                        "🚧src_kv_cache does not match, num_slot:%d, "
+                        "num_token:%d", len(slot_mapping), num_token)
 
                 dst_kv_cache_layer.reshape(dst_kv_cache_layer_shape)
 
@@ -357,7 +357,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
         return meta
 
     @staticmethod
-    def parse_request_id(request_id: str, is_prefill=True) -> Tuple[str, int]:
+    def parse_request_id(request_id: str, is_prefill=True) -> tuple[str, int]:
         logger.debug("parse_request_id, request_id: %s, is_prefill: %s",
                      request_id, is_prefill)
         # Regular expression to match the string hostname and integer port

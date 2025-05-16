@@ -4,7 +4,6 @@ import atexit
 import ctypes
 import math
 from dataclasses import dataclass
-from typing import Dict, Tuple
 
 import torch
 
@@ -29,8 +28,8 @@ class TensorMemoryPool:
         self.max_block_size = self._round_to_power_of_two(max_block_size)
         self.min_block_size = self._round_to_power_of_two(min_block_size)
 
-        self.free_lists: Dict[int, Dict[int, MemoryBlock]] = {}
-        self.allocated_blocks: Dict[int, MemoryBlock] = {}
+        self.free_lists: dict[int, dict[int, MemoryBlock]] = {}
+        self.allocated_blocks: dict[int, MemoryBlock] = {}
 
         self._initialize_free_lists()
         self._allocate_pinned_memory()
@@ -82,7 +81,8 @@ class TensorMemoryPool:
         raise MemoryError("Insufficient memory")
 
     def _split_block(self, block: MemoryBlock, required_size: int):
-        while block.size > required_size and block.size // 2 >= self.min_block_size:
+        while (block.size > required_size and
+               block.size // 2 >= self.min_block_size):
             buddy_size = block.size // 2
             buddy_addr = block.addr + buddy_size
 
@@ -128,7 +128,8 @@ class TensorMemoryPool:
         if block.size < size:
             self.free(addr)
             raise MemoryError(
-                f"Allocated block size {block.size} is smaller than required size {size}"
+                f"Allocated block size {block.size} is smaller than "
+                f"required size {size}"
             )
 
         try:
@@ -136,9 +137,9 @@ class TensorMemoryPool:
             cpu_tensor = torch.frombuffer(buffer,
                                           dtype=tensor.dtype,
                                           count=tensor.numel())
-        except ValueError as e:
+        except ValueError as err:
             self.free(addr)
-            raise MemoryError(f"Failed to create tensor view: {e}")
+            raise MemoryError(f"Failed to create tensor view: {err}") from err
 
         with torch.cuda.stream(self.store_stream):
             ops.store_tensor(tensor, cpu_tensor)
@@ -147,7 +148,7 @@ class TensorMemoryPool:
         return addr
 
     def load_tensor(self, addr: int, dtype: torch.dtype,
-                    shape: Tuple[int, ...], device) -> torch.Tensor:
+                    shape: tuple[int, ...], device) -> torch.Tensor:
         if addr not in self.allocated_blocks:
             raise ValueError("Invalid address to load")
 

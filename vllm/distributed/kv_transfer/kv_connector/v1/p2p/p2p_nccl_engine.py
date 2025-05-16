@@ -5,7 +5,7 @@ import threading
 import time
 import typing
 from collections import deque
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Optional
 
 import msgpack
 import torch
@@ -14,8 +14,7 @@ import zmq
 from vllm.config import KVTransferConfig
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     NCCLLibrary, buffer_type, cudaStream_t, ncclComm_t, ncclDataTypeEnum)
-from vllm.distributed.kv_transfer.kv_connector.v1.p2p.tensor_memory_pool import (
-    TensorMemoryPool)
+from vllm.tensor_memory_pool import TensorMemoryPool
 from vllm.utils import current_stream, get_ip
 
 logger = logging.getLogger(__name__)
@@ -82,21 +81,21 @@ class P2pNcclEngine:
         # PUT, GET, PUT_ASYNC.
         self.send_type = self.config.get_from_extra_config("send_type", "PUT")
         if self.send_type == "GET":
-            self.send_store: Dict[str,
+            self.send_store: dict[str,
                                   torch.Tensor] = {}  # tensor_id: torch.Tensor
         else:
             # PUT or PUT_ASYNC
-            self.send_queue: Deque[
-                List[Any]] = deque()  # tensor_id: torch.Tensor
+            # tensor_id: torch.Tensor
+            self.send_queue: deque[list[Any]] = deque()
             if self.send_type == "PUT_ASYNC":
                 self._send_thread = threading.Thread(target=self._send_async,
                                                      daemon=True)
                 self._send_thread.start()
 
         # tensor_id: torch.Tensor/(addr, dtype, shape)
-        self.recv_store: Dict[str, Any] = {}
-        self.socks: Dict[str, Any] = {}  # remote_address: client socket
-        self.comms: Dict[str, Any] = {}  # remote_address: (ncclComm_t, rank)
+        self.recv_store: dict[str, Any] = {}
+        self.socks: dict[str, Any] = {}  # remote_address: client socket
+        self.comms: dict[str, Any] = {}  # remote_address: (ncclComm_t, rank)
 
         self.buffer_size = 0
         self.buffer_size_threshold = self.config.kv_buffer_size
