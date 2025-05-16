@@ -8,7 +8,9 @@ MODELS=(
 
 # Number of prefill and decode instances to create
 NUM_PREFILL_INSTANCES=${NUM_PREFILL_INSTANCES:-1} # Default to 1
-NUM_DECODE_INSTANCES=${NUM_DECODE_INSTANCES:-2}   # Default to 2
+NUM_DECODE_INSTANCES=${NUM_DECODE_INSTANCES:-1}   # Default to 1
+PREFILLER_TP_SIZE=${PREFILLER_TP_SIZE:-1}
+DECODER_TP_SIZE=${DECODER_TP_SIZE:-1}
 
 # Find the git repository root directory
 GIT_ROOT=$(git rev-parse --show-toplevel)
@@ -44,40 +46,6 @@ get_model_args() {
   echo "$extra_args"
 }
 
-set_cli_args() {
-  PREFILLER_TP_SIZE=1
-  DECODER_TP_SIZE=1
-  # Iterate through the rest of the arguments
-  while [[ $# -gt 0 ]]; do
-    echo $#
-    case "$1" in
-      --prefiller-tp-size)
-        if [[ -n "$2" ]]; then
-          PREFILLER_TP_SIZE="$2"
-          shift 2 # Consume the flag and its value ($2)
-        else
-          echo "Error: --prefiller-tp-size requires a value." >&2
-          exit 1
-        fi
-        ;;
-      --decoder-tp-size)
-        if [[ -n "$2" ]]; then
-          DECODER_TP_SIZE="$2"
-          shift 2
-        else
-          echo "Error: --decoder-tp-size requires a value." >&2
-          exit 1
-        fi
-        ;;
-      *)
-        # Handle any arguments not recognized
-        shift # Ignore unknown argument
-        ;;
-    esac
-  done
-}
-
-
 # Function to run tests for a specific model
 run_tests_for_model() {
   local model_name=$1
@@ -87,7 +55,6 @@ run_tests_for_model() {
 
   # Get model-specific arguments
   local model_args=$(get_model_args "$model_name")
-  set_cli_args "$@"
 
   # Arrays to store all hosts and ports
   PREFILL_HOSTS=()
@@ -100,15 +67,16 @@ run_tests_for_model() {
     # Calculate GPU ID - we'll distribute across available GPUs
     GPU_ID=$((i % $(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)))
 
+
     # Calculate port number (base port + instance number)
     PORT=$((8100 + i))
     # Calculate side channel port. Avoid clash with with TP workers. 
-    SIDE_CHANNEL_PORT=$((5559 + i * $PREFILLER_TP_SIZE))
+    SIDE_CHANNEL_PORT=$((5559 + i))
 
     echo "Starting prefill instance $i on GPU $GPU_ID, port $PORT"
 
     # Build the command with or without model-specific args
-    BASE_CMD="VLLM_WORKER_MULTIPROC_METHOD=spawn VLLM_ENABLE_V1_MULTIPROCESSING=0 CUDA_VISIBLE_DEVICES=$GPU_ID VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT vllm serve $model_name \
+    BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT vllm serve $model_name \
     --port $PORT \
     --enforce-eager \
     --disable-log-requests \
@@ -137,12 +105,12 @@ run_tests_for_model() {
     # Calculate port number (base port + instance number)
     PORT=$((8200 + i))
     # Calculate side channel port
-    SIDE_CHANNEL_PORT=$((5659 + i * $PREFILLER_TP_SIZE))
+    SIDE_CHANNEL_PORT=$((5659 + i * $DECODER_TP_SIZE))
 
     echo "Starting decode instance $i on GPU $GPU_ID, port $PORT"
 
     # Build the command with or without model-specific args
-    BASE_CMD="VLLM_WORKER_MULTIPROC_METHOD=spawn VLLM_ENABLE_V1_MULTIPROCESSING=0 CUDA_VISIBLE_DEVICES=$GPU_ID VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT vllm serve $model_name \
+    BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT vllm serve $model_name \
     --port $PORT \
     --enforce-eager \
     --disable-log-requests \
@@ -203,7 +171,7 @@ run_tests_for_model() {
 
 # Run tests for each model
 for model in "${MODELS[@]}"; do
-  run_tests_for_model "$model" "$@"
+  run_tests_for_model "$model"
 done
 
 echo "All tests completed!"
