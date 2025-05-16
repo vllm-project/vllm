@@ -30,5 +30,4 @@ tokenizer.push_to_hub(hub_repo)
 quantized_model.push_to_hub(hub_repo, safe_serialization=False)
 ```
 
-Alternatively, you can use the TorchAO Quantization space for quantizing models with a simple UI.
-See: https://huggingface.co/spaces/medmekk/TorchAO_Quantization
+Alternatively, you can use the [TorchAO Quantization space](https://huggingface.co/spaces/medmekk/TorchAO_Quantization) for quantizing models with a simple UI.

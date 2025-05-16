@@ -116,7 +116,7 @@ __global__ void permute_cols_kernel(
     int base_k = 0;
 
     for (int i = 0; i < iters; i++) {
-      int cur_k = base_k + threadIdx.x;
+      auto cur_k = base_k + threadIdx.x;
       int src_pos = perm_int_ptr[cur_k];
 
       out_half[cur_k] = a_row_half[src_pos];
@@ -126,7 +126,7 @@ __global__ void permute_cols_kernel(
 
     if (rest) {
       if (threadIdx.x < rest) {
-        int cur_k = base_k + threadIdx.x;
+        auto cur_k = base_k + threadIdx.x;
         int src_pos = perm_int_ptr[cur_k];
 
         out_half[cur_k] = a_row_half[src_pos];
@@ -195,7 +195,6 @@ int get_scales_cache_size(thread_config_t const& th_config, int prob_m,
         tb_groups * pipe_stages * 2;     // Chunk size is 2x pipeline over dim K
     load_groups = max(load_groups, 32);  // We load at least 32 scale groups
     return load_groups * tb_n * 2;
-
   } else {
     int tb_scales = tb_groups * tb_n * 2;
 
@@ -203,22 +202,24 @@ int get_scales_cache_size(thread_config_t const& th_config, int prob_m,
   }
 }
 
-int get_kernel_cache_size(thread_config_t const& th_config, int thread_m_blocks,
-                          int prob_m, int prob_n, int prob_k, int num_bits,
-                          int group_size, bool has_act_order, bool is_k_full,
-                          int has_zp, int is_zp_float) {
+int get_kernel_cache_size(thread_config_t const& th_config, bool m_block_size_8,
+                          int thread_m_blocks, int prob_m, int prob_n,
+                          int prob_k, int num_bits, int group_size,
+                          bool has_act_order, bool is_k_full, int has_zp,
+                          int is_zp_float) {
   int pack_factor = 32 / num_bits;
 
   // Get B size
   int tb_k = th_config.thread_k;
   int tb_n = th_config.thread_n;
-  int tb_m = thread_m_blocks * 16;
+  int tb_m = thread_m_blocks * (m_block_size_8 ? 8 : 16);
 
-  // shm size for block_sorted_ids/block_topk_weights
+  // shm size for block_sorted_ids/rd_block_sorted_ids/block_topk_weights
   // both of them requires tb_m * 4 bytes (tb_m * int32 or tb_m * float32)
-  int sh_block_meta_size = tb_m * 4 * 2;
+  int sh_block_meta_size = tb_m * 4;
   int sh_a_size = pipe_stages * (tb_m * tb_k) * 2;
   int sh_b_size = pipe_stages * (tb_k * tb_n / pack_factor) * 4;
+  int sh_red_size = tb_m * (tb_n + 8) * 2;
   int sh_s_size =
       get_scales_cache_size(th_config, prob_m, prob_n, prob_k, num_bits,
                             group_size, has_act_order, is_k_full);
@@ -233,16 +234,17 @@ int get_kernel_cache_size(thread_config_t const& th_config, int thread_m_blocks,
       sh_zp_size = sh_s_size / 2;
   }
 
-  int total_size = sh_a_size + sh_b_size + sh_s_size + sh_zp_size +
-                   sh_g_idx_size + sh_block_meta_size;
+  int total_size = max(sh_b_size, sh_red_size) + sh_a_size + sh_s_size +
+                   sh_zp_size + sh_g_idx_size + sh_block_meta_size;
 
   return total_size;
 }
 
-bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
-                     int prob_m, int prob_n, int prob_k, int num_bits,
-                     int group_size, bool has_act_order, bool is_k_full,
-                     int has_zp, int is_zp_float, int max_shared_mem) {
+bool is_valid_config(thread_config_t const& th_config, bool m_block_size_8,
+                     int thread_m_blocks, int prob_m, int prob_n, int prob_k,
+                     int num_bits, int group_size, bool has_act_order,
+                     bool is_k_full, int has_zp, int is_zp_float,
+                     int max_shared_mem) {
   // Sanity
   if (th_config.thread_k == -1 || th_config.thread_n == -1 ||
       th_config.num_threads == -1) {
@@ -266,143 +268,129 @@ bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
 
   // Check that pipeline fits into cache
   int cache_size = get_kernel_cache_size(
-      th_config, thread_m_blocks, prob_m, prob_n, prob_k, num_bits, group_size,
-      has_act_order, is_k_full, has_zp, is_zp_float);
+      th_config, m_block_size_8, thread_m_blocks, prob_m, prob_n, prob_k,
+      num_bits, group_size, has_act_order, is_k_full, has_zp, is_zp_float);
   return cache_size <= max_shared_mem;
 }
 
-  #define __GET_IF(W_TYPE, THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS, \
-                   M_BLOCK_SIZE_8, HAS_ACT_ORDER, HAS_ZP, GROUP_BLOCKS,       \
-                   NUM_THREADS, IS_ZP_FLOAT)                                  \
-    else if (q_type == W_TYPE && thread_m_blocks == THREAD_M_BLOCKS &&        \
-             thread_n_blocks == THREAD_N_BLOCKS &&                            \
-             thread_k_blocks == THREAD_K_BLOCKS &&                            \
-             m_block_size_8 == M_BLOCK_SIZE_8 &&                              \
-             has_act_order == HAS_ACT_ORDER && has_zp == HAS_ZP &&            \
-             group_blocks == GROUP_BLOCKS && num_threads == NUM_THREADS &&    \
-             is_zp_float == IS_ZP_FLOAT) {                                    \
-      kernel = Marlin<scalar_t, W_TYPE.id(), NUM_THREADS, THREAD_M_BLOCKS,    \
-                      THREAD_N_BLOCKS, THREAD_K_BLOCKS, M_BLOCK_SIZE_8,       \
-                      pipe_stages, HAS_ACT_ORDER, HAS_ZP, GROUP_BLOCKS,       \
-                      IS_ZP_FLOAT>;                                           \
+  #define _GET_IF(W_TYPE, THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS, \
+                  M_BLOCK_SIZE_8, GROUP_BLOCKS, NUM_THREADS, IS_ZP_FLOAT)    \
+    else if (q_type == W_TYPE && thread_m_blocks == THREAD_M_BLOCKS &&       \
+             thread_n_blocks == THREAD_N_BLOCKS &&                           \
+             thread_k_blocks == THREAD_K_BLOCKS &&                           \
+             m_block_size_8 == M_BLOCK_SIZE_8 &&                             \
+             group_blocks == GROUP_BLOCKS && num_threads == NUM_THREADS &&   \
+             is_zp_float == IS_ZP_FLOAT) {                                   \
+      kernel = Marlin<scalar_t, W_TYPE.id(), NUM_THREADS, THREAD_M_BLOCKS,   \
+                      THREAD_N_BLOCKS, THREAD_K_BLOCKS, M_BLOCK_SIZE_8,      \
+                      pipe_stages, GROUP_BLOCKS, IS_ZP_FLOAT>;               \
     }
 
-  #define GPTQ_GET_IF_M1(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)              \
-    __GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, true, false, 0, NUM_THREADS, \
-             false)                                                            \
-    __GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, true, false, 0,             \
-             NUM_THREADS, false)                                               \
-                                                                               \
-    __GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, false, false, -1,            \
-             NUM_THREADS, false)                                               \
-    __GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, false, false, 2,             \
-             NUM_THREADS, false)                                               \
-    __GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, false, false, 4,             \
-             NUM_THREADS, false)                                               \
-    __GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, false, false, 8,             \
-             NUM_THREADS, false)                                               \
-    __GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, false, false, -1,           \
-             NUM_THREADS, false)                                               \
-    __GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, false, false, 2,            \
-             NUM_THREADS, false)                                               \
-    __GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, false, false, 4,            \
-             NUM_THREADS, false)                                               \
-    __GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, false, false, 8,            \
-             NUM_THREADS, false)
+  // COMMON: cases for (group_blocks in [-1, 2, 4, 8] and is_zp_float == false)
+  //         this is the most common cases
+  // BIGGROUP: cases for big group size (group_blocks in [-1, 8])
+  // FZP: cases for float-zero-point (is_zp_float = true)
+  // ACT: cases for act order case (group_blocks == 0)
+  // FP4: cases for nvfp4(e2m1) (group_blocks == 1)
+  #define COMMON_GET_IF_M1(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)       \
+    _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, -1, NUM_THREADS, false)  \
+    _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, 2, NUM_THREADS, false)   \
+    _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, 4, NUM_THREADS, false)   \
+    _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, 8, NUM_THREADS, false)   \
+    _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, -1, NUM_THREADS, false) \
+    _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, 2, NUM_THREADS, false)  \
+    _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, 4, NUM_THREADS, false)  \
+    _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, 8, NUM_THREADS, false)
 
-  #define GPTQ_GET_IF_M234(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)  \
-    __GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, true, false, 0,   \
-             NUM_THREADS, false)                                     \
-    __GET_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, true, false, 0,   \
-             NUM_THREADS, false)                                     \
-    __GET_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, true, false, 0,   \
-             NUM_THREADS, false)                                     \
-                                                                     \
-    __GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, false, false, -1, \
-             NUM_THREADS, false)                                     \
-    __GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, false, false, 2,  \
-             NUM_THREADS, false)                                     \
-    __GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, false, false, 4,  \
-             NUM_THREADS, false)                                     \
-    __GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, false, false, 8,  \
-             NUM_THREADS, false)                                     \
-                                                                     \
-    __GET_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, false, false, -1, \
-             NUM_THREADS, false)                                     \
-    __GET_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, false, false, 2,  \
-             NUM_THREADS, false)                                     \
-    __GET_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, false, false, 4,  \
-             NUM_THREADS, false)                                     \
-    __GET_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, false, false, 8,  \
-             NUM_THREADS, false)                                     \
-                                                                     \
-    __GET_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, false, false, -1, \
-             NUM_THREADS, false)                                     \
-    __GET_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, false, false, 2,  \
-             NUM_THREADS, false)                                     \
-    __GET_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, false, false, 4,  \
-             NUM_THREADS, false)                                     \
-    __GET_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, false, false, 8,  \
-             NUM_THREADS, false)
+  #define COMMON_GET_IF_M234(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)     \
+    _GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, -1, NUM_THREADS, false) \
+    _GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, 2, NUM_THREADS, false)  \
+    _GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, 4, NUM_THREADS, false)  \
+    _GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, 8, NUM_THREADS, false)  \
+                                                                          \
+    _GET_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, -1, NUM_THREADS, false) \
+    _GET_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, 2, NUM_THREADS, false)  \
+    _GET_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, 4, NUM_THREADS, false)  \
+    _GET_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, 8, NUM_THREADS, false)  \
+                                                                          \
+    _GET_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, -1, NUM_THREADS, false) \
+    _GET_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, 2, NUM_THREADS, false)  \
+    _GET_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, 4, NUM_THREADS, false)  \
+    _GET_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, 8, NUM_THREADS, false)
 
-  #define AWQ_GET_IF_M1(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)               \
-    __GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, false, true, -1,             \
-             NUM_THREADS, false)                                               \
-    __GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, false, true, 2, NUM_THREADS, \
-             false)                                                            \
-    __GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, false, true, 4, NUM_THREADS, \
-             false)                                                            \
-    __GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, false, true, 8, NUM_THREADS, \
-             false)                                                            \
-    __GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, false, true, -1,            \
-             NUM_THREADS, false)                                               \
-    __GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, false, true, 2,             \
-             NUM_THREADS, false)                                               \
-    __GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, false, true, 4,             \
-             NUM_THREADS, false)                                               \
-    __GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, false, true, 8,             \
-             NUM_THREADS, false)
+  #define COMMON_GET_IF(W_TYPE)            \
+    COMMON_GET_IF_M1(W_TYPE, 8, 8, 256)    \
+    COMMON_GET_IF_M1(W_TYPE, 8, 4, 128)    \
+    COMMON_GET_IF_M234(W_TYPE, 16, 4, 256) \
+    COMMON_GET_IF_M234(W_TYPE, 8, 4, 128)
 
-  #define AWQ_GET_IF_M234(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)  \
-    __GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, false, true, -1, \
-             NUM_THREADS, false)                                    \
-    __GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, false, true, 2,  \
-             NUM_THREADS, false)                                    \
-    __GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, false, true, 4,  \
-             NUM_THREADS, false)                                    \
-    __GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, false, true, 8,  \
-             NUM_THREADS, false)                                    \
-                                                                    \
-    __GET_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, false, true, -1, \
-             NUM_THREADS, false)                                    \
-    __GET_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, false, true, 2,  \
-             NUM_THREADS, false)                                    \
-    __GET_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, false, true, 4,  \
-             NUM_THREADS, false)                                    \
-    __GET_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, false, true, 8,  \
-             NUM_THREADS, false)                                    \
-                                                                    \
-    __GET_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, false, true, -1, \
-             NUM_THREADS, false)                                    \
-    __GET_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, false, true, 2,  \
-             NUM_THREADS, false)                                    \
-    __GET_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, false, true, 4,  \
-             NUM_THREADS, false)                                    \
-    __GET_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, false, true, 8,  \
-             NUM_THREADS, false)
+  #define BIGGROUP_GET_IF_M1(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)     \
+    _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, -1, NUM_THREADS, false)  \
+    _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, 8, NUM_THREADS, false)   \
+    _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, -1, NUM_THREADS, false) \
+    _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, 8, NUM_THREADS, false)
+
+  #define BIGGROUP_GET_IF_M234(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)   \
+    _GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, -1, NUM_THREADS, false) \
+    _GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, 8, NUM_THREADS, false)  \
+    _GET_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, -1, NUM_THREADS, false) \
+    _GET_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, 8, NUM_THREADS, false)  \
+                                                                          \
+    _GET_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, -1, NUM_THREADS, false) \
+    _GET_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, 8, NUM_THREADS, false)
+
+  #define FP4_GET_IF_M1(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)        \
+    _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, 1, NUM_THREADS, false) \
+    _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false)
+
+  #define FP4_GET_IF_M234(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)       \
+    _GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false) \
+    _GET_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false) \
+    _GET_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false)
+
+  #define FP4_GET_IF(W_TYPE)            \
+    FP4_GET_IF_M1(W_TYPE, 8, 8, 256)    \
+    FP4_GET_IF_M1(W_TYPE, 8, 4, 128)    \
+    FP4_GET_IF_M234(W_TYPE, 16, 4, 256) \
+    FP4_GET_IF_M234(W_TYPE, 8, 4, 128)
+
+  #define BIGGROUP_GET_IF(W_TYPE)            \
+    BIGGROUP_GET_IF_M1(W_TYPE, 8, 8, 256)    \
+    BIGGROUP_GET_IF_M1(W_TYPE, 8, 4, 128)    \
+    BIGGROUP_GET_IF_M234(W_TYPE, 16, 4, 256) \
+    BIGGROUP_GET_IF_M234(W_TYPE, 8, 4, 128)
 
   // We currently have 4-bit models only with group_blocks == 4
-  #define HQQ_GET_IF(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)                  \
-    __GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, false, true, 4, NUM_THREADS, \
-             true)                                                             \
-    __GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, false, true, 4,             \
-             NUM_THREADS, true)                                                \
-    __GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, false, true, 4,             \
-             NUM_THREADS, true)                                                \
-    __GET_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, false, true, 4,             \
-             NUM_THREADS, true)                                                \
-    __GET_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, false, true, 4,             \
-             NUM_THREADS, true)
+  #define FZP_GET_IF_M1(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)       \
+    _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, 4, NUM_THREADS, true) \
+    _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, 4, NUM_THREADS, true)
+
+  #define FZP_GET_IF_M234(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)      \
+    _GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, 4, NUM_THREADS, true) \
+    _GET_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, 4, NUM_THREADS, true) \
+    _GET_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, 4, NUM_THREADS, true)
+
+  #define FZP_GET_IF(W_TYPE)            \
+    FZP_GET_IF_M1(W_TYPE, 8, 8, 256)    \
+    FZP_GET_IF_M1(W_TYPE, 8, 4, 128)    \
+    FZP_GET_IF_M234(W_TYPE, 16, 4, 256) \
+    FZP_GET_IF_M234(W_TYPE, 8, 4, 128)
+
+  // We currently have 4-bit models only with group_blocks == 4
+  #define ACT_GET_IF_M1(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)        \
+    _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, 0, NUM_THREADS, false) \
+    _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, 0, NUM_THREADS, false)
+
+  #define ACT_GET_IF_M234(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)       \
+    _GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, 0, NUM_THREADS, false) \
+    _GET_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, 0, NUM_THREADS, false) \
+    _GET_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, 0, NUM_THREADS, false)
+
+  #define ACT_GET_IF(W_TYPE)            \
+    ACT_GET_IF_M1(W_TYPE, 8, 8, 256)    \
+    ACT_GET_IF_M1(W_TYPE, 8, 4, 128)    \
+    ACT_GET_IF_M234(W_TYPE, 16, 4, 256) \
+    ACT_GET_IF_M234(W_TYPE, 8, 4, 128)
 
 template <typename scalar_t>
 MarlinFuncPtr get_marlin_kernel(const vllm::ScalarType q_type,
@@ -415,23 +403,17 @@ MarlinFuncPtr get_marlin_kernel(const vllm::ScalarType q_type,
   auto kernel = MarlinDefault;
   if (false) {
   }
-  GPTQ_GET_IF_M1(vllm::kU4B8, 8, 8, 256)
-  GPTQ_GET_IF_M1(vllm::kU4B8, 8, 4, 128)
 
-  GPTQ_GET_IF_M234(vllm::kU4B8, 16, 4, 256)
-  GPTQ_GET_IF_M234(vllm::kU4B8, 8, 4, 128)
+  COMMON_GET_IF(vllm::kU4)
+  COMMON_GET_IF(vllm::kU4B8)
+  COMMON_GET_IF(vllm::kU8B128)
 
-  GPTQ_GET_IF_M1(vllm::kU8B128, 8, 8, 256)
-  GPTQ_GET_IF_M1(vllm::kU8B128, 8, 4, 128)
+  BIGGROUP_GET_IF(vllm::kFE4M3fn)
 
-  GPTQ_GET_IF_M234(vllm::kU8B128, 16, 4, 256)
-  GPTQ_GET_IF_M234(vllm::kU8B128, 8, 4, 128)
+  FP4_GET_IF(vllm::kFE2M1f)
 
-  AWQ_GET_IF_M1(vllm::kU4, 8, 8, 256)
-  AWQ_GET_IF_M1(vllm::kU4, 8, 4, 128)
-
-  AWQ_GET_IF_M234(vllm::kU4, 16, 4, 256)
-  AWQ_GET_IF_M234(vllm::kU4, 8, 4, 128)
+  ACT_GET_IF(vllm::kU4B8)
+  ACT_GET_IF(vllm::kU8B128)
 
   return kernel;
 }
@@ -457,19 +439,19 @@ exec_config_t determine_exec_config(const vllm::ScalarType& q_type, int prob_m,
   for (int i = 0; i < thread_configs_size; i++) {
     thread_config_t th_config = thread_configs[i];
 
-    if (!is_valid_config(th_config, thread_m_blocks, prob_m, prob_n, prob_k,
-                         num_bits, group_size, has_act_order, is_k_full, has_zp,
-                         is_zp_float, max_shared_mem)) {
+    if (!is_valid_config(th_config, m_block_size_8, thread_m_blocks, prob_m,
+                         prob_n, prob_k, num_bits, group_size, has_act_order,
+                         is_k_full, has_zp, is_zp_float, max_shared_mem)) {
       continue;
     }
 
     int cache_size = get_kernel_cache_size(
-        th_config, thread_m_blocks, prob_m, prob_n, prob_k, num_bits,
-        group_size, has_act_order, is_k_full, has_zp, is_zp_float);
+        th_config, m_block_size_8, thread_m_blocks, prob_m, prob_n, prob_k,
+        num_bits, group_size, has_act_order, is_k_full, has_zp, is_zp_float);
 
     int group_blocks = 0;
     if (!has_act_order) {
-      group_blocks = group_size == -1 ? -1 : group_size / 16;
+      group_blocks = group_size == -1 ? -1 : (group_size / 16);
     }
 
     auto kernel = get_marlin_kernel<scalar_t>(
@@ -501,7 +483,7 @@ exec_config_t determine_exec_config(const vllm::ScalarType& q_type, int prob_m,
 
 template <typename scalar_t>
 void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
-               void* zp, void* g_idx, void* perm, void* a_tmp,
+               void* s2, void* zp, void* g_idx, void* perm, void* a_tmp,
                void* sorted_token_ids, void* expert_ids,
                void* num_tokens_past_padded, void* topk_weights,
                int moe_block_size, int top_k, bool mul_topk_weights, bool is_ep,
@@ -520,8 +502,10 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
         "q_type must be u4 or u8 when has_zp = True. Got = ", q_type.str());
   } else {
     TORCH_CHECK(
-        q_type == vllm::kU4B8 || q_type == vllm::kU8B128,
-        "q_type must be uint4b8 or uint8b128 when has_zp = False. Got = ",
+        q_type == vllm::kU4B8 || q_type == vllm::kU8B128 ||
+            q_type == vllm::kFE4M3fn || q_type == vllm::kFE2M1f,
+        "q_type must be uint4b8, uint8b128, float8_e4m3fn or float4_e2m1f when "
+        "has_zp = False. Got = ",
         q_type.str());
   }
 
@@ -555,6 +539,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
   int4* C_ptr = (int4*)C;
   int4* C_tmp_ptr = (int4*)C_tmp;
   const int4* s_ptr = (const int4*)s;
+  const uint16_t* s2_ptr = (const uint16_t*)s2;
   const int4* zp_ptr = (const int4*)zp;
   const int* g_idx_ptr = (const int*)g_idx;
   const int* perm_ptr = (const int*)perm;
@@ -631,18 +616,18 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
   int thread_k_blocks = thread_k / 16;
   int thread_n_blocks = thread_n / 16;
 
-  TORCH_CHECK(is_valid_config(thread_tfg, thread_m_blocks, prob_m, prob_n,
-                              prob_k, num_bits, group_size, has_act_order,
-                              is_k_full, has_zp, is_zp_float, max_shared_mem),
-              "Invalid thread config: thread_m_blocks = ", thread_m_blocks,
-              ", thread_k = ", thread_tfg.thread_k,
-              ", thread_n = ", thread_tfg.thread_n,
-              ", num_threads = ", thread_tfg.num_threads, " for MKN = [",
-              prob_m, ", ", prob_k, ", ", prob_n, "] and num_bits = ", num_bits,
-              ", group_size = ", group_size,
-              ", has_act_order = ", has_act_order, ", is_k_full = ", is_k_full,
-              ", has_zp = ", has_zp, ", is_zp_float = ", is_zp_float,
-              ", max_shared_mem = ", max_shared_mem);
+  TORCH_CHECK(
+      is_valid_config(thread_tfg, m_block_size_8, thread_m_blocks, prob_m,
+                      prob_n, prob_k, num_bits, group_size, has_act_order,
+                      is_k_full, has_zp, is_zp_float, max_shared_mem),
+      "Invalid thread config: thread_m_blocks = ", thread_m_blocks,
+      ", thread_k = ", thread_tfg.thread_k,
+      ", thread_n = ", thread_tfg.thread_n,
+      ", num_threads = ", thread_tfg.num_threads, " for MKN = [", prob_m, ", ",
+      prob_k, ", ", prob_n, "] and num_bits = ", num_bits,
+      ", group_size = ", group_size, ", has_act_order = ", has_act_order,
+      ", is_k_full = ", is_k_full, ", has_zp = ", has_zp,
+      ", is_zp_float = ", is_zp_float, ", max_shared_mem = ", max_shared_mem);
 
   auto kernel = get_marlin_kernel<scalar_t>(
       q_type, thread_m_blocks, thread_n_blocks, thread_k_blocks, m_block_size_8,
@@ -663,10 +648,10 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
   // avoid ">>>" being formatted to "> > >"
   // clang-format off
   kernel<<<blocks, num_threads, max_shared_mem, stream>>>(
-      A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, zp_ptr, g_idx_ptr,
+      A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, s2_ptr, zp_ptr, g_idx_ptr,
       sorted_token_ids_ptr, expert_ids_ptr, num_tokens_past_padded_ptr,
       topk_weights_ptr, top_k, mul_topk_weights, is_ep, num_groups, prob_m,
-      prob_n, prob_k, locks, use_atomic_add, use_fp32_reduce);
+      prob_n, prob_k, locks, use_atomic_add, use_fp32_reduce, max_shared_mem);
   // clang-format on
 }
 
@@ -675,6 +660,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
 torch::Tensor moe_wna16_marlin_gemm(
     torch::Tensor& a, std::optional<torch::Tensor> const& c_or_none,
     torch::Tensor& b_q_weight, torch::Tensor& b_scales,
+    std::optional<torch::Tensor> const& global_scale_or_none,
     std::optional<torch::Tensor> const& b_zeros_or_none,
     std::optional<torch::Tensor> const& g_idx_or_none,
     std::optional<torch::Tensor> const& perm_or_none, torch::Tensor& workspace,
@@ -826,6 +812,17 @@ torch::Tensor moe_wna16_marlin_gemm(
     }
   }
 
+  torch::Tensor global_scale;
+  if (global_scale_or_none.has_value()) {
+    global_scale = global_scale_or_none.value();
+    TORCH_CHECK(b_q_type == vllm::kFE2M1f,
+                "global_scale can only be used for float4_e2m1f.");
+  } else {
+    global_scale = torch::empty({0}, options);
+    TORCH_CHECK(!(b_q_type == vllm::kFE2M1f),
+                "the global_scale parameter must be passed for float4_e2m1f.");
+  }
+
   torch::Tensor b_zeros;
   if (b_zeros_or_none.has_value()) {
     b_zeros = b_zeros_or_none.value();
@@ -838,13 +835,15 @@ torch::Tensor moe_wna16_marlin_gemm(
 
   if (has_zp) {
     TORCH_CHECK(
-        b_q_type == vllm::kU4,
-        "b_q_type must be u4 when has_zp = True. Got = ", b_q_type.str());
+        b_q_type == vllm::kU4 || b_q_type == vllm::kU8,
+        "b_q_type must be u4 or u8 when has_zp = True. Got = ", b_q_type.str());
   } else {
-    TORCH_CHECK(
-        b_q_type == vllm::kU4B8 || b_q_type == vllm::kU8B128,
-        "b_q_type must be uint4b8 or uint8b128 when has_zp = False. Got = ",
-        b_q_type.str());
+    TORCH_CHECK(b_q_type == vllm::kU4B8 || b_q_type == vllm::kU8B128 ||
+                    b_q_type == vllm::kFE4M3fn || b_q_type == vllm::kFE2M1f,
+                "b_q_type must be uint4b8, uint8b128, float8_e4m3fn or "
+                "float4_e2m1f when "
+                "has_zp = False. Got = ",
+                b_q_type.str());
   }
 
   if (has_zp && is_zp_float) {
@@ -889,9 +888,16 @@ torch::Tensor moe_wna16_marlin_gemm(
 
   int dev = a.get_device();
   if (a.scalar_type() == at::ScalarType::Half) {
+    void* scales_ptr;
+    if (b_q_type == vllm::kFE2M1f) {
+      scales_ptr = b_scales.data_ptr<at::Float8_e4m3fn>();
+    } else {
+      scales_ptr = b_scales.data_ptr<at::Half>();
+    }
+
     MARLIN_NAMESPACE_NAME::marlin_mm<half>(
         a.data_ptr<at::Half>(), b_q_weight.data_ptr(), c.data_ptr<at::Half>(),
-        c_tmp.data_ptr<float>(), b_scales.data_ptr<at::Half>(),
+        c_tmp.data_ptr<float>(), scales_ptr, global_scale.data_ptr<at::Half>(),
         b_zeros.data_ptr(), g_idx.data_ptr(), perm.data_ptr(),
         a_tmp.data_ptr<at::Half>(), sorted_token_ids.data_ptr(),
         expert_ids.data_ptr(), num_tokens_past_padded.data_ptr(),
@@ -901,11 +907,18 @@ torch::Tensor moe_wna16_marlin_gemm(
         at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms,
         use_atomic_add, use_fp32_reduce, is_zp_float);
   } else if (a.scalar_type() == at::ScalarType::BFloat16) {
+    void* scales_ptr;
+    if (b_q_type == vllm::kFE2M1f) {
+      scales_ptr = b_scales.data_ptr<at::Float8_e4m3fn>();
+    } else {
+      scales_ptr = b_scales.data_ptr<at::BFloat16>();
+    }
+
     MARLIN_NAMESPACE_NAME::marlin_mm<nv_bfloat16>(
         a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(),
-        c.data_ptr<at::BFloat16>(), c_tmp.data_ptr<float>(),
-        b_scales.data_ptr<at::BFloat16>(), b_zeros.data_ptr(), g_idx.data_ptr(),
-        perm.data_ptr(), a_tmp.data_ptr<at::BFloat16>(),
+        c.data_ptr<at::BFloat16>(), c_tmp.data_ptr<float>(), scales_ptr,
+        global_scale.data_ptr<at::BFloat16>(), b_zeros.data_ptr(),
+        g_idx.data_ptr(), perm.data_ptr(), a_tmp.data_ptr<at::BFloat16>(),
         sorted_token_ids.data_ptr(), expert_ids.data_ptr(),
         num_tokens_past_padded.data_ptr(), topk_weights.data_ptr(),
         moe_block_size, top_k, mul_topk_weights, is_ep, size_m, size_n, size_k,

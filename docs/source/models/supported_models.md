@@ -168,6 +168,66 @@ If vLLM successfully returns text (for generative models) or hidden states (for 
 Otherwise, please refer to [Adding a New Model](#new-model) for instructions on how to implement your model in vLLM.
 Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project/vllm/issues/new/choose) to request vLLM support.
 
+#### Download a model
+
+If you prefer, you can use the Hugging Face CLI to [download a model](https://huggingface.co/docs/huggingface_hub/guides/cli#huggingface-cli-download) or specific files from a model repository:
+
+```console
+# Download a model
+huggingface-cli download HuggingFaceH4/zephyr-7b-beta
+
+# Specify a custom cache directory
+huggingface-cli download HuggingFaceH4/zephyr-7b-beta --cache-dir ./path/to/cache
+
+# Download a specific file from a model repo
+huggingface-cli download HuggingFaceH4/zephyr-7b-beta eval_results.json
+```
+
+#### List the downloaded models
+
+Use the Hugging Face CLI to [manage models](https://huggingface.co/docs/huggingface_hub/guides/manage-cache#scan-your-cache) stored in local cache:
+
+```console
+# List cached models
+huggingface-cli scan-cache
+
+# Show detailed (verbose) output
+huggingface-cli scan-cache -v
+
+# Specify a custom cache directory
+huggingface-cli scan-cache --dir ~/.cache/huggingface/hub
+```
+
+#### Delete a cached model
+
+Use the Hugging Face CLI to interactively [delete downloaded model](https://huggingface.co/docs/huggingface_hub/guides/manage-cache#clean-your-cache) from the cache:
+
+```console
+# The `delete-cache` command requires extra dependencies to work with the TUI.
+# Please run `pip install huggingface_hub[cli]` to install them.
+
+# Launch the interactive TUI to select models to delete
+$ huggingface-cli delete-cache
+? Select revisions to delete: 1 revisions selected counting for 438.9M.
+  ○ None of the following (if selected, nothing will be deleted).
+Model BAAI/bge-base-en-v1.5 (438.9M, used 1 week ago)
+❯ ◉ a5beb1e3: main # modified 1 week ago
+
+Model BAAI/bge-large-en-v1.5 (1.3G, used 1 week ago)
+  ○ d4aa6901: main # modified 1 week ago
+
+Model BAAI/bge-reranker-base (1.1G, used 4 weeks ago)
+  ○ 2cfc18c9: main # modified 4 weeks ago
+
+Press <space> to select, <enter> to validate and <ctrl+c> to quit without modification.
+
+# Need to confirm after selected
+? Select revisions to delete: 1 revision(s) selected.
+? 1 revisions selected counting for 438.9M. Confirm deletion ? Yes
+Start deletion.
+Done. Deleted 1 repo(s) and 0 revision(s) for a total of 438.9M.
+```
+
 #### Using a proxy
 
 Here are some tips for loading/downloading models from Hugging Face using a proxy:
@@ -221,6 +281,16 @@ output = llm.encode("Hello, my name is")
 print(output)
 ```
 
+(feature-status-legend)=
+
+## Feature Status Legend
+
+- ✅︎ indicates that the feature is supported for the model.
+
+- 🚧 indicates that the feature is planned but not yet supported for the model.
+
+- ⚠️ indicates that the feature is available but may have known issues or limitations.
+
 (supported-text-models)=
 
 ## List of Text-only Language Models
@@ -229,7 +299,9 @@ print(output)
 
 See [this page](#generative-models) for more information on how to use generative models.
 
-#### Text Generation (`--task generate`)
+#### Text Generation
+
+Specified using `--task generate`.
 
 :::{list-table}
 :widths: 25 25 50 5 5
@@ -322,7 +394,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
 - * `GemmaForCausalLM`
   * Gemma
-  * `google/gemma-2b`, `google/gemma-7b`, etc.
+  * `google/gemma-2b`, `google/gemma-1.1-2b-it`, etc.
   * ✅︎
   * ✅︎
 - * `Gemma2ForCausalLM`
@@ -373,6 +445,11 @@ See [this page](#generative-models) for more information on how to use generativ
 - * `GraniteMoeForCausalLM`
   * Granite 3.0 MoE, PowerMoE
   * `ibm-granite/granite-3.0-1b-a400m-base`, `ibm-granite/granite-3.0-3b-a800m-instruct`, `ibm/PowerMoE-3b`, etc.
+  * ✅︎
+  * ✅︎
+- * `GraniteMoeHybridForCausalLM`
+  * Granite 4.0 MoE Hybrid
+  * `ibm-granite/granite-4.0-tiny-preview`, etc.
   * ✅︎
   * ✅︎
 - * `GraniteMoeSharedForCausalLM`
@@ -462,7 +539,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
 - * `OLMo2ForCausalLM`
   * OLMo2
-  * `allenai/OLMo2-7B-1124`, etc.
+  * `allenai/OLMo-2-0425-1B`, etc.
   *
   * ✅︎
 - * `OLMoEForCausalLM`
@@ -532,8 +609,8 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
 - * `Qwen3MoeForCausalLM`
   * Qwen3MoE
-  * `Qwen/Qwen3-MoE-15B-A2B`, etc.
-  * ✅︎
+  * `Qwen/Qwen3-30B-A3B`, etc.
+  *
   * ✅︎
 - * `StableLmForCausalLM`
   * StableLM
@@ -575,6 +652,11 @@ See [this page](#generative-models) for more information on how to use generativ
   * `Zyphra/Zamba2-7B-instruct`, `Zyphra/Zamba2-2.7B-instruct`, `Zyphra/Zamba2-1.2B-instruct`, etc.
   *
   *
+- * `MiMoForCausalLM`
+  * MiMo
+  * `XiaomiMiMo/MiMo-7B-RL`, etc.
+  *
+  *
 :::
 
 :::{note}
@@ -590,7 +672,9 @@ Since some model architectures support both generative and pooling tasks,
 you should explicitly specify the task type to ensure that the model is used in pooling mode instead of generative mode.
 :::
 
-#### Text Embedding (`--task embed`)
+#### Text Embedding
+
+Specified using `--task embed`.
 
 :::{list-table}
 :widths: 25 25 50 5 5
@@ -603,7 +687,7 @@ you should explicitly specify the task type to ensure that the model is used in 
   * [PP](#distributed-serving)
 - * `BertModel`
   * BERT-based
-  * `BAAI/bge-base-en-v1.5`, etc.
+  * `BAAI/bge-base-en-v1.5`, `Snowflake/snowflake-arctic-embed-xs`, etc.
   *
   *
 - * `Gemma2Model`
@@ -616,6 +700,26 @@ you should explicitly specify the task type to ensure that the model is used in 
   * `parasail-ai/GritLM-7B-vllm`.
   * ✅︎
   * ✅︎
+- * `GteModel`
+  * Arctic-Embed-2.0-M
+  * `Snowflake/snowflake-arctic-embed-m-v2.0`.
+  *
+  * ︎
+- * `GteNewModel`
+  * mGTE-TRM (see note)
+  * `Alibaba-NLP/gte-multilingual-base`, etc.
+  * ︎
+  * ︎
+- * `ModernBertModel`
+  * ModernBERT-based
+  * `Alibaba-NLP/gte-modernbert-base`, etc.
+  * ︎
+  * ︎
+- * `NomicBertModel`
+  * Nomic BERT
+  * `nomic-ai/nomic-embed-text-v1`, `nomic-ai/nomic-embed-text-v2-moe`, `Snowflake/snowflake-arctic-embed-m-long`, etc.
+  * ︎
+  * ︎
 - * `LlamaModel`, `LlamaForCausalLM`, `MistralModel`, etc.
   * Llama-based
   * `intfloat/e5-mistral-7b-instruct`, etc.
@@ -628,12 +732,12 @@ you should explicitly specify the task type to ensure that the model is used in 
   * ✅︎
 - * `RobertaModel`, `RobertaForMaskedLM`
   * RoBERTa-based
-  * `sentence-transformers/all-roberta-large-v1`, `sentence-transformers/all-roberta-large-v1`, etc.
+  * `sentence-transformers/all-roberta-large-v1`, etc.
   *
   *
 - * `XLMRobertaModel`
   * XLM-RoBERTa-based
-  * `intfloat/multilingual-e5-large`, `jinaai/jina-reranker-v2-base-multilingual`, etc.
+  * `intfloat/multilingual-e5-large`, `jinaai/jina-reranker-v2-base-multilingual`, `Snowflake/snowflake-arctic-embed-l-v2.0`, `jinaai/jina-embeddings-v3`(see note), etc.
   *
   *
 :::
@@ -651,11 +755,21 @@ For both the 1.5B and 7B variants, you also need to enable `--trust-remote-code`
 See [relevant issue on HF Transformers](https://github.com/huggingface/transformers/issues/34882).
 :::
 
+:::{note}
+`jinaai/jina-embeddings-v3` supports multiple tasks through lora, while vllm temporarily only supports text-matching tasks by merging lora weights.
+:::
+
+:::{note}
+The second-generation GTE model (mGTE-TRM) is named `NewModel`. The name `NewModel` is too generic, you should set `--hf-overrides '{"architectures": ["GteNewModel"]}'` to specify the use of the `GteNewModel` architecture.
+:::
+
 If your model is not in the above list, we will try to automatically convert the model using
 {func}`~vllm.model_executor.models.adapters.as_embedding_model`. By default, the embeddings
 of the whole prompt are extracted from the normalized hidden state corresponding to the last token.
 
-#### Reward Modeling (`--task reward`)
+#### Reward Modeling
+
+Specified using `--task reward`.
 
 :::{list-table}
 :widths: 25 25 50 5 5
@@ -696,7 +810,9 @@ For process-supervised reward models such as `peiyi9979/math-shepherd-mistral-7b
 e.g.: `--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 123, "returned_token_ids": [456, 789]}'`.
 :::
 
-#### Classification (`--task classify`)
+#### Classification
+
+Specified using `--task classify`.
 
 :::{list-table}
 :widths: 25 25 50 5 5
@@ -722,7 +838,9 @@ e.g.: `--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 123, "r
 If your model is not in the above list, we will try to automatically convert the model using
 {func}`~vllm.model_executor.models.adapters.as_classification_model`. By default, the class probabilities are extracted from the softmaxed hidden state corresponding to the last token.
 
-#### Sentence Pair Scoring (`--task score`)
+#### Sentence Pair Scoring
+
+Specified using `--task score`.
 
 :::{list-table}
 :widths: 25 25 50 5 5
@@ -783,6 +901,8 @@ or `--limit-mm-per-prompt` (online serving). For example, to enable passing up t
 Offline inference:
 
 ```python
+from vllm import LLM
+
 llm = LLM(
     model="Qwen/Qwen2-VL-7B-Instruct",
     limit_mm_per_prompt={"image": 4},
@@ -807,7 +927,9 @@ vLLM currently only supports adding LoRA to the language backbone of multimodal 
 
 See [this page](#generative-models) for more information on how to use generative models.
 
-#### Text Generation (`--task generate`)
+#### Text Generation
+
+Specified using `--task generate`.
 
 :::{list-table}
 :widths: 25 25 15 20 5 5 5
@@ -880,6 +1002,13 @@ See [this page](#generative-models) for more information on how to use generativ
   * GLM-4V
   * T + I
   * `THUDM/glm-4v-9b`, `THUDM/cogagent-9b-20241220` etc.
+  * ✅︎
+  * ✅︎
+  * ✅︎
+- * `GraniteSpeechForConditionalGeneration`
+  * Granite Speech
+  * T + A
+  * `ibm-granite/granite-speech-3.3-8b`
   * ✅︎
   * ✅︎
   * ✅︎
@@ -960,11 +1089,18 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
   * ✅︎
   * ✅︎
+- * `MiniMaxVL01ForConditionalGeneration`
+  * MiniMax-VL
+  * T + I<sup>E+</sup>
+  * `MiniMaxAI/MiniMax-VL-01`, etc.
+  *
+  * ✅︎
+  * ✅︎
 - * `Mistral3ForConditionalGeneration`
   * Mistral3
   * T + I<sup>+</sup>
   * `mistralai/Mistral-Small-3.1-24B-Instruct-2503`, etc.
-  *
+  * ✅︎
   * ✅︎
   * ✅︎
 - * `MllamaForConditionalGeneration`
@@ -987,6 +1123,13 @@ See [this page](#generative-models) for more information on how to use generativ
   * `nvidia/NVLM-D-72B`, etc.
   *
   * ✅︎
+  * ✅︎
+- * `Ovis`
+  * Ovis2, Ovis1.6
+  * T + I<sup>+</sup>
+  * `AIDC-AI/Ovis2-1B`, `AIDC-AI/Ovis1.6-Llama3.2-3B`, etc.
+  *
+  *
   * ✅︎
 - * `PaliGemmaForConditionalGeneration`
   * PaliGemma, PaliGemma 2
@@ -1080,11 +1223,6 @@ See [this page](#generative-models) for more information on how to use generativ
 <sup>E</sup> Pre-computed embeddings can be inputted for this modality.  
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 
-:::{important}
-Pan-and-scan image pre-processing is currently supported on V0 (but not V1).
-You can enable it by passing `--mm-processor-kwargs '{"do_pan_and_scan": True}'`.
-:::
-
 :::{warning}
 Both V0 and V1 support `Gemma3ForConditionalGeneration` for text-only inputs.
 However, there are differences in how they handle text + image inputs:
@@ -1097,18 +1235,48 @@ V0 correctly implements the model's attention pattern:
 
 V1 currently uses a simplified attention pattern:
 - Uses causal attention for all tokens, including image tokens
-- Generates reasonable outputs but does not match the original model's attention for text + image inputs, especially when `{"do_pan_and_scan": True}`
+- Generates reasonable outputs but does not match the original model's attention for text + image inputs, especially when `{"do_pan_and_scan": true}`
 - Will be updated in the future to support the correct behavior
 
 This limitation exists because the model's mixed attention pattern (bidirectional for images, causal otherwise) is not yet supported by vLLM's attention backends.
 :::
 
 :::{note}
-`h2oai/h2ovl-mississippi-2b` will be available in V1 once we support backends other than FlashAttention.
+`h2oai/h2ovl-mississippi-2b` will be available in V1 once we support head size 80.
 :::
 
 :::{note}
 To use `TIGER-Lab/Mantis-8B-siglip-llama3`, you have to pass `--hf_overrides '{"architectures": ["MantisForConditionalGeneration"]}'` when running vLLM.
+:::
+
+:::{warning}
+The output quality of `AllenAI/Molmo-7B-D-0924` (especially in object localization tasks) has deteriorated in recent updates.
+
+For the best results, we recommend using the following dependency versions (tested on A10 and L40):
+
+```text
+# Core vLLM-compatible dependencies with Molmo accuracy setup (tested on L40)
+torch==2.5.1
+torchvision==0.20.1
+transformers==4.48.1
+tokenizers==0.21.0
+tiktoken==0.7.0
+vllm==0.7.0
+
+# Optional but recommended for improved performance and stability
+triton==3.1.0
+xformers==0.0.28.post3
+uvloop==0.21.0
+protobuf==5.29.3
+openai==1.60.2
+opencv-python-headless==4.11.0.86
+pillow==10.4.0
+
+# Installed FlashAttention (for float16 only)
+flash-attn>=2.5.6  # Not used in float32, but should be documented
+```
+
+**Note:** Make sure you understand the security implications of using outdated packages.
 :::
 
 :::{note}
@@ -1125,7 +1293,7 @@ To use Qwen2.5-Omni, you have to install Hugging Face Transformers library from 
 `pip install git+https://github.com/huggingface/transformers.git`.
 
 Read audio from video pre-processing is currently supported on V0 (but not V1), because overlapping modalities is not yet supported in V1.
-`--mm-processor-kwargs '{"use_audio_in_video": True}'`.
+`--mm-processor-kwargs '{"use_audio_in_video": true}'`.
 :::
 
 ### Pooling Models
@@ -1137,7 +1305,9 @@ Since some model architectures support both generative and pooling tasks,
 you should explicitly specify the task type to ensure that the model is used in pooling mode instead of generative mode.
 :::
 
-#### Text Embedding (`--task embed`)
+#### Text Embedding
+
+Specified using `--task embed`.
 
 Any text generation model can be converted into an embedding model by passing `--task embed`.
 
@@ -1177,7 +1347,9 @@ The following table lists those that are tested in vLLM.
   * ✅︎
 :::
 
-#### Transcription (`--task transcription`)
+#### Transcription
+
+Specified using `--task transcription`.
 
 Speech2Text models trained specifically for Automatic Speech Recognition.
 

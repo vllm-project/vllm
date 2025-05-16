@@ -929,6 +929,15 @@ class QKVParallelLinear(ColumnParallelLinear):
         shard_offset = self._get_shard_offset_mapping(loaded_shard_id)
         shard_size = self._get_shard_size_mapping(loaded_shard_id)
 
+        # Note(simon): This is needed for Qwen3's fp8 quantization.
+        if isinstance(param, BlockQuantScaleParameter):
+            assert self.quant_method is not None
+            assert hasattr(self.quant_method, "quant_config")
+            weight_block_size = self.quant_method.quant_config.weight_block_size
+            block_n, _ = weight_block_size[0], weight_block_size[1]
+            shard_offset = (shard_offset + block_n - 1) // block_n
+            shard_size = (shard_size + block_n - 1) // block_n
+
         param.load_qkv_weight(loaded_weight=loaded_weight,
                               num_heads=self.num_kv_head_replicas,
                               shard_id=loaded_shard_id,
@@ -1416,8 +1425,8 @@ class QKVCrossParallelLinear(LinearBase):
     ):
         missing_attrs_dict = {
             k: getattr(src_param, k)
-            for k in (set(src_param.__dict__.keys()) -
-                      set(tgt_param.__dict__.keys()))
+            for k in (set(vars(src_param).keys()) -
+                      set(vars(tgt_param).keys()))
         }
         # TODO(Isotr0py): handle bitsandbytes 8bit
         use_bitsandbytes_4bit = getattr(src_param, "use_bitsandbytes_4bit",

@@ -7,11 +7,9 @@ from typing import Literal, Optional
 import numpy as np
 import numpy.typing as npt
 
-from vllm.inputs.registry import InputContext
 from vllm.utils import PlaceholderModule
 
-from .base import MediaIO, MultiModalPlugin
-from .inputs import AudioItem, ModalityData, MultiModalKwargs
+from .base import MediaIO
 
 try:
     import librosa
@@ -22,25 +20,6 @@ try:
     import soundfile
 except ImportError:
     soundfile = PlaceholderModule("soundfile")  # type: ignore[assignment]
-
-
-class AudioPlugin(MultiModalPlugin):
-    """Plugin for audio data."""
-
-    def get_data_key(self) -> str:
-        return "audio"
-
-    def _default_input_mapper(
-        self,
-        ctx: InputContext,
-        data: ModalityData[AudioItem],
-        **mm_processor_kwargs,
-    ) -> MultiModalKwargs:
-        raise NotImplementedError("There is no default audio input mapper")
-
-    def _default_max_multimodal_tokens(self, ctx: InputContext) -> int:
-        raise NotImplementedError(
-            "There is no default maximum multimodal tokens")
 
 
 def resample_audio_librosa(

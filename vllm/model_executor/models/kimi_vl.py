@@ -43,10 +43,9 @@
 
 import copy
 import math
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import (Any, Iterable, List, Literal, Optional, Sequence, Tuple,
-                    TypedDict, Union)
+from typing import Any, Literal, Optional, TypedDict, Union
 
 import torch
 from torch import nn
@@ -120,7 +119,7 @@ class KimiVLMultiModalProjector(nn.Module):
 
 class KimiVLImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
-    pixel_values: Union[torch.Tensor, List[torch.Tensor]]
+    pixel_values: Union[torch.Tensor, list[torch.Tensor]]
     """
     Shape:`(num_patches, num_channels, patch_size, patch_size)`
     """
@@ -340,8 +339,7 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal):
         else:
             pixel_values = pixel_values.reshape(-1, num_channels, patch_size,
                                                 patch_size)
-        # fp32 -> bf16
-        pixel_values = pixel_values.to(torch.bfloat16)
+        pixel_values = pixel_values.to(self.vision_tower.dtype)
         # image_grid_hws.shape = (N, 2)
         assert image_grid_hws.ndim == 2, f"unexpected shape for image_grid_hws: {image_grid_hws.shape}"
 
@@ -369,6 +367,9 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal):
         lengths = [x.shape[0] for x in image_features]
         return self.multi_modal_projector(
             torch.cat(image_features)).split(lengths)
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
 
     def get_multimodal_embeddings(self,
                                   **kwargs: object) -> Optional[NestedTensors]:
@@ -445,7 +446,7 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal):
                                        sampling_metadata, **kwargs)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         config = self.config.text_config
         _KEYS_TO_MODIFY_MAPPING = {
             "language_model.lm_head": "lm_head",

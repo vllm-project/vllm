@@ -6,7 +6,7 @@ import os
 import time
 from functools import cache
 from pathlib import Path
-from typing import Any, Callable, Dict, Literal, Optional, Type, Union
+from typing import Any, Callable, Literal, Optional, Union
 
 import huggingface_hub
 from huggingface_hub import hf_hub_download
@@ -34,9 +34,11 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
                                              H2OVLChatConfig,
                                              InternVLChatConfig, JAISConfig,
                                              KimiVLConfig, MedusaConfig,
-                                             MllamaConfig, MLPSpeculatorConfig,
-                                             MPTConfig, NemotronConfig,
-                                             NVLM_D_Config, RWConfig,
+                                             MiniMaxText01Config,
+                                             MiniMaxVL01Config, MllamaConfig,
+                                             MLPSpeculatorConfig, MPTConfig,
+                                             NemotronConfig, NVLM_D_Config,
+                                             OvisConfig, RWConfig,
                                              SkyworkR1VChatConfig, SolarConfig,
                                              Telechat2Config, UltravoxConfig)
 # yapf: enable
@@ -53,11 +55,11 @@ HF_TOKEN = os.getenv('HF_TOKEN', None)
 
 logger = init_logger(__name__)
 
-_CONFIG_REGISTRY_OVERRIDE_HF: Dict[str, Type[PretrainedConfig]] = {
+_CONFIG_REGISTRY_OVERRIDE_HF: dict[str, type[PretrainedConfig]] = {
     "mllama": MllamaConfig
 }
 
-_CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
+_CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "chatglm": ChatGLMConfig,
     "cohere2": Cohere2Config,
     "dbrx": DbrxConfig,
@@ -73,8 +75,11 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "exaone": ExaoneConfig,
     "h2ovl_chat": H2OVLChatConfig,
     "internvl_chat": InternVLChatConfig,
+    "minimax_text_01": MiniMaxText01Config,
+    "minimax_vl_01": MiniMaxVL01Config,
     "nemotron": NemotronConfig,
     "NVLM_D": NVLM_D_Config,
+    "ovis": OvisConfig,
     "solar": SolarConfig,
     "skywork_chat": SkyworkR1VChatConfig,
     "telechat": Telechat2Config,
@@ -194,7 +199,7 @@ def patch_rope_scaling(config: PretrainedConfig) -> None:
         patch_rope_scaling_dict(rope_scaling)
 
 
-def patch_rope_scaling_dict(rope_scaling: Dict[str, Any]) -> None:
+def patch_rope_scaling_dict(rope_scaling: dict[str, Any]) -> None:
     if "rope_type" in rope_scaling and "type" in rope_scaling:
         rope_type = rope_scaling["rope_type"]
         rope_type_legacy = rope_scaling["type"]
@@ -650,6 +655,11 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
     config_file_name = "params.json"
 
     config_dict = get_hf_file_to_dict(config_file_name, model, revision)
+    if config_dict is None:
+        raise ValueError(
+            f"Failed to load mistral '{config_file_name}' config for model "
+            f"{model}. Please check if the model is a mistral-format model "
+            f"and if the config file exists.")
     assert isinstance(config_dict, dict)
 
     config_mapping = {
@@ -738,7 +748,7 @@ def get_hf_image_processor_config(
     hf_token: Optional[Union[bool, str]] = None,
     revision: Optional[str] = None,
     **kwargs,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     # ModelScope does not provide an interface for image_processor
     if VLLM_USE_MODELSCOPE:
         return dict()
@@ -755,19 +765,22 @@ def get_hf_text_config(config: PretrainedConfig):
     """Get the "sub" config relevant to llm for multi modal models.
     No op for pure text models.
     """
-    if hasattr(config, "text_config"):
-        # The code operates under the assumption that text_config should have
-        # `num_attention_heads` (among others). Assert here to fail early
-        # if transformers config doesn't align with this assumption.
-        assert hasattr(config.text_config, "num_attention_heads")
-        return config.text_config
-    elif hasattr(config, "thinker_config"):
+    # This block should be unnecessary after https://github.com/huggingface/transformers/pull/37517
+    if hasattr(config, "thinker_config"):
         # TODO(suyang.fy): Refactor code.
         #  For Qwen2.5-Omni, change hf_text_config to
         #  thinker_config.text_config.
         return config.thinker_config.text_config
-    else:
-        return config
+
+    text_config = config.get_text_config()
+
+    if text_config is not config:
+        # The code operates under the assumption that text_config should have
+        # `num_attention_heads` (among others). Assert here to fail early
+        # if transformers config doesn't align with this assumption.
+        assert hasattr(text_config, "num_attention_heads")
+
+    return text_config
 
 
 def try_get_generation_config(
