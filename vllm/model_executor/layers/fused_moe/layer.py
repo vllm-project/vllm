@@ -252,29 +252,29 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
         moe: MoEConfig = self.moe
 
-        all_to_all_args = dict(
-            max_num_tokens=moe.max_num_tokens,
-            num_experts=moe.num_experts,
-            experts_per_token=moe.experts_per_token,  # topk
-            rank=all2all_manager.rank,
-            world_size=all2all_manager.world_size,
-            # dp_size actually means tp_size, bug in pplx kernels
-            dp_size=all2all_manager.tp_group.world_size,
-            hidden_dim=moe.hidden_dim,
-            hidden_dim_bytes=moe.hidden_dim * moe.in_dtype.itemsize,
-            # For blocked per token: set to
-            #   ceil_div(hidden_dim, block_size) * sizeof(float32)
-            # For per-token: set to sizeof(float32)
-            hidden_dim_scale_bytes=(0 if moe.in_dtype.itemsize != 1 else
-                                    ((moe.hidden_dim + moe.block_size - 1) //
-                                     moe.block_size * torch.float32.itemsize)),
-            group_name=all2all_manager.cpu_group.group_name,
-        )
-
-        handle = all2all_manager.get_handle(all_to_all_args)
-
         prepare_finalize = None
         if moe.use_pplx_kernels:
+            all_to_all_args = dict(
+                max_num_tokens=moe.max_num_tokens,
+                num_experts=moe.num_experts,
+                experts_per_token=moe.experts_per_token,  # topk
+                rank=all2all_manager.rank,
+                world_size=all2all_manager.world_size,
+                # dp_size actually means tp_size, bug in pplx kernels
+                dp_size=all2all_manager.tp_group.world_size,
+                hidden_dim=moe.hidden_dim,
+                hidden_dim_bytes=moe.hidden_dim * moe.in_dtype.itemsize,
+                # For blocked per token: set to
+                #   ceil_div(hidden_dim, block_size) * sizeof(float32)
+                # For per-token: set to sizeof(float32)
+                hidden_dim_scale_bytes=(0 if moe.in_dtype.itemsize != 1 else (
+                    (moe.hidden_dim + moe.block_size - 1) // moe.block_size *
+                    torch.float32.itemsize)),
+                group_name=all2all_manager.cpu_group.group_name,
+            )
+
+            handle = all2all_manager.get_handle(all_to_all_args)
+
             prepare_finalize = PplxPrepareAndFinalize(
                 handle,
                 max_num_tokens=moe.max_num_tokens,
