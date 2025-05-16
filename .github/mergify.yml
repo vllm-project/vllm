@@ -174,7 +174,6 @@ pull_request_rules:
       users:
         - "sangstar"
 
-
 - name: remove 'needs-rebase' label when conflict is resolved
   conditions:
       - -conflict
