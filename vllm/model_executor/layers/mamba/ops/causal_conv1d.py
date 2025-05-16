@@ -167,7 +167,7 @@ def _causal_conv1d_update_kernel(
         conv_state_batch_coord = tl.load(conv_state_indices_ptr + idx_seq)
     else:
         conv_state_batch_coord = idx_seq
-    if USE_PAD_SLOT:
+    if USE_PAD_SLOT:  # noqa
         if conv_state_batch_coord == pad_slot_id:
             # not processing as this is not the actual sequence
             return
@@ -263,8 +263,7 @@ def _causal_conv1d_update_kernel(
 
         matrix_w = w_col0
         matrix_x = col0
-        for j in tl.static_range(
-                KERNEL_WIDTH):  # <-- RESTORE THIS AFTER DEBUG3
+        for j in tl.static_range(KERNEL_WIDTH):
             if KERNEL_WIDTH == 2:
                 if j == 1:  # KERNEL_WIDTH-1:
                     matrix_w = w_col1
@@ -355,10 +354,7 @@ def causal_conv1d_update_triton(
         assert pad_slot_id is not None
         assert x.stride(1) == 1
     if isinstance(activation, bool):
-        if activation is True:
-            activation = "silu"
-        else:
-            activation = None
+        activation = "silu" if activation is True else None
     unsqueeze = x.dim() == 2
     if unsqueeze:
         # make it (batch, dim, seqlen) with seqlen == 1
@@ -548,7 +544,7 @@ def _causal_conv1d_fwd_kernel_contbatch(  # continuous batching
     else:
         # cache_idx
         conv_state_batch_coord = idx_seq
-    if USE_PAD_SLOT:
+    if USE_PAD_SLOT:  # noqa
         if conv_state_batch_coord == pad_slot_id:
             # not processing as this is not the actual sequence
             return
@@ -812,17 +808,13 @@ def _causal_conv1d_fwd_kernel_contbatch(  # continuous batching
 def causal_conv1d_fn_triton(
     x: torch.Tensor,
     weight: torch.Tensor,
-    bias: Optional[torch.Tensor] = None,
-    conv_states: Optional[
-        torch.
-        Tensor] = None,  # place the role of initial_state and incorporate `cache_indices`
-    query_start_loc: Optional[
-        torch.
-        Tensor] = None,  # NEW (to use with varlen with x.shape=(dim, cu_seq_len))
-    cache_indices: Optional[torch.Tensor] = None,  # NEW (used by conv_states)
+    conv_states: torch.Tensor,  # place the role of initial_state and incorporate `cache_indices`
+    query_start_loc: torch.Tensor,  # to use with varlen with x.shape=(dim, cu_seq_len))
+    cache_indices: Optional[torch.Tensor] = None,  # used by conv_states
     has_initial_states: Optional[
         torch.
         Tensor] = None,  # NEW interpretation sequence-level boolean (previously batch-level)
+    bias: Optional[torch.Tensor] = None,
     # silu_activation: bool,
     activation: Optional[str] = "silu",
     # pad_slot_id: int,
@@ -867,7 +859,7 @@ def causal_conv1d_fn_triton(
         it use `cache_indices` to get the index to the cache of conv_state for that sequence
 
         conv_state[cache_indices[i]] for seq-i - to be used as initial_state when has_initial_states[i] = True
-             and afther that conv_state[cache_indices[i]] need to be shift-left and updated with values from 'x'
+             and after that conv_state[cache_indices[i]] need to be shift-left and updated with values from 'x'
         ]
     activation: either None or "silu" or "swish"
     pad_slot_id: int
@@ -885,9 +877,8 @@ def causal_conv1d_fn_triton(
 
     out: same shape as `x`
     """
-    if isinstance(activation, bool):
-        if activation:
-            activation = "silu"
+    if isinstance(activation, bool) and activation:
+        activation = "silu"
 
     args = None
     if metadata is not None:
@@ -977,25 +968,19 @@ def causal_conv1d_fn_triton(
     if metadata is None:
 
         def num_program(META, seqlens):
-            query_start_loc = META["query_start_loc_ptr"]
-            batch_tensor = META["batch_ptr"]
-
             tot = 0
 
             mlist = []
-            offsetlist = []
-            tot_per_request = []
+            offsetlist = []  # type: ignore
 
             nums = -(-seqlens // META["BLOCK_M"])
 
             tot = nums.sum().item()
             mlist = np.repeat(np.arange(len(nums)), nums)
-            tot_per_request = np.repeat(nums, nums)
-            start = 0
             for idx, num in enumerate(nums):
                 offsetlist.extend(
                     range(num)
-                )  # chunk-idx if a sequence is splitted into multiple chunks
+                )  # chunk-idx if a sequence is split into multiple chunks
 
             if META["batch_ptr"].nelement() < len(mlist):
                 newlen = len(mlist) + 1
@@ -1016,7 +1001,6 @@ def causal_conv1d_fn_triton(
     else:
 
         def num_program(META, nums_dict):
-            nums = nums_dict[META["BLOCK_M"]]['nums']
             tot = nums_dict[META["BLOCK_M"]]['tot']
 
             mlist = nums_dict[META["BLOCK_M"]]['mlist']

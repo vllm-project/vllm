@@ -45,7 +45,7 @@ class Mamba2Metadata:
     stride_o_seq: Optional[int] = 0
     stride_o_dim: Optional[int] = None
     stride_o_token: Optional[int] = None
-    MAX_NUM_PROGRAMS: Optional[int] = 1024
+    MAX_NUM_PROGRAMS: int = 1024
     batch_ptr: Optional[torch.tensor] = None
     token_chunk_offset_ptr: Optional[torch.tensor] = None
 

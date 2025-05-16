@@ -479,7 +479,7 @@ class MambaMixer2(CustomOp):
                     )
                     query_start_loc = attn_metadata.query_start_loc
                     seqlens = np.diff(query_start_loc.to('cpu'))
-                    nums_dict = {}
+                    nums_dict = {}  # type: ignore
                     for BLOCK_M in [8]:  # cover all BLOCK_M values
                         nums = -(-seqlens // BLOCK_M)
                         nums_dict[BLOCK_M] = {}
@@ -491,8 +491,8 @@ class MambaMixer2(CustomOp):
                         mlist_len = len(nums_dict[BLOCK_M]['mlist'])
                         nums_dict[BLOCK_M]['mlist_len'] = mlist_len
                         mamba2_metadata.MAX_NUM_PROGRAMS = max(
-                            mamba2_metadata.MAX_NUM_PROGRAMS, mlist_len)
-                        offsetlist = []
+                            mamba2_metadata.MAX_NUM_PROGRAMS, mlist_len)  # type: ignore
+                        offsetlist = []  # type: ignore
                         for idx, num in enumerate(nums):
                             offsetlist.extend(range(num))
                         offsetlist = torch.tensor(offsetlist,
@@ -518,25 +518,25 @@ class MambaMixer2(CustomOp):
                             ) < mamba2_metadata.MAX_NUM_PROGRAMS:
                                 mamba2_metadata.batch_ptr.resize_(
                                     mamba2_metadata.MAX_NUM_PROGRAMS).fill_(
-                                        PAD_SLOT_ID)
-                                mamba2_metadata.token_chunk_offset_ptr.resize_(
+                                        PAD_SLOT_ID)  # type: ignore
+                                mamba2_metadata.token_chunk_offset_ptr.resize_(  # type: ignore
                                     mamba2_metadata.MAX_NUM_PROGRAMS).fill_(
-                                        PAD_SLOT_ID)
+                                        PAD_SLOT_ID)  # type: ignore
 
                         mamba2_metadata.batch_ptr[0:mlist_len].copy_(mlist)
-                        mamba2_metadata.token_chunk_offset_ptr[
+                        mamba2_metadata.token_chunk_offset_ptr[  # type: ignore
                             0:mlist_len].copy_(offsetlist)
                         nums_dict[BLOCK_M][
                             'batch_ptr'] = mamba2_metadata.batch_ptr
                         nums_dict[BLOCK_M][
-                            'token_chunk_offset_ptr'] = mamba2_metadata.token_chunk_offset_ptr
+                            'token_chunk_offset_ptr'] = mamba2_metadata.token_chunk_offset_ptr  # type: ignore
                     mamba2_metadata.seqlens = seqlens
                     mamba2_metadata.padded_batch = query_start_loc.size(0) - 1
                     mamba2_metadata.nums_dict = nums_dict
                 hidden_states_B_C = causal_conv1d_fn_triton(
                     x,
                     conv_weights,
-                    self.conv1d.bias,
+                    bias=self.conv1d.bias,
                     activation=self.activation,
                     conv_states=mamba_cache_params.conv_state,
                     has_initial_states=mamba2_metadata.has_initial_states,

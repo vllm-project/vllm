@@ -618,7 +618,7 @@ def test_causal_conv1d_varlen_vllm(batch, with_padding, dim, seqlen, width,
                                         dim=-1)
     out = causal_conv1d_fn_triton(x.squeeze(0),
                                   weight,
-                                  bias,
+                                  bias=bias,
                                   conv_states=final_states,
                                   query_start_loc=cumsum.cuda(),
                                   cache_indices=padded_state_indices,
