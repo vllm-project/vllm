@@ -36,7 +36,7 @@ class CpuPlatform(Platform):
             # instead of checking the OS. For instance M2 shall supports bf16
             # already. But we need to modify `cpu_extension.cmake` to activate
             # the feature in the build.
-            return [torch.bfloat16, torch.float32]
+            return [torch.float16, torch.float32]
         # x86/aarch64 CPU has supported both bf16 and fp16 natively.
         return [torch.bfloat16, torch.float16, torch.float32]
 
