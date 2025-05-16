@@ -458,7 +458,8 @@ class MambaMixer2(CustomOp):
                     _, width = conv_weights.shape
                     final_states = mamba_cache_params.conv_state
                     mamba2_metadata.num_cache_lines = final_states.size(0)
-                    mamba2_metadata.num_cache_lines, mamba2_metadata.dim, state_len = final_states.size()
+                    mamba2_metadata.num_cache_lines, mamba2_metadata.dim, state_len = final_states.size(
+                    )
                     # mamba2_metadata.num_cache_lines, mamba2_metadata.dim, mamba2_metadata.state_len = final_states.size()
                     # state_len = width - 1
                     mamba2_metadata.width = width
@@ -491,9 +492,11 @@ class MambaMixer2(CustomOp):
                         nums_dict[BLOCK_M]['mlist'] = mlist
                         mlist_len = len(nums_dict[BLOCK_M]['mlist'])
                         nums_dict[BLOCK_M]['mlist_len'] = mlist_len
+                        # type: ignore
                         mamba2_metadata.MAX_NUM_PROGRAMS = max(
-                            mamba2_metadata.MAX_NUM_PROGRAMS, mlist_len)  # type: ignore
-                        offsetlist = []  # type: ignore
+                            mamba2_metadata.MAX_NUM_PROGRAMS,
+                            mlist_len)
+                        offsetlist = []
                         for idx, num in enumerate(nums):
                             offsetlist.extend(range(num))
                         offsetlist = torch.tensor(offsetlist,

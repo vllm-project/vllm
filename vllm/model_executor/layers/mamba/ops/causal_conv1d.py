@@ -818,12 +818,10 @@ def _causal_conv1d_fwd_kernel_contbatch(  # continuous batching
 def causal_conv1d_fn_triton(
     x: torch.Tensor,
     weight: torch.Tensor,
-    conv_states: torch.Tensor,  # place the role of initial_state and incorporate `cache_indices`
-    query_start_loc: torch.Tensor,  # to use with varlen with x.shape=(dim, cu_seq_len))
-    cache_indices: Optional[torch.Tensor] = None,  # used by conv_states
-    has_initial_states: Optional[
-        torch.
-        Tensor] = None,  # NEW interpretation sequence-level boolean (previously batch-level)
+    conv_states: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    cache_indices: Optional[torch.Tensor] = None,
+    has_initial_states: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
     # silu_activation: bool,
     activation: Optional[str] = "silu",
@@ -833,8 +831,6 @@ def causal_conv1d_fn_triton(
     validate_data=False,
 ):
     """support varlen + continuous batching when x is 2D tensor
-
-    Update Apr, 14, 2025: move position of 'conv_states' to the 4th position
 
     x: (dim,cu_seq_len)
         [len(shape)==2 means continuous-batching]
