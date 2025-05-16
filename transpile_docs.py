@@ -369,7 +369,7 @@ def main():
                 content = f.read()
             with open(new_path, "wb") as f:
                 f.write(content)
-        elif path.suffix in {".py", ".css", ".js"}:
+        elif path.suffix in {".py", ".css", ".js", ".html"}:
             logger.info("Skipping %s", path)
         else:
             logger.warning("Skipping %s", path)
