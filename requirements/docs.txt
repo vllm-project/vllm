@@ -1,4 +1,5 @@
 mkdocs
+mkdocs-api-autonav
 mkdocs-material
 mkdocstrings-python
 mkdocs-gen-files

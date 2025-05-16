@@ -67,8 +67,8 @@ nav:
     - contributing/model
     - contributing/vulnerability_management.md
   - API Reference:
-    - api/summary.md
-    - api/vllm/vllm.md
+    - api/README.md
+    - api/vllm/*
   - Community:
     - community/blog.md
     - community/meetups.md
