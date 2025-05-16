@@ -244,6 +244,9 @@ class PrometheusStatLogger(StatLoggerBase):
                 buckets=build_1_2_5_buckets(max_model_len),
                 labelnames=labelnames).labels(*labelvalues)
 
+        # TODO: This metric might be incorrect in case of using multiple
+        # api_server counts which uses prometheus mp.
+        # See: https://github.com/vllm-project/vllm/pull/18053
         self.histogram_iteration_tokens = \
             prometheus_client.Histogram(
                 name="vllm:iteration_tokens_total",
