@@ -34,7 +34,7 @@ from vllm.config import KVTransferConfig
 from vllm.engine.arg_utils import EngineArgs
 
 
-def setup_environment_variables():
+def setup_environment_variables(vllm_version: str):
     # LMCache-related environment variables
     # Use experimental features in LMCache
     os.environ["LMCACHE_USE_EXPERIMENTAL"] = "True"
@@ -44,6 +44,8 @@ def setup_environment_variables():
     os.environ["LMCACHE_LOCAL_CPU"] = "True"
     # Set local CPU memory limit to 5.0 GB
     os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = "5.0"
+    if vllm_version == "v0":
+        os.environ["VLLM_USE_V1"] = "0"
 
 
 @contextlib.contextmanager
@@ -120,7 +122,7 @@ def main():
         lmcache_connector = "LMCacheConnectorV1"
         model = "meta-llama/Meta-Llama-3.1-8B-Instruct"
 
-    setup_environment_variables()
+    setup_environment_variables(args.version)
 
     with build_llm_with_lmcache(lmcache_connector, model, args.version) as llm:
 
