@@ -128,6 +128,9 @@ def transpile_myst_to_md(old_path: Path) -> None:
         # Replace MyST links with regular markdown links
         line = replace_links(line)
 
+        # Remove inline code MyST syntax
+        line = line.replace("{code}`", "`")
+
         # Move page title to front matter
         if ((match := re.match(r"^# (.*)$", line))
                 and "```" not in "".join(lines[:i])):
