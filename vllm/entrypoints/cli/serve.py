@@ -29,6 +29,7 @@ from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.core import EngineCoreProc
 from vllm.v1.engine.core_client import CoreEngineProcManager
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 from vllm.v1.utils import (CoreEngine, get_engine_client_zmq_addr, shutdown,
                            wait_for_engine_startup)
 
@@ -295,7 +296,9 @@ def run_multi_api_server(args: argparse.Namespace):
 
     assert not args.headless
     num_api_servers = args.api_server_count
-    # assert num_api_servers > 1
+    assert num_api_servers > 1
+
+    setup_multiprocess_prometheus()
 
     listen_address, sock = setup_server(args)
 

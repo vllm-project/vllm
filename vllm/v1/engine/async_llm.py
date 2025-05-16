@@ -34,6 +34,7 @@ from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.loggers import (StatLoggerBase, StatLoggerFactory,
                                      setup_default_loggers)
+from vllm.v1.metrics.prometheus import shutdown_prometheus
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 logger = init_logger(__name__)
@@ -197,6 +198,8 @@ class AsyncLLM(EngineClient):
 
     def shutdown(self):
         """Shutdown, cleaning up the background proc and IPC."""
+
+        shutdown_prometheus()
 
         if engine_core := getattr(self, "engine_core", None):
             engine_core.shutdown()

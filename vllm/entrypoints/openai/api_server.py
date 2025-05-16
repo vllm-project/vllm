@@ -24,6 +24,8 @@ from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from prometheus_client import make_asgi_app
+from prometheus_fastapi_instrumentator import Instrumentator
 from starlette.concurrency import iterate_in_threadpool
 from starlette.datastructures import State
 from starlette.routing import Mount
@@ -97,6 +99,7 @@ from vllm.transformers_utils.tokenizer import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (Device, FlexibleArgumentParser, get_open_zmq_ipc_path,
                         is_valid_ipv6_address, set_ulimit)
+from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
@@ -323,22 +326,9 @@ router = APIRouter()
 
 
 def mount_metrics(app: FastAPI):
-    # Lazy import for prometheus multiprocessing.
-    # We need to set PROMETHEUS_MULTIPROC_DIR environment variable
-    # before prometheus_client is imported.
-    # See https://prometheus.github.io/client_python/multiprocess/
-    from prometheus_client import (REGISTRY, CollectorRegistry, make_asgi_app,
-                                   multiprocess)
-    from prometheus_fastapi_instrumentator import Instrumentator
+    """Mount prometheus metrics to a FastAPI app."""
 
-    registry = REGISTRY
-
-    prometheus_multiproc_dir_path = os.getenv("PROMETHEUS_MULTIPROC_DIR", None)
-    if prometheus_multiproc_dir_path is not None:
-        logger.debug("vLLM to use %s as PROMETHEUS_MULTIPROC_DIR",
-                     prometheus_multiproc_dir_path)
-        registry = CollectorRegistry()
-        multiprocess.MultiProcessCollector(registry)
+    registry = get_prometheus_registry()
 
     Instrumentator(
         excluded_handlers=[
