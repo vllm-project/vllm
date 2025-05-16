@@ -25,7 +25,6 @@ if TYPE_CHECKING:
 if current_platform.is_rocm():
     import aiter
 
-    from vllm.attention.ops.triton_unified_attention import unified_attention
     from vllm.triton_utils import tl, triton
     from vllm.utils import direct_register_custom_op
 
@@ -152,14 +151,10 @@ if current_platform.is_rocm():
                            dtype=torch.float8_e4m3fnuz,
                            device="cuda")
 
-    try:
-        direct_register_custom_op("flash_attn_varlen_func",
-                                  flash_attn_varlen_func_impl, ["out"],
-                                  flash_attn_varlen_func_fake)
-        flash_attn_varlen_func = torch.ops.vllm.flash_attn_varlen_func
-
-    except AttributeError:
-        flash_attn_varlen_func = flash_attn_varlen_func_impl
+    direct_register_custom_op("flash_attn_varlen_func",
+                              flash_attn_varlen_func_impl, ["out"],
+                              flash_attn_varlen_func_fake)
+    flash_attn_varlen_func = torch.ops.vllm.flash_attn_varlen_func
 
 logger = init_logger(__name__)
 
@@ -431,7 +426,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         self.kv_cache_dtype = kv_cache_dtype
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
-            logits_soft_cap = 0
+            logits_soft_cap = 0.
         self.logits_soft_cap = logits_soft_cap
 
         assert self.num_heads % self.num_kv_heads == 0
@@ -542,31 +537,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 max_seqlen_k = attn_metadata.max_seq_len
                 block_table = attn_metadata.block_table
 
-            descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
-
-            cu_seq_lens = attn_metadata.cu_seq_lens
-            total_tokens = attn_metadata.total_tokens
-            if max_seqlen_q <= 1:
-                unified_attention(
-                    q=query[:num_actual_tokens],
-                    k=key_cache,
-                    v=value_cache,
-                    out=output[:num_actual_tokens],
-                    cu_seqlens_q=cu_seqlens_q,
-                    max_seqlen_q=max_seqlen_q,
-                    seqused_k=seqused_k,
-                    max_seqlen_k=max_seqlen_k,
-                    softmax_scale=self.scale,
-                    causal=True,
-                    alibi_slopes=self.alibi_slopes,
-                    window_size=self.sliding_window,
-                    block_table=block_table,
-                    softcap=self.logits_soft_cap,
-                    q_descale=None,  # Not supported
-                    k_descale=layer._k_scale.expand(descale_shape),
-                    v_descale=layer._v_scale.expand(descale_shape),
-                )
-            else:
+            if max_seqlen_q > 1:
+                cu_seq_lens = attn_metadata.cu_seq_lens
+                total_tokens = attn_metadata.total_tokens
                 flash_attn_varlen_func(
                     query[:num_actual_tokens],
                     key_cache,
@@ -582,6 +555,42 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     block_table=block_table,
                     cu_seqlens_k=cu_seq_lens,
                 )
+
+            _, num_heads, head_size = query.shape
+            _PARTITION_SIZE_ROCM = 256
+            num_seqs = seqused_k.shape[0]
+            nbyes_per_qo_elem = torch.finfo(output.dtype).bits // 8
+            max_num_partitions = (max_seqlen_k + _PARTITION_SIZE_ROCM -
+                                  1) // _PARTITION_SIZE_ROCM
+
+            workspace_buffer = torch.empty(
+                (num_seqs * num_heads * max_num_partitions * head_size) *
+                nbyes_per_qo_elem + 2 *
+                (num_seqs * num_heads * max_num_partitions) * 4,
+                dtype=torch.uint8,
+                device=output.device,
+            )
+
+            aiter.paged_attention_v1(
+                output[:num_actual_tokens],
+                workspace_buffer,
+                query[:num_actual_tokens],
+                key_cache,
+                value_cache,
+                self.scale,
+                block_table,
+                cu_seqlens_q,
+                seqused_k,
+                int(max_seqlen_k),
+                self.alibi_slopes,
+                self.kv_cache_dtype,
+                "NHD",
+                self.logits_soft_cap,
+                layer._k_scale,
+                layer._v_scale,
+                None,
+                _PARTITION_SIZE_ROCM,
+            )
             return output
         else:
             raise NotImplementedError(
