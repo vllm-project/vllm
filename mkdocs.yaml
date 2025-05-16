@@ -76,20 +76,13 @@ markdown_extensions:
   - pymdownx.emoji:
       emoji_index: !!python/name:material.extensions.emoji.twemoji
       emoji_generator: !!python/name:material.extensions.emoji.to_svg
-  # TODO: explain why we need this
+  # For in page [TOC] (not sidebar)
   - toc:
       permalink: true
   # For math rendering
   - mdx_math:
       enable_dollar_delimiter: true
+
 extra_javascript:
   - javascript/run_llm_widget.js
   - https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS_HTML
-# extra:
-#   consent:
-#     title: Cookie consent
-#     description: >- 
-#       We use cookies to recognize your repeated visits and preferences, as well
-#       as to measure the effectiveness of our documentation and whether users
-#       find what they're searching for. With your consent, you're helping us to
-#       make our documentation better.
