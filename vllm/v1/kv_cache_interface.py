@@ -216,7 +216,7 @@ class KVCacheConfig:
     1. A model only uses full attention. The pattern is 
     (num_hidden_layers * full), so there is only one group and the block table 
     is shared by all layers.
-    2. (WIP) A model with 10 full attention layers and 20 sliding window 
+    2. A model with 10 full attention layers and 20 sliding window 
     attention layers. There are 3 layers in the pattern (1 * full, 2 * sw), so 
     there are 3 groups, each of which represents 10 layers in the model.
     """

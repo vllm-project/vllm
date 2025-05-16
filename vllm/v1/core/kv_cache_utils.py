@@ -123,6 +123,7 @@ class KVCacheBlock:
     prev_free_block: Optional["KVCacheBlock"] = None
     next_free_block: Optional["KVCacheBlock"] = None
 
+    # The single_type_kv_cache_manager this block belongs to.
     manager_id: int = -1
 
     @property
@@ -799,8 +800,9 @@ def get_kv_cache_config(vllm_config: VllmConfig,
         return _get_kv_cache_config_uniform_type(vllm_config, kv_cache_spec,
                                                  available_memory)
     elif is_kv_cache_page_size_uniform(kv_cache_spec):
-        # KV cache of all layers have the same page size. TODO notes about
-        # hybrid allocator
+        # KV cache of all layers have the same page size. Split the layers into
+        # groups with the same number of layers, and thus same total page size.
+        # See KVCacheConfig.kv_cache_groups for more details.
         return _get_kv_cache_config_uniform_page_size(vllm_config,
                                                       kv_cache_spec,
                                                       available_memory)
@@ -845,9 +847,8 @@ def unify_kv_cache_configs(kv_cache_configs: list[KVCacheConfig]):
 
 
 # KVCacheBlocks for the same block of all kv cache groups with the same kv cache
-# spec (and belongs to the same manager)
-# TODO: more notes
-# TODO: optimize the creation of KVCacheBlockBundle
+# spec (and belongs to the same manager). All blocks in the bundle have the same
+# block hash, and are allocated & freed & cached & evicted together.
 @dataclass
 class KVCacheBlockBundle:
     blocks: tuple[KVCacheBlock, ...]

@@ -183,7 +183,7 @@ class BlockPool:
             # Update and added the full block to the cache.
             blk.init_block_hash(block_hash, manager_id)
             # We make all blocks in the same KVCacheBlockBundle cached &
-            # uncached together. This is achieved by:
+            # evicted together. This is achieved by:
             # 1. Here, use the master_block_id as the representative of the
             #    KVCacheBlockBundle in the cache.
             # 2. In `free_blocks`, add the master block to the free list before
