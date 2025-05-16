@@ -65,11 +65,7 @@ def unregister_vllm_metrics():
 
 
 def shutdown_prometheus():
-    """Mark a process as dead in prometheus multiprocessing.
-    
-    Args:
-        pid: Process ID to mark as dead
-    """
+    """Shutdown prometheus metrics."""
     try:
         pid = os.getpid()
         multiprocess.mark_process_dead(pid)
