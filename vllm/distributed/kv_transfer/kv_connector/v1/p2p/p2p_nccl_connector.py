@@ -9,7 +9,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
-from vllm.distributed.kv_transfer.p2p_nccl_transfer import P2pNcclTransfer
+from vllm.distributed.kv_transfer.kv_connector.v1.p2p.p2p_nccl_engine import P2pNcclEngine
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import MLACommonMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -84,7 +84,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
         self.rank = rank
         self.is_producer = self.config.is_kv_producer
 
-        self.p2p_nccl_transfer = P2pNcclTransfer(
+        self.p2p_nccl_engine = P2pNcclEngine(
             local_rank=local_rank,
             config=self.config,
             hostname="",
@@ -104,7 +104,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
             The number of elements in kv_caches and layer_names should be
             the same.
         """
-        assert self.p2p_nccl_transfer is not None
+        assert self.p2p_nccl_engine is not None
 
         attn_metadata = forward_context.attn_metadata
 
@@ -179,7 +179,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 kv_cache_layer = attn_layer.kv_cache[ \
                     forward_context.virtual_engine]
 
-                kv_cache = self.p2p_nccl_transfer.recv_tensor(request.request_id +
+                kv_cache = self.p2p_nccl_engine.recv_tensor(request.request_id +
                                                           "-" + layer_name)
 
                 if kv_cache is None:
@@ -216,7 +216,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
         """
-        assert self.p2p_nccl_transfer is not None
+        assert self.p2p_nccl_engine is not None
 
         def extract_kv_from_layer(
             layer: torch.Tensor,
@@ -244,13 +244,13 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 remote_address = ip + ":" + str(port + self._rank)
                 kv_cache = extract_kv_from_layer(kv_layer,
                                                  request.slot_mapping)
-                self.p2p_nccl_transfer.send_tensor(request_id + "-" + layer_name,
+                self.p2p_nccl_engine.send_tensor(request_id + "-" + layer_name,
                                                kv_cache, remote_address)
 
     def wait_for_save(self):
         if self.is_producer:
-            assert self.p2p_nccl_transfer is not None
-            self.p2p_nccl_transfer.wait_for_sent()
+            assert self.p2p_nccl_engine is not None
+            self.p2p_nccl_engine.wait_for_sent()
 
     def get_num_new_matched_tokens(
         self,
