@@ -548,9 +548,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
             pixel_values: The pixels in each grid patch for each input image.
             image_sizes: The original `(height, width)` for each input image.
 
-        :::{seealso}
-        {class}`LlavaNextImageInputs`
-        :::
+        Info:
+            [LlavaNextImageInputs][]
         """
         if intermediate_tensors is not None:
             inputs_embeds = None
