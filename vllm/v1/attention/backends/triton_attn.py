@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import torch
 
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.ops.chunked_prefill_paged_decode import (
@@ -166,8 +167,8 @@ class TritonAttentionImpl(AttentionImpl):
         # performance to make sure it does not introduce any overhead.
 
         num_queries_per_kv = query.shape[1] // key.shape[1]
-        use_prefill_decode_attn = (num_queries_per_kv &
-                                   (num_queries_per_kv - 1)) != 0
+        use_prefill_decode_attn = envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION or (
+            (num_queries_per_kv & (num_queries_per_kv - 1)) != 0)
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
