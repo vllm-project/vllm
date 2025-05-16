@@ -38,6 +38,9 @@ def register_tt_models():
     from models.tt_transformers.tt.generator_vllm import Qwen2ForCausalLM
     ModelRegistry.register_model("TTQwen2ForCausalLM", Qwen2ForCausalLM)
 
+    from models.tt_transformers.tt.generator_vllm import MistralForCausalLM
+    ModelRegistry.register_model("TTMistralForCausalLM", MistralForCausalLM)
+
 register_tt_models()  # Import and register models from tt-metal
 
 
@@ -84,6 +87,7 @@ def check_tt_model_supported(model):
         "Qwen/Qwen2.5-72B",
         "Qwen/Qwen2.5-72B-Instruct",
         "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
+        "mistralai/Mistral-7B-Instruct-v0.3",
     ]
     assert model in supported_models, f"Invalid model: {model}"
 
@@ -131,7 +135,9 @@ def run_inference(
     disable_async_output_proc=False,
     multi_modal=False,
     test_increasing_seq_lens=False,
-    override_tt_config=None
+    override_tt_config=None,
+    max_model_len=131072,
+    max_num_batched_tokens=131072,
 ):
     check_tt_model_supported(model)
     
@@ -140,9 +146,9 @@ def run_inference(
         "model": model,
         "block_size": 64,
         "max_num_seqs": max_seqs_in_batch,
-        "max_model_len": 131072,
+        "max_model_len": max_model_len,
         "disable_log_stats": False,
-        "max_num_batched_tokens": 131072,
+        "max_num_batched_tokens": max_num_batched_tokens,
         "log_global_stats": True if measure_perf else False,
         "num_scheduler_steps": num_scheduler_steps,
         "disable_async_output_proc": disable_async_output_proc,
@@ -309,6 +315,8 @@ if __name__ == "__main__":
     parser.add_argument("--multi_modal", action="store_true", help="Run multi-modal inference with Llama3.2-11b")
     parser.add_argument("--test_increasing_seq_lens", action="store_true", help="Test generations of small to large sequences")
     parser.add_argument("--override_tt_config", type=str, default=None, help="Custom TT options as Json string")
+    parser.add_argument("--max_model_len", type=int, default=None, help="Max model len")
+    parser.add_argument("--max_num_batched_tokens", type=int, default=None, help="Max num batched tokens")
     
     args = parser.parse_args()
 
@@ -327,4 +335,6 @@ if __name__ == "__main__":
         multi_modal=args.multi_modal,
         test_increasing_seq_lens=args.test_increasing_seq_lens,
         override_tt_config=args.override_tt_config,
+        max_model_len=args.max_model_len,
+        max_num_batched_tokens=args.max_num_batched_tokens,
     )
