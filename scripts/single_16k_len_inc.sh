@@ -3,12 +3,16 @@
 # set -x
 
 USE_FP8_KV=false
+USE_NATIVE_SCALING=true
 
 # Parse arguments
 for arg in "$@"
 do
     if [ "$arg" == "--fp8_kv" ]; then
         USE_FP8_KV=true
+    fi
+    if [ "$arg" == "--disable_native_scaling" ]; then
+        USE_NATIVE_SCALING=false
     fi
 done
 
@@ -43,12 +47,13 @@ export VLLM_DELAYED_SAMPLING="true"
 #export VLLM_MOE_SLICE_LENGTH=20480
 
 # params
-max_model_len=16384
-max_num_batched_tokens=16384
+CONST_LEN=16384
+max_model_len=$CONST_LEN
+max_num_batched_tokens=$CONST_LEN
 max_num_seqs=256
 input_min=1
-input_max=16384
-output_max=16384
+input_max=$CONST_LEN
+output_max=$CONST_LEN
 
 unset VLLM_PROMPT_BS_BUCKET_MIN VLLM_PROMPT_BS_BUCKET_STEP VLLM_PROMPT_BS_BUCKET_MAX
 unset VLLM_PROMPT_SEQ_BUCKET_MIN VLLM_PROMPT_SEQ_BUCKET_STEP VLLM_PROMPT_SEQ_BUCKET_MAX
@@ -68,6 +73,14 @@ export VLLM_MLA_PERFORM_MATRIX_ABSORPTION=0
 export VLLM_REQUANT_FP8_INC=1
 export VLLM_ENABLE_RUNTIME_DEQUANT=1
 export VLLM_HPU_MARK_SCALES_AS_CONST=false
+
+if $USE_NATIVE_SCALING; then
+    echo "Using naive scaling"
+    export INC_FORCE_NAIVE_SCALING=1
+else
+    echo "Disabling naive scaling"
+    export INC_FORCE_NAIVE_SCALING=0
+fi
 
 # Check if FP8 KVCache is enabled
 if $USE_FP8_KV; then

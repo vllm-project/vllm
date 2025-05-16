@@ -76,7 +76,7 @@ Resulting full path: "/path/to/vllm-fork/scripts/nc_workspace_measure_kvache/inc
 
 ```bash
 cd vllm-fork
-huggingface-cli download Yi30/inc-woq-default-pile-one-cache-412-g2  --local-dir ./scripts/nc_workspace_measure_kvache
+huggingface-cli download Yi30/inc-woq-2282samples-514-g2  --local-dir ./scripts/nc_workspace_measure_kvache
 ```
 
 - Running the Benchmark
