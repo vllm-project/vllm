@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_VIDEO_FETCH_TIMEOUT: int = 30
     VLLM_AUDIO_FETCH_TIMEOUT: int = 10
+    VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MM_INPUT_CACHE_GIB: int = 8
     VLLM_TARGET_DEVICE: str = "cuda"
     MAX_JOBS: Optional[str] = None
@@ -445,6 +446,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Default is 10 seconds
     "VLLM_AUDIO_FETCH_TIMEOUT":
     lambda: int(os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "10")),
+
+    # Backend for Video IO
+    # - "opencv": Default backend that uses OpenCV stream buffered backend.
+    #
+    # Custom backend implementations can be registered
+    # via `@VIDEO_LOADER_REGISTRY.register("my_custom_video_loader")` and
+    # imported at runtime.
+    # If a non-existing backend is used, an AssertionError will be thrown.
+    "VLLM_VIDEO_LOADER_BACKEND":
+    lambda: os.getenv("VLLM_VIDEO_LOADER_BACKEND", "opencv"),
 
     # Cache size (in GiB) for multimodal input cache
     # Default is 4 GiB
