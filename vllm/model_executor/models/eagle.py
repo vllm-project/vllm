@@ -29,7 +29,7 @@ class DummyInputLayerNorm(nn.Module):
         self.weight = nn.Parameter(weight) if weight is not None else None
         self.bias = nn.Parameter(bias) if bias is not None else None
 
-    def forward(self, x):
+    def forward(self, x, residual=None, scale=None):
         return x
 
 
