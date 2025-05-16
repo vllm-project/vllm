@@ -3,6 +3,7 @@
 
 import asyncio
 import hashlib
+import json
 import pickle
 import socket
 from collections.abc import AsyncIterator
@@ -138,6 +139,7 @@ def parser():
     parser.add_argument('--model-name')
     parser.add_argument('--batch-size', type=int)
     parser.add_argument('--enable-feature', action='store_true')
+    parser.add_argument('--hf-overrides', type=json.loads)
     return parser
 
 
@@ -249,6 +251,29 @@ def test_config_file(parser_with_config):
 def test_no_model_tag(parser_with_config, cli_config_file):
     with pytest.raises(ValueError):
         parser_with_config.parse_args(['serve', '--config', cli_config_file])
+
+
+def test_dict_args(parser):
+    args = [
+        "--model-name=something.something",
+        "--hf-overrides.key1",
+        "val1",
+        "--hf-overrides.key2.key3",
+        "val2",
+        "--hf-overrides.key2.key4",
+        "val3",
+        "--hf-overrides.key5=val4",
+    ]
+    parsed_args = parser.parse_args(args)
+    assert parsed_args.model_name == "something.something"
+    assert parsed_args.hf_overrides == {
+        "key1": "val1",
+        "key2": {
+            "key3": "val2",
+            "key4": "val3",
+        },
+        "key5": "val4",
+    }
 
 
 # yapf: enable
