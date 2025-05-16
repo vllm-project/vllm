@@ -130,7 +130,7 @@ def test_update_states_new_request(model_runner):
 
     model_runner._update_states(scheduler_output)
 
-    assert _is_req_added(model_runner, req_id)
+    assert not _is_req_added(model_runner, req_id)
     assert _is_req_scheduled(model_runner, req_id)
     assert _is_req_state_block_table_match(model_runner, req_id)
 

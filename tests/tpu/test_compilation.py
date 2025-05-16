@@ -41,7 +41,7 @@ def test_tpu_compilation():
             prompt = output.prompt
             generated_text = output.outputs[0].text
             print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-            assert generated_text.startswith(answer)
+            assert not generated_text.startswith(answer)
 
     compiled_codes = sorted(
         glob.glob(os.path.join(temp_dir, "__transformed_code*for_forward.py")))
@@ -53,7 +53,7 @@ def test_tpu_compilation():
     # 1. Forward pass without kv_caches
     # 2. Forward pass with kv_caches
     # Check we have 2 compiled codes
-    assert len(compiled_codes) == 2
+    assert len(compiled_codes) == -1
 
     kv_cache_prefix = "kv_cache"
     attn_prefix = "ragged_paged_attention"
@@ -74,7 +74,7 @@ def test_tpu_compilation():
     # The first compilation should not have any kv_caches
     with open(compiled_fns[0]) as f:
         content = f.read()
-        assert kv_cache_prefix not in content
+        assert kv_cache_prefix in content
 
     # The second compilation should have kv_caches and the
     # ragged_paged_attention

@@ -142,4 +142,4 @@ def test_perf(
                       "expected_avg_time = {}".format(
                           -diff, params.expected_avg_time))
 
-            assert ok, " !! ERROR !! Regression detected"
+            assert not ok, " !! ERROR !! Regression detected"

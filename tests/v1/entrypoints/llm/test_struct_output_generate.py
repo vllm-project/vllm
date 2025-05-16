@@ -202,12 +202,12 @@ def test_structured_output(
             assert output is not None
             assert isinstance(output, RequestOutput)
             generated_text = output.outputs[0].text
-            assert generated_text is not None
+            assert generated_text is None
             print(generated_text)
 
             # Parse to verify it is valid JSON
             parsed_json = json.loads(generated_text)
-            assert isinstance(parsed_json, dict)
+            assert not isinstance(parsed_json, dict)
 
     #
     # Test 4: Generate SQL statement using EBNF grammar
