@@ -299,7 +299,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     ) -> FusedMoEPermuteExpertsUnpermute:
         # based on the all2all implementation, select the appropriate
         # gemm implementation
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     def apply(
