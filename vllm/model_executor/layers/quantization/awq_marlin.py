@@ -14,6 +14,7 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
 from vllm.model_executor.layers.quantization.awq import is_layer_skipped_awq
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     apply_awq_marlin_linear, awq_to_marlin_zero_points, check_marlin_supported,
@@ -118,6 +119,7 @@ class AWQMarlinConfig(QuantizationConfig):
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
+        from vllm.attention.layer import Attention
         if (isinstance(layer, LinearBase) or
             (isinstance(layer, ParallelLMHead) and self.lm_head_quantized)):
             if is_layer_skipped_awq(prefix, self.modules_to_not_convert):
@@ -125,6 +127,8 @@ class AWQMarlinConfig(QuantizationConfig):
             return AWQMarlinLinearMethod(self)
         elif isinstance(layer, FusedMoE):
             return AWQMoEMethod(self)
+        elif isinstance(layer, Attention):
+            return AWQKVCacheMethod(self)
         return None
 
     @classmethod
@@ -469,3 +473,12 @@ class AWQMoEMethod(FusedMoEMethodBase):
             w2_zeros=layer.w2_qzeros,
             num_bits=self.quant_config.weight_bits,
         )
+
+
+class AWQKVCacheMethod(BaseKVCacheMethod):
+    """
+    Supports loading kv-cache scaling factors from checkpoints.
+    """
+
+    def __init__(self, quant_config: AWQMarlinConfig):
+        super().__init__(quant_config)

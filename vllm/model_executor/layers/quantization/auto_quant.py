@@ -5,6 +5,7 @@ from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.utils import set_weight_attrs
@@ -79,8 +80,11 @@ class AutoQuantConfig(QuantizationConfig):
 
     def get_quant_method(
             self, layer: torch.nn.Module, prefix: str) -> Optional["AutoQuantLinearMethod"]:
+        from vllm.attention.layer import Attention
         if isinstance(layer, LinearBase):
             return AutoQuantLinearMethod(self)
+        elif isinstance(layer, Attention):
+            return AutoQuantKVCacheMethod(self)
         return None
 
     def get_scaled_act_names(self) -> List[str]:
@@ -340,3 +344,12 @@ def quantize_tensor(
                 pack_int_zeros[:, col] |= qzero_col << (i * n_bits)
         qzeros = pack_int_zeros
     return qweight, scales, qzeros
+
+
+class AutoQuantKVCacheMethod(BaseKVCacheMethod):
+    """
+    Supports loading kv-cache scaling factors from checkpoints.
+    """
+
+    def __init__(self, quant_config: AutoQuantConfig):
+        super().__init__(quant_config)
