@@ -347,11 +347,11 @@ class ModelConfig:
     """Maximum number of data items per modality per prompt. Only applicable
     for multimodal models."""
     interleave_mm_strings: bool = False
-    """Enable fully interleaved support for multimodal prompts, while using 
+    """Enable fully interleaved support for multimodal prompts, while using
     --chat-template-content-format=string. Defaults to False."""
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
-    """Additional args passed to process media inputs, keyed by modalities. 
-    For example, to set num_frames for video, set 
+    """Additional args passed to process media inputs, keyed by modalities.
+    For example, to set num_frames for video, set
     `--media-io-kwargs '{"video": {"num_frames": 40} }'` """
     use_async_output_proc: bool = True
     """Whether to use async output processor."""
@@ -3146,8 +3146,8 @@ class MultiModalConfig:
     """
 
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
-    """Additional args passed to process media inputs, keyed by modalities. 
-    For example, to set num_frames for video, set 
+    """Additional args passed to process media inputs, keyed by modalities.
+    For example, to set num_frames for video, set
     `--media-io-kwargs '{"video": {"num_frames": 40} }'` """
 
     mm_processor_kwargs: Optional[dict[str, object]] = None
@@ -3599,32 +3599,38 @@ def get_served_model_name(model: str,
     return served_model_name
 
 
-GuidedDecodingBackendV0 = Literal["auto", "outlines", "lm-format-enforcer",
-                                  "xgrammar", "guidance"]
-
-GuidedDecodingBackendV1 = Literal["auto", "xgrammar", "guidance", "outlines"]
-GuidedDecodingBackend = Literal[GuidedDecodingBackendV0,
-                                GuidedDecodingBackendV1]
+StructuredOutputsBackendV0 = Literal[
+    "auto",
+    "outlines",
+    "lm-format-enforcer",
+    "xgrammar",
+    "guidance",
+]
+StructuredOutputsBackendV1 = Literal["auto", "xgrammar", "guidance", "outlines"]
+StructuredOutputsBackend = Literal[
+    StructuredOutputsBackendV0,
+    StructuredOutputsBackendV1,
+]
 
 
 @config
 @dataclass
-class DecodingConfig:
-    """Dataclass which contains the decoding strategy of the engine."""
+class StructuredOutputsConfig:
+    """Dataclass which contains the structured outputs config for the engine."""
 
     @property
     @deprecated(
         "`guided_decoding_backend` is deprecated and has been renamed to "
         "`backend`. This will be removed in v0.10.0. Please use the "
         "`backend` argument instead.")
-    def guided_decoding_backend(self) -> GuidedDecodingBackend:
+    def guided_decoding_backend(self) -> StructuredOutputsBackend:
         return self.backend
 
     @guided_decoding_backend.setter
-    def guided_decoding_backend(self, value: GuidedDecodingBackend):
+    def guided_decoding_backend(self, value: StructuredOutputsBackend):
         self.backend = value
 
-    backend: GuidedDecodingBackend = "auto" if envs.VLLM_USE_V1 else "xgrammar"
+    backend: StructuredOutputsBackend = "auto" if envs.VLLM_USE_V1 else "xgrammar"  # noqa: E501
     """Which engine will be used for guided decoding (JSON schema / regex etc)
     by default. With "auto", we will make opinionated choices based on request
     contents and what the backend libraries currently support, so the behavior
@@ -3670,9 +3676,9 @@ class DecodingConfig:
             self._extract_backend_options()
 
         if envs.VLLM_USE_V1:
-            valid_guided_backends = get_args(GuidedDecodingBackendV1)
+            valid_guided_backends = get_args(StructuredOutputsBackendV1)
         else:
-            valid_guided_backends = get_args(GuidedDecodingBackendV0)
+            valid_guided_backends = get_args(StructuredOutputsBackendV0)
         if self.backend not in valid_guided_backends:
             raise ValueError(f"Invalid backend '{self.backend}',"
                              f" must be one of {valid_guided_backends}")
@@ -3685,15 +3691,12 @@ class DecodingConfig:
                              "for the guidance backend.")
 
     @deprecated(
-        "Passing guided decoding backend options inside backend in the format "
-        "'backend:...' is deprecated. This will be removed in v0.10.0. Please "
-        "use the dedicated arguments '--disable-fallback', "
-        "'--disable-any-whitespace' and '--disable-additional-properties' "
-        "instead.")
+        "Passing structured output backend options inside backend in the format 'backend:...' is deprecated. This will be removed in v0.10.0. Please use the dedicated arguments '--structured-outputs-config.disable_fallback=True', '--structured-outputs-config.disable_any_whitespace=True' and '--structured-outputs-config.disable_additional_properties=True' instead.",  # noqa: E501
+    )
     def _extract_backend_options(self):
         """Extract backend options from the backend string."""
         backend, options = self.backend.split(":")
-        self.backend = cast(GuidedDecodingBackend, backend)
+        self.backend = cast(StructuredOutputsBackend, backend)
         options_set = set(options.strip().split(","))
         if "no-fallback" in options_set:
             self.disable_fallback = True
@@ -3701,6 +3704,14 @@ class DecodingConfig:
             self.disable_any_whitespace = True
         if "no-additional-properties" in options_set:
             self.disable_additional_properties = True
+
+
+# For backward compatibility, should remove in v0.10.0
+@deprecated(
+    "DecodingConfig is deprecated and has been renamed to StructuredOutputsConfig. This will be removed in v0.10.0. Please use 'from vllm.config import StructuredOutputConfig' instead."  # noqa: E501
+)
+class DecodingConfig(StructuredOutputsConfig):
+    ...
 
 
 DetailedTraceModules = Literal["model", "worker", "all"]
@@ -4076,7 +4087,7 @@ class CompilationConfig:
     - True: inductor compilation is used (custom_ops disabled by default).
         One graph for symbolic shape and one graph per size in compile_sizes
         are compiled using configurations in inductor_compile_config.
-        
+
     This setting is ignored if level<PIECEWISE."""
     compile_sizes: Optional[list[Union[int, str]]] = None
     """Sizes to compile for inductor. In addition
@@ -4360,8 +4371,9 @@ class VllmConfig:
     """LoRA configuration."""
     speculative_config: Optional[SpeculativeConfig] = None
     """Speculative decoding configuration."""
-    decoding_config: DecodingConfig = field(default_factory=DecodingConfig)
-    """Decoding configuration."""
+    structured_outputs_config: StructuredOutputsConfig = field(
+        default_factory=StructuredOutputsConfig)
+    """Structured outputs configuration."""
     observability_config: Optional[ObservabilityConfig] = None
     """Observability configuration."""
     prompt_adapter_config: Optional[PromptAdapterConfig] = None
@@ -4374,7 +4386,7 @@ class VllmConfig:
 
     As a shorthand, `-O<n>` can be used to directly specify the compilation
     level `n`: `-O3` is equivalent to `-O.level=3` (same as `-O='{"level":3}'`).
-    Currently, -O <n> and -O=<n> are supported as well but this will likely be 
+    Currently, -O <n> and -O=<n> are supported as well but this will likely be
     removed in favor of clearer -O<n> syntax in the future.
 
     NOTE: level 0 is the default level without any optimization. level 1 and 2
@@ -4397,6 +4409,18 @@ class VllmConfig:
     you are using. Contents must be hashable."""
     instance_id: str = ""
     """The ID of the vLLM instance."""
+
+    @property
+    @deprecated(
+        "decoding_config is deprecated and has been renamed to 'structured_outputs_config'. This will be removed in v0.10.0. Uses 'structured_outputs_config' instead."  # noqa: E501
+    )
+    def decoding_config(self) -> StructuredOutputsConfig:
+        """Decoding configuration."""
+        return self.structured_outputs_config
+
+    @decoding_config.setter
+    def decoding_config(self, value: StructuredOutputsConfig):
+        self.structured_outputs_config = value
 
     def compute_hash(self) -> str:
         """
@@ -4454,8 +4478,8 @@ class VllmConfig:
             vllm_factors.append(self.speculative_config.compute_hash())
         else:
             vllm_factors.append("None")
-        if self.decoding_config:
-            vllm_factors.append(self.decoding_config.compute_hash())
+        if self.structured_outputs_config:
+            vllm_factors.append(self.structured_outputs_config.compute_hash())
         else:
             vllm_factors.append("None")
         if self.observability_config:
@@ -4834,7 +4858,7 @@ class VllmConfig:
             f"enforce_eager={self.model_config.enforce_eager}, "
             f"kv_cache_dtype={self.cache_config.cache_dtype}, "
             f" device_config={self.device_config.device}, "
-            f"decoding_config={self.decoding_config!r}, "
+            f"structured_outputs_config={self.structured_outputs_config!r}, "
             f"observability_config={self.observability_config!r}, "
             f"seed={self.model_config.seed}, "
             f"served_model_name={self.model_config.served_model_name}, "

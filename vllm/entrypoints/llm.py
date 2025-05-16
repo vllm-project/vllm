@@ -17,8 +17,7 @@ from typing_extensions import TypeVar, deprecated
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence,
                               create_sort_beams_key_function)
-from vllm.config import (CompilationConfig, ModelDType, TokenizerMode,
-                         is_init_field)
+from vllm.config import (CompilationConfig, ModelDType, StructuredOutputsConfig, TokenizerMode, is_init_field)
 from vllm.engine.arg_utils import (EngineArgs, HfOverrides, PoolerConfig,
                                    TaskOption)
 from vllm.engine.llm_engine import LLMEngine
@@ -194,6 +193,7 @@ class LLM:
         override_pooler_config: Optional[PoolerConfig] = None,
         compilation_config: Optional[Union[int, dict[str, Any],
                                            CompilationConfig]] = None,
+        structured_outputs_config: Optional[StructuredOutputsConfig] = None,
         **kwargs,
     ) -> None:
         """LLM constructor."""
@@ -241,6 +241,10 @@ class LLM:
         else:
             compilation_config_instance = CompilationConfig()
 
+        structured_outputs = StructuredOutputsConfig() \
+                if structured_outputs_config is None \
+                else structured_outputs_config
+
         engine_args = EngineArgs(
             model=model,
             task=task,
@@ -267,6 +271,7 @@ class LLM:
             mm_processor_kwargs=mm_processor_kwargs,
             override_pooler_config=override_pooler_config,
             compilation_config=compilation_config_instance,
+            structured_outputs_config=structured_outputs,
             **kwargs,
         )
 
@@ -1368,17 +1373,17 @@ class LLM:
         of your inputs into a single list and pass it to this method.
 
         Supports both text and multi-modal data (images, etc.) when used with
-        appropriate multi-modal models. For multi-modal inputs, ensure the 
+        appropriate multi-modal models. For multi-modal inputs, ensure the
         prompt structure matches the model's expected input format.
 
         Args:
-            data_1: Can be a single prompt, a list of prompts or 
-                `ScoreMultiModalParam`, which can contain either text or 
-                multi-modal data. When a list, it must have the same length as 
+            data_1: Can be a single prompt, a list of prompts or
+                `ScoreMultiModalParam`, which can contain either text or
+                multi-modal data. When a list, it must have the same length as
                 the `data_2` list.
-            data_2: The data to pair with the query to form the input to 
+            data_2: The data to pair with the query to form the input to
                 the LLM. Can be text or multi-modal data. See [PromptType]
-                [vllm.inputs.PromptType] for more details about the format of 
+                [vllm.inputs.PromptType] for more details about the format of
                 each prompt.
             use_tqdm: If `True`, shows a tqdm progress bar.
                 If a callable (e.g., `functools.partial(tqdm, leave=False)`),
