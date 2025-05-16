@@ -9,7 +9,8 @@ import torch
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
-from vllm.distributed.kv_transfer.kv_connector.v1.p2p.p2p_nccl_engine import P2pNcclEngine
+from vllm.distributed.kv_transfer.kv_connector.v1.p2p.p2p_nccl_engine import (
+    P2pNcclEngine)
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import MLACommonMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -135,8 +136,11 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 if len(slot_mapping) == num_token:
                     dst_kv_cache_layer[slot_mapping, ...] = src_kv_cache
                 else:
-                    dst_kv_cache_layer[slot_mapping[:num_token], ...] = src_kv_cache
-                    logger.warning("🚧src_kv_cache does not match, num_slot:%d, num_token:%d", len(slot_mapping), num_token)
+                    dst_kv_cache_layer[slot_mapping[:num_token],
+                                       ...] = src_kv_cache
+                    logger.warning(
+                        "🚧src_kv_cache does not match, num_slot:%d, num_token:%d",
+                        len(slot_mapping), num_token)
 
                 dst_kv_cache_layer.reshape(dst_kv_cache_layer_shape)
             else:
@@ -148,8 +152,11 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 if len(slot_mapping) == num_token:
                     dst_kv_cache_layer[:, slot_mapping, ...] = src_kv_cache
                 else:
-                    dst_kv_cache_layer[:, slot_mapping[:num_token],...] = src_kv_cache
-                    logger.warning("🚧src_kv_cache does not match, num_slot:%d, num_token:%d", len(slot_mapping), num_token)
+                    dst_kv_cache_layer[:, slot_mapping[:num_token],
+                                       ...] = src_kv_cache
+                    logger.warning(
+                        "🚧src_kv_cache does not match, num_slot:%d, num_token:%d",
+                        len(slot_mapping), num_token)
 
                 dst_kv_cache_layer.reshape(dst_kv_cache_layer_shape)
 
@@ -179,8 +186,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 kv_cache_layer = attn_layer.kv_cache[ \
                     forward_context.virtual_engine]
 
-                kv_cache = self.p2p_nccl_engine.recv_tensor(request.request_id +
-                                                          "-" + layer_name)
+                kv_cache = self.p2p_nccl_engine.recv_tensor(
+                    request.request_id + "-" + layer_name)
 
                 if kv_cache is None:
                     logger.warning("🚧src_kv_cache is None, %s",
@@ -245,7 +252,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 kv_cache = extract_kv_from_layer(kv_layer,
                                                  request.slot_mapping)
                 self.p2p_nccl_engine.send_tensor(request_id + "-" + layer_name,
-                                               kv_cache, remote_address)
+                                                kv_cache, remote_address)
 
     def wait_for_save(self):
         if self.is_producer:

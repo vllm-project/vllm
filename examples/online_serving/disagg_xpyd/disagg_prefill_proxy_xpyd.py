@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-import random
 import socket
 import threading
 import uuid
@@ -110,7 +109,8 @@ async def handle_request():
             # prefill_addr, prefill_zmq_addr = random.choice(
             #     list(prefill_instances.items()))
             prefill_list = list(prefill_instances.items())
-            prefill_addr, prefill_zmq_addr = prefill_list[count % len(prefill_list)]
+            prefill_addr, prefill_zmq_addr = prefill_list[count %
+                                                          len(prefill_list)]
 
         global decode_instances
         global decode_cv
@@ -118,7 +118,8 @@ async def handle_request():
             # decode_addr, decode_zmq_addr = random.choice(
             #     list(decode_instances.items()))
             decode_list = list(decode_instances.items())
-            decode_addr, decode_zmq_addr = decode_list[count % len(decode_list)]
+            decode_addr, decode_zmq_addr = decode_list[count %
+                                                       len(decode_list)]
 
         print(f"handle_request count: {count}, [HTTP:{prefill_addr}, "
               f"ZMQ:{prefill_zmq_addr}] 👉 [HTTP:{decode_addr}, "

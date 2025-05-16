@@ -75,7 +75,8 @@ class P2pNcclEngine:
         self.recv_stream = torch.cuda.Stream()
 
         mem_pool_size = self.config.get_from_extra_config("mem_pool_size", 128)
-        self.pool = TensorMemoryPool(max_block_size=mem_pool_size * 1024**3)  # GB
+        self.pool = TensorMemoryPool(max_block_size=mem_pool_size *
+                                     1024**3)  # GB
 
         # The sending type includes tree mutually exclusive options:
         # PUT, GET, PUT_ASYNC.
@@ -210,8 +211,8 @@ class P2pNcclEngine:
                     "🔵[PUT]Recv From %s, tensor_id:%s, shape:%s, "
                     "duration:%.3fms, size:%.3fGB, addr:%d, rank:%d",
                     remote_address, tensor_id, tensor.shape, duration * 1000,
-                    tensor.element_size() * tensor.numel() / 1024**3,
-                    addr, self.rank)
+                    tensor.element_size() * tensor.numel() / 1024**3, addr,
+                    self.rank)
             else:
                 duration = time.time() - start_time
                 logger.warning(
@@ -441,7 +442,7 @@ class P2pNcclEngine:
         logger.info(
             "🕐Nccl Send Tensor, shape:%s, duration:%.3fms, size:%.3fGB, "
             "rank:%d", tensor.shape, duration * 1000,
-            tensor.element_size() * tensor.numel() / 1024 ** 3, dst)
+            tensor.element_size() * tensor.numel() / 1024**3, dst)
 
     def _recv(self, comm, tensor: torch.Tensor, src: int, stream=None):
         assert tensor.device == self.device, (
@@ -460,7 +461,7 @@ class P2pNcclEngine:
         logger.info(
             "🕐Nccl Recv Tensor, shape:%s, duration:%.3fms, size:%.3fGB, "
             "rank:%d", tensor.shape, duration * 1000,
-            tensor.element_size() * tensor.numel() / 1024 ** 3, src)
+            tensor.element_size() * tensor.numel() / 1024**3, src)
 
     def close(self) -> None:
         self._listener_thread.join()
