@@ -17,7 +17,7 @@ from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.utils import (CacheInfo, FlexibleArgumentParser, LRUCache,
                         MemorySnapshot, PlaceholderModule, StoreBoolean,
                         bind_kv_cache, deprecate_kwargs, get_open_port,
-                        make_zmq_socket, memory_profiling,
+                        make_zmq_path, make_zmq_socket, memory_profiling,
                         merge_async_iterators, sha256, split_zmq_path,
                         supports_kw, swap_dict_values)
 
@@ -714,3 +714,8 @@ def test_make_zmq_socket_ipv6():
     # Clean up
     zsock.close()
     ctx.term()
+
+
+def test_make_zmq_path():
+    assert make_zmq_path("tcp", "127.0.0.1", "5555") == "tcp://127.0.0.1:5555"
+    assert make_zmq_path("tcp", "::1", "5555") == "tcp://[::1]:5555"

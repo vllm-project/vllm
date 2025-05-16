@@ -182,7 +182,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "JAISLMHeadModel": _HfExamplesInfo("inceptionai/jais-13b-chat"),
     "JambaForCausalLM": _HfExamplesInfo("ai21labs/AI21-Jamba-1.5-Mini",
                                         extras={"tiny": "ai21labs/Jamba-tiny-dev"}),  # noqa: E501
-    "LlamaForCausalLM": _HfExamplesInfo("meta-llama/Llama-3.2-1B-Instruct"),
+    "LlamaForCausalLM": _HfExamplesInfo("meta-llama/Llama-3.2-1B-Instruct",
+                                        extras={"guard": "meta-llama/Llama-Guard-3-1B",  # noqa: E501
+                                                "hermes": "NousResearch/Hermes-3-Llama-3.1-8B"}),  # noqa: E501
     "LLaMAForCausalLM": _HfExamplesInfo("decapoda-research/llama-7b-hf",
                                         is_available_online=False),
     "MambaForCausalLM": _HfExamplesInfo("state-spaces/mamba-130m-hf"),
@@ -203,7 +205,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MPTForCausalLM": _HfExamplesInfo("mosaicml/mpt-7b"),
     "NemotronForCausalLM": _HfExamplesInfo("nvidia/Minitron-8B-Base"),
     "OlmoForCausalLM": _HfExamplesInfo("allenai/OLMo-1B-hf"),
-    "Olmo2ForCausalLM": _HfExamplesInfo("shanearora/OLMo-7B-1124-hf"),
+    "Olmo2ForCausalLM": _HfExamplesInfo("allenai/OLMo-2-0425-1B"),
     "OlmoeForCausalLM": _HfExamplesInfo("allenai/OLMoE-1B-7B-0924-Instruct"),
     "OPTForCausalLM": _HfExamplesInfo("facebook/opt-125m",
                                       {"1b": "facebook/opt-iml-max-1.3b"}),
@@ -240,6 +242,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                          is_available_online=False,
                                          trust_remote_code=True),
     "Zamba2ForCausalLM": _HfExamplesInfo("Zyphra/Zamba2-7B-instruct"),
+    "MiMoForCausalLM": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL",
+                                        trust_remote_code=True),
     # [Encoder-decoder]
     "BartModel": _HfExamplesInfo("facebook/bart-base"),
     "BartForConditionalGeneration": _HfExamplesInfo("facebook/bart-large-cnn"),
@@ -252,11 +256,17 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "GritLM": _HfExamplesInfo("parasail-ai/GritLM-7B-vllm"),
     "GteModel": _HfExamplesInfo("Snowflake/snowflake-arctic-embed-m-v2.0",
                                                trust_remote_code=True),
+    "GteNewModel": _HfExamplesInfo("Alibaba-NLP/gte-base-en-v1.5",
+                                   trust_remote_code=True,
+                                   hf_overrides={"architectures":
+                                                     ["GteNewModel"]}),
     "InternLM2ForRewardModel": _HfExamplesInfo("internlm/internlm2-1_8b-reward",
                                                trust_remote_code=True),
     "JambaForSequenceClassification": _HfExamplesInfo("ai21labs/Jamba-tiny-reward-dev"),  # noqa: E501
     "LlamaModel": _HfExamplesInfo("llama", is_available_online=False),
     "MistralModel": _HfExamplesInfo("intfloat/e5-mistral-7b-instruct"),
+    "ModernBertModel": _HfExamplesInfo("Alibaba-NLP/gte-modernbert-base",
+                                trust_remote_code=True),
     "NomicBertModel": _HfExamplesInfo("Snowflake/snowflake-arctic-embed-m-long",  # noqa: E501
                                                trust_remote_code=True),
     "Qwen2Model": _HfExamplesInfo("ssmits/Qwen2-7B-Instruct-embed-base"),
@@ -353,9 +363,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                         max_transformers_version="4.48",
                                         transformers_version_reason="Use of deprecated imports which have been removed.",  # noqa: E501
                                         extras={"phi3.5": "microsoft/Phi-3.5-vision-instruct"}),  # noqa: E501
-    "Ovis2ForConditionalGeneration": _HfExamplesInfo("AIDC-AI/Ovis2-1B",
-                                                    trust_remote_code=True,
-                                                    hf_overrides={"architectures": ["Ovis2ForConditionalGeneration"]}), # noqa: E501
+    "Ovis": _HfExamplesInfo("AIDC-AI/Ovis2-1B", trust_remote_code=True,
+                            extras={"1.6-llama": "AIDC-AI/Ovis1.6-Llama3.2-3B",
+                                    "1.6-gemma": "AIDC-AI/Ovis1.6-Gemma2-9B"}),  # noqa: E501
     "Phi4MMForCausalLM": _HfExamplesInfo("microsoft/Phi-4-multimodal-instruct",
                                         trust_remote_code=True),
     "PixtralForConditionalGeneration": _HfExamplesInfo("mistralai/Pixtral-12B-2409",  # noqa: E501
@@ -378,7 +388,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     # Therefore, we borrow the BartTokenizer from the original Bart model
     "Florence2ForConditionalGeneration": _HfExamplesInfo("microsoft/Florence-2-base",  # noqa: E501
                                                          tokenizer="Isotr0py/Florence-2-tokenizer",
-                                                         trust_remote_code=True),  # noqa: E501
+                                                         trust_remote_code=True,),  # noqa: E501
     "MllamaForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-3.2-11B-Vision-Instruct"),  # noqa: E501
     "WhisperForConditionalGeneration": _HfExamplesInfo("openai/whisper-large-v3"),  # noqa: E501
 }
@@ -401,6 +411,9 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
                                             trust_remote_code=True,
                                             speculative_model="yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
                                             tokenizer="meta-llama/Llama-3.1-8B-Instruct"),
+    "MiMoMTPModel": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL",
+                                    trust_remote_code=True,
+                                    speculative_model="XiaomiMiMo/MiMo-7B-RL")
 }
 
 _TRANSFORMERS_MODELS = {

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0 Adapted from
 # https://github.com/huggingface/transformers/tree/main/src/transformers/models/aya_vision
-from typing import (Iterable, Literal, Mapping, Optional, Sequence, Set, Tuple,
-                    TypedDict, Union, cast)
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Literal, Optional, TypedDict, Union, cast
 
 import torch
 from torch import nn
@@ -315,8 +315,8 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
     def dtype(self):
         return next(self.parameters()).dtype
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 

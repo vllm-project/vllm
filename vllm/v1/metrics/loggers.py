@@ -128,9 +128,7 @@ class LoggingStatLogger(StatLoggerBase):
             scheduler_stats.gpu_cache_usage * 100,
             self.prefix_caching_metrics.hit_rate * 100,
         )
-
-        if scheduler_stats.spec_decoding_stats is not None:
-            self.spec_decoding_logging.log(log_fn=log_fn)
+        self.spec_decoding_logging.log(log_fn=log_fn)
 
     def log_engine_initialized(self):
         logger.info(
@@ -185,13 +183,13 @@ class PrometheusStatLogger(StatLoggerBase):
         self.counter_gpu_prefix_cache_queries = prometheus_client.Counter(
             name="vllm:gpu_prefix_cache_queries",
             documentation=
-            "GPU prefix cache queries, in terms of number of queried blocks.",
+            "GPU prefix cache queries, in terms of number of queried tokens.",
             labelnames=labelnames).labels(*labelvalues)
 
         self.counter_gpu_prefix_cache_hits = prometheus_client.Counter(
             name="vllm:gpu_prefix_cache_hits",
             documentation=
-            "GPU prefix cache hits, in terms of number of cached blocks.",
+            "GPU prefix cache hits, in terms of number of cached tokens.",
             labelnames=labelnames).labels(*labelvalues)
 
         #
