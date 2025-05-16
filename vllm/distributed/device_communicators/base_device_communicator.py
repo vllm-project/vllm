@@ -26,7 +26,7 @@ class Cache:
             return instance
 
 
-class All2AllBase:
+class All2AllManagerBase:
 
     def __init__(self, cpu_group, model: torch.nn.Module):
         self.cpu_group = cpu_group
@@ -103,7 +103,7 @@ class DeviceCommunicatorBase:
             use_ep = config.parallel_config.enable_expert_parallel
 
         self.use_all2all = "ep" in unique_name and use_ep
-        self.all2all_impl: Optional[All2AllBase] = None
+        self.all2all_manager: Optional[All2AllManagerBase] = None
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         dist.all_reduce(input_, group=self.device_group)

@@ -133,9 +133,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.pynccl_comm = None
         if self.ca_comm is not None:
             self.ca_comm = None
-        if self.all2all_impl is not None:
-            self.all2all_impl.destroy()
-            self.all2all_impl = None
+        if self.all2all_manager is not None:
+            self.all2all_manager.destroy()
+            self.all2all_manager = None
 
     def prepare_communication_buffer_for_model(self,
                                                model: torch.nn.Module) -> None:
@@ -146,11 +146,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
             return
         all2all_backend = envs.VLLM_ALL2ALL_BACKEND
         if all2all_backend == "naive":
-            from .all2all import NaiveAll2All
-            self.all2all_impl = NaiveAll2All(self.cpu_group, model)
+            from .all2all import NaiveAll2AllManager
+            self.all2all_manager = NaiveAll2AllManager(self.cpu_group, model)
         elif all2all_backend == "pplx":
-            from .all2all import PPLXAll2All
-            self.all2all_impl = PPLXAll2All(self.cpu_group, model)
+            from .all2all import PPLXAll2AllManager
+            self.all2all_manager = PPLXAll2AllManager(self.cpu_group, model)
         else:
             raise ValueError(f"Unknown all2all backend: {all2all_backend}")
 
@@ -164,12 +164,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
     def dispatch(
             self, hidden_states: torch.Tensor,
             router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        assert self.all2all_impl is not None
-        hidden_states, router_logits = self.all2all_impl.dispatch(
+        assert self.all2all_manager is not None
+        hidden_states, router_logits = self.all2all_manager.dispatch(
             hidden_states, router_logits)
         return hidden_states, router_logits
 
     def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        assert self.all2all_impl is not None
-        hidden_states = self.all2all_impl.combine(hidden_states)
+        assert self.all2all_manager is not None
+        hidden_states = self.all2all_manager.combine(hidden_states)
         return hidden_states

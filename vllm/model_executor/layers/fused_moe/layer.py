@@ -247,8 +247,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         raise NotImplementedError
 
     def init_prepare_finalize(self):
-        all2all_impl = get_ep_group().device_communicator.all2all_impl
-        assert all2all_impl is not None
+        all2all_manager = get_ep_group().device_communicator.all2all_manager
+        assert all2all_manager is not None
 
         moe: MoEConfig = self.moe
 
@@ -256,10 +256,10 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             max_num_tokens=moe.max_num_tokens,
             num_experts=moe.num_experts,
             experts_per_token=moe.experts_per_token,  # topk
-            rank=all2all_impl.rank,
-            world_size=all2all_impl.world_size,
+            rank=all2all_manager.rank,
+            world_size=all2all_manager.world_size,
             # dp_size actually means tp_size, bug in pplx kernels
-            dp_size=all2all_impl.tp_group.world_size,
+            dp_size=all2all_manager.tp_group.world_size,
             hidden_dim=moe.hidden_dim,
             hidden_dim_bytes=moe.hidden_dim * moe.in_dtype.itemsize,
             # For blocked per token: set to
@@ -268,20 +268,20 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             hidden_dim_scale_bytes=(0 if moe.in_dtype.itemsize != 1 else
                                     ((moe.hidden_dim + moe.block_size - 1) //
                                      moe.block_size * torch.float32.itemsize)),
-            group_name=all2all_impl.cpu_group.group_name,
+            group_name=all2all_manager.cpu_group.group_name,
         )
 
-        handle = all2all_impl.get_handle(all_to_all_args)
+        handle = all2all_manager.get_handle(all_to_all_args)
 
         prepare_finalize = None
         if moe.use_pplx_kernels:
             prepare_finalize = PplxPrepareAndFinalize(
                 handle,
                 max_num_tokens=moe.max_num_tokens,
-                world_size=all2all_impl.world_size,
-                rank=all2all_impl.rank,
+                world_size=all2all_manager.world_size,
+                rank=all2all_manager.rank,
                 # dp_size actually means tp_size, bug in pplx kernels
-                dp_size=all2all_impl.tp_group.world_size,
+                dp_size=all2all_manager.tp_group.world_size,
                 quant_dtype=moe.in_dtype,
             )
 
@@ -342,8 +342,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
         assert self.fused_experts == fused_experts
 
-        all2all_impl = get_ep_group().device_communicator.all2all_impl
-        assert all2all_impl is not None
+        all2all_manager = get_ep_group().device_communicator.all2all_manager
+        assert all2all_manager is not None
 
         experts: Optional[FusedMoEPermuteExpertsUnpermute] = None
 
@@ -352,9 +352,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             logger.debug("BatchedTritonExperts %s", self.moe)
             experts = BatchedTritonExperts(
                 max_num_tokens=MOE_DP_CHUNK_SIZE,
-                world_size=all2all_impl.world_size,
+                world_size=all2all_manager.world_size,
                 # dp_size actually means tp_size, bug in pplx kernels
-                dp_size=all2all_impl.tp_group.world_size,
+                dp_size=all2all_manager.tp_group.world_size,
                 use_fp8_w8a8=False,
                 use_int8_w8a8=False,
                 use_int8_w8a16=False,

@@ -8,7 +8,7 @@ import torch.distributed as dist
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 
-from .base_device_communicator import All2AllBase, Cache
+from .base_device_communicator import All2AllManagerBase, Cache
 
 logger = init_logger(__name__)
 
@@ -18,7 +18,7 @@ else:
     FusedMoE = None
 
 
-class NaiveAll2All(All2AllBase):
+class NaiveAll2AllManager(All2AllManagerBase):
     """
     A naive implementation of all2all communication.
     It uses all-reduce under the hood, which is not
@@ -73,7 +73,7 @@ class NaiveAll2All(All2AllBase):
         pass
 
 
-class PPLXAll2All(All2AllBase):
+class PPLXAll2AllManager(All2AllManagerBase):
     """
     All2All communication based on PPLX kernels.
     """
