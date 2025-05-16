@@ -229,6 +229,9 @@ class DeviceCommunicatorBase:
         """
         Prepare the communication buffer for the model.
         """
+        if not self.use_all2all:
+            return
+
         moe_modules = [
             module for module in model.modules()
             if module.__class__.__name__ == "FusedMoE"
