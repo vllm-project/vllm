@@ -42,10 +42,9 @@ model = client.models.list().data[0].id
 
 completion = client.chat.completions.create(
     model=model,
-    messages=[{
-        "role": "user",
-        "content": "Classify this sentiment: vLLM is wonderful!",
-    }],
+    messages=[
+        {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"}
+    ],
     extra_body={"guided_choice": ["positive", "negative"]},
 )
 print(completion.choices[0].message.content)
@@ -56,10 +55,12 @@ The next example shows how to use the `guided_regex`. The idea is to generate an
 ```python
 completion = client.chat.completions.create(
     model=model,
-    messages=[{
-        "role": "user",
-        "content": "Generate an example email address for Alan Turing, who works in Enigma. End in .com and new line. Example result: alan.turing@enigma.com\n",
-    }],
+    messages=[
+        {
+          "role": "user",
+          "content": "Generate an example email address for Alan Turing, who works in Enigma. End in .com and new line. Example result: alan.turing@enigma.com\n",
+        }
+    ],
     extra_body={"guided_regex": r"\w+@\w+\.com\n", "stop": ["\n"]},
 )
 print(completion.choices[0].message.content)
@@ -94,10 +95,12 @@ json_schema = CarDescription.model_json_schema()
 
 completion = client.chat.completions.create(
     model=model,
-    messages=[{
-        "role": "user",
-        "content": "Generate a JSON with the brand, model and car_type of the most iconic car from the 90's",
-    }],
+    messages=[
+        {
+            "role": "user",
+            "content": "Generate a JSON with the brand, model and car_type of the most iconic car from the 90's",
+        }
+    ],
     "response_format": {
         "type": "json_schema",
         "json_schema": {
@@ -137,10 +140,12 @@ simplified_sql_grammar = """
 
 completion = client.chat.completions.create(
     model=model,
-    messages=[{
-        "role": "user",
-        "content": "Generate an SQL query to show the 'username' and 'email' from the 'users' table.",
-    }],
+    messages=[
+        {
+            "role": "user",
+            "content": "Generate an SQL query to show the 'username' and 'email' from the 'users' table.",
+        }
+    ],
     extra_body={"guided_grammar": simplified_sql_grammar},
 )
 print(completion.choices[0].message.content)
@@ -169,10 +174,12 @@ class People(BaseModel):
 
 completion = client.chat.completions.create(
     model=model,
-    messages=[{
-        "role": "user",
-        "content": "Generate a JSON with the name and age of one random person.",
-    }],
+    messages=[
+        {
+            "role": "user",
+            "content": "Generate a JSON with the name and age of one random person.",
+        }
+    ],
     response_format={
         "type": "json_schema",
         "json_schema": {
@@ -258,7 +265,6 @@ completion = client.beta.chat.completions.parse(
         {"role": "user", "content": "Solve 8x + 31 = 2."},
     ],
     response_format=MathResponse,
-    extra_body=dict(guided_decoding_backend="outlines"),
 )
 
 message = completion.choices[0].message

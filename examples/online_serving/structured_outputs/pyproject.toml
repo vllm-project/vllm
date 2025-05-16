@@ -1,11 +1,18 @@
+[build-system]
+requires = [
+    "setuptools-scm",
+]
+
 [project]
-name = "examples-online-structured-output"
-version = "0.0.1"
+name = "examples-online-structured-outputs"
 requires-python = ">=3.9, <3.13"
 dependencies = [
   "openai==1.78.1",
   "pydantic==2.11.4",
 ]
+dynamic = ["version"]
+
+[tool.setuptools_scm]
 
 [project.scripts]
 structured-outputs = "structured_outputs:main"
