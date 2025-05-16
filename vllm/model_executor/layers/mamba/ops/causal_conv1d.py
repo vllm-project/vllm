@@ -133,11 +133,11 @@ def _causal_conv1d_update_kernel(
     state_len: tl.constexpr,
     num_cache_lines: tl.constexpr,  # added to support vLLM larger cache lines
     # Strides
-    stride_x_seq: tl.constexpr,  # stride to get to next sequence,
-    stride_x_dim: tl.constexpr,  # stride to get to next feature-value,
-    stride_x_token: tl.constexpr,  # stride to get to next token (same feature-index, same sequence-index)
-    stride_w_dim: tl.constexpr,  # stride to get to next dim-axis value
-    stride_w_width: tl.constexpr,  # stride to get to next width-axis value
+    stride_x_seq: tl.constexpr,
+    stride_x_dim: tl.constexpr,
+    stride_x_token: tl.constexpr,
+    stride_w_dim: tl.constexpr,
+    stride_w_width: tl.constexpr,
     stride_conv_state_seq: tl.constexpr,
     stride_conv_state_dim: tl.constexpr,
     stride_conv_state_tok: tl.constexpr,
@@ -155,6 +155,15 @@ def _causal_conv1d_update_kernel(
     USE_PAD_SLOT: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
+    # ruff: noqa: E501
+    """
+    stride_x_seq: tl.constexpr,  # stride to get to next sequence,
+    stride_x_dim: tl.constexpr,  # stride to get to next feature-value,
+    stride_x_token: tl.constexpr,  # stride to get to next token (same feature-index, same sequence-index)
+    stride_w_dim: tl.constexpr,  # stride to get to next dim-axis value
+    stride_w_width: tl.constexpr,  # stride to get to next width-axis value
+
+    """
     idx_seq = tl.program_id(0)
     if idx_seq >= batch:
         return
@@ -717,6 +726,7 @@ def _causal_conv1d_fwd_kernel_contbatch(  # continuous batching
             conv_states_ptrs = prior_tokens - 2 * stride_x_token  # [BLOCK_N]
             col0 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier='.ca')
         if KERNEL_WIDTH == 5:
+            # ruff: noqa: F841
             conv_states_ptrs = prior_tokens  # [BLOCK_N]
             col3 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier='.ca')
             conv_states_ptrs = prior_tokens - 1 * stride_x_token  # [BLOCK_N]

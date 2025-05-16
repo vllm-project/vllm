@@ -503,7 +503,8 @@ def test_causal_conv1d_update_with_batch_gather_vllm(batch_size, with_padding,
                                  device=device,
                                  dtype=itype)
     else:
-        # conv_state will be (cache_lines, dim, state_len) with contiguous along dim-axis
+        # conv_state will be (cache_lines, dim, state_len)
+        # with contiguous along dim-axis
         conv_state = torch.randn(total_entries,
                                  width - 1,
                                  dim,
@@ -511,7 +512,6 @@ def test_causal_conv1d_update_with_batch_gather_vllm(batch_size, with_padding,
                                  dtype=itype).transpose(1, 2)
 
     conv_state_for_padding_test = conv_state.clone()
-    conv_state_origin = conv_state.clone()
 
     weight = torch.randn(dim, width, device=device, dtype=itype)
     bias = torch.randn(dim, device=device, dtype=itype) if has_bias else None

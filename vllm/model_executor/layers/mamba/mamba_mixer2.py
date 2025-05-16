@@ -403,6 +403,7 @@ class MambaMixer2(CustomOp):
         mamba_cache_params: MambaCacheParams,
         mamba2_metadata: Mamba2Metadata,
     ):
+        # ruff: noqa: E501
         # mamba2_metadata contains metadata necessary for the mamba2 triton
         # kernels to operate in continuous batching and in chunked prefill
         # modes; they are computed at top-level model forward since they

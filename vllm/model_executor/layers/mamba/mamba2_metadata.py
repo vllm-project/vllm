@@ -91,6 +91,7 @@ def prepare_mamba2_metadata(
     attn_metadata: AttentionMetadata,
     mamba2_metadata=None,
 ) -> Mamba2Metadata:
+    # ruff: noqa: E501
 
     # compute number of prefill and decode requests
     # NOTE: in V0 we assume prefills are before decodes
