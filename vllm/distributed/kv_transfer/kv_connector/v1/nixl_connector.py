@@ -360,7 +360,8 @@ class NixlConnectorWorker:
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
 
-        # Optimization for models with local attention (Llama 4 for now)
+        # TODO(mgoin): remove this once we have hybrid memory allocator
+        # Optimization for models with local attention (Llama 4)
         # List of block window sizes for each layer for local attention
         self.block_window_per_layer: list[Optional[int]] = []
 
@@ -476,7 +477,8 @@ class NixlConnectorWorker:
         self.num_regions = len(caches_data)
         self.num_layers = len(self.kv_caches.keys())
 
-        # Local attention chunking optimization (Llama 4)
+        # TODO(mgoin): remove this once we have hybrid memory allocator
+        # Optimization for models with local attention (Llama 4)
         if self.vllm_config.model_config.model_type == "llama4":
             from transformers import Llama4TextConfig
             assert isinstance(self.vllm_config.model_config.hf_text_config,
@@ -737,7 +739,8 @@ class NixlConnectorWorker:
                 self.engine_id, local_block_ids)
             assert len(local_block_descs_ids) == len(remote_block_descs_ids)
         else:
-            # Llama 4 specific case: local attention with chunking
+            # TODO(mgoin): remove this once we have hybrid memory allocator
+            # Optimization for models with local attention (Llama 4)
             for layer_idx, block_window in enumerate(
                     self.block_window_per_layer):
                 # For each layer:
