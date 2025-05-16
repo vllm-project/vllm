@@ -1,14 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-import re
 import tempfile
 from typing import Optional
 
-from prometheus_client import (REGISTRY, CollectorRegistry, make_asgi_app,
-                               multiprocess)
-from prometheus_fastapi_instrumentator import Instrumentator
-from starlette.routing import Mount
+from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
 
 from vllm.logger import init_logger
 
@@ -67,39 +63,15 @@ def get_prometheus_registry():
     return REGISTRY
 
 
-def mount_metrics(app):
-    """Mount prometheus metrics to a FastAPI app.
-    
-    Args:
-        app: FastAPI application
-    """
-
-    registry = get_prometheus_registry()
-
-    Instrumentator(
-        excluded_handlers=[
-            "/metrics",
-            "/health",
-            "/load",
-            "/ping",
-            "/version",
-            "/server_info",
-        ],
-        registry=registry,
-    ).add().instrument(app).expose(app)
-
-    # Add prometheus asgi middleware to route /metrics requests
-    metrics_route = Mount("/metrics", make_asgi_app(registry=registry))
-
-    # Workaround for 307 Redirect for /metrics
-    metrics_route.path_regex = re.compile("^/metrics(?P<path>.*)$")
-    app.routes.append(metrics_route)
-
-
-def mark_process_dead(pid: int):
+def shutdown_prometheus():
     """Mark a process as dead in prometheus multiprocessing.
     
     Args:
         pid: Process ID to mark as dead
     """
-    multiprocess.mark_process_dead(pid)
+    try:
+        pid = os.getpid()
+        multiprocess.mark_process_dead(pid)
+        logger.debug("Marked Prometheus metrics for process %d as dead", pid)
+    except Exception as e:
+        logger.error("Error during metrics cleanup: %s", str(e))

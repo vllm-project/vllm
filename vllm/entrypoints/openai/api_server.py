@@ -7,6 +7,7 @@ import importlib
 import inspect
 import multiprocessing
 import os
+import re
 import signal
 import socket
 import tempfile
@@ -23,8 +24,11 @@ from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from prometheus_client import make_asgi_app
+from prometheus_fastapi_instrumentator import Instrumentator
 from starlette.concurrency import iterate_in_threadpool
 from starlette.datastructures import State
+from starlette.routing import Mount
 from typing_extensions import assert_never
 
 import vllm.envs as envs
@@ -95,7 +99,7 @@ from vllm.transformers_utils.tokenizer import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (Device, FlexibleArgumentParser, get_open_zmq_ipc_path,
                         is_valid_ipv6_address, set_ulimit)
-from vllm.v1.metrics.prometheus import mount_metrics
+from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
@@ -319,6 +323,31 @@ async def validate_json_request(raw_request: Request):
 
 
 router = APIRouter()
+
+
+def mount_metrics(app: FastAPI):
+    """Mount prometheus metrics to a FastAPI app."""
+
+    registry = get_prometheus_registry()
+
+    Instrumentator(
+        excluded_handlers=[
+            "/metrics",
+            "/health",
+            "/load",
+            "/ping",
+            "/version",
+            "/server_info",
+        ],
+        registry=registry,
+    ).add().instrument(app).expose(app)
+
+    # Add prometheus asgi middleware to route /metrics requests
+    metrics_route = Mount("/metrics", make_asgi_app(registry=registry))
+
+    # Workaround for 307 Redirect for /metrics
+    metrics_route.path_regex = re.compile("^/metrics(?P<path>.*)$")
+    app.routes.append(metrics_route)
 
 
 def base(request: Request) -> OpenAIServing:

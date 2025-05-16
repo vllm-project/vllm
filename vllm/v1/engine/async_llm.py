@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
-import os
 from collections.abc import AsyncGenerator, Mapping
 from copy import copy
 from typing import Any, Optional, Union
@@ -35,7 +34,7 @@ from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.loggers import (StatLoggerBase, StatLoggerFactory,
                                      setup_default_loggers)
-from vllm.v1.metrics.prometheus import mark_process_dead
+from vllm.v1.metrics.prometheus import shutdown_prometheus
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 logger = init_logger(__name__)
@@ -200,12 +199,7 @@ class AsyncLLM(EngineClient):
     def shutdown(self):
         """Shutdown, cleaning up the background proc and IPC."""
 
-        try:
-            mark_process_dead(os.getpid())
-            logger.debug("Marked Prometheus metrics for process %d as dead",
-                         os.getpid())
-        except Exception as e:
-            logger.error("Error during metrics cleanup: %s", str(e))
+        shutdown_prometheus()
 
         if engine_core := getattr(self, "engine_core", None):
             engine_core.shutdown()
