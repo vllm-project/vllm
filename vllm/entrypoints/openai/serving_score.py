@@ -295,7 +295,8 @@ class ServingScores(OpenAIServing):
         if error_check_ret is not None:
             return error_check_ret
 
-        request_id = f"score-{self._base_request_id(raw_request)}"
+        request_id = "score-" \
+                    f"{self._base_request_id(raw_request, request.request_id)}"
         created_time = int(time.time())
 
         try:
@@ -338,7 +339,8 @@ class ServingScores(OpenAIServing):
         if error_check_ret is not None:
             return error_check_ret
 
-        request_id = f"rerank-{self._base_request_id(raw_request)}"
+        request_id = "rerank-" \
+                    f"{self._base_request_id(raw_request, request.request_id)}"
         documents = request.documents
         top_n = request.top_n if request.top_n > 0 else len(documents)
 
