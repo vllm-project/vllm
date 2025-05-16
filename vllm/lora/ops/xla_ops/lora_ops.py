@@ -1,22 +1,45 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import jax
+import jax.numpy as jnp
 import torch
 import torch.nn.functional as F
+import torch_xla.core.xla_builder as xb
+from torch.library import impl
+from torch_xla.experimental.custom_kernel import XLA_LIB, jax_import_guard
 
 
-def bgmv(inputs: torch.Tensor, loras: torch.Tensor, idxs: torch.IntTensor):
-    if len(loras.shape) == 4:
-        loras = loras.squeeze(axis=1)
-
-    N = loras.shape[0]
-
-    selected_loras = torch.einsum(
-        "tn,nld->tld",
-        torch.nn.functional.one_hot(idxs.to(torch.long), N).to(inputs.dtype),
+@jax.jit
+def bgmv_jax(inputs, loras, idxs):
+    return jnp.einsum(
+        "td,tX,Xld->tl",
+        inputs,
+        jax.nn.one_hot(idxs, loras.shape[0], dtype=inputs.dtype),
         loras,
     )
 
-    return torch.einsum("td,tld->tl", inputs, selected_loras)
+
+XLA_LIB.define("bgmv(Tensor inputs, Tensor loras, Tensor idxs) -> Tensor")
+
+
+@impl(XLA_LIB, "bgmv", "XLA")
+def bgmv_xla(inputs: torch.Tensor, loras: torch.Tensor, idxs: torch.IntTensor):
+    if len(loras.shape) == 4:
+        loras = loras.squeeze(axis=1)
+
+    jax_import_guard()
+    return xb.call_jax(bgmv_jax, (inputs, loras, idxs))
+
+
+@impl(XLA_LIB, "bgmv", "CompositeExplicitAutograd")
+def bgmv_non_xla(inputs: torch.Tensor, loras: torch.Tensor,
+                 idxs: torch.IntTensor):
+    T, _ = inputs.shape
+    if len(loras.shape) == 4:
+        loras = loras.squeeze(axis=1)
+    _, L, _ = loras.shape
+
+    return torch.empty((T, L), device=inputs.device)
 
 
 def bgmv_expand(
@@ -42,7 +65,7 @@ def bgmv_expand(
             tensor.
     """
 
-    outputs = bgmv(inputs, lora_b_weights, lora_indices_tensor)
+    outputs = torch.ops.xla.bgmv(inputs, lora_b_weights, lora_indices_tensor)
 
     limit = output_tensor.shape[0]
     if outputs.shape[0] == 1 and output_tensor.shape[0] != 1:
@@ -75,7 +98,8 @@ def bgmv_shrink(
         scaling (float, optional): Scalar multiplier applied to the output.
     """
 
-    return scaling * bgmv(inputs, lora_b_weights, lora_indices_tensor)
+    return scaling * torch.ops.xla.bgmv(inputs, lora_b_weights,
+                                        lora_indices_tensor)
 
 
 def bgmv_expand_slice(
@@ -102,7 +126,7 @@ def bgmv_expand_slice(
         add_inputs (bool): Whether or not to add the input tensor to the output
             tensor.
     """
-    outputs = bgmv(inputs, lora_b_weights, lora_indices_tensor)
+    outputs = torch.ops.xla.bgmv(inputs, lora_b_weights, lora_indices_tensor)
 
     outputs = F.pad(
         outputs,
