@@ -285,12 +285,12 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 quant_dtype=moe.in_dtype,
             )
 
-        experts = self.select_gemm_impl(prepare_finalize)
-
-        self.fused_experts = FusedMoEModularKernel(
-            prepare_finalize,
-            experts,
-        )
+        if prepare_finalize is not None:
+            experts = self.select_gemm_impl(prepare_finalize)
+            self.fused_experts = FusedMoEModularKernel(
+                prepare_finalize,
+                experts,
+            )
 
     def select_gemm_impl(
         self, prepare_finalize: Optional[FusedMoEPrepareAndFinalize]
