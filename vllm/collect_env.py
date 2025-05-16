@@ -683,9 +683,6 @@ Versions of relevant libraries
 ==============================
 {pip_packages}
 {conda_packages}
-
-{pip_packages}
-{conda_packages}
 """.strip()
 
 # both the above code and the following code use `strip()` to
