@@ -479,19 +479,20 @@ class NixlConnectorWorker:
 
         # TODO(mgoin): remove this once we have hybrid memory allocator
         # Optimization for models with local attention (Llama 4)
-        if self.vllm_config.model_config.model_type == "llama4":
+        if self.vllm_config.model_config.hf_config.model_type == "llama4":
             from transformers import Llama4TextConfig
             assert isinstance(self.vllm_config.model_config.hf_text_config,
                               Llama4TextConfig)
             llama4_config = self.vllm_config.model_config.hf_text_config
+            no_rope_layers = llama4_config.no_rope_layers
+            chunk_size = llama4_config.attention_chunk_size
+            chunk_block_size = math.ceil(chunk_size / self.block_size)
             for layer_idx in range(self.num_layers):
-                no_rope_layers = llama4_config.no_rope_layers
                 # no_rope_layers[layer_idx] == 0 means NoPE (global)
                 # Any other value means RoPE (local chunked)
-                chunk_size = None if no_rope_layers[
-                    layer_idx] == 0 else llama4_config.attention_chunk_size
-                chunk_block_size = math.ceil(chunk_size / self.block_size)
-                self.block_window_per_layer.append(chunk_block_size)
+                is_local_attention = no_rope_layers[layer_idx] != 0
+                block_window = chunk_block_size if is_local_attention else None
+                self.block_window_per_layer.append(block_window)
             logger.debug("Llama 4 block window per layer mapping: %s",
                          self.block_window_per_layer)
             assert len(self.block_window_per_layer) == self.num_layers
@@ -737,7 +738,6 @@ class NixlConnectorWorker:
                 dst_engine_id, remote_block_ids)
             local_block_descs_ids = self._get_block_descs_ids(
                 self.engine_id, local_block_ids)
-            assert len(local_block_descs_ids) == len(remote_block_descs_ids)
         else:
             # TODO(mgoin): remove this once we have hybrid memory allocator
             # Optimization for models with local attention (Llama 4)
@@ -754,14 +754,14 @@ class NixlConnectorWorker:
                     layer_local_block_ids = local_block_ids[-block_window:]
                     layer_remote_block_ids = remote_block_ids[-block_window:]
 
-            # Get descs ids for the layer.
-            layer_remote_desc_ids = self._get_block_descs_ids(
-                dst_engine_id, layer_remote_block_ids, layer_idx)
-            layer_local_desc_ids = self._get_block_descs_ids(
-                self.engine_id, layer_local_block_ids, layer_idx)
+                # Get descs ids for the layer.
+                layer_local_desc_ids = self._get_block_descs_ids(
+                    self.engine_id, layer_local_block_ids, layer_idx)
+                layer_remote_desc_ids = self._get_block_descs_ids(
+                    dst_engine_id, layer_remote_block_ids, layer_idx)
 
-            remote_block_descs_ids.extend(layer_remote_desc_ids)
-            local_block_descs_ids.extend(layer_local_desc_ids)
+                local_block_descs_ids.extend(layer_local_desc_ids)
+                remote_block_descs_ids.extend(layer_remote_desc_ids)
 
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
 
