@@ -544,6 +544,75 @@ async def async_request_openai_audio(
         return output
 
 
+async def async_request_openai_embedding(
+    request_func_input: RequestFuncInput,
+    pbar: Optional[tqdm] = None,
+) -> RequestFuncOutput:
+    api_url = request_func_input.api_url
+    assert api_url.endswith(
+        "embeddings"), "OpenAI embedding API URL must end with 'embeddings'."
+
+    async with aiohttp.ClientSession(trust_env=True,
+                                     timeout=AIOHTTP_TIMEOUT) as session:
+        payload = {
+            "model": request_func_input.model_name \
+                if request_func_input.model_name else request_func_input.model,
+            "input": request_func_input.prompt
+        }
+        headers = {
+            "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"
+        }
+
+        output = RequestFuncOutput()
+
+        st = time.perf_counter()
+        most_recent_timestamp = st
+        try:
+            async with session.post(url=api_url, json=payload,
+                                    headers=headers) as response:
+                if response.status == 200:
+                    first_chunk_received = False
+                    async for chunk_bytes in response.content:
+                        chunk_bytes = chunk_bytes.strip()
+                        if not chunk_bytes:
+                            continue
+
+                        chunk = chunk_bytes.decode("utf-8").removeprefix(
+                            "data: ")
+                        if chunk != "[DONE]":
+                            data = json.loads(chunk)
+                            if data_embedding := data.get("data"):
+                                output.output_tokens = len(
+                                    data_embedding[0].get("embedding"))
+                                timestamp = time.perf_counter()
+                                # First token
+                                if not first_chunk_received:
+                                    first_chunk_received = True
+                                    ttft = time.perf_counter() - st
+                                    output.ttft = ttft
+
+                                most_recent_timestamp = timestamp
+                    if first_chunk_received:
+                        output.success = True
+                    else:
+                        output.success = False
+                        output.error = (
+                            "Never received a valid chunk to calculate TTFT."
+                            "This response will be marked as failed!")
+                    output.latency = most_recent_timestamp - st
+                else:
+                    output.error = response.reason or ""
+                    output.success = False
+        except Exception:
+            output.success = False
+            exc_info = sys.exc_info()
+            output.error = "".join(traceback.format_exception(*exc_info))
+
+    if pbar:
+        pbar.update(1)
+    return output
+
+
 def get_model(pretrained_model_name_or_path: str) -> str:
     if os.getenv('VLLM_USE_MODELSCOPE', 'False').lower() == 'true':
         from modelscope import snapshot_download
@@ -605,6 +674,7 @@ ASYNC_REQUEST_FUNCS = {
     "tensorrt-llm": async_request_trt_llm,
     "scalellm": async_request_openai_completions,
     "sglang": async_request_openai_completions,
+    "embed": async_request_openai_embedding,
 }
 
 OPENAI_COMPATIBLE_BACKENDS = [

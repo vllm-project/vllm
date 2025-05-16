@@ -139,10 +139,10 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
         prompt_len = len(prompt_token_ids)
         output_len = len(completion_token_ids
                          ) if fixed_output_len is None else fixed_output_len
-        if prompt_len < 4 or output_len < 4:
+        if prompt_len < args.min_input_len or output_len < 4:
             # Prune too short sequences.
             continue
-        if prompt_len > 1024 or prompt_len + output_len > 2048:
+        if prompt_len > args.max_input_len or prompt_len + output_len > 2048:
             # Prune too long sequences.
             continue
         filtered_dataset.append(
@@ -179,15 +179,16 @@ def run_vllm(
             if "prompt_token_ids" in request.prompt else \
             TextPrompt(prompt=request.prompt,
                        multi_modal_data=request.multi_modal_data))
-        sampling_params.append(
-            SamplingParams(
-                n=n,
-                temperature=1.0,
-                top_p=1.0,
-                ignore_eos=True,
-                max_tokens=request.expected_output_len,
-                detokenize=not disable_detokenize,
-            ))
+        if engine_args.task != 'embed':
+            sampling_params.append(
+                SamplingParams(
+                    n=n,
+                    temperature=1.0,
+                    top_p=1.0,
+                    ignore_eos=True,
+                    max_tokens=request.expected_output_len,
+                    detokenize=not disable_detokenize,
+                ))
     lora_requests: Optional[list[LoRARequest]] = None
     if engine_args.enable_lora:
         lora_requests = [request.lora_request for request in requests]
@@ -195,29 +196,34 @@ def run_vllm(
     use_beam_search = False
 
     outputs = None
-    if not use_beam_search:
+    if engine_args.task == 'embed':
         start = time.perf_counter()
-        outputs = llm.generate(prompts,
-                               sampling_params,
-                               lora_request=lora_requests,
-                               use_tqdm=True)
+        llm.embed(prompts)
         end = time.perf_counter()
     else:
-        assert lora_requests is None, "BeamSearch API does not support LoRA"
-        prompts = [request.prompt for request in requests]
-        # output_len should be the same for all requests.
-        output_len = requests[0][2]
-        for request in requests:
-            assert request.expected_output_len == output_len
-        start = time.perf_counter()
-        llm.beam_search(
-            prompts,
-            BeamSearchParams(
-                beam_width=n,
-                max_tokens=output_len,
-                ignore_eos=True,
-            ))
-        end = time.perf_counter()
+        if not use_beam_search:
+            start = time.perf_counter()
+            outputs = llm.generate(prompts,
+                                   sampling_params,
+                                   lora_request=lora_requests,
+                                   use_tqdm=True)
+            end = time.perf_counter()
+        else:
+            assert lora_requests is None, "BeamSearch API does not support LoRA"
+            prompts = [request.prompt for request in requests]
+            # output_len should be the same for all requests.
+            output_len = requests[0][2]
+            for request in requests:
+                assert request.expected_output_len == output_len
+            start = time.perf_counter()
+            llm.beam_search(
+                prompts,
+                BeamSearchParams(
+                    beam_width=n,
+                    max_tokens=output_len,
+                    ignore_eos=True,
+                ))
+            end = time.perf_counter()
     return end - start, outputs
 
 
@@ -695,6 +701,14 @@ if __name__ == "__main__":
                         type=int,
                         default=1000,
                         help="Number of prompts to process.")
+    parser.add_argument("--min-input-len",
+                        type=int,
+                        default=4,
+                        help="Min input prompt len in dataset to process.")
+    parser.add_argument("--max-input-len",
+                        type=int,
+                        default=1024,
+                        help="Max input prompt len in dataset to process.")
     parser.add_argument("--hf-max-batch-size",
                         type=int,
                         default=None,

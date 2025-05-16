@@ -552,6 +552,9 @@ def main(args: argparse.Namespace):
     if args.base_url is not None:
         api_url = f"{args.base_url}{args.endpoint}"
         base_url = f"{args.base_url}"
+    elif args.backend == "embed":
+        api_url = f"http://{args.host}:{args.port}" + "/v1/embeddings"
+        base_url = f"http://{args.host}:{args.port}"
     else:
         api_url = f"http://{args.host}:{args.port}{args.endpoint}"
         base_url = f"http://{args.host}:{args.port}"
