@@ -103,7 +103,7 @@ class TensorMemoryPool:
 
         while depth < MAX_MERGE_DEPTH:
             buddy_offset = block.size if (block.addr - self.base_address) % (
-                    2 * block.size) == 0 else -block.size
+                2 * block.size) == 0 else -block.size
             buddy_addr = block.addr + buddy_offset
             buddy = self.free_lists[block.size].get(buddy_addr)
             if buddy:

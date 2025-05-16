@@ -31,8 +31,9 @@ void store_tensor_impl(torch::Tensor device_tensor, torch::Tensor host_tensor) {
   auto device_ptr = device_tensor.data_ptr<scalar_t>();
   auto host_ptr = host_tensor.data_ptr<scalar_t>();
 
-  store_kernel<scalar_t><<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
-    device_ptr, host_ptr, num_elements);
+  store_kernel<scalar_t>
+    <<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
+      device_ptr, host_ptr, num_elements);
 }
 
 // Templated wrapper function: Load Tensor from pinned memory
@@ -45,8 +46,9 @@ void load_tensor_impl(torch::Tensor host_tensor, torch::Tensor device_tensor) {
   auto host_ptr = host_tensor.data_ptr<scalar_t>();
   auto device_ptr = device_tensor.data_ptr<scalar_t>();
 
-  load_kernel<scalar_t><<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
-    host_ptr, device_ptr, num_elements);
+  load_kernel<scalar_t>
+    <<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
+      host_ptr, device_ptr, num_elements);
 }
 
 // Type-dispatched wrapper function
@@ -54,8 +56,10 @@ void store_tensor(torch::Tensor device_tensor, torch::Tensor host_tensor) {
   // Validate arguments
   AT_ASSERT(device_tensor.is_cuda(), "Input tensor must be a CUDA tensor");
   AT_ASSERT(host_tensor.is_pinned(), "Output tensor must be pinned memory");
-  AT_ASSERT(device_tensor.numel() == host_tensor.numel(), "Tensors must have same number of elements");
-  AT_ASSERT(device_tensor.dtype() == host_tensor.dtype(), "Tensors must have same dtype");
+  AT_ASSERT(device_tensor.numel() == host_tensor.numel(),
+            "Tensors must have same number of elements");
+  AT_ASSERT(device_tensor.dtype() == host_tensor.dtype(),
+            "Tensors must have same dtype");
 
   // Type-based dispatch to different implementations
   switch (device_tensor.scalar_type()) {
@@ -77,8 +81,10 @@ void load_tensor(torch::Tensor host_tensor, torch::Tensor device_tensor) {
   // Validate arguments
   AT_ASSERT(device_tensor.is_cuda(), "Output tensor must be a CUDA tensor");
   AT_ASSERT(host_tensor.is_pinned(), "Input tensor must be pinned memory");
-  AT_ASSERT(device_tensor.numel() == host_tensor.numel(), "Tensors must have same number of elements");
-  AT_ASSERT(device_tensor.dtype() == host_tensor.dtype(), "Tensors must have same dtype");
+  AT_ASSERT(device_tensor.numel() == host_tensor.numel(),
+            "Tensors must have same number of elements");
+  AT_ASSERT(device_tensor.dtype() == host_tensor.dtype(),
+            "Tensors must have same dtype");
 
   // Type-based dispatch to different implementations
   switch (host_tensor.scalar_type()) {

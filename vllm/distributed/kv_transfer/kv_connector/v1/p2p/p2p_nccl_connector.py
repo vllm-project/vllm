@@ -252,7 +252,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 kv_cache = extract_kv_from_layer(kv_layer,
                                                  request.slot_mapping)
                 self.p2p_nccl_engine.send_tensor(request_id + "-" + layer_name,
-                                                kv_cache, remote_address)
+                                                 kv_cache, remote_address)
 
     def wait_for_save(self):
         if self.is_producer:
@@ -263,7 +263,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
         self,
         request: "Request",
         num_computed_tokens: int,
-    ) -> int:
+    ) -> tuple[int, bool]:
         """
         Get number of new tokens that can be loaded from the
         external KV cache beyond the num_computed_tokens.
@@ -278,7 +278,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
             external KV cache beyond what is already computed.
         """
         if self.is_producer:
-            return 0
+            return 0, False
 
         num_external_tokens = (len(request.prompt_token_ids) - 1 -
                                num_computed_tokens)
@@ -287,7 +287,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
             "num_computed_tokens:%d", num_external_tokens,
             len(request.prompt_token_ids), num_computed_tokens)
 
-        return num_external_tokens
+        return num_external_tokens, True
 
     def update_state_after_alloc(self, request: "Request",
                                  num_external_tokens: int):
