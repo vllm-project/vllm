@@ -63,8 +63,8 @@ def get_prometheus_registry():
         registry = CollectorRegistry()
         multiprocess.MultiProcessCollector(registry)
         return registry
-    else:
-        return REGISTRY
+
+    return REGISTRY
 
 
 def mount_metrics(app):
@@ -96,7 +96,7 @@ def mount_metrics(app):
     app.routes.append(metrics_route)
 
 
-def mark_process_dead(pid):
+def mark_process_dead(pid: int):
     """Mark a process as dead in prometheus multiprocessing.
     
     Args:
