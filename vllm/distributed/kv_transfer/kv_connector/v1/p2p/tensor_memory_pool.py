@@ -18,6 +18,7 @@ class MemoryBlock:
 
 
 class TensorMemoryPool:
+
     def __init__(self, max_block_size: int, min_block_size: int = 512):
         if max_block_size <= 0 or min_block_size <= 0:
             raise ValueError("Block sizes must be positive")

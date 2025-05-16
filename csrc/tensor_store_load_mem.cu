@@ -32,8 +32,8 @@ void store_tensor_impl(torch::Tensor device_tensor, torch::Tensor host_tensor) {
   auto host_ptr = host_tensor.data_ptr<scalar_t>();
 
   store_kernel<scalar_t>
-    <<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
-      device_ptr, host_ptr, num_elements);
+      <<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
+          device_ptr, host_ptr, num_elements);
 }
 
 // Templated wrapper function: Load Tensor from pinned memory
@@ -47,8 +47,8 @@ void load_tensor_impl(torch::Tensor host_tensor, torch::Tensor device_tensor) {
   auto device_ptr = device_tensor.data_ptr<scalar_t>();
 
   load_kernel<scalar_t>
-    <<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
-      host_ptr, device_ptr, num_elements);
+      <<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
+          host_ptr, device_ptr, num_elements);
 }
 
 // Type-dispatched wrapper function
@@ -103,6 +103,10 @@ void load_tensor(torch::Tensor host_tensor, torch::Tensor device_tensor) {
 }
 
 // PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-//     m.def("store_tensor", &store_tensor, "Store CUDA tensor to pinned memory (supports float32, float16, bfloat16)");
-//     m.def("load_tensor", &load_tensor, "Load CUDA tensor from pinned memory (supports float32, float16, bfloat16)");
+//     m.def("store_tensor", &store_tensor,
+//           "Store CUDA tensor to pinned memory
+//           (supports float32, float16, bfloat16)");
+//     m.def("load_tensor", &load_tensor,
+//           "Load CUDA tensor from pinned memory
+//           (supports float32, float16, bfloat16)");
 // }

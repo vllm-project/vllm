@@ -290,12 +290,10 @@ class P2pNcclConnector(KVConnectorBase_V1):
         return num_external_tokens, True
 
     def update_state_after_alloc(self, request: "Request",
+                                 blocks: "KVCacheBlocks",
                                  num_external_tokens: int):
         """
         Update KVConnector state after block allocation.
-
-        If blocks were allocated, add to _requests_need_load,
-        such that we load the KVs in the next forward pass.
         """
         if not self.is_producer and num_external_tokens > 0:
             self._requests_need_load[request.request_id] = request
