@@ -21,7 +21,7 @@ from vllm.utils import current_stream, get_ip
 logger = logging.getLogger(__name__)
 
 
-class P2pNcclPipe:
+class P2pNcclTransfer:
 
     def __init__(self,
                  local_rank: int,

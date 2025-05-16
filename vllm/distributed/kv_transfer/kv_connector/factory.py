@@ -98,10 +98,6 @@ KVConnectorFactory.register_connector(
     "MooncakeStoreConnector")
 
 KVConnectorFactory.register_connector(
-    "P2pConnector", "vllm.distributed.kv_transfer.kv_connector.p2p_connector",
-    "P2pConnector")
-
-KVConnectorFactory.register_connector(
     "SharedStorageConnector",
     "vllm.distributed.kv_transfer.kv_connector.v1.shared_storage_connector",
     "SharedStorageConnector")
