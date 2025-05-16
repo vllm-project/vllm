@@ -879,10 +879,11 @@ class KVCacheBlockBundle:
             block.reset_hash()
         self.block_hash = None
 
-    def reset(self):
+    def reset(self) -> 'KVCacheBlockBundle':
         assert self.ref_cnt == 0
         self.reset_hash()
         self.blocks = ()
+        return self
 
     def block_hash_is_none(self):
         return self.block_hash is None and all(block.block_hash is None

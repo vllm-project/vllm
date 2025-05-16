@@ -184,7 +184,6 @@ class KVCacheCoordinator:
 
     def find_longest_cache_hit(
         self,
-        request: Request,
         block_hashes_dict: dict[int, list[BlockHashType]],
         max_cache_hit_length: int,
     ) -> tuple[list[list[KVCacheBlockBundle]], int]:
@@ -192,7 +191,6 @@ class KVCacheCoordinator:
         Find the longest cache hit for the request.
 
         Args:
-            request: The request.
             block_hashes_dict: The block hashes of the request.
             max_cache_hit_length: The maximum length of the cache hit.
 

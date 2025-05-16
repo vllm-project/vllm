@@ -45,7 +45,9 @@ class BlockPool:
             KVCacheBlock(idx) for idx in range(num_gpu_blocks)
         ]
         # A pool of block bundle instances, to avoid frequent creation of
-        # KVCacheBlockBundle class.
+        # KVCacheBlockBundle class. As each KVCacheBlockBundle contains a
+        # distinct set of blocks, the number of KVCacheBlockBundle object won't
+        # exceed num_gpu_blocks.
         self._block_bundle_pool: deque[KVCacheBlockBundle] = deque(
             KVCacheBlockBundle(blocks=()) for _ in range(num_gpu_blocks))
         # Free block queue that constructs and manipulates a doubly linked
@@ -275,8 +277,7 @@ class BlockPool:
             # The block is the master block of its KVCacheBlockBundle.
             # See comments in cache_full_blocks for details.
             assert cached_block.master_block_id == block.block_id
-            cached_block.reset()
-            self._block_bundle_pool.append(cached_block)
+            self._block_bundle_pool.append(cached_block.reset())
             del cached_blocks[block.block_id]
             if len(cached_blocks) == 0:
                 del self.cached_block_hash_to_block[manager_id][block_hash]
@@ -325,6 +326,10 @@ class BlockPool:
                 # null_block should not be added to the free list.
                 if block != self.null_block:
                     self.free_block_queue.append(block)
+
+            if (block_bundle.block_hash is None and
+                    block_bundle.master_block_id != self.null_block.block_id):
+                self._block_bundle_pool.append(block_bundle.reset())
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF

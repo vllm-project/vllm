@@ -288,7 +288,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             # the last matched block.
             self.sliding_window_contiguous_blocks += 1
         single_null_block = block_pool.null_block
-        self._null_block = KVCacheBlockBundle(
+        self.null_block = KVCacheBlockBundle(
             tuple([single_null_block] * self.num_kv_cache_groups))
 
     def find_longest_cache_hit(self, block_hashes: list[BlockHashType],
@@ -299,7 +299,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         # sliding_window_contiguous_blocks),
         # which is good for low cache hit rate scenarios.
         max_num_blocks = max_length // self.block_size
-        computed_blocks = [self._null_block] * max_num_blocks
+        computed_blocks = [self.null_block] * max_num_blocks
         num_contiguous_blocks = 0
         match_found = False
         # Search from right to left and early stop when a match is found.
@@ -335,13 +335,13 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         blocks = self.req_to_blocks[request_id]
         removed_blocks: list[KVCacheBlockBundle] = []
         for i in range(last_useful_block - 1, -1, -1):
-            if blocks[i] == self._null_block:
+            if blocks[i] == self.null_block:
                 # If the block is already a null block, the blocks before it
                 # should also have been set to null blocks by the previous calls
                 # to this function.
                 break
             removed_blocks.append(blocks[i])
-            blocks[i] = self._null_block
+            blocks[i] = self.null_block
         self.block_pool.free_blocks(removed_blocks)
 
     def get_num_common_prefix_blocks(self, request_id: str,
