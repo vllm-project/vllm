@@ -246,12 +246,12 @@ def test_moe_permute_unpermute(n_token: int, n_hidden: int, topk: int,
     # add a random tensor to simulate group gemm
     result0 = 0.5 * permuted_hidden_states + torch.randn_like(
         permuted_hidden_states)
+    result4 = torch.empty_like(hidden_states)
+    moe_unpermute(result4, result0, topk_weights, inv_permuted_idx, topk,
+                  expert_first_token_offset)
 
-    result4 = moe_unpermute(result0, topk_weights, inv_permuted_idx,
-                            expert_first_token_offset, topk)
     gold4 = torch_unpermute(result0, topk_weights, topk_ids,
                             token_expert_indices, inv_permuted_idx,
                             valid_row_idx, topk, n_local_expert)
-
     # check unpermuted hidden
     torch.testing.assert_close(result4, gold4, atol=2e-2, rtol=0)
