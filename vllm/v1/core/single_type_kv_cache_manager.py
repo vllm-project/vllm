@@ -288,7 +288,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             # the last matched block.
             self.sliding_window_contiguous_blocks += 1
         single_null_block = block_pool.null_block
-        self._null_block = KVCacheBlockBundle.from_kv_cache_blocks(
+        self._null_block = KVCacheBlockBundle(
             tuple([single_null_block] * self.num_kv_cache_groups))
 
     def find_longest_cache_hit(self, block_hashes: list[BlockHashType],

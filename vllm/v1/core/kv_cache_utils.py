@@ -865,15 +865,23 @@ class KVCacheBlockBundle:
     def master_block_id(self):
         return self.blocks[0].block_id
 
-    @staticmethod
-    def from_kv_cache_blocks(blocks: tuple[KVCacheBlock, ...]):
-        return KVCacheBlockBundle(blocks=blocks,
-                                  block_hash=blocks[0].block_hash)
+    def init_kv_cache_blocks(
+            self, blocks: tuple[KVCacheBlock, ...]) -> 'KVCacheBlockBundle':
+        assert self.block_hash is None
+        assert self.ref_cnt == 0
+        self.blocks = blocks
+        self.block_hash = blocks[0].block_hash
+        return self
 
     def reset_hash(self):
         for block in self.blocks:
             block.reset_hash()
         self.block_hash = None
+
+    def reset(self):
+        assert self.ref_cnt == 0
+        self.reset_hash()
+        self.blocks = ()
 
     def block_hash_is_none(self):
         return self.block_hash is None and all(block.block_hash is None

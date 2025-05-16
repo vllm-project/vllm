@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Iterable
 from typing import Callable, Optional
 
@@ -44,6 +44,10 @@ class BlockPool:
         self.blocks: list[KVCacheBlock] = [
             KVCacheBlock(idx) for idx in range(num_gpu_blocks)
         ]
+        # A pool of block bundle instances, to avoid frequent creation of
+        # KVCacheBlockBundle class.
+        self._block_bundle_pool: deque[KVCacheBlockBundle] = deque(
+            KVCacheBlockBundle(blocks=()) for _ in range(num_gpu_blocks))
         # Free block queue that constructs and manipulates a doubly linked
         # list of free blocks (including eviction candidates when caching is
         # enabled).
@@ -244,8 +248,7 @@ class BlockPool:
         new_block_bundles: list[KVCacheBlockBundle] = []
         for i in range(num_block_bundle):
             blocks = new_blocks[i * bundle_size:(i + 1) * bundle_size]
-            # TODO: avoid frequent creation of KVCacheBlockBundle class
-            block_bundle = KVCacheBlockBundle.from_kv_cache_blocks(
+            block_bundle = self._block_bundle_pool.pop().init_kv_cache_blocks(
                 tuple(blocks))
             block_bundle.incr_ref()
             new_block_bundles.append(block_bundle)
@@ -272,8 +275,8 @@ class BlockPool:
             # The block is the master block of its KVCacheBlockBundle.
             # See comments in cache_full_blocks for details.
             assert cached_block.master_block_id == block.block_id
-            assert cached_block.ref_cnt == 0
-            cached_block.reset_hash()
+            cached_block.reset()
+            self._block_bundle_pool.append(cached_block)
             del cached_blocks[block.block_id]
             if len(cached_blocks) == 0:
                 del self.cached_block_hash_to_block[manager_id][block_hash]
