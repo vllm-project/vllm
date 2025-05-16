@@ -28,7 +28,7 @@ class Cache:
 
 class All2AllManagerBase:
 
-    def __init__(self, cpu_group, model: torch.nn.Module):
+    def __init__(self, cpu_group):
         self.cpu_group = cpu_group
 
         # compute some common properties
@@ -228,9 +228,13 @@ class DeviceCommunicatorBase:
                                                model: torch.nn.Module) -> None:
         """
         Prepare the communication buffer for the model.
-        This is a no-op in the base class.
         """
-        pass
+        moe_modules = [
+            module for module in model.modules()
+            if module.__class__.__name__ == "FusedMoE"
+        ]
+        for module in moe_modules:
+            module.quant_method.init_prepare_finalize()
 
     def dispatch(
             self, hidden_states: torch.Tensor,

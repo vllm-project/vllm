@@ -6,8 +6,11 @@ import torch
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
+from vllm.logger import init_logger
 
 from .base_device_communicator import DeviceCommunicatorBase
+
+logger = init_logger(__name__)
 
 
 class CudaCommunicator(DeviceCommunicatorBase):
@@ -52,6 +55,19 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 group=self.cpu_group,
                 device=self.device,
             )
+
+        if self.use_all2all:
+            all2all_backend = envs.VLLM_ALL2ALL_BACKEND
+            if all2all_backend == "naive":
+                from .all2all import NaiveAll2AllManager
+                self.all2all_manager = NaiveAll2AllManager(self.cpu_group)
+                logger.info("Using naive all2all manager.")
+            elif all2all_backend == "pplx":
+                from .all2all import PPLXAll2AllManager
+                self.all2all_manager = PPLXAll2AllManager(self.cpu_group)
+                logger.info("Using PPLX all2all manager.")
+            else:
+                raise ValueError(f"Unknown all2all backend: {all2all_backend}")
 
     def all_reduce(self, input_):
         # always try custom allreduce first,
@@ -136,30 +152,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if self.all2all_manager is not None:
             self.all2all_manager.destroy()
             self.all2all_manager = None
-
-    def prepare_communication_buffer_for_model(self,
-                                               model: torch.nn.Module) -> None:
-        """
-        Prepare the communication buffer for the model.
-        """
-        if not self.use_all2all:
-            return
-        all2all_backend = envs.VLLM_ALL2ALL_BACKEND
-        if all2all_backend == "naive":
-            from .all2all import NaiveAll2AllManager
-            self.all2all_manager = NaiveAll2AllManager(self.cpu_group, model)
-        elif all2all_backend == "pplx":
-            from .all2all import PPLXAll2AllManager
-            self.all2all_manager = PPLXAll2AllManager(self.cpu_group, model)
-        else:
-            raise ValueError(f"Unknown all2all backend: {all2all_backend}")
-
-        moe_modules = [
-            module for module in model.modules()
-            if module.__class__.__name__ == "FusedMoE"
-        ]
-        for module in moe_modules:
-            module.quant_method.init_prepare_finalize()
 
     def dispatch(
             self, hidden_states: torch.Tensor,

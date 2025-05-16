@@ -26,8 +26,8 @@ class NaiveAll2AllManager(All2AllManagerBase):
     debugging.
     """
 
-    def __init__(self, cpu_group, model: torch.nn.Module):
-        super().__init__(cpu_group, model)
+    def __init__(self, cpu_group):
+        super().__init__(cpu_group)
 
     def naive_multicast(self, x: torch.Tensor,
                         cu_tokens_across_dp_cpu: torch.Tensor):
@@ -78,10 +78,10 @@ class PPLXAll2AllManager(All2AllManagerBase):
     All2All communication based on PPLX kernels.
     """
 
-    def __init__(self, cpu_group, model: torch.nn.Module):
+    def __init__(self, cpu_group):
         has_pplx = importlib.util.find_spec("pplx_kernels") is not None
         assert has_pplx, "pplx_kernels not found. Please follow https://github.com/vllm-project/vllm/blob/main/tools/ep_kernels/README.md to install pplx_kernels."  # noqa
-        super().__init__(cpu_group, model)
+        super().__init__(cpu_group)
 
         if self.internode:
             # inter-node communication needs nvshmem,
