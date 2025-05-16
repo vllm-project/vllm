@@ -204,7 +204,7 @@ class CoreEngineActorManager:
         if local_engine_count > 0:
             head_node_ip = \
                 vllm_config.parallel_config.data_parallel_master_ip
-            bundles[0]["node_ip:" + head_node_ip] = 0.001
+            bundles[0]["node:" + head_node_ip] = 0.001
 
         placement_group = ray.util.placement_group(
             name="dp_engine_actors",

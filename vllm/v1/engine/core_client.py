@@ -1091,6 +1091,8 @@ class RayDPClient(DPAsyncMPClient):
             self.resources.output_socket = make_zmq_socket(
                 self.ctx, output_address, zmq.constants.PULL)
 
+            logger.info("executor_class: %s", executor_class)
+
             # Start all engines.
             self.resources.local_engine_manager = CoreEngineActorManager(
                 vllm_config=vllm_config,
