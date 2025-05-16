@@ -1336,7 +1336,14 @@ class HiddenStates(msgspec.Struct, array_like=True,
         seq_ids = get_all_seq_ids(seq_group_metadata_list)
         if seq_ids != self._seq_ids:
             # Batch contents changed - prune removed sequences.
-            index = [self._seq_ids.index(seq_id) for seq_id in seq_ids]
+            if len(seq_ids) < len(self._seq_ids):
+                index = [self._seq_ids.index(seq_id) for seq_id in seq_ids]
+            else:
+                # This path is added for use_padding_aware_scheduling
+                index = [
+                    self._seq_ids.index(seq_id)
+                    if seq_id in self._seq_ids else 0 for seq_id in seq_ids
+                ]
             self.hidden_states = self.hidden_states[index]
             if self.second_last_token_hidden_states is not None:
                 self.second_last_token_hidden_states = self\

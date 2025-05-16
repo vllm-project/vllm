@@ -55,9 +55,6 @@ PRECISION = "float32"
 
         # Main model
         "model_name": MAIN_MODEL,
-
-        # schedule
-        "use_padding_aware_scheduling": False,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
