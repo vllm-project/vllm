@@ -215,7 +215,7 @@ class LLM:
             else:
                 compilation_config_instance = compilation_config
         else:
-            compilation_config_instance = None
+            compilation_config_instance = CompilationConfig()
 
         engine_args = EngineArgs(
             model=model,
