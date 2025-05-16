@@ -366,7 +366,8 @@ class Scheduler(SchedulerInterface):
                 num_computed_tokens = (num_native_computed_tokens +
                                        num_external_computed_tokens +
                                        num_prealloc_computed_tokens)
-
+                if request.num_cached_tokens < 0:
+                    request.num_cached_tokens = num_computed_tokens
                 encoder_inputs_to_schedule = None
                 new_encoder_budget = encoder_budget
 
