@@ -308,7 +308,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # are not supported by Machete yet.
   # 9.0 for latest bf16 atomicAdd PTX
   # Marlin kernels: generate and build for supported architectures
-  cuda_archs_loose_intersection(MARLIN_ARCHS "8.0+PTX" "${CUDA_ARCHS}")
   optional_cuda_sources(
     NAME Marlin
     ARCHS "8.0;9.0+PTX"
