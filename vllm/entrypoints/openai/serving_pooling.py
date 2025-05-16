@@ -83,7 +83,8 @@ class OpenAIServingPooling(OpenAIServing):
                 "dimensions is currently not supported")
 
         model_name = self._get_model_name(request.model)
-        request_id = f"pool-{self._base_request_id(raw_request)}"
+        request_id = "pool-" \
+                     f"{self._base_request_id(raw_request, request.request_id)}"
         created_time = int(time.time())
 
         truncate_prompt_tokens = request.truncate_prompt_tokens

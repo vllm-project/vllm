@@ -247,7 +247,8 @@ class OpenAIServingTranscription(OpenAIServing):
             return self.create_error_response(
                 "Currently only support response_format `text` or `json`")
 
-        request_id = f"trsc-{self._base_request_id(raw_request)}"
+        request_id = "trsc-" \
+                     f"{self._base_request_id(raw_request, request.request_id)}"
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
         if raw_request:
