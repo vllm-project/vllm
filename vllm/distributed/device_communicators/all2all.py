@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import importlib.util
-import threading
 from typing import TYPE_CHECKING
-from weakref import WeakValueDictionary
 
 import torch
 import torch.distributed as dist
@@ -10,66 +8,14 @@ import torch.distributed as dist
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 
+from .base_device_communicator import All2AllBase, Cache
+
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 else:
     FusedMoE = None
-
-
-class Cache:
-
-    def __init__(self):
-        self._cache: WeakValueDictionary = WeakValueDictionary()
-        self._lock = threading.RLock()  # Reentrant lock for thread safety
-
-    def get_or_create(self, kwargs, func):
-        # Create a hashable key from the kwargs
-        key = tuple(sorted((k, v) for k, v in kwargs.items()))
-
-        with self._lock:
-            instance = self._cache.get(key)
-            if instance is None:
-                instance = func(**kwargs)
-                self._cache[key] = instance
-            return instance
-
-
-class All2AllBase:
-
-    def __init__(self, cpu_group, model: torch.nn.Module):
-        self.cpu_group = cpu_group
-
-        # compute some common properties
-        from vllm.distributed.parallel_state import (get_dp_group,
-                                                     get_ep_group,
-                                                     get_tp_group,
-                                                     in_the_same_node_as)
-
-        # all2all lives in ep group, which is merged from dp and tp group
-        self.dp_group = get_dp_group()
-        self.tp_group = get_tp_group()
-        self.ep_group = get_ep_group()
-        self.dp_rank = self.dp_group.rank_in_group
-        self.dp_world_size = self.dp_group.world_size
-        self.rank = self.ep_group.rank_in_group
-        self.world_size = self.ep_group.world_size
-
-        # all2all communication often has separate implementations for
-        # intra-node and inter-node communication
-        self.intranode = in_the_same_node_as(cpu_group, source_rank=0)
-        self.internode = not self.intranode
-
-    def dispatch(self, hidden_states: torch.Tensor,
-                 router_logits: torch.Tensor):
-        raise NotImplementedError
-
-    def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError
-
-    def destroy(self):
-        pass
 
 
 class NaiveAll2All(All2AllBase):
@@ -135,7 +81,6 @@ class PPLXAll2All(All2AllBase):
     def __init__(self, cpu_group, model: torch.nn.Module):
         has_pplx = importlib.util.find_spec("pplx_kernels") is not None
         assert has_pplx, "pplx_kernels not found. Please follow https://github.com/vllm-project/vllm/blob/main/tools/ep_kernels/README.md to install pplx_kernels."  # noqa
-        import pplx_kernels as pplx
         super().__init__(cpu_group, model)
 
         if self.internode:
@@ -162,35 +107,13 @@ class PPLXAll2All(All2AllBase):
             if module.__class__.__name__ == "FusedMoE"
         ]
         for module in moe_modules:
-            moe_layer = module
-            moe = moe_layer.moe_config
-            max_num_tokens = moe.max_num_tokens
+            module.quant_method.init_prepare_finalize()
 
-            all_to_all_args = dict(
-                max_num_tokens=max_num_tokens,
-                num_experts=moe.num_experts,
-                experts_per_token=moe.experts_per_token,  # topk
-                rank=self.rank,
-                world_size=self.world_size,
-                # dp_size actually means tp_size, bug in pplx kernels
-                dp_size=self.tp_group.world_size,
-                hidden_dim=moe.hidden_dim,
-                hidden_dim_bytes=moe.hidden_dim * moe.in_dtype.itemsize,
-                # For blocked per token: set to
-                #   ceil_div(hidden_dim, block_size) * sizeof(float32)
-                # For per-token: set to sizeof(float32)
-                hidden_dim_scale_bytes=(0 if moe.in_dtype.itemsize != 1 else (
-                    (moe.hidden_dim + moe.block_size - 1) // moe.block_size *
-                    torch.float32.itemsize)),
-                group_name=self.cpu_group.group_name,
-            )
-
-            pplx_handle = self.handle_cache.get_or_create(
-                all_to_all_args, pplx.AllToAll.internode
-                if self.internode else pplx.AllToAll.intranode)
-
-            moe_layer.quant_method.fused_experts.prepare_finalize.a2a \
-                = pplx_handle
+    def get_handle(self, kwargs):
+        import pplx_kernels as pplx
+        return self.handle_cache.get_or_create(
+            kwargs, pplx.AllToAll.internode
+            if self.internode else pplx.AllToAll.intranode)
 
     def dispatch(self, hidden_states: torch.Tensor,
                  router_logits: torch.Tensor):
