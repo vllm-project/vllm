@@ -292,6 +292,8 @@ def rocm_aiter_fused_experts(
             quant_method = QuantMethod.BLOCK_128x128.value
         elif use_fp8_w8a8:
             quant_method = QuantMethod.PER_TOKEN.value
+            if a1_scale is not None and a2_scale is not None:
+                quant_method = QuantMethod.PER_TENSOR.value
 
         if apply_router_weight_on_input:
             assert (topk_weights.dim() == 2
