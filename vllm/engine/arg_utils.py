@@ -159,7 +159,10 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
         # Get the set of possible types for the field
         type_hints: set[TypeHint] = set()
         if get_origin(field.type) in {Union, Annotated}:
-            predicate = lambda arg: not isinstance(arg, SkipValidation)
+            if IS_IN_DOC_BUILD:
+                predicate = lambda _: True
+            else:
+                predicate = lambda arg: not isinstance(arg, SkipValidation)
             type_hints.update(filter(predicate, get_args(field.type)))
         else:
             type_hints.add(field.type)
