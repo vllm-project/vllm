@@ -266,7 +266,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> bool:
         """
         Update the order of requests in the batch based on the attention
-        backend's needs. For example, some attention backends (namely MLA) may 
+        backend's needs. For example, some attention backends (namely MLA) may
         want to separate requests based on if the attention computation will be
         compute-bound or memory-bound.
 
@@ -1348,7 +1348,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             next_token_ids = torch.tensor(next_token_ids,
                                           dtype=torch.int32,
                                           device=self.device)
-            eagle_attn_metadata = attn_metadata[self.drafter.attn_layer_name]
+            # At this moment, we assume all eagle layers belong to the same KV
+            # cache group, thus using the same attention metadata.
+            eagle_attn_metadata = attn_metadata[
+                self.drafter.attn_layer_names[0]]
 
             if spec_decode_metadata is None:
                 # input_ids can be None for multimodal models.
@@ -1987,6 +1990,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     # TODO: add new branches when introducing more types of
                     # KV cache specs.
                     raise ValueError("Unknown KV cache spec type.")
+
+        if self.speculative_config and self.speculative_config.use_eagle():
+            assert isinstance(self.drafter, EagleProposer)
+            # validate all draft model layers belong to the same kv cache
+            # group
+            self.drafter.validate_kv_cache_group(kv_cache_config)
 
         bind_kv_cache(
             kv_caches,
