@@ -47,19 +47,23 @@ def test_guided_logits_processors(zephyr_7B_tokenzer, sample_regex,
                                   reasoner=None,
                                   vocab_size=32000)
 
-    token_ids = zephyr_7B_tokenzer.encode(
-        f"Give an example IPv4 address with this regex: {sample_regex}")
     tensor = torch.rand(32000)
     original_tensor = torch.clone(tensor)
-    for i in range(1, len(token_ids) + 1):
-        tensor = regex_LP(token_ids[:i], tensor)
+    tokens = []
+    for i in range(10):
+        token = json_LP._guide.get_tokens()[0]
+        tokens.append(token)
+        tensor = json_LP(tokens, tensor)
     assert tensor.shape == original_tensor.shape
     assert not torch.allclose(tensor, original_tensor)
 
     tensor = torch.rand(32000)
     original_tensor = torch.clone(tensor)
-    for i in range(1, len(token_ids) + 1):
-        tensor = json_LP(token_ids[:i], tensor)
+    tokens = []
+    for i in range(10):
+        token = regex_LP._guide.get_tokens()[0]
+        tokens.append(token)
+        tensor = regex_LP(tokens, tensor)
     assert tensor.shape == original_tensor.shape
     assert not torch.allclose(tensor, original_tensor)
 
@@ -81,8 +85,6 @@ async def test_guided_logits_processor_black_box(backend: str, is_local: bool,
         seed=0,
         dtype="bfloat16",
     )
-    token_ids = zephyr_7B_tokenzer.encode(
-        f"Give an example IPv4 address with this regex: {sample_regex}")
     regex_request = GuidedDecodingParams(regex=sample_regex, backend=backend)
 
     regex_lp = get_local_guided_decoding_logits_processor(
@@ -92,14 +94,14 @@ async def test_guided_logits_processor_black_box(backend: str, is_local: bool,
     assert regex_lp is not None
     tensor = torch.rand(32000)
     original_tensor = torch.clone(tensor)
-    for i in range(1, len(token_ids) + 1):
-        tensor = regex_lp(token_ids[:i], tensor)
+    tokens = []
+    for i in range(10):
+        token = regex_lp._guide.get_tokens()[0]
+        tokens.append(token)
+        tensor = regex_lp(tokens, tensor)
     assert tensor.shape == original_tensor.shape
     assert not torch.allclose(tensor, original_tensor)
 
-    token_ids = zephyr_7B_tokenzer.encode(
-        f"Give an employee profile that fits this schema: {sample_json_schema}"
-    )
     json_request = GuidedDecodingParams(json=sample_json_schema,
                                         backend=backend)
     json_lp = await get_guided_decoding_logits_processor(
@@ -107,8 +109,11 @@ async def test_guided_logits_processor_black_box(backend: str, is_local: bool,
     assert json_lp is not None
     tensor = torch.rand(32000)
     original_tensor = torch.clone(tensor)
-    for i in range(1, len(token_ids) + 1):
-        tensor = json_lp(token_ids[:i], tensor)
+    tokens = []
+    for i in range(10):
+        token = json_lp._guide.get_tokens()[0]
+        tokens.append(token)
+        tensor = json_lp(tokens, tensor)
     assert tensor.shape == original_tensor.shape
     assert not torch.allclose(tensor, original_tensor)
 
@@ -132,7 +137,6 @@ async def test_guided_logits_processor_with_reasoning(
         dtype="bfloat16",
     )
     token_ids = deepseek_r1_qwen_tokenizer.encode(
-        f"Give an example IPv4 address with this regex: {sample_regex}."
         "<think>here is the thinking process")
     regex_request = GuidedDecodingParams(regex=sample_regex, backend=backend)
 
@@ -145,13 +149,15 @@ async def test_guided_logits_processor_with_reasoning(
     assert regex_lp is not None
     tensor = torch.rand(32000)
     original_tensor = torch.clone(tensor)
-    for i in range(1, len(token_ids) + 1):
-        tensor = regex_lp(token_ids[:i], tensor)
+    # We can just feed in tokenids here since it shouldn't
+    # ever get to the Guide (which will error if invalid tokenid's are input)
+    # because the ReasoningParser is causing the logits processor 
+    # to quick return.
+    json_lp(token_ids, tensor)
     assert tensor.shape == original_tensor.shape
     assert torch.allclose(tensor, original_tensor)
 
     token_ids = deepseek_r1_qwen_tokenizer.encode(
-        f"Give an employee profile that fits this schema: {sample_json_schema}."
         "<think>here is the thinking process")
     json_request = GuidedDecodingParams(json=sample_json_schema,
                                         backend=backend)
@@ -163,15 +169,13 @@ async def test_guided_logits_processor_with_reasoning(
     assert json_lp is not None
     tensor = torch.rand(32000)
     original_tensor = torch.clone(tensor)
-    for i in range(1, len(token_ids) + 1):
-        tensor = json_lp(token_ids[:i], tensor)
+    regex_lp(token_ids, tensor)
     assert tensor.shape == original_tensor.shape
     assert torch.allclose(tensor, original_tensor)
 
     # Thinking is over, so the tensor should change.
     token_ids = deepseek_r1_qwen_tokenizer.encode(
-        f"Give an employee profile that fits this schema: {sample_json_schema}."
-        "<think>here is the thinking process</think> Then")
+        "<think>here is the thinking process</think>")
     json_request = GuidedDecodingParams(json=sample_json_schema,
                                         backend=backend)
     json_lp = get_local_guided_decoding_logits_processor(
@@ -182,8 +186,14 @@ async def test_guided_logits_processor_with_reasoning(
     assert json_lp is not None
     tensor = torch.rand(32000)
     original_tensor = torch.clone(tensor)
-    for i in range(1, len(token_ids) + 1):
-        tensor = json_lp(token_ids[:i], tensor)
+    # We must actually follow the list of allowed tokens here,
+    # since the thinking is over, and the Guide will error if we pass
+    # in disallowed tokenids.
+    tokens = []
+    for i in range(10):
+        token = json_lp._guide.get_tokens()[0]
+        tokens.append(token)
+        tensor = json_lp(tokens, tensor)
     assert tensor.shape == original_tensor.shape
     assert not torch.allclose(tensor, original_tensor)
 
