@@ -4287,18 +4287,6 @@ class VllmConfig:
             self.compilation_config.level = CompilationLevel.PIECEWISE
             self.compilation_config.set_splitting_ops_for_v1()
 
-        if self.parallel_config is not None and \
-            self.parallel_config.tensor_parallel_size > 1 and \
-            self.parallel_config.pipeline_parallel_size > 1 and \
-            self.compilation_config is not None and \
-                self.compilation_config.pass_config is not None and \
-            self.compilation_config.pass_config.enable_sequence_parallelism:
-            logger.warning_once(
-                "Sequence parallelism is not supported with pipeline "
-                "parallelism. Disabling sequence parallelism.")
-            self.compilation_config.pass_config.\
-                enable_sequence_parallelism = False
-
         self._set_cudagraph_sizes()
 
         if self.cache_config is not None and \
