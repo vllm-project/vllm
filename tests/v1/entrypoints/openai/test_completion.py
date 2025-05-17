@@ -383,7 +383,7 @@ async def test_completion_streaming(server_logic, client: openai.AsyncOpenAI,
     )
     stream = await server_logic.create_completion(completion_request)
     chunks_text: list[str] = []
-    chunks_obj: list[dict] = []
+    chunks_obj: list[SimpleNamespace] = []
     finish_reason_count = 0
     async for chunk in stream:
         if chunk.strip() == "data: [DONE]":
