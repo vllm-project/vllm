@@ -99,6 +99,9 @@ def test_triton_unified_attn(
 ) -> None:
     torch.set_default_device("cuda")
 
+    if q_dtype is not None and q_dtype.itemsize < 2 and block_size < 32:
+        pytest.skip("block size must be at least 32 for fp8")
+
     current_platform.seed_everything(0)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]

@@ -150,6 +150,101 @@ def merge_attn_states(output: torch.Tensor,
                                    prefix_lse, suffix_output, suffix_lse)
 
 
+def convert_vertical_slash_indexes(
+    q_seqlens: torch.Tensor,  # [BATCH, ]
+    kv_seqlens: torch.Tensor,  # [BATCH, ]
+    vertical_indexes: torch.Tensor,  # [BATCH, N_HEADS, NNZ_V]
+    slash_indexes: torch.Tensor,  # [BATCH, N_HEADS, NNZ_S]
+    context_size: int,
+    block_size_M: int,
+    block_size_N: int,
+    causal: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    batch_size = slash_indexes.size(0)
+    num_heads = slash_indexes.size(1)
+    nnz_slash = slash_indexes.size(2)
+    nnz_vertical = vertical_indexes.size(2)
+    num_rows = (context_size + block_size_M - 1) // block_size_M
+
+    block_count = torch.zeros(batch_size,
+                              num_heads,
+                              num_rows,
+                              dtype=q_seqlens.dtype,
+                              device=q_seqlens.device)
+    block_offset = torch.zeros(batch_size,
+                               num_heads,
+                               num_rows,
+                               nnz_slash,
+                               dtype=q_seqlens.dtype,
+                               device=q_seqlens.device)
+    column_count = torch.zeros(batch_size,
+                               num_heads,
+                               num_rows,
+                               dtype=q_seqlens.dtype,
+                               device=q_seqlens.device)
+    column_index = torch.zeros(batch_size,
+                               num_heads,
+                               num_rows,
+                               nnz_vertical,
+                               dtype=q_seqlens.dtype,
+                               device=q_seqlens.device)
+
+    torch.ops._C.convert_vertical_slash_indexes(
+        block_count, block_offset, column_count, column_index, q_seqlens,
+        kv_seqlens, vertical_indexes, slash_indexes, context_size,
+        block_size_M, block_size_N, causal)
+    return block_count, block_offset, column_count, column_index
+
+
+def convert_vertical_slash_indexes_mergehead(
+    q_seqlens: torch.Tensor,  # [BATCH, ]
+    kv_seqlens: torch.Tensor,  # [BATCH, ]
+    vertical_indexes: torch.Tensor,  # [BATCH, N_HEADS, NNZ_V]
+    slash_indexes: torch.Tensor,  # [BATCH, N_HEADS, NNZ_S]
+    # [N_HEADS] : different head use different number of indices
+    vertical_indices_count: torch.Tensor,
+    slash_indices_count: torch.Tensor,
+    context_size: int,
+    block_size_M: int,
+    block_size_N: int,
+    causal: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    batch_size = slash_indexes.size(0)
+    num_heads = slash_indexes.size(1)
+    nnz_slash = slash_indexes.size(2)
+    nnz_vertical = vertical_indexes.size(2)
+    num_rows = (context_size + block_size_M - 1) // block_size_M
+
+    block_count = torch.empty(batch_size,
+                              num_heads,
+                              num_rows,
+                              dtype=q_seqlens.dtype,
+                              device=q_seqlens.device)
+    block_offset = torch.empty(batch_size,
+                               num_heads,
+                               num_rows,
+                               nnz_slash,
+                               dtype=q_seqlens.dtype,
+                               device=q_seqlens.device)
+    column_count = torch.empty(batch_size,
+                               num_heads,
+                               num_rows,
+                               dtype=q_seqlens.dtype,
+                               device=q_seqlens.device)
+    column_index = torch.empty(batch_size,
+                               num_heads,
+                               num_rows,
+                               nnz_vertical,
+                               dtype=q_seqlens.dtype,
+                               device=q_seqlens.device)
+
+    torch.ops._C.convert_vertical_slash_indexes_mergehead(
+        block_count, block_offset, column_count, column_index, q_seqlens,
+        kv_seqlens, vertical_indexes, slash_indexes, vertical_indices_count,
+        slash_indices_count, context_size, block_size_M, block_size_N, causal)
+    return block_count, block_offset, column_count, column_index
+
+
 # pos encoding ops
 def rotary_embedding(
     positions: torch.Tensor,
@@ -159,14 +254,8 @@ def rotary_embedding(
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
 ) -> None:
-    # TODO: Remove this contiguous call when the kernel is updated to support tensor slices
-    query_contiguous = query.contiguous()
-    key_contiguous = key.contiguous() if key is not None else None
-    torch.ops._C.rotary_embedding(positions, query_contiguous, key_contiguous,
-                                  head_size, cos_sin_cache, is_neox)
-    query.copy_(query_contiguous)
-    if key is not None:
-        key.copy_(key_contiguous)
+    torch.ops._C.rotary_embedding(positions, query, key, head_size,
+                                  cos_sin_cache, is_neox)
 
 
 def batched_rotary_embedding(positions: torch.Tensor, query: torch.Tensor,
@@ -174,16 +263,9 @@ def batched_rotary_embedding(positions: torch.Tensor, query: torch.Tensor,
                              cos_sin_cache: torch.Tensor, is_neox: bool,
                              rot_dim: int,
                              cos_sin_cache_offsets: torch.Tensor) -> None:
-    # TODO: Remove this contiguous call when the kernel is updated to support tensor slices
-    query_contiguous = query.contiguous()
-    key_contiguous = key.contiguous() if key is not None else None
-    torch.ops._C.batched_rotary_embedding(positions, query_contiguous,
-                                          key_contiguous, head_size,
+    torch.ops._C.batched_rotary_embedding(positions, query, key, head_size,
                                           cos_sin_cache, is_neox, rot_dim,
                                           cos_sin_cache_offsets)
-    query.copy_(query_contiguous)
-    if key is not None:
-        key.copy_(key_contiguous)
 
 
 # layer norm ops
@@ -333,6 +415,7 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
                                c: Optional[torch.Tensor],
                                b_q_weight: torch.Tensor,
                                b_scales: torch.Tensor,
+                               global_scale: Optional[torch.Tensor],
                                b_zeros: Optional[torch.Tensor],
                                g_idx: Optional[torch.Tensor],
                                perm: Optional[torch.Tensor],
@@ -866,6 +949,7 @@ def gptq_marlin_gemm(a: torch.Tensor,
                      c: Optional[torch.Tensor],
                      b_q_weight: torch.Tensor,
                      b_scales: torch.Tensor,
+                     global_scale: Optional[torch.Tensor],
                      b_zeros: Optional[torch.Tensor],
                      g_idx: Optional[torch.Tensor],
                      perm: Optional[torch.Tensor],
@@ -878,9 +962,10 @@ def gptq_marlin_gemm(a: torch.Tensor,
                      use_atomic_add: bool = False,
                      use_fp32_reduce: bool = False,
                      is_zp_float: bool = False) -> torch.Tensor:
-    return torch.ops._C.gptq_marlin_gemm(a, c, b_q_weight, b_scales, b_zeros,
-                                         g_idx, perm, workspace, b_q_type.id,
-                                         size_m, size_n, size_k, is_k_full,
+    return torch.ops._C.gptq_marlin_gemm(a, c, b_q_weight, b_scales,
+                                         global_scale, b_zeros, g_idx, perm,
+                                         workspace, b_q_type.id, size_m,
+                                         size_n, size_k, is_k_full,
                                          use_atomic_add, use_fp32_reduce,
                                          is_zp_float)
 
@@ -1381,6 +1466,7 @@ def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
 
 def moe_wna16_marlin_gemm(input: torch.Tensor, output: Optional[torch.Tensor],
                           b_qweight: torch.Tensor, b_scales: torch.Tensor,
+                          global_scale: Optional[torch.Tensor],
                           b_qzeros: Optional[torch.Tensor],
                           g_idx: Optional[torch.Tensor],
                           perm: Optional[torch.Tensor],
@@ -1395,11 +1481,11 @@ def moe_wna16_marlin_gemm(input: torch.Tensor, output: Optional[torch.Tensor],
                           use_fp32_reduce: bool,
                           is_zp_float: bool) -> torch.Tensor:
     return torch.ops._moe_C.moe_wna16_marlin_gemm(
-        input, output, b_qweight, b_scales, b_qzeros, g_idx, perm, workspace,
-        sorted_token_ids, expert_ids, num_tokens_past_padded, topk_weights,
-        moe_block_size, top_k, mul_topk_weights, is_ep, b_q_type.id, size_m,
-        size_n, size_k, is_k_full, use_atomic_add, use_fp32_reduce,
-        is_zp_float)
+        input, output, b_qweight, b_scales, global_scale, b_qzeros, g_idx,
+        perm, workspace, sorted_token_ids, expert_ids, num_tokens_past_padded,
+        topk_weights, moe_block_size, top_k, mul_topk_weights, is_ep,
+        b_q_type.id, size_m, size_n, size_k, is_k_full, use_atomic_add,
+        use_fp32_reduce, is_zp_float)
 
 
 if supports_moe_ops and hasattr(torch.ops._moe_C, "marlin_gemm_moe"):
