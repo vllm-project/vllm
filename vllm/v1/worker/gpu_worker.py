@@ -21,7 +21,7 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils import GiB_bytes
+from vllm.utils import GiB_bytes, MemorySnapshot, memory_profiling
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
@@ -128,7 +128,9 @@ class Worker(WorkerBase):
             _check_if_gpu_supports_dtype(self.model_config.dtype)
             gc.collect()
             torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
             self.init_gpu_memory = torch.cuda.mem_get_info()[0]
+            self.baseline_snapshot = MemorySnapshot()
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
@@ -179,12 +181,14 @@ class Worker(WorkerBase):
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
 
-        _, total_gpu_memory = torch.cuda.mem_get_info()
-        # Execute a forward pass with dummy inputs to profile the memory usage
-        # of the model.
-        self.model_runner.profile_run()
+        with memory_profiling(
+                self.baseline_snapshot,
+                weights_memory=self.model_runner.model_memory_usage) as result:
+            # Execute a forward pass with dummy inputs to profile the
+            # memory usage of the model.
+            self.model_runner.profile_run()
 
-        free_gpu_memory, _ = torch.cuda.mem_get_info()
+        free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
         assert self.init_gpu_memory > free_gpu_memory, (
@@ -192,24 +196,11 @@ class Worker(WorkerBase):
             f"Initial free memory {self.init_gpu_memory}, current free memory"
             f" {free_gpu_memory}. This happens when the GPU memory was "
             "not properly cleaned up before initializing the vLLM instance.")
+        memory_for_current_instance = total_gpu_memory * \
+            self.cache_config.gpu_memory_utilization
 
-        # Get the peak memory allocation recorded by torch
-        peak_memory = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
-
-        # Check for any memory left around that may have been allocated on the
-        # gpu outside of `torch`. NCCL operations, for example, can use a few
-        # GB during a forward pass
-        torch.cuda.empty_cache()
-        torch_allocated_bytes = torch.cuda.memory_stats(
-        )["allocated_bytes.all.current"]
-        total_allocated_bytes = torch.cuda.mem_get_info(
-        )[1] - torch.cuda.mem_get_info()[0]
-        non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
-        if non_torch_allocations > 0:
-            peak_memory += non_torch_allocations
-        available_kv_cache_memory = (
-            total_gpu_memory * self.cache_config.gpu_memory_utilization -
-            peak_memory)
+        available_kv_cache_memory = (memory_for_current_instance -
+                                     result.non_kv_cache_memory)
 
         return int(available_kv_cache_memory)
 
