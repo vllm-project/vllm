@@ -90,7 +90,7 @@ run_test 4 "test_quantization_accuracy.py" \
 run_test 5 "examples/offline_inference/tpu.py" \
     "python3 /workspace/vllm/examples/offline_inference/tpu.py"
 run_test 6 "test_tpu_model_runner.py" \
-    "python3 -m pytest -s -v /workspace/vllm/tests/tpu/worker/test_tpu_model_runner.py"
+    "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/worker/test_tpu_model_runner.py"
 run_test 7 "test_sampler.py" \
     "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_sampler.py"
 run_test 8 "test_topk_topp_sampler.py" \
