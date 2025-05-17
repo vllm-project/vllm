@@ -14,6 +14,16 @@ from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
 
 SeqId = int
 
+SUPPORTED_SPEC_DECODING_ATTENTION_METADATA = set()
+
+
+def register_spec_decode(cls):
+    """
+    Register an AttentionMetadata subclass that supports speculative decoding
+    """
+    SUPPORTED_SPEC_DECODING_ATTENTION_METADATA.add(cls)
+    return cls
+
 
 def get_all_num_logprobs(
         seq_group_metadata_list: List[SequenceGroupMetadata]) -> List[int]:
