@@ -103,8 +103,7 @@ class PoolingModelRunner(
             "finished_requests_ids": model_input.finished_requests_ids,
             "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
         } if self.has_inner_state else {}
-        if (self.observability_config is not None
-                and self.observability_config.collect_model_forward_time):
+        if self.must_collect_model_fwd_time():
             model_forward_start = torch.cuda.Event(enable_timing=True)
             model_forward_end = torch.cuda.Event(enable_timing=True)
             model_forward_start.record()
@@ -124,8 +123,7 @@ class PoolingModelRunner(
                 **cross_enc_kwargs,
                 **seqlen_agnostic_kwargs)
 
-        if (self.observability_config is not None
-                and self.observability_config.collect_model_forward_time):
+        if self.must_collect_model_fwd_time():
             model_forward_end.record()
 
         # Only perform pooling in the last pipeline stage.
@@ -134,8 +132,7 @@ class PoolingModelRunner(
                     and hidden_or_intermediate_states is not None
                     and isinstance(hidden_or_intermediate_states,
                                    IntermediateTensors)
-                    and self.observability_config is not None
-                    and self.observability_config.collect_model_forward_time):
+                    and self.must_collect_model_fwd_time()):
                 model_forward_end.synchronize()
                 model_forward_time = model_forward_start.elapsed_time(
                     model_forward_end)

@@ -383,6 +383,11 @@ class LocalOrDistributedWorkerBase(WorkerBase):
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
 
+    def _must_collect_model_exec_time(self):
+        if self.observability_config is not None:
+            return self.observability_config.collect_model_execute_time
+        return False
+
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None,
@@ -412,8 +417,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             intermediate_tensors = IntermediateTensors(
                 get_pp_group().recv_tensor_dict(
                     all_gather_group=get_tp_group()))
-            if (self.observability_config is not None
-                    and self.observability_config.collect_model_execute_time):
+            if self._must_collect_model_exec_time():
                 orig_model_execute_time = intermediate_tensors.tensors.get(
                     "model_execute_time", torch.tensor(0)).item()
 
@@ -430,16 +434,13 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         if not get_pp_group().is_last_rank:
             # output is IntermediateTensors
             assert isinstance(output, IntermediateTensors)
-            if (self.observability_config is not None
-                    and self.observability_config.collect_model_execute_time):
+            if self._must_collect_model_exec_time():
                 output.tensors["model_execute_time"] = torch.tensor(
                     model_execute_time + orig_model_execute_time)
             get_pp_group().send_tensor_dict(output.tensors,
                                             all_gather_group=get_tp_group())
             return [None]
-        if (self.observability_config is not None
-                and self.observability_config.collect_model_execute_time
-                and output is not None):
+        if (self._must_collect_model_exec_time() and output is not None):
             for o in output:
                 o.model_execute_time = (orig_model_execute_time +
                                         model_execute_time)
