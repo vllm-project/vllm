@@ -65,6 +65,7 @@ def test_can_initialize(model_arch):
                 "num_speculative_tokens": 1,
             } if model_info.speculative_model else None,
             trust_remote_code=model_info.trust_remote_code,
+            revision=model_info.revision,
             load_format="dummy",
             hf_overrides=hf_overrides,
         )

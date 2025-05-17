@@ -52,6 +52,9 @@ class _HfExamplesInfo:
     fail.
     """
 
+    revision: Optional[str] = None
+    """The revision of the model to load."""
+
     trust_remote_code: bool = False
     """The ``trust_remote_code`` level required to load the model."""
 
@@ -368,6 +371,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                     "1.6-gemma": "AIDC-AI/Ovis1.6-Gemma2-9B"}),  # noqa: E501
     "Phi4MMForCausalLM": _HfExamplesInfo("microsoft/Phi-4-multimodal-instruct",
                                         trust_remote_code=True),
+    "Phi4MultimodalForCausalLM": _HfExamplesInfo("microsoft/Phi-4-multimodal-instruct",  # noqa: E501
+                                                 revision="refs/pr/70"),
     "PixtralForConditionalGeneration": _HfExamplesInfo("mistralai/Pixtral-12B-2409",  # noqa: E501
                                                        tokenizer_mode="mistral"),
     "QwenVLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen-VL",

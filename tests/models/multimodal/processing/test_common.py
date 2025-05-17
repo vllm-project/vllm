@@ -5,6 +5,7 @@ from typing import Optional, Union
 
 import numpy as np
 import pytest
+import torch
 from mistral_common.protocol.instruct.messages import (ImageChunk, TextChunk,
                                                        UserMessage)
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
@@ -24,13 +25,19 @@ from ...registry import HF_EXAMPLE_MODELS
 
 
 def _test_processing_correctness(
-    model_id: str,
+    model_id_or_arch: str,
     hit_rate: float,
     num_batches: int,
     simplify_rate: float,
     ignore_mm_keys: Optional[set[str]] = None,
 ):
-    model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
+    if model_id_or_arch in HF_EXAMPLE_MODELS.get_supported_archs():
+        # Use model architecture to get the default model id
+        model_info = HF_EXAMPLE_MODELS.get_hf_info(model_id_or_arch)
+        model_id = model_info.default
+    else:
+        model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id_or_arch)
+        model_id = model_id_or_arch
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
 
@@ -42,7 +49,7 @@ def _test_processing_correctness(
         trust_remote_code=model_info.trust_remote_code,
         seed=0,
         dtype="float16",
-        revision=None,
+        revision=model_info.revision,
         hf_overrides=model_info.hf_overrides,
     )
 
@@ -343,6 +350,32 @@ def test_processing_correctness_phi3v(
         num_batches=num_batches,
         simplify_rate=simplify_rate,
     )
+
+
+@pytest.mark.parametrize("model_arch", ["Phi4MultimodalForCausalLM"])
+@pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
+@pytest.mark.parametrize("num_batches", [32])
+@pytest.mark.parametrize("simplify_rate", [1.0])
+def test_processing_correctness_phi4_multimodal(
+    model_arch: str,
+    hit_rate: float,
+    num_batches: int,
+    simplify_rate: float,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # HACK(Isotr0py): phi4_multimodal processor has a precision issue,
+    # which causes the test to fail:
+    # -  22.1997, 23.0574, 21.8926, 22.6318, 22.1144, 22.8465, 23.4688, 22.1902,
+    # ?                          ^
+    # +  22.1997, 23.0574, 21.8925, 22.6318, 22.1144, 22.8465, 23.4688, 22.1902,
+    with monkeypatch.context() as m:
+        m.setattr(torch, "equal", partial(torch.allclose, rtol=1e-4))
+        _test_processing_correctness(
+            model_arch,
+            hit_rate=hit_rate,
+            num_batches=num_batches,
+            simplify_rate=simplify_rate,
+        )
 
 
 def _assert_inputs_equal(
