@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import torch
@@ -22,6 +22,15 @@ class KVCacheSpec:
 
     # number of tokens in a block
     block_size: int
+
+    # index of attention layer to share KV cache with
+    # NOTE(sarckk): init=False ensures we can set default value
+    # in parent class (otherwise errors as non-default arg follows default arg)
+    # compare=False ensures that same cache specs with different target layer
+    # indices are considered equal by python
+    kv_sharing_target_layer_idx: Optional[int] = field(default=None,
+                                                       compare=False,
+                                                       init=False)
 
     @property
     def type_id(self) -> str:
@@ -100,6 +109,10 @@ class FullAttentionSpec(AttentionSpec):
         return f"full_attention_{self.block_size}_{self.page_size_bytes}"
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        if self.kv_sharing_target_layer_idx is not None:
+            # shares KV cache memory with another layer, no allocation
+            return 0
+
         max_model_len = vllm_config.model_config.max_model_len
         return cdiv(max_model_len, self.block_size) * self.page_size_bytes
 
@@ -135,6 +148,10 @@ class SlidingWindowSpec(AttentionSpec):
         return f"sliding_window_{self.sliding_window}_{self.block_size}_{self.page_size_bytes}"  # noqa
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        if self.kv_sharing_target_layer_idx is not None:
+            # shares KV cache memory with another layer, no allocation
+            return 0
+
         max_model_len = vllm_config.model_config.max_model_len
         max_num_batched_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens)
@@ -173,6 +190,9 @@ class KVCacheGroupSpec:
     layer_names: list[str]
     # The KV cache spec of this manager layer
     kv_cache_spec: KVCacheSpec
+    # Mapping [consumer] layer to [provider] layer index
+    # where [consumer] reuses the KV cache allocated by [provider]
+    kv_sharing_layer_mapping: Optional[dict[str, int]] = None
 
 
 @dataclass

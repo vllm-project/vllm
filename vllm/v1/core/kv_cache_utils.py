@@ -581,8 +581,20 @@ def create_kv_cache_group_specs(
             kv_cache_spec[layer_name] for layer_name in layer_names_one_group
         ]
         merged_layer_spec = layer_specs[0].merge(layer_specs)
+
+        kv_sharing_layer_mapping = {}
+        for layer_name in layer_names_one_group:
+            kv_sharing_target_layer_idx = (
+                kv_cache_spec[layer_name].kv_sharing_target_layer_idx)
+            if kv_sharing_target_layer_idx is not None:
+                kv_sharing_layer_mapping[layer_name] = (
+                    kv_sharing_target_layer_idx)
+
         kv_cache_groups.append(
-            KVCacheGroupSpec(layer_names_one_group, merged_layer_spec))
+            KVCacheGroupSpec(
+                layer_names_one_group, merged_layer_spec,
+                kv_sharing_layer_mapping
+                if kv_sharing_layer_mapping else None))
     return kv_cache_groups
 
 
@@ -621,7 +633,15 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
     assert len(page_sizes) == 1
     page_size = page_sizes.pop()
 
-    num_blocks = int(available_memory // page_size // len(kv_cache_spec))
+    # Some layers may not allocate KV cache and reuse from other layers
+    # if so, we can increase the no. of blocks to allocate
+    alloc_kv_cache_specs = [
+        layer for layer in kv_cache_spec.values()
+        if layer.kv_sharing_target_layer_idx is None
+    ]
+
+    num_blocks = int(available_memory // page_size //
+                     len(alloc_kv_cache_specs))
     num_blocks = max(num_blocks, 0)
 
     if vllm_config.cache_config.num_gpu_blocks_override is not None:
@@ -648,8 +668,11 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
         tensors={
-            layer_name: KVCacheTensor(size=per_layer_size)
-            for layer_name in kv_cache_spec
+            # size=0 for layers that share KV cache with another layer
+            layer_name:
+            KVCacheTensor(size=(per_layer_size if layer.
+                                kv_sharing_target_layer_idx is None else 0))
+            for layer_name, layer in kv_cache_spec.items()
         },
         kv_cache_groups=create_kv_cache_group_specs(kv_cache_spec,
                                                     grouped_layer_names),
@@ -675,7 +698,7 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
     if has_full_attention and has_sliding_window:
         for layer_name, spec in kv_cache_spec.items():
             if isinstance(spec, SlidingWindowSpec):
-                kv_cache_spec[layer_name] = FullAttentionSpec(
+                updated_spec = FullAttentionSpec(
                     block_size=spec.block_size,
                     num_kv_heads=spec.num_kv_heads,
                     head_size=spec.head_size,
@@ -683,6 +706,9 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
                     use_mla=spec.use_mla,
                     sliding_window=spec.sliding_window,
                 )
+                updated_spec.kv_sharing_target_layer_idx = (
+                    spec.kv_sharing_target_layer_idx)
+                kv_cache_spec[layer_name] = updated_spec
 
 
 def get_kv_cache_config(vllm_config: VllmConfig,
