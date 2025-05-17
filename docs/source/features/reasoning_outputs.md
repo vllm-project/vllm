@@ -50,7 +50,7 @@ model = models.data[0].id
 # Round 1
 messages = [{"role": "user", "content": "9.11 and 9.8, which is greater?"}]
 # For granite, add: `extra_body={"chat_template_kwargs": {"thinking": True}}`
-# For Qwen3 series, if you want to disable reasoning in reasoning mode, add:
+# For Qwen3 series, if you want to disable thinking in reasoning mode, add:
 # extra_body={"chat_template_kwargs": {"enable_thinking": False}}
 response = client.chat.completions.create(model=model, messages=messages)
 
@@ -107,7 +107,7 @@ model = models.data[0].id
 
 messages = [{"role": "user", "content": "9.11 and 9.8, which is greater?"}]
 # For granite, add: `extra_body={"chat_template_kwargs": {"thinking": True}}`
-# For Qwen3 series, if you want to disable reasoning in reasoning mode, add:
+# For Qwen3 series, if you want to disable thinking in reasoning mode, add:
 # extra_body={"chat_template_kwargs": {"enable_thinking": False}}
 stream = client.chat.completions.create(model=model,
                                         messages=messages,
