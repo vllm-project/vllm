@@ -161,8 +161,7 @@ if __name__ == "__main__":
         "--num-documents",
         type=int,
         default=8,
-        help="Range of input lengths for sampling prompts, "
-        'specified as "min:max" (e.g., "128:256").',
+        help="Number of documents to sample prompts from.",
     )
 
     parser.add_argument("--output-len", type=int, default=10)

@@ -2,7 +2,7 @@
 
 This folder demonstrates how to use LMCache for disaggregated prefilling, CPU offloading and KV cache sharing.
 
-## 1. Disaggregated Prefill in vLLM v1
+## 1. Disaggregated Prefill in vLLM V1
 
 This example demonstrates how to run LMCache with disaggregated prefill using NIXL on a single node.
 
@@ -44,13 +44,13 @@ The main script generates several log files:
 
 ## 2. CPU Offload Examples
 
-- `python cpu_offload_lmcache.py -v v0` - CPU offloading implementation for vLLM v0
-- `python cpu_offload_lmcache.py -v v1` - CPU offloading implementation for vLLM v1
+- `python cpu_offload_lmcache.py -v v0` - CPU offloading implementation for vLLM V0
+- `python cpu_offload_lmcache.py -v v1` - CPU offloading implementation for vLLM V1
 
 ## 3. KV Cache Sharing
 
-The `kv_cache_sharing_lmcache_v1.py` example demonstrates how to share KV caches between vLLM v1 instances.
+The `kv_cache_sharing_lmcache_v1.py` example demonstrates how to share KV caches between vLLM V1 instances.
 
-## 4. Disaggregated Prefill in vLLM v0
+## 4. Disaggregated Prefill in vLLM V0
 
-The `disaggregated_prefill_lmcache_v0.py` provides an example of how to run disaggregated prefill in vLLM v0.
+The `disaggregated_prefill_lmcache_v0.py` provides an example of how to run disaggregated prefill in vLLM V0.

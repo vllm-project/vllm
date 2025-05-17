@@ -1,10 +1,10 @@
 # Metrics
 
-Ensure the v1 LLM Engine exposes a superset of the metrics available in v0.
+Ensure the V1 LLM Engine exposes a superset of the metrics available in V0.
 
 ## Objectives
 
-- Achieve parity of metrics between v0 and v1.
+- Achieve parity of metrics between V0 and V1.
 - The priority use case is accessing these metrics via Prometheus as this is what we expect to be used in production environments.
 - Logging support - i.e. printing metrics to the info log - is provided for more ad-hoc testing, debugging, development, and exploratory use cases.
 
@@ -116,7 +116,7 @@ The following metrics are supported by default by `prometheus_client`, but the a
 - `process_open_fds`
 - `process_max_fds`
 
-This is relevant because if we move away from multiprocess mode in v1,
+This is relevant because if we move away from multiprocess mode in V1,
 we get these back. However, it's questionable how relevant these are
 if they don't aggregate these stats for all processes that make up a
 vLLM instance.
@@ -133,11 +133,11 @@ For background, these are some of the relevant PRs which added the v0 metrics:
 
 Also note the ["Even Better Observability"](gh-issue:3616) feature where e.g. [a detailed roadmap was laid out](gh-issue:3616#issuecomment-2030858781).
 
-## v1 Design
+## V1 Design
 
-### v1 PRs
+### V1 PRs
 
-For background, here are the relevant v1 PRs relating to the v1
+For background, here are the relevant V1 PRs relating to the V1
 metrics issue <gh-issue:10582>:
 
 - <gh-pr:11962>
@@ -154,7 +154,7 @@ metrics issue <gh-issue:10582>:
 
 ### Metrics Collection
 
-In v1, we wish to move computation and overhead out of the engine core
+In V1, we wish to move computation and overhead out of the engine core
 process to minimize the time between each forward pass.
 
 The overall idea of V1 EngineCore design is:
@@ -512,8 +512,8 @@ See above - we now expose 'queries' and 'hits' counters rather than a
 
 ### KV Cache Offloading
 
-Two v0 metrics relate to a "swapped" preemption mode that is no
-longer relevant in v1:
+Two V0 metrics relate to a "swapped" preemption mode that is no
+longer relevant in V1:
 
 - `vllm:num_requests_swapped`
 - `vllm:cpu_cache_usage_perc`
@@ -523,7 +523,7 @@ cache to complete other requests), we swap kv cache blocks out to CPU
 memory. This is also known as "KV cache offloading" and is configured
 with `--swap-space` and `--preemption-mode`.
 
-In v0, [vLLM has long supported beam
+In V0, [vLLM has long supported beam
 search](gh-issue:6226). The
 SequenceGroup encapsulated the idea of N Sequences which
 all shared the same prompt kv blocks. This enabled KV cache block
@@ -579,8 +579,8 @@ model and then validate those tokens with the larger model.
 - `vllm:spec_decode_num_emitted_tokens_total` (Counter)
 
 There is a PR under review (<gh-pr:12193>) to add "prompt lookup (ngram)"
-seculative decoding to v1. Other techniques will follow. We should
-revisit the v0 metrics in this context.
+seculative decoding to V1. Other techniques will follow. We should
+revisit the V0 metrics in this context.
 
 Note - we should probably expose acceptance rate as separate accepted
 and draft counters, like we do for prefix caching hit rate. Efficiency
@@ -660,7 +660,7 @@ metrics are often relatively straightforward to add:
    metrics are usually of very limited use unless they can be enabled
    by default and in production.
 3. They have an impact on development and maintenance of the
-   project. Every metric added to v0 has made this v1 effort more
+   project. Every metric added to V0 has made this V1 effort more
    time-consuming, and perhaps not all metrics justify this ongoing
    investment in their maintenance.
 
@@ -689,7 +689,7 @@ OpenTelemetry has a [Gen AI Working
 Group](https://github.com/open-telemetry/community/blob/main/projects/gen-ai.md).
 
 Since metrics is a big enough topic on its own, we are going to tackle
-the topic of tracing in v1 separately.
+the topic of tracing in V1 separately.
 
 ### OpenTelemetry Model Forward vs Execute Time
 

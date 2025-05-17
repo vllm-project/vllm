@@ -63,7 +63,7 @@ This living user guide outlines a few known **important changes and limitations*
 - **🟢 Functional**: Fully operational, with ongoing optimizations.  
 - **🚧 WIP**: Under active development.  
 - **🟡 Planned**: Scheduled for future implementation (some may have open PRs/RFCs).  
-- **🔴 Deprecated**: Not planned for v1 unless there is strong demand.
+- **🔴 Deprecated**: Not planned for V1 unless there is strong demand.
 
 **Note**: vLLM V1’s unified scheduler treats both prompt and output tokens the same
 way by using a simple dictionary (e.g., {request_id: num_tokens}) to dynamically

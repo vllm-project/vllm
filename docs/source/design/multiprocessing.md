@@ -85,14 +85,14 @@ Related PRs:
 
 - <gh-pr:8823>
 
-## Prior State in v1
+## Prior State in V1
 
 There was an environment variable to control whether multiprocessing is used in
-the v1 engine core, `VLLM_ENABLE_V1_MULTIPROCESSING`. This defaulted to off.
+the V1 engine core, `VLLM_ENABLE_V1_MULTIPROCESSING`. This defaulted to off.
 
 - <https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/envs.py#L452-L454>
 
-When it was enabled, the v1 `LLMEngine` would create a new process to run the
+When it was enabled, the V1 `LLMEngine` would create a new process to run the
 engine core.
 
 - <https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/v1/engine/llm_engine.py#L93-L95>
@@ -102,10 +102,10 @@ engine core.
 It was off by default for all the reasons mentioned above - compatibility with
 dependencies and code using vLLM as a library.
 
-### Changes Made in v1
+### Changes Made in V1
 
 There is not an easy solution with Python's `multiprocessing` that will work
-everywhere. As a first step, we can get v1 into a state where it does "best
+everywhere. As a first step, we can get V1 into a state where it does "best
 effort" choice of multiprocessing method to maximize compatibility.
 
 - Default to `fork`.

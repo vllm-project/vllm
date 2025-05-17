@@ -118,7 +118,7 @@ torch.cuda.current_stream().synchronize()
 value = out.mean().item()
 assert value == world_size, f"Expected {world_size}, got {value}"
 
-print("vLLM NCCL with cuda graph is successful!")
+print("vLLM NCCL with CUDA graph is successful!")
 
 dist.destroy_process_group(gloo_group)
 dist.destroy_process_group()

@@ -231,7 +231,7 @@ To provide the backward compatibility support, you can still use the old key-val
 The new format of `--lora-modules` is mainly to support the display of parent model information in the model card. Here's an explanation of how your current response supports this:
 
 - The `parent` field of LoRA model `sql-lora` now links to its base model `meta-llama/Llama-2-7b-hf`. This correctly reflects the hierarchical relationship between the base model and the LoRA adapter.
-- The `root` field points to the artifact location of the lora adapter.
+- The `root` field points to the artifact location of the LoRA adapter.
 
 ```bash
 $ curl http://localhost:8000/v1/models
