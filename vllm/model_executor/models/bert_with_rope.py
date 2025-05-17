@@ -12,6 +12,7 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import (get_act_and_mul_fn,
                                                    get_act_fn)
+from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
@@ -25,6 +26,8 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models import SupportsV0Only
 from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.model_executor.models.utils import WeightsMapper
+from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 
@@ -310,6 +313,81 @@ class NomicMoELayer(nn.Module):
         return out
 
 
+class NomicMoE(nn.Module):
+    def __init__(
+        self,
+        num_experts: int,
+        top_k: int,
+        hidden_size: int,
+        intermediate_size: int,
+        params_dtype: Optional[torch.dtype] = None,
+        tp_size: Optional[int] = None,
+    ):
+        super().__init__()
+
+        self.tp_size = tp_size or get_tensor_model_parallel_world_size()
+        assert (self.tp_size == 1, "Bert MoE hasn't supported tp yet")
+        self.num_total_experts = num_experts
+        self.top_k = top_k
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size // self.tp_size
+
+        if params_dtype is None:
+            params_dtype = torch.get_default_dtype()
+        self.params_dtype = params_dtype
+
+        self.router = ReplicatedLinear(self.hidden_size, self.num_total_experts, bias=False)
+        self.w1 = nn.Parameter(
+            torch.empty(self.num_total_experts,
+                        self.intermediate_size,
+                        self.hidden_size,
+                        device=current_platform.device_type,
+                        dtype=self.params_dtype))
+        self.w2 = nn.Parameter(
+            torch.empty(self.num_total_experts,
+                        self.hidden_size,
+                        self.intermediate_size,
+                        device=current_platform.device_type,
+                        dtype=self.params_dtype))
+        self.bias = nn.Parameter(torch.zeros(self.hidden_size))
+        set_weight_attrs(self.w1, {
+            "weight_loader": self.weight_loader,
+        })
+        set_weight_attrs(self.w2, {
+            "weight_loader": self.weight_loader,
+        })
+    
+    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor,
+                      weight_name: str,):
+        # NOTE: Nomic-MoE has fused experts weights
+        param_data = param.data
+        if weight_name.endswith("w1"):
+            param_data.copy_(loaded_weight.reshape(
+                self.num_total_experts, self.intermediate_size, self.hidden_size))
+        if weight_name.endswith("w2"):
+            param_data.copy_(loaded_weight.reshape(
+                self.num_total_experts, self.hidden_size, self.intermediate_size))
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        num_tokens, hidden_size = hidden_states.shape
+        hidden_states = hidden_states.view(-1, self.hidden_size)
+        # router_logits: (num_tokens, n_experts)
+        router_logits, _ = self.router(hidden_states)
+        final_hidden_states = fused_moe(hidden_states,
+                                        self.w1,
+                                        self.w2,
+                                        router_logits,
+                                        self.top_k,
+                                        renormalize=True,
+                                        inplace=True)
+
+        # if self.tp_size > 1:
+        #     final_hidden_states = tensor_model_parallel_all_reduce(
+        #         final_hidden_states)
+
+        return final_hidden_states.view(num_tokens, hidden_size) 
+
+
 class BertWithRopeBlock(nn.Module):
 
     def __init__(self,
@@ -331,7 +409,12 @@ class BertWithRopeBlock(nn.Module):
             prefix=f"{prefix}.attention")
 
         if moe:
-            self.mlp = NomicMoELayer(config=config, )
+            # self.mlp = NomicMoELayer(config=config, )
+            self.mlp = NomicMoE(
+                num_experts=config.num_experts,
+                top_k=config.moe_top_k,
+                hidden_size=config.hidden_size,
+                intermediate_size=config.intermediate_size)
         else:
             if config.hidden_act in ["silu", "geglu"]:
                 self.mlp = BertWithRopeGatedMLP(
@@ -465,7 +548,11 @@ class BertWithRope(nn.Module, SupportsV0Only, SupportsQuant):
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
-                weight_loader(param, loaded_weight)
+                if name.endswith((".w1", ".w2")):
+                    # Nomic-MoE has fused experts weights
+                    weight_loader(param, loaded_weight, name)
+                else:
+                    weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
 
@@ -483,6 +570,10 @@ class NomicBertModel(BertWithRope):
             "mlp.fc12": "mlp.gate_proj",
             "mlp.fc2": "mlp.down_proj",
             "norm2": "mlp_ln",
+            # MoE mapping
+            "experts.mlp.": "",
+            "experts.": "",
+            "router.layer": "router",
         })
 
     def config_verify(self, vllm_config):
