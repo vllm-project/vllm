@@ -114,6 +114,13 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
+    def set_host_xfer_buffer_ops(self, d2h_copy_blocks: Any, h2d_copy_blocks: Any):
+        """
+        Set the xPU-specific ops for copying KV between host and device. 
+        Needed when host buffer is used for kv transfer (e.g., in NixlConnector)
+        """
+        return
+
     @abstractmethod
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs) -> None:

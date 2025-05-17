@@ -19,6 +19,7 @@ from typing import Any, Callable, Optional, Union, cast
 
 import cloudpickle
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
@@ -38,7 +39,7 @@ logger = init_logger(__name__)
 POLLING_TIMEOUT_MS = 5000
 POLLING_TIMEOUT_S = POLLING_TIMEOUT_MS // 1000
 
-EXECUTE_MODEL_TIMEOUT_S = 40
+EXECUTE_MODEL_TIMEOUT_S = envs.VLLM_MULTIPROC_EXECUTE_MODEL_TIMEOUT_S
 
 
 class MultiprocExecutor(Executor):
