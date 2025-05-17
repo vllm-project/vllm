@@ -48,9 +48,6 @@ class NeuronPlatform(Platform):
         if parallel_config.world_size > 1:
             parallel_config.distributed_executor_backend = "uni"
 
-        assert (vllm_config.lora_config
-                is None), "LoRA is not supported for Neuron backend."
-
         cache_config = vllm_config.cache_config
         if cache_config:
             # neuron needs block_size = max_model_len
