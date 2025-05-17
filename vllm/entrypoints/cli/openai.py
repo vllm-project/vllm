@@ -101,6 +101,20 @@ class ChatCommand(CLISubcommand):
         model_name, client = _interactive_cli(args)
         system_prompt = args.system_prompt
         conversation: list[ChatCompletionMessageParam] = []
+
+        if args.quick_chat:
+            if args.system_prompt:
+                conversation.append({
+                    "role": "system",
+                    "content": args.system_prompt
+                })
+            conversation.append({"role": "user", "content": args.quick_chat})
+
+            chat_completion = client.chat.completions.create(
+                model=model_name, messages=conversation)
+            print(chat_completion.choices[0].message.content)
+            return
+
         if system_prompt is not None:
             conversation.append({"role": "system", "content": system_prompt})
 
@@ -136,6 +150,12 @@ class ChatCommand(CLISubcommand):
             default=None,
             help=("The system prompt to be added to the chat template, "
                   "used for models that support system prompts."))
+        chat_parser.add_argument("-qc",
+                                 "--quick-chat",
+                                 type=str,
+                                 metavar="MESSAGE",
+                                 help=("Send a single prompt as MESSAGE "
+                                       "and print the response, then exit."))
         return chat_parser
 
 
