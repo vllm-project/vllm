@@ -1199,7 +1199,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if not get_pp_group().is_last_rank:
             # For mid-pipeline stages, return the hidden states.
-            # print(f"cascade pp is not last rank, return hidden states")
             return hidden_states
 
         sample_hidden_states = hidden_states[logits_indices]
