@@ -314,6 +314,7 @@ class NomicMoELayer(nn.Module):
 
 
 class NomicMoE(nn.Module):
+
     def __init__(
         self,
         num_experts: int,
@@ -326,7 +327,7 @@ class NomicMoE(nn.Module):
         super().__init__()
 
         self.tp_size = tp_size or get_tensor_model_parallel_world_size()
-        assert (self.tp_size == 1, "Bert MoE hasn't supported tp yet")
+        assert self.tp_size == 1, ("Nomic FusedMoE hasn't supported tp yet")
         self.num_total_experts = num_experts
         self.top_k = top_k
         self.hidden_size = hidden_size
@@ -336,7 +337,9 @@ class NomicMoE(nn.Module):
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
 
-        self.router = ReplicatedLinear(self.hidden_size, self.num_total_experts, bias=False)
+        self.router = ReplicatedLinear(self.hidden_size,
+                                       self.num_total_experts,
+                                       bias=False)
         self.w1 = nn.Parameter(
             torch.empty(self.num_total_experts,
                         self.intermediate_size,
@@ -356,17 +359,24 @@ class NomicMoE(nn.Module):
         set_weight_attrs(self.w2, {
             "weight_loader": self.weight_loader,
         })
-    
-    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor,
-                      weight_name: str,):
+
+    def weight_loader(
+        self,
+        param: nn.Parameter,
+        loaded_weight: torch.Tensor,
+        weight_name: str,
+    ):
         # NOTE: Nomic-MoE has fused experts weights
         param_data = param.data
         if weight_name.endswith("w1"):
-            param_data.copy_(loaded_weight.reshape(
-                self.num_total_experts, self.intermediate_size, self.hidden_size))
+            param_data.copy_(
+                loaded_weight.reshape(self.num_total_experts,
+                                      self.intermediate_size,
+                                      self.hidden_size))
         if weight_name.endswith("w2"):
-            param_data.copy_(loaded_weight.reshape(
-                self.num_total_experts, self.hidden_size, self.intermediate_size))
+            param_data.copy_(
+                loaded_weight.reshape(self.num_total_experts, self.hidden_size,
+                                      self.intermediate_size))
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
@@ -379,13 +389,14 @@ class NomicMoE(nn.Module):
                                         router_logits,
                                         self.top_k,
                                         renormalize=True,
-                                        inplace=True)
+                                        inplace=True,
+                                        is_act_and_mul=False)
 
         # if self.tp_size > 1:
         #     final_hidden_states = tensor_model_parallel_all_reduce(
         #         final_hidden_states)
 
-        return final_hidden_states.view(num_tokens, hidden_size) 
+        return final_hidden_states.view(num_tokens, hidden_size)
 
 
 class BertWithRopeBlock(nn.Module):
@@ -410,11 +421,10 @@ class BertWithRopeBlock(nn.Module):
 
         if moe:
             # self.mlp = NomicMoELayer(config=config, )
-            self.mlp = NomicMoE(
-                num_experts=config.num_experts,
-                top_k=config.moe_top_k,
-                hidden_size=config.hidden_size,
-                intermediate_size=config.intermediate_size)
+            self.mlp = NomicMoE(num_experts=config.num_experts,
+                                top_k=config.moe_top_k,
+                                hidden_size=config.hidden_size,
+                                intermediate_size=config.intermediate_size)
         else:
             if config.hidden_act in ["silu", "geglu"]:
                 self.mlp = BertWithRopeGatedMLP(
