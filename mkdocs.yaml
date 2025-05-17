@@ -66,6 +66,9 @@ plugins:
   - mkdocstrings:
       handlers:
         python:
+          options:
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
           inventories:
           - https://docs.python.org/3/objects.inv
           - https://typing-extensions.readthedocs.io/en/latest/objects.inv
