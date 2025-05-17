@@ -297,7 +297,7 @@ class ModelConfig:
     - 1K -> 1024\n
     - 25.6k -> 25,600"""
     spec_target_max_model_len: Optional[int] = None
-    """Specify the the maximum length for spec decoding draft models."""
+    """Specify the maximum length for spec decoding draft models."""
     quantization: Optional[QuantizationMethods] = None
     """Method used to quantize the weights. If `None`, we first check the
     `quantization_config` attribute in the model config file. If that is
@@ -906,12 +906,17 @@ class ModelConfig:
     def _verify_cuda_graph(self) -> None:
         self.max_seq_len_to_capture = min(self.max_seq_len_to_capture,
                                           self.max_model_len)
+        # CUDAGraph capture not supported for enc-dec models and mllama on ROCm
         ROCM_UNSUPPORTED_MODELS = ['mllama']
-        if (self.hf_config.model_type in ROCM_UNSUPPORTED_MODELS
-                and not self.enforce_eager and current_platform.is_rocm()):
+        unsupported_rocm = (self.hf_config.model_type
+                            in ROCM_UNSUPPORTED_MODELS
+                            or self.is_encoder_decoder)
+
+        if (unsupported_rocm and not self.enforce_eager
+                and current_platform.is_rocm()):
             logger.warning(
                 "CUDA graph is not supported for %s on ROCm yet, fallback "
-                "to the eager mode.", self.hf_config.model_type)
+                "to eager mode.", self.hf_config.model_type)
             self.enforce_eager = True
 
     def _verify_bnb_config(self) -> None:
@@ -1690,7 +1695,6 @@ class ParallelConfig:
     """Port of the data parallel master."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
-
     max_parallel_loading_workers: Optional[int] = None
     """Maximum number of parallel loading workers when loading model
     sequentially in multiple batches. To avoid RAM OOM when using tensor
@@ -3945,11 +3949,12 @@ class CompilationConfig:
             self.cudagraph_capture_sizes = cudagraph_capture_sizes
         else:
             # de-duplicate the sizes provided by the config
-            self.cudagraph_capture_sizes = list(
-                set(self.cudagraph_capture_sizes))
-            logger.info(("cudagraph sizes specified by model runner"
-                         " %s is overridden by config %s"),
-                        cudagraph_capture_sizes, self.cudagraph_capture_sizes)
+            dedup_sizes = list(set(self.cudagraph_capture_sizes))
+            if len(dedup_sizes) < len(self.cudagraph_capture_sizes):
+                logger.info(("cudagraph sizes specified by model runner"
+                             " %s is overridden by config %s"),
+                            cudagraph_capture_sizes, dedup_sizes)
+            self.cudagraph_capture_sizes = dedup_sizes
 
         computed_compile_sizes = []
         if self.compile_sizes is not None:
