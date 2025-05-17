@@ -410,6 +410,7 @@ class EngineArgs:
     override_generation_config: dict[str, Any] = \
         get_field(ModelConfig, "override_generation_config")
     model_impl: str = ModelConfig.model_impl
+    use_fp8_scales: bool = ModelConfig.use_fp8_scales
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
 
@@ -526,6 +527,8 @@ class EngineArgs:
         model_group.add_argument("--model-impl",
                                  choices=[f.value for f in ModelImpl],
                                  **model_kwargs["model_impl"])
+        model_group.add_argument("--use-fp8-scales",
+                                 **model_kwargs["use_fp8_scales"])
 
         # Model loading arguments
         load_kwargs = get_kwargs(LoadConfig)
@@ -909,6 +912,7 @@ class EngineArgs:
             override_generation_config=self.override_generation_config,
             enable_sleep_mode=self.enable_sleep_mode,
             model_impl=self.model_impl,
+            use_fp8_scales=self.use_fp8_scales,
         )
 
     def create_load_config(self) -> LoadConfig:
