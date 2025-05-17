@@ -28,7 +28,7 @@ from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
-from vllm.v1.utils import CoreEngineProcManager
+from vllm.v1.utils import CoreEngineActorManager, CoreEngineProcManager
 
 logger = init_logger(__name__)
 
@@ -67,7 +67,11 @@ class EngineCoreClient(ABC):
 
         if multiprocess_mode and asyncio_mode:
             if vllm_config.parallel_config.data_parallel_size > 1:
-                return DPAsyncMPClient(vllm_config, executor_class, log_stats)
+                if vllm_config.parallel_config.data_parallel_backend == "ray":
+                    return RayDPClient(vllm_config, executor_class, log_stats)
+                else:
+                    return DPAsyncMPClient(vllm_config, executor_class,
+                                           log_stats)
 
             return AsyncMPClient(vllm_config, executor_class, log_stats)
 
@@ -289,7 +293,8 @@ class BackgroundResources:
     circular reference back to the client object."""
 
     ctx: Union[zmq.Context]
-    local_engine_manager: Optional[CoreEngineProcManager] = None
+    local_engine_manager: Optional[Union[CoreEngineProcManager,
+                                         CoreEngineActorManager]] = None
     output_socket: Optional[Union[zmq.Socket, zmq.asyncio.Socket]] = None
     input_socket: Optional[Union[zmq.Socket, zmq.asyncio.Socket]] = None
     output_queue_task: Optional[asyncio.Task] = None
@@ -463,6 +468,9 @@ class MPClient(EngineCoreClient):
         poller.register(sync_input_socket, zmq.POLLIN)
         proc_manager = self.resources.local_engine_manager
         if proc_manager is not None:
+            assert isinstance(proc_manager, CoreEngineProcManager), (
+                "_wait_for_engine_startup should only be called "
+                "with CoreEngineProcManager")
             for sentinel in proc_manager.sentinels():
                 poller.register(sentinel, zmq.POLLIN)
         while any(conn_pending) or any(start_pending):
@@ -1018,3 +1026,104 @@ class DPAsyncMPClient(AsyncMPClient):
         if not self.resources.engine_dead:
             await self._send_input(EngineCoreRequestType.ABORT, request_ids,
                                    engine)
+
+
+class RayDPClient(DPAsyncMPClient):
+    """
+    Ray-based client for multi-proc, multi-engine (data parallel)
+    EngineCore.
+    """
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        executor_class: type[Executor],
+        log_stats: bool,
+    ):
+        self.current_wave = 0
+        self.engines_running = False
+        self.reqs_in_flight: dict[str, CoreEngine] = {}
+
+        self.vllm_config = vllm_config
+        # Serialization setup.
+        self.encoder = MsgpackEncoder()
+        self.decoder = MsgpackDecoder(EngineCoreOutputs)
+
+        # ZMQ setup.
+        sync_ctx = zmq.Context(io_threads=2)
+        self.ctx = zmq.asyncio.Context(sync_ctx)
+
+        # This will ensure resources created so far are closed
+        # when the client is garbage collected, even if an
+        # exception is raised mid-construction.
+        self.resources = BackgroundResources(ctx=sync_ctx)
+        self._finalizer = weakref.finalize(self, self.resources)
+        success = False
+        try:
+            parallel_config = vllm_config.parallel_config
+            local_engine_count = parallel_config.data_parallel_size_local
+            start_index = parallel_config.data_parallel_rank
+            local_start_index = parallel_config.data_parallel_rank_local
+
+            # SPMD mode is where there is an LLM instance per DP rank and
+            # one core engine per LLM, see
+            # examples/offline_inference/data_parallel.py.
+            spmd_mode = local_start_index is not None
+            if spmd_mode:
+                assert local_engine_count == 1
+                self.core_engines = [
+                    CoreEngine(index=local_start_index, local=True)
+                ]
+            else:
+                assert start_index == 0
+                local_start_index = 0
+                self.core_engines = [
+                    CoreEngine(index=i, local=(i < local_engine_count))
+                    for i in range(parallel_config.data_parallel_size)
+                ]
+
+            input_address, output_address = self._get_zmq_addresses(
+                parallel_config, spmd_mode)
+
+            # Create input and output sockets.
+            self.input_socket = self.resources.input_socket = make_zmq_socket(
+                self.ctx, input_address, zmq.ROUTER, bind=True)
+            self.resources.output_socket = make_zmq_socket(
+                self.ctx, output_address, zmq.constants.PULL)
+
+            # Start all engines.
+            self.resources.local_engine_manager = CoreEngineActorManager(
+                vllm_config=vllm_config,
+                executor_class=executor_class,
+                log_stats=log_stats,
+                input_address=input_address,
+                output_address=output_address,
+                local_engine_count=local_engine_count,
+                start_index=start_index,
+                local_start_index=local_start_index)
+
+            self.core_engine = self.core_engines[0]
+
+            self.utility_results: dict[int, AnyFuture] = {}
+
+            # Request objects which may contain pytorch-allocated tensors
+            # that we need to keep references to until zmq is done with the
+            # underlying data.
+            self.pending_messages = deque[tuple[zmq.MessageTracker, Any]]()
+            self.outputs_queue = asyncio.Queue[Union[EngineCoreOutputs,
+                                                     Exception]]()
+
+            success = True
+        finally:
+            if not success:
+                self._finalizer()
+
+        try:
+            # If we are running in an asyncio event loop, start the queue task.
+            # Otherwise, it will be started lazily. If it is not started here,
+            # we could miss EXECUTOR_FAILED messages from engine core if they
+            # occur prior to any requests being sent.
+            asyncio.get_running_loop()
+            self._ensure_output_queue_task()
+        except RuntimeError:
+            pass
