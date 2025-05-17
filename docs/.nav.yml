@@ -5,7 +5,11 @@ nav:
     - getting_started/installation/gpu.md
     - getting_started/installation/cpu.md
     - getting_started/installation/ai_accelerator.md
-    - getting_started/examples
+    - Examples:
+      - LMCache: getting_started/examples/lmcache
+      - getting_started/examples/offline_inference
+      - getting_started/examples/online_serving
+      - getting_started/examples/other
     - Other:
       - getting_started/*
   - Models:
