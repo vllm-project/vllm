@@ -91,16 +91,19 @@
         {%- endif %}
         {{- '<|eot_id|>' }}
     {%- elif 'tool_calls' in message %}
-        {%- if not message.tool_calls|length == 1 %}
+        {%- if message.tool_calls|length > 1 %}
             {{- raise_exception("This model only supports single tool-calls at once!") }}
+        {%- elif message.tool_calls|length == 0 %}
+            {{- "No tool calls found." }}
+        {%- else %}
+            {%- set tool_call = message.tool_calls[0].function %}
+            {{- '<|start_header_id|>assistant<|end_header_id|>\n\n' -}}
+            {{- '{"name": "' + tool_call.name|trim + '", ' }}
+            {{- '"parameters": ' }}
+            {{- tool_call.arguments | tojson }}
+            {{- "}" }}
+            {{- "<|eot_id|>" }}
         {%- endif %}
-        {%- set tool_call = message.tool_calls[0].function %}
-        {{- '<|start_header_id|>assistant<|end_header_id|>\n\n' -}}
-        {{- '{"name": "' + tool_call.name + '", ' }}
-        {{- '"parameters": ' }}
-        {{- tool_call.arguments | tojson }}
-        {{- "}" }}
-        {{- "<|eot_id|>" }}
     {%- elif message.role == "tool" or message.role == "ipython" %}
         {{- "<|start_header_id|>ipython<|end_header_id|>\n\n" }}
         {%- if message.content is string %}
