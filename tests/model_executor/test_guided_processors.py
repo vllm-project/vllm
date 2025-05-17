@@ -151,7 +151,7 @@ async def test_guided_logits_processor_with_reasoning(
     original_tensor = torch.clone(tensor)
     # We can just feed in tokenids here since it shouldn't
     # ever get to the Guide (which will error if invalid tokenid's are input)
-    # because the ReasoningParser is causing the logits processor 
+    # because the ReasoningParser is causing the logits processor
     # to quick return.
     json_lp(token_ids, tensor)
     assert tensor.shape == original_tensor.shape
