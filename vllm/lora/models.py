@@ -185,19 +185,19 @@ class LoRAModel(AdapterModel):
 
     @classmethod
     def from_local_checkpoint(
-        cls,
-        lora_dir: str,
-        expected_lora_modules: list[str],
-        peft_helper: PEFTHelper,
-        *,
-        lora_model_id: Optional[int] = None,
-        device: str = "cuda",
-        dtype: Optional[torch.dtype] = None,
-        target_embedding_padding: Optional[int] = None,
-        embedding_modules: Optional[dict[str, str]] = None,
-        embedding_padding_modules: Optional[list[str]] = None,
-        weights_mapper: Optional[WeightsMapper] = None,
-    ) -> "LoRAModel":
+            cls,
+            lora_dir: str,
+            expected_lora_modules: list[str],
+            peft_helper: PEFTHelper,
+            *,
+            lora_model_id: Optional[int] = None,
+            device: str = "cuda",
+            dtype: Optional[torch.dtype] = None,
+            target_embedding_padding: Optional[int] = None,
+            embedding_modules: Optional[dict[str, str]] = None,
+            embedding_padding_modules: Optional[list[str]] = None,
+            weights_mapper: Optional[WeightsMapper] = None,
+            tensorizer_config_dict: Optional[dict] = None) -> "LoRAModel":
         """Create a LoRAModel from a local checkpoint.
         
         Args:
@@ -219,10 +219,23 @@ class LoRAModel(AdapterModel):
             lora_dir, "new_embeddings.safetensors")
         new_embeddings_bin_file_path = os.path.join(lora_dir,
                                                     "new_embeddings.bin")
-
+        tensors: dict[str, torch.Tensor] = {}
         unexpected_modules: list[Union[list[str], str]]
-        if os.path.isfile(lora_tensor_path):
-            tensors: dict[str, torch.Tensor] = {}
+        if tensorizer_config_dict:
+            from tensorizer import TensorDeserializer
+
+            from vllm.model_executor.model_loader.tensorizer import (
+                TensorizerConfig)
+
+            tensorizer_config = TensorizerConfig(**tensorizer_config_dict)
+            lora_tensor_path = os.path.join(tensorizer_config.tensorizer_dir,
+                                            "adapter_model.tensors")
+            tensorizer_args = tensorizer_config._construct_tensorizer_args()
+            tensors = TensorDeserializer(lora_tensor_path,
+                                         dtype=tensorizer_config.dtype,
+                                         **tensorizer_args.deserializer_params)
+
+        elif os.path.isfile(lora_tensor_path):
             # Find unexpected modules.
             # Use safetensor key as a source of truth to find expected modules.
             # in peft if you have target_modules A, B, C and C does not exist
