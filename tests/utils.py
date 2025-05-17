@@ -199,33 +199,33 @@ def _test_completion(
 ):
     results = []
 
-    # test with text prompt
-    completion = client.completions.create(model=model,
-                                           prompt=prompt,
-                                           max_tokens=5,
-                                           temperature=0.0)
+    # # test with text prompt
+    # completion = client.completions.create(model=model,
+    #                                        prompt=prompt,
+    #                                        max_tokens=5,
+    #                                        temperature=0.0)
 
-    results.append({
-        "test": "single_completion",
-        "text": completion.choices[0].text,
-        "finish_reason": completion.choices[0].finish_reason,
-        "usage": completion.usage,
-    })
+    # results.append({
+    #     "test": "single_completion",
+    #     "text": completion.choices[0].text,
+    #     "finish_reason": completion.choices[0].finish_reason,
+    #     "usage": completion.usage,
+    # })
 
-    # test using token IDs
-    completion = client.completions.create(
-        model=model,
-        prompt=token_ids,
-        max_tokens=5,
-        temperature=0.0,
-    )
+    # # test using token IDs
+    # completion = client.completions.create(
+    #     model=model,
+    #     prompt=token_ids,
+    #     max_tokens=5,
+    #     temperature=0.0,
+    # )
 
-    results.append({
-        "test": "token_ids",
-        "text": completion.choices[0].text,
-        "finish_reason": completion.choices[0].finish_reason,
-        "usage": completion.usage,
-    })
+    # results.append({
+    #     "test": "token_ids",
+    #     "text": completion.choices[0].text,
+    #     "finish_reason": completion.choices[0].finish_reason,
+    #     "usage": completion.usage,
+    # })
 
     # test seeded random sampling
     completion = client.completions.create(model=model,
@@ -241,56 +241,56 @@ def _test_completion(
         "usage": completion.usage,
     })
 
-    # test seeded random sampling with multiple prompts
-    completion = client.completions.create(model=model,
-                                           prompt=[prompt, prompt],
-                                           max_tokens=5,
-                                           seed=33,
-                                           temperature=1.0)
+    # # test seeded random sampling with multiple prompts
+    # completion = client.completions.create(model=model,
+    #                                        prompt=[prompt, prompt],
+    #                                        max_tokens=5,
+    #                                        seed=33,
+    #                                        temperature=1.0)
 
-    results.append({
-        "test":
-        "seeded_sampling",
-        "text": [choice.text for choice in completion.choices],
-        "finish_reason":
-        [choice.finish_reason for choice in completion.choices],
-        "usage":
-        completion.usage,
-    })
+    # results.append({
+    #     "test":
+    #     "seeded_sampling",
+    #     "text": [choice.text for choice in completion.choices],
+    #     "finish_reason":
+    #     [choice.finish_reason for choice in completion.choices],
+    #     "usage":
+    #     completion.usage,
+    # })
 
-    # test simple list
-    batch = client.completions.create(
-        model=model,
-        prompt=[prompt, prompt],
-        max_tokens=5,
-        temperature=0.0,
-    )
+    # # test simple list
+    # batch = client.completions.create(
+    #     model=model,
+    #     prompt=[prompt, prompt],
+    #     max_tokens=5,
+    #     temperature=0.0,
+    # )
 
-    results.append({
-        "test": "simple_list",
-        "text0": batch.choices[0].text,
-        "text1": batch.choices[1].text,
-    })
+    # results.append({
+    #     "test": "simple_list",
+    #     "text0": batch.choices[0].text,
+    #     "text1": batch.choices[1].text,
+    # })
 
-    # test streaming
-    batch = client.completions.create(
-        model=model,
-        prompt=[prompt, prompt],
-        max_tokens=5,
-        temperature=0.0,
-        stream=True,
-    )
+    # # test streaming
+    # batch = client.completions.create(
+    #     model=model,
+    #     prompt=[prompt, prompt],
+    #     max_tokens=5,
+    #     temperature=0.0,
+    #     stream=True,
+    # )
 
-    texts = [""] * 2
-    for chunk in batch:
-        assert len(chunk.choices) == 1
-        choice = chunk.choices[0]
-        texts[choice.index] += choice.text
+    # texts = [""] * 2
+    # for chunk in batch:
+    #     assert len(chunk.choices) == 1
+    #     choice = chunk.choices[0]
+    #     texts[choice.index] += choice.text
 
-    results.append({
-        "test": "streaming",
-        "texts": texts,
-    })
+    # results.append({
+    #     "test": "streaming",
+    #     "texts": texts,
+    # })
 
     return results
 

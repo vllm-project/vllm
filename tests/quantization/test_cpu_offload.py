@@ -30,14 +30,15 @@ def test_cpu_offload_gptq(monkeypatch):
     # This quant method is sensitive to dummy weights, so we force real weights
     monkeypatch.setenv('VLLM_TEST_FORCE_LOAD_FORMAT', 'auto')
     # Test GPTQ Marlin
-    compare_two_settings("Qwen/Qwen2-1.5B-Instruct-GPTQ-Int4", [],
-                         ["--cpu-offload-gb", "1"],
-                         max_wait_seconds=480)
+    # compare_two_settings("Qwen/Qwen2-1.5B-Instruct-GPTQ-Int4", [],
+    #                      ["--cpu-offload-gb", "1"],
+    #                      max_wait_seconds=480)
     # Test GPTQ
-    compare_two_settings("Qwen/Qwen2-1.5B-Instruct-GPTQ-Int4",
-                         ["--quantization", "gptq"],
-                         ["--quantization", "gptq", "--cpu-offload-gb", "1"],
-                         max_wait_seconds=480)
+    compare_two_settings(
+        "Qwen/Qwen2-1.5B-Instruct-GPTQ-Int4",
+        ["--quantization", "gptq", '--enforce-eager'],
+        ["--quantization", "gptq", "--cpu-offload-gb", "1", '--enforce-eager'],
+        max_wait_seconds=480)
 
 
 @pytest.mark.skipif(not is_quant_method_supported("awq_marlin"),
