@@ -762,20 +762,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     start += shard_size
 
             if self.rocm_aiter_moe_enabled:
-                # reshaping weights is required for aiter moe kernel.
-                expansion_dims = [
-                    layer.w13_weight.shape[1], layer.w2_weight.shape[1]
-                ]
-                max_w13_scales, w2_scales = expand_weights(
-                    max_w13_scales,
-                    layer.w2_weight_scale.data,
-                    expansion_dims=expansion_dims)
-                layer.w2_weight_scale = torch.nn.Parameter(
-                    w2_scales.contiguous(), requires_grad=False)
-
                 shuffled_w13, shuffled_w2 = shuffle_weights(layer.w13_weight,
                                                             layer.w2_weight,
-                                                            layout=(32, 32))
+                                                            layout=(16, 16))
 
                 layer.w13_weight = torch.nn.Parameter(shuffled_w13,
                                                       requires_grad=False)
