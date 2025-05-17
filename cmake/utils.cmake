@@ -39,6 +39,34 @@ function (run_python OUT EXPR ERR_MSG)
   set(${OUT} ${PYTHON_OUT} PARENT_SCOPE)
 endfunction()
 
+# Generate CUDA sources via a Python script with caching based on script hash
+function(generate_cuda_sources NAME SCRIPT GLOB OUT_SRCS)
+  string(TOUPPER "${NAME}" _UPPER_NAME)
+  set(_CACHE_VAR "${_UPPER_NAME}_GEN_SCRIPT_HASH")
+  file(MD5 "${SCRIPT}" _GEN_HASH)
+  message(STATUS "${NAME} generation script hash: ${_GEN_HASH}")
+  message(STATUS "Last run ${NAME} generation script hash: $CACHE{${_CACHE_VAR}}")
+  if(NOT DEFINED CACHE{${_CACHE_VAR}} OR NOT $CACHE{${_CACHE_VAR}} STREQUAL "${_GEN_HASH}")
+    execute_process(
+      COMMAND ${CMAKE_COMMAND} -E env
+        PYTHONPATH=$ENV{PYTHONPATH}
+        ${Python_EXECUTABLE} "${SCRIPT}"
+      RESULT_VARIABLE _GEN_RESULT
+      OUTPUT_FILE "${CMAKE_CURRENT_BINARY_DIR}/${NAME}_generation.log"
+      ERROR_FILE "${CMAKE_CURRENT_BINARY_DIR}/${NAME}_generation.log"
+    )
+    if(NOT _GEN_RESULT EQUAL 0)
+      message(FATAL_ERROR "${NAME} generation failed. Result: \"${_GEN_RESULT}\"\nCheck the log for details: ${CMAKE_CURRENT_BINARY_DIR}/${NAME}_generation.log")
+    else()
+      set(${_CACHE_VAR} "${_GEN_HASH}" CACHE STRING "Last run ${NAME} generation script hash" FORCE)
+      message(STATUS "${NAME} generation completed successfully.")
+    endif()
+  else()
+    message(STATUS "${NAME} generation script has not changed, skipping generation.")
+  endif()
+  file(GLOB ${OUT_SRCS} "${GLOB}")
+endfunction()
+
 # Run `EXPR` in python after importing `PKG`. Use the result of this to extend
 # `CMAKE_PREFIX_PATH` so the torch cmake configuration can be imported.
 macro (append_cmake_prefix_path PKG EXPR)
@@ -85,6 +113,74 @@ function (hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
   list(APPEND HIP_SRCS ${CXX_SRCS})
   set(${OUT_SRCS} ${HIP_SRCS} PARENT_SCOPE)
 endfunction()
+
+# Macro to conditionally include CUDA sources based on architecture and CUDA
+# compiler version, optionally generating sources via a Python script.
+# Usage:
+#   optional_cuda_sources(
+#     NAME <name>
+#     [MIN_VERSION <version>]
+#     ARCHS <arch1;arch2;...>
+#     SRCS <static_source1> [<static_source2> ...]
+#     [FLAGS <flag1> ...]
+#     [VERSION_MSG <line1> [<line2> ...]]
+#     [NO_ARCH_MSG <line1> [<line2> ...]]
+#     [GEN_SCRIPT <path/to/generate_script.py>]
+#     [GEN_GLOB <glob_pattern_for_generated_sources>]
+# This will run GEN_SCRIPT once when version and arch checks pass, globbing
+# sources matching GEN_GLOB and appending them alongside SRCS.
+macro(optional_cuda_sources)
+  set(oneValueArgs NAME MIN_VERSION GEN_SCRIPT GEN_GLOB OUT_SRCS_VAR)
+  set(multiValueArgs ARCHS SRCS FLAGS VERSION_MSG NO_ARCH_MSG)
+  cmake_parse_arguments(OCS "" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+  if(NOT OCS_NAME)
+    message(FATAL_ERROR "optional_cuda_sources: NAME is required")
+  endif()
+  if(NOT OCS_ARCHS)
+    message(FATAL_ERROR "optional_cuda_sources ${OCS_NAME}: ARCHS is required")
+  endif()
+  if(NOT OCS_SRCS AND NOT OCS_GEN_SCRIPT)
+    message(FATAL_ERROR "optional_cuda_sources ${OCS_NAME}: either SRCS or GEN_SCRIPT must be provided")
+  endif()
+  if(NOT OCS_MIN_VERSION)
+    set(OCS_MIN_VERSION "0.0")
+  endif()
+  cuda_archs_loose_intersection(_OCS_ARCHS "${OCS_ARCHS}" "${CUDA_ARCHS}")
+  if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL ${OCS_MIN_VERSION})
+    if(_OCS_ARCHS)
+      set(_OCS_SRCS ${OCS_SRCS})
+      # Generate sources if a script is provided
+      if(OCS_GEN_SCRIPT AND OCS_GEN_GLOB)
+        generate_cuda_sources(${OCS_NAME} "${OCS_GEN_SCRIPT}" "${OCS_GEN_GLOB}" _OCS_GEN_SRCS)
+        list(APPEND _OCS_SRCS ${_OCS_GEN_SRCS})
+      endif()
+      set_gencode_flags_for_srcs(SRCS "${_OCS_SRCS}" CUDA_ARCHS "${_OCS_ARCHS}")
+      if(OCS_OUT_SRCS_VAR)
+        list(APPEND ${OCS_OUT_SRCS_VAR} ${_OCS_SRCS})
+      else()
+        list(APPEND VLLM_EXT_SRC ${_OCS_SRCS})
+      endif()
+      if(OCS_FLAGS)
+        list(APPEND VLLM_GPU_FLAGS ${OCS_FLAGS})
+      endif()
+      message(STATUS "Building ${OCS_NAME} for archs: ${_OCS_ARCHS}")
+    else()
+      if(OCS_NO_ARCH_MSG)
+        list(JOIN OCS_NO_ARCH_MSG "\n" _OCS_NO_ARCH_JOINED)
+        message(STATUS "${_OCS_NO_ARCH_JOINED}")
+      else()
+        message(STATUS "Not building ${OCS_NAME}: no compatible architectures found in CUDA target architectures")
+      endif()
+    endif()
+  else()
+    if(OCS_VERSION_MSG)
+      list(JOIN OCS_VERSION_MSG "\n" _OCS_VERSION_JOINED)
+      message(STATUS "${_OCS_VERSION_JOINED}")
+    else()
+      message(STATUS "Not building ${OCS_NAME}: CUDA Compiler version is less than ${OCS_MIN_VERSION}")
+    endif()
+  endif()
+endmacro()
 
 #
 # Get additional GPU compiler flags from torch.
