@@ -192,10 +192,6 @@ def test_async_tp_pass_correctness(
 ):
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_transformers_version(on_fail="skip")
-
-    # trust_remote_code = model_info.trust_remote_code
-    # tokenizer_mode = model_info.tokenizer_mode
-    # hf_overrides = model_info.hf_overrides
     model_info.check_available_online(on_fail="skip")
 
     pp_size = 1
