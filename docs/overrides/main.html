@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+
+{% block announce %}
+  {% if "/latest/" in page.url %}
+    <p>You are viewing the latest developer preview docs. <a href="https://docs.vllm.ai/en/stable/">Click here</a> to view docs for the latest stable release.</p>
+  {% endif %}
+{% endblock %}
+

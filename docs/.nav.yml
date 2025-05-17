@@ -1,0 +1,75 @@
+nav:
+  - Getting Started:
+    - getting_started/quickstart.md
+    - getting_started/installation
+    - getting_started/installation/gpu.md
+    - getting_started/installation/cpu.md
+    - getting_started/installation/ai_accelerator.md
+    - getting_started/examples
+    - Other:
+      - getting_started/*
+  - Models:
+    - models/supported_models.md
+    - models/generative_models.md
+    - models/pooling_models.md
+    - models/extensions
+  - Features:
+    - features/compatibility_matrix.md
+    - features/lora.md
+    - features/tool_calling.md
+    - features/reasoning_outputs.md
+    - features/structured_outputs.md
+    - features/automatic_prefix_caching.md
+    - features/disagg_prefill.md
+    - features/spec_decode.md
+    - features/quantization
+  - Training:
+    - training/trl.md
+    - training/rlhf.md
+  - Inference and Serving:
+    - serving/offline_inference.md
+    - serving/openai_compatible_server.md
+    - serving/multimodal_inputs.md
+    - serving/distributed_serving.md
+    - serving/metrics.md
+    - serving/engine_args.md
+    - serving/env_vars.md
+    - serving/usage_stats.md
+    - serving/integrations
+  - Deployment:
+    - deployment/security.md
+    - deployment/docker.md
+    - deployment/k8s.md
+    - deployment/nginx.md
+    - deployment/frameworks
+    - deployment/integrations
+  - Performance:
+    - performance/optimization.md
+    - performance/benchmarks.md
+  - Design Documents:
+    - V0:
+      - design/arch_overview.md
+      - design/huggingface_integration.md
+      - design/plugin_system.md
+      - design/kernel/paged_attention.md
+      - design/mm_processing.md
+      - design/automatic_prefix_caching.md
+      - design/multiprocessing.md
+    - V1:
+      - design/v1/torch_compile.md
+      - design/v1/prefix_caching.md
+      - design/v1/metrics.md
+  - Developer Guide:
+    - contributing/overview.md
+    - contributing/deprecation_policy.md
+    - contributing/profiling.md
+    - contributing/dockerfile/dockerfile.md
+    - contributing/model
+    - contributing/vulnerability_management.md
+  - API Reference:
+    - api/README.md
+    - api/vllm/*
+  - Community:
+    - community/blog.md
+    - community/meetups.md
+    - community/sponsors.md

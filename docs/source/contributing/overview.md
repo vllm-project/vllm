@@ -29,6 +29,20 @@ See <gh-file:LICENSE>.
 Depending on the kind of development you'd like to do (e.g. Python, CUDA), you can choose to build vLLM with or without compilation.
 Check out the [building from source](#build-from-source) documentation for details.
 
+### Building the docs
+
+Install the dependencies:
+
+```bash
+pip install -r requirements/docs.txt
+```
+
+Start the autoreloading MkDocs server:
+
+```bash
+mkdocs serve
+```
+
 ## Testing
 
 ```bash
