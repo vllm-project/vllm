@@ -61,6 +61,7 @@ class OpenAIServingChat(OpenAIServing):
         return_tokens_as_token_ids: bool = False,
         reasoning_parser: str = "",
         enable_auto_tools: bool = False,
+        expand_tools_even_if_tool_choice_none: bool = False,
         tool_parser: Optional[str] = None,
         enable_prompt_tokens_details: bool = False,
     ) -> None:
@@ -107,6 +108,7 @@ class OpenAIServingChat(OpenAIServing):
                 raise TypeError("Error: --enable-auto-tool-choice requires "
                                 f"tool_parser:'{tool_parser}' which has not "
                                 "been registered") from e
+        self.expand_tools_even_if_tool_choice_none = expand_tools_even_if_tool_choice_none
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.default_sampling_params = (
@@ -171,9 +173,14 @@ class OpenAIServingChat(OpenAIServing):
                     "--enable-auto-tool-choice and --tool-call-parser to be set"
                 )
 
-            tool_dicts = None if request.tools is None else [
-                tool.model_dump() for tool in request.tools
-            ]
+            if (request.tools is None or
+                    (request.tool_choice == "none" and
+                     not self.expand_tools_even_if_tool_choice_none)):
+                tool_dicts = None
+            else:
+                tool_dicts = [
+                    tool.model_dump() for tool in request.tools
+                ]
 
             (
                 conversation,
