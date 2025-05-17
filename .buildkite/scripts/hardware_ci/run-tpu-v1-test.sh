@@ -78,7 +78,7 @@ run_test() {
 
 # Run tests sequentially. If any test fails, the script will exit.
 run_test 0 "test_perf.py" \
-    "python3 -m pytest -s -v /workspace/vllm/tests/tpu/test_perf.py"
+    "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_perf.py"
 run_test 1 "test_compilation.py" \
     "python3 -m pytest -s -v /workspace/vllm/tests/tpu/test_compilation.py"
 run_test 2 "test_basic.py" \
