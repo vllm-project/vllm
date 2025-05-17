@@ -278,6 +278,9 @@ class CPUWorker(LocalOrDistributedWorkerBase):
         # Initialize the cache.
         self._init_cache_engine()
 
+        assert self.kv_cache is not None
+        self.model_runner.warming_up_model(self.kv_cache[0])
+
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
 
