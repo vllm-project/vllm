@@ -31,14 +31,25 @@ Check out the [building from source](#build-from-source) documentation for detai
 
 ## Testing
 
+:::::{tab-set}
+:sync-group: device
+
+::::{tab-item} NVIDIA CUDA
+:sync: cuda
+
 ```bash
-pip install -r requirements/dev.txt
+sudo apt install python3-dev
+
+# work around for https://github.com/state-spaces/mamba/issues/720 that's also done in docker/Dockerfile
+pip install --no-build-isolation "git+https://github.com/state-spaces/mamba@v2.2.4"
+
+pip install -r requirements/dev.txt --extra-index-url https://download.pytorch.org/whl/cu128
 
 # Linting, formatting and static type checking
 pre-commit install --hook-type pre-commit --hook-type commit-msg
 
 # You can manually run pre-commit with
-pre-commit run --all-files
+pre-commit run --all-files --show-diff-on-failure
 
 # To manually run something from CI that does not run
 # locally by default, you can run:
@@ -47,6 +58,10 @@ pre-commit run mypy-3.9 --hook-stage manual --all-files
 # Unit tests
 pytest tests/
 ```
+
+::::
+
+:::::
 
 :::{tip}
 Since the <gh-file:docker/Dockerfile> ships with Python 3.12, all tests in CI (except `mypy`) are run with Python 3.12.
