@@ -3,8 +3,8 @@
 import asyncio
 import time
 from abc import ABC, abstractmethod
-from typing import (Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple,
-                    Union)
+from typing import (TYPE_CHECKING, Any, Awaitable, Callable, Dict, List,
+                    Optional, Set, Tuple, Union)
 
 import torch.nn as nn
 from typing_extensions import TypeVar
@@ -23,6 +23,9 @@ logger = init_logger(__name__)
 
 _R = TypeVar("_R", default=Any)
 
+if TYPE_CHECKING:
+    from vllm.v1.structured_output import StructuredOutputManager
+
 
 class ExecutorBase(ABC):
     """Base class for all executors.
@@ -37,6 +40,7 @@ class ExecutorBase(ABC):
     def __init__(
         self,
         vllm_config: VllmConfig,
+        structured_output_manager: Optional["StructuredOutputManager"] = None
     ) -> None:
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -49,6 +53,7 @@ class ExecutorBase(ABC):
         self.speculative_config = vllm_config.speculative_config
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
+        self.structured_output_manager = structured_output_manager
         self._init_executor()
         self.is_sleeping = False
         self.sleeping_tags: set[str] = set()
