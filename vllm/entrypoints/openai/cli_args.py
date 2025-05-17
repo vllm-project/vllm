@@ -18,6 +18,7 @@ from vllm.entrypoints.openai.serving_models import (LoRAModulePath,
                                                     PromptAdapterPath)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.logger import init_logger
+from vllm.tools import CHAT_TEMPLATES
 from vllm.utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
@@ -135,12 +136,13 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         action=PromptAdapterParserAction,
         help="Prompt adapter configurations in the format name=path. "
         "Multiple adapters can be specified.")
-    parser.add_argument("--chat-template",
-                        type=optional_type(str),
-                        default=None,
-                        help="The file path to the chat template, "
-                        "or the template in single-line form "
-                        "for the specified model.")
+    parser.add_argument(
+        "--chat-template",
+        type=optional_type(str),
+        default=None,
+        help=
+        f"Optional file path to the chat template, or the template in single-line form for the specified model. Built-in supported templates: {', '.join(CHAT_TEMPLATES)}",  # noqa: E501
+    )
     parser.add_argument(
         '--chat-template-content-format',
         type=str,

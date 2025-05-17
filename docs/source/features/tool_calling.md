@@ -10,7 +10,7 @@ Start the server with tool calling enabled. This example uses Meta's Llama 3.1 8
 vllm serve meta-llama/Llama-3.1-8B-Instruct \
     --enable-auto-tool-choice \
     --tool-call-parser llama3_json \
-    --chat-template examples/tool_chat_template_llama3.1_json.jinja
+    --chat-template tool_chat_template_llama3.1_json
 ```
 
 Next, make a request to the model that should result in it using the available tools:
@@ -108,7 +108,9 @@ will continue to be added in the future, and also can register your own tool par
 * `--tool-parser-plugin` -- **optional** tool parser plugin used to register user defined tool parsers into vllm, the registered tool parser name can be specified in `--tool-call-parser`.
 * `--chat-template` -- **optional** for auto tool choice. the path to the chat template which handles `tool`-role messages and `assistant`-role messages
 that contain previously generated tool calls. Hermes, Mistral and Llama models have tool-compatible chat templates in their
-`tokenizer_config.json` files, but you can specify a custom template. This argument can be set to `tool_use` if your model has a tool use-specific chat
+`tokenizer_config.json` files, but you can specify a custom template. This argument can be set to `tool_use` if your model has a tool use-specific chat.
+`--chat-template` supports parsing either literal template as string or a path to Jinja template files. vLLM also ship a set of pre-defined templates that is available under [`vllm/tools`](https://github.com/vllm-project/vllm/tree/main/vllm/tools).
+You can use this by parsing in the relevant file stem (i.e: `--chat-template tool_chat_template_hermes`)
 template configured in the `tokenizer_config.json`. In this case, it will be used per the `transformers` specification. More on this [here](https://huggingface.co/docs/transformers/en/chat_templating#why-do-some-models-have-multiple-templates)
 from HuggingFace; and you can find an example of this in a `tokenizer_config.json` [here](https://huggingface.co/NousResearch/Hermes-2-Pro-Llama-3-8B/blob/main/tokenizer_config.json)
 
@@ -146,7 +148,7 @@ it works with vLLM's tool call IDs (provided `tool_call_id` fields are truncated
 * <gh-file:examples/tool_chat_template_mistral_parallel.jinja> - this is a "better" version that adds a tool-use system prompt
 when tools are provided, that results in much better reliability when working with parallel tool calling.
 
-Recommended flags: `--tool-call-parser mistral --chat-template examples/tool_chat_template_mistral_parallel.jinja`
+Recommended flags: `--tool-call-parser mistral --chat-template tool_chat_template_mistral_parallel`
 
 ### Llama Models (`llama3_json`)
 
@@ -189,7 +191,7 @@ Supported models:
 
 * `ibm-granite/granite-3.0-8b-instruct`
 
-Recommended flags: `--tool-call-parser granite --chat-template examples/tool_chat_template_granite.jinja`
+Recommended flags: `--tool-call-parser granite --chat-template tool_chat_template_granite`
 
 <gh-file:examples/tool_chat_template_granite.jinja>: this is a modified chat template from the original on Huggingface. Parallel function calls are supported.
 
@@ -201,7 +203,7 @@ The chat template from Huggingface can be used directly. Parallel function calls
 
 * `ibm-granite/granite-20b-functioncalling`
 
-Recommended flags: `--tool-call-parser granite-20b-fc --chat-template examples/tool_chat_template_granite_20b_fc.jinja`
+Recommended flags: `--tool-call-parser granite-20b-fc --chat-template tool_chat_template_granite_20b_fc`
 
 <gh-file:examples/tool_chat_template_granite_20b_fc.jinja>: this is a modified chat template from the original on Huggingface, which is not vLLM compatible. It blends function description elements from the Hermes template and follows the same system prompt as "Response Generation" mode from [the paper](https://arxiv.org/abs/2407.00121). Parallel function calls are supported.
 
@@ -216,7 +218,7 @@ Known issues:
 
 * Although this implementation also supports InternLM2, the tool call results are not stable when testing with the `internlm/internlm2-chat-7b` model.
 
-Recommended flags: `--tool-call-parser internlm --chat-template examples/tool_chat_template_internlm2_tool.jinja`
+Recommended flags: `--tool-call-parser internlm --chat-template tool_chat_template_internlm2_tool`
 
 ### Jamba Models (`jamba`)
 
@@ -241,7 +243,7 @@ Flags: `--tool-call-parser hermes`
 Supported models:
 * `deepseek-ai/DeepSeek-V3-0324`
 
-Flags: `--tool-call-parser deepseek_v3 --chat-template examples/tool_chat_template_deepseekv3.jinja`
+Flags: `--tool-call-parser deepseek_v3 --chat-template tool_chat_template_deepseekv3`
 
 ### Models with Pythonic Tool Calls (`pythonic`)
 
