@@ -14,6 +14,7 @@ The table below shows the compatibility of various quantization implementations 
   * Ampere
   * Ada
   * Hopper
+  * Blackwell
   * AMD GPU
   * Intel GPU
   * x86 CPU
@@ -25,12 +26,14 @@ The table below shows the compatibility of various quantization implementations 
   * ✅︎
   * ✅︎
   * ✅︎
+  * ✅︎
   * ❌
   * ✅︎
   * ✅︎
   * ❌
   * ❌
 - * GPTQ
+  * ✅︎
   * ✅︎
   * ✅︎
   * ✅︎
@@ -47,6 +50,7 @@ The table below shows the compatibility of various quantization implementations 
   * ✅︎
   * ✅︎
   * ✅︎
+  * ✅︎
   * ❌
   * ❌
   * ❌
@@ -54,6 +58,7 @@ The table below shows the compatibility of various quantization implementations 
   * ❌
 - * INT8 (W8A8)
   * ❌
+  * ✅︎
   * ✅︎
   * ✅︎
   * ✅︎
@@ -67,6 +72,7 @@ The table below shows the compatibility of various quantization implementations 
   * ❌
   * ❌
   * ❌
+  * ✅︎
   * ✅︎
   * ✅︎
   * ✅︎
@@ -85,7 +91,9 @@ The table below shows the compatibility of various quantization implementations 
   * ❌
   * ❌
   * ❌
+  * ❌
 - * AQLM
+  * ✅︎
   * ✅︎
   * ✅︎
   * ✅︎
@@ -102,12 +110,14 @@ The table below shows the compatibility of various quantization implementations 
   * ✅︎
   * ✅︎
   * ✅︎
+  * ✅︎
   * ❌
   * ❌
   * ❌
   * ❌
   * ❌
 - * DeepSpeedFP
+  * ✅︎
   * ✅︎
   * ✅︎
   * ✅︎
@@ -125,6 +135,7 @@ The table below shows the compatibility of various quantization implementations 
   * ✅︎
   * ✅︎
   * ✅︎
+  * ✅︎
   * ❌
   * ❌
   * ❌
@@ -135,6 +146,7 @@ The table below shows the compatibility of various quantization implementations 
   * ✅︎
   * ✅︎
   * ✅︎︎
+  * ✅︎︎
   * ❌
   * ❌
   * ❌
@@ -142,7 +154,7 @@ The table below shows the compatibility of various quantization implementations 
   * ❌
 :::
 
-- Volta refers to SM 7.0, Turing to SM 7.5, Ampere to SM 8.0/8.6, Ada to SM 8.9, and Hopper to SM 9.0.
+- Volta refers to SM 7.0, Turing to SM 7.5, Ampere to SM 8.0/8.6, Ada to SM 8.9, Hopper to SM 9.0, and Blackwell to SM 10.0/12.0.
 - ✅︎ indicates that the quantization method is supported on the specified hardware.
 - ❌ indicates that the quantization method is not supported on the specified hardware.
 
