@@ -44,6 +44,7 @@ theme:
 
 hooks:
   - transpile_docs.py  # temporary
+  - docs/remove_announcement.py
   - docs/gen_examples.py
   - docs/url_schemes.py
 

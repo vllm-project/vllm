@@ -1,0 +1,13 @@
+import os
+
+
+def on_startup():
+    # see https://docs.readthedocs.io/en/stable/reference/environment-variables.html # noqa
+    if os.getenv('READTHEDOCS_VERSION_TYPE') == "tag":
+        # remove the warning banner if the version is a tagged release
+        docs_dir = os.path.dirname(__file__)
+        announcement_path = os.path.join(docs_dir, "overrides/main.html")
+        # The file might be removed already if the build is triggered multiple times
+        # (readthedocs build both HTML and PDF versions separately)
+        if os.path.exists(announcement_path):
+            os.remove(announcement_path)
