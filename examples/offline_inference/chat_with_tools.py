@@ -111,6 +111,7 @@ messages = [{
 
 outputs = llm.chat(messages, sampling_params=sampling_params, tools=tools)
 output = outputs[0].outputs[0].text.strip()
+output = output.removeprefix('[TOOL_CALLS]')
 
 # append the assistant message
 messages.append({
