@@ -2085,18 +2085,18 @@ class SchedulerConfig:
                 self.max_num_batched_tokens = max(
                     self.max_model_len, _DEFAULT_MAX_NUM_BATCHED_TOKENS)
 
-            if self.runner_type == "pooling":
-                # Choose specific value for higher throughput
-                self.max_num_batched_tokens = max(
-                    self.max_num_batched_tokens,
-                    _POOLING_MODEL_MAX_NUM_BATCHED_TOKENS,
-                )
-            if self.is_multimodal_model:
-                # The value needs to be at least the number of multimodal tokens
-                self.max_num_batched_tokens = max(
-                    self.max_num_batched_tokens,
-                    _MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
-                )
+        if self.runner_type == "pooling":
+            # Choose specific value for higher throughput
+            self.max_num_batched_tokens = max(
+                self.max_num_batched_tokens,
+                _POOLING_MODEL_MAX_NUM_BATCHED_TOKENS,
+            )
+        if self.is_multimodal_model:
+            # The value needs to be at least the number of multimodal tokens
+            self.max_num_batched_tokens = max(
+                self.max_num_batched_tokens,
+                _MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
+            )
 
             # When using default settings,
             # Ensure max_num_batched_tokens does not exceed model limit.
