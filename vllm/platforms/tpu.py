@@ -194,3 +194,11 @@ class TpuPlatform(Platform):
             if params.sampling_type == SamplingType.RANDOM_SEED:
                 raise ValueError(
                     "Torch XLA does not support per-request seed.")
+
+
+try:
+    from tpu_commons.platforms import TpuPlatform as TpuCommonsPlatform
+    TpuPlatform = TpuCommonsPlatform  # type: ignore
+except ImportError:
+    logger.info("tpu_commons not found, using vLLM's TpuPlatform")
+    pass
