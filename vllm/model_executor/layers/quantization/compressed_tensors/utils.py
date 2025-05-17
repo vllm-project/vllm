@@ -15,6 +15,7 @@ def is_activation_quantization_format(format: str) -> bool:
         CompressionFormat.naive_quantized.value,
         CompressionFormat.int_quantized.value,
         CompressionFormat.float_quantized.value,
+        "nvfp4-pack-quantized"  # TODO: use enum value after next release
     ]
     return format in _ACTIVATION_QUANTIZATION_FORMATS
 
