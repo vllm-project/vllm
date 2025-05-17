@@ -1067,6 +1067,40 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             indices=out_indices,
         )
 
+    def sync_and_slice_intermediate_tensors(
+            self, num_tokens: int, intermediate_tensors: IntermediateTensors,
+            sync_self: bool) -> IntermediateTensors:
+
+        assert self.intermediate_tensors is not None
+
+        tp = self.vllm_config.parallel_config.tensor_parallel_size
+        enabled_sp = self.vllm_config.compilation_config.pass_config. \
+            enable_sequence_parallelism
+        if enabled_sp:
+            # When sequence parallelism is enabled, we always pad num_tokens
+            # to be a multiple of tensor_parallel_size (tp) earlier
+            assert num_tokens % tp == 0
+        is_residual_scattered = tp > 1 and enabled_sp \
+            and num_tokens % tp == 0
+
+        # When sequence parallelism is enabled, the "residual" tensor is sharded
+        # across tensor parallel ranks, so each rank only needs its own slice.
+        if sync_self:
+            assert intermediate_tensors is not None
+            for k, v in intermediate_tensors.items():
+                is_scattered = "residual" and is_residual_scattered
+                copy_len = num_tokens // tp if is_scattered else \
+                    num_tokens
+                self.intermediate_tensors[k][:copy_len].copy_(
+                    v[:copy_len], non_blocking=True)
+
+        return IntermediateTensors({
+            k:
+            v[:num_tokens // tp]
+            if k == "residual" and is_residual_scattered else v[:num_tokens]
+            for k, v in self.intermediate_tensors.items()
+        })
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1143,27 +1177,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if get_pp_group().is_first_rank:
             intermediate_tensors = None
         else:
-            assert intermediate_tensors is not None
-            assert self.intermediate_tensors is not None
-            tp = self.vllm_config.parallel_config.tensor_parallel_size
-            enabled_sp = self.vllm_config.compilation_config.pass_config. \
-                enable_sequence_parallelism
-            is_residual_scattered = tp > 1 and enabled_sp \
-                and num_input_tokens % tp == 0
-
-            for k, v in intermediate_tensors.items():
-                is_scattered = "residual" and is_residual_scattered
-                copy_len = num_input_tokens // tp if is_scattered else \
-                    num_input_tokens
-                self.intermediate_tensors[k][:copy_len].copy_(
-                    v[:copy_len], non_blocking=True)
-
-            intermediate_tensors = IntermediateTensors({
-                k:
-                v[:num_input_tokens // tp] if k == "residual"
-                and is_residual_scattered else v[:num_input_tokens]
-                for k, v in self.intermediate_tensors.items()
-            })
+            intermediate_tensors = self.sync_and_slice_intermediate_tensors(
+                num_input_tokens, intermediate_tensors, True)
 
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
@@ -1582,18 +1597,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                             dtype=self.model_config.dtype,
                             device=self.device))
 
-                tp = self.vllm_config.parallel_config.tensor_parallel_size
-                enabled_sp = self.vllm_config.compilation_config.pass_config. \
-                    enable_sequence_parallelism
-                is_residual_scattered = tp > 1 and enabled_sp \
-                    and num_tokens % tp == 0
-
-                intermediate_tensors = IntermediateTensors({
-                    k:
-                    v[:num_tokens // tp] if k == "residual"
-                    and is_residual_scattered else v[:num_tokens]
-                    for k, v in self.intermediate_tensors.items()
-                })
+                intermediate_tensors = self.sync_and_slice_intermediate_tensors(
+                    num_tokens, None, False)
 
             with set_forward_context(attn_metadata,
                                      self.vllm_config,
