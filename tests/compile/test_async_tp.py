@@ -199,9 +199,8 @@ def test_async_tp_pass_correctness(
         pytest.skip(f"Need at least {tp_size} x {pp_size} GPUs")
 
     common_args = [
-        # use half precision for speed and memory savings in CI environment
         "--dtype",
-        "float16",
+        "bfloat16",
         "--max-model-len",
         "2048",
         "--max-num-seqs",
