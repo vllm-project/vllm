@@ -71,7 +71,9 @@ class BasevLLMParameter(Parameter):
     def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
         self._assert_and_load(loaded_weight)
 
-    def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
+    def load_row_parallel_weight(self,
+                                 loaded_weight: torch.Tensor,
+                                 use_presharded_weights: bool = False):
         self._assert_and_load(loaded_weight)
 
     def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
@@ -100,11 +102,15 @@ class _ColumnvLLMParameter(BasevLLMParameter):
     def output_dim(self):
         return self._output_dim
 
-    def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
-        tp_rank = get_tensor_model_parallel_rank()
-        shard_size = self.data.shape[self.output_dim]
-        loaded_weight = loaded_weight.narrow(self.output_dim,
-                                             tp_rank * shard_size, shard_size)
+    def load_column_parallel_weight(self,
+                                    loaded_weight: torch.Tensor,
+                                    use_presharded_weights: bool = False):
+        if not use_presharded_weights:
+            tp_rank = get_tensor_model_parallel_rank()
+            shard_size = self.data.shape[self.output_dim]
+            loaded_weight = loaded_weight.narrow(self.output_dim,
+                                                 tp_rank * shard_size,
+                                                 shard_size)
         assert self.data.shape == loaded_weight.shape
         self.data.copy_(loaded_weight)
 
@@ -112,6 +118,7 @@ class _ColumnvLLMParameter(BasevLLMParameter):
 
         shard_offset = kwargs.get("shard_offset")
         shard_size = kwargs.get("shard_size")
+        use_presharded_weights = kwargs.get("use_presharded_weights", False)
         if isinstance(
                 self,
             (PackedColumnParameter,
@@ -124,12 +131,17 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         tp_rank = get_tensor_model_parallel_rank()
         param_data = param_data.narrow(self.output_dim, shard_offset,
                                        shard_size)
-        loaded_weight = loaded_weight.narrow(self.output_dim,
-                                             tp_rank * shard_size, shard_size)
+        if not use_presharded_weights:
+            loaded_weight = loaded_weight.narrow(self.output_dim,
+                                                 tp_rank * shard_size,
+                                                 shard_size)
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
-    def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
+    def load_qkv_weight(self,
+                        loaded_weight: torch.Tensor,
+                        use_presharded_weights: bool = False,
+                        **kwargs):
 
         shard_offset = kwargs.get("shard_offset")
         shard_size = kwargs.get("shard_size")
@@ -148,8 +160,10 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         shard_id = tp_rank if shard_id == "q" else tp_rank // num_heads
         param_data = param_data.narrow(self.output_dim, shard_offset,
                                        shard_size)
-        loaded_weight = loaded_weight.narrow(self.output_dim,
-                                             shard_id * shard_size, shard_size)
+        if not use_presharded_weights:
+            loaded_weight = loaded_weight.narrow(self.output_dim,
+                                                 shard_id * shard_size,
+                                                 shard_size)
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
@@ -171,11 +185,15 @@ class RowvLLMParameter(BasevLLMParameter):
     def input_dim(self):
         return self._input_dim
 
-    def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
-        tp_rank = get_tensor_model_parallel_rank()
-        shard_size = self.data.shape[self.input_dim]
-        loaded_weight = loaded_weight.narrow(self.input_dim,
-                                             tp_rank * shard_size, shard_size)
+    def load_row_parallel_weight(self,
+                                 loaded_weight: torch.Tensor,
+                                 use_presharded_weights: bool = False):
+        if not use_presharded_weights:
+            tp_rank = get_tensor_model_parallel_rank()
+            shard_size = self.data.shape[self.input_dim]
+            loaded_weight = loaded_weight.narrow(self.input_dim,
+                                                 tp_rank * shard_size,
+                                                 shard_size)
 
         if len(loaded_weight.shape) == 0:
             loaded_weight = loaded_weight.reshape(1)
@@ -239,6 +257,7 @@ class PerTensorScaleParameter(BasevLLMParameter):
     # For row parallel layers, no sharding needed
     # load weight into parameter as is
     def load_row_parallel_weight(self, *args, **kwargs):
+        kwargs.pop("use_presharded_weights", None)
         super().load_row_parallel_weight(*args, **kwargs)
 
     def load_merged_column_weight(self, *args, **kwargs):
@@ -248,6 +267,7 @@ class PerTensorScaleParameter(BasevLLMParameter):
         self._load_into_shard_id(*args, **kwargs)
 
     def load_column_parallel_weight(self, *args, **kwargs):
+        kwargs.pop("use_presharded_weights", None)
         super().load_row_parallel_weight(*args, **kwargs)
 
     def _load_into_shard_id(self, loaded_weight: torch.Tensor,

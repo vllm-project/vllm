@@ -1082,10 +1082,16 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     }
 
     # To ensure correct weight loading and mapping.
-    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={
-        "lm_head.": "language_model.lm_head.",
-        "model.": "language_model.model.",
-    })
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "lm_head.": "language_model.lm_head.",
+            "model.": "language_model.model.",
+            "embed_tokens.": "language_model.model.embed_tokens.",
+        },
+        orig_to_new_substr={
+            "layermodel.norm.": "layernorm.",
+        },
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
