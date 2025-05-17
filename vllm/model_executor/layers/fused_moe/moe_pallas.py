@@ -61,7 +61,7 @@ def fused_moe(
     x = torch.ops.xla.gmm(x, w2, group_sizes)
     x = x[topk_argsort_revert_indices].reshape(-1, topk, hidden_size)
 
-    x = x * topk_weights.unsqueeze_(dim=-1)
+    x = x * topk_weights.unsqueeze(dim=-1)
     x = x.sum(dim=-2)
     x = x.reshape(orig_shape)
     return x
