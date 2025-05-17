@@ -30,7 +30,7 @@ _LONG_INFO = torch.iinfo(torch.long)
 
 
 class OpenAIBaseModel(BaseModel):
-    # A unique identifier for the request
+    # Unique identifier for the request
     request_id: str = Field(
         default_factory=lambda: f"{random_uuid()}",
         description=(
