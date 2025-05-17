@@ -220,8 +220,9 @@ class CompressedTensorsConfig(QuantizationConfig):
 
     def _is_fp4a4_nvfp4(self, weight_quant: BaseModel, input_quant: BaseModel):
 
-        is_weight_act_quant = (weight_quant is not None
-                               and input_quant is not None)
+        if weight_quant is None or input_quant is None:
+            return False
+
         is_group_quant = (
             weight_quant.strategy == QuantizationStrategy.GROUP.value)
         is_symmetric = weight_quant.symmetric and input_quant.symmetric
@@ -232,8 +233,8 @@ class CompressedTensorsConfig(QuantizationConfig):
                          and input_quant.type == QuantizationType.FLOAT.value)
         is_4_bits = weight_quant.num_bits == 4 and input_quant.num_bits == 4
 
-        return (is_weight_act_quant and is_group_quant and is_float_type
-                and is_4_bits and is_group_size_16 and is_symmetric)
+        return (is_group_quant and is_float_type and is_4_bits
+                and is_group_size_16 and is_symmetric)
 
     def _is_fp4a16_nvfp4(self, weight_quant: BaseModel,
                          input_quant: BaseModel):
@@ -352,9 +353,6 @@ class CompressedTensorsConfig(QuantizationConfig):
         if self._is_fp4a16_nvfp4(weight_quant, input_quant):
             return CompressedTensorsW4A16Fp4()
 
-        if self._is_fp4a4_nvfp4(weight_quant, input_quant):
-            return CompressedTensorsW4A4Fp4()
-
         if self._is_wNa16_group_channel(weight_quant, input_quant):
             if (self.quant_format == CompressionFormat.marlin_24.value
                     and weight_quant.num_bits in W4A16SPARSE24_SUPPORTED_BITS):
@@ -373,6 +371,9 @@ class CompressedTensorsConfig(QuantizationConfig):
                     actorder=weight_quant.actorder)
 
         if is_activation_quantization_format(self.quant_format):
+            if self._is_fp4a4_nvfp4(weight_quant, input_quant):
+                return CompressedTensorsW4A4Fp4()
+
             if self._is_fp8_w8a8(weight_quant, input_quant):
                 is_fp8_w8a8_supported = self._check_scheme_supported(
                     CompressedTensorsW8A8Fp8.get_min_capability(), error=False)
