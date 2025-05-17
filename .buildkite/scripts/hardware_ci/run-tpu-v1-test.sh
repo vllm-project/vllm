@@ -14,7 +14,7 @@ remove_docker_container
 # For HF_TOKEN.
 source /etc/environment
 
-docker run --privileged --net host --shm-size=16G -i \
+docker run --privileged --net host --shm-size=16G -it \
     -e "HF_TOKEN=$HF_TOKEN" --name tpu-test \
     vllm-tpu /bin/bash -c '
 set -e # Exit immediately if a command exits with a non-zero status.
