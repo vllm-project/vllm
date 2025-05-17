@@ -35,10 +35,6 @@ def assert_enc_dec_mr_supported_scenario(
             STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP']
         )
 
-    if enc_dec_mr.lora_config is not None:
-        raise NotImplementedError(
-            STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_LORA'])
-
     if enc_dec_mr.parallel_config.pipeline_parallel_size > 1:
         raise NotImplementedError(
             STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_PP'])
