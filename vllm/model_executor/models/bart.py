@@ -45,7 +45,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsQuant, SupportsV0Only
-from .utils import maybe_prefix
+from .utils import AutoWeightsLoader, maybe_prefix
 
 logger = logging.get_logger(__name__)
 
@@ -699,7 +699,8 @@ class BartDecoder(nn.Module):
 
 class BartModel(nn.Module, SupportsQuant):
     _tied_weights_keys = [
-        "encoder.embed_tokens.weight", "decoder.embed_tokens.weight"
+        "encoder.embed_tokens.weight", "decoder.embed_tokens.weight",
+        "lm_head.weight"
     ]
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -761,6 +762,113 @@ class BartModel(nn.Module, SupportsQuant):
             encoder_hidden_states=encoder_hidden_states)
 
         return decoder_outputs
+
+    stacked_params_mapping = {
+        "q_proj": {
+            "param_name": "qkv_proj",
+            "shard_id": "q",
+        },
+        "k_proj": {
+            "param_name": "qkv_proj",
+            "shard_id": "k",
+        },
+        "v_proj": {
+            "param_name": "qkv_proj",
+            "shard_id": "v",
+        },
+    }
+
+    params_mapping = {
+        "beta": "bias",
+        "gamma": "weight",
+        "LayerNorm": "layernorm",
+    }
+
+    def _rename_key(self, key: str):
+        prefix = f"{self.base_model_prefix}."
+        key = key[len(prefix):] if key.startswith(prefix) else key
+
+        for src, dst in self.params_mapping.items():
+            key = key.replace(src, dst)
+
+        return key
+
+    def _rename_stacked_param(
+        self,
+        name: str,
+    ) -> tuple[str, Optional[str]]:
+        for key, mapping in self.stacked_params_mapping.items():
+            if key in name:
+                name = name.replace(key, mapping["param_name"])
+                return name, mapping["shard_id"]
+        return name, None
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        model_params_dict = dict(self.named_parameters())
+
+        weights_tuple_list = list(weights)
+
+        shared_embedding_weight = None
+        shared_embedding_shard_id = None
+
+        for name, loaded_weight in weights_tuple_list:
+
+            name = self._rename_key(name)
+            name, shard_id = self._rename_stacked_param(name)
+
+            if ('shared.weight' in name
+                    or 'encoder.embed_tokens.weight' in name
+                    or 'decoder.embed_tokens.weight' in name
+                    or 'lm_head.weight' in name):
+                assert shared_embedding_weight is None, (
+                    "Conflicting embedding weights.")
+                shared_embedding_weight = loaded_weight
+                shared_embedding_shard_id = shard_id
+            else:
+                # Skip the specific downstream task weight.
+                if name.startswith('cls.'):
+                    continue
+                # use Pooler instead.
+                if name.startswith('pooler.'):
+                    continue
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in model_params_dict:
+                    continue
+
+                param = model_params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                if shard_id:
+                    weight_loader(param, loaded_weight, shard_id)
+                else:
+                    weight_loader(param, loaded_weight)
+
+        # Assign shared weight values
+        encoder_in_param = model_params_dict['encoder.embed_tokens.weight']
+        encoder_in_weight_loader = getattr(encoder_in_param, "weight_loader",
+                                           default_weight_loader)
+
+        decoder_in_param = model_params_dict['decoder.embed_tokens.weight']
+        decoder_in_weight_loader = getattr(decoder_in_param, "weight_loader",
+                                           default_weight_loader)
+
+        lm_head_in_param = model_params_dict['lm_head.weight']
+        lm_head_in_weight_loader = getattr(lm_head_in_param, "weight_loader",
+                                           default_weight_loader)
+
+        assert shared_embedding_weight is not None
+
+        if shared_embedding_shard_id:
+            encoder_in_weight_loader(encoder_in_param, shared_embedding_weight,
+                                     shared_embedding_shard_id)
+            decoder_in_weight_loader(decoder_in_param, shared_embedding_weight,
+                                     shared_embedding_shard_id)
+            lm_head_in_weight_loader(lm_head_in_param, shared_embedding_weight,
+                                     shared_embedding_shard_id)
+        else:
+            encoder_in_weight_loader(encoder_in_param, shared_embedding_weight)
+            decoder_in_weight_loader(decoder_in_param, shared_embedding_weight)
+            lm_head_in_weight_loader(lm_head_in_param, shared_embedding_weight)
 
 
 class BartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
@@ -827,111 +935,6 @@ class BartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
                                        sampling_metadata)
         return logits
 
-    stacked_params_mapping = {
-        "q_proj": {
-            "param_name": "qkv_proj",
-            "shard_id": "q",
-        },
-        "k_proj": {
-            "param_name": "qkv_proj",
-            "shard_id": "k",
-        },
-        "v_proj": {
-            "param_name": "qkv_proj",
-            "shard_id": "v",
-        },
-    }
-
-    params_mapping = {
-        "beta": "bias",
-        "gamma": "weight",
-        "LayerNorm": "layernorm",
-    }
-
-    def _rename_key(self, key: str):
-        prefix = f"{self.base_model_prefix}."
-        key = key[len(prefix):] if key.startswith(prefix) else key
-
-        for src, dst in self.params_mapping.items():
-            key = key.replace(src, dst)
-
-        return key
-
-    def _rename_stacked_param(
-        self,
-        name: str,
-    ) -> tuple[str, Optional[str]]:
-        for key, mapping in self.stacked_params_mapping.items():
-            if key in name:
-                name = name.replace(key, mapping["param_name"])
-                return name, mapping["shard_id"]
-        return name, None
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-
-        model_params_dict = dict(self.model.named_parameters())
-        top_params_dict = dict(self.named_parameters())
-
-        weights_tuple_list = list(weights)
-
-        shared_embedding_weight = None
-        shared_embedding_shard_id = None
-
-        for name, loaded_weight in weights_tuple_list:
-
-            name = self._rename_key(name)
-            name, shard_id = self._rename_stacked_param(name)
-
-            if ('shared.weight' in name
-                    or 'encoder.embed_tokens.weight' in name
-                    or 'decoder.embed_tokens.weight' in name
-                    or 'lm_head.weight' in name):
-                assert shared_embedding_weight is None, (
-                    "Conflicting embedding weights.")
-                shared_embedding_weight = loaded_weight
-                shared_embedding_shard_id = shard_id
-            else:
-                # Skip the specific downstream task weight.
-                if name.startswith('cls.'):
-                    continue
-                # use Pooler instead.
-                if name.startswith('pooler.'):
-                    continue
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in model_params_dict:
-                    continue
-
-                param = model_params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                if shard_id:
-                    weight_loader(param, loaded_weight, shard_id)
-                else:
-                    weight_loader(param, loaded_weight)
-
-        # Assign shared weight values
-        encoder_in_param = model_params_dict['encoder.embed_tokens.weight']
-        encoder_in_weight_loader = getattr(encoder_in_param, "weight_loader",
-                                           default_weight_loader)
-
-        decoder_in_param = model_params_dict['decoder.embed_tokens.weight']
-        decoder_in_weight_loader = getattr(decoder_in_param, "weight_loader",
-                                           default_weight_loader)
-
-        lm_head_in_param = top_params_dict['lm_head.weight']
-        lm_head_in_weight_loader = getattr(lm_head_in_param, "weight_loader",
-                                           default_weight_loader)
-
-        assert shared_embedding_weight is not None
-
-        if shared_embedding_shard_id:
-            encoder_in_weight_loader(encoder_in_param, shared_embedding_weight,
-                                     shared_embedding_shard_id)
-            decoder_in_weight_loader(decoder_in_param, shared_embedding_weight,
-                                     shared_embedding_shard_id)
-            lm_head_in_weight_loader(lm_head_in_param, shared_embedding_weight,
-                                     shared_embedding_shard_id)
-        else:
-            encoder_in_weight_loader(encoder_in_param, shared_embedding_weight)
-            decoder_in_weight_loader(decoder_in_param, shared_embedding_weight)
-            lm_head_in_weight_loader(lm_head_in_param, shared_embedding_weight)
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights)
