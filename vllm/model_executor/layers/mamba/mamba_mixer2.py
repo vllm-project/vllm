@@ -34,7 +34,11 @@ from vllm.model_executor.utils import set_weight_attrs
 @CustomOp.register("mixer2_gated_rms_norm")
 class Mixer2RMSNormGated(CustomOp):
 
-    def __init__(self, full_hidden_size, full_n_groups, eps=1e-6):
+    def __init__(self,
+                 full_hidden_size,
+                 full_n_groups,
+                 use_rms_norm=True,
+                 eps=1e-6):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
@@ -44,9 +48,15 @@ class Mixer2RMSNormGated(CustomOp):
         self.n_groups = full_hidden_size // self.group_size
 
         self.variance_epsilon = eps
-        self.weight = nn.Parameter(torch.ones(self.per_rank_hidden_size))
-        set_weight_attrs(self.weight,
-                         {"weight_loader": sharded_weight_loader(0)})
+        self.use_rms_norm = use_rms_norm
+        if self.use_rms_norm:
+            # Register norm weight only if we're actually applying RMSNorm
+            self.weight = nn.Parameter(torch.ones(self.per_rank_hidden_size))
+            set_weight_attrs(self.weight,
+                             {"weight_loader": sharded_weight_loader(0)})
+        else:
+            # Avoid checkpoint mismatch by skipping unused parameter
+            self.register_parameter("weight", None)
         assert (self.full_hidden_size % self.tp_size == 0
                 ), "Tensor parallel world size must divide hidden size."
 
@@ -54,7 +64,6 @@ class Mixer2RMSNormGated(CustomOp):
         self,
         x: torch.Tensor,
         gate: torch.Tensor,
-        use_rms_norm: bool = True,
     ):
         # Three tensor-parallel cases:
         #   1. n_groups is 1
@@ -67,7 +76,7 @@ class Mixer2RMSNormGated(CustomOp):
         #      the input and then redundantly compute the RMSNorm.
         input_dtype = x.dtype
         x = x * nn.functional.silu(gate.to(torch.float32))
-        if not use_rms_norm:
+        if not self.use_rms_norm:
             return x
 
         if self.n_groups == 1:
@@ -107,10 +116,9 @@ class Mixer2RMSNormGated(CustomOp):
         self,
         x: torch.Tensor,
         gate: torch.Tensor,
-        use_rms_norm: bool = True,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
 
-        if not use_rms_norm:
+        if not self.use_rms_norm:
             return x * nn.functional.silu(gate.to(torch.float32))
 
         if self.tp_size > 1 or self.n_groups != 1:
@@ -397,6 +405,7 @@ class MambaMixer2(CustomOp):
 
         self.norm = Mixer2RMSNormGated(intermediate_size,
                                        n_groups,
+                                       self.use_rms_norm,
                                        eps=rms_norm_eps)
 
     def forward_native(
@@ -571,9 +580,7 @@ class MambaMixer2(CustomOp):
         # GatedRMSNorm internally applying SiLU to the gate
         # SiLU is applied internally before normalization, unlike standard
         # norm usage
-        hidden_states = self.norm(hidden_states,
-                                  gate,
-                                  use_rms_norm=self.use_rms_norm)
+        hidden_states = self.norm(hidden_states, gate)
 
         # # 5. Final linear projection
         out, _ = self.out_proj(hidden_states)
