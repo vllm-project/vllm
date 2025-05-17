@@ -3524,6 +3524,10 @@ class KVTransferConfig:
     kv_connector_extra_config: dict[str, Any] = field(default_factory=dict)
     """any extra config that the connector may need."""
 
+    kv_connector_module_path: Optional[str] = None
+    """The Python module path to dynamically load the KV connector from.
+    Only supported in V1."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
