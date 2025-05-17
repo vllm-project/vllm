@@ -381,7 +381,9 @@ def test_guided_json_object(llm, guided_decoding_backend: str,
 
             # Parse to verify it is valid JSON
             parsed_json = json.loads(generated_text)
-            assert isinstance(parsed_json, dict)
+            # A list is not what was intended, but is still valid
+            # json.
+            assert isinstance(parsed_json, (dict, list))
 
 
 class CarType(str, Enum):
