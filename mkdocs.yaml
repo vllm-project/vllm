@@ -31,15 +31,17 @@ theme:
         icon: material/brightness-2
         name: Switch to system preference
   features:
+    - content.code.copy
     - content.tabs.link
     - navigation.tracking
     - navigation.tabs
     - navigation.sections
     - navigation.indexes
     - navigation.prune
-    - toc.follow
     - navigation.top
-    - content.code.copy
+    - search.highlight
+    - search.share
+    - toc.follow
   custom_dir: docs/overrides
 
 hooks:
