@@ -13,6 +13,7 @@ import pytest
 from pydantic import BaseModel
 
 from tests.reasoning.utils import run_reasoning_extraction
+from vllm.config import StructuredOutputsConfig
 from vllm.entrypoints.llm import LLM
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
@@ -20,7 +21,7 @@ from vllm.reasoning.abs_reasoning_parsers import ReasoningParserManager
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
 if TYPE_CHECKING:
-    from vllm.config import TokenizerMode
+    from vllm.config import StructuredOutputsBackend, TokenizerMode
 
 NGRAM_SPEC_CONFIG = {
     "model": "[ngram]",
@@ -80,7 +81,7 @@ def _load_json(s: str, backend: str) -> str:
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
-    "model_name, guided_decoding_backend, tokenizer_mode, speculative_config",
+    "model_name, structured_outputs_backend, tokenizer_mode, speculative_config",
     PARAMS_MODELS_BACKENDS_TOKENIZER_MODE)
 def test_structured_output(
     monkeypatch: pytest.MonkeyPatch,
@@ -90,8 +91,8 @@ def test_structured_output(
     sample_sql_lark: str,
     sample_regex: str,
     sample_guided_choice: str,
-    guided_decoding_backend: str,
-    tokenizer_mode: str,
+    structured_outputs_backend: StructuredOutputsBackend,
+    tokenizer_mode: TokenizerMode,
     model_name: str,
     speculative_config: dict[str, Any],
 ):
@@ -108,8 +109,10 @@ def test_structured_output(
     llm = LLM(model=model_name,
               enforce_eager=enforce_eager,
               max_model_len=1024,
-              guided_decoding_backend=guided_decoding_backend,
-              guided_decoding_disable_any_whitespace=True,
+              structured_outputs_config=StructuredOutputsConfig(
+                  backend=structured_outputs_backend,
+                  disable_any_whitespace=True,
+              ),
               tokenizer_mode=tokenizer_mode,
               speculative_config=speculative_config)
 
@@ -179,7 +182,7 @@ def test_structured_output(
         temperature=1.0,
         max_tokens=4096,
         guided_decoding=GuidedDecodingParams(json=unsupported_json_schema))
-    if guided_decoding_backend.startswith("xgrammar"):
+    if structured_outputs_backend.startswith("xgrammar"):
         with pytest.raises(ValueError,
                            match="The provided JSON schema contains features "
                            "not supported by xgrammar."):
@@ -522,7 +525,7 @@ Make the response as short as possible.
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
-    "model_name, guided_decoding_backend, tokenizer_mode, reasoning_parser, speculative_config",  # noqa: E501
+    "model_name, structured_outputs_backend, tokenizer_mode, reasoning_parser, speculative_config",  # noqa: E501
     [
         ("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", "xgrammar", "auto",
          "deepseek_r1", NGRAM_SPEC_CONFIG),
@@ -531,7 +534,7 @@ Make the response as short as possible.
 )
 def test_structured_output_with_reasoning_matrices(
     monkeypatch: pytest.MonkeyPatch,
-    guided_decoding_backend: str,
+    structured_outputs_backend: StructuredOutputsBackend,
     tokenizer_mode: TokenizerMode,
     reasoning_parser: str,
     model_name: str,
@@ -551,10 +554,12 @@ def test_structured_output_with_reasoning_matrices(
         enforce_eager=bool(not current_platform.is_tpu()),
         max_model_len=1024,
         max_num_seqs=16,
-        guided_decoding_backend=guided_decoding_backend,
-        guided_decoding_disable_any_whitespace=True,
+        structured_outputs_config=StructuredOutputsConfig(
+            backend=structured_outputs_backend,
+            disable_any_whitespace=True,
+            reasoning_parser=reasoning_parser,
+        ),
         tokenizer_mode=tokenizer_mode,
-        reasoning_parser=reasoning_parser,
         speculative_config=speculative_config,
     )
     tokenizer = llm.get_tokenizer(None)
@@ -609,14 +614,16 @@ def test_structured_output_auto_mode(
     monkeypatch: pytest.MonkeyPatch,
     unsupported_json_schema: dict[str, Any],
     model_name: str,
-    tokenizer_mode: str,
+    tokenizer_mode: TokenizerMode,
 ):
     monkeypatch.setenv("VLLM_USE_V1", "1")
 
-    llm = LLM(model=model_name,
-              max_model_len=1024,
-              guided_decoding_backend="auto",
-              tokenizer_mode=tokenizer_mode)
+    llm = LLM(
+        model=model_name,
+        max_model_len=1024,
+        structured_outputs_config=StructuredOutputsConfig(backend="auto"),
+        tokenizer_mode=tokenizer_mode,
+    )
 
     sampling_params = SamplingParams(
         temperature=1.0,
@@ -658,9 +665,11 @@ def test_guidance_no_additional_properties(monkeypatch: pytest.MonkeyPatch):
 
     llm = LLM(model="Qwen/Qwen2.5-1.5B-Instruct",
               max_model_len=1024,
-              guided_decoding_backend="guidance",
-              guided_decoding_disable_any_whitespace=True,
-              guided_decoding_disable_additional_properties=True)
+              structured_outputs_config=StructuredOutputsConfig(
+                  backend='guidance',
+                  disable_any_whitespace=True,
+                  disable_additional_properties=True,
+              ))
 
     schema = {
         'type': 'object',

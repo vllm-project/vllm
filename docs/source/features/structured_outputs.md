@@ -24,11 +24,20 @@ You can see the complete list of supported parameters on the [OpenAI-Compatible 
 
 Structured outputs are supported by default in the OpenAI-Compatible Server. You
 may choose to specify the backend to use by setting the
-`--guided-decoding-backend` flag to `vllm serve`. The default backend is `auto`,
+`--structured-outputs-config '{"backend": "<supported_backend>"}'` flag to `vllm serve`. The default backend is `auto`,
 which will try to choose an appropriate backend based on the details of the
 request. You may also choose a specific backend, along with
 some options. A full set of options is available in the `vllm serve --help`
 text.
+
+:::{tip}
+You can also specify backend with via json-arg style:
+
+```bash
+vllm serve <model> --structured-outputs-config.backend "<supported_backend>" --structured-outputs-config.disable_any_whitespace=True
+```
+
+:::
 
 Now let´s see an example for each of the cases, starting with the `guided_choice`, as it´s the easiest one:
 
@@ -107,13 +116,13 @@ print(completion.choices[0].message.content)
 
 :::{tip}
 While not strictly necessary, normally it´s better to indicate in the prompt the
-JSON schema and how the fields should be populated.  This can improve the
+JSON schema and how the fields should be populated. This can improve the
 results notably in most cases.
 :::
 
 Finally we have the `guided_grammar` option, which is probably the most
 difficult to use, but it´s really powerful. It allows us to define complete
-languages like SQL queries.  It works by using a context free EBNF grammar.
+languages like SQL queries. It works by using a context free EBNF grammar.
 As an example, we can use to define a specific format of simplified SQL queries:
 
 ```python
@@ -254,7 +263,7 @@ The main available options inside `GuidedDecodingParams` are:
 - `structural_tag`
 
 These parameters can be used in the same way as the parameters from the Online
-Serving examples above.  One example for the usage of the `choice` parameter is
+Serving examples above. One example for the usage of the `choice` parameter is
 shown below:
 
 ```python

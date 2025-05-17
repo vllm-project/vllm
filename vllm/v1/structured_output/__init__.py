@@ -50,7 +50,7 @@ class StructuredOutputManager:
             scheduler_config=self.vllm_config.scheduler_config,
             lora_config=self.vllm_config.lora_config,
         ).get_lora_tokenizer(None)
-        reasoning_backend = vllm_config.decoding_config.reasoning_backend
+        reasoning_backend = vllm_config.structured_outputs_config.reasoning_backend
         if reasoning_backend:
             reasoner_cls = ReasoningParserManager.get_reasoning_parser(
                 reasoning_backend)

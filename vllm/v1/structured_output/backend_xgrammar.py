@@ -33,7 +33,7 @@ class XgrammarBackend(StructuredOutputBackend):
 
     def __post_init__(self):
         self.disable_any_whitespace = \
-            self.vllm_config.decoding_config.disable_any_whitespace
+            self.vllm_config.structured_outputs_config.disable_any_whitespace
 
         if isinstance(self.tokenizer, MistralTokenizer):
             # NOTE: ideally, xgrammar should handle this accordingly.

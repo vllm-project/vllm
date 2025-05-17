@@ -16,7 +16,7 @@ from zmq import Frame  # type: ignore[attr-defined]
 from zmq.asyncio import Socket
 
 from vllm import PoolingParams
-from vllm.config import DecodingConfig, ModelConfig, VllmConfig
+from vllm.config import ModelConfig, StructuredOutputsConfig, VllmConfig
 from vllm.core.scheduler import SchedulerOutputs
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -96,7 +96,7 @@ class MQLLMEngineClient(EngineClient):
         # Get the configs.
         self.vllm_config = engine_config
         self.model_config = engine_config.model_config
-        self.decoding_config = engine_config.decoding_config
+        self.structured_outputs_config = engine_config.structured_outputs_config
 
         # Create the tokenizer group.
         self.tokenizer = init_tokenizer_from_configs(
@@ -381,8 +381,8 @@ class MQLLMEngineClient(EngineClient):
     async def get_vllm_config(self) -> VllmConfig:
         return self.vllm_config
 
-    async def get_decoding_config(self) -> DecodingConfig:
-        return self.decoding_config
+    async def get_decoding_config(self) -> StructuredOutputsConfig:
+        return self.structured_outputs_config
 
     async def get_model_config(self) -> ModelConfig:
         return self.model_config
@@ -616,11 +616,11 @@ class MQLLMEngineClient(EngineClient):
                 build_guided_decoding_logits_processor_async(
                     sampling_params=params,
                     tokenizer=await self.get_tokenizer(lora_request),
-                    default_guided_backend=(self.decoding_config.backend
-                        if self.decoding_config
-                        else DecodingConfig.backend),
+                    default_guided_backend=(self.structured_outputs_config.backend
+                        if self.structured_outputs_config
+                        else StructuredOutputsConfig.backend),
                     model_config=self.model_config,
-                    reasoning_backend=self.decoding_config.reasoning_backend,
+                    reasoning_backend=self.structured_outputs_config.reasoning_backend,
                 )
 
         # 1) Create output queue for this requests.
