@@ -1285,6 +1285,12 @@ def create_server_socket(addr: tuple[str, int]) -> socket.socket:
     return sock
 
 
+def create_server_unix_socket(path: str) -> socket.socket:
+    sock = socket.socket(family=socket.AF_UNIX, type=socket.SOCK_STREAM)
+    sock.bind(path)
+    return sock
+
+
 async def run_server(args, **uvicorn_kwargs) -> None:
     logger.info("vLLM API server version %s", VLLM_VERSION)
     log_non_default_args(args)
@@ -1308,8 +1314,12 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     # workaround to make sure that we bind the port before the engine is set up.
     # This avoids race conditions with ray.
     # see https://github.com/vllm-project/vllm/issues/8204
-    sock_addr = (args.host or "", args.port)
-    sock = create_server_socket(sock_addr)
+    if args.uds:
+        sock_addr = (args.uds, args.port)
+        sock = create_server_unix_socket(args.uds)
+    else:
+        sock_addr = (args.host or "", args.port)
+        sock = create_server_socket(sock_addr)
 
     # workaround to avoid footguns where uvicorn drops requests with too
     # many concurrent requests active
@@ -1333,9 +1343,13 @@ async def run_server(args, **uvicorn_kwargs) -> None:
             return a or "0.0.0.0"
 
         is_ssl = args.ssl_keyfile and args.ssl_certfile
-        logger.info("Starting vLLM API server on http%s://%s:%d",
-                    "s" if is_ssl else "", _listen_addr(sock_addr[0]),
-                    sock_addr[1])
+        if args.uds:
+            logger.info("Starting vLLM API server on unix socket %s",
+                        sock_addr[0])
+        else:
+            logger.info("Starting vLLM API server on http%s://%s:%d",
+                        "s" if is_ssl else "", _listen_addr(sock_addr[0]),
+                        sock_addr[1])
 
         shutdown_task = await serve_http(
             app,
