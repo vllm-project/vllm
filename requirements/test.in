@@ -6,6 +6,7 @@ pytest-asyncio
 pytest-rerunfailures
 pytest-shard
 pytest-timeout
+pytest-httpx
 
 # testing utils
 backoff # required for phi4mm test
