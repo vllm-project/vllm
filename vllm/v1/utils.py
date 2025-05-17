@@ -373,7 +373,7 @@ def wait_for_completion_or_failure(
         logger.info("Waiting for API servers to complete ...")
         # Create a mapping of sentinels to their corresponding processes
         # for efficient lookup
-        sentinel_to_proc = {
+        sentinel_to_proc: dict[Any, Union[SpawnProcess, Process]] = {
             proc.sentinel: proc
             for proc in api_server_manager.processes
         }
@@ -391,7 +391,7 @@ def wait_for_completion_or_failure(
         # Check if any process terminates
         while sentinel_to_proc:
             # Wait for any process to terminate
-            ready_sentinels = connection.wait(sentinel_to_proc)
+            ready_sentinels: list[Any] = connection.wait(sentinel_to_proc)
 
             # Process any terminated processes
             for sentinel in ready_sentinels:

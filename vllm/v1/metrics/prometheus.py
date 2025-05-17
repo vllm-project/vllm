@@ -56,8 +56,11 @@ def unregister_vllm_metrics():
     
     This is useful for testing and CI/CD where metrics may be registered
     multiple times across test runs.
+    
+    Also, in case of multiprocess, we need to unregister the metrics from the 
+    global registry.
     """
-    registry = get_prometheus_registry()
+    registry = REGISTRY
     # Unregister any existing vLLM collectors
     for collector in list(registry._collector_to_names):
         if hasattr(collector, "_name") and "vllm" in collector._name:
