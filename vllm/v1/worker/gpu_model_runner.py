@@ -344,6 +344,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for new_req_data in scheduler_output.scheduled_new_reqs:
             req_id = new_req_data.req_id
             sampling_params = new_req_data.sampling_params
+            assert sampling_params is not None
             if sampling_params.sampling_type == SamplingType.RANDOM_SEED:
                 generator = torch.Generator(device=self.device)
                 generator.manual_seed(sampling_params.seed)
@@ -1411,6 +1412,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_token_ids=spec_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
+            pooler_output=[],
             finished_sending=finished_sending,
             finished_recving=finished_recving,
         )

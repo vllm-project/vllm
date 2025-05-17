@@ -883,7 +883,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             spec_token_ids=None,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
-        )
+            pooler_output=[])
 
         # Check there are no new graphs compiled - all the graphs should be
         # captured and compiled during warm up.

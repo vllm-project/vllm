@@ -16,6 +16,7 @@ from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
+from vllm.v1.worker.interfaces import BaseInputBatch
 
 _SAMPLING_EPS = 1e-5
 
@@ -53,7 +54,7 @@ class CachedRequestState:
             return self.output_token_ids[idx - self.num_prompt_tokens]
 
 
-class InputBatch:
+class InputBatch(BaseInputBatch):
 
     def __init__(
         self,
