@@ -30,6 +30,9 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.layers.quantization.gptq import GPTQConfig
+from vllm.model_executor.layers.quantization.gptq_marlin import (
+    GPTQMarlinConfig)
 from vllm.model_executor.models.aimv2 import AIMv2Model
 from vllm.model_executor.models.siglip import SiglipVisionModel
 from vllm.model_executor.models.utils import (AutoWeightsLoader, flatten_bn,
@@ -410,7 +413,7 @@ class Ovis(nn.Module, SupportsMultiModal):
 
         self.visual_tokenizer = VisualTokenizer(
             config=config.visual_tokenizer_config,
-            quant_config=quant_config,
+            quant_config=self._maybe_ignore_quant_config(quant_config),
             prefix=f"{prefix}.visual_tokenizer",
         )
 
@@ -421,9 +424,16 @@ class Ovis(nn.Module, SupportsMultiModal):
         text_model_type = self.config.get_text_config().model_type
         self.image_pad_token_id = IMAGE_PAD_TOKEN_ID_MAP[text_model_type]
 
-        # TODO(Isotr0py): PP support
-        # self.make_empty_intermediate_tensors = (
-        #    self.language_model.make_empty_intermediate_tensors)
+        self.make_empty_intermediate_tensors = (
+            self.get_language_model().make_empty_intermediate_tensors)
+
+    def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
+        # GPTQ configs do not have a list of ignored modules, however AutoGPTQ
+        # seems to avoid vision encoder sections for some models.
+        # See: https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct-GPTQ-Int4
+        if isinstance(quant_config, (GPTQConfig, GPTQMarlinConfig)):
+            return None
+        return quant_config
 
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[OvisImagePatchInputs]:
