@@ -271,6 +271,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        num_share_fusion_replicas: int = 0,
+        routed_scaling_factor: Optional[float] = None,
     ) -> torch.Tensor:
         raise NotImplementedError
 
@@ -412,6 +414,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        num_share_fusion_replicas: int = 0,
+        routed_scaling_factor: Optional[float] = None,
     ) -> torch.Tensor:
         return self.forward(
             x=x,
@@ -428,7 +432,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
             activation=activation,
-            apply_router_weight_on_input=apply_router_weight_on_input)
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            num_share_fusion_replicas=num_share_fusion_replicas,
+            routed_scaling_factor=routed_scaling_factor,
+        )
 
     def set_prepare_finalize(
         self,
@@ -488,6 +495,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        num_share_fusion_replicas: int = 0,
+        routed_scaling_factor: Optional[float] = None,
     ) -> torch.Tensor:
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
@@ -500,8 +509,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
-            indices_type=torch.uint32 if self.moe.use_pplx_kernels else None)
-
+            indices_type=torch.uint32 if self.moe.use_pplx_kernels else None,
+            num_share_fusion_replicas=num_share_fusion_replicas,
+            routed_scaling_factor=routed_scaling_factor,
+        )
         if self.rocm_aiter_moe_enabled:
             assert expert_map is None
             return self.rocm_aiter_fused_experts(
@@ -762,6 +773,7 @@ class FusedMoE(torch.nn.Module):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        routed_scaling_factor: Optional[float] = None,
     ):
         super().__init__()
 
@@ -779,6 +791,8 @@ class FusedMoE(torch.nn.Module):
                 vllm_parallel_config=vllm_config.parallel_config))
 
         self.global_num_experts = num_experts
+        num_share_fusion_replicas = \
+            vllm_config.parallel_config.num_share_fusion_replicas
 
         # For smuggling this layer into the fused moe custom op
         self.use_direct_call = self.dp_size == 1
@@ -795,6 +809,13 @@ class FusedMoE(torch.nn.Module):
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
                 global_num_experts=self.global_num_experts)
+            if (num_share_fusion_replicas > 0
+                    and self.ep_size != num_share_fusion_replicas):
+                logger.warning(
+                    "With EP enabled and share expert fusion enabled"
+                    ", share expert replica should be same as ep_size"
+                    "got share expert replica = %d"
+                    "and ep_size = %d", num_share_fusion_replicas, ep_size)
         else:
             self.local_num_experts, self.expert_map = (self.global_num_experts,
                                                        None)
@@ -816,6 +837,8 @@ class FusedMoE(torch.nn.Module):
         self.e_score_correction_bias = e_score_correction_bias
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = activation
+        self.routed_scaling_factor = routed_scaling_factor
+        self.num_share_fusion_replicas = num_share_fusion_replicas
 
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
@@ -1193,7 +1216,9 @@ class FusedMoE(torch.nn.Module):
                        custom_routing_function: Optional[Callable] = None,
                        scoring_func: str = "softmax",
                        e_score_correction_bias: Optional[torch.Tensor] = None,
-                       indices_type: Optional[torch.dtype] = None):
+                       indices_type: Optional[torch.dtype] = None,
+                       num_share_fusion_replicas: int = 0,
+                       routed_scaling_factor: Optional[float] = None):
         from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 
         # DeekSeekv2 uses grouped_top_k
@@ -1208,7 +1233,9 @@ class FusedMoE(torch.nn.Module):
                 num_expert_group=num_expert_group,
                 topk_group=topk_group,
                 scoring_func=scoring_func,
-                e_score_correction_bias=e_score_correction_bias)
+                e_score_correction_bias=e_score_correction_bias,
+                num_share_fusion_replicas=num_share_fusion_replicas,
+                routed_scaling_factor=routed_scaling_factor)
             if indices_type is not None:
                 topk_ids = topk_ids.to(dtype=indices_type)
         elif custom_routing_function is None:
@@ -1340,7 +1367,8 @@ class FusedMoE(torch.nn.Module):
             e_score_correction_bias=self.e_score_correction_bias,
             activation=self.activation,
             apply_router_weight_on_input=self.apply_router_weight_on_input,
-        )
+            routed_scaling_factor=self.routed_scaling_factor,
+            num_share_fusion_replicas=self.num_share_fusion_replicas)
 
         if self.dp_size > 1:
             final_hidden_states = get_ep_group().combine(final_hidden_states)

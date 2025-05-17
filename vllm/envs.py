@@ -117,6 +117,7 @@ if TYPE_CHECKING:
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5557
     VLLM_ALL2ALL_BACKEND: str = "naive"
+    VLLM_SHARED_EXPERT_FUSION_REPLICAS: int = 0
 
 
 def get_default_cache_root():
@@ -768,6 +769,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_V0_USE_OUTLINES_CACHE":
     lambda: os.environ.get("VLLM_V0_USE_OUTLINES_CACHE", "0") == "1",
 
+    # If set, disables TPU-specific optimization for top-k & top-p sampling
+    "VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION":
+    lambda: bool(int(os.environ["VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION"]))
+    if "VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION" in os.environ else None,
+
     # Gap between padding buckets for the forward pass. So we have
     # 8, we will run forward pass with [16, 24, 32, ...].
     "VLLM_TPU_BUCKET_PADDING_GAP":
@@ -811,6 +817,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # all2all backend for vllm's expert parallel communication
     "VLLM_ALL2ALL_BACKEND":
     lambda: os.getenv("VLLM_ALL2ALL_BACKEND", "naive"),
+
+    # Enable Share Expert Fusion by setting this > 0, disable by setting = 0
+    # The value here will be the Shared Expert relicas copied into MoE
+    # Set a larger value will consume more GPU memory
+    # but a better loading-balance thus potentially faster inference
+    "VLLM_SHARED_EXPERT_FUSION_REPLICAS":
+    lambda: int(os.environ["VLLM_SHARED_EXPERT_FUSION_REPLICAS"])
+    if "VLLM_SHARED_EXPERT_FUSION_REPLICAS" in os.environ else 0
 }
 
 # end-env-vars-definition
