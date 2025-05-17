@@ -8,7 +8,8 @@ from unittest.mock import patch
 
 import pytest
 
-from vllm.entrypoints.cli.serve import APIServerProcessManager
+from vllm.v1.utils import (APIServerProcessManager,
+                           wait_for_completion_or_failure)
 
 # Global variables to control worker behavior
 WORKER_RUNTIME_SECONDS = 0.5
@@ -27,6 +28,8 @@ def api_server_args():
     """Fixture to provide arguments for APIServerProcessManager."""
     sock = socket.socket()
     return {
+        "target_server_fn":
+        mock_run_api_server_worker,
         "listen_address":
         "localhost:8000",
         "sock":
@@ -48,8 +51,6 @@ def api_server_args():
     }
 
 
-@patch("vllm.entrypoints.cli.serve.run_api_server_worker",
-       mock_run_api_server_worker)
 @pytest.mark.parametrize("with_stats_update", [True, False])
 def test_api_server_process_manager_init(api_server_args, with_stats_update):
     """Test initializing the APIServerProcessManager."""
@@ -110,7 +111,7 @@ def test_wait_for_completion_or_failure(api_server_args):
 
         def run_with_exception_capture():
             try:
-                manager.wait_for_completion_or_failure()
+                wait_for_completion_or_failure(api_server_manager=manager)
             except Exception as e:
                 result["exception"] = e
 
@@ -150,8 +151,6 @@ def test_wait_for_completion_or_failure(api_server_args):
         time.sleep(0.2)
 
 
-@patch("vllm.entrypoints.cli.serve.run_api_server_worker",
-       mock_run_api_server_worker)
 @pytest.mark.timeout(30)
 def test_normal_completion(api_server_args):
     """Test that wait_for_completion_or_failure works in normal completion."""
@@ -180,7 +179,7 @@ def test_normal_completion(api_server_args):
         # since all processes have already
         # terminated, it should return immediately
         # with no error
-        manager.wait_for_completion_or_failure()
+        wait_for_completion_or_failure(api_server_manager=manager)
 
     finally:
         # Clean up just in case
@@ -188,38 +187,47 @@ def test_normal_completion(api_server_args):
         time.sleep(0.2)
 
 
-@patch("vllm.entrypoints.cli.serve.run_api_server_worker",
-       mock_run_api_server_worker)
 @pytest.mark.timeout(30)
 def test_external_process_monitoring(api_server_args):
-    """Test that wait_for_completion_or_failure detects failures in monitored 
-    external processes."""
+    """Test that wait_for_completion_or_failure handles additional processes."""
     global WORKER_RUNTIME_SECONDS
     WORKER_RUNTIME_SECONDS = 100
 
     # Create and start the external process
+    # (simulates local_engine_manager or coordinator)
     spawn_context = multiprocessing.get_context("spawn")
     external_proc = spawn_context.Process(target=mock_run_api_server_worker,
                                           name="MockExternalProcess")
     external_proc.start()
 
-    # Create the manager with the external process to monitor
-    manager = APIServerProcessManager(**api_server_args,
-                                      extra_processes_to_healthcheck=[
-                                          external_proc
-                                      ])
+    # Create the class to simulate a coordinator
+    class MockCoordinator:
+
+        def __init__(self, proc):
+            self.proc = proc
+
+        def close(self):
+            if self.proc.is_alive():
+                self.proc.terminate()
+                self.proc.join(timeout=0.5)
+
+    # Create a mock coordinator with the external process
+    mock_coordinator = MockCoordinator(external_proc)
+
+    # Create the API server manager
+    manager = APIServerProcessManager(**api_server_args)
 
     try:
         # Verify manager initialization
         assert len(manager.processes) == 3
-        assert len(manager.extra_processes_to_healthcheck) == 1
 
         # Create a result capture for the thread
         result = {"exception": None}
 
         def run_with_exception_capture():
             try:
-                manager.wait_for_completion_or_failure()
+                wait_for_completion_or_failure(api_server_manager=manager,
+                                               coordinator=mock_coordinator)
             except Exception as e:
                 result["exception"] = e
 
@@ -228,14 +236,14 @@ def test_external_process_monitoring(api_server_args):
                                        daemon=True)
         wait_thread.start()
 
-        # Terminate the external process
+        # Terminate the external process to trigger a failure
+        time.sleep(0.2)
         external_proc.terminate()
 
-        # Wait for the external process to fail and
-        # wait_for_completion_or_failure to detect it
+        # Wait for the thread to detect the failure
         wait_thread.join(timeout=1.0)
 
-        # Verify that the wait thread has completed
+        # The wait thread should have completed
         assert not wait_thread.is_alive(
         ), "wait_for_completion_or_failure thread still running"
 
@@ -255,6 +263,5 @@ def test_external_process_monitoring(api_server_args):
     finally:
         # Clean up
         manager.close()
-        if external_proc.is_alive():
-            external_proc.terminate()
+        mock_coordinator.close()
         time.sleep(0.2)

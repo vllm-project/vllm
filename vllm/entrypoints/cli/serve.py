@@ -1,15 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
-import multiprocessing
 import os
 import signal
 import socket
 import sys
-import weakref
 from multiprocessing import connection
-from multiprocessing.context import SpawnProcess
-from typing import Any, Optional, Union, cast
+from typing import Any, Union
 
 import uvloop
 import zmq
@@ -30,140 +27,15 @@ from vllm.v1.engine.core import EngineCoreProc
 from vllm.v1.engine.core_client import CoreEngineProcManager
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
-from vllm.v1.utils import (CoreEngine, get_engine_client_zmq_addr, shutdown,
+from vllm.v1.utils import (APIServerProcessManager, CoreEngine,
+                           get_engine_client_zmq_addr,
+                           wait_for_completion_or_failure,
                            wait_for_engine_startup)
 
 logger = init_logger(__name__)
 
 # Type for process sentinel objects
 SentinelType = Union[connection.Connection, socket.socket, int]
-
-
-class APIServerProcessManager:
-    """Manages a group of API server processes.
-    
-    Handles creation, monitoring, and termination of API server worker
-    processes. Also monitors extra processes to check if they are healthy.
-    """
-
-    def __init__(
-        self,
-        listen_address: str,
-        sock: Any,
-        args: argparse.Namespace,
-        num_servers: int,
-        input_addresses: list[str],
-        output_addresses: list[str],
-        stats_update_address: Optional[str] = None,
-        extra_processes_to_healthcheck: Optional[list[
-            multiprocessing.Process]] = None,
-    ):
-        """Initialize and start API server worker processes.
-        
-        Args:
-            listen_address: Address to listen for client connections
-            sock: Socket for client connections
-            args: Command line arguments
-            num_servers: Number of API server processes to start
-            input_addresses: Input addresses for each API server
-            output_addresses: Output addresses for each API server
-            stats_update_address: Optional stats update address
-            extra_processes_to_healthcheck: Optional list of additional 
-                processes to monitor
-        """
-        self.listen_address = listen_address
-        self.sock = sock
-        self.args = args
-
-        # Store additional processes to monitor
-        self.extra_processes_to_healthcheck = (extra_processes_to_healthcheck
-                                               or [])
-
-        # Start API servers
-        spawn_context = multiprocessing.get_context("spawn")
-        self.processes: list[SpawnProcess] = []
-
-        for i, in_addr, out_addr in zip(range(num_servers), input_addresses,
-                                        output_addresses):
-            client_config = {
-                "input_address": in_addr,
-                "output_address": out_addr,
-                "client_index": i
-            }
-            if stats_update_address is not None:
-                client_config["stats_update_address"] = stats_update_address
-
-            proc = spawn_context.Process(target=run_api_server_worker,
-                                         name=f"ApiServer_{i}",
-                                         args=(listen_address, sock, args,
-                                               client_config))
-            self.processes.append(proc)
-            proc.start()
-
-        logger.info("Started %d API server processes", len(self.processes))
-
-        # Casting due to mypy error
-        process_list: list[multiprocessing.Process] = cast(
-            list[multiprocessing.Process], self.processes)
-        # Shutdown only the API server processes on garbage collection
-        # The extra processes are managed by their owners
-        self._finalizer = weakref.finalize(self, shutdown, process_list)
-
-    def wait_for_completion_or_failure(self) -> None:
-        """Wait for all processes to complete or detect if any fail.
-        Raises an exception if any process exits with a non-zero status.
-        """
-        try:
-            # Create a list of all processes we need to monitor
-            all_processes: list[multiprocessing.Process] = []
-
-            # Casting due to mypy error
-            all_processes.extend(
-                cast(list[multiprocessing.Process], self.processes))
-            all_processes.extend(self.extra_processes_to_healthcheck)
-
-            # Log the processes we're monitoring
-            logger.info(
-                "Monitoring %d API server processes "
-                "and %d additional processes", len(self.processes),
-                len(self.extra_processes_to_healthcheck))
-
-            # Create a mapping of sentinels to their corresponding processes
-            # for efficient lookup
-            sentinel_to_proc: dict[Any, multiprocessing.Process] = {
-                proc.sentinel: proc
-                for proc in all_processes
-            }
-            sentinels = list(sentinel_to_proc.keys())
-
-            # Check if any process terminates
-            while sentinels:
-                # Wait for any process to terminate
-                ready_sentinels = connection.wait(sentinels)
-                if not ready_sentinels:
-                    continue
-
-                # Process any terminated processes
-                for sentinel in ready_sentinels:
-                    proc = sentinel_to_proc[sentinel]
-                    sentinels.remove(sentinel)
-
-                    # Check if process exited with error
-                    if proc.exitcode != 0:
-                        logger.error(
-                            "Process %s (PID: %d) "
-                            "died with exit code %s", proc.name, proc.pid,
-                            proc.exitcode)
-                        raise RuntimeError(
-                            f"Process {proc.name} (PID: {proc.pid}) "
-                            f"died with exit code {proc.exitcode}")
-        except Exception:
-            # If any exception occurs, terminate all processes before re-raising
-            self.close()
-            raise
-
-    def close(self) -> None:
-        self._finalizer()
 
 
 class ServeSubcommand(CLISubcommand):
@@ -363,22 +235,20 @@ def run_multi_api_server(args: argparse.Namespace):
 
         # Start API servers using the manager
         api_server_manager = APIServerProcessManager(
+            target_server_fn=run_api_server_worker,
             listen_address=listen_address,
             sock=sock,
             args=args,
             num_servers=num_api_servers,
             input_addresses=input_addresses,
             output_addresses=output_addresses,
-            stats_update_address=stats_update_address,
-            extra_processes_to_healthcheck=[coordinator.proc]
-            if coordinator else None)
+            stats_update_address=stats_update_address)
 
         # Wait for engine handshakes to complete.
         core_engines = [
             CoreEngine(index=i, local=(i < local_engine_count))
             for i in range(dp_size)
         ]
-
         wait_for_engine_startup(
             handshake_socket,
             addresses,
@@ -389,28 +259,11 @@ def run_multi_api_server(args: argparse.Namespace):
             coordinator.proc if coordinator else None,
         )
 
-        # Wait for API server processes to complete or fail
-        try:
-            api_server_manager.wait_for_completion_or_failure()
-        except KeyboardInterrupt:
-            logger.info(
-                "Received KeyboardInterrupt, shutting down API servers...")
-            api_server_manager.close()
-            # Cleanup coordinator and engine manager
-            if coordinator:
-                coordinator.close()
-            if local_engine_manager:
-                local_engine_manager.close()
-            raise
-        except Exception as e:
-            logger.exception(
-                "Exception occurred while running API servers: %s", str(e))
-            # Cleanup coordinator and engine manager
-            if coordinator:
-                coordinator.close()
-            if local_engine_manager:
-                local_engine_manager.close()
-            raise
+        # Wait for API servers
+        wait_for_completion_or_failure(
+            api_server_manager=api_server_manager,
+            local_engine_manager=local_engine_manager,
+            coordinator=coordinator)
 
 
 def run_api_server_worker(listen_address,
