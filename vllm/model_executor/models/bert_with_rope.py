@@ -371,14 +371,18 @@ class NomicMoE(nn.Module):
         # NOTE: Nomic-MoE has fused experts weights
         param_data = param.data
         if weight_name.endswith("w1"):
-            param_data.copy_(
-                loaded_weight.reshape(self.num_total_experts,
-                                      self.intermediate_size,
-                                      self.hidden_size))
+            loaded_weight = loaded_weight.reshape(
+                self.num_total_experts,
+                self.intermediate_size,
+                self.hidden_size,
+            )
         if weight_name.endswith("w2"):
-            param_data.copy_(
-                loaded_weight.reshape(self.num_total_experts, self.hidden_size,
-                                      self.intermediate_size))
+            loaded_weight = loaded_weight.reshape(
+                self.num_total_experts,
+                self.intermediate_size,
+                self.hidden_size,
+            ).transpose(1, 2).contiguous()
+        param_data.copy_(loaded_weight)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
@@ -399,7 +403,7 @@ class NomicMoE(nn.Module):
         #     final_hidden_states = tensor_model_parallel_all_reduce(
         #         final_hidden_states)
 
-        return final_hidden_states.view(num_tokens, hidden_size)
+        return final_hidden_states.view(num_tokens, hidden_size) + self.bias
 
 
 class BertWithRopeBlock(nn.Module):
