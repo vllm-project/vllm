@@ -6,7 +6,7 @@ import json
 import math
 import os
 from dataclasses import MISSING, dataclass, field, fields
-from typing import List, Literal, Optional, Union
+from typing import Literal, Optional, Union
 
 from vllm.config import LoRAConfig
 from vllm.logger import init_logger
@@ -40,7 +40,7 @@ class PEFTHelper:
     vllm_max_position_embeddings: Optional[int] = field(default=False)
     vllm_long_context_scaling_factor: Optional[float] = field(default=None)
 
-    def _validate_features(self) -> List[str]:
+    def _validate_features(self) -> list[str]:
         """
         Check if there are any unsupported LoRA features.
         """
