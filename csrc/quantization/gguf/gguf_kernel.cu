@@ -321,7 +321,7 @@ torch::Tensor ggml_mul_mat_a8_q8_0_mi50(torch::Tensor W,  // quant weight, q8_0
   int num_tiles_col = (ncols_out + TILE_SIZE_COL - 1) / TILE_SIZE_COL;
   int num_tiles_row = (nrows_out + TILE_SIZE_ROW - 1) / TILE_SIZE_ROW;
   const dim3 gridDim_mulmat(num_tiles_col, num_tiles_row);
-  const dim3 blockDim_mulmat(WARP_SIZE_GCN, TILE_SIZE_COL, TILE_SIZE_ROW);
+  const dim3 blockDim_mulmat(32, 32);
   mul_mat_q8_0_mi50<<<gridDim_mulmat, blockDim_mulmat, 0, stream>>>(
       (block_q8_0*)W.data_ptr(), (block_q8_0*)quant_X.data_ptr(),
       (half*)Y.data_ptr(), ncols, nrows_w, nrows_x, num_qblocks_per_row,
