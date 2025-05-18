@@ -217,11 +217,16 @@ def test_moe_permute_unpermute(n_token: int, n_hidden: int, topk: int,
          align_block_size=align_block_size,
          fill_invalid_expert=fill_invalid_expert)
 
-    (permuted_hidden_states, expert_first_token_offset, inv_permuted_idx,
-     permuted_idx, m_indices) = moe_permute(hidden_states, topk_ids, topk,
-                                            n_expert, expert_map,
-                                            align_block_size,
-                                            fill_invalid_expert)
+    (permuted_hidden_states, _, expert_first_token_offset, inv_permuted_idx,
+     permuted_idx,
+     m_indices) = moe_permute(hidden_states=hidden_states,
+                              a1q_scale=None,
+                              topk_ids=topk_ids,
+                              topk=topk,
+                              n_expert=n_expert,
+                              expert_map=expert_map,
+                              align_block_size=align_block_size,
+                              fill_invalid_expert=fill_invalid_expert)
 
     # check expert_first_token_offset
     torch.testing.assert_close(gold_expert_first_token_offset,

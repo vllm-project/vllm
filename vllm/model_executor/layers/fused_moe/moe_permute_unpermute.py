@@ -76,6 +76,7 @@ def _moe_unpermute_and_reduce(
 
 def moe_permute(
     hidden_states: torch.Tensor,
+    a1q_scale: Optional[torch.Tensor],
     topk_ids: torch.Tensor,
     topk: int,
     n_expert: int,
@@ -83,12 +84,13 @@ def moe_permute(
     align_block_size: Optional[int] = None,
     fill_invalid_expert: int = -1
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
-           torch.Tensor]:
+           torch.Tensor, torch.Tensor]:
     """
     This function expands and permutes activation to gather uncontinuous tokens
       for each expert.
     Parameters:
     - hidden_states (torch.Tensor): The input tensor to the MoE layer.
+    - a1q_scale (Optional[torch.Tensor]): quant scale for hidden_states
     - topk_ids (torch.Tensor): topk expert route id for each token.
     - topk (int): The number of top-k experts to select.
     - n_expert (int): The number of expert.
@@ -100,6 +102,7 @@ def moe_permute(
       to workaround DeepGemm unsupported -1 in m_indices
     Returns:
     - permuted_hidden_states (torch.Tensor): permuted activation.
+    - a1q_scale (Optional[torch.Tensor]): quant scale for hidden_states
     - expert_first_token_offset (torch.Tensor): offset of the first token
        of each expert for standard grouped gemm. if enable 'align_block_size'
        expert_first_token_offset will align up to 'align_block_size'.
@@ -150,7 +153,10 @@ def moe_permute(
                                  align_block_size, permuted_hidden_states,
                                  expert_first_token_offset, inv_permuted_idx,
                                  permuted_idx, m_indices)
-    return (permuted_hidden_states, expert_first_token_offset,
+    if a1q_scale is not None:
+        a1q_scale = a1q_scale[permuted_idx.clamp(max=n_token * topk - 1) //
+                              topk]
+    return (permuted_hidden_states, a1q_scale, expert_first_token_offset,
             inv_permuted_idx, permuted_idx, m_indices)
 
 
@@ -161,7 +167,7 @@ def moe_unpermute(
     inv_permuted_idx: torch.Tensor,
     topk: int,
     expert_first_token_offset: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
+) -> None:
     """
     This function expands and permutes activation to gathering uncontinuous
       tokens for each expert.
@@ -183,7 +189,6 @@ def moe_unpermute(
     torch.ops._moe_C.moe_unpermute(permuted_hidden_states, topk_weights,
                                    inv_permuted_idx, expert_first_token_offset,
                                    topk, out)
-
 
 def _customized_moe_permute(
     curr_hidden_states: torch.Tensor,
