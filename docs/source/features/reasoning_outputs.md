@@ -19,6 +19,7 @@ vLLM currently supports the following reasoning models:
 
 :::{note}
 IBM Granite 3.2 reasoning is disabled by default; to enable it, you must also pass `thinking=True` in your `chat_template_kwargs`.
+The reasoning feature for the Qwen3 series is enabled by default. To disable it, you must pass `enable_thinking=False` in your `chat_template_kwargs`.
 :::
 
 ## Quickstart
@@ -49,6 +50,8 @@ model = models.data[0].id
 # Round 1
 messages = [{"role": "user", "content": "9.11 and 9.8, which is greater?"}]
 # For granite, add: `extra_body={"chat_template_kwargs": {"thinking": True}}`
+# For Qwen3 series, if you want to disable thinking in reasoning mode, add:
+# extra_body={"chat_template_kwargs": {"enable_thinking": False}}
 response = client.chat.completions.create(model=model, messages=messages)
 
 reasoning_content = response.choices[0].message.reasoning_content
@@ -104,6 +107,8 @@ model = models.data[0].id
 
 messages = [{"role": "user", "content": "9.11 and 9.8, which is greater?"}]
 # For granite, add: `extra_body={"chat_template_kwargs": {"thinking": True}}`
+# For Qwen3 series, if you want to disable thinking in reasoning mode, add:
+# extra_body={"chat_template_kwargs": {"enable_thinking": False}}
 stream = client.chat.completions.create(model=model,
                                         messages=messages,
                                         stream=True)
