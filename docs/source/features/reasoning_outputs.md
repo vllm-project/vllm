@@ -231,13 +231,12 @@ For more examples, please refer to <gh-file:examples/online_serving/openai_chat_
 
 ## How to support a new reasoning model
 
-You can add a new `ReasoningParser` similar to <gh-file:vllm/entrypoints/openai/reasoning_parsers/deepseek_r1_reasoning_parser.py>.
+You can add a new `ReasoningParser` similar to <gh-file:vllm/reasoning/deepseek_r1_reasoning_parser.py>.
 
 ```python
 # import the required packages
 
-from vllm.entrypoints.openai.reasoning_parsers.abs_reasoning_parsers import (
-    ReasoningParser, ReasoningParserManager)
+from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaMessage)
 
@@ -288,7 +287,7 @@ class ExampleParser(ReasoningParser):
         """
 ```
 
-Additionally, to enable structured output, you'll need to create a new `Reasoner` similar to the one in <gh-file:vllm/model_executor/guided_decoding/reasoner/deepseek_reasoner.py>.
+Additionally, to enable structured output, you'll need to create a new `Reasoner` similar to the one in <gh-file:vllm/reasoning/deepseek_r1_reasoning_parser.py>.
 
 ```python
 @dataclass
