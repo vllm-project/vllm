@@ -66,12 +66,14 @@ def benchmark_permute(
         if use_customized_permute:
             (
                 permuted_hidden_states,
+                a1q_scale,
                 first_token_off,
                 inv_perm_idx,
                 permuted_idx,
                 m_indices,
             ) = moe_permute(
                 qhidden_states,
+                a1q_scale=None,
                 topk_ids=topk_ids,
                 topk=topk,
                 n_expert=num_experts,
@@ -154,12 +156,14 @@ def benchmark_unpermute(
         if use_customized_permute:
             (
                 permuted_hidden_states,
+                a1q_scale,
                 first_token_off,
                 inv_perm_idx,
                 permuted_idx,
                 m_indices,
             ) = moe_permute(
                 qhidden_states,
+                a1q_scale=None,
                 topk_ids=topk_ids,
                 topk=topk,
                 n_expert=num_experts,
