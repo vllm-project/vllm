@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
-import multiprocessing
 import os
 import signal
+import socket
 import sys
-from multiprocessing.context import SpawnProcess
-from typing import Any
+from multiprocessing import connection
+from typing import Any, Union
 
 import uvloop
 import zmq
@@ -27,10 +27,15 @@ from vllm.v1.engine.core import EngineCoreProc
 from vllm.v1.engine.core_client import CoreEngineProcManager
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
-from vllm.v1.utils import (CoreEngine, get_engine_client_zmq_addr,
+from vllm.v1.utils import (APIServerProcessManager, CoreEngine,
+                           get_engine_client_zmq_addr,
+                           wait_for_completion_or_failure,
                            wait_for_engine_startup)
 
 logger = init_logger(__name__)
+
+# Type for process sentinel objects
+SentinelType = Union[connection.Connection, socket.socket, int]
 
 
 class ServeSubcommand(CLISubcommand):
@@ -204,6 +209,8 @@ def run_multi_api_server(args: argparse.Namespace):
         coordinator = DPCoordinator(parallel_config)
         addresses.update(coordinator.get_engine_socket_addresses())
         stats_update_address = coordinator.get_stats_publish_address()
+        logger.info("Started DP Coordinator process (PID: %d)",
+                    coordinator.proc.pid)
 
     handshake_address = get_engine_client_zmq_addr(
         local_only, host, parallel_config.data_parallel_rpc_port)
@@ -226,33 +233,22 @@ def run_multi_api_server(args: argparse.Namespace):
                 start_index=0,
                 local_start_index=0)
 
-        # Start API servers.
-        spawn_context = multiprocessing.get_context("spawn")
-        api_server_workers: list[SpawnProcess] = []
-        for i, in_addr, out_addr in zip(range(num_api_servers),
-                                        input_addresses, output_addresses):
-            client_config = {
-                "input_address": in_addr,
-                "output_address": out_addr,
-                "client_index": i
-            }
-            if stats_update_address is not None:
-                client_config["stats_update_address"] = stats_update_address
-
-            # TODO check signal propagation
-            proc = spawn_context.Process(target=run_api_server_worker,
-                                         name=f"ApiServer_{i}",
-                                         args=(listen_address, sock, args,
-                                               client_config))
-            api_server_workers.append(proc)
-            proc.start()
+        # Start API servers using the manager
+        api_server_manager = APIServerProcessManager(
+            target_server_fn=run_api_server_worker,
+            listen_address=listen_address,
+            sock=sock,
+            args=args,
+            num_servers=num_api_servers,
+            input_addresses=input_addresses,
+            output_addresses=output_addresses,
+            stats_update_address=stats_update_address)
 
         # Wait for engine handshakes to complete.
         core_engines = [
             CoreEngine(index=i, local=(i < local_engine_count))
             for i in range(dp_size)
         ]
-
         wait_for_engine_startup(
             handshake_socket,
             addresses,
@@ -263,9 +259,11 @@ def run_multi_api_server(args: argparse.Namespace):
             coordinator.proc if coordinator else None,
         )
 
-        # TODO handle failures / clean shutdown here
-        for proc in api_server_workers:
-            proc.join()
+        # Wait for API servers
+        wait_for_completion_or_failure(
+            api_server_manager=api_server_manager,
+            local_engine_manager=local_engine_manager,
+            coordinator=coordinator)
 
 
 def run_api_server_worker(listen_address,
