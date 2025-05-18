@@ -5,7 +5,7 @@
 #define WARP_SIZE_GCN 64
 
 // matmul tile size def
-#define TILE_SIZE_COL 64 // unit: (unquantized) element
+#define TILE_SIZE_COL 32 // unit: (unquantized) element
 #define TILE_SIZE_ROW 32 //  unit: (unquantized) element
 
 // how many quantize blocks (block_q8_0 and block_q8_1) in each segment
@@ -17,8 +17,100 @@
 // warp shuffle to reduce partial sum of qblocks in a segment
 #define QBLOCKS_PER_SEGMENT 8
 
-// each thread handle one block of vector dot in every segment
-#define THREADS_PER_BLOCK TILE_SIZE_COL *TILE_SIZE_ROW *QBLOCKS_PER_SEGMENT
+__device__ __forceinline__ void allocate_shared_memory(int32_t *&qweight_qs, half *&qweight_d,
+                                                       int32_t *&x_qs, half *&x_d)
+{
+  __shared__ int32_t _qweight_qs[TILE_SIZE_COL * QBLOCKS_PER_SEGMENT * QI8_0];
+  __shared__ int32_t _x_qs[TILE_SIZE_ROW * QBLOCKS_PER_SEGMENT * QI8_0];
+  __shared__ half _qweight_d[TILE_SIZE_COL * QBLOCKS_PER_SEGMENT];
+  __shared__ half _x_d[TILE_SIZE_ROW * QBLOCKS_PER_SEGMENT];
+
+  qweight_qs = _qweight_qs;
+  qweight_d = _qweight_d;
+  x_qs = _x_qs;
+  x_d = _x_d;
+}
+
+__device__ __forceinline__ void print_smem_qs(int32_t *qs, int row, int col)
+{
+
+  for (int r = 0; r < row; r++)
+  {
+    for (int c = 0; c < col; c++)
+    {
+      printf("%d, ", qs[r * col + c]);
+    }
+    printf("\n");
+  }
+}
+
+__device__ __forceinline__ void print_smem_d(half *d, int row, int col)
+{
+
+  for (int r = 0; r < row; r++)
+  {
+    for (int c = 0; c < col; c++)
+    {
+      printf("%f, ", __half2float(d[r * col + c]));
+    }
+    printf("\n");
+  }
+}
+
+__device__ __forceinline__ void print_qblock(block_q8_0 *b)
+{
+  printf("qs: ");
+  for (int i = 0; i < 32; i++)
+    printf("%d, ", b->qs[i]);
+  printf("\nd: %f\n", __half2float(b->d));
+}
+
+__device__ __forceinline__ void load_qblock_to_shared_memory(block_q8_0 *qblock_start, int32_t *qs_start, half *d_start,
+                                                             int &global_col_or_row_idx, int &tile_col_or_row_idx, int &num_qblocks_per_row, int &segment_idx, int &qblock_idx_in_segment)
+{
+  block_q8_0 *qblock = qblock_start +
+                       (global_col_or_row_idx * num_qblocks_per_row +
+                        segment_idx * QBLOCKS_PER_SEGMENT +
+                        qblock_idx_in_segment);
+
+  int32_t *qs = qs_start + (tile_col_or_row_idx * QBLOCKS_PER_SEGMENT + qblock_idx_in_segment) * QI8_0;
+
+  half *d = d_start + (tile_col_or_row_idx * QBLOCKS_PER_SEGMENT + qblock_idx_in_segment);
+
+  // #pragma unroll
+  //   for (int i = 0; i < QI8_0; i++)
+  //   {
+  //     *(qs + i) = *reinterpret_cast<int32_t *>(qblock->qs + (i * 4));
+  //     memcpy(qs + i, qblock->qs + (i * 4), sizeof(int32_t));
+  //   }
+  memcpy(qs, qblock->qs, QI8_0 * sizeof(int32_t));
+
+  *d = qblock->d;
+
+  // printf("t(%d,%d,%d), d:%f, qs:[%d,%d,%d,%d,%d,%d,%d,%d]\n", threadIdx.x, threadIdx.y, threadIdx.z, __half2float(*d), *qs, *(qs + 1), *(qs + 2), *(qs + 3), *(qs + 4), *(qs + 5), *(qs + 6), *(qs + 7));
+}
+
+__device__ __forceinline__ void get_qblock_from_shared_memory(int32_t *qs_start, half *d_start, block_q8_0 *out,
+                                                              int &tile_col_or_row_idx, int &qblock_idx_in_segment)
+{
+  int32_t *qs = qs_start + (tile_col_or_row_idx * QBLOCKS_PER_SEGMENT + qblock_idx_in_segment) * QI8_0;
+  half *d = d_start + (tile_col_or_row_idx * QBLOCKS_PER_SEGMENT + qblock_idx_in_segment);
+
+  // for (int i = 0; i < QI8_0; i++)
+  // {
+  //   *reinterpret_cast<int32_t *>((out->qs) + (i * 4)) = *(qs + i);
+  // }
+
+  memcpy(out->qs, qs, QI8_0 * sizeof(int32_t));
+
+  out->d = *d;
+
+  // printf("t(%d,%d,%d), d:%f, qs:[%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d]\n", threadIdx.x, threadIdx.y, threadIdx.z, __half2float(out->d),
+  //        out->qs[0], out->qs[1], out->qs[2], out->qs[3], out->qs[4], out->qs[5], out->qs[6], out->qs[7],
+  //        out->qs[8], out->qs[9], out->qs[10], out->qs[11], out->qs[12], out->qs[13], out->qs[14], out->qs[15],
+  //        out->qs[16], out->qs[17], out->qs[18], out->qs[19], out->qs[20], out->qs[21], out->qs[22], out->qs[23],
+  //        out->qs[24], out->qs[25], out->qs[26], out->qs[27], out->qs[28], out->qs[29], out->qs[30], out->qs[31]);
+}
 
 __device__ __forceinline__ float vec_dot_q8_0_q8_0(block_q8_0 *b0,
                                                    block_q8_0 *b1)
@@ -61,7 +153,7 @@ __global__ void mul_mat_q8_0_mi50(block_q8_0 *__restrict__ qweight,
                                   int nrows_weight, int nrows_x,
                                   int num_qblocks_per_row,
                                   int num_segments_per_row,
-                                  int num_invald_qblocks_per_row)
+                                  int num_invalid_qblocks_per_row)
 {
   /*
   Arguments:
@@ -125,84 +217,131 @@ __global__ void mul_mat_q8_0_mi50(block_q8_0 *__restrict__ qweight,
 
   */
 
-  int tile_col_idx_1 = 2 * threadIdx.x;
-  int tile_col_idx_2 = tile_col_idx_1 + 1;
+  int tile_col_idx = threadIdx.x;
   int tile_row_idx = threadIdx.y;
 
   int tile_col_idx_bias = TILE_SIZE_COL * blockIdx.x;
   int tile_row_idx_bias = TILE_SIZE_ROW * blockIdx.y;
 
-  int global_out_col_idx_1 = tile_col_idx_bias + tile_col_idx_1;
-  int global_out_col_idx_2 = tile_col_idx_bias + tile_col_idx_2;
+  int global_out_col_idx = tile_col_idx_bias + tile_col_idx;
   int global_out_row_idx = tile_row_idx_bias + tile_row_idx;
 
   int &nrows_out = nrows_x;
   int &ncols_out = nrows_weight;
 
-  if (global_out_row_idx >= nrows_out || global_out_col_idx_1 >= ncols_out)
+  if (global_out_row_idx >= nrows_out || global_out_col_idx >= ncols_out)
   {
     return;
   }
 
   // Step1: allocate shared memory and registers
-  __shared__ block_q8_0 smem_qweight_segment[TILE_SIZE_COL * QBLOCKS_PER_SEGMENT];
-  __shared__ block_q8_0 smem_x_segment[TILE_SIZE_ROW * QBLOCKS_PER_SEGMENT];
+  // __shared__ block_q8_0 smem_qweight_segment[TILE_SIZE_COL * QBLOCKS_PER_SEGMENT];
+  // __shared__ block_q8_0 smem_x_segment[TILE_SIZE_ROW * QBLOCKS_PER_SEGMENT];
 
-  float sum_1 = 0.0f; // final output's element @ (tile_row_idx, tile_col_idx_1)
-  float sum_2 = 0.0f; // final output's element @ (tile_row_idx, tile_col_idx_2)
+  int32_t *smem_qweight_qs;
+  half *smem_qweight_d;
+  int32_t *smem_x_qs;
+  half *smem_x_d;
+
+  allocate_shared_memory(smem_qweight_qs, smem_qweight_d, smem_x_qs, smem_x_d);
+
+  // __syncthreads();
+  // if (threadIdx.x == 0 && threadIdx.y == 0)
+  // {
+  //   for (int i = 0; i < TILE_SIZE_COL * QBLOCKS_PER_SEGMENT * QI8_0; i++)
+  //   {
+  //     smem_qweight_qs[i] = 0;
+  //     smem_x_qs[i] = 0;
+  //   }
+  //   for (int i = 0; i < TILE_SIZE_COL * QBLOCKS_PER_SEGMENT; i++)
+  //   {
+  //     smem_qweight_d[i] = __float2half(0.0f);
+  //     smem_x_d[i] = __float2half(0.0f);
+  //   }
+  //   // printf("smem_qweight_qs ====================\n");
+  //   // print_smem_qs(smem_qweight_qs, TILE_SIZE_COL, QBLOCKS_PER_SEGMENT * QI8_0);
+  //   // printf("smem_qweight_d =====================\n");
+  //   // print_smem_d(smem_qweight_d, TILE_SIZE_ROW, QBLOCKS_PER_SEGMENT * QI8_0);
+
+  //   // printf("smem_x_qs ====================\n");
+  //   // print_smem_qs(smem_x_qs, TILE_SIZE_COL, QBLOCKS_PER_SEGMENT * QI8_0);
+  //   // printf("smem_x_d =====================\n");
+  //   // print_smem_d(smem_x_d, TILE_SIZE_ROW, QBLOCKS_PER_SEGMENT * QI8_0);
+  // }
+  // __syncthreads();
+
+  float sum = 0.0f; // final output's element @ (tile_row_idx, tile_col_idx)
 
   // Step3: calculation
   // loop over segments
-  for (int seg_idx = 0; seg_idx < num_segments_per_row; seg_idx++)
+  for (int segment_idx = 0; segment_idx < num_segments_per_row; segment_idx++)
   {
     __syncthreads();
 
     // load input data segment from global memory to shared memory
     // IDEA: if tile_row_idx == 0 and tile_col_idx == 0, latency is 2x, maybe offload work to tile_idx(1,1) ?
-    int num_vald_qblock = seg_idx != num_segments_per_row - 1
+    int num_vald_qblock = segment_idx != num_segments_per_row - 1
                               ? QBLOCKS_PER_SEGMENT
-                              : QBLOCKS_PER_SEGMENT - num_invald_qblocks_per_row;
-    for (int qblock_idx_in_seg = 0; qblock_idx_in_seg < num_vald_qblock; qblock_idx_in_seg++)
+                              : QBLOCKS_PER_SEGMENT - num_invalid_qblocks_per_row;
+    for (int qblock_idx_in_segment = 0; qblock_idx_in_segment < num_vald_qblock; qblock_idx_in_segment++)
     {
       if (tile_row_idx == 0)
       {
-        smem_qweight_segment[tile_col_idx_1 * QBLOCKS_PER_SEGMENT + qblock_idx_in_seg] =
-            qweight[global_out_col_idx_1 * num_qblocks_per_row // row idx of qweight
-                    + seg_idx * QBLOCKS_PER_SEGMENT            // segment idx in this row
-                    + qblock_idx_in_seg                        // qblock idx in this segment
-        ];
-        smem_qweight_segment[tile_col_idx_2 * QBLOCKS_PER_SEGMENT + qblock_idx_in_seg] =
-            qweight[global_out_col_idx_2 * num_qblocks_per_row // row idx of qweight
-                    + seg_idx * QBLOCKS_PER_SEGMENT            // segment idx in this row
-                    + qblock_idx_in_seg                        // qblock idx in this segment
-        ];
+        load_qblock_to_shared_memory(qweight, smem_qweight_qs, smem_qweight_d, global_out_col_idx, tile_col_idx, num_qblocks_per_row, segment_idx, qblock_idx_in_segment);
+        //     qweight[global_out_col_idx_1 * num_qblocks_per_row // row idx of qweight
+        //             + segment_idx * QBLOCKS_PER_SEGMENT            // segment idx in this row
+        //             + qblock_idx_in_segment                        // qblock idx in this segment
+        // ];
+        // smem_qweight_segment[tile_col_idx_2 * QBLOCKS_PER_SEGMENT + qblock_idx_in_segment] =
+        //     qweight[global_out_col_idx_2 * num_qblocks_per_row // row idx of qweight
+        //             + segment_idx * QBLOCKS_PER_SEGMENT            // segment idx in this row
+        //             + qblock_idx_in_segment                        // qblock idx in this segment
+        // ];
       }
-      if (tile_col_idx_1 == 0)
+      if (tile_col_idx == 0)
       {
-        // only threads with tile_col_idx == 0 load data
-        // to avoid duplicated load
-        smem_x_segment[tile_row_idx * QBLOCKS_PER_SEGMENT + qblock_idx_in_seg] =
-            qx[global_out_row_idx * num_qblocks_per_row // row idx of x
-               + seg_idx * QBLOCKS_PER_SEGMENT          // segment idx in this row
-               + qblock_idx_in_seg                      // qblock idx in this segment
-        ];
+        load_qblock_to_shared_memory(qx, smem_x_qs, smem_x_d, global_out_row_idx, tile_row_idx, num_qblocks_per_row, segment_idx, qblock_idx_in_segment);
+        // smem_x_segment[tile_row_idx * QBLOCKS_PER_SEGMENT + qblock_idx_in_segment] =
+        //     qx[global_out_row_idx * num_qblocks_per_row // row idx of x
+        //        + segment_idx * QBLOCKS_PER_SEGMENT          // segment idx in this row
+        //        + qblock_idx_in_segment                      // qblock idx in this segment
+        // ];
       }
     }
     __syncthreads();
 
+    // if (threadIdx.x == 0 && threadIdx.y == 0)
+    // {
+    //   printf("smem_qweight_qs ====================\n");
+    //   print_smem_qs(smem_qweight_qs, TILE_SIZE_COL, QBLOCKS_PER_SEGMENT * QI8_0);
+    //   printf("smem_qweight_d =====================\n");
+    //   print_smem_d(smem_qweight_d, TILE_SIZE_COL, QBLOCKS_PER_SEGMENT);
+
+    //   printf("smem_x_qs ====================\n");
+    //   print_smem_qs(smem_x_qs, TILE_SIZE_ROW, QBLOCKS_PER_SEGMENT * QI8_0);
+    //   printf("smem_x_d =====================\n");
+    //   print_smem_d(smem_x_d, TILE_SIZE_ROW, QBLOCKS_PER_SEGMENT);
+    // }
+    // __syncthreads();
+
     // do vecdot for the qblock of this thread
-    for (int qblock_idx_in_seg = 0; qblock_idx_in_seg < num_vald_qblock; qblock_idx_in_seg++)
+    for (int qblock_idx_in_segment = 0; qblock_idx_in_segment < num_vald_qblock; qblock_idx_in_segment++)
     {
-      sum_1 += vec_dot_q8_0_q8_0(
-          &smem_qweight_segment[tile_col_idx_1 * QBLOCKS_PER_SEGMENT + qblock_idx_in_seg],
-          &smem_x_segment[tile_row_idx * QBLOCKS_PER_SEGMENT + qblock_idx_in_seg]);
-      sum_2 += vec_dot_q8_0_q8_0(
-          &smem_qweight_segment[tile_col_idx_2 * QBLOCKS_PER_SEGMENT + qblock_idx_in_seg],
-          &smem_x_segment[tile_row_idx * QBLOCKS_PER_SEGMENT + qblock_idx_in_seg]);
+      block_q8_0 qblock_qweight, qblock_x;
+      get_qblock_from_shared_memory(smem_x_qs, smem_x_d, &qblock_x, tile_row_idx, qblock_idx_in_segment);
+      get_qblock_from_shared_memory(smem_qweight_qs, smem_qweight_d, &qblock_qweight, tile_col_idx, qblock_idx_in_segment);
+      // if (blockIdx.x == 1 && blockIdx.y == 1 && threadIdx.x == 0 && threadIdx.y == 0)
+      // {
+      //   printf("qblock_idx: %d\n", qblock_idx_in_segment);
+      //   printf("qweight:\n");
+      //   print_qblock(&qblock_qweight);
+      //   printf("x:\n");
+      //   print_qblock(&qblock_x);
+      // }
+      sum += vec_dot_q8_0_q8_0(&qblock_qweight, &qblock_x);
     }
   }
 
   // write output back to global memory
-  out[global_out_row_idx * nrows_weight + global_out_col_idx_1] = __float2half(sum_1);
-  out[global_out_row_idx * nrows_weight + global_out_col_idx_2] = __float2half(sum_2);
+  out[global_out_row_idx * nrows_weight + global_out_col_idx] = __float2half(sum);
 }
