@@ -321,6 +321,7 @@ class NomicMoE(nn.Module):
         top_k: int,
         hidden_size: int,
         intermediate_size: int,
+        hidden_act: str,
         params_dtype: Optional[torch.dtype] = None,
         tp_size: Optional[int] = None,
     ):
@@ -332,6 +333,7 @@ class NomicMoE(nn.Module):
         self.top_k = top_k
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size // self.tp_size
+        self.hidden_act = hidden_act
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -390,6 +392,7 @@ class NomicMoE(nn.Module):
                                         self.top_k,
                                         renormalize=True,
                                         inplace=True,
+                                        activation=self.hidden_act,
                                         is_act_and_mul=False)
 
         # if self.tp_size > 1:
@@ -424,7 +427,8 @@ class BertWithRopeBlock(nn.Module):
             self.mlp = NomicMoE(num_experts=config.num_experts,
                                 top_k=config.moe_top_k,
                                 hidden_size=config.hidden_size,
-                                intermediate_size=config.intermediate_size)
+                                intermediate_size=config.intermediate_size,
+                                hidden_act=config.hidden_act)
         else:
             if config.hidden_act in ["silu", "geglu"]:
                 self.mlp = BertWithRopeGatedMLP(
