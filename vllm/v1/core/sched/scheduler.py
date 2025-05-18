@@ -418,6 +418,13 @@ class Scheduler(SchedulerInterface):
                     delay_cache_blocks=load_kv_async,
                 )
                 if new_blocks is None:
+                    # P/D: if the request is recved on this step,
+                    # then we need to free the kv cache blocks
+                    if num_prealloc_computed_tokens > 0:
+                        assert request.num_computed_tokens != 0
+                        self.kv_cache_manager.free(request)
+                        request.num_computed_tokens = 0
+
                     # The request cannot be scheduled.
                     break
 
