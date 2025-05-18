@@ -231,13 +231,12 @@ For more examples, please refer to <gh-file:examples/online_serving/openai_chat_
 
 ## How to support a new reasoning model
 
-You can add a new `ReasoningParser` similar to <gh-file:vllm/entrypoints/openai/reasoning_parsers/deepseek_r1_reasoning_parser.py>.
+You can add a new `ReasoningParser` similar to <gh-file:vllm/reasoning/deepseek_r1_reasoning_parser.py>.
 
 ```python
 # import the required packages
 
-from vllm.entrypoints.openai.reasoning_parsers.abs_reasoning_parsers import (
-    ReasoningParser, ReasoningParserManager)
+from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaMessage)
 
@@ -288,31 +287,7 @@ class ExampleParser(ReasoningParser):
         """
 ```
 
-Additionally, to enable structured output, you'll need to create a new `Reasoner` similar to the one in <gh-file:vllm/model_executor/guided_decoding/reasoner/deepseek_reasoner.py>.
-
-```python
-@dataclass
-class DeepSeekReasoner(Reasoner):
-    """
-    Reasoner for DeepSeek R series models.
-    """
-    start_token_id: int
-    end_token_id: int
-
-    start_token: str = "<think>"
-    end_token: str = "</think>"
-
-    @classmethod
-    def from_tokenizer(cls, tokenizer: PreTrainedTokenizer) -> Reasoner:
-        return cls(start_token_id=tokenizer.encode(
-            "<think>", add_special_tokens=False)[0],
-                   end_token_id=tokenizer.encode("</think>",
-                                                 add_special_tokens=False)[0])
-
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        return self.end_token_id in input_ids
-    ...
-```
+Additionally, to enable structured output, you'll need to create a new `Reasoner` similar to the one in <gh-file:vllm/reasoning/deepseek_r1_reasoning_parser.py>.
 
 The structured output engine like [xgrammar](https://github.com/mlc-ai/xgrammar) will use `end_token_id` to check if the reasoning content is present in the model output and skip the structured output if it is the case.
 
