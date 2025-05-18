@@ -379,14 +379,11 @@ def wait_for_completion_or_failure(
         }
 
         if coordinator:
-            sentinel_to_proc.update(
-                {coordinator.proc.sentinel: coordinator.proc})
+            sentinel_to_proc[coordinator.proc.sentinel] = coordinator.proc
 
         if local_engine_manager:
-            sentinel_to_proc.update({
-                proc.sentinel: proc
-                for proc in local_engine_manager.processes
-            })
+            for proc in local_engine_manager.processes:
+                sentinel_to_proc[proc.sentinel] = proc
 
         # Check if any process terminates
         while sentinel_to_proc:
