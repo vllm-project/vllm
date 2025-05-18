@@ -117,10 +117,12 @@ class TpuPlatform(Platform):
         if envs.VLLM_USE_V1:
             from vllm.v1.attention.backends.pallas import (
                 PallasAttentionBackend)
+
             # For v1, the default block size is calculated from vllm_config.
             cache_config.block_size = (
                 cache_config.block_size
-                or PallasAttentionBackend.get_page_size(vllm_config)  # type: ignore[assignment]
+                or PallasAttentionBackend.get_page_size(
+                    vllm_config)  # type: ignore[assignment]
             )
 
             min_page_size = PallasAttentionBackend.get_min_page_size(
@@ -135,9 +137,8 @@ class TpuPlatform(Platform):
                 cache_config.block_size = min_page_size  # type: ignore[assignment]
         else:
             # For v0, the default block size is 16.
-            cache_config.block_size = (
-                cache_config.block_size or cast(BlockSize, 16)
-            )
+            cache_config.block_size = (cache_config.block_size
+                                       or cast(BlockSize, 16))
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
         if parallel_config.worker_cls == "auto":
