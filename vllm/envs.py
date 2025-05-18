@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_PREFER_TRITON: bool = True
     VLLM_USE_SDPA_ATTENTION: bool = False
     VLLM_USE_TRITON_FLASH_ATTN: bool = True
+    VLLM_V1_USE_PREFILL_DECODE_ATTENTION: bool = True
     VLLM_USE_ROCM_SKINNY_GEMM: bool = True
     VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT: bool = True
     VLLM_USE_ROCM_FP8_FLASH_ATTN: bool = False
@@ -317,6 +318,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # when using the flash-attention backend.
     "VLLM_FLASH_ATTN_VERSION":
     lambda: maybe_convert_int(os.environ.get("VLLM_FLASH_ATTN_VERSION", None)),
+
+    # Use separate prefill and decode kernels for V1 attention instead of
+    # the unified triton kernel.
+    "VLLM_V1_USE_PREFILL_DECODE_ATTENTION":
+    lambda:
+    (os.getenv("VLLM_V1_USE_PREFILL_DECODE_ATTENTION", "True").lower() in
+     ("true", "1")),
 
     # Internal flag to enable Dynamo fullgraph capture
     "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE":
