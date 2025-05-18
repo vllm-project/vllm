@@ -15,7 +15,11 @@ And LiteLLM supports all models on VLLM.
 
 ## Prerequisites
 
-- Setup vLLM environment
+- Setup vLLM and litellm environment
+
+```console
+pip install vllm litellm
+```
 
 ## Deploy
 
