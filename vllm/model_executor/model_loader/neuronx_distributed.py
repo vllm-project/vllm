@@ -144,7 +144,7 @@ class NeuronCausalLM(nn.Module):
             neuron_config,
             load_config=load_pretrained_config(model_name_or_path))
         hashed_config = hashlib.md5(
-            config.to_json_string().encode('utf-8')).hexdigest()
+            config.to_json_string().encode('utf-8'), usedforsecurity=False).hexdigest()
         if os.getenv("NEURON_COMPILED_ARTIFACTS") is not None:
             compiled_model_path = os.getenv("NEURON_COMPILED_ARTIFACTS")
         elif os.path.exists(model_name_or_path):
@@ -264,7 +264,7 @@ class NeuronMllamaForCausalLM(nn.Module):
             neuron_config,
             load_config=load_pretrained_config(model_name_or_path))
         hashed_config = hashlib.md5(
-            config.to_json_string().encode('utf-8')).hexdigest()
+            config.to_json_string().encode('utf-8'), usedforsecurity=False).hexdigest()
         if os.getenv("NEURON_COMPILED_ARTIFACTS") is not None:
             compiled_model_path = os.getenv("NEURON_COMPILED_ARTIFACTS")
         elif os.path.exists(model_name_or_path):
@@ -427,7 +427,7 @@ class NeuronSpeculationCausalLM(nn.Module):
         self.config.neuron_config = neuron_config
 
         hashed_config = hashlib.md5(
-            config.to_json_string().encode('utf-8')).hexdigest()
+            config.to_json_string().encode('utf-8'), usedforsecurity=False).hexdigest()
         if os.getenv("NEURON_COMPILED_ARTIFACTS") is not None:
             compiled_model_path = os.getenv("NEURON_COMPILED_ARTIFACTS")
         elif os.path.exists(model_name_or_path):
