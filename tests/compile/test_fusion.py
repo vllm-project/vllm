@@ -125,5 +125,5 @@ def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static,
                                  find_auto_fn_maybe)
 
         # In post-nodes, fused kernels should be there and fp8 quant should not
-        backend.check_before_ops(model.ops_in_model_after(), find_auto_fn,
-                                 find_auto_fn_maybe)
+        backend.check_after_ops(model.ops_in_model_after(), find_auto_fn,
+                                find_auto_fn_maybe)
