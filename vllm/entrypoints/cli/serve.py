@@ -168,15 +168,24 @@ def run_multi_api_server(args: argparse.Namespace):
 
     assert not args.headless
     num_api_servers = args.api_server_count
-    assert num_api_servers > 1
+    #assert num_api_servers > 1
 
-    setup_multiprocess_prometheus()
+    if num_api_servers > 1:
+        setup_multiprocess_prometheus()
 
     listen_address, sock = setup_server(args)
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+    model_config = vllm_config.model_config
+
+    if num_api_servers > 1 and model_config.is_multimodal_model and not (
+            model_config.disable_mm_preprocessor_cache):
+        logger.warning("Multi-model preprocessor cache will be disabled for"
+                       " api_server_count > 1")
+        model_config.disable_mm_preprocessor_cache = True
+
     parallel_config = vllm_config.parallel_config
 
     assert parallel_config.data_parallel_rank == 0
