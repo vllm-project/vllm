@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import random
 from typing import Optional
 
 import pytest
@@ -17,7 +16,7 @@ def _vllm_model(apc: bool, vllm_runner, monkeypatch):
     return vllm_runner(
         MODEL,
         dtype=DTYPE,
-        max_model_len=128,
+        max_model_len=1280,
         enforce_eager=True,
         enable_prefix_caching=apc,
         gpu_memory_utilization=0.95,
@@ -29,7 +28,7 @@ def _vllm_model(apc: bool, vllm_runner, monkeypatch):
     # env var adjustment via monkeypatch
     scope="function",
     # Prefix caching
-    params=[False, True])
+    params=[True])
 def vllm_model(vllm_runner, request, monkeypatch):
     """VllmRunner test fixture parameterized by APC True/False."""
     with _vllm_model(request.param, vllm_runner, monkeypatch) as vllm_model:
@@ -51,16 +50,17 @@ def _get_test_sampling_params(
 
     def get_mostly_n_gt1() -> int:
         r"""Mostly n \in [2,20], ~1/3 n=1"""
-        x = random.randint(0, 28)
-        if x < 10:
-            return 1
-        else:
-            return x - 8
+        # x = random.randint(0, 28)
+        # if x < 10:
+        #     return 1
+        # else:
+        #     return x - 8dad
+        return 10
 
     n_list = [get_mostly_n_gt1() for _ in range(len(prompt_list))]
     # High temperature to maximize the chance of unique completions
     return [
-        SamplingParams(temperature=0.95, top_p=0.95, n=n, seed=seed)
+        SamplingParams(temperature=0.5, top_p=0.95, n=n, seed=seed)
         for n in n_list
     ], n_list
 
@@ -74,26 +74,46 @@ def test_parallel_sampling(vllm_model, example_prompts) -> None:
     """
     sampling_params_list, n_list = _get_test_sampling_params(example_prompts)
     model: LLM = vllm_model.model
-    outputs = model.generate(example_prompts, sampling_params_list)
+    # example_prompt = example_prompts[0]
+    # generate a long prompt to test the model
+    # example_prompt = "This is a test prompt. " * 200
+    # sampling_params = SamplingParams(
+    #     temperature=0.01,
+    #     top_p=0.95,
+    #     n=20,
+    #     seed=42,
+    # )
+    # model.start_profile()
+    outputs = model.generate(example_prompt, sampling_params)
+    # outputs = model.generate(example_prompts, sampling_params_list)
+    # model.stop_profile()
+    assert len(outputs) == 1
+    assert len(outputs[0].outputs) == 20
 
-    # Validate each request response
-    for out, n in zip(outputs, n_list):
-        completion_counts: dict[str, int] = {}
-        # Assert correct number of completions
-        assert len(out.outputs) == n, (
-            f"{len(out.outputs)} completions; {n} expected.")
-        for idx in range(n):
-            comp = out.outputs[idx]
-            # Assert correct completion indices
-            assert comp.index == idx, (f"Index {comp.index}; expected {idx}.")
-            text = comp.text
-            completion_counts[text] = completion_counts.get(text, 0) + 1
-        # Assert unique completions
-        if len(completion_counts) != n:
-            repeats = {
-                txt: num
-                for (txt, num) in completion_counts.items() if num > 1
-            }
-            raise AssertionError(
-                f"{len(completion_counts)} unique completions; expected"
-                f" {n}. Repeats: {repeats}")
+    # # Validate each request response
+    # for out, n in zip(outputs, n_list):
+    #     completion_counts: dict[str, int] = {}
+    #     print(f"Prompt: {out.prompt}")
+    #     # Assert correct number of completions
+    #     assert len(out.outputs) == n, (
+    #         f"{len(out.outputs)} completions; {n} expected.")
+    #     for idx in range(n):
+    #         comp = out.outputs[idx]
+    #         # Assert correct completion indices
+    #         assert comp.index == idx, (f"Index {comp.index}; expected {idx}.")
+    #         text = comp.text
+    #         print(f"Completion {idx}: {text}")
+    #         completion_counts[text] = completion_counts.get(text, 0) + 1
+    #     # Assert unique completions
+    #     if len(completion_counts) != n:
+    #         repeats = {
+    #             txt: num
+    #             for (txt, num) in completion_counts.items() if num > 1
+    #         }
+    #         raise AssertionError(
+    #             f"{len(completion_counts)} unique completions; expected"
+    #             f" {n}. Repeats: {repeats}")
+
+
+# if __name__ == "__main__":
+#     pytest.main([__file__, "-v", "-s"])

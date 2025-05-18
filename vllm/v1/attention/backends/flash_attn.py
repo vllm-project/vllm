@@ -111,8 +111,8 @@ class FlashAttentionMetadataBuilder:
             common_prefix_len: list[tuple[int,
                                           int]]) -> FlashAttentionMetadata:
         assert num_reqs == common_prefix_len[-1][0], (
-            "Number of requests must be equal to the number of latest_parent_psumLen blocks."
-        )
+            "Number of requests"
+            "must be equal to the number of latest_parent_psumLen blocks.")
         query_start_loc = self.runner.query_start_loc_cpu[:num_reqs + 1].to(
             self.runner.device, non_blocking=True)
         seq_lens = self.runner.seq_lens_cpu[:num_reqs].to(self.runner.device,
@@ -352,8 +352,9 @@ class FlashAttentionImpl(AttentionImpl):
                 query_start_loc[current_parent_bgpos:parent_psumLen + 1] -
                 attn_metadata.query_start_loc[current_parent_bgpos],
                 max_query_len=attn_metadata.max_query_len[i],
-                cu_prefix_query_lens=attn_metadata.cu_prefix_query_lens[i:i + 2] -
-                                        attn_metadata.cu_prefix_query_lens[i],
+                cu_prefix_query_lens=attn_metadata.cu_prefix_query_lens[i:i +
+                                                                        2] -
+                attn_metadata.cu_prefix_query_lens[i],
                 prefix_kv_lens=attn_metadata.prefix_kv_lens[i:i + 1],
                 suffix_kv_lens=attn_metadata.
                 suffix_kv_lens[current_parent_bgpos:parent_psumLen],
