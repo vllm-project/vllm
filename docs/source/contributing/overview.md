@@ -32,6 +32,8 @@ Check out the [building from source](#build-from-source) documentation for detai
 ## Testing
 
 ```bash
+# The following command assumes CUDA 12.8. For CPU-only, other CUDA versions, 
+# or ROCm, etc., adjust the torch installation as needed.
 pip install -r requirements/dev.txt --extra-index-url https://download.pytorch.org/whl/cu128
 
 # Linting, formatting and static type checking
