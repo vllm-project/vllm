@@ -16,3 +16,11 @@ class CommonAttentionMetadata:
     seq_lens: torch.Tensor
     """(batch_size,), the length of each request including both computed tokens
     and newly scheduled tokens"""
+
+
+def slice_query_start_locs(
+    query_start_loc: torch.Tensor,
+    req_slice: slice,
+) -> torch.Tensor:
+    return query_start_loc[req_slice.start: req_slice.stop + 1] -\
+        query_start_loc[req_slice.start]
