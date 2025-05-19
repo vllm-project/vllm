@@ -87,11 +87,12 @@ def test_module_skip_prefix():
 
     # Try to load the weights to a new instance
     def weight_generator():
-        redunant_weights = {
+        # weights needed to be filtered out
+        redundant_weights = {
             "prefix.bn.weight": torch.Tensor([1, 2]),
             "prefix.bn.bias": torch.Tensor([3, 4]),
         }
-        yield from (mod.state_dict() | redunant_weights).items()
+        yield from (mod.state_dict() | redundant_weights).items()
 
     new_mod = ModuleWithNestedBatchNorm()
 
@@ -120,11 +121,12 @@ def test_module_skip_substr():
 
     # Try to load the weights to a new instance
     def weight_generator():
-        redunant_weights = {
+        # weights needed to be filtered out
+        redundant_weights = {
             "nested_mod.substr.weight": torch.Tensor([1, 2]),
             "nested_mod.substr.bias": torch.Tensor([3, 4]),
         }
-        yield from (mod.state_dict() | redunant_weights).items()
+        yield from (mod.state_dict() | redundant_weights).items()
 
     new_mod = ModuleWithNestedBatchNorm()
 
