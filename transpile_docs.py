@@ -266,6 +266,10 @@ def transpile_myst_to_md(old_path: Path) -> None:
         # Handle images
         if block.type == "image":
             src = block.args
+            if src.startswith("/assets"):
+                relative_path = new_path.relative_to(NEW_DIR)
+                relative = "../" * (len(relative_path.parents) - 1)
+                src = relative + src[1:]
             _, attrs = parse_fence_block(lines[start + 1:end], indent)
             alt = attrs.pop("alt", "")
             if attrs:
@@ -276,6 +280,10 @@ def transpile_myst_to_md(old_path: Path) -> None:
             continue
         if block.type == "figure":
             src = block.args
+            if src.startswith("/assets"):
+                relative_path = new_path.relative_to(NEW_DIR)
+                relative = "../" * (len(relative_path.parents) - 1)
+                src = relative + src[1:]
             content, attrs = parse_fence_block(lines[start + 1:end], indent)
             lines[start] = f'{indent}<figure markdown="span">\n'
             attr_list = " ".join(f'{k}="{v}"' for k, v in attrs.items())
