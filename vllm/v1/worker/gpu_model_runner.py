@@ -1354,6 +1354,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if has_kv_transfer_group():
             get_kv_transfer_group().clear_connector_metadata()
 
+        # EPLB step
+        if self.parallel_config.enable_eplb:
+            self.eplb_state.step(self.model)
+
+        # TODO(bowen): Log balancedness
+
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,

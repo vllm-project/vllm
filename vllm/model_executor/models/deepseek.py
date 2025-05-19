@@ -519,6 +519,7 @@ class DeepseekForCausalLM(nn.Module, SupportsPP, IsMixtureOfExperts):
         # TODO(bowen): Add support for MTP layers
         self.num_moe_layers = (config.num_hidden_layers -
                                config.first_k_dense_replace)
+        self.num_expert_groups = config.n_groups
 
         example_moe = typing.cast(
             DeepseekMoE, self.model.layers[config.num_hidden_layers - 1].mlp)

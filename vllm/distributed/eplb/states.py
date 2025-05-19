@@ -3,12 +3,21 @@
 Expert parallelism load balancer (EPLB) metrics and states.
 """
 
+import time
 from dataclasses import dataclass
 
 import torch
+from torch.distributed import all_reduce
 
 from vllm.config import ParallelConfig
+from vllm.distributed.parallel_state import get_ep_group
+from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import IsMixtureOfExperts
+
+from .rebalance import rebalance_experts
+from .rebalance_execute import rearrange_expert_weights_inplace
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -51,12 +60,16 @@ class EplbState:
     """
     expert_load_window_step: int = 0
     """Current step in the sliding window."""
+    expert_load_window_size: int = 0
+    """Size of the expert load sliding window."""
 
     expert_rearrangement_step: int = 0
     """
     Steps after last rearrangement.
     Will trigger a rearrangement if it exceeds the threshold.
     """
+    expert_rearrangement_step_interval: int = 0
+    """Interval for expert rearrangement steps."""
 
     @staticmethod
     def build_initial_global_physical_to_logical_map(
@@ -127,8 +140,9 @@ class EplbState:
             (model.num_moe_layers, model.num_local_physical_experts),
             device=device,
         )
+        expert_load_window_size = parallel_config.eplb_window_size
         expert_load_window = torch.zeros(
-            (parallel_config.eplb_window_size, model.num_moe_layers,
+            (expert_load_window_size, model.num_moe_layers,
              model.num_local_physical_experts),
             device=device,
         )
@@ -144,5 +158,100 @@ class EplbState:
             logical_replica_count,
             expert_load_pass,
             expert_load_window,
+            expert_load_window_size=expert_load_window_size,
             expert_rearrangement_step=expert_rearrangement_step,
+            expert_rearrangement_step_interval=eplb_step_interval,
         )
+
+    def step(self, model: IsMixtureOfExperts) -> None:
+        """
+        Step the EPLB state.
+        """
+
+        # Update the expert load sliding window
+        self.expert_load_window[self.expert_load_window_step] = (
+            self.expert_load_pass.clone())
+        self.expert_load_window_step += 1
+        if self.expert_load_window_step >= self.expert_load_window_size:
+            self.expert_load_window_step = 0
+        self.expert_load_pass.zero_()
+
+        # Step the expert rearrangement step
+        self.expert_rearrangement_step += 1
+        if (self.expert_rearrangement_step
+                >= self.expert_rearrangement_step_interval):
+            self.expert_rearrangement_step = 0
+            self.rearrange(model)
+
+    def rearrange(self, model: IsMixtureOfExperts) -> None:
+        """
+        Rearrange the experts according to the current load.
+        """
+
+        ep_group = get_ep_group()
+        ep_rank = ep_group.rank()
+        is_main_rank = ep_rank == 0
+        if is_main_rank:
+            torch.cuda.synchronize()
+            time_start = time.perf_counter()
+            logger.info("Rearranging experts...")
+
+        window_size, num_moe_layers, num_local_physical_experts = (
+            self.expert_load_window.shape)
+        num_physical_experts = model.num_physical_experts
+
+        local_expert_start = ep_rank * num_local_physical_experts
+        local_expert_end = local_expert_start + num_local_physical_experts
+        local_physical_to_logical_map = self.physical_to_logical_map[:,
+                                                                     local_expert_start:
+                                                                     local_expert_end]
+        device = local_physical_to_logical_map.device
+
+        # Perform all-reduce to get the expert load across all ranks
+        expert_load_window = self.expert_load_window
+        global_expert_load_window = torch.zeros(window_size,
+                                                num_moe_layers,
+                                                num_physical_experts,
+                                                device=device)
+        global_expert_load_window.scatter_add_(
+            -1,
+            local_physical_to_logical_map.expand_as(expert_load_window),
+            expert_load_window,
+        )
+        all_reduce(global_expert_load_window, group=ep_group)
+
+        # TODO(bowen): Treat differently for prefill and decode nodes
+        num_replicas = num_physical_experts
+        num_groups = model.num_expert_groups
+        # TODO(bowen): Remove magic numbers
+        num_nodes = (ep_group.size() + 7) // 8
+        num_gpus = ep_group.size()
+
+        # Get new expert mappings
+        (
+            new_physical_to_logical_map,
+            new_logical_to_physical_map,
+            new_logical_replica_count,
+        ) = (rebalance_experts(
+            global_expert_load_window,
+            num_replicas,
+            num_groups,
+            num_nodes,
+            num_gpus,
+        ))
+
+        # Update expert weights
+        rearrange_expert_weights_inplace(
+            self.physical_to_logical_map,
+            new_physical_to_logical_map,
+            model.expert_weights,
+            ep_group,
+        )
+
+        if is_main_rank:
+            torch.cuda.synchronize()
+            time_end = time.perf_counter()
+            logger.info(
+                "Rearranged experts in %.2f seconds.",
+                time_end - time_start,
+            )

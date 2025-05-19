@@ -442,6 +442,9 @@ class IsMixtureOfExperts(Protocol):
     num_moe_layers: int
     """Number of MoE layers in this model."""
 
+    num_expert_groups: int
+    """Number of expert groups in this model."""
+
     num_logical_experts: int
     """Number of logical experts in this model."""
 
