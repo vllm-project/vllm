@@ -123,6 +123,8 @@ def test_module_skip_substr():
     def weight_generator():
         # weights needed to be filtered out
         redundant_weights = {
+            "nested_mod.0.substr.weight": torch.Tensor([1, 2]),
+            "nested_mod.0.substr.bias": torch.Tensor([3, 4]),
             "nested_mod.substr.weight": torch.Tensor([1, 2]),
             "nested_mod.substr.bias": torch.Tensor([3, 4]),
         }

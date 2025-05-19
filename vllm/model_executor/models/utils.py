@@ -260,6 +260,9 @@ class AutoWeightsLoader:
     ) -> set[str]:
         if mapper is not None:
             weights = mapper.apply(weights)
+        # filter out weights with first-prefix/substr to skip in name
+        weights = ((name, weight) for name, weight in weights
+                   if not self._can_skip(name))
 
         autoloaded_weights = set(self._load_module("", self.module, weights))
         return autoloaded_weights
