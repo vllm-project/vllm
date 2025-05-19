@@ -54,7 +54,7 @@ For a model to be compatible with the Transformers backend for vLLM it must:
 
 If the compatible model is:
 
-- on the Hugging Face Model Hub, simply set `trust_remote_code=True` for <project:#offline-inference> or `--trust-remode-code` for the <project:#openai-compatible-server>.
+- on the Hugging Face Model Hub, simply set `trust_remote_code=True` for <project:#offline-inference> or `--trust-remote-code` for the <project:#openai-compatible-server>.
 - in a local directory, simply pass directory path to `model=<MODEL_DIR>` for <project:#offline-inference> or `vllm serve <MODEL_DIR>` for the <project:#openai-compatible-server>.
 
 This means that, with the Transformers backend for vLLM, new models can be used before they are officially supported in Transformers or vLLM!
@@ -539,7 +539,7 @@ Specified using `--task generate`.
   * ✅︎
 - * `OLMo2ForCausalLM`
   * OLMo2
-  * `allenai/OLMo2-7B-1124`, etc.
+  * `allenai/OLMo-2-0425-1B`, etc.
   *
   * ✅︎
 - * `OLMoEForCausalLM`
@@ -701,12 +701,22 @@ Specified using `--task embed`.
   * ✅︎
   * ✅︎
 - * `GteModel`
-  * GteModel
+  * Arctic-Embed-2.0-M
   * `Snowflake/snowflake-arctic-embed-m-v2.0`.
   *
   * ︎
+- * `GteNewModel`
+  * mGTE-TRM (see note)
+  * `Alibaba-NLP/gte-multilingual-base`, etc.
+  * ︎
+  * ︎
+- * `ModernBertModel`
+  * ModernBERT-based
+  * `Alibaba-NLP/gte-modernbert-base`, etc.
+  * ︎
+  * ︎
 - * `NomicBertModel`
-  * NomicBertModel
+  * Nomic BERT
   * `nomic-ai/nomic-embed-text-v1`, `nomic-ai/nomic-embed-text-v2-moe`, `Snowflake/snowflake-arctic-embed-m-long`, etc.
   * ︎
   * ︎
@@ -747,6 +757,10 @@ See [relevant issue on HF Transformers](https://github.com/huggingface/transform
 
 :::{note}
 `jinaai/jina-embeddings-v3` supports multiple tasks through lora, while vllm temporarily only supports text-matching tasks by merging lora weights.
+:::
+
+:::{note}
+The second-generation GTE model (mGTE-TRM) is named `NewModel`. The name `NewModel` is too generic, you should set `--hf-overrides '{"architectures": ["GteNewModel"]}'` to specify the use of the `GteNewModel` architecture.
 :::
 
 If your model is not in the above list, we will try to automatically convert the model using
