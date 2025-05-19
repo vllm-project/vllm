@@ -178,10 +178,10 @@ def test_qwen2vl_lora_beam_search(qwen2vl_lora_files):
 
     # Test with different LoRA IDs
     for lora_id in [1, 2]:
-        # NOTE currently, we only test cherry blossom since stop sign seems
-        # to fail on v1 - this is likely independent of the intent of this
-        # test, since we are only trying to verify we can pass the lora through
-        # .beam_search -> .generate
+        # NOTE currently, we only test cherry blossom since stop sign
+        # output is slightly different for v1; - the root cause is likely
+        # independent of the intent of this test, which is to ensure beam
+        # search passes through lora through correctly.
         tester.run_beam_search_test(
             [ImageAsset("cherry_blossom")],
             expected_outputs=EXPECTED_BEAM_SEARCH_OUTPUTS,
