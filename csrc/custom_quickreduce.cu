@@ -79,4 +79,9 @@ int64_t qr_max_size() {
   return static_cast<int64_t>(quickreduce::DeviceComms::kMaxProblemSize);
 }
 
+int64_t qr_min_size() {
+  return static_cast<int64_t>(quickreduce::kBlockSize * quickreduce::kAtoms *
+                              sizeof(quickreduce::int32x4_t));
+}
+
 #endif  // USE_ROCM

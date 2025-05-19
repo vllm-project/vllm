@@ -1,15 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-import os
 from typing import Optional
 
 import torch
 from torch.distributed import ProcessGroup
 
-from vllm.platforms import current_platform
-
 import vllm.envs as envs
+from vllm.platforms import current_platform
 
 from .all2all import All2AllBase
 from .base_device_communicator import DeviceCommunicatorBase
@@ -28,10 +26,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if "tp" not in unique_name:
             # only tp uses custom allreduce
             use_custom_allreduce = False
+            quick_reduce_algo = None
         else:
             from vllm.distributed.parallel_state import (
-                _ENABLE_CUSTOM_ALL_REDUCE)
+                _ENABLE_CUSTOM_ALL_REDUCE, _QUICK_REDUCE_ALGO)
             use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
+            quick_reduce_algo = _QUICK_REDUCE_ALGO
 
         # ep does not use pynccl
         use_pynccl = "ep" not in unique_name
@@ -47,7 +47,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         from vllm.distributed.device_communicators.pynccl import (
             PyNcclCommunicator)
         from vllm.distributed.device_communicators.quick_all_reduce import (
-            QuickAllReduce, QuickReduceAlgo)
+            QuickAllReduce)
 
         self.pynccl_comm: Optional[PyNcclCommunicator] = None
         if use_pynccl and self.world_size > 1:
@@ -63,26 +63,21 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 group=self.cpu_group,
                 device=self.device,
             )
-        self.use_quick_allreduce = os.environ.get("VLLM_USE_QUICK_ALLREDUCE",
-                                                  "0") == "1"
-        if self.use_quick_allreduce and not current_platform.is_rocm():
+        self.quick_reduce_comm_algo = quick_reduce_algo
+        if (self.quick_reduce_comm_algo is not None
+                and not current_platform.is_rocm()):
             logger.warning(
-                "Environment variable VLLM_USE_QUICK_ALLREDUCE is set to 1," \
-                " but QuickReduce is only supported on ROCm platform."
-            )
+                "quick_reduce_comm_algo is not None,"
+                " but QuickReduce is only supported on ROCm platform.")
         self.qr_comm: Optional[QuickAllReduce] = None
-        if self.use_quick_allreduce and self.world_size > 1 and \
-            current_platform.is_rocm():
-            # Initialize a custom fast all-reduce implementation.
-            qr_comm_algo = os.environ.get("VLLM_QUICK_ALLREDUCE_ALGO",
-                                          "TwoShot")
-            assert qr_comm_algo in QuickReduceAlgo.__members__, \
-            "Unknown QuickReduce algorithm: {}".format(
-            qr_comm_algo)
-            self.qr_comm_algo = QuickReduceAlgo[qr_comm_algo]
+
+        if (self.quick_reduce_comm_algo is not None
+                and current_platform.is_rocm() and self.world_size > 1):
+            # Initialize a custom fast all-reduce implementation
+            # based on quick reduce (https://github.com/mk1-project/quickreduce).
             self.qr_comm = QuickAllReduce(group=self.cpu_group,
                                           device=self.device,
-                                          algo=self.qr_comm_algo)
+                                          algo=self.quick_reduce_comm_algo)
 
     def all_reduce(self, input_):
         # always try quick reduce first, then custom allreduce,
