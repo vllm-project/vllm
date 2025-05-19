@@ -50,11 +50,6 @@ hooks:
   - docs/gen_examples.py
   - docs/url_schemes.py
 
-# Required to stop api-autonav from raising an error
-# https://github.com/tlambert03/mkdocs-api-autonav/issues/16
-nav:
-  - api
-
 plugins:
   - meta
   - search
