@@ -327,6 +327,12 @@ class ModelConfig:
     preventing potential numerical issues. Note that even if this is set to
     False, cascade attention will be only used when the heuristic tells that
     it's beneficial."""
+    disable_forested_cascade_attn = False,
+    """Disable forested cascade attention for V1. While forested cascade attention
+    is beneficial when requests can be split into several groups with large
+    common prefixes, it can lead to high overhead when this is not the case. Like
+    disable_cascade_attn, forested cascade will only be set when heuristics tell it
+    is beneficial. """
     skip_tokenizer_init: bool = False
     """Skip initialization of tokenizer and detokenizer. Expects valid
     `prompt_token_ids` and `None` for prompt from the input. The generated
@@ -2902,8 +2908,9 @@ class PromptAdapterConfig:
 class MultiModalConfig:
     """Controls the behavior of multimodal models."""
 
-    limit_per_prompt: dict[str, int] = \
-        cast(dict[str, int], get_field(ModelConfig, "limit_mm_per_prompt"))
+    limit_per_prompt: dict[str, int] = field(
+        default_factory=lambda: cast(dict[str, int], get_field(ModelConfig, "limit_mm_per_prompt"))
+    )
     """
     The maximum number of input items allowed per prompt for each modality.
     Defaults to 1 (V0) or 999 (V1) for each modality.

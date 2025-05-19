@@ -16,6 +16,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheTensor, SlidingWindowSpec)
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
+from vllm.v1.utils import ConstantList
 
 logger = init_logger(__name__)
 
@@ -169,9 +170,16 @@ class KVCacheBlock:
                 f"prev_free_block={prev_block_id}, "
                 f"next_free_block={next_block_id})")
 
+@dataclass
+class CommonPrefixGroups:
+    request_ids: ConstantList[str]
+    # Group metadata composed of (num_common_prefix_blocks, start_index, end_index)
+    # tuples where the index vars index into request_ids
+    group_metadata: ConstantList[tuple[int, int, int]]
+
 def get_scheduled_requests(request_list: list[tuple[str, bool]],
                            groups_list: list[tuple[int, int, int]]) \
-        -> tuple[list[str], list[tuple[int, int, int]]]:
+        -> CommonPrefixGroups:
 
     # Post-process request and group list to remove non-scheduled running requests
     actual_request_list = []
@@ -188,7 +196,8 @@ def get_scheduled_requests(request_list: list[tuple[str, bool]],
             actual_groups_list.append((group_num_common_blocks, actual_start_id,
                                        len(actual_request_list)))
 
-    return actual_request_list, actual_groups_list
+    return CommonPrefixGroups(ConstantList(actual_request_list),
+                              ConstantList(actual_groups_list))
 
 
 class KVCacheBlockPrefixTrie:
@@ -254,14 +263,13 @@ class KVCacheBlockPrefixTrie:
         self.block_id_to_req_id[leaf_block_id].add(req_id)
         self.block_id_to_leaf_node[leaf_block_id] = curr_block_node
 
-    def remove(self, request: Request):
+    def remove(self, req_id: str):
         """
         Calls remove_child on nodes corresponding to given request.
         Args:
-            request: Request which we remove from trie.
+            req_id: Request id of the request which we remove from trie.
         """
 
-        req_id = request.request_id
         if req_id not in self.req_id_to_block_id:
             return
         del self.req_id_to_req_id_wrapper[req_id]
@@ -281,10 +289,10 @@ class KVCacheBlockPrefixTrie:
             parent_node.remove_child(curr_node.block_id)
             curr_node = parent_node
 
-    def allocate_group(self, alloc_mode: str)-> tuple[list[str], list[tuple[int, int,int]]]:
+    def allocate_group(self, alloc_mode: str)-> CommonPrefixGroups:
         return self.ALLOC_METHODS[alloc_mode]()
 
-    def alloc_full_pass(self) -> tuple[list[str], list[tuple[int, int,int]]]:
+    def alloc_full_pass(self) -> CommonPrefixGroups:
         """
         Allocates groups of requests based on the weight of each node.
         Traverses the entire trie to find best groupings.
