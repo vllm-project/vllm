@@ -2122,6 +2122,8 @@ class CUDAGraphRunner(nn.Module):
         **kwargs,
     ) -> torch.Tensor:
         attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
+        
+        print("=== CUDAGraphRunner forward ===")
 
         # Copy the input tensors to the input buffers.
         self.input_buffers["input_ids"].copy_(input_ids, non_blocking=True)

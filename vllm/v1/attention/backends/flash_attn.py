@@ -324,10 +324,12 @@ class FlashAttentionMetadataBuilder:
                       scheduler_output: "SchedulerOutput") -> bool:
         return False
 
-    def build_slice(self, max_query_len: int, common_prefix_len: int,
+    def build_slice(self, req_slice: slice,
+                    token_slice: slice,
+                    max_query_len: int, 
+                    common_prefix_len: int,
                     common_attn_metadata: CommonAttentionMetadata,
-                    req_slice: slice,
-                    token_slice: slice) -> FlashAttentionMetadata:
+        ) -> FlashAttentionMetadata:
         num_reqs = req_slice.stop - req_slice.start
         num_tokens = token_slice.stop - token_slice.start
 
@@ -472,15 +474,15 @@ class FlashAttentionMetadataBuilder:
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata):
         return self.build_slice(
+            req_slice=slice(0, num_reqs),
+            token_slice=slice(0, num_actual_tokens),
             max_query_len=max_query_len,
             common_prefix_len=common_prefix_len,
             common_attn_metadata=common_attn_metadata,
-            req_slice=slice(0, num_reqs),
-            token_slice=slice(0, num_actual_tokens),
         )
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
-        return use_cascade_attention(*args, **kwargs)
+        return False #use_cascade_attention(*args, **kwargs)
 
 
 class FlashAttentionImpl(AttentionImpl):

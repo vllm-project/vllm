@@ -1740,6 +1740,9 @@ class ParallelConfig:
 
     rank: int = 0
     """Global rank in distributed setup."""
+    
+    enable_microbatching: bool = False
+    """Enable microbatching for the model executor."""
 
     @property
     def world_size_across_dp(self) -> int:
@@ -4312,6 +4315,11 @@ class VllmConfig:
                 "full_cuda_graph is not supported with "
                 "cascade attention. Disabling cascade attention.")
             self.model_config.disable_cascade_attn = True
+    
+        if self.parallel_config.enable_microbatching:
+            # Microbatching is not supported with piecewise compilation yet.
+            #  More specifically piecewise cuda-graphs
+            self.compilation_config.level = CompilationLevel.DYNAMO_ONCE
 
         if self.model_config and self.model_config.use_mla and \
             not (current_platform.is_cuda() or current_platform.is_rocm()):
