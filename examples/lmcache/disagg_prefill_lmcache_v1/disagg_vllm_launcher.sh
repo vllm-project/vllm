@@ -54,6 +54,6 @@ elif [[ $1 == "decoder" ]]; then
 
 else
     echo "Invalid role: $1"
-    echo "Should be either prefill, decode"
+    echo "Should be either prefiller, decoder"
     exit 1
 fi
