@@ -32,23 +32,6 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.sampling_params import SamplingParams
 
 logger = init_logger(__name__)
-import logging
-logger_myown = logging.getLogger("my_custom_logger")
-logger_myown.setLevel(logging.INFO)  # or DEBUG if you want more detailed logs
-
-# Create handlers
-file_handler = logging.FileHandler("my_own_vllm_logs.txt")
-
-console_handler = logging.StreamHandler()
-
-# Set formatters and add it to handlers
-formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-file_handler.setFormatter(formatter)
-console_handler.setFormatter(formatter)
-
-# Add handlers to the logger
-logger_myown.addHandler(file_handler)
-logger_myown.addHandler(console_handler)
 
 class Scheduler(SchedulerInterface):
 
@@ -209,16 +192,6 @@ class Scheduler(SchedulerInterface):
 
         # First, schedule the RUNNING requests.
         req_index = 0
-        # self.running.sort(key=lambda r: 0 if "probe" in r.request_id else 1)
-        # ✅ Pause decode of main requests while probe is active
-        # has_active_probe = any("probe" in r.request_id for r in self.running) \
-        #                 or any("probe" in r.request_id for r in self.waiting)
-
-        # if has_active_probe:
-        #     # Keep only probes in the running list; defer all main decoding
-        #     logger_myown.info("[Preempt] Pausing main decode due to active probe.")
-        #     self.running = [r for r in self.running if "probe" in r.request_id]
-
 
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
@@ -339,7 +312,6 @@ class Scheduler(SchedulerInterface):
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
             # Sort waiting queue to prioritize probes
-            # self.waiting = deque(sorted(self.waiting, key=lambda r: 0 if "probe" in r.request_id else 1))
             self.waiting = deque(sorted(self.waiting,key=lambda r: (0 if "probe" in r.request_id else 1, getattr(r, "priority", 0))))
 
 
@@ -744,7 +716,6 @@ class Scheduler(SchedulerInterface):
         )
         if parent_request.status == RequestStatus.RUNNING:
             self.add_request(new_request)
-            # print(f"[Scheduler] Created new request {new_request_id} from {parent_request.request_id}")
 
     def update_from_output(
         self,
@@ -764,7 +735,7 @@ class Scheduler(SchedulerInterface):
         # NOTE(woosuk): As len(self.running) can be up to 1K or more, the below
         # loop can be a performance bottleneck. We should do our best to avoid
         # expensive operations inside the loop.
-        # self.running = deque(sorted(self.running, key=lambda r: 0 if "probe" in r.request_id else 1))
+        # Prioritizing probe requests
         self.running = deque(sorted(self.running, key=lambda r: (0 if "probe" in r.request_id else 1, getattr(r, "priority", 0))))
 
        
@@ -818,8 +789,6 @@ class Scheduler(SchedulerInterface):
             
             if request.request_id in self.requests_to_abort:
                 new_token_ids = [self.tokenizer.encode("</think>", add_special_tokens=False)[0]]
-                print(f"How many decodes done:",{len(request.output_token_ids)})
-            
                 self.requests_to_abort.remove(request.request_id)
             else:
                 new_token_ids = generated_token_ids
@@ -841,13 +810,8 @@ class Scheduler(SchedulerInterface):
                         decoded_text = self.tokenizer.decode(request.output_token_ids, skip_special_tokens=True)
                         final_answer = extract_final_answer(decoded_text)
                         self.probe_answers.setdefault(main_id, []).append(final_answer)
-                        print(f"[Probe] Probe request {request.request_id} finished with answer: {final_answer}")
-                        print(self.probe_answers)
                         answers = self.probe_answers[main_id]
                         if len(answers) >= 2 and answers[-1] == answers[-2]:
-                            # print(f"[Dynasor-Abort] Confident answer detected. Aborting {main_id}.")
-                            
-                            main_req= self.requests.get(main_id)
                             self.requests_to_abort.append(main_id)
                             
 
@@ -1036,17 +1000,6 @@ class Scheduler(SchedulerInterface):
         if self.kv_event_publisher:
             self.kv_event_publisher.shutdown()
 
-
-
-def extract_final_answer(text: str) -> Optional[str]:
-  import re
-    match = re.search(r"([^\s{}\\]+)}\s*\\\]", text)
-    if match:
-        return match.group(1).strip()
-
-    return None
-
-
     ########################################################################
     # P/D Related Methods
     ########################################################################
@@ -1121,3 +1074,11 @@ def extract_final_answer(text: str) -> Optional[str]:
         for req_id in (model_runner_output.finished_sending or ()):
             logger.debug("Finished sending KV transfer for request %s", req_id)
             self._free_blocks(self.requests[req_id])
+
+def extract_final_answer(text: str) -> Optional[str]:
+        import re
+        match = re.search(r"([^\s{}\\]+)}\s*\\\]", text)
+        if match:
+            return match.group(1).strip()
+
+        return None
