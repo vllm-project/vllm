@@ -520,15 +520,20 @@ class LLM:
         return executor.apply_model(func)
 
     def _get_beam_search_lora_requests(
-            beam_width: int, lora_request: Optional[Union[list[LoRARequest],
-                                                          LoRARequest]]):
-        """FIXME"""
-        if lora_request is None:
-            return [None] * beam_width
-        if isinstance(lora_request, LoRARequest):
-            return [lora_request] * beam_width
-        else:
-            return lora_request
+        self,
+        lora_request: Optional[Union[list[LoRARequest], LoRARequest]],
+        prompts: list[Union[TokensPrompt, TextPrompt]],
+    ) -> list[Optional[LoRARequest]]:
+        """Get the optional lora request corresponding to each prompt."""
+        if isinstance(lora_request,
+                      Sequence) and len(lora_request) != len(prompts):
+            raise ValueError(
+                "Lora request list should be the same length as the prompts")
+
+        if lora_request is None or isinstance(lora_request, LoRARequest):
+            return [lora_request] * len(prompts)
+        # Lora request is a sequence and is already the same length as prompts
+        return lora_request
 
     def beam_search(
         self,
@@ -553,11 +558,8 @@ class LLM:
         ignore_eos = params.ignore_eos
         length_penalty = params.length_penalty
 
-        # TODO - attach the lora request to each beam instance so that when
-        # we make the prompt batch, we can also create the lora request batch
-        # in the same way.
         lora_requests = self._get_beam_search_lora_requests(
-            beam_width, lora_request)
+            lora_request, prompts)
 
         def sort_beams_key(x: BeamSearchSequence) -> float:
             return get_beam_search_score(x.tokens, x.cum_logprob,
@@ -586,7 +588,7 @@ class LLM:
                                             temperature=temperature)
         instances: list[BeamSearchInstance] = []
 
-        for instance_lora_req, prompt in zip(lora_requests, prompts):
+        for lora_req, prompt in zip(lora_requests, prompts):
             # Add multimodal processor kwargs & data
             mm_kwargs = {}
             if "multi_modal_data" in prompt:
@@ -604,7 +606,7 @@ class LLM:
             instances.append(
                 BeamSearchInstance(
                     prompt_tokens,
-                    lora_request=instance_lora_req,
+                    lora_request=lora_req,
                     logprobs=None,
                     **mm_kwargs,
                 ), )
