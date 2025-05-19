@@ -415,10 +415,12 @@ class EngineArgs:
 
     additional_config: Optional[Dict[str, Any]] = None
     enable_reasoning: Optional[bool] = None  # DEPRECATED
+    enable_early_exit_reasoning_model:bool=None
     reasoning_parser: str = DecodingConfig.reasoning_backend
 
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
     pt_load_map_location: str = LoadConfig.pt_load_map_location
+    
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -1127,6 +1129,7 @@ class EngineArgs:
             max_num_partial_prefills=self.max_num_partial_prefills,
             max_long_partial_prefills=self.max_long_partial_prefills,
             long_prefill_token_threshold=self.long_prefill_token_threshold,
+            early_exit_reasoning_model=self.enable_early_exit_reasoning_model
         )
 
         lora_config = LoRAConfig(
@@ -1468,7 +1471,7 @@ class EngineArgs:
         """Set Default Arguments for V1 Engine."""
 
         # V1 always uses chunked prefills.
-        self.enable_chunked_prefill = True
+        self.enable_chunked_prefill = False # COT
 
         # V1 enables prefix caching by default.
         if self.enable_prefix_caching is None:
