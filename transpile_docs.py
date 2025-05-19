@@ -62,12 +62,31 @@ def parse_fence_block(lines: list[str],
     attrs = {m.group(1): m.group(2) for m in option_matches if m is not None}
     return content, attrs
 
+MYST_ANCHORS = set()
 
 def replace_links(line: str) -> str:
     # Replace MyST anchors with MkDocs anchors
-    line = re.sub(r"^\((.*)\)=$", r"[](){ #\1 }", line)
+    myst_anchor_pattern = re.compile(r"^\((.*)\)=$")
+
+    def replace_myst_anchor(match: re.Match) -> str:
+        anchor = match.group(1)
+        MYST_ANCHORS.add(anchor)
+        return f"[](){{ #{anchor} }}"
+
+    line = myst_anchor_pattern.sub(replace_myst_anchor, line)
     # Fix references to these anchors
-    line = re.sub(r"\[(.*?)\]\(#(.*?)\)", r"[\1](\2)", line)
+    myst_anchor_ref_pattern = re.compile(r"\[(.*?)\]\(#(.*?)\)")
+
+    def replace_myst_anchor_ref(match: re.Match) -> str:
+        anchor = match.group(2)
+        if anchor in MYST_ANCHORS:
+            title = match.group(1)
+            if not title:
+                title = anchor.replace("-", " ").title()
+            return f"[{title}][{anchor}]"
+        return match.group(0)
+        
+    line = myst_anchor_ref_pattern.sub(replace_myst_anchor_ref, line)
     line = re.sub(r"<project:#(.*?)>", r"[\1][\1]", line)
     # Replace autodoc links with mkdocstrings links
     autodoc_pattern = re.compile(r"\{(mod|class|meth|func)\}`(?P<object>[^\s]+?)`")
@@ -380,7 +399,9 @@ def main():
 
 def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool) -> None:
     main()
+    main()
 
 
 if __name__ == "__main__":
+    main()
     main()
