@@ -291,6 +291,7 @@ class EngineArgs:
     data_parallel_address: Optional[str] = None
     data_parallel_rpc_port: Optional[int] = None
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
+    enable_microbatching: bool = ParallelConfig.enable_microbatching
     max_parallel_loading_workers: Optional[
         int] = ParallelConfig.max_parallel_loading_workers
     block_size: Optional[BlockSize] = CacheConfig.block_size
@@ -621,6 +622,9 @@ class EngineArgs:
         parallel_group.add_argument(
             "--enable-expert-parallel",
             **parallel_kwargs["enable_expert_parallel"])
+        parallel_group.add_argument(
+            "--enable-microbatching",
+            **parallel_kwargs["enable_microbatching"])
         parallel_group.add_argument(
             "--max-parallel-loading-workers",
             **parallel_kwargs["max_parallel_loading_workers"])
@@ -1066,6 +1070,7 @@ class EngineArgs:
             data_parallel_master_ip=data_parallel_address,
             data_parallel_rpc_port=data_parallel_rpc_port,
             enable_expert_parallel=self.enable_expert_parallel,
+            enable_microbatching=self.enable_microbatching,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
             ray_workers_use_nsight=self.ray_workers_use_nsight,

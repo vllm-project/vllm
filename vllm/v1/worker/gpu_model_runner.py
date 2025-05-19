@@ -2,6 +2,7 @@
 
 import copy
 import gc
+import os
 import time
 import weakref
 from typing import TYPE_CHECKING, Optional, TypeAlias, Union
@@ -73,6 +74,7 @@ AttnMetadataDict: TypeAlias = dict[str, FlashAttentionMetadata]
 # list when ubatching is enabled
 PerLayerAttnMetadata: TypeAlias = Union[list[AttnMetadataDict],
                                         AttnMetadataDict]
+UBatchSlices: TypeAlias = Optional[list[tuple[slice, slice]]]
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
@@ -493,13 +495,30 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if batch_changed or batch_reordered:
             self.input_batch.refresh_sampling_metadata()
 
-    def _prepare_inputs(
+    def _ubatch_split(
         self,
-        scheduler_output: "SchedulerOutput",
-        ubatch_slices: Optional[list[tuple[
-            slice, slice]]] = None,  # req_slice, token_slice 
+        max_num_scheduled_tokens: int, 
+        scheduler_output: "SchedulerOutput"
+    ) -> Optional[UBatchSlices]:
+        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        num_reqs = self.input_batch.num_reqs
+        
+        if self.parallel_config.enable_microbatching and max_num_scheduled_tokens == 1:
+            # For pure decode we can just create ubatchs by cutting the request
+            # in half
+            b0_reqs_end = num_reqs // 2
+            b0_tokens_end = total_num_scheduled_tokens // 2
+            return [
+                (slice(0, b0_reqs_end), slice(0, b0_tokens_end)),
+                (slice(b0_reqs_end, num_reqs),
+                 slice(b0_tokens_end, total_num_scheduled_tokens)),
+            ]
+        return None
+
+    def _prepare_inputs(
+        self, scheduler_output: "SchedulerOutput"
     ) -> tuple[PerLayerAttnMetadata, torch.Tensor,
-               Optional[SpecDecodeMetadata]]:
+               Optional[SpecDecodeMetadata], Optional[UBatchSlices]]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -514,6 +533,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
         num_scheduled_tokens = np.array(tokens, dtype=np.int32)
         max_num_scheduled_tokens = max(tokens)
+
+        ubatch_slices: Optional[UBatchSlices] = self._ubatch_split(
+            max_num_scheduled_tokens, scheduler_output)
 
         # Get request indices.
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
@@ -650,11 +672,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     attn_metadata_i = (
                         self.attn_metadata_builders[kv_cache_group_id].
                         build_slice(
-                            max(tokens[req_slice]),
-                            common_prefix_len=common_prefix_len,
-                            common_attn_metadata=common_attn_metadata,
                             req_slice=req_slice,
                             token_slice=token_slice,
+                            max_query_len=max(tokens[req_slice]),
+                            common_prefix_len=common_prefix_len,
+                            common_attn_metadata=common_attn_metadata,
                         ))
                     for layer_name in kv_cache_group_spec.layer_names:
                         assert type(attn_metadata) is list
@@ -699,7 +721,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.lora_config:
             self.set_active_loras(self.input_batch, num_scheduled_tokens)
 
-        return attn_metadata, logits_indices, spec_decode_metadata
+        return attn_metadata, logits_indices, spec_decode_metadata, ubatch_slices
 
     def _compute_cascade_attn_prefix_len(
         self,
@@ -1136,7 +1158,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Use piecewise CUDA graphs.
             # Add padding to the batch size.
             tokens_slice = \
-             slice(tokens_slice.start, self.vllm_config.pad_for_cudagraph(num_tokens))
+             slice(tokens_slice.start, tokens_slice.start+
+                   self.vllm_config.pad_for_cudagraph(num_tokens))
         else:
             # Eager mode.
             # Pad tokens to multiple of tensor_parallel_size when
@@ -1145,8 +1168,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.vllm_config.compilation_config.pass_config. \
                 enable_sequence_parallelism and tp_size > 1:
                 from vllm.utils import round_up
-                tokens_slice = slice(tokens_slice.start,
-                                     round_up(num_tokens, tp_size))
+                tokens_slice = slice(
+                    tokens_slice.start,
+                    tokens_slice.start + round_up(num_tokens, tp_size))
+
+        # update num tokens for padding
         num_tokens = tokens_slice.stop - tokens_slice.start
 
         # _prepare_inputs may reorder the batch, so we must gather multi
@@ -1197,7 +1223,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, IntermediateTensors]:
-        ubatch_slices: Optional[list[tuple[slice, slice]]] = None
 
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
@@ -1208,7 +1233,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return self.kv_connector_no_forward(scheduler_output)
 
         # Prepare the decoder inputs.
-        attn_metadata, logits_indices, spec_decode_metadata = (
+        attn_metadata, logits_indices, spec_decode_metadata, ubatch_slices = (
             self._prepare_inputs(scheduler_output))
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
 
@@ -1217,6 +1242,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.maybe_setup_kv_connector(scheduler_output)
 
         if ubatch_slices is not None:
+            model_outputs = []
             for i, (_, tokens_slice) in enumerate(ubatch_slices):
                 input_ids, positions, inputs_embeds, intermediate_tensors = \
                     self._get_model_inputs(tokens_slice, scheduler_output)
@@ -1224,14 +1250,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
                 with set_forward_context(attn_metadata[i],
                                          self.vllm_config,
-                                         num_tokens=num_input_tokens):
-
+                                         num_tokens=num_input_token):
                     model_output = self.model(
                         input_ids=input_ids,
                         positions=positions,
                         intermediate_tensors=intermediate_tensors,
                         inputs_embeds=inputs_embeds,
                     )
+                    
+                    # clone is important for eventually piecewise cuda-graphs
+                    model_outputs.append(model_output.clone())
+            model_output = torch.cat(model_outputs, dim=0)
         else:
             input_ids, positions, inputs_embeds, intermediate_tensors = \
                 self._get_model_inputs(slice(0, num_scheduled_tokens),
