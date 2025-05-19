@@ -1790,6 +1790,9 @@ class ParallelConfig:
     rank: int = 0
     """Global rank in distributed setup."""
 
+    enable_vision_encoder_data_parallel: bool = False
+    """ Use data parallelism instead of tensor parallelism for vision encoder. Only support LLama4 for now"""
+
     @property
     def world_size_across_dp(self) -> int:
         """world_size_across_dp is TPxPPxDP, it is the size of the world
