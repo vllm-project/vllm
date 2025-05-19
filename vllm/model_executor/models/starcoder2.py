@@ -351,6 +351,5 @@ class Starcoder2ForCausalLM(nn.Module, SupportsPP):
             # the checkpoint. Skip them.
             skip_prefixes=(["lm_head.weight"]
                            if self.config.tie_word_embeddings else None),
-            skip_substrs=["rotary_emb.inv_freq"],
         )
         return loader.load_weights(weights)

@@ -80,6 +80,14 @@ class AutoWeightsLoader:
     environment variable ``VLLM_LOGGING_LEVEL=DEBUG``.
     """
 
+    # Models trained using early version ColossalAI
+    # may include these tensors in checkpoint. Skip them.
+    ROTARY_EMBEDS_UNUSED_WEIGHTS = [
+        "rotary_emb.inv_freq",
+        "rotary_emb.cos_cached",
+        "rotary_emb.sin_cached",
+    ]
+
     def __init__(
         self,
         module: nn.Module,
@@ -94,6 +102,8 @@ class AutoWeightsLoader:
         self.skip_prefixes = skip_prefixes or []
         self.skip_substrs = skip_substrs or []
         self.ignore_unexpected_prefixes = ignore_unexpected_prefixes or []
+        # update default skip_substrs
+        self.skip_substrs += self.ROTARY_EMBEDS_UNUSED_WEIGHTS
 
     def _groupby_prefix(
         self,
