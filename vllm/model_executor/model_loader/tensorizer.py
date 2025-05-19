@@ -214,6 +214,7 @@ class TensorizerArgs:
 
         group.add_argument(
             "--tensorizer-uri",
+            type=str,
             help="Path to serialized model tensors. Can be a local file path,"
             " or an HTTP(S) or S3 URI.",
         )
@@ -226,6 +227,7 @@ class TensorizerArgs:
         )
         group.add_argument(
             "--encryption-keyfile",
+            type=str,
             default=None,
             help="The file path to a binary file containing a binary key to "
             "use for decryption. Can be a file path or S3 network URI.")
@@ -239,18 +241,21 @@ class TensorizerArgs:
             "and model size. This greatly increases performance.")
         group.add_argument(
             "--s3-access-key-id",
+            type=str,
             default=None,
             help="The access key for the S3 bucket. Can also be set via the "
             "S3_ACCESS_KEY_ID environment variable.",
         )
         group.add_argument(
             "--s3-secret-access-key",
+            type=str,
             default=None,
             help="The secret access key for the S3 bucket. Can also be set via "
             "the S3_SECRET_ACCESS_KEY environment variable.",
         )
         group.add_argument(
             "--s3-endpoint",
+            type=str,
             default=None,
             help="The endpoint for the S3 bucket. Can also be set via the "
             "S3_ENDPOINT_URL environment variable.",
