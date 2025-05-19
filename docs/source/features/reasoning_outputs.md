@@ -19,6 +19,7 @@ vLLM currently supports the following reasoning models:
 
 :::{note}
 IBM Granite 3.2 reasoning is disabled by default; to enable it, you must also pass `thinking=True` in your `chat_template_kwargs`.
+The reasoning feature for the Qwen3 series is enabled by default. To disable it, you must pass `enable_thinking=False` in your `chat_template_kwargs`.
 :::
 
 ## Quickstart
@@ -49,6 +50,8 @@ model = models.data[0].id
 # Round 1
 messages = [{"role": "user", "content": "9.11 and 9.8, which is greater?"}]
 # For granite, add: `extra_body={"chat_template_kwargs": {"thinking": True}}`
+# For Qwen3 series, if you want to disable thinking in reasoning mode, add:
+# extra_body={"chat_template_kwargs": {"enable_thinking": False}}
 response = client.chat.completions.create(model=model, messages=messages)
 
 reasoning_content = response.choices[0].message.reasoning_content
@@ -104,6 +107,8 @@ model = models.data[0].id
 
 messages = [{"role": "user", "content": "9.11 and 9.8, which is greater?"}]
 # For granite, add: `extra_body={"chat_template_kwargs": {"thinking": True}}`
+# For Qwen3 series, if you want to disable thinking in reasoning mode, add:
+# extra_body={"chat_template_kwargs": {"enable_thinking": False}}
 stream = client.chat.completions.create(model=model,
                                         messages=messages,
                                         stream=True)
@@ -141,10 +146,10 @@ Remember to check whether the `reasoning_content` exists in the response before 
 The reasoning content is also available in the structured output. The structured output engine like `xgrammar` will use the reasoning content to generate structured output. It is only supported in v0 engine now.
 
 ```bash
-VLLM_USE_V1=0 vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B --reasoning-parser deepseek_r1
+vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B --reasoning-parser deepseek_r1
 ```
 
-Please note that the `VLLM_USE_V1` environment variable must be set to `0` to use the v0 engine.
+The following is an example client:
 
 ```python
 from openai import OpenAI
@@ -231,13 +236,12 @@ For more examples, please refer to <gh-file:examples/online_serving/openai_chat_
 
 ## How to support a new reasoning model
 
-You can add a new `ReasoningParser` similar to <gh-file:vllm/entrypoints/openai/reasoning_parsers/deepseek_r1_reasoning_parser.py>.
+You can add a new `ReasoningParser` similar to <gh-file:vllm/reasoning/deepseek_r1_reasoning_parser.py>.
 
 ```python
 # import the required packages
 
-from vllm.entrypoints.openai.reasoning_parsers.abs_reasoning_parsers import (
-    ReasoningParser, ReasoningParserManager)
+from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaMessage)
 
@@ -288,7 +292,7 @@ class ExampleParser(ReasoningParser):
         """
 ```
 
-Additionally, to enable structured output, you'll need to create a new `Reasoner` similar to the one in <gh-file:vllm/model_executor/guided_decoding/reasoner/deepseek_reasoner.py>.
+Additionally, to enable structured output, you'll need to create a new `Reasoner` similar to the one in <gh-file:vllm/reasoning/deepseek_r1_reasoning_parser.py>.
 
 ```python
 @dataclass
