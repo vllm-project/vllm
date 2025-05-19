@@ -40,6 +40,8 @@ from torch.distributed import Backend, ProcessGroup
 import vllm.envs as envs
 from vllm.distributed.device_communicators.base_device_communicator import (
     DeviceCommunicatorBase)
+from vllm.distributed.device_communicators.quick_all_reduce import (
+    QuickReduceAlgo)
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.utils import (direct_register_custom_op, get_distributed_init_method,
@@ -906,6 +908,14 @@ _ENABLE_CUSTOM_ALL_REDUCE = True
 def set_custom_all_reduce(enable: bool):
     global _ENABLE_CUSTOM_ALL_REDUCE
     _ENABLE_CUSTOM_ALL_REDUCE = enable
+
+
+_QUICK_REDUCE_ALGO: Optional[QuickReduceAlgo] = None
+
+
+def set_quick_reduce_algo(algo: Optional[QuickReduceAlgo]):
+    global _QUICK_REDUCE_ALGO
+    _QUICK_REDUCE_ALGO = algo
 
 
 def init_distributed_environment(

@@ -44,13 +44,28 @@ using fp32x4_t = __attribute__((__vector_size__(4 * sizeof(float)))) float;
 using fp32x8_t = __attribute__((__vector_size__(8 * sizeof(float)))) float;
 using fp32x16_t = __attribute__((__vector_size__(16 * sizeof(float)))) float;
 
-static int constexpr kNegOne = 0xBC00BC00;  // {-1, -1}, fp16x2_t
+static constexpr int kNegOne = 0xBC00BC00;  // {-1, -1}, fp16x2_t
+
+// Number of atoms (4xf16x2_t) processed by a single thread
+static constexpr int kAtoms = 8;
+
+// We use a workgroup of 256 threads
+static constexpr int kBlockSize = 256;
+static constexpr int kAtomStride = kBlockSize;
+
+// Size and atom stride of source/destination data that the block will
+// process.
+static constexpr int kTileSize = kBlockSize * kAtoms * sizeof(int32x4_t);
 
 // Standard CDNA wavefront size.
-static int constexpr kWavefront = 64;
+static constexpr int kWavefront = 64;
 
 // 256 thread, 4 wavefronts.
 static dim3 constexpr kBlock = {64, 4, 1};
+
+// Number of threads in a group for quantization
+// It corresponds to 32 F16 elements in quantization block
+static constexpr int kThreadGroupSize = 8;
 
 // Methods
 __device_inline__ __host__ unsigned long divceil(unsigned long x,
@@ -82,6 +97,9 @@ __device_inline__ static void buffer_store_dwordx4(
     int32x4_t data, int32x4_t srsrc, int32_t voffset, int32_t soffset,
     int32_t aux) __asm("llvm.amdgcn.raw.buffer.store.v4i32");
 
+// Setting fp16 flag does not seem to have an effect for gfx942
+// The register offset has to be validated
+// So we don't use it in Codecs for now.
 __device_inline__ static void set_fp16_ovfl(bool const value) {
   // short size = 0b00001;    // Specifies the bit size to modify
   // const short offset = 0b10111;  // Corrected offset to 23, which is the bit
@@ -300,6 +318,78 @@ __device_inline__ float T2float_cast<half>(half a) {
 template <>
 __device_inline__ float T2float_cast<nv_bfloat16>(nv_bfloat16 a) {
   return __bfloat162float(a);
+}
+
+template <typename T>
+__device_inline__ int group_abs_max(int32x4_t atom) {
+  const int group_leader = (threadIdx.x / kThreadGroupSize) * kThreadGroupSize;
+
+  int wmax, wmin, wblockmax;
+  int a, b;
+  a = packed_max<T>(atom[0], atom[1]);
+  b = packed_max<T>(atom[2], atom[3]);
+
+  wmax = packed_max<T>(a, b);
+
+  a = packed_min<T>(atom[0], atom[1]);
+  b = packed_min<T>(atom[2], atom[3]);
+
+  wmin = packed_min<T>(a, b);
+
+  // Reduce the max among a group of threads
+  // Note: This is basically 2 blocks of values setup as the
+  // upper/lower halves of the f16x2_t
+  for (int i = 1; i < kThreadGroupSize; i <<= 1) {
+    int x = __shfl_down(wmax, i);
+    wmax = packed_max<T>(wmax, x);
+
+    int y = __shfl_down(wmin, i);
+    wmin = packed_min<T>(wmin, y);
+  }
+  wblockmax = packed_abs_max<T>(wmax, wmin);
+  // Share with the cohort
+  wblockmax = __shfl(wblockmax, group_leader);
+  return wblockmax;
+}
+
+template <typename T>
+__device_inline__ void group_max_min(int32x4_t atom, int& wblockmax,
+                                     int& wblockmin) {
+  const int group_leader = (threadIdx.x / kThreadGroupSize) * kThreadGroupSize;
+
+  int wmax, wmin;
+  int a, b;
+  a = packed_max<T>(atom[0], atom[1]);
+  b = packed_max<T>(atom[2], atom[3]);
+  wmax = packed_max<T>(a, b);
+
+  a = packed_min<T>(atom[0], atom[1]);
+  b = packed_min<T>(atom[2], atom[3]);
+  wmin = packed_min<T>(a, b);
+
+  // Reduce the max and min among a group of threads
+  // Note: This is basically 2 blocks of values setup as the
+  // upper/lower halves of the f16x2_t
+  for (int i = 1; i < kThreadGroupSize; i <<= 1) {
+    int x = __shfl_down(wmax, i);
+    wmax = packed_max<T>(wmax, x);
+
+    int y = __shfl_down(wmin, i);
+    wmin = packed_min<T>(wmin, y);
+  }
+
+  // Share with the cohort
+  wblockmax = __shfl(wmax, group_leader);
+  wblockmin = __shfl(wmin, group_leader);
+}
+
+__device_inline__ void set_sync_flag(int* flag_ptr, int flag) {
+  __atomic_store_n(flag_ptr, flag, __ATOMIC_RELEASE);
+}
+
+__device_inline__ void wait_sync_flag(int* flag_ptr, int flag) {
+  while (__atomic_load_n(flag_ptr, __ATOMIC_RELAXED) != flag) {
+  }
 }
 
 }  // namespace quickreduce

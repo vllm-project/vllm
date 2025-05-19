@@ -195,19 +195,19 @@ struct DeviceComms {
                            data_offset, flag_color);
         break;
       case QuickReduceAlgo::TWOSHOT_Q8:
-        TWOSHOT_DISPATCH(TwoshotQ8LineCodec)
+        TWOSHOT_DISPATCH(CodecQ8Symm)
         break;
       case QuickReduceAlgo::TWOSHOT_MAX_MIN_Q8:
-        TWOSHOT_DISPATCH(TwoshotMaxMinQ8LineCodec)
+        TWOSHOT_DISPATCH(CodecQ8Asymm)
         break;
       case QuickReduceAlgo::TWOSHOT_Q4:
-        TWOSHOT_DISPATCH(TwoshotQ4LineCodec)
+        TWOSHOT_DISPATCH(CodecQ4Symm)
         break;
       case QuickReduceAlgo::TWOSHOT_MAX_MIN_Q4:
-        TWOSHOT_DISPATCH(TwoshotMaxMinQ4LineCodec)
+        TWOSHOT_DISPATCH(CodecQ4Asymm)
         break;
       default:
-        TWOSHOT_DISPATCH(TwoshotFP16LineCodec)
+        TWOSHOT_DISPATCH(CodecFP16)
         break;
     }
     HIP_CHECK(cudaGetLastError());
