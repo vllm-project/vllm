@@ -8,7 +8,6 @@ from aiohttp import web
 
 
 class RoundRobinProxy:
-
     def __init__(self, target_ports):
         self.target_ports = target_ports
         self.port_cycle = itertools.cycle(self.target_ports)
@@ -21,14 +20,15 @@ class RoundRobinProxy:
             try:
                 # Forward the request
                 async with session.request(
-                        method=request.method,
-                        url=target_url,
-                        headers=request.headers,
-                        data=request.content,
+                    method=request.method,
+                    url=target_url,
+                    headers=request.headers,
+                    data=request.content,
                 ) as response:
                     # Start sending the response
-                    resp = web.StreamResponse(status=response.status,
-                                              headers=response.headers)
+                    resp = web.StreamResponse(
+                        status=response.status, headers=response.headers
+                    )
                     await resp.prepare(request)
 
                     # Stream the response content
@@ -45,11 +45,11 @@ class RoundRobinProxy:
 async def main():
     proxy = RoundRobinProxy([8100, 8200])
     app = web.Application()
-    app.router.add_route('*', '/{path:.*}', proxy.handle_request)
+    app.router.add_route("*", "/{path:.*}", proxy.handle_request)
 
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, 'localhost', 8000)
+    site = web.TCPSite(runner, "localhost", 8000)
     await site.start()
 
     print("Proxy server started on http://localhost:8000")
@@ -58,5 +58,5 @@ async def main():
     await asyncio.Event().wait()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     asyncio.run(main())
