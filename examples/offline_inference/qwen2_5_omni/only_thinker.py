@@ -140,7 +140,7 @@ def main(args):
         print(generated_text)
 
 
-if __name__ == "__main__":
+def parse_args():
     parser = FlexibleArgumentParser(
         description='Demo on using vLLM for offline inference with '
         'audio language models')
@@ -155,5 +155,9 @@ if __name__ == "__main__":
                         default=None,
                         help="Set the seed when initializing `vllm.LLM`.")
 
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = parse_args()
     main(args)
