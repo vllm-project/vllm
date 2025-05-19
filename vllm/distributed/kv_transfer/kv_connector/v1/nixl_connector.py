@@ -779,23 +779,18 @@ class NixlConnectorWorker:
         """
         done_req_ids: set[str] = set()
         for req_id, handles in list(transfers.items()):
-            running_reqs = []
-            for handle in handles:
+            for handle, xfer_stime in handles:
                 xfer_state = self.nixl_wrapper.check_xfer_state(handle)
                 if xfer_state == "DONE":
                     # TODO ptarasiewicz: why abort is throwing errors?
                     # self.nixl_wrapper.release_xfer_handle(handle)
+                    done_req_ids.add(req_id)
+                    del transfers[req_id]
+                elif xfer_state == "PROC":
                     continue
-                if xfer_state == "PROC":
-                    running_reqs.append(handle)
                 else:
                     raise RuntimeError("Transfer failed with state %s",
                                        xfer_state)
-            if len(running_reqs) == 0:
-                done_req_ids.add(req_id)
-                del transfers[req_id]
-            else:
-                transfers[req_id] = running_reqs
         return done_req_ids
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
@@ -918,7 +913,9 @@ class NixlConnectorWorker:
         self.nixl_wrapper.transfer(handle)
 
         # Use handle to check completion in future step().
-        self._recving_transfers[request_id].append(handle)
+        # TODO surface xfer elapsed time
+        self._recving_transfers[request_id].append(
+            (handle, time.perf_counter()))
 
     def _get_block_descs_ids(self,
                              engine_id: str,
