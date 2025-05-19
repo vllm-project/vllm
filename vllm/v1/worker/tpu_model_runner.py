@@ -21,7 +21,6 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.lora.layers import BaseLayerWithLoRA
-from vllm.lora.request import LoRARequest
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargs,
@@ -1465,6 +1464,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                                                          batch_size)
         return MultiModalKwargs.as_kwargs(batched_dummy_mm_inputs,
                                           device=self.device)
+
 
 def _get_req_paddings(min_req_size: int, max_req_size: int) -> list[int]:
     logger.info("Preparing request paddings:")
