@@ -9,7 +9,7 @@ import importlib
 import multiprocessing
 import os
 import shutil
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -46,7 +46,7 @@ TORCH_DTYPE_TO_NEURON_AMP = {
 }
 
 # Models supported by Neuronx distributed for inference.
-_NEURON_SUPPORTED_MODELS: Dict[str, Tuple[str, str]] = {
+_NEURON_SUPPORTED_MODELS: dict[str, tuple[str, str]] = {
     "LlamaForCausalLM":
     ("neuronx_distributed_inference.models.llama.modeling_llama",
      "NeuronLlamaForCausalLM"),
@@ -143,8 +143,8 @@ class NeuronCausalLM(nn.Module):
         config = neuronx_model_cls.get_config_cls()(
             neuron_config,
             load_config=load_pretrained_config(model_name_or_path))
-        hashed_config = hashlib.md5(
-            config.to_json_string().encode('utf-8')).hexdigest()
+        hashed_config = hashlib.md5(config.to_json_string().encode('utf-8'),
+                                    usedforsecurity=False).hexdigest()
         if os.getenv("NEURON_COMPILED_ARTIFACTS") is not None:
             compiled_model_path = os.getenv("NEURON_COMPILED_ARTIFACTS")
         elif os.path.exists(model_name_or_path):
@@ -263,8 +263,8 @@ class NeuronMllamaForCausalLM(nn.Module):
         config = neuronx_model_cls.get_config_cls()(
             neuron_config,
             load_config=load_pretrained_config(model_name_or_path))
-        hashed_config = hashlib.md5(
-            config.to_json_string().encode('utf-8')).hexdigest()
+        hashed_config = hashlib.md5(config.to_json_string().encode('utf-8'),
+                                    usedforsecurity=False).hexdigest()
         if os.getenv("NEURON_COMPILED_ARTIFACTS") is not None:
             compiled_model_path = os.getenv("NEURON_COMPILED_ARTIFACTS")
         elif os.path.exists(model_name_or_path):
@@ -365,7 +365,7 @@ class NeuronSpeculationCausalLM(nn.Module):
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[list[SamplerOutput]]:
         batch_size, num_steps = logits.shape
         seq_ids = [
             seq_id for sg in sampling_metadata.seq_groups
@@ -426,8 +426,8 @@ class NeuronSpeculationCausalLM(nn.Module):
         config.fused_spec_config = fused_spec_config
         self.config.neuron_config = neuron_config
 
-        hashed_config = hashlib.md5(
-            config.to_json_string().encode('utf-8')).hexdigest()
+        hashed_config = hashlib.md5(config.to_json_string().encode('utf-8'),
+                                    usedforsecurity=False).hexdigest()
         if os.getenv("NEURON_COMPILED_ARTIFACTS") is not None:
             compiled_model_path = os.getenv("NEURON_COMPILED_ARTIFACTS")
         elif os.path.exists(model_name_or_path):
