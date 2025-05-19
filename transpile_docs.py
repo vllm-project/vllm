@@ -381,7 +381,7 @@ def main():
             continue
         elif path.suffix == ".md":
             transpile_myst_to_md(path)
-        elif path.suffix in {".png", ".jpg", ".ico"}:
+        elif path.suffix in {".png", ".jpg", ".ico", ".yml"}:
             new_path = NEW_DIR / path.relative_to(OLD_DIR)
             new_path.parent.mkdir(parents=True, exist_ok=True)
             with open(path, "rb") as f:
