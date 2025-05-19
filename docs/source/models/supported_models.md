@@ -532,6 +532,11 @@ Specified using `--task generate`.
   * `nvidia/Minitron-8B-Base`, `mgoin/Nemotron-4-340B-Base-hf-FP8`, etc.
   * ✅︎
   * ✅︎
+- * `NGPTForCausalLM`
+  * NGPT
+  * `nvidia/NGPT-8B-Instruct`, etc.
+  * ✅︎
+  * ✅︎
 - * `OLMoForCausalLM`
   * OLMo
   * `allenai/OLMo-1B-hf`, `allenai/OLMo-7B-hf`, etc.
