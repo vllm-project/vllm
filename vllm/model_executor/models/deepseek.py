@@ -35,6 +35,7 @@ from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.distributed.parallel_state import get_ep_group
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -95,11 +96,13 @@ class DeepseekMoE(nn.Module):
 
     def __init__(
         self,
+        layer_idx: int,
         config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ):
         super().__init__()
+        self.layer_idx = layer_idx
         self.config = config
         self.rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -124,12 +127,18 @@ class DeepseekMoE(nn.Module):
                                     self.n_logical_experts)
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
+        self.physical_expert_start = (self.ep_rank *
+                                      self.n_local_physical_experts)
+        self.physical_expert_end = (self.physical_expert_start +
+                                    self.n_local_physical_experts)
+
         self.experts = nn.ModuleList([
             DeepseekMLP(hidden_size=config.hidden_size,
                         intermediate_size=config.moe_intermediate_size,
                         hidden_act=config.hidden_act,
                         quant_config=quant_config,
                         reduce_results=False)
+            # TODO(bowen): Work together with EP
             for idx in range(self.n_routed_experts)
         ])
         self.pack_params()
@@ -194,13 +203,28 @@ class DeepseekMoE(nn.Module):
             shared_output = self.shared_experts(hidden_states)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = fused_moe(hidden_states,
-                                        self.w1,
-                                        self.w2,
-                                        router_logits,
-                                        self.top_k,
-                                        renormalize=self.config.norm_topk_prob,
-                                        inplace=True)
+        final_hidden_states, topk_ids = fused_moe(
+            hidden_states,
+            self.w1,
+            self.w2,
+            router_logits,
+            self.top_k,
+            renormalize=self.config.norm_topk_prob,
+            inplace=True,
+            return_topk_ids=True)
+
+        # Collect expert load statistics
+        forward_context = get_forward_context()
+        if forward_context.expert_load_pass is not None:
+            expert_load_pass = forward_context.expert_load_pass
+            local_mask = (topk_ids >= self.physical_expert_start) & (
+                topk_ids < self.physical_expert_end)
+            if local_mask.any():
+                local_indices = topk_ids[
+                    local_mask] - self.physical_expert_start
+                counts = torch.bincount(
+                    local_indices, minlength=self.n_local_physical_experts)
+                expert_load_pass[self.layer_idx] += counts
 
         if self.config.n_shared_experts is not None:
             final_hidden_states = final_hidden_states + shared_output
@@ -321,7 +345,8 @@ class DeepseekDecoderLayer(nn.Module):
         if (config.n_routed_experts is not None
                 and layer_idx >= config.first_k_dense_replace
                 and layer_idx % config.moe_layer_freq == 0):
-            self.mlp = DeepseekMoE(config=config,
+            self.mlp = DeepseekMoE(layer_idx=layer_idx,
+                                   config=config,
                                    quant_config=quant_config,
                                    prefix=f"{prefix}.mlp")
         else:

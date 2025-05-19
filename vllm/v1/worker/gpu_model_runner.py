@@ -1645,9 +1645,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     for k, v in self.intermediate_tensors.items()
                 })
 
+            if self.parallel_config.enable_eplb:
+                expert_load_pass = self.eplb_state.expert_load_pass
+            else:
+                expert_load_pass = None
+
             with set_forward_context(attn_metadata,
                                      self.vllm_config,
-                                     num_tokens=num_tokens):
+                                     num_tokens=num_tokens,
+                                     expert_load_pass=expert_load_pass):
                 outputs = model(
                     input_ids=input_ids,
                     positions=positions,
