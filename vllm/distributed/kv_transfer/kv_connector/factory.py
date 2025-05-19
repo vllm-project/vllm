@@ -58,8 +58,17 @@ class KVConnectorFactory:
             raise ValueError("Attempting to initialize a V1 Connector, "
                              f"but found {envs.VLLM_USE_V1=}")
 
-        connector_name = config.kv_transfer_config.kv_connector
-        connector_cls = cls._registry[connector_name]()
+        kv_transfer_config = config.kv_transfer_config
+        connector_name = kv_transfer_config.kv_connector
+        if connector_name in cls._registry:
+            connector_cls = cls._registry[connector_name]()
+        else:
+            connector_module_path = kv_transfer_config.kv_connector_module_path
+            if connector_module_path is None:
+                raise ValueError(
+                    f"Unsupported connector type: {connector_name}")
+            connector_module = importlib.import_module(connector_module_path)
+            connector_cls = getattr(connector_module, connector_name)
         assert issubclass(connector_cls, KVConnectorBase_V1)
         logger.info("Creating v1 connector with name: %s", connector_name)
         # NOTE(Kuntai): v1 connector is explicitly separated into two roles.
