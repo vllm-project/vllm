@@ -105,8 +105,8 @@ class ChatCommand(CLISubcommand):
         if system_prompt is not None:
             conversation.append({"role": "system", "content": system_prompt})
 
-        if args.quick_chat:
-            conversation.append({"role": "user", "content": args.quick_chat})
+        if args.quick:
+            conversation.append({"role": "user", "content": args.quick})
 
             chat_completion = client.chat.completions.create(
                 model=model_name, messages=conversation)
@@ -165,9 +165,9 @@ class CompleteCommand(CLISubcommand):
     def cmd(args: argparse.Namespace) -> None:
         model_name, client = _interactive_cli(args)
 
-        if args.quick_complete:
+        if args.quick:
             completion = client.completions.create(model=model_name,
-                                                   prompt=args.quick_complete)
+                                                   prompt=args.quick)
             print(completion.choices[0].text)
             return
 
