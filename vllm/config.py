@@ -12,8 +12,8 @@ import uuid
 import warnings
 from collections import Counter
 from contextlib import contextmanager
-from dataclasses import (MISSING, Field, asdict, dataclass, field, fields,
-                         is_dataclass, replace)
+from dataclasses import (MISSING, Field, asdict, field, fields, is_dataclass,
+                         replace)
 from functools import cached_property
 from importlib.util import find_spec
 from pathlib import Path
@@ -21,9 +21,10 @@ from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
                     Protocol, TypeVar, Union, cast, get_args, get_origin)
 
 import torch
+from pydantic import ConfigDict, SkipValidation, TypeAdapter, model_validator
 from torch.distributed import ProcessGroup, ReduceOp
 from transformers import PretrainedConfig
-from typing_extensions import deprecated
+from typing_extensions import deprecated, runtime_checkable
 
 import vllm.envs as envs
 from vllm import version
@@ -43,8 +44,21 @@ from vllm.transformers_utils.config import (
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
 from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
-                        get_cpu_memory, get_open_port, is_torch_equal_or_newer,
-                        random_uuid, resolve_obj_by_qualname)
+                        get_cpu_memory, get_open_port, is_in_doc_build,
+                        is_torch_equal_or_newer, random_uuid,
+                        resolve_obj_by_qualname)
+
+IS_IN_DOC_BUILD = is_in_doc_build()
+
+if IS_IN_DOC_BUILD:
+
+    def dataclass(*args, **kwargs):
+        """A non-Pydantic dataclass for docs builds."""
+        kwargs.pop("config", None)
+        from dataclasses import dataclass as _dataclass
+        return _dataclass(*args, **kwargs)
+else:
+    from pydantic.dataclasses import dataclass
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
@@ -57,7 +71,10 @@ if TYPE_CHECKING:
 
     ConfigType = type[DataclassInstance]
 else:
+    PlacementGroup = Any
+    ExecutorBase = Any
     QuantizationConfig = Any
+    BaseModelLoader = Any
     ConfigType = type
 
 logger = init_logger(__name__)
@@ -95,6 +112,7 @@ HfOverrides = Union[dict[str, Any], Callable[[PretrainedConfig],
                                              PretrainedConfig]]
 
 
+@runtime_checkable
 class SupportsHash(Protocol):
 
     def compute_hash(self) -> str:
@@ -226,7 +244,7 @@ ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 
 
 @config
-@dataclass
+@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
 class ModelConfig:
     """Configuration for the model."""
 
@@ -239,7 +257,7 @@ class ModelConfig:
     task, even if the same model can be used for multiple tasks. When the model
     only supports one task, "auto" can be used to select it; otherwise, you
     must specify explicitly which task to use."""
-    tokenizer: str = None  # type: ignore
+    tokenizer: SkipValidation[str] = None  # type: ignore
     """Name or path of the Hugging Face tokenizer to use. If unspecified, model
     name or path will be used."""
     tokenizer_mode: TokenizerMode = "auto"
@@ -287,7 +305,7 @@ class ModelConfig:
     """The specific revision to use for the tokenizer on the Hugging Face Hub.
     It can be a branch name, a tag name, or a commit id. If unspecified, will
     use the default version."""
-    max_model_len: int = None  # type: ignore
+    max_model_len: SkipValidation[int] = None  # type: ignore
     """Model context length (prompt and output). If unspecified, will be
     automatically derived from the model config.
 
@@ -600,6 +618,13 @@ class ModelConfig:
         self._verify_quantization()
         self._verify_cuda_graph()
         self._verify_bnb_config()
+
+    @model_validator(mode="after")
+    def validate_model_config_after(self: "ModelConfig") -> "ModelConfig":
+        if not isinstance(self.max_model_len, int):
+            raise ValueError(
+                "max_model_len must be an integer after __post_init__.")
+        return self
 
     @property
     def registry(self):
@@ -1391,7 +1416,7 @@ PrefixCachingHashAlgo = Literal["builtin", "sha256"]
 class CacheConfig:
     """Configuration for the KV cache."""
 
-    block_size: BlockSize = None  # type: ignore
+    block_size: SkipValidation[BlockSize] = None  # type: ignore
     """Size of a contiguous cache block in number of tokens. This is ignored on
     neuron devices and set to `--max-model-len`. On CUDA devices, only block
     sizes up to 32 are supported. On HPU devices, block size defaults to 128.
@@ -1695,6 +1720,7 @@ class ParallelConfig:
     """Port of the data parallel master."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
+
     max_parallel_loading_workers: Optional[int] = None
     """Maximum number of parallel loading workers when loading model
     sequentially in multiple batches. To avoid RAM OOM when using tensor
@@ -1923,19 +1949,19 @@ class SchedulerConfig:
     runner_type: RunnerType = "generate"
     """The runner type to launch for the model."""
 
-    max_num_batched_tokens: int = None  # type: ignore
+    max_num_batched_tokens: SkipValidation[int] = None  # type: ignore
     """Maximum number of tokens to be processed in a single iteration.
 
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
-    max_num_seqs: int = None  # type: ignore
+    max_num_seqs: SkipValidation[int] = None  # type: ignore
     """Maximum number of sequences to be processed in a single iteration.
 
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
-    max_model_len: int = None  # type: ignore
+    max_model_len: SkipValidation[int] = None  # type: ignore
     """Maximum length of a sequence (including prompt and generated text). This
     is primarily set in `ModelConfig` and that value should be manually
     duplicated here."""
@@ -1974,7 +2000,7 @@ class SchedulerConfig:
     """Apply a delay (of delay factor multiplied by previous
     prompt latency) before scheduling next prompt."""
 
-    enable_chunked_prefill: bool = None  # type: ignore
+    enable_chunked_prefill: SkipValidation[bool] = None  # type: ignore
     """If True, prefill requests can be chunked based
     on the remaining max_num_batched_tokens."""
 
@@ -2196,7 +2222,7 @@ Device = Literal["auto", "cuda", "neuron", "cpu", "tpu", "xpu", "hpu"]
 
 
 @config
-@dataclass
+@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
 class DeviceConfig:
     """Configuration for the device to use for vLLM execution."""
 
@@ -2227,7 +2253,9 @@ class DeviceConfig:
         return hash_str
 
     def __post_init__(self):
-        if self.device == "auto":
+        if IS_IN_DOC_BUILD:
+            self.device_type = "cpu"
+        elif self.device == "auto":
             # Automated device type detection
             from vllm.platforms import current_platform
             self.device_type = current_platform.device_type
@@ -2262,8 +2290,7 @@ class SpeculativeConfig:
     """Configuration for speculative decoding."""
 
     # General speculative decoding control
-    num_speculative_tokens: int = field(default=None,
-                                        init=True)  # type: ignore
+    num_speculative_tokens: SkipValidation[int] = None  # type: ignore
     """The number of speculative tokens, if provided. It will default to the
     number in the draft model config if present, otherwise, it is required."""
     model: Optional[str] = None
@@ -2339,26 +2366,23 @@ class SpeculativeConfig:
     """Specifies the tree structure for speculative token generation.
     """
     # required configuration params passed from engine
-    target_model_config: ModelConfig = field(default=None,
-                                             init=True)  # type: ignore
+    target_model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """The configuration of the target model."""
-    target_parallel_config: ParallelConfig = field(default=None,
-                                                   init=True)  # type: ignore
+    target_parallel_config: SkipValidation[
+        ParallelConfig] = None  # type: ignore
     """The parallel configuration for the target model."""
-    enable_chunked_prefill: bool = field(default=None,
-                                         init=True)  # type: ignore
+    enable_chunked_prefill: SkipValidation[bool] = None  # type: ignore
     """Whether vLLM is configured to use chunked prefill or not. Used for
     raising an error since it's not yet compatible with speculative decode."""
-    disable_log_stats: bool = field(default=None, init=True)  # type: ignore
+    disable_log_stats: SkipValidation[bool] = None  # type: ignore
     """Whether to disable the periodic printing of stage times in speculative
     decoding."""
 
     # params generated in the post-init stage
-    draft_model_config: ModelConfig = field(default=None,
-                                            init=True)  # type: ignore
+    draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """The configuration of the draft model initialized internal."""
-    draft_parallel_config: ParallelConfig = field(default=None,
-                                                  init=True)  # type: ignore
+    draft_parallel_config: SkipValidation[
+        ParallelConfig] = None  # type: ignore
     """The parallel configuration for the draft model initialized internal."""
 
     def compute_hash(self) -> str:
@@ -2748,7 +2772,7 @@ LoRADType = Literal["auto", "float16", "bfloat16"]
 
 
 @config
-@dataclass
+@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
 class LoRAConfig:
     """Configuration for LoRA."""
 
@@ -2845,7 +2869,7 @@ class LoRAConfig:
 
 
 @config
-@dataclass
+@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
 class PromptAdapterConfig:
     """Configuration for PromptAdapters."""
 
@@ -3864,17 +3888,11 @@ class CompilationConfig:
             "pass_config",
             "traced_files",
         }
-        include = dict()
-        for k, v in asdict(self).items():
-            if k in exclude:
-                continue
-            f = get_field(CompilationConfig, k)
-            if (d := f.default) is not MISSING and d == v:
-                continue
-            if (df := f.default_factory) is not MISSING and df() == v:
-                continue
-            include[k] = v
-        return json.dumps(include)
+        # The cast to string is necessary because Pydantic is mocked in docs
+        # builds and sphinx-argparse doesn't know the return type of decode()
+        return str(
+            TypeAdapter(CompilationConfig).dump_json(
+                self, exclude=exclude, exclude_unset=True).decode())
 
     __str__ = __repr__
 
@@ -3883,7 +3901,7 @@ class CompilationConfig:
         """Parse the CLI value for the compilation config."""
         if cli_value in ["0", "1", "2", "3"]:
             return cls(level=int(cli_value))
-        return cls(**json.loads(cli_value))
+        return TypeAdapter(CompilationConfig).validate_json(cli_value)
 
     def __post_init__(self) -> None:
         count_none = self.custom_ops.count("none")
@@ -4009,7 +4027,7 @@ class CompilationConfig:
 
 
 @config
-@dataclass
+@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
 class VllmConfig:
     """Dataclass which contains all vllm-related configuration. This
     simplifies passing around the distinct configurations in the codebase.
@@ -4266,8 +4284,6 @@ class VllmConfig:
                 "To workaround this limitation, vLLM will set 'ieee' input "
                 "precision for chunked prefill triton kernels.")
 
-        if self.compilation_config is None:
-            self.compilation_config = CompilationConfig()
         if self.compilation_config.pass_config.enable_sequence_parallelism:
             self.compilation_config.custom_ops.append("+rms_norm")
         if envs.VLLM_USE_V1 and self.model_config is not None and \
