@@ -23,7 +23,8 @@
 # limitations under the License.
 """Inference-only Deepseek model."""
 import typing
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
+from collections.abc import Iterable
+from typing import Any, Optional, Union
 
 import torch
 from torch import nn
@@ -159,11 +160,11 @@ class DeepseekMoE(nn.Module):
                 reduce_results=False,
             )
 
-    def get_weights(self) -> List[torch.Tensor]:
-        ret: List[torch.Tensor] = []
+    def get_weights(self) -> list[torch.Tensor]:
+        ret: list[torch.Tensor] = []
         for weight in [self.gate_proj_weight, self.down_proj_weight]:
             weight = typing.cast(
-                Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], weight)
+                Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]], weight)
             if isinstance(weight, torch.Tensor):
                 assert weight.is_contiguous()
                 ret.append(weight.view(self.n_local_physical_experts, -1))
@@ -242,7 +243,7 @@ class DeepseekAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         rope_theta: float = 10000,
-        rope_scaling: Optional[Dict[str, Any]] = None,
+        rope_scaling: Optional[dict[str, Any]] = None,
         max_position_embeddings: int = 8192,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
@@ -444,8 +445,8 @@ class DeepseekModel(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -456,7 +457,7 @@ class DeepseekModel(nn.Module):
         ]
 
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -553,8 +554,8 @@ class DeepseekForCausalLM(nn.Module, SupportsPP, IsMixtureOfExperts):
                                        sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         loaded_weights = loader.load_weights(weights)
 

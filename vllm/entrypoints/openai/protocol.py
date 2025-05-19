@@ -745,7 +745,8 @@ class CompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/completions/create
     model: Optional[str] = None
-    prompt: Union[list[int], list[list[int]], str, list[str]]
+    prompt: Optional[Union[list[int], list[list[int]], str, list[str]]] = None
+    prompt_embeds: Optional[Union[bytes, list[bytes]]] = None
     best_of: Optional[int] = None
     echo: Optional[bool] = False
     frequency_penalty: Optional[float] = 0.0
@@ -1023,6 +1024,14 @@ class CompletionRequest(OpenAIBaseModel):
             raise ValueError(
                 "Stream options can only be defined when `stream=True`.")
 
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_prompt_and_prompt_embeds(cls, data):
+        if data.get("prompt") is None and data.get("prompt_embeds") is None:
+            raise ValueError(
+                "At least one of `prompt` or `prompt_embeds` must be set.")
         return data
 
 
@@ -1592,6 +1601,10 @@ class TokenizeChatRequest(OpenAIBaseModel):
     mm_processor_kwargs: Optional[dict[str, Any]] = Field(
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
+    )
+    tools: Optional[list[ChatCompletionToolsParam]] = Field(
+        default=None,
+        description=("A list of tools the model may call."),
     )
 
     @model_validator(mode="before")
