@@ -31,6 +31,8 @@ if current_platform.is_cuda():
     from vllm.vllm_flash_attn import (flash_attn_varlen_func,
                                       get_scheduler_metadata)
 
+from vllm.v1.attention.backends.utils import slice_query_start_locs
+
 logger = init_logger(__name__)
 
 
@@ -322,23 +324,23 @@ class FlashAttentionMetadataBuilder:
                       scheduler_output: "SchedulerOutput") -> bool:
         return False
 
-    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int,
-              common_attn_metadata: CommonAttentionMetadata):
-        max_seq_len = self.runner.seq_lens_np[:num_reqs].max()
-        query_start_loc = common_attn_metadata.query_start_loc
-        seq_lens = common_attn_metadata.seq_lens
+    def build_slice(self, max_query_len: int, common_prefix_len: int,
+                    common_attn_metadata: CommonAttentionMetadata,
+                    req_slice: slice,
+                    token_slice: slice) -> FlashAttentionMetadata:
+        num_reqs = req_slice.stop - req_slice.start
+        num_tokens = token_slice.stop - token_slice.start
+
+        max_seq_len = self.runner.seq_lens_np[req_slice].max()
+        query_start_loc = slice_query_start_locs(
+            common_attn_metadata.query_start_loc, req_slice)
+        seq_lens = common_attn_metadata.seq_lens[req_slice]
         block_table = self.block_table
-        block_table_tensor = block_table.get_device_tensor()[:num_reqs]
+        block_table_tensor = block_table.get_device_tensor()[req_slice]
 
-        block_table.slot_mapping[:num_actual_tokens].copy_(
-            block_table.slot_mapping_cpu[:num_actual_tokens],
-            non_blocking=True)
-        # Fill unused with -1. Needed for reshape_and_cache in full cuda graph
-        # mode.
-        block_table.slot_mapping[num_actual_tokens:].fill_(-1)
-
-        slot_mapping = block_table.slot_mapping[:num_actual_tokens]
+        block_table.slot_mapping[token_slice].copy_(
+            block_table.slot_mapping_cpu[token_slice], non_blocking=True)
+        slot_mapping = block_table.slot_mapping[token_slice]
 
         if self.aot_sliding_window is None:
             self.aot_sliding_window = (-1, -1)
@@ -380,8 +382,8 @@ class FlashAttentionMetadataBuilder:
             seqlens_q_local_np, virt_q_cu_seqlens_np, virt_k_seqlens_np, \
                 virt_block_table_tensor = make_local_attention_virtual_batches(
                     self.runner.attention_chunk_size,
-                    self.runner.query_start_loc_np[:num_reqs + 1],
-                    self.runner.seq_lens_np[:num_reqs],
+                    query_start_loc,
+                    seq_lens,
                     block_table_tensor,
                     self.block_size,
                 )
@@ -411,20 +413,20 @@ class FlashAttentionMetadataBuilder:
         use_cascade = common_prefix_len > 0
 
         if use_cascade:
-            cu_prefix_query_lens = torch.tensor([0, num_actual_tokens],
+            cu_prefix_query_lens = torch.tensor([0, num_tokens],
                                                 dtype=torch.int32,
                                                 device=self.runner.device)
             prefix_kv_lens = torch.tensor([common_prefix_len],
                                           dtype=torch.int32,
                                           device=self.runner.device)
-            suffix_kv_lens = (self.runner.seq_lens_np[:num_reqs] -
+            suffix_kv_lens = (self.runner.seq_lens_np[req_slice] -
                               common_prefix_len)
             suffix_kv_lens = torch.from_numpy(suffix_kv_lens).to(
                 self.runner.device)
             prefix_scheduler_metadata = schedule(
                 batch_size=1,
                 cu_query_lens=cu_prefix_query_lens,
-                max_query_len=num_actual_tokens,
+                max_query_len=num_tokens,
                 seqlens=prefix_kv_lens,
                 max_seq_len=common_prefix_len,
                 causal=False)
@@ -448,7 +450,7 @@ class FlashAttentionMetadataBuilder:
                                           causal=True)
 
         attn_metadata = FlashAttentionMetadata(
-            num_actual_tokens=num_actual_tokens,
+            num_actual_tokens=num_tokens,
             max_query_len=max_query_len,
             query_start_loc=query_start_loc,
             max_seq_len=max_seq_len,
@@ -465,6 +467,17 @@ class FlashAttentionMetadataBuilder:
             prefix_scheduler_metadata=prefix_scheduler_metadata,
         )
         return attn_metadata
+
+    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
+              common_prefix_len: int,
+              common_attn_metadata: CommonAttentionMetadata):
+        return self.build_slice(
+            max_query_len=max_query_len,
+            common_prefix_len=common_prefix_len,
+            common_attn_metadata=common_attn_metadata,
+            req_slice=slice(0, num_reqs),
+            token_slice=slice(0, num_actual_tokens),
+        )
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         return use_cascade_attention(*args, **kwargs)
