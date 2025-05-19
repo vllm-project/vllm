@@ -521,6 +521,9 @@ class Scheduler(SchedulerInterface):
                 resumed_from_preemption=False,
             ) for req in scheduled_running_reqs
         ]
+
+        common_prefix_list = self.kv_cache_manager.get_common_prefix_groups()
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=resumed_reqs_data + running_reqs_data,
@@ -537,6 +540,7 @@ class Scheduler(SchedulerInterface):
             free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
             structured_output_request_ids=structured_output_request_ids,
             grammar_bitmask=grammar_bitmask,
+            common_prefix_list=common_prefix_list
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:

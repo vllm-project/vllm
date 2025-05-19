@@ -5,11 +5,11 @@ from typing import Callable
 
 from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHashType, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
+                                         KVCacheBlockPrefixTrie, CommonPrefixGroups)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheSpec,
-                                        SlidingWindowSpec)
+                                        SlidingWindowSpec, ForestedPrefixSpec)
 from vllm.v1.request import Request
-
 
 class SingleTypeKVCacheManager(ABC):
     """
@@ -20,6 +20,7 @@ class SingleTypeKVCacheManager(ABC):
     def __init__(
         self,
         kv_cache_spec: KVCacheSpec,
+        forested_prefix_spec: ForestedPrefixSpec,
         block_pool: BlockPool,
         use_eagle: bool,
         num_kv_cache_groups: int,
@@ -38,6 +39,7 @@ class SingleTypeKVCacheManager(ABC):
 
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
+        self.forested_prefix_spec = forested_prefix_spec
         self.block_pool = block_pool
 
         # Needs special handling for find_longest_cache_hit if eagle is enabled
@@ -48,6 +50,14 @@ class SingleTypeKVCacheManager(ABC):
         # is finished.
         self.req_to_blocks: defaultdict[str,
                                         list[KVCacheBlock]] = defaultdict(list)
+
+        # Mapping from request id to the depth of the earliest non-null block
+        # allocated for the request.
+        self.req_to_depth: dict[str, int] = {}
+
+        # Mapping from block depth to a KVCacheBlockPrefixTrie
+        # This is necessary when using forested CascadeAttention
+        self.depth_to_prefix_trie: dict[int, KVCacheBlockPrefixTrie] = {}
 
         # {req_id: The number of cached blocks for this given request}
         # This is used to track the number of cached blocks for each request.
@@ -144,18 +154,40 @@ class SingleTypeKVCacheManager(ABC):
             num_tokens: The total number of tokens that need to be cached 
                 (including tokens that are already cached).
         """
-        num_cached_blocks = self.num_cached_block[request.request_id]
+
+        req_id = request.request_id
+
+        num_cached_blocks = self.num_cached_block[req_id]
         num_full_blocks = num_tokens // self.block_size
 
         self.block_pool.cache_full_blocks(
             request=request,
-            blocks=self.req_to_blocks[request.request_id],
+            blocks=self.req_to_blocks[req_id],
             block_hashes=block_hashes,
             num_cached_blocks=num_cached_blocks,
             num_full_blocks=num_full_blocks,
             block_size=self.block_size,
             hash_fn=self.caching_hash_fn,
         )
+
+        if req_id not in self.req_to_depth:
+            self.req_to_depth[req_id] = 1
+
+        use_forested_prefix = False if self.forested_prefix_spec is None \
+            else self.forested_prefix_spec.use_forested_prefix
+
+        absorption_threshold_ratio = self.forested_prefix_spec.absorption_threshold_ratio if (
+            self.forested_prefix_spec is not None) else float('inf')
+
+        if use_forested_prefix:
+            req_depth = self.req_to_depth[req_id]
+
+            new_forested_cascade_trie = self.depth_to_prefix_trie.get(req_depth, None)
+            if not new_forested_cascade_trie:
+                new_forested_cascade_trie = KVCacheBlockPrefixTrie(
+                    self.req_to_depth[request.request_id], absorption_threshold_ratio)
+            new_forested_cascade_trie.insert(
+                request, self.req_to_blocks[req_id][num_cached_blocks: num_full_blocks])
 
         self.num_cached_block[request.request_id] = num_full_blocks
 
@@ -166,6 +198,9 @@ class SingleTypeKVCacheManager(ABC):
         # Free blocks in reverse order so that the tail blocks are
         # freed first.
         ordered_blocks = reversed(req_blocks)
+
+        base_block_depth = req_blocks[0].block_depth
+        self.depth_to_prefix_trie[base_block_depth].remove(request_id)
 
         self.block_pool.free_blocks(ordered_blocks)
         self.num_cached_block.pop(request_id, None)
@@ -211,18 +246,28 @@ class SingleTypeKVCacheManager(ABC):
 
     @abstractmethod
     def remove_skipped_blocks(self, request_id: str,
-                              num_computed_tokens: int) -> None:
+                              num_computed_tokens: int) \
+            -> None:
         """
-        Remove the blocks that are no longer needed from `blocks`. The removed 
-        blocks should be replaced by null_block. Return the removed blocks in 
+        Remove the blocks that are no longer needed from `blocks`. The removed
+        blocks should be replaced by null_block. Return the removed blocks in
         eviction order, where the first returned block should be evicted first.
-        Don't free the removed blocks in this function. Need to be customized 
-        for each attention type.
+        The return statement is necessary to track block depth
 
         Args:
             request_id: The request ID.
             num_computed_tokens: The number of tokens that have been computed.
+
         """
+        raise NotImplementedError
+
+    def get_common_prefix_groups(self) -> CommonPrefixGroups | None:
+
+        """
+        Returns a data structure for retrieving common prefixes from
+        different requests
+        """
+
         raise NotImplementedError
 
 
@@ -246,7 +291,8 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         return computed_blocks
 
     def remove_skipped_blocks(self, request_id: str,
-                              num_computed_tokens: int) -> None:
+                              num_computed_tokens: int) \
+            -> None:
         # No need to remove blocks for full attention.
         pass
 
@@ -261,6 +307,16 @@ class FullAttentionManager(SingleTypeKVCacheManager):
                 break
         return num_common_blocks
 
+    def get_common_prefix_groups(self) -> list[CommonPrefixGroups] | None:
+        if self.forested_prefix_spec is None:
+            return None
+        common_prefix_list = []
+        alloc_method = self.forested_prefix_spec.allocate_method
+        for depth in self.depth_to_prefix_trie:
+            prefix_trie = self.depth_to_prefix_trie[depth]
+            groups = prefix_trie.allocate_group(alloc_method)
+            common_prefix_list.append(groups)
+        return common_prefix_list
 
 class SlidingWindowManager(SingleTypeKVCacheManager):
 
@@ -317,14 +373,15 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         return computed_blocks
 
     def remove_skipped_blocks(self, request_id: str,
-                              num_computed_tokens: int) -> None:
+                              num_computed_tokens: int) \
+            -> None:
         # Remove the blocks that are no longer be in the sliding window and
         # skipped during the attention computation.
-        last_useful_token = num_computed_tokens - self.sliding_window + 1
-        last_useful_block = last_useful_token // self.block_size
+        first_useful_token = num_computed_tokens - self.sliding_window + 1
+        first_useful_block_depth = first_useful_token // self.block_size
         blocks = self.req_to_blocks[request_id]
         removed_blocks: list[KVCacheBlock] = []
-        for i in range(last_useful_block - 1, -1, -1):
+        for i in range(first_useful_block_depth - 1, -1, -1):
             if blocks[i] == self._null_block:
                 # If the block is already a null block, the blocks before it
                 # should also have been set to null blocks by the previous calls
@@ -332,6 +389,21 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                 break
             removed_blocks.append(blocks[i])
             blocks[i] = self._null_block
+
+        use_forested_prefix = False if self.forested_prefix_spec is None \
+            else self.forested_prefix_spec.use_forested_prefix
+
+        old_req_depth = -1
+        if removed_blocks:
+            old_req_depth = removed_blocks[-1].block_depth
+            new_req_depth = removed_blocks[0].block_depth + 1
+            self.req_to_depth[request_id] = new_req_depth
+
+        if removed_blocks and use_forested_prefix:
+            old_forested_cascade_trie = self.depth_to_prefix_trie.get(old_req_depth, None)
+            if old_forested_cascade_trie:
+                old_forested_cascade_trie.remove(request_id)
+
         self.block_pool.free_blocks(removed_blocks)
 
     def get_num_common_prefix_blocks(self, request_id: str,
@@ -343,6 +415,9 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         window in the future.
         """
         return 0
+
+    def get_common_prefix_groups(self) -> CommonPrefixGroups | None:
+        pass
 
 
 spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {

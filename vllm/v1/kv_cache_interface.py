@@ -174,6 +174,23 @@ class KVCacheGroupSpec:
     # The KV cache spec of this manager layer
     kv_cache_spec: KVCacheSpec
 
+@dataclass
+class ForestedPrefixSpec:
+    """
+    If set to true, we group requests with common prefixes
+    together so that we can call forested cascade attention.
+    """
+    use_forested_prefix: bool = False
+    """
+    Threshold parameter that specifies whether to group leaves
+    under a parent node, or its child_map nodes.
+    """
+    absorption_threshold_ratio: float = 0.8
+    """
+    Specifies the method used to allocate groups for forested
+    cascade attention.
+    """
+    allocate_method: str = "leaf_pass"
 
 @dataclass
 class KVCacheConfig:
@@ -206,3 +223,5 @@ class KVCacheConfig:
     there are 3 groups, each of which represents 10 layers in the model.
     """
     kv_cache_groups: list[KVCacheGroupSpec]
+
+    forested_prefix_config: Optional[ForestedPrefixSpec] = None
