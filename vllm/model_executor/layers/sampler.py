@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """A layer that samples the next tokens from the model's outputs."""
 import itertools
-import warnings
 from collections.abc import Iterator
 from dataclasses import dataclass
 from importlib.util import find_spec
@@ -24,7 +23,6 @@ from vllm.sequence import (VLLM_INVALID_TOKEN_ID,
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 if envs.VLLM_USE_FLASHINFER_SAMPLER and find_spec("flashinfer"):
-    import flashinfer.sampling
     # yapf: disable
     from flashinfer.sampling import (
         top_k_top_p_sampling_from_probs as flashinfer_top_k_top_p_sampling)
@@ -32,6 +30,10 @@ if envs.VLLM_USE_FLASHINFER_SAMPLER and find_spec("flashinfer"):
     # yapf: enable
 else:
     flashinfer_top_k_top_p_sampling = None
+
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 def get_sampler() -> torch.nn.Module:
@@ -545,38 +547,15 @@ def _multinomial(
 def _top_k_top_p_multinomial_with_flashinfer(
         probs: torch.Tensor, top_ks: torch.Tensor, top_ps: torch.Tensor,
         num_samples: int, seq_groups: Optional[list[SequenceGroupToSample]]):
-    max_top_k_round = 32
     if num_samples > 1:
         probs = probs.repeat_interleave(num_samples, dim=0)
         top_ks = top_ks.repeat_interleave(num_samples)
         top_ps = top_ps.repeat_interleave(num_samples)
-    batch_size = probs.shape[0]
-    uniform_samples = torch.empty((max_top_k_round, batch_size),
-                                  device=probs.device)
-    if seq_groups is None:
-        uniform_samples.uniform_()
-    else:
-        sample_idx = 0
-        for seq_group in seq_groups:
-            seq_ids = seq_group.seq_ids
-            stride = len(seq_ids) * num_samples
-            assert seq_group.generator is not None
-            uniform_samples[:, sample_idx:sample_idx +
-                            stride].uniform_(generator=seq_group.generator)
-            sample_idx += stride
-    batch_next_token_ids, success = flashinfer_top_k_top_p_sampling(
+    batch_next_token_ids = flashinfer_top_k_top_p_sampling(
         probs,
-        uniform_samples,
         top_ks,
         top_ps,
     )
-    if not success.all():
-        warnings.warn("FlashInfer rejection sampling failed, fallback.",
-                      stacklevel=1)
-        probs = flashinfer.sampling.top_k_renorm_prob(probs, top_ks)
-        probs = flashinfer.sampling.top_p_renorm_prob(probs, top_ps)
-        batch_next_token_ids = flashinfer.sampling.sampling_from_probs(
-            probs, uniform_samples[0])
     return batch_next_token_ids.view(-1, num_samples)
 
 
@@ -712,19 +691,14 @@ def _sample_with_torch(
                               seq_groups)
 
             if flashinfer_top_k_top_p_sampling is not None:
-                multinomial_samples[
-                    sampling_type] = _top_k_top_p_multinomial_with_flashinfer(
-                        probs[long_sample_indices],
-                        sampling_tensors.top_ks[long_sample_indices],
-                        sampling_tensors.top_ps[long_sample_indices],
-                        max_n_in_batch,
-                        seq_groups_arg,
-                    )
-            else:
-                multinomial_samples[sampling_type] = _multinomial(
-                    probs[long_sample_indices],
-                    max_n_in_batch,
-                    seq_groups=seq_groups_arg)
+                logger.warning("FlashInfer 0.2.3+ does not support "
+                               "per-request generators. Falling back to "
+                               "PyTorch-native implementation.")
+
+            multinomial_samples[sampling_type] = _multinomial(
+                probs[long_sample_indices],
+                max_n_in_batch,
+                seq_groups=seq_groups_arg)
 
             if sampled_token_ids_tensor is not None:
                 # Store sampled tokens in output tensor.
