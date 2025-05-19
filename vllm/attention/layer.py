@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Attention layer."""
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 
 import torch
 import torch.nn as nn
@@ -120,11 +120,13 @@ class Attention(nn.Module):
             self.quant_method = quant_method
             self.quant_method.create_weights(self)
 
-        # During model initialization, the default dtype is set as the model
-        # weight and activation dtype.
-        dtype = torch.get_default_dtype()
+        vllm_config = get_current_vllm_config()
+        self.dtype = cast(torch.dtype, vllm_config.model_config.dtype)
+        self.attn_dtype = cast(torch.dtype,
+                               vllm_config.model_config.attn_dtype)
+
         attn_backend = get_attn_backend(head_size,
-                                        dtype,
+                                        self.attn_dtype,
                                         kv_cache_dtype,
                                         block_size,
                                         is_attention_free,
@@ -136,7 +138,6 @@ class Attention(nn.Module):
                              blocksparse_params, logits_soft_cap, attn_type,
                              **extra_impl_args)
         self.backend = backend_name_to_enum(attn_backend.get_name())
-        self.dtype = dtype
 
         # For cuda-alike (CUDA and ROCM) and cpu platforms, we control how
         # torch.compile works by registering the attention as one giant
@@ -183,10 +184,17 @@ class Attention(nn.Module):
         context using
         `vllm.forward_context.get_forward_context().attn_metadata`.
         """
+
+        if self.attn_dtype != self.dtype:
+            query = query.to(self.attn_dtype)
+            key = key.to(self.attn_dtype)
+            value = value.to(self.attn_dtype)
+
         if self.calculate_kv_scales:
             attn_metadata = get_forward_context().attn_metadata
             if attn_metadata.enable_kv_scales_calculation:
                 self.calc_kv_scales(query, key, value)
+
         if self.use_output:
             output_shape = (output_shape
                             if output_shape is not None else query.shape)
@@ -223,7 +231,7 @@ class Attention(nn.Module):
             else:
                 torch.ops.vllm.unified_attention_with_output(
                     query, key, value, output, self.layer_name)
-            return output.view(-1, hidden_size)
+            return output.view(-1, hidden_size).to(self.dtype)
         else:
             if self.use_direct_call:
                 forward_context = get_forward_context()
@@ -232,10 +240,11 @@ class Attention(nn.Module):
                     attn_metadata = attn_metadata[self.layer_name]
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
                 return self.impl.forward(self, query, key, value,
-                                         self_kv_cache, attn_metadata)
+                                         self_kv_cache,
+                                         attn_metadata).to(self.dtype)
             else:
                 return torch.ops.vllm.unified_attention(
-                    query, key, value, self.layer_name)
+                    query, key, value, self.layer_name).to(self.dtype)
 
     def calc_kv_scales(self, query, key, value):
         self._q_scale.copy_(torch.abs(query).max() / self.q_range)

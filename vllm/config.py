@@ -260,6 +260,11 @@ class ModelConfig:
     - "bfloat16" for a balance between precision and range.\n
     - "float" is shorthand for FP32 precision.\n
     - "float32" for FP32 precision."""
+    attn_dtype: Optional[Union[ModelDType, torch.dtype]] = None
+    """
+    Data type for attention:
+    Default is the same as dtype, other data types can be manually specified.
+    """
     seed: Optional[int] = None
     """Random seed for reproducibility. Initialized to None in V0, but
     initialized to 0 in V1."""
@@ -423,6 +428,7 @@ class ModelConfig:
         factors: list[Any] = []
         factors.append(self.model)
         factors.append(self.dtype)
+        factors.append(self.attn_dtype)
         factors.append(self.quantization)
         factors.append(self.revision)
         factors.append(self.code_revision)
@@ -535,6 +541,9 @@ class ModelConfig:
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, hf_token=self.hf_token, revision=self.revision)
         self.dtype = _get_and_verify_dtype(self.hf_config, self.dtype)
+        self.attn_dtype = (self.dtype if self.attn_dtype
+                           is None else _get_and_verify_dtype(
+                               self.hf_config, self.attn_dtype))
 
         interleaved_attn_models = ["gemma2", "gemma3_text", "cohere2"]
         sliding_window = getattr(self.hf_text_config, "sliding_window", None)
