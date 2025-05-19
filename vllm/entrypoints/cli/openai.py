@@ -146,7 +146,7 @@ class ChatCommand(CLISubcommand):
             help=("The system prompt to be added to the chat template, "
                   "used for models that support system prompts."))
         chat_parser.add_argument("-q",
-                                 "--quick-chat",
+                                 "--quick",
                                  type=str,
                                  metavar="MESSAGE",
                                  help=("Send a single prompt as MESSAGE "
@@ -192,7 +192,7 @@ class CompleteCommand(CLISubcommand):
         _add_query_options(complete_parser)
         complete_parser.add_argument(
             "-q",
-            "--quick-complete",
+            "--quick",
             type=str,
             metavar="PROMPT",
             help=
