@@ -90,6 +90,8 @@ models/extensions/index
 :maxdepth: 1
 
 features/quantization/index
+features/multimodal_inputs
+features/prompt_embeds
 features/lora
 features/tool_calling
 features/reasoning_outputs
@@ -118,8 +120,6 @@ training/rlhf.md
 serving/offline_inference
 serving/openai_compatible_server
 serving/serve_args
-serving/multimodal_inputs
-serving/prompt_embeds
 serving/distributed_serving
 serving/metrics
 serving/engine_args
