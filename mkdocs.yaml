@@ -69,6 +69,12 @@ plugins:
           options:
             show_symbol_type_heading: true
             show_symbol_type_toc: true
+            summary: true
+            show_if_no_docstring: true
+            show_signature_annotations: true
+            separate_signature: true
+            show_overloads: true
+            signature_crossrefs: true
           inventories:
           - https://docs.python.org/3/objects.inv
           - https://typing-extensions.readthedocs.io/en/latest/objects.inv
