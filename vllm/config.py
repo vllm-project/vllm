@@ -1862,6 +1862,10 @@ class ParallelConfig:
                                      "please install Ray with `pip install "
                                      "ray`.") from ray_utils.ray_import_err
                 backend = "ray"
+            elif self.data_parallel_backend == "ray":
+                logger.info("Using ray distributed inference because "
+                            "data_parallel_backend is ray")
+                backend = "ray"
             elif ray_found:
                 if self.placement_group:
                     backend = "ray"
