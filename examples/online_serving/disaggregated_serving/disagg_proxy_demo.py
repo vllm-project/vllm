@@ -414,7 +414,7 @@ class ProxyServer:
         server.run()
 
 
-if __name__ == "__main__":
+def parse_args():
     # Todo: allow more config
     parser = argparse.ArgumentParser("vLLM disaggregated proxy server.")
     parser.add_argument("--model",
@@ -445,6 +445,10 @@ if __name__ == "__main__":
         default=8000,
         help="Server port number",
     )
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = parse_args()
     proxy_server = ProxyServer(args=args)
     proxy_server.run_server()

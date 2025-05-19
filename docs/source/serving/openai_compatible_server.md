@@ -4,7 +4,7 @@
 
 vLLM provides an HTTP server that implements OpenAI's [Completions API](https://platform.openai.com/docs/api-reference/completions), [Chat API](https://platform.openai.com/docs/api-reference/chat), and more! This functionality lets you serve models and interact with them using an HTTP client.
 
-In your terminal, you can [install](../getting_started/installation.md) vLLM, then start the server with the [`vllm serve`](#vllm-serve) command. (You can also use our [Docker](#deployment-docker) image.)
+In your terminal, you can [install](../getting_started/installation.md) vLLM, then start the server with the [`vllm serve`](#serve-args) command. (You can also use our [Docker](#deployment-docker) image.)
 
 ```bash
 vllm serve NousResearch/Meta-Llama-3-8B-Instruct --dtype auto --api-key token-abc123
@@ -167,54 +167,6 @@ completion = client.completions.create(
 )
 print(completion._request_id)
 ```
-
-## CLI Reference
-
-(vllm-serve)=
-
-### `vllm serve`
-
-The `vllm serve` command is used to launch the OpenAI-compatible server.
-
-:::{tip}
-The vast majority of command-line arguments are based on those for offline inference.
-
-See [here](configuration-options) for some common options.
-:::
-
-:::{argparse}
-:module: vllm.entrypoints.openai.cli_args
-:func: create_parser_for_docs
-:prog: vllm serve
-:::
-
-#### Configuration file
-
-You can load CLI arguments via a [YAML](https://yaml.org/) config file.
-The argument names must be the long form of those outlined [above](#vllm-serve).
-
-For example:
-
-```yaml
-# config.yaml
-
-model: meta-llama/Llama-3.1-8B-Instruct
-host: "127.0.0.1"
-port: 6379
-uvicorn-log-level: "info"
-```
-
-To use the above config file:
-
-```bash
-vllm serve --config config.yaml
-```
-
-:::{note}
-In case an argument is supplied simultaneously using command line and the config file, the value from the command line will take precedence.
-The order of priorities is `command line > config file values > defaults`.
-e.g. `vllm serve SOME_MODEL --config config.yaml`, SOME_MODEL takes precedence over `model` in config file.
-:::
 
 ## API Reference
 

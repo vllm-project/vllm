@@ -215,6 +215,8 @@ class LlamaAttention(nn.Module):
                                          and quant_config.is_fp8_w8a8())
         self.attn_fp8_out = (envs.VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT
                              and current_platform.is_fp8_fnuz() and use_fp8)
+        if envs.VLLM_USE_V1 and not envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION:
+            self.attn_fp8_out = False
 
         self.attn = Attention(
             self.num_heads,
