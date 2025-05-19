@@ -184,8 +184,13 @@ class CoreEngineActorManager:
         executor_class: type[Executor],
         log_stats: bool,
     ):
-        import deepcopy
+        import copy
+
         import ray
+        from ray._private.state import available_resources_per_node
+        from ray.util.scheduling_strategies import (
+            PlacementGroupSchedulingStrategy)
+        from ray.util.state import list_nodes
 
         from vllm.v1.engine.core import DPEngineCoreActor
 
@@ -194,76 +199,91 @@ class CoreEngineActorManager:
 
         dp_size = vllm_config.parallel_config.data_parallel_size
         remote_engine_count = dp_size - local_engine_count
-        data_parallel_size_per_node = \
-            vllm_config.parallel_config.data_parallel_size_per_node
-        # NOTE(rui): we can support more flexible data parallel size per node
-        # if needed by passing in a list
-        assert dp_size % data_parallel_size_per_node == 0, (
-            "data_parallel_size must be divisible by "
-            "data_parallel_size_per_node")
-        node_count = dp_size // data_parallel_size_per_node
 
-        num_workers = vllm_config.parallel_config.world_size
-        placement_groups = []
-        if local_engine_count > 0:
-            head_node_ip = \
-                vllm_config.parallel_config.data_parallel_master_ip
-            ips = [head_node_ip] \
-                + vllm_config.parallel_config.data_parallel_worker_ips
+        if ray.is_initialized():
+            logger.info(
+                "Ray is already initialized. Skipping Ray initialization.")
         else:
-            ips = vllm_config.parallel_config.data_parallel_worker_ips
-        for i in range(node_count):
-            ip = ips[i]
-            bundles = [{"GPU": 1.0, "node:" + ip: 0.001}] * num_workers
-            for j in range(data_parallel_size_per_node):
-                dp_rank = i * data_parallel_size_per_node + j
-                pg = ray.util.placement_group(
-                    name=f"dp_rank_{dp_rank}",
-                    strategy="STRICT_PACK",
-                    bundles=bundles,
-                )
-                placement_groups.append(pg)
+            ray.init()
+
+        nodes = list_nodes()
+        available_resources_by_id = available_resources_per_node()
+        available_resources_by_ip = {}
+        num_workers = vllm_config.parallel_config.world_size
+
+        dp_size_available = 0
+        for node in nodes:
+            node_ip = node.node_ip
+            node_id = node.node_id
+            node_resources = available_resources_by_id[node_id]
+            available_resources_by_ip[node_ip] = node_resources
+            # For now, each DP rank can only be assigned to one node
+            # TODO(rui): support allocating a single DP rank to multiple nodes
+            dp_size_available += node_resources["GPU"] // num_workers
+
+        assert dp_size_available >= dp_size, (
+            "Not enough resources to allocate DP ranks")
+
+        head_node_ip = \
+            vllm_config.parallel_config.data_parallel_master_ip
 
         refs = []
         for index in range(local_engine_count):
             local_index = local_start_index + index
             global_index = start_index + index
-            resources = {"CPU": 1.0, "node:" + ips[0]: 0.001}
-            dp_vllm_config = deepcopy.deepcopy(vllm_config)
-            dp_vllm_config.parallel_config.placement_group = (
-                placement_groups[global_index])
+            dp_vllm_config = copy.deepcopy(vllm_config)
+            bundles = [{
+                "GPU": 1.0,
+                "node:" + head_node_ip: 0.001
+            }] * num_workers + [{
+                "CPU": 1.0
+            }]
+            pg = ray.util.placement_group(
+                name=f"dp_rank_{global_index}",
+                strategy="STRICT_PACK",
+                bundles=bundles,
+            )
+            dp_vllm_config.parallel_config.placement_group = pg
             actor = ray.remote(DPEngineCoreActor).options(
-                resources=resources).remote(vllm_config=dp_vllm_config,
-                                            executor_class=executor_class,
-                                            log_stats=log_stats,
-                                            input_address=input_address,
-                                            output_address=output_address,
-                                            on_head_node=True,
-                                            engine_index=global_index,
-                                            dp_rank=global_index,
-                                            local_dp_rank=local_index)
+                scheduling_strategy=PlacementGroupSchedulingStrategy(
+                    placement_group=pg,
+                    placement_group_bundle_index=num_workers,
+                )).remote(vllm_config=dp_vllm_config,
+                          executor_class=executor_class,
+                          log_stats=log_stats,
+                          input_address=input_address,
+                          output_address=output_address,
+                          on_head_node=True,
+                          engine_index=global_index,
+                          dp_rank=global_index,
+                          local_dp_rank=local_index)
             self.local_engine_actors.append(actor)
             refs.append(actor.wait_for_init.remote())
 
         for index in range(remote_engine_count):
             local_index = index
             global_index = local_engine_count + index
-            node_index = (local_engine_count +
-                          index) // data_parallel_size_per_node
-            resources = {"CPU": 1.0, "node:" + ips[node_index]: 0.001}
-            dp_vllm_config = deepcopy.deepcopy(vllm_config)
-            dp_vllm_config.parallel_config.placement_group = (
-                placement_groups[global_index])
+            bundles = [{"GPU": 1.0}] * num_workers + [{"CPU": 1.0}]
+            pg = ray.util.placement_group(
+                name=f"dp_rank_{global_index}",
+                strategy="STRICT_PACK",
+                bundles=bundles,
+            )
+            dp_vllm_config = copy.deepcopy(vllm_config)
+            dp_vllm_config.parallel_config.placement_group = pg
             actor = ray.remote(DPEngineCoreActor).options(
-                resources=resources).remote(vllm_config=dp_vllm_config,
-                                            executor_class=executor_class,
-                                            log_stats=log_stats,
-                                            input_address=input_address,
-                                            output_address=output_address,
-                                            on_head_node=False,
-                                            engine_index=global_index,
-                                            dp_rank=global_index,
-                                            local_dp_rank=local_index)
+                scheduling_strategy=PlacementGroupSchedulingStrategy(
+                    placement_group=pg,
+                    placement_group_bundle_index=num_workers,
+                )).remote(vllm_config=dp_vllm_config,
+                          executor_class=executor_class,
+                          log_stats=log_stats,
+                          input_address=input_address,
+                          output_address=output_address,
+                          on_head_node=False,
+                          engine_index=global_index,
+                          dp_rank=global_index,
+                          local_dp_rank=local_index)
             self.remote_engine_actors.append(actor)
             refs.append(actor.wait_for_init.remote())
 
