@@ -33,6 +33,9 @@ python3 -m pip install --progress-bar off git+https://github.com/thuml/depyf.git
     && python3 -m pip install --progress-bar off pytest pytest-asyncio tpu-info \
     && python3 -m pip install --progress-bar off lm_eval[api]==0.4.4
 echo "--- Python dependencies installed ---"
+export VLLM_USE_V1=1
+export VLLM_XLA_CHECK_RECOMPILATION=1
+echo "Using VLLM V1"
 
 echo "--- Hardware Information ---"
 tpu-info
@@ -126,4 +129,4 @@ else
     exit 0
 fi
 # TODO: This test fails because it uses RANDOM_SEED sampling
-# && VLLM_USE_V1=1 pytest -v -s /workspace/vllm/tests/tpu/test_custom_dispatcher.py \
+# pytest -v -s /workspace/vllm/tests/tpu/test_custom_dispatcher.py \
