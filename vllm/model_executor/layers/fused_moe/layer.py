@@ -376,9 +376,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             shuffle_weights)
 
         if self.rocm_aiter_moe_enabled:
-            shuffled_w13, shuffled_w2 = shuffle_weights(layer.w13_weight.data,
-                                                        layer.w2_weight.data,
-                                                        layout=(16, 16))
+            shuffled_w13, shuffled_w2 = shuffle_weights(
+                layer.w13_weight.data, layer.w2_weight.data)
 
             layer.w13_weight.data = shuffled_w13
             layer.w2_weight.data = shuffled_w2

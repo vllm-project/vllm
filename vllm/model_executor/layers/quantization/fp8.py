@@ -629,9 +629,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             if self.rocm_aiter_moe_enabled:
                 # reshaping weights is required for aiter moe kernel.
                 shuffled_w13, shuffled_w2 = shuffle_weights(
-                    layer.w13_weight.data,
-                    layer.w2_weight.data,
-                    layout=(16, 16))
+                    layer.w13_weight.data, layer.w2_weight.data)
 
                 layer.w13_weight = torch.nn.Parameter(shuffled_w13,
                                                       requires_grad=False)
@@ -688,9 +686,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 layer.w2_weight_scale = torch.nn.Parameter(
                     w2_scales.contiguous(), requires_grad=False)
 
-                shuffled_w13, shuffled_w2 = shuffle_weights(layer.w13_weight,
-                                                            layer.w2_weight,
-                                                            layout=(16, 16))
+                shuffled_w13, shuffled_w2 = shuffle_weights(
+                    layer.w13_weight, layer.w2_weight)
 
                 layer.w13_weight = torch.nn.Parameter(shuffled_w13,
                                                       requires_grad=False)
