@@ -70,7 +70,8 @@ plugins:
           options:
             show_symbol_type_heading: true
             show_symbol_type_toc: true
-            summary: true
+            summary:
+              modules: true
             show_if_no_docstring: true
             show_signature_annotations: true
             separate_signature: true
