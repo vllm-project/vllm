@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
     VLLM_CPU_AUTO_OMP_THREAD_NUMA_BIND: bool = True
+    VLLM_CPU_NUM_OF_NO_BIND_CPU: int = 0
     VLLM_CPU_MOE_PREPACK: bool = True
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
@@ -425,6 +426,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # OpenMP threads of a rank will auto bound to a NUMA node.
     "VLLM_CPU_AUTO_OMP_THREAD_NUMA_BIND":
     lambda: bool(int(os.getenv("VLLM_CPU_AUTO_OMP_THREAD_NUMA_BIND", "1"))),
+
+    # (CPU backend only) CPU cores not used by OMP threads .
+    # Those CPU cores will not be used by OMP threads of a rank.
+    "VLLM_CPU_NUM_OF_NO_BIND_CPU":
+    lambda: int(os.getenv("VLLM_CPU_NUM_OF_NO_BIND_CPU", "0")),
 
     # (CPU backend only) whether to use prepack for MoE layer. This will be
     # passed to ipex.llm.modules.GatedMLPMOE. On unsupported CPUs, you might
