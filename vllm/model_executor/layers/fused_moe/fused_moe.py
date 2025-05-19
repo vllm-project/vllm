@@ -1499,9 +1499,9 @@ def fused_moe(
     Returns:
     - torch.Tensor: The output tensor after applying the MoE layer.
     """
-    if is_act_and_mul:
+    if not is_act_and_mul:
         assert inplace is False, (
-            "is_act_and_mul=True is not supported with inplace=True")
+            "is_act_and_mul=False is not supported with inplace=True")
 
     if use_grouped_topk:
         assert num_expert_group is not None and topk_group is not None
