@@ -340,7 +340,7 @@ class KVCacheBlockPrefixTrie:
 
         return get_scheduled_requests(request_list, groups_list)
 
-    def alloc_leaf_pass(self) -> tuple[list[str], list[tuple[int, int,int]]]:
+    def alloc_leaf_pass(self) -> CommonPrefixGroups:
         """
         Allocates groups of requests based on the weight of each node.
         Traverses only trie leaves to find best groupings.
