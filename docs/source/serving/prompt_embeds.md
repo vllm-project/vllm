@@ -36,6 +36,7 @@ llm = LLM(model=model_name, enable_prompt_embeds=True)
 chat = [{"role": "user", "content": "Please tell me about the capital of France."}]
 token_ids = tokenizer.apply_chat_template(chat, add_generation_prompt=True, return_tensors='pt')
 
+embedding_layer = transformers_model.get_input_embeddings()
 prompt_embeds = embedding_layer(token_ids).squeeze(0)
 
 # Single prompt inference
@@ -116,6 +117,7 @@ transformers_model = transformers.AutoModelForCausalLM.from_pretrained(model_nam
 chat = [{"role": "user", "content": "Please tell me about the capital of France."}]
 token_ids = tokenizer.apply_chat_template(chat, add_generation_prompt=True, return_tensors='pt')
 
+embedding_layer = transformers_model.get_input_embeddings()
 prompt_embeds = embedding_layer(token_ids).squeeze(0)
 
 # Prompt embeddings
