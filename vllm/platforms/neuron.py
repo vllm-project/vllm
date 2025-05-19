@@ -51,8 +51,7 @@ class NeuronPlatform(Platform):
         assert (vllm_config.lora_config
                 is None), "LoRA is not supported for Neuron backend."
 
-        cache_config = vllm_config.cache_config
-        if cache_config:
+        if vllm_config.cache_config and vllm_config.model_config:
             # neuron needs block_size = max_model_len
             vllm_config.cache_config.block_size = \
                 vllm_config.model_config.max_model_len  # type: ignore

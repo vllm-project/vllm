@@ -403,6 +403,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "access by 3rd parties, and long enough to be "
             "unpredictable (e.g., 43 characters base64-encoded, corresponding "
             "to 256 bit). Not supported by vLLM engine V0."))
+    kv_transfer_params: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="KVTransfer parameters used for disaggregated serving.")
 
     # doc: end-chat-completion-extra-params
 
@@ -540,7 +543,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
             output_kind=RequestOutputKind.DELTA if self.stream \
                 else RequestOutputKind.FINAL_ONLY,
             guided_decoding=guided_decoding,
-            logit_bias=self.logit_bias)
+            logit_bias=self.logit_bias,
+            extra_args=({"kv_transfer_params": self.kv_transfer_params}
+                        if self.kv_transfer_params else None))
 
     def _get_guided_json_from_tool(
             self) -> Optional[Union[str, dict, BaseModel]]:
@@ -740,7 +745,8 @@ class CompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/completions/create
     model: Optional[str] = None
-    prompt: Union[list[int], list[list[int]], str, list[str]]
+    prompt: Optional[Union[list[int], list[list[int]], str, list[str]]] = None
+    prompt_embeds: Optional[Union[bytes, list[bytes]]] = None
     best_of: Optional[int] = None
     echo: Optional[bool] = False
     frequency_penalty: Optional[float] = 0.0
@@ -847,6 +853,10 @@ class CompletionRequest(OpenAIBaseModel):
             "If specified with 'logprobs', tokens are represented "
             " as strings of the form 'token_id:{token_id}' so that tokens "
             "that are not JSON-encodable can be identified."))
+
+    kv_transfer_params: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="KVTransfer parameters used for disaggregated serving.")
 
     # doc: end-completion-extra-params
 
@@ -973,7 +983,9 @@ class CompletionRequest(OpenAIBaseModel):
                 else RequestOutputKind.FINAL_ONLY,
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias,
-            allowed_token_ids=self.allowed_token_ids)
+            allowed_token_ids=self.allowed_token_ids,
+            extra_args=({"kv_transfer_params": self.kv_transfer_params}
+                        if self.kv_transfer_params else None))
 
     @model_validator(mode="before")
     @classmethod
@@ -1012,6 +1024,14 @@ class CompletionRequest(OpenAIBaseModel):
             raise ValueError(
                 "Stream options can only be defined when `stream=True`.")
 
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_prompt_and_prompt_embeds(cls, data):
+        if data.get("prompt") is None and data.get("prompt_embeds") is None:
+            raise ValueError(
+                "At least one of `prompt` or `prompt_embeds` must be set.")
         return data
 
 
@@ -1223,6 +1243,8 @@ class CompletionResponse(OpenAIBaseModel):
     model: str
     choices: list[CompletionResponseChoice]
     usage: UsageInfo
+    kv_transfer_params: Optional[dict[str, Any]] = Field(
+        default=None, description="KVTransfer parameters.")
 
 
 class CompletionResponseStreamChoice(OpenAIBaseModel):
@@ -1412,6 +1434,8 @@ class ChatCompletionResponse(OpenAIBaseModel):
     choices: list[ChatCompletionResponseChoice]
     usage: UsageInfo
     prompt_logprobs: Optional[list[Optional[dict[int, Logprob]]]] = None
+    kv_transfer_params: Optional[dict[str, Any]] = Field(
+        default=None, description="KVTransfer parameters.")
 
 
 class DeltaMessage(OpenAIBaseModel):
@@ -1577,6 +1601,10 @@ class TokenizeChatRequest(OpenAIBaseModel):
     mm_processor_kwargs: Optional[dict[str, Any]] = Field(
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
+    )
+    tools: Optional[list[ChatCompletionToolsParam]] = Field(
+        default=None,
+        description=("A list of tools the model may call."),
     )
 
     @model_validator(mode="before")
