@@ -100,7 +100,10 @@ class DeviceCommunicatorBase:
         from vllm.config import get_current_vllm_config
         config = get_current_vllm_config()
         if config is not None:
-            use_ep = config.parallel_config.enable_expert_parallel
+            # as long as we use data parallel (coupled data parallel
+            # where all data parallel ranks execute forward together),
+            # we initialize the all2all manager used in expert parallel.
+            use_ep = config.parallel_config.data_parallel_size > 1
 
         self.use_all2all = "ep" in unique_name and use_ep
         self.all2all_manager: Optional[All2AllManagerBase] = None
