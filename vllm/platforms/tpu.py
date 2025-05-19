@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import TYPE_CHECKING, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Optional, Union, cast
 
 import torch
 from tpu_info import device
@@ -73,7 +73,7 @@ class TpuPlatform(Platform):
         return "vllm.lora.punica_wrapper.punica_tpu.PunicaWrapperTPU"
 
     @classmethod
-    def get_infinity_values(cls, dtype: torch.dtype) -> Tuple[float, float]:
+    def get_infinity_values(cls, dtype: torch.dtype) -> tuple[float, float]:
         return torch.finfo(dtype).min, torch.finfo(dtype).max
 
     @classmethod
@@ -194,3 +194,11 @@ class TpuPlatform(Platform):
             if params.sampling_type == SamplingType.RANDOM_SEED:
                 raise ValueError(
                     "Torch XLA does not support per-request seed.")
+
+
+try:
+    from tpu_commons.platforms import TpuPlatform as TpuCommonsPlatform
+    TpuPlatform = TpuCommonsPlatform  # type: ignore
+except ImportError:
+    logger.info("tpu_commons not found, using vLLM's TpuPlatform")
+    pass
