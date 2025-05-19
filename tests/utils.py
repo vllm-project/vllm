@@ -239,7 +239,8 @@ class LocalOpenAIServer:
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
-        await self.engine_client_cm.__aexit__(exc_type, exc, tb)
+        if self.engine_client_cm is not None:
+            await self.engine_client_cm.__aexit__(exc_type, exc, tb)
 
 
 def _test_completion(
