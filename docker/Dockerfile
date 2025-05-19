@@ -257,8 +257,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
     # uv pip install --system https://github.com/flashinfer-ai/flashinfer/releases/download/v0.2.4/flashinfer_python-0.2.4+cu124torch2.6-cp38-abi3-linux_x86_64.whl ; \
     # TESTING: install FlashInfer from source to test 2.7.0 final RC
-    FLASHINFER_ENABLE_AOT=1 TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0 10.0+PTX' \
-    uv pip install --system --no-build-isolation "git+https://github.com/flashinfer-ai/flashinfer@e00e8cedbfcb220f328fd36aa8f529f869b01e6b" ; \
+    if [[ "$CUDA_VERSION" == 12.8* ]]; then \
+        export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0 10.0+PTX'; \
+    else \
+        export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0+PTX'; \
+    fi && \
+    export FLASHINFER_ENABLE_AOT=1; \
+    uv pip install --system --no-build-isolation "git+https://github.com/flashinfer-ai/flashinfer@21ea1d2545f74782b91eb8c08fd503ac4c0743fc" ; \
 fi
 COPY examples examples
 COPY benchmarks benchmarks
