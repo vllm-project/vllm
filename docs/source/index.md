@@ -117,7 +117,9 @@ training/rlhf.md
 
 serving/offline_inference
 serving/openai_compatible_server
+serving/serve_args
 serving/multimodal_inputs
+serving/prompt_embeds
 serving/distributed_serving
 serving/metrics
 serving/engine_args
