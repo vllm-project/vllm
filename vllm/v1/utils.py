@@ -8,9 +8,9 @@ from collections import defaultdict
 from collections.abc import Sequence
 from enum import Enum, auto
 from multiprocessing import Process, connection
-from multiprocessing.context import SpawnProcess
+from multiprocessing.process import BaseProcess
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Optional, TypeVar,
-                    Union, cast, overload)
+                    Union, overload)
 
 import msgspec
 import torch
@@ -147,7 +147,7 @@ class APIServerProcessManager:
 
         # Start API servers
         spawn_context = multiprocessing.get_context("spawn")
-        self.processes: list[SpawnProcess] = []
+        self.processes: list[BaseProcess] = []
 
         for i, in_addr, out_addr in zip(range(num_servers), input_addresses,
                                         output_addresses):
@@ -168,12 +168,9 @@ class APIServerProcessManager:
 
         logger.info("Started %d API server processes", len(self.processes))
 
-        # Casting due to mypy error
-        process_list: list[multiprocessing.Process] = cast(
-            list[multiprocessing.Process], self.processes)
         # Shutdown only the API server processes on garbage collection
         # The extra processes are managed by their owners
-        self._finalizer = weakref.finalize(self, shutdown, process_list)
+        self._finalizer = weakref.finalize(self, shutdown, self.processes)
 
     def close(self) -> None:
         self._finalizer()
@@ -206,7 +203,7 @@ class CoreEngineProcManager:
             "log_stats": log_stats,
         }
 
-        self.processes: list[Process] = []
+        self.processes: list[BaseProcess] = []
         for index in range(local_engine_count):
             local_index = local_start_index + index
             global_index = start_index + index
@@ -373,7 +370,7 @@ def wait_for_completion_or_failure(
         logger.info("Waiting for API servers to complete ...")
         # Create a mapping of sentinels to their corresponding processes
         # for efficient lookup
-        sentinel_to_proc: dict[Any, Union[SpawnProcess, Process]] = {
+        sentinel_to_proc: dict[Any, BaseProcess] = {
             proc.sentinel: proc
             for proc in api_server_manager.processes
         }
@@ -416,7 +413,7 @@ def wait_for_completion_or_failure(
 
 # Note(rob): shutdown function cannot be a bound method,
 # else the gc cannot collect the object.
-def shutdown(procs: list[Process]):
+def shutdown(procs: list[BaseProcess]):
     # Shutdown the process.
     for proc in procs:
         if proc.is_alive():
