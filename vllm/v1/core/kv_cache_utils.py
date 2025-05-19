@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """KV-Cache Utilities."""
+from __future__ import annotations
+
 import os
 from collections import deque, defaultdict
 from collections.abc import Sequence
