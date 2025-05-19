@@ -21,12 +21,12 @@ except Exception:
 
 
 class QuickReduceAlgo(Enum):
-    OneShot = 0
-    TwoShot = 1
-    TwoShot_Q8 = 2
-    TwoShot_Q4 = 3
-    TwoShot_MAX_MIN_Q8 = 4
-    TwoShot_MAX_MIN_Q4 = 5
+    OneShotFP = 0
+    TwoShotFP = 1
+    TwoShotQ8SYMM = 2
+    TwoShotQ4SYMM = 3
+    TwoShotQ8ASYMM = 4
+    TwoShotQ4ASYMM = 5
 
 
 class QuickAllReduce:
@@ -36,7 +36,7 @@ class QuickAllReduce:
     def __init__(self,
                  group: ProcessGroup,
                  device: Union[int, str, torch.device],
-                 algo: QuickReduceAlgo = QuickReduceAlgo.TwoShot) -> None:
+                 algo: QuickReduceAlgo = QuickReduceAlgo.TwoShotFP) -> None:
         self.disabled = True
         if not ops_available:
             # disable because of missing quick reduce library
@@ -46,8 +46,14 @@ class QuickAllReduce:
             return
 
         self.max_size = ops.qr_max_size()
+        self.min_size = ops.qr_min_size()
         self.group = group
-        self.algo = algo
+        if isinstance(algo, str):
+            assert algo in QuickReduceAlgo.__members__, \
+                "Algo {} is not supported by QuickReduce".format(algo)
+            self.algo = QuickReduceAlgo[algo]
+        else:
+            self.algo = algo
 
         assert dist.get_backend(group) != dist.Backend.NCCL, (
             "QuickReduce should be attached to a non-NCCL group.")
@@ -60,14 +66,14 @@ class QuickAllReduce:
         if world_size not in QuickAllReduce._SUPPORTED_WORLD_SIZES:
             logger.warning(
                 "QuickReduce allreduce is disabled due to an unsupported world"
-                " size: %d. Supported world sizes: %s. To silence this "
-                "warning, specify disable_custom_all_reduce=True explicitly.",
-                world_size, str(QuickAllReduce._SUPPORTED_WORLD_SIZES))
+                " size: %d. Supported world sizes: %s."
+                " To disable this warning set quick_reduce_allreduce_algo"
+                " to None", world_size,
+                str(QuickAllReduce._SUPPORTED_WORLD_SIZES))
             return
 
         assert current_platform.is_rocm(), (
             "QuickReduce is only supported on ROCm platform.")
-
         if isinstance(device, int):
             device = torch.device(f"cuda:{device}")
         elif isinstance(device, str):
@@ -121,4 +127,4 @@ class QuickAllReduce:
         if inp_size % 16 != 0:
             return False
         return inp.dtype in QuickAllReduce._SUPPORTED_DTYPES and \
-            inp_size < self.max_size
+            inp_size < self.max_size and inp_size >= self.min_size

@@ -726,6 +726,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
 
   custom_ar.def("free_shared_buffer", &free_shared_buffer);
 #ifdef USE_ROCM
+  // Quick Reduce all-reduce kernels
   custom_ar.def(
       "qr_all_reduce(int fa, Tensor inp, Tensor out, int algo_int) -> ()");
   custom_ar.impl("qr_all_reduce", torch::kCUDA, &qr_all_reduce);
@@ -738,7 +739,12 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
   custom_ar.def("qr_open_handles(int _fa, Tensor[](b!) handles) -> ()");
   custom_ar.impl("qr_open_handles", torch::kCPU, &qr_open_handles);
 
+  // Max input size in bytes
   custom_ar.def("qr_max_size", &qr_max_size);
+  // Minimal input size in bytes.
+  // For inputs size less than this value
+  // AllReduce collective is ineffective
+  custom_ar.def("qr_min_size", &qr_min_size);
 #endif
 }
 

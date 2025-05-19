@@ -1775,6 +1775,10 @@ def qr_max_size() -> int:
     return torch.ops._C_custom_ar.qr_max_size()
 
 
+def qr_min_size() -> int:
+    return torch.ops._C_custom_ar.qr_min_size()
+
+
 def get_flash_mla_metadata(
     cache_seqlens: torch.Tensor,
     num_heads_per_head_k: int,
