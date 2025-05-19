@@ -19,6 +19,12 @@ pip install amd-quark
 You can refer to [Quark installation guide](https://quark.docs.amd.com/latest/install.html)
 for more installation details.
 
+Additionally, install `vllm` and `lm-evaluation-harness` for evaluation:
+
+```console
+pip install vllm lm-eval==0.4.4
+```
+
 ## Quantization Process
 
 After installing Quark, we will use an example to illustrate how to use Quark.  
@@ -150,6 +156,7 @@ LLAMA_KV_CACHE_GROUP = ["*k_proj", "*v_proj"]
 export_config = ExporterConfig(json_export_config=JsonExporterConfig())
 export_config.json_export_config.kv_cache_group = LLAMA_KV_CACHE_GROUP
 
+# Model: Llama-2-70b-chat-hf-w-fp8-a-fp8-kvcache-fp8-pertensor-autosmoothquant
 EXPORT_DIR = MODEL_ID.split("/")[1] + "-w-fp8-a-fp8-kvcache-fp8-pertensor-autosmoothquant"
 exporter = ModelExporter(config=export_config, export_dir=EXPORT_DIR)
 with torch.no_grad():

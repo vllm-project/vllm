@@ -2,6 +2,8 @@
 from abc import ABC, abstractmethod
 from typing import Optional
 
+import tokenizers
+from packaging import version
 from tokenizers import Tokenizer
 from tokenizers.decoders import DecodeStream
 from transformers import PreTrainedTokenizerFast
@@ -43,8 +45,10 @@ class IncrementalDetokenizer:
             # No tokenizer => skipping detokenization.
             return IncrementalDetokenizer()
 
-        if isinstance(tokenizer, PreTrainedTokenizerFast):
+        if (isinstance(tokenizer, PreTrainedTokenizerFast) and version.parse(
+                tokenizers.__version__) >= version.parse("0.21.1")):
             # Fast tokenizer => use tokenizers library DecodeStream.
+            # And only tokenizers >= 0.21.1 supports Fast Detokenizer.
             return FastIncrementalDetokenizer(tokenizer, request)
 
         # Fall back to slow python-based incremental detokenization.
@@ -161,7 +165,7 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
         prompt_suffix = request.prompt_token_ids
         prompt_len = len(prompt_suffix)
         if prompt_len > 4:
-            for i in range(4, max(prompt_len + 1, 32)):
+            for i in range(4, min(prompt_len + 1, 24)):
                 suffix = request.prompt_token_ids[-i:]
                 if '�' not in self.tokenizer.decode(suffix):
                     prompt_suffix = suffix

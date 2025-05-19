@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # unit test for `examples/offline_inference/torchrun_example.py`
-
+import os
 import random
 
 import torch.distributed as dist
@@ -25,6 +25,7 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 # to test if all ranks agree on the same kv cache configuration.
 llm = LLM(model="facebook/opt-125m",
           tensor_parallel_size=2,
+          pipeline_parallel_size=int(os.getenv("PP_SIZE", 1)),
           distributed_executor_backend="external_launcher",
           gpu_memory_utilization=random.uniform(0.7, 0.9),
           swap_space=random.randint(1, 4),

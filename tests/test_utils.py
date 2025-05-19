@@ -3,6 +3,7 @@
 
 import asyncio
 import hashlib
+import json
 import pickle
 import socket
 from collections.abc import AsyncIterator
@@ -10,13 +11,15 @@ from unittest.mock import patch
 
 import pytest
 import torch
+import zmq
 from vllm_test_utils.monitor import monitor
 
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.utils import (CacheInfo, FlexibleArgumentParser, LRUCache,
                         MemorySnapshot, PlaceholderModule, StoreBoolean,
                         bind_kv_cache, deprecate_kwargs, get_open_port,
-                        memory_profiling, merge_async_iterators, sha256,
+                        make_zmq_path, make_zmq_socket, memory_profiling,
+                        merge_async_iterators, sha256, split_zmq_path,
                         supports_kw, swap_dict_values)
 
 from .utils import create_new_process_for_each_test, error_on_warning
@@ -136,6 +139,7 @@ def parser():
     parser.add_argument('--model-name')
     parser.add_argument('--batch-size', type=int)
     parser.add_argument('--enable-feature', action='store_true')
+    parser.add_argument('--hf-overrides', type=json.loads)
     return parser
 
 
@@ -247,6 +251,29 @@ def test_config_file(parser_with_config):
 def test_no_model_tag(parser_with_config, cli_config_file):
     with pytest.raises(ValueError):
         parser_with_config.parse_args(['serve', '--config', cli_config_file])
+
+
+def test_dict_args(parser):
+    args = [
+        "--model-name=something.something",
+        "--hf-overrides.key1",
+        "val1",
+        "--hf-overrides.key2.key3",
+        "val2",
+        "--hf-overrides.key2.key4",
+        "val3",
+        "--hf-overrides.key5=val4",
+    ]
+    parsed_args = parser.parse_args(args)
+    assert parsed_args.model_name == "something.something"
+    assert parsed_args.hf_overrides == {
+        "key1": "val1",
+        "key2": {
+            "key3": "val2",
+            "key4": "val3",
+        },
+        "key5": "val4",
+    }
 
 
 # yapf: enable
@@ -662,3 +689,58 @@ def test_sha256(input: tuple, output: int):
 
     # hashing different input, returns different value
     assert hash != sha256(input + (1, ))
+
+
+@pytest.mark.parametrize(
+    "path,expected",
+    [
+        ("ipc://some_path", ("ipc", "some_path", "")),
+        ("tcp://127.0.0.1:5555", ("tcp", "127.0.0.1", "5555")),
+        ("tcp://[::1]:5555", ("tcp", "::1", "5555")),  # IPv6 address
+        ("inproc://some_identifier", ("inproc", "some_identifier", "")),
+    ]
+)
+def test_split_zmq_path(path, expected):
+    assert split_zmq_path(path) == expected
+
+
+@pytest.mark.parametrize(
+    "invalid_path",
+    [
+        "invalid_path",  # Missing scheme
+        "tcp://127.0.0.1",  # Missing port
+        "tcp://[::1]",  # Missing port for IPv6
+        "tcp://:5555",  # Missing host
+    ]
+)
+def test_split_zmq_path_invalid(invalid_path):
+    with pytest.raises(ValueError):
+        split_zmq_path(invalid_path)
+
+
+def test_make_zmq_socket_ipv6():
+    # Check if IPv6 is supported by trying to create an IPv6 socket
+    try:
+        sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        sock.close()
+    except socket.error:
+        pytest.skip("IPv6 is not supported on this system")
+
+    ctx = zmq.Context()
+    ipv6_path = "tcp://[::]:5555"  # IPv6 loopback address
+    socket_type = zmq.REP  # Example socket type
+
+    # Create the socket
+    zsock: zmq.Socket = make_zmq_socket(ctx, ipv6_path, socket_type)
+
+    # Verify that the IPV6 option is set
+    assert zsock.getsockopt(zmq.IPV6) == 1, "IPV6 option should be enabled for IPv6 addresses"
+
+    # Clean up
+    zsock.close()
+    ctx.term()
+
+
+def test_make_zmq_path():
+    assert make_zmq_path("tcp", "127.0.0.1", "5555") == "tcp://127.0.0.1:5555"
+    assert make_zmq_path("tcp", "::1", "5555") == "tcp://[::1]:5555"

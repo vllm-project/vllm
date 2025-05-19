@@ -8,8 +8,7 @@
 # --------------------------------------------------------
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
-from functools import cached_property
-from typing import Literal, Optional, Set, Tuple, TypedDict, TypeVar, Union
+from typing import Literal, Optional, TypedDict, TypeVar, Union
 
 import torch
 import torch.nn as nn
@@ -21,7 +20,6 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.awq import AWQConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.models.intern_vit import (InternVisionModel,
                                                    InternVisionPatchModel)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -699,13 +697,6 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
                 (llm_quant_config is not None):
                 quant_config.modules_to_not_convert.append("vision_model")
 
-    @cached_property
-    def sampler(self):
-        if hasattr(self.language_model, "sampler"):
-            return self.language_model.sampler
-
-        return get_sampler()
-
     def _init_vision_model(
         self,
         config: PretrainedConfig,
@@ -908,7 +899,7 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
-    ) -> Union[SamplerOutput, IntermediateTensors]:
+    ) -> IntermediateTensors:
 
         if intermediate_tensors is not None:
             input_ids = None
@@ -946,15 +937,8 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        return self.language_model.sample(logits, sampling_metadata)
-
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         skip_prefixes = [
             "action_embed", "temporal_embed", "track_embed",
             "track_embed_decoder", "box_token", "cg_criterion", "cg_model",

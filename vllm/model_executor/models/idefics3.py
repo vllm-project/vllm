@@ -17,7 +17,7 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Dict, Literal, Optional, Set, Tuple, TypedDict, Union
+from typing import Literal, Optional, TypedDict, Union
 
 import torch
 from torch import nn
@@ -28,7 +28,6 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -86,7 +85,7 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(
         self,
         *,
-        size: Optional[Dict[str, int]] = None,
+        size: Optional[dict[str, int]] = None,
         **kwargs: object,
     ) -> Idefics3Processor:
         if size is not None:
@@ -603,7 +602,6 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         if self.config.text_config.tie_word_embeddings:
             self.lm_head.weight = self.model.text_model.wte.weight
         self.logits_processor = LogitsProcessor(config.text_config.vocab_size)
-        self.sampler = get_sampler()
 
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
         h = w = self.config.vision_config.image_size
@@ -754,16 +752,8 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
                                        sampling_metadata)
         return logits
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
-
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 

@@ -410,9 +410,9 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         NOTE(cade): This will require a special check if the proposer worker
         does not have a sampler (e.g. ngram speculation).
         """
-        (self.scorer_worker.model_runner.model.sampler.include_gpu_probs_tensor
+        (self.scorer_worker.model_runner.sampler.include_gpu_probs_tensor
          ) = True
-        (self.scorer_worker.model_runner.model.sampler.
+        (self.scorer_worker.model_runner.sampler.
          should_modify_greedy_probs_inplace) = True
         self.proposer_worker.set_include_gpu_probs_tensor()
         self.proposer_worker.set_should_modify_greedy_probs_inplace()
@@ -695,6 +695,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                     seq_group_meta_with_hidden):
                 self.previous_hidden_states.update(hidden_states,
                                                    seq_group_meta_with_hidden)
+                self.previous_hidden_states.prune(seq_group_meta_with_hidden)
 
         if not skip_proposer:
             # We prepare the prefill hidden states here so that there no

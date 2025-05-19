@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
-import triton
-import triton.language as tl
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.triton_utils import tl, triton
 from vllm.utils import round_up
 
 
@@ -154,7 +153,7 @@ def moe_align_block_size(
     num_experts: int,
     expert_map: Optional[torch.Tensor] = None,
     pad_sorted_ids: bool = False
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Aligns the token distribution across experts to be compatible with block
     size for matrix multiplication.

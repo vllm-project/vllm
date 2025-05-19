@@ -16,7 +16,7 @@
 # limitations under the License.
 """Inference-only IBM/NASA Prithvi Geospatial model."""
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Optional, Set, Tuple, Union
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -154,7 +154,7 @@ class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree, SupportsMultiModal,
                 "by PrithviGeospatialMAE.")
 
     def _parse_and_validate_multimodal_data(
-            self, **kwargs) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+            self, **kwargs) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
 
         pixel_values = kwargs.pop("pixel_values", None)
         if not isinstance(pixel_values, torch.Tensor):
@@ -195,8 +195,8 @@ class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree, SupportsMultiModal,
     ) -> Optional[PoolerOutput]:
         return PoolerOutput([PoolingSequenceGroupOutput(hidden_states)])
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         params_list = []
         model_buffers = dict(self.named_buffers())
         loaded_buffers = []

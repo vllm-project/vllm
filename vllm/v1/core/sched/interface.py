@@ -4,6 +4,7 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, Optional, Union
 
 if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.engine import EngineCoreOutputs
     from vllm.v1.metrics.stats import SchedulerStats
@@ -118,11 +119,6 @@ class SchedulerInterface(ABC):
         return self.has_unfinished_requests() or self.has_finished_requests()
 
     @abstractmethod
-    def get_num_unscheduled_requests(self) -> int:
-        """Number of requests that are not being processed by the executor."""
-        raise NotImplementedError
-
-    @abstractmethod
     def reset_prefix_cache(self) -> bool:
         """Reset the prefix cache for KV cache.
 
@@ -137,3 +133,11 @@ class SchedulerInterface(ABC):
         The SchedulerStats object is created for every scheduling step.
         """
         raise NotImplementedError
+
+    @abstractmethod
+    def shutdown(self) -> None:
+        """Shutdown the scheduler."""
+        raise NotImplementedError
+
+    def get_kv_connector(self) -> Optional["KVConnectorBase_V1"]:
+        return None

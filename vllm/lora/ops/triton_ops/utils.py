@@ -1,14 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Dict, List, Tuple
-
 import torch
 
-_LORA_A_PTR_DICT: Dict[Tuple[int, ...], Tuple[torch.tensor, ...]] = {}
-_LORA_B_PTR_DICT: Dict[Tuple[int, ...], Tuple[torch.tensor, ...]] = {}
+_LORA_A_PTR_DICT: dict[tuple[int, ...], tuple[torch.tensor, ...]] = {}
+_LORA_B_PTR_DICT: dict[tuple[int, ...], tuple[torch.tensor, ...]] = {}
 
 
-def _get_lora_a_ptr(lora_a_weights: List[torch.Tensor], device: torch.device):
+def _get_lora_a_ptr(lora_a_weights: list[torch.Tensor], device: torch.device):
     """
     `_LORA_A_PTR_DICT` collects the required information during `profile_run`, 
     After this, it remains constant and subsequent usage is through LUT.
@@ -53,7 +51,7 @@ def _get_lora_a_ptr(lora_a_weights: List[torch.Tensor], device: torch.device):
     return _LORA_A_PTR_DICT.get(key)
 
 
-def _get_lora_b_ptr(lora_weights: List[torch.Tensor], offset_start: int,
+def _get_lora_b_ptr(lora_weights: list[torch.Tensor], offset_start: int,
                     device: torch.device):
     """ 
      `_LORA_B_PTR_DICT` collects the required information during `profile_run`, 

@@ -18,7 +18,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only OPT model compatible with HuggingFace weights."""
-from typing import Iterable, Optional, Set, Tuple, Union
+from collections.abc import Iterable
+from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -35,7 +36,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -313,8 +313,8 @@ class OPTModel(nn.Module):
                             intermediate_tensors,
                             inputs_embeds=inputs_embeds)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -322,7 +322,7 @@ class OPTModel(nn.Module):
             ("qkv_proj", "v_proj", "v"),
         ]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
@@ -375,7 +375,6 @@ class OPTForCausalLM(nn.Module, SupportsPP):
             self.lm_head = ParallelLMHead(config.vocab_size,
                                           config.word_embed_proj_dim)
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
@@ -402,16 +401,8 @@ class OPTForCausalLM(nn.Module, SupportsPP):
                                        sampling_metadata)
         return logits
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
-
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head.weight"]

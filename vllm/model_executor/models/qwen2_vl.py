@@ -24,9 +24,8 @@
 # limitations under the License.
 """Inference-only Qwen2-VL model compatible with HuggingFace weights."""
 from collections.abc import Iterable, Mapping, Sequence
-from functools import cached_property, partial
-from typing import (Any, Callable, Literal, Optional, Set, Tuple, TypedDict,
-                    Union)
+from functools import partial
+from typing import Any, Callable, Literal, Optional, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -51,7 +50,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.gptq import GPTQConfig
 from vllm.model_executor.layers.quantization.gptq_marlin import (
     GPTQMarlinConfig)
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -65,7 +63,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
-from vllm.platforms import _Backend
+from vllm.platforms import _Backend, current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
 from vllm.transformers_utils.processor import (
@@ -103,7 +101,7 @@ class Qwen2VLImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
     image_embeds: torch.Tensor
     """Supported types:
-    - List[`torch.Tensor`]: A list of tensors holding all images' features.
+    - list[`torch.Tensor`]: A list of tensors holding all images' features.
         Each tensor holds an image's features.
     - `torch.Tensor`: A tensor holding all images' features
         (concatenation of all images' feature tensors).
@@ -143,7 +141,7 @@ class Qwen2VLVideoEmbeddingInputs(TypedDict):
     type: Literal["video_embeds"]
     video_embeds: torch.Tensor
     """Supported types:
-    - List[`torch.Tensor`]: A list of tensors holding all videos' features.
+    - list[`torch.Tensor`]: A list of tensors holding all videos' features.
         Each tensor holds an video's features.
     - `torch.Tensor`: A tensor holding all videos' features
         (concatenation of all videos' feature tensors).
@@ -231,14 +229,13 @@ def apply_rotary_emb_torch(x: torch.Tensor,
 
 
 def apply_rotary_pos_emb_vision(t: torch.Tensor,
-                                freqs: torch.Tensor,
-                                use_flash_attn=False) -> torch.Tensor:
+                                freqs: torch.Tensor) -> torch.Tensor:
     t_ = t.float()
     cos = freqs.cos()
     sin = freqs.sin()
     apply_rotary_emb = apply_rotary_emb_torch
-    if use_flash_attn:
-        from flash_attn.layers.rotary import apply_rotary_emb
+    if current_platform.is_cuda():
+        from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
     output = apply_rotary_emb(t_, cos, sin).type_as(t)
     return output
 
@@ -664,8 +661,8 @@ class Qwen2VisionTransformer(nn.Module):
 
         return x
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -673,7 +670,7 @@ class Qwen2VisionTransformer(nn.Module):
             ("qkv_proj", "v_proj", "v"),
         ]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
@@ -761,9 +758,11 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
     ) -> Qwen2VLProcessor:
         return self.ctx.get_hf_processor(
             Qwen2VLProcessor,
-            image_processor=self.get_image_processor(min_pixels=min_pixels,
-                                                     max_pixels=max_pixels,
-                                                     size=size),
+            image_processor=self.get_image_processor(
+                min_pixels=min_pixels,
+                max_pixels=max_pixels,
+                size=size,
+                use_fast=kwargs.get("use_fast")),
             **kwargs,
         )
 
@@ -775,8 +774,9 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         size: Optional[dict[str, int]] = None,
         **kwargs: object,
     ):
-        if self.ctx.model_config.mm_processor_kwargs:
-            kwargs.update(self.ctx.model_config.mm_processor_kwargs)
+        mm_config = self.ctx.model_config.get_multimodal_config()
+        if mm_config.mm_processor_kwargs:
+            kwargs.update(mm_config.mm_processor_kwargs)
 
         if min_pixels is not None:
             kwargs["min_pixels"] = min_pixels
@@ -1112,13 +1112,6 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
-    @cached_property
-    def sampler(self):
-        if hasattr(self.language_model, "sampler"):
-            return self.language_model.sampler
-
-        return get_sampler()
-
     def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
         # GPTQ configs do not have a list of ignored modules, however AutoGPTQ
         # seems to avoid vision encoder sections for some models.
@@ -1400,15 +1393,8 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        return self.language_model.sample(logits, sampling_metadata)
-
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
 
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
@@ -1419,5 +1405,6 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         """
         return MultiModelKeys.from_string_field(
             language_model="language_model",
-            connector="visual.",
-            tower_model="visual.merger.")
+            connector="visual.merger.",
+            tower_model="visual.",
+        )

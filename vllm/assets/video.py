@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Literal, Optional
+from typing import ClassVar, Literal, Optional
 
 import cv2
 import numpy as np
@@ -76,20 +76,31 @@ def video_to_pil_images_list(path: str,
     ]
 
 
+VideoAssetName = Literal["baby_reading"]
+
+
 @dataclass(frozen=True)
 class VideoAsset:
-    name: Literal["sample_demo_1.mp4"]
+    name: VideoAssetName
     num_frames: int = -1
+
+    _NAME_TO_FILE: ClassVar[dict[VideoAssetName, str]] = {
+        "baby_reading": "sample_demo_1.mp4",
+    }
+
+    @property
+    def filename(self) -> str:
+        return self._NAME_TO_FILE[self.name]
 
     @property
     def pil_images(self) -> list[Image.Image]:
-        video_path = download_video_asset(self.name)
+        video_path = download_video_asset(self.filename)
         ret = video_to_pil_images_list(video_path, self.num_frames)
         return ret
 
     @property
     def np_ndarrays(self) -> npt.NDArray:
-        video_path = download_video_asset(self.name)
+        video_path = download_video_asset(self.filename)
         ret = video_to_ndarrays(video_path, self.num_frames)
         return ret
 
@@ -99,5 +110,5 @@ class VideoAsset:
         
         See also: examples/offline_inference/qwen2_5_omni/only_thinker.py
         """
-        video_path = download_video_asset(self.name)
+        video_path = download_video_asset(self.filename)
         return librosa.load(video_path, sr=sampling_rate)[0]

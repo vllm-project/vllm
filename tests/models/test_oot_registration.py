@@ -18,10 +18,9 @@ def test_plugin(
         m.setenv("VLLM_USE_V1", "0")
         m.setenv("VLLM_PLUGINS", "")
 
-        with pytest.raises(Exception) as excinfo:
+        match = "Cannot find model module"
+        with pytest.raises(ValueError, match=match):
             LLM(model=dummy_opt_path, load_format="dummy")
-        error_msg = "has no vLLM implementation and the Transformers implementation is not compatible with vLLM"  # noqa: E501
-        assert (error_msg in str(excinfo.value))
 
 
 @create_new_process_for_each_test()

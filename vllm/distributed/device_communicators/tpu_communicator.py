@@ -91,3 +91,12 @@ class TpuCommunicator(DeviceCommunicatorBase):
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         assert dim == -1, "TPUs only support dim=-1 for all-gather."
         return xm.all_gather(input_, dim=dim)
+
+
+try:
+    from tpu_commons.distributed.device_communicators import (
+        TpuCommunicator as TpuCommonsCommunicator)
+    TpuCommunicator = TpuCommonsCommunicator  # type: ignore
+except ImportError:
+    logger.info("tpu_commons not found, using vLLM's TpuCommunicator")
+    pass

@@ -21,12 +21,8 @@ ENV UV_LINK_MODE=copy
 # Note: A dummy file 'control' is created in /tmp/ to artificially create dependencies between stages when building stages in parallel
 #       when `--jobs=<N>` is passed with podman build command
 RUN microdnf install -y openssl-devel dnf \
-    && dnf install -y https://mirror.stream.centos.org/9-stream/BaseOS/`arch`/os/Packages/centos-gpg-keys-9.0-24.el9.noarch.rpm \
-        https://mirror.stream.centos.org/9-stream/BaseOS/`arch`/os/Packages/centos-stream-repos-9.0-24.el9.noarch.rpm \
-        https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm \
-    && dnf config-manager --add-repo https://mirror.stream.centos.org/9-stream/BaseOS/`arch`/os \
-    && dnf config-manager --add-repo https://mirror.stream.centos.org/9-stream/AppStream/`arch`/os \
-    && dnf config-manager --set-enabled crb \
+    && dnf install -y  https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm \
+    && dnf config-manager --set-enabled codeready-builder-for-rhel-9-ppc64le-rpms \
     && dnf install -y \
        git tar gcc-toolset-13 automake libtool numactl-devel lapack-devel \
        pkgconfig xsimd zeromq-devel kmod findutils protobuf* \

@@ -10,12 +10,17 @@ from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType,
                                               is_quantized_kv_cache)
+from vllm.attention.layer import Attention
 from vllm.attention.ops.merge_attn_states import merge_attn_states
+from vllm.attention.utils.fa_utils import (flash_attn_supports_fp8,
+                                           get_flash_attn_version)
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import cdiv
-from vllm.vllm_flash_attn.fa_utils import (flash_attn_supports_fp8,
-                                           get_flash_attn_version)
+from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.worker.block_table import BlockTable
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -64,10 +69,6 @@ class FlashAttentionBackend(AttentionBackend):
             raise ValueError("Block size must be a multiple of 16.")
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
-    @staticmethod
-    def use_cascade_attention(*args, **kwargs) -> bool:
-        return use_cascade_attention(*args, **kwargs)
-
 
 @dataclass
 class FlashAttentionMetadata:
@@ -98,9 +99,6 @@ class FlashAttentionMetadata:
     scheduler_metadata: Optional[torch.Tensor] = None
     prefix_scheduler_metadata: Optional[torch.Tensor] = None
 
-    # For logging.
-    num_input_tokens: int = 0  # Number of tokens including padding.
-
     # for local attention
     @dataclass
     class LocalAttentionMetadata:
@@ -109,6 +107,7 @@ class FlashAttentionMetadata:
         local_block_table: torch.Tensor
         local_max_query_len: int
         local_max_seq_len: int
+        local_scheduler_metadata: Optional[torch.Tensor]
 
     local_attn_metadata: Optional[LocalAttentionMetadata] = None
 
@@ -170,7 +169,7 @@ def make_local_attention_virtual_batches(
     query_start_loc_np: np.ndarray,
     seq_lens_np: np.ndarray,
     block_table: torch.Tensor,
-    page_size: int = 0,
+    block_size: int = 0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, torch.Tensor]:
     q_seqlens = query_start_loc_np[1:] - query_start_loc_np[:-1]
     actual_batch_size = seq_lens_np.shape[0]
@@ -241,14 +240,14 @@ def make_local_attention_virtual_batches(
     # For the example the local attention blocks start at:
     #                           _b0_  _____b1_____  _b2_
     #   k_seqstarts_absolute = [0, 4, 4, 8, 12, 16, 4, 8]
-    block_starts = k_seqstarts_absolute // page_size
-    assert attn_chunk_size % page_size == 0, \
+    block_starts = k_seqstarts_absolute // block_size
+    assert attn_chunk_size % block_size == 0, \
         f"attn_chunk_size {attn_chunk_size} is not " \
-        f"divisible by page_size {page_size}"
-    pages_per_local_batch = attn_chunk_size // page_size
+        f"divisible by block_size {block_size}"
+    pages_per_local_batch = attn_chunk_size // block_size
 
     # Create a block_table for the local attention blocks
-    # For out example if we have a block-table like (assuming page_size=2):
+    # For out example if we have a block-table like (assuming block_size=2):
     #   block_table = [
     #     [ 0,  1,  2,  3,  4,  5,  6,  7,  8,  9],  < batch 0
     #     [10, 11, 12, 13, 14, 15, 16, 17, 18, 19],  < batch 1
@@ -279,75 +278,137 @@ def make_local_attention_virtual_batches(
         block_table_local
 
 
+def _get_sliding_window_configs(
+        vllm_config: VllmConfig) -> set[Optional[tuple[int, int]]]:
+    """Get the set of all sliding window configs used in the model."""
+    sliding_window_configs: set[Optional[tuple[int, int]]] = set()
+    layers = get_layers_from_vllm_config(vllm_config, Attention)
+    for layer in layers.values():
+        assert isinstance(layer.impl, FlashAttentionImpl)
+        sliding_window_configs.add(layer.impl.sliding_window)
+    return sliding_window_configs
+
+
 class FlashAttentionMetadataBuilder:
 
-    def __init__(self, runner: "GPUModelRunner"):
+    def __init__(self, runner: "GPUModelRunner", kv_cache_spec: AttentionSpec,
+                 block_table: BlockTable):
         model_config = runner.model_config
+        compilation_config = runner.vllm_config.compilation_config
 
         self.runner = runner
-        self.aot_schedule = (get_flash_attn_version() == 3)
-        self.num_heads = model_config.get_num_attention_heads(
+        self.num_heads_q = model_config.get_num_attention_heads(
+            runner.parallel_config)
+        self.num_heads_kv = model_config.get_num_kv_heads(
             runner.parallel_config)
         self.headdim = model_config.get_head_size()
-        self.page_size = self.runner.block_size
+        self.block_size = kv_cache_spec.block_size
+        self.kv_cache_spec = kv_cache_spec
+        self.block_table = block_table
+
+        if get_flash_attn_version() == 3:
+            self.aot_schedule = not compilation_config.full_cuda_graph
+            if not self.aot_schedule:
+                logger.warning(
+                    "AOT Schedule is disabled when using full_cuda_graph")
+        else:
+            self.aot_schedule = False
+
+        # Sliding window size to be used with the AOT scheduler will be
+        # populated on first build() call.
+        self.aot_sliding_window: Optional[tuple[int, int]] = None
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
         return False
 
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int):
+              common_prefix_len: int,
+              common_attn_metadata: CommonAttentionMetadata):
         max_seq_len = self.runner.seq_lens_np[:num_reqs].max()
-        query_start_loc_cpu = self.runner.query_start_loc_cpu[:num_reqs + 1]
-        query_start_loc = query_start_loc_cpu.to(self.runner.device,
-                                                 non_blocking=True)
-        seq_lens_cpu = self.runner.seq_lens_cpu[:num_reqs]
-        seq_lens = seq_lens_cpu.to(self.runner.device, non_blocking=True)
-        block_table = (
-            self.runner.input_batch.block_table.get_device_tensor()[:num_reqs])
-        slot_mapping = self.runner.slot_mapping_cpu[:num_actual_tokens].to(
-            self.runner.device, non_blocking=True).long()
+        query_start_loc = common_attn_metadata.query_start_loc
+        seq_lens = common_attn_metadata.seq_lens
+        block_table = self.block_table
+        block_table_tensor = block_table.get_device_tensor()[:num_reqs]
+
+        block_table.slot_mapping[:num_actual_tokens].copy_(
+            block_table.slot_mapping_cpu[:num_actual_tokens],
+            non_blocking=True)
+        # Fill unused with -1. Needed for reshape_and_cache in full cuda graph
+        # mode.
+        block_table.slot_mapping[num_actual_tokens:].fill_(-1)
+
+        slot_mapping = block_table.slot_mapping[:num_actual_tokens]
+
+        if self.aot_sliding_window is None:
+            self.aot_sliding_window = (-1, -1)
+            # For the AOT scheduler we need the sliding window value to be
+            # constant for all layers to. We have to populate this on the first
+            # build() call so the layers are constructed (cannot populate)
+            # in __init__.
+            if self.aot_schedule:
+                sliding_window_configs = _get_sliding_window_configs(
+                    self.runner.vllm_config)
+                if len(sliding_window_configs) == 1:
+                    sliding_window_config = sliding_window_configs.pop()
+                    if sliding_window_config is not None:
+                        self.aot_sliding_window = sliding_window_config
+                elif len(sliding_window_configs) > 1:
+                    self.aot_schedule = False
+
+        def schedule(batch_size, cu_query_lens, max_query_len, seqlens,
+                     max_seq_len, causal):
+            if self.aot_schedule:
+                return get_scheduler_metadata(
+                    batch_size=batch_size,
+                    max_seqlen_q=max_query_len,
+                    max_seqlen_k=max_seq_len,
+                    cache_seqlens=seqlens,
+                    num_heads_q=self.num_heads_q,
+                    num_heads_kv=self.num_heads_kv,
+                    headdim=self.headdim,
+                    page_size=self.block_size,
+                    cu_seqlens_q=cu_query_lens,
+                    causal=causal,
+                    window_size=self.aot_sliding_window,
+                )
+            return None
 
         # for local attention
         local_attn_metadata = None
         if self.runner.attention_chunk_size is not None:
             seqlens_q_local_np, virt_q_cu_seqlens_np, virt_k_seqlens_np, \
-                virt_block_table = make_local_attention_virtual_batches(
+                virt_block_table_tensor = make_local_attention_virtual_batches(
                     self.runner.attention_chunk_size,
                     self.runner.query_start_loc_np[:num_reqs + 1],
                     self.runner.seq_lens_np[:num_reqs],
-                    block_table,
-                    self.runner.block_size,
+                    block_table_tensor,
+                    self.block_size,
                 )
+            local_query_start_loc = torch.from_numpy(virt_q_cu_seqlens_np).to(
+                self.runner.device, non_blocking=True)
+            local_seqused_k = torch.from_numpy(virt_k_seqlens_np).to(
+                self.runner.device, non_blocking=True)
+            local_max_query_len = seqlens_q_local_np.max()
+            local_max_seq_len = virt_k_seqlens_np.max()
+            local_scheduler_metadata = schedule(
+                batch_size=local_query_start_loc.shape[0] - 1,
+                cu_query_lens=local_query_start_loc,
+                max_query_len=local_max_query_len,
+                seqlens=local_seqused_k,
+                max_seq_len=local_max_seq_len,
+                causal=True)
+
             local_attn_metadata = FlashAttentionMetadata.LocalAttentionMetadata(
-                local_query_start_loc=torch.from_numpy(
-                    virt_q_cu_seqlens_np).to(self.runner.device,
-                                             non_blocking=True),
-                local_seqused_k=torch.from_numpy(virt_k_seqlens_np).to(
-                    self.runner.device, non_blocking=True),
-                local_block_table=virt_block_table,
-                local_max_query_len=seqlens_q_local_np.max(),
-                local_max_seq_len=virt_k_seqlens_np.max(),
+                local_query_start_loc=local_query_start_loc,
+                local_seqused_k=local_seqused_k,
+                local_block_table=virt_block_table_tensor,
+                local_max_query_len=local_max_query_len,
+                local_max_seq_len=local_max_seq_len,
+                local_scheduler_metadata=local_scheduler_metadata,
             )
 
         use_cascade = common_prefix_len > 0
-
-        def schedule(cu_query_lens, max_query_len, seqlens, max_seq_len,
-                     causal):
-            if self.aot_schedule:
-                return get_scheduler_metadata(
-                    batch_size=num_reqs,
-                    max_seqlen_q=max_query_len,
-                    max_seqlen_k=max_seq_len,
-                    cache_seqlens=seqlens,
-                    num_heads_q=self.num_heads,
-                    num_heads_kv=self.num_heads,
-                    headdim=self.headdim,
-                    page_size=self.page_size,
-                    cu_seqlens_q=cu_query_lens,
-                    causal=causal,
-                )
-            return None
 
         if use_cascade:
             cu_prefix_query_lens = torch.tensor([0, num_actual_tokens],
@@ -361,12 +422,14 @@ class FlashAttentionMetadataBuilder:
             suffix_kv_lens = torch.from_numpy(suffix_kv_lens).to(
                 self.runner.device)
             prefix_scheduler_metadata = schedule(
+                batch_size=1,
                 cu_query_lens=cu_prefix_query_lens,
                 max_query_len=num_actual_tokens,
                 seqlens=prefix_kv_lens,
                 max_seq_len=common_prefix_len,
                 causal=False)
-            scheduler_metadata = schedule(cu_query_lens=query_start_loc,
+            scheduler_metadata = schedule(batch_size=num_reqs,
+                                          cu_query_lens=query_start_loc,
                                           max_query_len=max_query_len,
                                           seqlens=suffix_kv_lens,
                                           max_seq_len=max_seq_len -
@@ -377,7 +440,8 @@ class FlashAttentionMetadataBuilder:
             prefix_kv_lens = None
             suffix_kv_lens = None
             prefix_scheduler_metadata = None
-            scheduler_metadata = schedule(cu_query_lens=query_start_loc,
+            scheduler_metadata = schedule(batch_size=num_reqs,
+                                          cu_query_lens=query_start_loc,
                                           max_query_len=max_query_len,
                                           seqlens=seq_lens,
                                           max_seq_len=max_seq_len,
@@ -389,7 +453,7 @@ class FlashAttentionMetadataBuilder:
             query_start_loc=query_start_loc,
             max_seq_len=max_seq_len,
             seq_lens=seq_lens,
-            block_table=block_table,
+            block_table=block_table_tensor,
             slot_mapping=slot_mapping,
             use_cascade=use_cascade,
             common_prefix_len=common_prefix_len,
@@ -401,6 +465,9 @@ class FlashAttentionMetadataBuilder:
             prefix_scheduler_metadata=prefix_scheduler_metadata,
         )
         return attn_metadata
+
+    def use_cascade_attention(self, *args, **kwargs) -> bool:
+        return use_cascade_attention(*args, **kwargs)
 
 
 class FlashAttentionImpl(AttentionImpl):
@@ -541,12 +608,14 @@ class FlashAttentionImpl(AttentionImpl):
                 max_seqlen_q = local_metadata.local_max_query_len
                 max_seqlen_k = local_metadata.local_max_seq_len
                 block_table = local_metadata.local_block_table
+                scheduler_metadata = local_metadata.local_scheduler_metadata
             else:
                 cu_seqlens_q = attn_metadata.query_start_loc
                 seqused_k = attn_metadata.seq_lens
                 max_seqlen_q = attn_metadata.max_query_len
                 max_seqlen_k = attn_metadata.max_seq_len
                 block_table = attn_metadata.block_table
+                scheduler_metadata = attn_metadata.scheduler_metadata
 
             descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
 
@@ -565,7 +634,7 @@ class FlashAttentionImpl(AttentionImpl):
                 window_size=self.sliding_window,
                 block_table=block_table,
                 softcap=self.logits_soft_cap,
-                scheduler_metadata=attn_metadata.scheduler_metadata,
+                scheduler_metadata=scheduler_metadata,
                 fa_version=self.vllm_flash_attn_version,
                 q_descale=layer._q_scale.expand(descale_shape),
                 k_descale=layer._k_scale.expand(descale_shape),

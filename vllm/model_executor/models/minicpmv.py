@@ -25,9 +25,8 @@
 import math
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
-from functools import cached_property, partial
-from typing import (Any, Callable, Literal, Optional, Set, Tuple, TypedDict,
-                    Union)
+from functools import partial
+from typing import Any, Callable, Literal, Optional, TypedDict, Union
 
 import numpy as np
 import torch
@@ -40,7 +39,6 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.resampler import (BaseResampler, Resampler2,
                                                   get_2d_sincos_pos_embed)
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.models.minicpm import MiniCPMForCausalLM
@@ -119,7 +117,7 @@ class Resampler2_5(BaseResampler):
                  num_heads: int,
                  kv_dim: Optional[int] = None,
                  norm_layer: Callable[[int], nn.LayerNorm] = DEFAULT_LN,
-                 max_size: Tuple[int, int] = (70, 70),
+                 max_size: tuple[int, int] = (70, 70),
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = "") -> None:
         super().__init__(num_queries,
@@ -134,7 +132,7 @@ class Resampler2_5(BaseResampler):
         self._set_2d_pos_cache(self.max_size)
 
     def _set_2d_pos_cache(self,
-                          max_size: Tuple[int, int],
+                          max_size: tuple[int, int],
                           device: torch.types.Device = "cpu") -> None:
         pos_embed_arr = get_2d_sincos_pos_embed(self.embed_dim,
                                                 max_size,
@@ -204,7 +202,7 @@ class Resampler2_5(BaseResampler):
         return x
 
 
-def get_version_by_config(config: PretrainedConfig) -> Tuple[int, ...]:
+def get_version_by_config(config: PretrainedConfig) -> tuple[int, ...]:
     version_float = getattr(config, "version", None)
 
     # The old configs do not include version number
@@ -758,13 +756,6 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.llm.make_empty_intermediate_tensors)
 
-    @cached_property
-    def sampler(self):
-        if hasattr(self.llm, "sampler"):
-            return self.llm.sampler
-
-        return get_sampler()
-
     def _parse_and_validate_vision_input(
         self,
         modality: str,
@@ -946,16 +937,8 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> Optional[torch.Tensor]:
         return self.llm.compute_logits(hidden_states, sampling_metadata)
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
-
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 
@@ -1197,7 +1180,7 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
     def init_vision_module(
         self,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig],
+        quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> nn.Module:
         model = Idefics2VisionTransformer(config.vision_config,

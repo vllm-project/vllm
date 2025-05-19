@@ -14,7 +14,7 @@ import torch.nn.functional as F
 from vllm.model_executor.layers.linear import LinearBase  # noqa: E501
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization import (
-    get_quantization_config, register_quantization_config)
+    QuantizationMethods, get_quantization_config, register_quantization_config)
 from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
     QuantizationConfig)
 
@@ -54,7 +54,7 @@ class CustomQuantConfig(QuantizationConfig):
         """Initialize the quantization config."""
         self.num_bits = num_bits
 
-    def get_name(self) -> str:
+    def get_name(self) -> QuantizationMethods:
         """Name of the quantization method."""
         return "custom_quant"
 

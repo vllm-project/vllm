@@ -22,6 +22,7 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCIsSleepingResponse,
                                          RPCLoadAdapterRequest,
                                          RPCProcessRequest,
+                                         RPCResetMultiModalCacheRequest,
                                          RPCResetPrefixCacheRequest,
                                          RPCSleepRequest, RPCStartupRequest,
                                          RPCStartupResponse,
@@ -41,18 +42,18 @@ HEALTHY_RESPONSE = (pickle.dumps(VLLM_RPC_SUCCESS_STR), )
 
 
 class MQLLMEngine:
-    """A multiprocessing wrapper for :class:`LLMEngine`.
+    """A multiprocessing wrapper for {class}`LLMEngine`.
 
-    This class is used to wrap the :class:`LLMEngine` class to enable use
+    This class is used to wrap the {class}`LLMEngine` class to enable use
     in concurrnet manner. It runs a background loop and uses zeromq to
     receive new requests and stream outputs incrementally via ipc.
 
-    The :class:`LLMEngine` generate or encode process is kicked off when a new
+    The {class}`LLMEngine` generate or encode process is kicked off when a new
     RPCProcessRequest is received by the input_socket.
 
     The self.engine_loop checks the input_socket for new requests,
     adds them to the LLMEngine if there are any, calls the internal
-    :class:`LLMEngine.step()`, and sends the RequestOutputs back over
+    {class}`LLMEngine.step()`, and sends the RequestOutputs back over
     the output_socket.
 
     If use_async_sockets is set, the logic associated with reading new
@@ -64,8 +65,8 @@ class MQLLMEngine:
         ipc_path: Base path for zeromq interprocess messaging
         use_async_sockets: Whether to make send/recv async with GPU
         log_requests: Whether to log the requests.
-        *args: Arguments for :class:`LLMEngine`.
-        **kwargs: Arguments for :class:`LLMEngine`.
+        *args: Arguments for {class}`LLMEngine`.
+        **kwargs: Arguments for {class}`LLMEngine`.
     """
 
     def __init__(self,
@@ -269,6 +270,8 @@ class MQLLMEngine:
                         self.stop_profile()
                 elif isinstance(request, RPCLoadAdapterRequest):
                     self._handle_load_adapter_request(request)
+                elif isinstance(request, RPCResetMultiModalCacheRequest):
+                    self.reset_mm_cache()
                 elif isinstance(request, RPCResetPrefixCacheRequest):
                     self.reset_prefix_cache()
                 elif isinstance(request, RPCSleepRequest):
@@ -284,7 +287,7 @@ class MQLLMEngine:
         except Exception as e:
             self._set_errored(e)
             self._send_unhealthy(e)
-            raise e
+            raise e from None
 
     def _handle_process_request(self, request: RPCProcessRequest):
         """Handle RPCProcessRequest by adding it to the LLMEngine."""
@@ -409,6 +412,9 @@ class MQLLMEngine:
     def stop_profile(self) -> None:
         self.engine.stop_profile()
 
+    def reset_mm_cache(self) -> bool:
+        return self.engine.reset_mm_cache()
+
     def reset_prefix_cache(self) -> bool:
         return self.engine.reset_prefix_cache()
 
@@ -447,4 +453,4 @@ def run_mp_engine(vllm_config: VllmConfig, usage_context: UsageContext,
     except BaseException as e:
         logger.exception(e)
         engine_alive.value = False
-        raise e
+        raise e from None

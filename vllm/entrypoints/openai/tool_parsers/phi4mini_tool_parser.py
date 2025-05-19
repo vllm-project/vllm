@@ -7,6 +7,7 @@ from typing import Any, Optional
 
 from transformers import PreTrainedTokenizerBase
 
+from vllm.entrypoints.chat_utils import random_tool_call_id
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaMessage,
                                               ExtractedToolCallInformation,
@@ -14,7 +15,6 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
 from vllm.logger import init_logger
-from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
@@ -73,7 +73,7 @@ class Phi4MiniJsonToolParser(ToolParser):
 
             tool_calls: list[ToolCall] = [
                 ToolCall(
-                    id=f"chatcmpl-tool-{random_uuid()}",
+                    id=random_tool_call_id(),
                     type="function",
                     function=FunctionCall(
                         name=raw_function_call["name"],

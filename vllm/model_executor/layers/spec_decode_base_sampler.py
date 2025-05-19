@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from abc import abstractmethod
-from typing import Dict, Optional, Union
+from typing import Optional, Union
 
 import torch
 import torch.jit
@@ -253,6 +253,6 @@ class SpecDecodeStochasticBaseSampler(SpecDecodeBaseSampler):
         bonus_token_ids: torch.Tensor,
         draft_probs: torch.Tensor,
         draft_token_ids: torch.Tensor,
-        seeded_seqs: Optional[Dict[int, torch.Generator]] = None,
+        seeded_seqs: Optional[dict[int, torch.Generator]] = None,
     ) -> torch.Tensor:
         raise NotImplementedError

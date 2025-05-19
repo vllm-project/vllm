@@ -272,3 +272,43 @@ def test_serving_chat_could_load_correct_generation_config():
 
     assert mock_engine.generate.call_args.args[1].temperature == 0.0
     assert mock_engine.generate.call_args.args[1].repetition_penalty == 1.05
+
+
+def test_serving_chat_did_set_correct_cache_salt():
+    mock_model_config = MockModelConfig()
+
+    mock_engine = MagicMock(spec=MQLLMEngineClient)
+    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
+    mock_engine.errored = False
+
+    # Initialize the serving chat
+    models = OpenAIServingModels(engine_client=mock_engine,
+                                 base_model_paths=BASE_MODEL_PATHS,
+                                 model_config=mock_model_config)
+    serving_chat = OpenAIServingChat(mock_engine,
+                                     mock_model_config,
+                                     models,
+                                     response_role="assistant",
+                                     chat_template=CHAT_TEMPLATE,
+                                     chat_template_content_format="auto",
+                                     request_logger=None)
+
+    # Test cache_salt
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{
+            "role": "user",
+            "content": "what is 1+1?"
+        }],
+    )
+
+    # By default cache_salt in the engine prompt is not set
+    with suppress(Exception):
+        asyncio.run(serving_chat.create_chat_completion(req))
+    assert "cache_salt" not in mock_engine.generate.call_args.args[0]
+
+    # Test with certain cache_salt
+    req.cache_salt = "test_salt"
+    with suppress(Exception):
+        asyncio.run(serving_chat.create_chat_completion(req))
+    assert mock_engine.generate.call_args.args[0]["cache_salt"] == "test_salt"

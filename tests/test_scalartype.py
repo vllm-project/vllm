@@ -11,7 +11,7 @@ from vllm.scalar_type import scalar_types
     (0, 15, scalar_types.uint4),
     (-8, 7, scalar_types.uint4b8),
     (-128, 127, scalar_types.uint8b128),
-    (-6., 6., scalar_types.float4_e2m1fn),
+    (-6., 6., scalar_types.float4_e2m1f),
     (-28., 28., scalar_types.float6_e3m2f),
     (torch.int8, scalar_types.int8),
     (torch.uint8, scalar_types.uint8),

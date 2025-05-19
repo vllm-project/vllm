@@ -10,7 +10,7 @@ import torch
 from huggingface_hub import snapshot_download
 
 from vllm import LLM, SamplingParams
-from vllm.model_executor.model_loader.loader import ShardedStateLoader
+from vllm.model_executor.model_loader import ShardedStateLoader
 
 prompts = [
     "Hello, my name is",

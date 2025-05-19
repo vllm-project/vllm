@@ -10,10 +10,12 @@ from .base import get_vllm_public_assets
 
 VLM_IMAGES_DIR = "vision_model_images"
 
+ImageAssetName = Literal["stop_sign", "cherry_blossom"]
+
 
 @dataclass(frozen=True)
 class ImageAsset:
-    name: Literal["stop_sign", "cherry_blossom"]
+    name: ImageAssetName
 
     @property
     def pil_image(self) -> Image.Image:

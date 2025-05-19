@@ -12,7 +12,7 @@ possible on ROCm), the model can be optionally augmented with KV cache
 scaling factors.
 """
 
-from typing import Dict, Optional
+from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, ValidationInfo, model_validator
 
@@ -23,7 +23,7 @@ class KVCacheQuantSchema(BaseModel):
     # layer indices to their per-tensor KV cache scaling factor.
     # TODO: Consider pulling this and its validation methods out into its
     # own schema class (tricky as its members are variable)
-    scaling_factor: Dict[int, Dict[int, float]]
+    scaling_factor: dict[int, dict[int, float]]
 
     @model_validator(mode="after")
     def check_is_fp8(self) -> "KVCacheQuantSchema":

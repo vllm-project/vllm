@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Optional
 
 import torch
 
@@ -45,7 +45,7 @@ class QuarkMoEMethod(FusedMoEMethodBase):
 
 class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
 
-    def __init__(self, weight_config: Dict[str, Any], input_config: Dict[str,
+    def __init__(self, weight_config: dict[str, Any], input_config: dict[str,
                                                                          Any]):
         self.weight_quant = weight_config
         self.input_quant = input_config

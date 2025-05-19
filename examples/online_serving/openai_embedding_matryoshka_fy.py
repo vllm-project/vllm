@@ -25,11 +25,11 @@ def main():
     responses = client.embeddings.create(
         input=["Follow the white rabbit."],
         model=model,
-        dimensions=1,
+        dimensions=32,
     )
 
     for data in responses.data:
-        print(data.embedding)  # List of float of len 1
+        print(data.embedding)  # List of float of len 32
 
 
 if __name__ == "__main__":

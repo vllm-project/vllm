@@ -2,7 +2,7 @@
 
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
-from typing import Any, Dict, Literal, Optional, Set, Tuple, TypedDict, Union
+from typing import Any, Literal, Optional, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -22,7 +22,6 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -230,7 +229,7 @@ class ChameleonAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         rope_theta: float = 10000,
-        rope_scaling: Optional[Dict[str, Any]] = None,
+        rope_scaling: Optional[dict[str, Any]] = None,
         max_position_embeddings: int = 4096,
         quant_config: Optional[QuantizationConfig] = None,
         bias: bool = False,
@@ -293,7 +292,7 @@ class ChameleonAttention(nn.Module):
                               prefix=f"{prefix}.attn")
 
     def _apply_qk_norm(self, q: torch.Tensor,
-                       k: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+                       k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         # reshape for layernorm
         q = q.reshape(-1, self.num_heads, self.head_dim)
         k = k.reshape(-1, self.num_kv_heads, self.head_dim)
@@ -368,7 +367,7 @@ class ChameleonDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
 
         if residual is None:
             residual = hidden_states
@@ -439,7 +438,7 @@ class ChameleonSwinDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
 
         residual = hidden_states
         hidden_states = self.self_attn(
@@ -774,7 +773,7 @@ class ChameleonVQVAE(nn.Module):
 
     def encode(
         self, pixel_values: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         hidden_states = self.encoder(pixel_values)
         hidden_states = self.quant_conv(hidden_states)
         quant, emb_loss, indices = self.quantize(hidden_states)
@@ -787,7 +786,7 @@ class ChameleonImageVocabularyMapping:
     A class for mapping discrete image tokens from VQGAN to BPE tokens.
     """
 
-    def __init__(self, vocab_map: Dict[str, int]):
+    def __init__(self, vocab_map: dict[str, int]):
         self.vocab_map = vocab_map
         self.image_token_id = vocab_map.get("<image>")
 
@@ -950,7 +949,6 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size, logit_scale)
-        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
@@ -1054,16 +1052,8 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return logits
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
-
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -1073,7 +1063,7 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
             (".gate_up_proj", ".up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -1121,10 +1111,10 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
                             ".kv_scale", ".attn.kv_scale")
                         if remapped_kv_scale_name not in params_dict:
                             logger.warning_once(
-                                "Found kv scale in the checkpoint (e.g. "
-                                f"{name}), but not found the expected name in "
-                                f"the model (e.g. {remapped_kv_scale_name}). "
-                                "kv-scale is not loaded.")
+                                "Found kv scale in the checkpoint (e.g. %s), but not found the expected name in the model (e.g. %s). kv-scale is not loaded.",  # noqa: E501
+                                name,
+                                remapped_kv_scale_name,
+                            )
                             continue
                         else:
                             name = remapped_kv_scale_name

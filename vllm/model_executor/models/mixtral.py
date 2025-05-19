@@ -22,7 +22,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Mixtral model."""
-from typing import Iterable, Optional, Set, Tuple, Union
+from collections.abc import Iterable
+from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -40,7 +41,6 @@ from vllm.model_executor.layers.linear import (QKVParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -315,8 +315,8 @@ class MixtralModel(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -333,7 +333,7 @@ class MixtralModel(nn.Module):
             num_experts=self.config.num_local_experts)
 
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if (self.quant_config is not None and
                 (scale_name := self.quant_config.get_cache_scale(name))):
@@ -454,7 +454,6 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.lm_head.weight = self.model.embed_tokens.weight
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
-        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
@@ -481,15 +480,7 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                        sampling_metadata)
         return logits
 
-    def sample(
-        self,
-        logits: Optional[torch.Tensor],
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
-
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self, skip_prefixes=["rotary_emb.inv_freq"])
         return loader.load_weights(weights)

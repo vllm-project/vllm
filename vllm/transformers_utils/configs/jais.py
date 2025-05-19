@@ -98,7 +98,7 @@ class JAISConfig(PretrainedConfig):
             Scale attention weights by dividing by hidden_size instead of
             sqrt(hidden_size). Need to set scale_attn_weights to `True` as
             well.
-        alibi_scaling (`Dict`, *optional*):
+        alibi_scaling (`dict`, *optional*):
             Dictionary containing the scaling configuration for ALiBi
             embeddings. Currently only supports linear
             scaling strategy. Can specify either the scaling `factor` (must be
@@ -108,7 +108,7 @@ class JAISConfig(PretrainedConfig):
             formats are `{"type": strategy name, "factor": scaling factor}` or
             `{"type": strategy name,
             "train_seq_len": training sequence length}`.
-        architectures (`List`, *optional*, defaults to ['JAISLMHeadModel']):
+        architectures (`list`, *optional*, defaults to ['JAISLMHeadModel']):
             architecture names for Jais.
 
     Example:

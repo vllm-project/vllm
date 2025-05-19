@@ -19,7 +19,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Iterable, Set, Tuple
+from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
@@ -50,14 +50,14 @@ class TeleChat2Model(LlamaModel):
                 layer.mlp.gate_up_proj.bias = None
                 layer.mlp.gate_up_proj.skip_bias_add = True
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             ('gate_up_proj', 'gate_proj', 0),
             ('gate_up_proj', 'up_proj', 1),
         ]
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         total_num_heads = self.config.n_head
         head_dim = self.config.hidden_size // total_num_heads
         for name, loaded_weight in weights:
@@ -128,8 +128,8 @@ class TeleChat2ForCausalLM(LlamaForCausalLM):
                     layer_type: type[nn.Module] = LlamaDecoderLayer):
         return TeleChat2Model(vllm_config=vllm_config, prefix=prefix)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
 
         loader = AutoWeightsLoader(
             self,

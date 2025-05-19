@@ -28,7 +28,6 @@ from vllm.model_executor.model_loader.tensorizer import (TensorizerConfig,
 from vllm.utils import PlaceholderModule, import_from_path
 
 from ..utils import VLLM_PATH, RemoteOpenAIServer
-from .conftest import retry_until_skip
 
 try:
     from tensorizer import EncryptionParams
@@ -325,7 +324,7 @@ def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(
     assert outputs == deserialized_outputs
 
 
-@retry_until_skip(3)
+@pytest.mark.flaky(reruns=3)
 def test_vllm_tensorized_model_has_same_outputs(vllm_runner, tmp_path):
     gc.collect()
     torch.cuda.empty_cache()

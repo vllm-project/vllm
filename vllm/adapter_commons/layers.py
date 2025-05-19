@@ -1,15 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Tuple
 
 
 @dataclass
 class AdapterMapping:
     # Per every token in input_ids:
-    index_mapping: Tuple[int, ...]
+    index_mapping: tuple[int, ...]
     # Per sampled token:
-    prompt_mapping: Tuple[int, ...]
+    prompt_mapping: tuple[int, ...]
 
     def __post_init__(self):
         self.index_mapping = tuple(self.index_mapping)

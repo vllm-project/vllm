@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.platforms import current_platform
 from vllm.utils import make_tensor_with_pad
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
@@ -13,7 +14,8 @@ from vllm.v1.sample.sampler import Sampler
 VOCAB_SIZE = 1024
 NUM_OUTPUT_TOKENS = 20
 CUDA_DEVICES = [
-    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
+    f"{current_platform.device_type}:{i}"
+    for i in range(1 if current_platform.device_count() == 1 else 2)
 ]
 MAX_NUM_PROMPT_TOKENS = 64
 

@@ -415,8 +415,8 @@ The discussion in <gh-issue:10582> about adding prefix cache metrics yielded
 some interesting points which may be relevant to how we approach
 future metrics.
 
-Every time the prefix cache is queried, we record the number of blocks
-queried and the number of queried blocks present in the cache
+Every time the prefix cache is queried, we record the number of tokens
+queried and the number of queried tokens present in the cache
 (i.e. hits).
 
 However, the metric of interest is the hit rate - i.e. the number of
@@ -466,6 +466,9 @@ In general:
    in order to give administrators [an escape
    hatch](https://kubernetes.io/docs/concepts/cluster-administration/system-metrics/#show-hidden-metrics)
    for some time before deleting them.
+
+See the [deprecation policy](project:../../contributing/deprecation_policy.md) for
+the project-wide deprecation policy.
 
 ### Unimplemented - `vllm:tokens_total`
 

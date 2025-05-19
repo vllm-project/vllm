@@ -16,7 +16,7 @@
 # limitations under the License.
 """Llama model for fairseq2 weights."""
 
-from typing import Iterable, Set, Tuple
+from collections.abc import Iterable
 
 import torch
 from torch.nn import Parameter
@@ -44,8 +44,8 @@ class Fairseq2LlamaForCausalLM(LlamaForCausalLM):
             f"model.{self.tp_rank}.pt",
         ]
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         # fairseq2's serialization adds a wrapper to usual .pt state_dict's:
         # { "model_key": my_model_name, "my_model_name": state_dict }
         # which we first need to unpack
@@ -102,7 +102,7 @@ class Fairseq2LlamaForCausalLM(LlamaForCausalLM):
         name: str,
         loaded_weight: torch.Tensor,
         params: dict[str, Parameter],
-    ) -> Tuple[str, torch.Tensor]:
+    ) -> tuple[str, torch.Tensor]:
         """Reshape fairseq2's weights."""
 
         def permute(w: torch.Tensor, n_heads: int) -> torch.Tensor:

@@ -11,33 +11,33 @@ from tabulate import tabulate
 
 def parse_arguments():
     parser = argparse.ArgumentParser(
-        description=
-        'Parse command line arguments for summary-nightly-results script.')
-    parser.add_argument('--results-folder',
-                        type=str,
-                        required=True,
-                        help='The folder where the results are stored.')
-    parser.add_argument('--description',
-                        type=str,
-                        required=True,
-                        help='Description of the results.')
+        description="Parse command line arguments for summary-nightly-results script."
+    )
+    parser.add_argument(
+        "--results-folder",
+        type=str,
+        required=True,
+        help="The folder where the results are stored.",
+    )
+    parser.add_argument(
+        "--description", type=str, required=True, help="Description of the results."
+    )
 
     args = parser.parse_args()
     return args
 
 
 def get_perf(df, method, model, metric):
-
     means = []
 
     for qps in [2, 4, 8, 16, "inf"]:
-        target = df['Test name'].str.contains(model)
-        target = target & df['Engine'].str.contains(method)
-        target = target & df['Test name'].str.contains("qps_" + str(qps))
+        target = df["Test name"].str.contains(model)
+        target = target & df["Engine"].str.contains(method)
+        target = target & df["Test name"].str.contains("qps_" + str(qps))
         filtered_df = df[target]
 
         if filtered_df.empty:
-            means.append(0.)
+            means.append(0.0)
         else:
             means.append(filtered_df[metric].values[0])
 
@@ -45,7 +45,6 @@ def get_perf(df, method, model, metric):
 
 
 def get_perf_w_std(df, method, model, metric):
-
     if metric in ["TTFT", "ITL"]:
         mean = get_perf(df, method, model, "Mean " + metric + " (ms)")
         mean = mean.tolist()
@@ -60,7 +59,8 @@ def get_perf_w_std(df, method, model, metric):
     else:
         assert metric == "Tput"
         mean = get_perf(df, method, model, "Input Tput (tok/s)") + get_perf(
-            df, method, model, "Output Tput (tok/s)")
+            df, method, model, "Output Tput (tok/s)"
+        )
         mean = mean.tolist()
         std = None
 
@@ -80,18 +80,17 @@ def main(args):
     # generate markdown table
     df = pd.DataFrame.from_dict(results)
 
-    md_table = tabulate(df, headers='keys', tablefmt='pipe', showindex=False)
+    md_table = tabulate(df, headers="keys", tablefmt="pipe", showindex=False)
 
     with open(args.description) as f:
         description = f.read()
 
-    description = description.format(
-        nightly_results_benchmarking_table=md_table)
+    description = description.format(nightly_results_benchmarking_table=md_table)
 
     with open("nightly_results.md", "w") as f:
         f.write(description)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     args = parse_arguments()
     main(args)

@@ -18,7 +18,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only GPT-2 model compatible with HuggingFace weights."""
-from typing import Iterable, Optional, Set, Tuple, Union
+from collections.abc import Iterable
+from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -35,7 +36,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -255,7 +255,6 @@ class GPT2LMHeadModel(nn.Module, SupportsPP):
             self.lm_head = self.lm_head.tie_weights(self.transformer.wte)
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.transformer.make_empty_intermediate_tensors)
 
@@ -282,18 +281,10 @@ class GPT2LMHeadModel(nn.Module, SupportsPP):
                                        sampling_metadata)
         return logits
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
-
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if ".attn.bias" in name or ".attn.masked_bias" in name:
                 # Skip attention mask.

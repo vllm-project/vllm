@@ -25,15 +25,16 @@ TEMPLATE = ("template __global__ void Marlin<"
             "{{thread_k_blocks}}, "
             "{{'true' if m_block_size_8 else 'false'}}, "
             "{{stages}}, "
-            "{{'true' if has_act_order else 'false'}}, "
-            "{{'true' if has_zp else 'false'}}, "
             "{{group_blocks}}, "
             "{{'true' if is_zp_float else 'false'}}>"
             "( MARLIN_KERNEL_PARAMS );")
 
 # int8 with zero point case (vllm::kU8) is also supported,
 # we don't add it to reduce wheel size.
-SCALAR_TYPES = ["vllm::kU4", "vllm::kU4B8", "vllm::kU8B128"]
+SCALAR_TYPES = [
+    "vllm::kU4", "vllm::kU4B8", "vllm::kU8B128", "vllm::kFE4M3fn",
+    "vllm::kFE2M1f"
+]
 THREAD_CONFIGS = [(128, 128, 256), (64, 256, 256), (64, 128, 128)]
 
 THREAD_M_BLOCKS = [0.5, 1, 2, 3, 4]
@@ -41,7 +42,7 @@ THREAD_M_BLOCKS = [0.5, 1, 2, 3, 4]
 #   = 0 : act order case
 #   = -1 : channelwise quantization
 #   > 0 : group_size=16*group_blocks
-GROUP_BLOCKS = [0, -1, 2, 4, 8]
+GROUP_BLOCKS = [0, -1, 1, 2, 4, 8]
 DTYPES = ["fp16", "bf16"]
 
 
@@ -52,20 +53,34 @@ def remove_old_kernels():
 
 def generate_new_kernels():
     for scalar_type, dtype in itertools.product(SCALAR_TYPES, DTYPES):
-        has_zp = "B" not in scalar_type
         all_template_str_list = []
 
         for group_blocks, m_blocks, thread_configs in itertools.product(
                 GROUP_BLOCKS, THREAD_M_BLOCKS, THREAD_CONFIGS):
 
-            has_act_order = group_blocks == 0
-            if has_zp and has_act_order:
+            # act order case only support gptq-int4 and gptq-int8
+            if group_blocks == 0 and scalar_type not in [
+                    "vllm::kU4B8", "vllm::kU8B128"
+            ]:
                 continue
             if thread_configs[2] == 256:
+                # for small batch (m_blocks == 1), we only need (128, 128, 256)
+                # for large batch (m_blocks > 1), we only need (64, 256, 256)
                 if m_blocks <= 1 and thread_configs[0] != 128:
                     continue
                 if m_blocks > 1 and thread_configs[0] != 64:
                     continue
+
+            # we only support channelwise quantization and group_size == 128
+            # for fp8
+            if scalar_type == "vllm::kFE4M3fn" and group_blocks not in [-1, 8]:
+                continue
+            # nvfp4 only supports group_size == 16
+            if scalar_type == "vllm::kFE2M1f" and group_blocks not in [1, 2]:
+                continue
+            # other quantization methods don't support group_size = 16
+            if scalar_type != "vllm::kFE2M1f" and group_blocks == 1:
+                continue
 
             k_blocks = thread_configs[0] // 16
             n_blocks = thread_configs[1] // 16
@@ -82,8 +97,6 @@ def generate_new_kernels():
                 thread_k_blocks=k_blocks,
                 m_block_size_8=m_blocks == 0.5,
                 stages="pipe_stages",
-                has_act_order=has_act_order,
-                has_zp=has_zp,
                 group_blocks=group_blocks,
                 is_zp_float=False,
             )

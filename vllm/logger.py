@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import sys
+from collections.abc import Hashable
 from functools import lru_cache, partial
 from logging import Logger
 from logging.config import dictConfig
@@ -52,39 +53,39 @@ DEFAULT_LOGGING_CONFIG = {
 
 
 @lru_cache
-def _print_info_once(logger: Logger, msg: str) -> None:
+def _print_info_once(logger: Logger, msg: str, *args: Hashable) -> None:
     # Set the stacklevel to 2 to print the original caller's line info
-    logger.info(msg, stacklevel=2)
+    logger.info(msg, *args, stacklevel=2)
 
 
 @lru_cache
-def _print_warning_once(logger: Logger, msg: str) -> None:
+def _print_warning_once(logger: Logger, msg: str, *args: Hashable) -> None:
     # Set the stacklevel to 2 to print the original caller's line info
-    logger.warning(msg, stacklevel=2)
+    logger.warning(msg, *args, stacklevel=2)
 
 
 class _VllmLogger(Logger):
     """
     Note:
         This class is just to provide type information.
-        We actually patch the methods directly on the :class:`logging.Logger`
+        We actually patch the methods directly on the {class}`logging.Logger`
         instance to avoid conflicting with other libraries such as
         `intel_extension_for_pytorch.utils._logger`.
     """
 
-    def info_once(self, msg: str) -> None:
+    def info_once(self, msg: str, *args: Hashable) -> None:
         """
-        As :meth:`info`, but subsequent calls with the same message
+        As {meth}`info`, but subsequent calls with the same message
         are silently dropped.
         """
-        _print_info_once(self, msg)
+        _print_info_once(self, msg, *args)
 
-    def warning_once(self, msg: str) -> None:
+    def warning_once(self, msg: str, *args: Hashable) -> None:
         """
-        As :meth:`warning`, but subsequent calls with the same message
+        As {meth}`warning`, but subsequent calls with the same message
         are silently dropped.
         """
-        _print_warning_once(self, msg)
+        _print_warning_once(self, msg, *args)
 
 
 def _configure_vllm_root_logger() -> None:

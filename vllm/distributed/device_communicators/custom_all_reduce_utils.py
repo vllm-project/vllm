@@ -7,8 +7,9 @@ import pickle
 import subprocess
 import sys
 import tempfile
+from collections.abc import Sequence
 from itertools import product
-from typing import Dict, List, Optional, Sequence
+from typing import Optional
 
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -149,7 +150,7 @@ def can_actually_p2p(
     p_src.join()
     p_tgt.join()
     assert p_src.exitcode == 0 and p_tgt.exitcode == 0
-    result: List[bool] = []
+    result: list[bool] = []
     for src, tgt in zip(batch_src, batch_tgt):
         a = result_queue.get()
         b = result_queue.get()
@@ -175,7 +176,7 @@ def can_actually_p2p(
 #  e.g. used by different vllm engines. The device id in the cache file is a
 #  **local** device id, i.e. from 0 to num_dev-1, where num_dev is the number
 #  of visible devices in the vllm engine.
-_gpu_p2p_access_cache: Optional[Dict[str, bool]] = None
+_gpu_p2p_access_cache: Optional[dict[str, bool]] = None
 
 
 def gpu_p2p_access_check(src: int, tgt: int) -> bool:
@@ -204,7 +205,7 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
         # only the local master process (with local_rank == 0) can
         #  enter this block to calculate the cache
         logger.info("generating GPU P2P access cache in %s", path)
-        cache: Dict[str, bool] = {}
+        cache: dict[str, bool] = {}
         ids = list(range(num_dev))
         # batch of all pairs of GPUs
         batch_src, batch_tgt = zip(*list(product(ids, ids)))
