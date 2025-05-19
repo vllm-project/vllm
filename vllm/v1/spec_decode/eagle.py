@@ -332,7 +332,7 @@ class EagleProposer:
         if self.vllm_config.speculative_config.method != "eagle3" and \
                 hasattr(target_model, "lm_head"):
             logger.info("Loading EAGLE LM head weights from the target model.")
-            if supports_multimodal(target_model) or hasattr(target_model, 'get_language_model'):
+            if supports_multimodal(target_model):
                 self.model.lm_head = target_model.get_language_model().lm_head
             else:
                 self.model.lm_head = target_model.lm_head
