@@ -50,6 +50,9 @@ _NEURON_SUPPORTED_MODELS: dict[str, tuple[str, str]] = {
     "LlamaForCausalLM":
     ("neuronx_distributed_inference.models.llama.modeling_llama",
      "NeuronLlamaForCausalLM"),
+    "MistralForCausalLM":
+    ("neuronx_distributed_inference.models.llama.modeling_llama",
+     "NeuronLlamaForCausalLM"),
     "DbrxForCausalLM":
     ("neuronx_distributed_inference.models.dbrx.modeling_dbrx",
      "NeuronDbrxForCausalLM"),
