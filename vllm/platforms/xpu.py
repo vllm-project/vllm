@@ -75,7 +75,9 @@ class XPUPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         cache_config = vllm_config.cache_config
         # in V1(or with ipex chunked prefill) block_size is 64
-        if cache_config and envs.VLLM_USE_V1:
+        if cache_config and \
+            cache_config.block_size is None and \
+            envs.VLLM_USE_V1:
             cache_config.block_size = 64
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
@@ -182,3 +184,7 @@ class XPUPlatform(Platform):
     @classmethod
     def supports_v1(cls, model_config: ModelConfig) -> bool:
         return True
+
+    @classmethod
+    def device_count(cls) -> int:
+        return torch.xpu.device_count()
