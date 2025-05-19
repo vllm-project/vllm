@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List, Optional, Tuple, Union
+from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -104,7 +104,7 @@ class Mixer2RMSNormGated(CustomOp):
         self,
         x: torch.Tensor,
         gate: torch.Tensor,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
 
         if self.tp_size > 1 or self.n_groups != 1:
             return self.forward_native(x, gate)
@@ -136,13 +136,13 @@ def extra_groups_for_head_shards(ngroups: int, tp_size: int):
 
 
 def mamba_v2_sharded_weight_loader(
-    shard_spec: List[Tuple[int, int, float]],
+    shard_spec: list[tuple[int, int, float]],
     tp_size: int,
     tp_rank: int,
 ) -> LoaderFunction:
     """Create a weight loader for mamba v2. This ensures that the projections 
     are correctly sharded so that they can be split into x, B, C. It also 
-    ensures the the all the groups corresponding to a head shard is placed 
+    ensures that all the groups corresponding to a head shard is placed 
     together with it.
     """
 

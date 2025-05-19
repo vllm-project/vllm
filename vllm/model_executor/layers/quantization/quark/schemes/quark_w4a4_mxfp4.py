@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Optional
 
 import torch
 import torch.nn.functional as F
@@ -18,8 +18,8 @@ __all__ = ["QuarkW4A4MXFP4"]
 
 class QuarkW4A4MXFP4(QuarkScheme):
 
-    def __init__(self, weight_quant_spec: Dict[str, Any],
-                 input_quant_spec: Dict[str, Any]):
+    def __init__(self, weight_quant_spec: dict[str, Any],
+                 input_quant_spec: dict[str, Any]):
         self.out_dtype = torch.get_default_dtype()
         self.qscheme = "per_group"
         self.weight_quant_spec = weight_quant_spec
@@ -74,7 +74,7 @@ class QuarkW4A4MXFP4(QuarkScheme):
             torch.cuda.empty_cache()
 
     def create_weights(self, layer: torch.nn.Module,
-                       output_partition_sizes: List[int],
+                       output_partition_sizes: list[int],
                        input_size_per_partition: int,
                        params_dtype: torch.dtype, weight_loader: Callable,
                        **kwargs):

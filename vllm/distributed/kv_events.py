@@ -130,6 +130,7 @@ class ZmqEventPublisher(EventPublisher):
         self._endpoint = endpoint
         self._replay_endpoint = replay_endpoint
         self._hwm = hwm
+        self._socket_setup()
 
         # Payload
         self._seq_gen = count()
@@ -207,7 +208,6 @@ class ZmqEventPublisher(EventPublisher):
     def _publisher_thread(self) -> None:
         """Background thread that processes the event queue."""
         self._pack = msgspec.msgpack.Encoder()
-        self._socket_setup()
 
         assert self._pub is not None  # narrows type for mypy
 
