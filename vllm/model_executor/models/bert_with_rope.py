@@ -394,7 +394,7 @@ class NomicMoE(nn.Module):
                                         self.w2,
                                         router_logits,
                                         self.top_k,
-                                        renormalize=True,
+                                        renormalize=False,
                                         inplace=True,
                                         activation=self.hidden_act,
                                         is_act_and_mul=False)
