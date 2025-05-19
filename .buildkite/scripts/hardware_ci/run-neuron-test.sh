@@ -11,13 +11,14 @@ container_name="neuron_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)"
 HF_CACHE="$(realpath ~)/huggingface"
 mkdir -p "${HF_CACHE}"
 HF_MOUNT="/root/.cache/huggingface"
+HF_TOKEN=$(aws secretsmanager get-secret-value  --secret-id "ci/vllm-neuron/hf-token" --region us-west-2 --query 'SecretString' --output text | jq -r .VLLM_NEURON_CI_HF_TOKEN)
 
 NEURON_COMPILE_CACHE_URL="$(realpath ~)/neuron_compile_cache"
 mkdir -p "${NEURON_COMPILE_CACHE_URL}"
 NEURON_COMPILE_CACHE_MOUNT="/root/.cache/neuron_compile_cache"
 
 # Try building the docker image
-aws ecr get-login-password --region us-west-2 | docker login --username AWS --password-stdin 763104351884.dkr.ecr.us-west-2.amazonaws.com
+aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws
 
 # prune old image and containers to save disk space, and only once a day
 # by using a timestamp file in tmp.
@@ -47,6 +48,7 @@ trap remove_docker_container EXIT
 docker run --rm -it --device=/dev/neuron0 --network bridge \
        -v "${HF_CACHE}:${HF_MOUNT}" \
        -e "HF_HOME=${HF_MOUNT}" \
+       -e "HF_TOKEN=${HF_TOKEN}" \
        -v "${NEURON_COMPILE_CACHE_URL}:${NEURON_COMPILE_CACHE_MOUNT}" \
        -e "NEURON_COMPILE_CACHE_URL=${NEURON_COMPILE_CACHE_MOUNT}" \
        --name "${container_name}" \
