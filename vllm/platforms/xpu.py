@@ -82,22 +82,25 @@ class XPUPlatform(Platform):
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
 
+        # Instances created using VllmConfig() typically have model_config as None by default.
+        # The modification involves adding a check to prevent potential null exceptions
         # check and update model config
-        model_config = vllm_config.model_config
-        if model_config.dtype == torch.bfloat16:
-            bf16_supported = cls.device_support_bf16()
-            if not bf16_supported:
+        if vllm_config.model_config is not None:
+            model_config = vllm_config.model_config
+            if model_config.dtype == torch.bfloat16:
+                bf16_supported = cls.device_support_bf16()
+                if not bf16_supported:
+                    logger.warning(
+                        "bfloat16 is only supported on Intel Data Center GPU, "
+                        "Intel Arc GPU is not supported yet. Your device is %s,"
+                        " which is not supported. will fallback to float16",
+                        cls.get_device_name())
+                    model_config.dtype = torch.float16
+            if not model_config.enforce_eager:
                 logger.warning(
-                    "bfloat16 is only supported on Intel Data Center GPU, "
-                    "Intel Arc GPU is not supported yet. Your device is %s,"
-                    " which is not supported. will fallback to float16",
-                    cls.get_device_name())
-                model_config.dtype = torch.float16
-        if not model_config.enforce_eager:
-            logger.warning(
-                "CUDA graph is not supported on XPU, fallback to the eager "
-                "mode.")
-            model_config.enforce_eager = True
+                    "CUDA graph is not supported on XPU, fallback to the eager "
+                    "mode.")
+                model_config.enforce_eager = True
 
         if vllm_config.speculative_config is not None:
             raise NotImplementedError(
