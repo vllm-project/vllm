@@ -146,6 +146,17 @@ class EAGLE(nn.Module):
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings(input_ids)
 
+        # Handle both empty previous_hidden_states
+        # and mismatched batch size
+        batch_size = inputs_embeds.size(0)
+        if previous_hidden_states.size(0) == 0 or \
+           previous_hidden_states.size(0) != batch_size:
+            hidden_dim = self.config.model.hidden_size
+            device = inputs_embeds.device
+            # Create zero tensor with matching batch size
+            previous_hidden_states = \
+                torch.zeros(batch_size, hidden_dim, device=device)
+
         if self.add_para_norm:
             inputs_embeds = torch.cat([
                 self.enorm(inputs_embeds),

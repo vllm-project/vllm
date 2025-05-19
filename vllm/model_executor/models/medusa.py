@@ -164,7 +164,14 @@ class Medusa(nn.Module):
         self,
         previous_hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> list[SamplerOutput]:
+    ) -> Optional[list[SamplerOutput]]:
+        # During preemption, we may receive an empty tensor (batch_size=0)
+        if previous_hidden_states.size(0) == 0:
+            # Return None to signal the Top1Proposer that no proposals
+            # were generated for this batch, allowing it to handle this
+            # special case appropriately
+            return None
+
         return self.sample(
             logits=self.compute_logits(
                 hidden_states=self.forward(previous_hidden_states),
