@@ -11,7 +11,6 @@ from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, PoolerConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
@@ -56,7 +55,6 @@ class BertEmbedding(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        seq_lens: torch.Tensor,
         position_ids: torch.Tensor,
         token_type_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -285,7 +283,8 @@ class BertIntermediate(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.dense(hidden_states)
-        hidden_states = self.intermediate_act_fn(hidden_states)
+        hidden_states = torch.nn.functional.gelu(hidden_states)
+        #hidden_states = self.intermediate_act_fn(hidden_states)
         return hidden_states
 
 
@@ -341,16 +340,7 @@ class BertModel(nn.Module, SupportsQuant):
         if inputs_embeds is not None:
             hidden_states = inputs_embeds
         else:
-            attn_metadata = get_forward_context().attn_metadata
-            seq_lens = None
-            if attn_metadata is not None:  # Can be None during warmup
-                if isinstance(attn_metadata, dict):
-                    attn_metadata = next(iter(attn_metadata.values()))
-                seq_lens = getattr(attn_metadata, "seq_lens_tensor",
-                                   attn_metadata.seq_lens)
-                assert seq_lens is not None
             hidden_states = self.embeddings(input_ids=input_ids,
-                                            seq_lens=seq_lens,
                                             position_ids=position_ids,
                                             token_type_ids=token_type_ids)
 
@@ -416,11 +406,13 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
         self,
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
+        token_type_ids: Optional[torch.Tensor] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         return self.model(input_ids=input_ids,
                           position_ids=positions,
+                          token_type_ids=token_type_ids,
                           inputs_embeds=inputs_embeds,
                           intermediate_tensors=intermediate_tensors)
 

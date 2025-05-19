@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import gc
+import inspect
 import time
 import weakref
 from typing import TYPE_CHECKING, Optional, Union, cast
@@ -227,11 +228,12 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
                                         device="cpu",
                                         pin_memory=self.pin_memory)
         self.seq_lens_np = self.seq_lens_cpu.numpy()
+        self.supports_token_type_ids: bool = False
 
     def get_token_type_ids(self) -> torch.Tensor:
         if self.token_type_ids is None:
             self.token_type_ids = torch.zeros(self.max_num_tokens,
-                                              dtype=torch.int8,
+                                              dtype=torch.int32,
                                               device=self.device)
         return self.token_type_ids
 
@@ -777,11 +779,13 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
                 for k, v in self.intermediate_tensors.items()
             })
 
+        seq_lens = self.seq_lens[:self.input_batch.num_reqs]
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
         with set_forward_context(attn_metadata,
                                  self.vllm_config,
-                                 num_tokens=num_input_tokens):
+                                 num_tokens=num_input_tokens,
+                                 seq_lens=seq_lens):
             output = self.model(
                 input_ids=input_ids,
                 positions=positions,
@@ -831,6 +835,11 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
         logger.info("Model loading took %.4f GiB and %.6f seconds",
                     self.model_memory_usage / GiB_bytes,
                     time_after_load - time_before_load)
+        self.supports_token_type_ids = 'token_type_ids' in \
+                inspect.getfullargspec(self.model.forward).args
+        if self.supports_token_type_ids:
+            # pre-allocate tensor
+            self.get_token_type_ids()
 
     @torch.inference_mode()
     def _dummy_run(
@@ -852,12 +861,14 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
         assert len(num_scheduled_tokens_list) == num_reqs
         num_scheduled_tokens = np.array(num_scheduled_tokens_list,
                                         dtype=np.int32)
+        self.seq_lens.fill_(0)
+        seq_lens = self.seq_lens[:num_reqs]
+        seq_lens.copy_(torch.from_numpy(num_scheduled_tokens))
 
         if skip_attn:
             attn_metadata: Optional[dict[str, FlashAttentionMetadata]] = None
         else:
             query_start_loc = self.query_start_loc[:num_reqs + 1]
-            seq_lens = self.seq_lens[:num_reqs]
 
             common_attn_metadata = CommonAttentionMetadata(
                 query_start_loc=query_start_loc, seq_lens=seq_lens)
@@ -879,6 +890,10 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
             model = self.model
+            model_kwargs = {}
+            if self.supports_token_type_ids:
+                token_type_ids = self.get_token_type_ids()[:num_tokens]
+                model_kwargs["token_type_ids"] = token_type_ids
             if self.is_multimodal_model:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:num_tokens]
@@ -889,6 +904,12 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
                 positions = self.mrope_positions[:, :num_tokens]
             else:
                 positions = self.positions[:num_tokens]
+
+            offset = 0
+            for seq_len in num_scheduled_tokens_list:
+                positions[offset:offset + seq_len] = torch.arange(
+                    seq_len, dtype=positions.dtype)
+                offset += seq_len
 
             if get_pp_group().is_first_rank:
                 intermediate_tensors = None
@@ -906,14 +927,15 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
 
             with set_forward_context(attn_metadata,
                                      self.vllm_config,
-                                     num_tokens=num_tokens):
-                outputs = model(
-                    input_ids=input_ids,
-                    positions=positions,
-                    intermediate_tensors=intermediate_tensors,
-                    inputs_embeds=inputs_embeds,
-                )
+                                     num_tokens=num_tokens,
+                                     seq_lens=seq_lens):
+                outputs = model(input_ids=input_ids,
+                                positions=positions,
+                                intermediate_tensors=intermediate_tensors,
+                                inputs_embeds=inputs_embeds,
+                                **model_kwargs)
 
+            positions = self.positions[:num_tokens].zero_()
             hidden_states = outputs
 
         return hidden_states, num_reqs
@@ -1113,6 +1135,7 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
             kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
+        self.kv_cache_config = kv_cache_config
         if len(kv_cache_config.kv_cache_groups) != 1:
             raise NotImplementedError(
                 "Hybrid models with more than one KV cache type are not "
