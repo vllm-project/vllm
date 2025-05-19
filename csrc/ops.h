@@ -369,4 +369,5 @@ void qr_open_handles(fptr_t _fa, const std::vector<torch::Tensor>& handles);
 void qr_all_reduce(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
                    int64_t algo_int);
 int64_t qr_max_size();
+int64_t qr_min_size();
 #endif
