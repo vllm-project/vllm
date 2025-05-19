@@ -3,7 +3,6 @@
 
 # vllm-flash-attn built from source
 vllm/vllm_flash_attn/*
-!vllm/vllm_flash_attn/fa_utils.py
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -81,6 +80,7 @@ instance/
 # Sphinx documentation
 docs/_build/
 docs/source/getting_started/examples/
+docs/source/api/vllm
 
 # PyBuilder
 .pybuilder/
@@ -203,3 +203,6 @@ benchmarks/**/*.json
 # Linting
 actionlint
 shellcheck*/
+
+# Ingore moe/marlin_moe gen code
+csrc/moe/marlin_moe_wna16/kernel_*

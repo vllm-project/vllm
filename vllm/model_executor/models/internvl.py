@@ -8,8 +8,7 @@
 # --------------------------------------------------------
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
-from functools import cached_property
-from typing import Literal, Optional, Set, Tuple, TypedDict, TypeVar, Union
+from typing import Literal, Optional, TypedDict, TypeVar, Union
 
 import torch
 import torch.nn as nn
@@ -20,19 +19,18 @@ from transformers import BatchEncoding, PretrainedConfig, TensorType
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.awq import AWQConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.models.intern_vit import (InternVisionModel,
                                                    InternVisionPatchModel)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
-                                    NestedTensors)
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalKwargs, NestedTensors)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate, PromptUpdateDetails)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
@@ -458,13 +456,6 @@ class BaseInternVLProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {"image": self.get_max_image_tokens()}
-
     def get_num_image_tokens(
         self,
         *,
@@ -478,15 +469,6 @@ class BaseInternVLProcessingInfo(BaseProcessingInfo):
         return processor.get_num_image_tokens(
             image_width=image_width,
             image_height=image_height,
-        )
-
-    def get_max_image_tokens(self) -> int:
-        target_width, target_height = self.get_image_size_with_most_features()
-
-        return self.get_num_image_tokens(
-            image_width=target_width,
-            image_height=target_height,
-            processor=None,
         )
 
     def get_image_size_with_most_features(self) -> ImageSize:
@@ -520,26 +502,26 @@ _I = TypeVar("_I", bound=BaseInternVLProcessingInfo)
 
 class InternVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 
-    def get_dummy_processor_inputs(
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        num_images = mm_counts.get("image", 0)
+
+        return "<image>" * num_images
+
+    def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    ) -> MultiModalDataDict:
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
         num_images = mm_counts.get("image", 0)
 
-        mm_data = {
+        return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
                                    num_images=num_images)
         }
-
-        return ProcessorInputs(
-            prompt_text="<image>" * num_images,
-            mm_data=mm_data,
-        )
 
 
 class InternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
@@ -713,13 +695,6 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
             if (not quant_config.modules_to_not_convert) and \
                 (llm_quant_config is not None):
                 quant_config.modules_to_not_convert.append("vision_model")
-
-    @cached_property
-    def sampler(self):
-        if hasattr(self.language_model, "sampler"):
-            return self.language_model.sampler
-
-        return get_sampler()
 
     def _init_vision_model(
         self,
@@ -919,7 +894,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
-    ) -> Union[SamplerOutput, IntermediateTensors]:
+    ) -> IntermediateTensors:
 
         if intermediate_tensors is not None:
             input_ids = None
@@ -957,15 +932,8 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        return self.language_model.sample(logits, sampling_metadata)
-
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         # unused modules appear in OpenGVLab/InternVideo2_5_Chat_8B
         skip_prefixes = [
             "action_embed", "temporal_embed", "track_embed",

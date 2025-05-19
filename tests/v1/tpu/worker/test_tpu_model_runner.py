@@ -7,9 +7,9 @@ from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
-from vllm.v1.worker.tpu_model_runner import (TPUModelRunner,
-                                             _get_padded_token_len,
-                                             _get_paddings)
+from vllm.v1.worker.tpu_model_runner import (
+    TPUModelRunner, _get_padded_num_reqs_with_upper_limit,
+    _get_padded_token_len, _get_req_paddings, _get_token_paddings)
 
 # Mock torch_xla module since it may not be available in the test environments
 torch_xla_patcher = mock.patch.dict(
@@ -77,7 +77,6 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
             NewRequestData(
                 req_id=req_id,
                 prompt_token_ids=[1, 2, 3],
-                prompt="test",
                 mm_inputs=[],
                 mm_hashes=[],
                 mm_positions=[],
@@ -294,18 +293,51 @@ def test_update_states_request_unscheduled(model_runner):
 
 
 def test_get_paddings():
+    # Bucketed padding
     min_token_size, max_token_size, padding_gap = 16, 512, 64
     expected_paddings = [16, 32, 64, 128, 192, 256, 320, 384, 448, 512]
-    actual_paddings = _get_paddings(min_token_size, max_token_size,
-                                    padding_gap)
+    actual_paddings = _get_token_paddings(min_token_size, max_token_size,
+                                          padding_gap)
+
+    # Bucketed padding with max_token_size not a power of two.
+    max_token_size = 317
+    expected_paddings = [16, 32, 64, 128, 192, 256, 320]
+    actual_paddings = _get_token_paddings(min_token_size, max_token_size,
+                                          padding_gap)
+    assert actual_paddings == expected_paddings
+
+    # Exponential padding.
+    max_token_size, padding_gap = 1024, 0
+    expected_paddings = [16, 32, 64, 128, 256, 512, 1024]
+    actual_paddings = _get_token_paddings(min_token_size, max_token_size,
+                                          padding_gap)
+    assert actual_paddings == expected_paddings
+    # Exponential padding with max_token_size not a power of two.
+    max_token_size = 317
+    expected_paddings = [16, 32, 64, 128, 256, 512]
+    actual_paddings = _get_token_paddings(min_token_size, max_token_size,
+                                          padding_gap)
     assert actual_paddings == expected_paddings
 
 
 def test_get_padded_token_len():
     min_token_size, max_token_size, padding_gap = 16, 512, 64
-    paddings = _get_paddings(min_token_size, max_token_size, padding_gap)
+    paddings = _get_token_paddings(min_token_size, max_token_size, padding_gap)
     assert _get_padded_token_len(paddings, 1) == 16
     assert _get_padded_token_len(paddings, 16) == 16
     assert _get_padded_token_len(paddings, 20) == 32
     assert _get_padded_token_len(paddings, 300) == 320
     assert _get_padded_token_len(paddings, 512) == 512
+
+
+def test_get_padded_num_reqs_with_upper_limit():
+    assert _get_padded_num_reqs_with_upper_limit(3, 32) == 8
+    assert _get_padded_num_reqs_with_upper_limit(9, 32) == 16
+    assert _get_padded_num_reqs_with_upper_limit(19, 32) == 32
+    assert _get_padded_num_reqs_with_upper_limit(17, 28) == 28
+
+
+def test_get_req_paddings():
+    assert _get_req_paddings(1, 32) == [8, 16, 32]
+    assert _get_req_paddings(8, 32) == [8, 16, 32]
+    assert _get_req_paddings(8, 36) == [8, 16, 32, 36]

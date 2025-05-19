@@ -2,9 +2,8 @@
 
 from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
-from functools import cached_property
-from typing import (Final, Literal, Optional, Protocol, Set, Tuple, TypedDict,
-                    TypeVar, Union, cast)
+from typing import (Final, Literal, Optional, Protocol, TypedDict, TypeVar,
+                    Union, cast)
 
 import torch
 import torch.nn as nn
@@ -23,7 +22,6 @@ from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
@@ -34,7 +32,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, ProcessingCache,
                                         PromptReplacement, PromptUpdate,
                                         PromptUpdateDetails)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
 from .clip import CLIPVisionModel
@@ -137,13 +135,6 @@ class BaseLlavaProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {"image": self.get_max_image_tokens()}
-
     def _apply_feature_select_strategy(
         self,
         strategy: str,
@@ -193,29 +184,30 @@ _I = TypeVar("_I", bound=BaseLlavaProcessingInfo)
 
 class LlavaDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 
-    def get_dummy_processor_inputs(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
 
         processor = self.info.get_hf_processor()
         image_token = processor.image_token
+
+        return image_token * num_images
+
+    def get_dummy_mm_data(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> MultiModalDataDict:
+        num_images = mm_counts.get("image", 0)
+
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
 
-        mm_data = {
+        return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
                                    num_images=num_images)
         }
-
-        return ProcessorInputs(
-            prompt_text=image_token * num_images,
-            mm_data=mm_data,
-        )
 
 
 class LlavaProcessingInfo(BaseLlavaProcessingInfo):
@@ -362,9 +354,8 @@ class PixtralHFMultiModalProcessor(
         image_token_id = hf_config.image_token_index
         image_end_id = vocab[processor.image_end_token]
 
-        vision_config = hf_config.vision_config
-        assert isinstance(vision_config, PixtralVisionConfig)
-        encoder_info = PixtralHFEncoderInfo(vision_config)
+        assert isinstance(hf_config.vision_config, PixtralVisionConfig)
+        encoder_info = PixtralHFEncoderInfo(hf_config)
 
         def get_replacement(item_idx: int):
             images = mm_items.get_items("image", ImageProcessorItems)
@@ -404,14 +395,12 @@ def _build_llava_or_pixtral_hf_processor(
     dummy_inputs: BaseDummyInputsBuilder[_I],
     *,
     cache: Optional[ProcessingCache] = None,
-    enable_sanity_checks: bool = True,
 ) -> BaseMultiModalProcessor:
     if isinstance(info, PixtralHFProcessingInfo):
         return PixtralHFMultiModalProcessor(
             info,
             dummy_inputs,  # type: ignore
             cache=cache,
-            enable_sanity_checks=enable_sanity_checks,
         )
 
     if isinstance(info, LlavaProcessingInfo):
@@ -419,7 +408,6 @@ def _build_llava_or_pixtral_hf_processor(
             info,
             dummy_inputs,  # type: ignore
             cache=cache,
-            enable_sanity_checks=enable_sanity_checks,
         )
 
     raise NotImplementedError(type(info))
@@ -551,13 +539,6 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
-
-    @cached_property
-    def sampler(self):
-        if hasattr(self.language_model, "sampler"):
-            return self.language_model.sampler
-
-        return get_sampler()
 
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
         h = w = self.config.vision_config.image_size
@@ -740,8 +721,9 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
                 batch.
             pixel_values: The pixels in each input image.
 
-        See also:
-            :class:`LlavaImageInputs`
+        :::{seealso}
+        {class}`LlavaImageInputs`
+        :::
         """
         if intermediate_tensors is not None:
             inputs_embeds = None
@@ -769,15 +751,8 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        return self.language_model.sample(logits, sampling_metadata)
-
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 

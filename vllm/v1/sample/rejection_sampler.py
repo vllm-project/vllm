@@ -3,10 +3,9 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-import triton
-import triton.language as tl
 
 from vllm.logger import init_logger
+from vllm.triton_utils import tl, triton
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -75,7 +74,7 @@ class RejectionSampler(nn.Module):
                 outside of the rejection sampler with the default sampling
                 strategy. It allows for more flexibility in the sampling
                 process such as top_p, top_k sampling.
-            sampling_metadata (SamplingMetadata):
+            sampling_metadata (vllm.v1.sample.metadata.SamplingMetadata):
                 Additional metadata needed for sampling, such as temperature,
                 top-k/top-p parameters, or other relevant information.
         Returns:
@@ -226,7 +225,7 @@ def rejection_sample(
         is_greedy,
         max_spec_len,
         vocab_size,
-        IS_NGRAM=draft_probs is None,
+        NO_DRAFT_PROBS=draft_probs is None,
         num_warps=1,
     )
     return output_token_ids
@@ -423,7 +422,7 @@ def sample_recovered_tokens(
         q,
         vocab_size,
         triton.next_power_of_2(vocab_size),
-        IS_NGRAM=draft_probs is None,
+        NO_DRAFT_PROBS=draft_probs is None,
     )
     return recovered_token_ids
 
@@ -490,7 +489,7 @@ def rejection_random_sample_kernel(
     is_greedy_ptr,  # [batch_size]
     max_spec_len,
     vocab_size,
-    IS_NGRAM: tl.constexpr,
+    NO_DRAFT_PROBS: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     is_greedy = tl.load(is_greedy_ptr + req_idx)
@@ -509,7 +508,7 @@ def rejection_random_sample_kernel(
     for pos in range(num_draft_tokens):
         if not rejected:
             draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
-            if IS_NGRAM:
+            if NO_DRAFT_PROBS:
                 draft_prob = 1
             else:
                 draft_prob = tl.load(draft_probs_ptr +
@@ -575,7 +574,7 @@ def sample_recovered_tokens_kernel(
     q_ptr,  # [batch_size, vocab_size]
     vocab_size,
     PADDED_VOCAB_SIZE: tl.constexpr,
-    IS_NGRAM: tl.constexpr,
+    NO_DRAFT_PROBS: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     if req_idx == 0:
@@ -591,7 +590,7 @@ def sample_recovered_tokens_kernel(
         return
 
     vocab_offset = tl.arange(0, PADDED_VOCAB_SIZE)
-    if IS_NGRAM:
+    if NO_DRAFT_PROBS:
         draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
         orig_prob = tl.load(target_probs_ptr + (start_idx + pos) * vocab_size +
                             draft_token_id)
@@ -624,7 +623,7 @@ def sample_recovered_tokens_kernel(
     recovered_id = tl.argmax(prob / q, axis=-1)
     tl.store(output_token_ids_ptr + start_idx + pos, recovered_id)
 
-    if IS_NGRAM:
+    if NO_DRAFT_PROBS:
         # Restore the original probability.
         tl.store(
             target_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id,

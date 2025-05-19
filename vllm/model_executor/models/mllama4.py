@@ -17,9 +17,8 @@
 # limitations under the License.
 import math
 from collections.abc import Iterable, Mapping
-from functools import cached_property
 from itertools import tee
-from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union
+from typing import Literal, Optional, TypedDict, Union
 
 import torch
 from torch import nn
@@ -38,19 +37,18 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
-from vllm.model_executor.model_loader.loader import _initialize_model
+from vllm.model_executor.model_loader.utils import initialize_model
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
-                                    NestedTensors)
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalKwargs, NestedTensors)
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate, PromptUpdateDetails)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -477,7 +475,9 @@ class Mllama4ProcessingInfo(BaseProcessingInfo):
                                          **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        return {"image": 10}
+        # Although vLLM can support more images from an infra capability
+        # perspective, we do not recommend using >10 images in practice.
+        return {"image": None}
 
     @staticmethod
     def get_patch_per_chunk(vision_config: Llama4VisionConfig) -> int:
@@ -496,31 +496,12 @@ class Mllama4ProcessingInfo(BaseProcessingInfo):
         image_processor = self.get_hf_processor().image_processor
         return image_processor.max_patches
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        vision_config = self.get_hf_config().vision_config
-        patch_per_chunk = self.get_patch_per_chunk(vision_config)
-        num_patches = self.get_max_num_tiles() + 1
-
-        return {"image": patch_per_chunk * num_patches}
-
     def get_image_size_with_most_features(self) -> ImageSize:
         vision_config = self.get_hf_config().vision_config
         image_size = vision_config.image_size
         # Result in the max possible feature size (h:w = 16:1)
         return ImageSize(height=self.get_max_num_tiles() * image_size,
                          width=image_size)
-
-    def get_max_image_tokens(self) -> int:
-        target_width, target_height = self.get_image_size_with_most_features()
-
-        return self.get_num_image_tokens(
-            image_width=target_width,
-            image_height=target_height,
-        )
 
 
 class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo]
@@ -601,7 +582,7 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo]
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> List[PromptUpdate]:
+    ) -> list[PromptUpdate]:
         assert (
             mm_items.get_count("image", strict=False) == 0
             or "aspect_ratios" in out_mm_kwargs
@@ -636,28 +617,30 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo]
 
 class Mllama4DummyInputsBuilder(BaseDummyInputsBuilder[Mllama4ProcessingInfo]):
 
-    def get_dummy_processor_inputs(
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        num_images = mm_counts.get("image", 0)
+
+        processor = self.info.get_hf_processor()
+        image_token = processor.fake_image_token
+
+        return image_token * num_images
+
+    def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         (target_width,
          target_height) = self.info.get_image_size_with_most_features()
 
-        mm_data = {
+        return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
                                    num_images=num_images)
         }
-
-        image_token = self.info.get_hf_processor().fake_image_token
-        return ProcessorInputs(
-            prompt_text=image_token * num_images,
-            mm_data=mm_data,
-        )
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -687,22 +670,15 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
             self.config,
             None,
             prefix=maybe_prefix(prefix, "multi_modal_projector"))
-
-        self.language_model = _initialize_model(
-            vllm_config=vllm_config.with_hf_config(config.text_config),
+        self.language_model = initialize_model(
+            vllm_config=vllm_config.with_hf_config(config.text_config,
+                                                   ["LlamaForCausalLM"]),
             prefix=maybe_prefix(prefix, "language_model"),
             model_class=Llama4ForCausalLM,
         )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
-
-    @cached_property
-    def sampler(self):
-        if hasattr(self.language_model, "sampler"):
-            return self.language_model.sampler
-
-        return get_sampler()
 
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[Llama4ImagePatchInputs]:
@@ -800,32 +776,28 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
-    def sample(self, logits: torch.Tensor,
-               sampling_metadata: SamplingMetadata) -> Optional[SamplerOutput]:
-        return self.language_model.sample(logits, sampling_metadata)
-
     def separate_weights(
         self,
-        weights: Iterable[Tuple[str, torch.Tensor]],
+        weights: Iterable[tuple[str, torch.Tensor]],
         prefix: str,
-    ) -> Tuple[Iterable[Tuple[str, torch.Tensor]], Iterable[Tuple[
+    ) -> tuple[Iterable[tuple[str, torch.Tensor]], Iterable[tuple[
             str, torch.Tensor]]]:
         weights1, weights2 = tee(weights, 2)
 
-        def get_prefix_weights() -> Iterable[Tuple[str, torch.Tensor]]:
+        def get_prefix_weights() -> Iterable[tuple[str, torch.Tensor]]:
             for name, data in weights1:
                 if name.startswith(prefix):
                     yield (name, data)
 
-        def get_other_weights() -> Iterable[Tuple[str, torch.Tensor]]:
+        def get_other_weights() -> Iterable[tuple[str, torch.Tensor]]:
             for name, data in weights2:
                 if not name.startswith(prefix):
                     yield (name, data)
 
         return get_prefix_weights(), get_other_weights()
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
 
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -834,12 +806,12 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
             (".self_attn.qkv_proj", ".self_attn.v_proj", "v"),
         ]
         params_dict = dict(self.named_parameters())
-        updated_params: Set[str] = set()
+        updated_params: set[str] = set()
 
         # language_model is an Llama4ForCausalLM instance. We load it's
         # using llama4's load_weights routine.
         language_model_weights, other_weights = self.separate_weights(
-            weights, prefix="language_model.model.")
+            weights, prefix="language_model.")
         loader = AutoWeightsLoader(self)
         loaded_language_model_params = loader.load_weights(
             language_model_weights)

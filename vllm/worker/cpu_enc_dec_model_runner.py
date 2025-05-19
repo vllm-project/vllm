@@ -316,7 +316,7 @@ class CPUEncoderDecoderModelRunner(
             return []
 
         # Sample the next token.
-        output = self.model.sample(
+        output = self.sampler(
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
         )

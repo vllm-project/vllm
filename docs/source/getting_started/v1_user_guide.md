@@ -44,8 +44,8 @@ This living user guide outlines a few known **important changes and limitations*
 |-----------------|-----------------------------------------------------------------------------------|
 | **Prefix Caching**                    | <nobr>🚀 Optimized</nobr>                                                        |
 | **Chunked Prefill**                    | <nobr>🚀 Optimized</nobr>                                                        |
+| **LoRA**                                    | <nobr>🚀 Optimized</nobr>                                                         |
 | **Logprobs Calculation**                    | <nobr>🟢 Functional</nobr>                                                        |
-| **LoRA**                                    | <nobr>🟢 Functional ([PR #13096](https://github.com/vllm-project/vllm/pull/13096))</nobr>|
 | **Multimodal Models**                       | <nobr>🟢 Functional</nobr>                                                        |
 | **FP8 KV Cache**                            | <nobr>🟢 Functional on Hopper devices ([PR #15191](https://github.com/vllm-project/vllm/pull/15191))</nobr>|
 | **Spec Decode**                             | <nobr>🚧 WIP ([PR #13933](https://github.com/vllm-project/vllm/pull/13933))</nobr>|
@@ -120,11 +120,6 @@ Although we have re-implemented and partially optimized many features and models
 
 These features are already supported in vLLM V1, but their optimization is still
 in progress.
-
-- **LoRA**: LoRA is functionally working on vLLM V1 but its performance is
-  inferior to that of V0. The team is actively working on improving its
-  performance
-(e.g., see [PR #13096](https://github.com/vllm-project/vllm/pull/13096)).
 
 - **Spec Decode**: Currently, only ngram-based spec decode is supported in V1. There
   will be follow-up work to support other types of spec decode (e.g., see [PR #13933](https://github.com/vllm-project/vllm/pull/13933)). We will prioritize the support for Eagle, MTP compared to draft model based spec decode.

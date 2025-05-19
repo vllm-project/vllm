@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import concurrent
 import contextlib
@@ -16,6 +15,7 @@ import importlib.metadata
 import importlib.util
 import inspect
 import ipaddress
+import json
 import multiprocessing
 import os
 import pickle
@@ -25,6 +25,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import time
 import traceback
@@ -32,15 +33,20 @@ import types
 import uuid
 import warnings
 import weakref
+from argparse import (Action, ArgumentDefaultsHelpFormatter, ArgumentParser,
+                      ArgumentTypeError, _ArgumentGroup)
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import UserDict, defaultdict
 from collections.abc import (AsyncGenerator, Awaitable, Generator, Hashable,
                              Iterable, Iterator, KeysView, Mapping)
+from concurrent.futures.process import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
 from types import MappingProxyType
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
-                    Optional, Tuple, Type, TypeVar, Union, cast, overload)
+                    Optional, Sequence, Tuple, Type, TypeVar, Union, cast,
+                    overload)
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import cachetools
@@ -53,14 +59,20 @@ import torch.types
 import yaml
 import zmq
 import zmq.asyncio
+from packaging import version
 from packaging.version import Version
 from torch.library import Library
 from typing_extensions import Never, ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
+# NOTE: import triton_utils to make TritonPlaceholderModule work
+#       if triton is unavailable
+import vllm.triton_utils  # noqa: F401
 from vllm.logger import enable_trace_function_call, init_logger
 
 if TYPE_CHECKING:
+    from argparse import Namespace
+
     from vllm.config import ModelConfig, VllmConfig
 
 logger = init_logger(__name__)
@@ -142,6 +154,7 @@ STR_TORCH_SDPA_ATTN_VAL: str = "TORCH_SDPA"
 STR_ROCM_FLASH_ATTN_VAL: str = "ROCM_FLASH"
 STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
 STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
+STR_DUAL_CHUNK_FLASH_ATTN_VAL: str = "DUAL_CHUNK_FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
 
 GB_bytes = 1_000_000_000
@@ -233,6 +246,12 @@ class CacheInfo(NamedTuple):
 
         return self.hits / self.total
 
+    def __sub__(self, other: CacheInfo):
+        return CacheInfo(
+            hits=self.hits - other.hits,
+            total=self.total - other.total,
+        )
+
 
 class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
 
@@ -240,15 +259,26 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
                  capacity: float,
                  getsizeof: Optional[Callable[[_V], float]] = None):
         super().__init__(capacity, getsizeof)
+
         self.pinned_items = set[_K]()
-        self.capacity = capacity
 
         self._hits = 0
         self._total = 0
+        self._last_info = CacheInfo(hits=0, total=0)
+
+    def __getitem__(self, key: _K, *, update_info: bool = True) -> _V:
+        value = super().__getitem__(key)
+
+        if update_info:
+            self._hits += 1
+            self._total += 1
+
+        return value
 
     def __delitem__(self, key: _K) -> None:
         run_on_remove = key in self
-        value = self.__getitem__(key)
+        value = self.__getitem__(key,
+                                 update_info=False)  # type: ignore[call-arg]
         super().__delitem__(key)
         if key in self.pinned_items:
             # Todo: add warning to inform that del pinned item
@@ -268,11 +298,38 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
         """Return the internal order dictionary (read-only)."""
         return MappingProxyType(self._LRUCache__order)  # type: ignore
 
-    def stat(self) -> CacheInfo:
-        return CacheInfo(hits=self._hits, total=self._total)
+    @property
+    def capacity(self) -> float:
+        return self.maxsize
+
+    @property
+    def usage(self) -> float:
+        if self.maxsize == 0:
+            return 0
+
+        return self.currsize / self.maxsize
+
+    def stat(self, *, delta: bool = False) -> CacheInfo:
+        """
+        Gets the cumulative number of hits and queries against this cache.
+
+        If `delta=True`, instead gets these statistics
+        since the last call that also passed `delta=True`.
+        """
+        info = CacheInfo(hits=self._hits, total=self._total)
+
+        if delta:
+            info_delta = info - self._last_info
+            self._last_info = info
+            info = info_delta
+
+        return info
 
     def touch(self, key: _K) -> None:
-        self._LRUCache__update(key)  # type: ignore
+        try:
+            self._LRUCache__order.move_to_end(key)  # type: ignore
+        except KeyError:
+            self._LRUCache__order[key] = None  # type: ignore
 
     @overload
     def get(self, key: _K, /) -> Optional[_V]:
@@ -289,7 +346,8 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
                                     _T]] = None) -> Optional[Union[_V, _T]]:
         value: Optional[Union[_V, _T]]
         if key in self:
-            value = self.__getitem__(key)
+            value = self.__getitem__(
+                key, update_info=False)  # type: ignore[call-arg]
 
             self._hits += 1
         else:
@@ -314,8 +372,9 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
         if key not in self:
             return default
 
-        value = self[key]
-        del self[key]
+        value = self.__getitem__(key,
+                                 update_info=False)  # type: ignore[call-arg]
+        self.__delitem__(key)
         return value
 
     def put(self, key: _K, value: _V) -> None:
@@ -350,10 +409,6 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
         while self.currsize > self.capacity:
             self.remove_oldest()
 
-    def clear(self) -> None:
-        while len(self) > 0:
-            self.remove_oldest(remove_pinned=True)
-
     def popitem(self, remove_pinned: bool = False):
         """Remove and return the `(key, value)` pair least recently used."""
         if not remove_pinned:
@@ -368,6 +423,14 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
             lru_key = next(iter(self.order))
         value = self.pop(cast(_K, lru_key))
         return (lru_key, value)
+
+    def clear(self) -> None:
+        while len(self) > 0:
+            self.remove_oldest(remove_pinned=True)
+
+        self._hits = 0
+        self._total = 0
+        self._last_info = CacheInfo(hits=0, total=0)
 
 
 class PyObjectCache:
@@ -551,6 +614,10 @@ def is_valid_ipv6_address(address: str) -> bool:
 
 
 def get_distributed_init_method(ip: str, port: int) -> str:
+    return get_tcp_uri(ip, port)
+
+
+def get_tcp_uri(ip: str, port: int) -> str:
     # Brackets are not permitted in ipv4 addresses,
     # see https://github.com/python/cpython/issues/103848
     return f"tcp://[{ip}]:{port}" if ":" in ip else f"tcp://{ip}:{port}"
@@ -575,12 +642,12 @@ def get_open_port() -> int:
     process. Currently it uses 2 ports.
     """
     if "VLLM_DP_MASTER_PORT" in os.environ:
-        dp_port = envs.VLLM_DP_MASTER_PORT
+        dp_master_port = envs.VLLM_DP_MASTER_PORT
+        reserved_port_range = range(dp_master_port, dp_master_port + 10)
         while True:
-            port = _get_open_port()
-            if dp_port <= port < dp_port + 10:
-                continue
-            return port
+            candidate_port = _get_open_port()
+            if candidate_port not in reserved_port_range:
+                return candidate_port
     return _get_open_port()
 
 
@@ -645,6 +712,13 @@ def cdiv(a: int, b: int) -> int:
     return -(a // -b)
 
 
+def next_power_of_2(n) -> int:
+    """The next power of 2 (inclusive)"""
+    if n < 1:
+        return 1
+    return 1 << (n - 1).bit_length()
+
+
 def round_up(x: int, y: int) -> int:
     return ((x + y - 1) // y) * y
 
@@ -707,21 +781,28 @@ def create_kv_caches_with_random_flash(
     model_dtype: Optional[Union[str, torch.dtype]] = None,
     seed: Optional[int] = None,
     device: Optional[str] = "cuda",
+    cache_layout: Optional[str] = "NHD",
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     from vllm.platforms import current_platform
     current_platform.seed_everything(seed)
 
     torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
-    key_value_cache_shape = (num_blocks, 2, block_size, num_heads, head_size)
+    generic_kv_cache_shape = (num_blocks, 2, block_size, num_heads, head_size)
+    assert cache_layout in ("NHD", "HND")
+    stride_order = (0, 1, 2, 3, 4) if cache_layout == "NHD" else (0, 1, 3, 2,
+                                                                  4)
+
+    kv_cache_allocation_shape = tuple(generic_kv_cache_shape[i]
+                                      for i in stride_order)
     scale = head_size**-0.5
 
     key_caches: list[torch.Tensor] = []
     value_caches: list[torch.Tensor] = []
 
     for _ in range(num_layers):
-        key_value_cache = torch.empty(size=key_value_cache_shape,
+        key_value_cache = torch.empty(size=kv_cache_allocation_shape,
                                       dtype=torch_dtype,
-                                      device=device)
+                                      device=device).permute(*stride_order)
         if cache_dtype in ["auto", "half", "bfloat16", "float"]:
             key_value_cache.uniform_(-scale, scale)
         elif cache_dtype == 'fp8':
@@ -917,7 +998,7 @@ def flatten_2d_lists(lists: Iterable[Iterable[T]]) -> list[T]:
 
 def full_groupby(values: Iterable[_V], *, key: Callable[[_V], _K]):
     """
-    Unlike :class:`itertools.groupby`, groups are not broken by
+    Unlike {class}`itertools.groupby`, groups are not broken by
     non-contiguous data.
     """
     groups = defaultdict[_K, list[_V]](list)
@@ -1182,6 +1263,22 @@ def cuda_is_initialized() -> bool:
     return torch.cuda.is_initialized()
 
 
+def cuda_get_device_properties(device,
+                               names: Sequence[str],
+                               init_cuda=False) -> tuple[Any, ...]:
+    """Get specified CUDA device property values without initializing CUDA in
+    the current process."""
+    if init_cuda or cuda_is_initialized():
+        props = torch.cuda.get_device_properties(device)
+        return tuple(getattr(props, name) for name in names)
+
+    # Run in subprocess to avoid initializing CUDA as a side effect.
+    mp_ctx = multiprocessing.get_context("fork")
+    with ProcessPoolExecutor(max_workers=1, mp_context=mp_ctx) as executor:
+        return executor.submit(cuda_get_device_properties, device, names,
+                               True).result()
+
+
 def weak_bind(bound_method: Callable[..., Any], ) -> Callable[..., None]:
     """Make an instance method that weakly references
     its associated instance and no-ops once that
@@ -1208,7 +1305,7 @@ def run_once(f: Callable[P, None]) -> Callable[P, None]:
     return wrapper
 
 
-class StoreBoolean(argparse.Action):
+class StoreBoolean(Action):
 
     def __call__(self, parser, namespace, values, option_string=None):
         if values.lower() == "true":
@@ -1220,16 +1317,31 @@ class StoreBoolean(argparse.Action):
                              "Expected 'true' or 'false'.")
 
 
-class SortedHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
+class SortedHelpFormatter(ArgumentDefaultsHelpFormatter):
     """SortedHelpFormatter that sorts arguments by their option strings."""
+
+    def _split_lines(self, text, width):
+        """
+        1. Sentences split across lines have their single newlines removed.
+        2. Paragraphs and explicit newlines are split into separate lines.
+        3. Each line is wrapped to the specified width (width of terminal).
+        """
+        # The patterns also include whitespace after the newline
+        single_newline = re.compile(r"(?<!\n)\n(?!\n)\s*")
+        multiple_newlines = re.compile(r"\n{2,}\s*")
+        text = single_newline.sub(' ', text)
+        lines = re.split(multiple_newlines, text)
+        return sum([textwrap.wrap(line, width) for line in lines], [])
 
     def add_arguments(self, actions):
         actions = sorted(actions, key=lambda x: x.option_strings)
         super().add_arguments(actions)
 
 
-class FlexibleArgumentParser(argparse.ArgumentParser):
+class FlexibleArgumentParser(ArgumentParser):
     """ArgumentParser that allows both underscore and dash in names."""
+
+    _deprecated: set[Action] = set()
 
     def __init__(self, *args, **kwargs):
         # Set the default 'formatter_class' to SortedHelpFormatter
@@ -1237,7 +1349,43 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
             kwargs['formatter_class'] = SortedHelpFormatter
         super().__init__(*args, **kwargs)
 
-    def parse_args(self, args=None, namespace=None):
+    if sys.version_info < (3, 13):
+        # Enable the deprecated kwarg for Python 3.12 and below
+
+        def parse_known_args(self, args=None, namespace=None):
+            namespace, args = super().parse_known_args(args, namespace)
+            for action in FlexibleArgumentParser._deprecated:
+                if (hasattr(namespace, dest := action.dest)
+                        and getattr(namespace, dest) != action.default):
+                    logger.warning_once("argument '%s' is deprecated", dest)
+            return namespace, args
+
+        def add_argument(self, *args, **kwargs):
+            deprecated = kwargs.pop("deprecated", False)
+            action = super().add_argument(*args, **kwargs)
+            if deprecated:
+                FlexibleArgumentParser._deprecated.add(action)
+            return action
+
+        class _FlexibleArgumentGroup(_ArgumentGroup):
+
+            def add_argument(self, *args, **kwargs):
+                deprecated = kwargs.pop("deprecated", False)
+                action = super().add_argument(*args, **kwargs)
+                if deprecated:
+                    FlexibleArgumentParser._deprecated.add(action)
+                return action
+
+        def add_argument_group(self, *args, **kwargs):
+            group = self._FlexibleArgumentGroup(self, *args, **kwargs)
+            self._action_groups.append(group)
+            return group
+
+    def parse_args(  # type: ignore[override]
+        self,
+        args: list[str] | None = None,
+        namespace: Namespace | None = None,
+    ):
         if args is None:
             args = sys.argv[1:]
 
@@ -1272,6 +1420,51 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
             else:
                 processed_args.append(arg)
 
+        def create_nested_dict(keys: list[str], value: str):
+            """Creates a nested dictionary from a list of keys and a value.
+
+            For example, `keys = ["a", "b", "c"]` and `value = 1` will create:
+            `{"a": {"b": {"c": 1}}}`
+            """
+            nested_dict: Any = value
+            for key in reversed(keys):
+                nested_dict = {key: nested_dict}
+            return nested_dict
+
+        def recursive_dict_update(original: dict, update: dict):
+            """Recursively updates a dictionary with another dictionary."""
+            for k, v in update.items():
+                if isinstance(v, dict) and isinstance(original.get(k), dict):
+                    recursive_dict_update(original[k], v)
+                else:
+                    original[k] = v
+
+        delete = set()
+        dict_args: dict[str, dict] = defaultdict(dict)
+        for i, processed_arg in enumerate(processed_args):
+            if processed_arg.startswith("--") and "." in processed_arg:
+                if "=" in processed_arg:
+                    processed_arg, value = processed_arg.split("=", 1)
+                    if "." not in processed_arg:
+                        # False positive, . was only in the value
+                        continue
+                else:
+                    value = processed_args[i + 1]
+                    delete.add(i + 1)
+                key, *keys = processed_arg.split(".")
+                # Merge all values with the same key into a single dict
+                arg_dict = create_nested_dict(keys, value)
+                recursive_dict_update(dict_args[key], arg_dict)
+                delete.add(i)
+        # Filter out the dict args we set to None
+        processed_args = [
+            a for i, a in enumerate(processed_args) if i not in delete
+        ]
+        # Add the dict args back as if they were originally passed as JSON
+        for dict_arg, dict_value in dict_args.items():
+            processed_args.append(dict_arg)
+            processed_args.append(json.dumps(dict_value))
+
         return super().parse_args(processed_args, namespace)
 
     def check_port(self, value):
@@ -1279,11 +1472,10 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
             value = int(value)
         except ValueError:
             msg = "Port must be an integer"
-            raise argparse.ArgumentTypeError(msg) from None
+            raise ArgumentTypeError(msg) from None
 
         if not (1024 <= value <= 65535):
-            raise argparse.ArgumentTypeError(
-                "Port must be between 1024 and 65535")
+            raise ArgumentTypeError("Port must be between 1024 and 65535")
 
         return value
 
@@ -1682,7 +1874,7 @@ def get_cuda_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
 def is_in_doc_build() -> bool:
     try:
         from sphinx.ext.autodoc.mock import _MockModule
-        return isinstance(torch, _MockModule)
+        return isinstance(zmq, _MockModule)
     except ModuleNotFoundError:
         return False
 
@@ -1726,10 +1918,11 @@ class _PlaceholderBase:
     Disallows downstream usage of placeholder modules.
 
     We need to explicitly override each dunder method because
-    :meth:`__getattr__` is not called when they are accessed.
+    {meth}`__getattr__` is not called when they are accessed.
 
-    See also:
-        [Special method lookup](https://docs.python.org/3/reference/datamodel.html#special-lookup)
+    :::{seealso}
+    [Special method lookup](https://docs.python.org/3/reference/datamodel.html#special-lookup)
+    :::
     """
 
     def __getattr__(self, key: str) -> Never:
@@ -1958,9 +2151,6 @@ def direct_register_custom_op(
     library object. If you want to bind the operator to a different library,
     make sure the library object is alive when the operator is used.
     """
-    if is_in_doc_build():
-        return
-
     if not supports_custom_op():
         from vllm.platforms import current_platform
         assert not current_platform.is_cuda_alike(), (
@@ -2185,6 +2375,45 @@ def get_exception_traceback():
     return err_str
 
 
+def split_zmq_path(path: str) -> Tuple[str, str, str]:
+    """Split a zmq path into its parts."""
+    parsed = urlparse(path)
+    if not parsed.scheme:
+        raise ValueError(f"Invalid zmq path: {path}")
+
+    scheme = parsed.scheme
+    host = parsed.hostname or ""
+    port = str(parsed.port or "")
+
+    if scheme == "tcp" and not all((host, port)):
+        # The host and port fields are required for tcp
+        raise ValueError(f"Invalid zmq path: {path}")
+
+    if scheme != "tcp" and port:
+        # port only makes sense with tcp
+        raise ValueError(f"Invalid zmq path: {path}")
+
+    return scheme, host, port
+
+
+def make_zmq_path(scheme: str, host: str, port: Optional[int] = None) -> str:
+    """Make a ZMQ path from its parts.
+
+    Args:
+        scheme: The ZMQ transport scheme (e.g. tcp, ipc, inproc).
+        host: The host - can be an IPv4 address, IPv6 address, or hostname.
+        port: Optional port number, only used for TCP sockets.
+
+    Returns:
+        A properly formatted ZMQ path string.
+    """
+    if not port:
+        return f"{scheme}://{host}"
+    if is_valid_ipv6_address(host):
+        return f"{scheme}://[{host}]:{port}"
+    return f"{scheme}://{host}:{port}"
+
+
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L783 # noqa: E501
 def make_zmq_socket(
     ctx: Union[zmq.asyncio.Context, zmq.Context],  # type: ignore[name-defined]
@@ -2223,6 +2452,12 @@ def make_zmq_socket(
 
     if identity is not None:
         socket.setsockopt(zmq.IDENTITY, identity)
+
+    # Determine if the path is a TCP socket with an IPv6 address.
+    # Enable IPv6 on the zmq socket if so.
+    scheme, host, _ = split_zmq_path(path)
+    if scheme == "tcp" and is_valid_ipv6_address(host):
+        socket.setsockopt(zmq.IPV6, 1)
 
     if bind:
         socket.bind(path)
@@ -2580,3 +2815,20 @@ def sha256(input) -> int:
     input_bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
     return int.from_bytes(hashlib.sha256(input_bytes).digest(),
                           byteorder="big")
+
+
+def is_torch_equal_or_newer(target: str) -> bool:
+    """Check if the installed torch version is >= the target version.
+
+    Args:
+        target: a version string, like "2.6.0".
+
+    Returns:
+        Whether the condition meets.
+    """
+    try:
+        torch_version = version.parse(str(torch.__version__))
+        return torch_version >= version.parse(target)
+    except Exception:
+        # Fallback to PKG-INFO to load the package info, needed by the doc gen.
+        return Version(importlib.metadata.version('torch')) >= Version(target)
