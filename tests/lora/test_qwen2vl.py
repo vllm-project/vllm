@@ -70,7 +70,7 @@ class Qwen2VLTester:
                  expected_outputs: list[str],
                  lora_id: Optional[int] = None,
                  temperature: float = 0,
-                 max_tokens: int = 5) -> list[str]:
+                 max_tokens: int = 5):
 
         sampling_params = vllm.SamplingParams(
             temperature=temperature,
@@ -100,11 +100,11 @@ class Qwen2VLTester:
 
     def run_beam_search_test(self,
                              images: list[ImageAsset],
-                             expected_outputs: list[str],
+                             expected_outputs: list[list[str]],
                              lora_id: Optional[int] = None,
                              temperature: float = 0,
                              beam_width: int = 2,
-                             max_tokens: int = 5) -> list[str]:
+                             max_tokens: int = 5):
 
         beam_search_params = BeamSearchParams(beam_width=beam_width,
                                               max_tokens=max_tokens,
