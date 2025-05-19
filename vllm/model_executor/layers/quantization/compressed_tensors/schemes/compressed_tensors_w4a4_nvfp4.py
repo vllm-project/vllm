@@ -41,6 +41,34 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         # dont restrict as emulations
         return 80
 
+    
+    def run_nvfp4_emulations(self, x: torch.Tensor, layer):
+        x_m, x_k = x.shape
+        output_dtype = x.dtype
+
+        # quantize input to (FP4 and interleaved block scale)
+        x_fp4, x_blockscale = ref_nvfp4_quant(x, layer.input_global_scale,
+                                            self.group_size)
+
+        # dequantize input
+        x_fp4 = x_fp4.reshape(x_m, x_k // self.group_size, self.group_size)
+        x_blockscale = x_blockscale.unsqueeze(-1) / layer.input_global_scale
+        x_dq = (x_fp4 * x_blockscale).reshape(x_m, x_k).to(output_dtype)
+        del x_fp4, x_blockscale
+
+        # dequantize weight
+        w_fp4 = layer.weight.data.view(torch.uint8)
+        w_blockscale = layer.weight_scale_swizzled.data
+        w_global_scale = layer.weight_global_scale
+        w_dq = dequantize_to_dtype(w_fp4, w_blockscale, w_global_scale,
+                                output_dtype, x.device, self.group_size)
+
+        # matmul
+        out = torch.matmul(x_dq, w_dq.t())
+        del w_dq, x_dq
+        return out
+
+
     def create_weights(self, layer: torch.nn.Module,
                        output_partition_sizes: list[int],
                        input_size_per_partition: int,
@@ -135,42 +163,17 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-        if not self.cutlass_nvfp4_supported:
-            x_m, x_k = x.shape
+        if self.cutlass_nvfp4_supported:
             output_dtype = x.dtype
+            output_shape = [x.shape[0], layer.weight.shape[0]]
 
-            # quantize input to (FP4 and interleaved block scale)
-            x_global_scale = layer.input_global_scale
-            x_fp4, x_blockscale = ref_nvfp4_quant(x, x_global_scale,
-                                                self.group_size)
+            # quantize BF16 or FP16 to (FP4 and interleaved block scale)
+            x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_global_scale)
 
-            # dequantize input
-            x_fp4 = x_fp4.reshape(x_m, x_k // self.group_size, self.group_size)
-            x_blockscale = x_blockscale.unsqueeze(-1) / x_global_scale
-            x_dq = (x_fp4 * x_blockscale).reshape(x_m, x_k).to(output_dtype)
-            del x_fp4, x_blockscale
-
-            # dequantize weight
-            w_fp4 = layer.weight.data.view(torch.uint8)
-            w_blockscale = layer.weight_scale_swizzled.data
-            w_global_scale = layer.weight_global_scale
-            w_dq = dequantize_to_dtype(w_fp4, w_blockscale, w_global_scale,
-                                    output_dtype, x.device, self.group_size)
-
-            # matmul
-            out = torch.matmul(x_dq, w_dq.t())
-            del w_dq, x_dq
-            return out
-
-        output_dtype = x.dtype
-        output_shape = [x.shape[0], layer.weight.shape[0]]
-
-        # quantize BF16 or FP16 to (FP4 and interleaved block scale)
-        x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_global_scale)
-
-        out = cutlass_scaled_fp4_mm(x_fp4, layer.weight, x_blockscale,
-                            layer.weight_scale_swizzled, 1 / layer.alpha,
-                            output_dtype)
-        if bias is not None:
-            out = out + bias
-        return out.view(*output_shape)
+            out = cutlass_scaled_fp4_mm(x_fp4, layer.weight, x_blockscale,
+                                layer.weight_scale_swizzled, 1 / layer.alpha,
+                                output_dtype)
+            if bias is not None:
+                out = out + bias
+            return out.view(*output_shape)
+        return self.run_nvfp4_emulations(x, layer)
