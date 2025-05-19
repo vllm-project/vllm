@@ -529,11 +529,12 @@ class LLM:
                       Sequence) and len(lora_request) != len(prompts):
             raise ValueError(
                 "Lora request list should be the same length as the prompts")
+            return lora_request
 
         if lora_request is None or isinstance(lora_request, LoRARequest):
             return [lora_request] * len(prompts)
-        # Lora request is a sequence and is already the same length as prompts
-        return lora_request
+
+        raise TypeError(f"Invalid lora_request type {type(lora_request)}")
 
     def beam_search(
         self,
