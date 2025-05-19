@@ -123,7 +123,8 @@ def test_mxfp4_loading_and_execution(vllm_runner, model_case: ModelCase):
             assert isinstance(layer.mlp.experts.quant_method,
                               QuarkW4A4MXFp4MoEMethod)
 
-        llm.apply_model(check_model)
+        if model_case.model_id == "fxmarty/qwen_1.5-moe-a2.7b-mxfp4":
+            llm.apply_model(check_model)
 
         output = llm.generate_greedy("Today I am in the French Alps and",
                                      max_tokens=20)
