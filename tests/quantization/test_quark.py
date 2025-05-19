@@ -4,16 +4,19 @@
 Run `pytest tests/quantization/test_quark.py`.
 """
 
+import os
+from dataclasses import dataclass
+
+import lm_eval
 import pytest
 import torch
-from dataclasses import dataclass
-import lm_eval
+
 from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
     QuarkLinearMethod, QuarkW4A4MXFP4, QuarkW8A8Fp8, QuarkW8A8Int8)
 from vllm.model_executor.layers.quantization.quark.quark_moe import (
     QuarkW4A4MXFp4MoEMethod)
 from vllm.platforms import current_platform
-import os
+
 
 @pytest.fixture(scope="function", autouse=True)
 def use_v0_only(monkeypatch):
@@ -99,14 +102,15 @@ class ModelCase:
     model_id: str
     tp: int
 
+
 @pytest.mark.parametrize('model_case', [
-        ModelCase("fxmarty/qwen_1.5-moe-a2.7b-mxfp4", tp=1),
-        ModelCase("fxmarty/deepseek_r1_3_layers_mxfp4", tp=8),
-        ModelCase("fxmarty/Llama-4-Scout-17B-16E-Instruct-2-layers-mxfp4", tp=1)
-    ]
-)
+    ModelCase("fxmarty/qwen_1.5-moe-a2.7b-mxfp4", tp=1),
+    ModelCase("fxmarty/deepseek_r1_3_layers_mxfp4", tp=8),
+    ModelCase("fxmarty/Llama-4-Scout-17B-16E-Instruct-2-layers-mxfp4", tp=1)
+])
 def test_mxfp4_loading_and_execution(vllm_runner, model_case: ModelCase):
-    with vllm_runner(model_case.model_id, tensor_parallel_size=model_case.tp) as llm:
+    with vllm_runner(model_case.model_id,
+                     tensor_parallel_size=model_case.tp) as llm:
 
         def check_model(model):
             layer = model.model.layers[0]
@@ -132,8 +136,10 @@ class GSM8KAccuracyTestConfig:
     excepted_value: float
 
     def get_model_args(self) -> str:
-        return (f"pretrained={self.model_name},"
-                "dtype=auto,add_bos_token=True,tensor_parallel_size=8,gpu_memory_utilization=0.7,max_model_len=38768")
+        return (
+            f"pretrained={self.model_name},"
+            "dtype=auto,add_bos_token=True,tensor_parallel_size=8,gpu_memory_utilization=0.7,max_model_len=38768"
+        )
 
 
 ACCURACY_CONFIGS = [
@@ -165,6 +171,6 @@ def test_gsm8k_correctness(config: GSM8KAccuracyTestConfig):
     assert (measured_value - rtol < EXPECTED_VALUE
             and measured_value + rtol > EXPECTED_VALUE
             ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
-    
+
     del os.environ["VLLM_QUARK_EMU_MEM_OPT"]
     del os.environ["VLLM_USE_TRITON_FLASH_ATTN"]
