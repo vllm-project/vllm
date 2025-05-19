@@ -54,7 +54,8 @@ class OpenAIServingTokenization(OpenAIServing):
         if error_check_ret is not None:
             return error_check_ret
 
-        request_id = f"tokn-{self._base_request_id(raw_request)}"
+        request_id = "tokn-" \
+                    f"{self._base_request_id(raw_request, request.request_id)}"
 
         try:
             (
@@ -122,7 +123,8 @@ class OpenAIServingTokenization(OpenAIServing):
         if error_check_ret is not None:
             return error_check_ret
 
-        request_id = f"tokn-{self._base_request_id(raw_request)}"
+        request_id = "tokn-" \
+                    f"{self._base_request_id(raw_request, request.request_id)}"
 
         (
             lora_request,
