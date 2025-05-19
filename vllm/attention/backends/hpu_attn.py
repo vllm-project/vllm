@@ -158,7 +158,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 f"Supported head sizes are: {supported_head_sizes}.")
 
         self.attn_type = attn_type
-        if self.attn_type != AttentionType.DECODER:
+        if attn_type != AttentionType.DECODER and \
+            self.attn_type != AttentionType.ENCODER_ONLY:
             raise NotImplementedError("Encoder self-attention and "
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
