@@ -35,6 +35,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
     filter_duplicate_safetensors_files, filter_files_not_needed_for_inference,
     pt_weights_iterator, safetensors_weights_iterator)
+from vllm.model_executor.models import is_pooling_model
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
@@ -133,6 +134,16 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         return hf_weights_files, use_safetensors
 
     def _hf_weight_iter(self, hf_weights_files, use_safetensors: bool):
+        def _maybe_pool_model(module_name:str):
+            # For pool model, we need to add the prefix `model.`
+            # for the weight name if possible.
+            if self.is_pool_model and self.target_modules[0]. \
+                startswith("model.") and not module_name.startswith(
+                    "model."):
+                return "model."+module_name
+
+            return module_name
+
         if use_safetensors:
             iterator = safetensors_weights_iterator(
                 hf_weights_files,
@@ -148,6 +159,9 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             # mapping weight names from transformers to vllm while preserving
             # original names.
             mapped_name = self.weight_mapper(org_name)
+            mapped_name=_maybe_pool_model(mapped_name)
+
+
             yield org_name, mapped_name, param
 
     def _get_quantized_weights_iterator(
@@ -405,7 +419,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             raise AttributeError(
                 f"Model {type(model).__name__} does not support BitsAndBytes "
                 "quantization yet. No 'packed_modules_mapping' found.")
-
+        self.is_pool_model=is_pooling_model(model)
         self.modules_mapping = ParamMapping(
             copy.deepcopy(model.packed_modules_mapping))
 
