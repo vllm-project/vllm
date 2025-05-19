@@ -21,7 +21,8 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                  rank: int,
                  dp_size: int,
                  quant_dtype: Optional[torch.dtype] = None,
-                 block_shape: Optional[list[int]] = None):
+                 block_shape: Optional[list[int]] = None,
+                 per_act_token: bool = False):
         super().__init__()
         assert max_num_tokens > 0
         self.a2a = a2a
@@ -31,7 +32,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.rank = rank
         self.dp_size = dp_size
         self.quant_dtype = quant_dtype
-
+        self.per_act_token = per_act_token
     def prepare(
         self,
         a1: torch.Tensor,
@@ -58,14 +59,22 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             assert topk == 1, (
                 "apply_router_weight_on_input is only implemented for topk=1")
             a1 = a1 * rank_topk_weights.to(a1.dtype)
+        
+        repeat_cols = 4
+        if self.per_act_token:
+            repeat_rows = 1
+            a1q, a1q_scale = moe_kernel_quantize_input(a1, None,
+                                                    self.quant_dtype,
+                                                    self.per_act_token,
+                                                    self.block_shape)
+        else:
+            repeat_rows = a1.shape[0]
+            a1q, a1q_scale = moe_kernel_quantize_input(a1, a1_scale,
+                                                    self.quant_dtype,
+                                                    self.per_act_token,
+                                                    self.block_shape)
 
-        per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
-            a2_scale.numel() != 1 if a2_scale is not None else False)
-
-        a1q, a1q_scale = moe_kernel_quantize_input(a1, a1_scale,
-                                                   self.quant_dtype,
-                                                   per_act_token,
-                                                   self.block_shape)
+        a1q_scale = a1q_scale.repeat(repeat_rows, repeat_cols)
 
         # rem_experts need to be 0 for pplx to work properly.
         rem_experts = num_experts % self.world_size
@@ -93,7 +102,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                           else 1) * float32_size
             expert_x_scale = torch.empty(
                 (
-                    num_experts,
+                    num_local_experts,
                     expert_x.size(1),
                     (expert_x.size(2) + block_size - 1) // block_size,
                 ),
@@ -105,6 +114,13 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # There's not much point setting this unless it is != indices.size(0)
         bound_m: Optional[torch.Tensor] = None
 
+        print(expert_num_tokens.dtype)
+        print(expert_x.dtype)
+        print(expert_x_scale.dtype)
+        print(a1q.dtype)
+        print(a1q_scale.dtype)
+        print(rank_topk_ids.dtype)
+
         self.a2a.dispatch(
             out_expert_num_tokens=expert_num_tokens,
             out_expert_x=expert_x,
@@ -114,6 +130,10 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             indices=rank_topk_ids,
             bound_m=bound_m,
         )
+        if self.per_act_token:
+            expert_x_scale = expert_x_scale[:, :, 0:1]
+        else:
+            expert_x_scale = expert_x_scale[0:1, 0:1, 0:1]
 
         return expert_x, expert_x_scale, expert_num_tokens
 
