@@ -106,8 +106,9 @@ class OpenAIServingTokenization(OpenAIServing):
 
             # Silently ignore prompt adapter since it does not affect
             # tokenization (Unlike in Embeddings API where an error is raised)
-
-            input_ids.extend(engine_prompt["prompt_token_ids"])
+            if isinstance(engine_prompt,
+                          dict) and "prompt_token_ids" in engine_prompt:
+                input_ids.extend(engine_prompt["prompt_token_ids"])
 
         return TokenizeResponse(tokens=input_ids,
                                 count=len(input_ids),

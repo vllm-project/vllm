@@ -286,6 +286,9 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     if args.enable_auto_tool_choice and not args.tool_call_parser:
         raise TypeError("Error: --enable-auto-tool-choice requires "
                         "--tool-call-parser")
+    if args.enable_prompt_embeds and args.enable_prompt_adapter:
+        raise ValueError(
+            "Cannot use prompt embeds and prompt adapter at the same time.")
 
 
 def log_non_default_args(args: argparse.Namespace):

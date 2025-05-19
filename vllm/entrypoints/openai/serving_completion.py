@@ -8,6 +8,7 @@ from typing import Optional, Union, cast
 
 import jinja2
 from fastapi import Request
+from typing_extensions import assert_never
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
@@ -25,8 +26,11 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               UsageInfo)
 # yapf: enable
 from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
-                                                    clamp_prompt_logprobs)
+                                                    clamp_prompt_logprobs,
+                                                    is_text_tokens_prompt)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.inputs.data import (EmbedsPrompt, TokensPrompt, is_embeds_prompt,
+                              is_tokens_prompt)
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
@@ -90,6 +94,10 @@ class OpenAIServingCompletion(OpenAIServing):
             return self.create_error_response(
                 "suffix is not currently supported")
 
+        if request.echo and request.prompt_embeds is not None:
+            return self.create_error_response(
+                "Echo is unsupported with prompt embeds.")
+
         request_id = f"cmpl-{self._base_request_id(raw_request)}"
         created_time = int(time.time())
 
@@ -130,8 +138,24 @@ class OpenAIServingCompletion(OpenAIServing):
         try:
             for i, engine_prompt in enumerate(engine_prompts):
                 sampling_params: Union[SamplingParams, BeamSearchParams]
-                default_max_tokens = self.max_model_len - len(
-                    engine_prompt["prompt_token_ids"])
+                # Mypy does not infer that engine_prompt will have only one of
+                # "prompt_token_ids" or "prompt_embeds" defined, and both of
+                # these as Union[object, the expected type], where it infers
+                # object if engine_prompt is a subclass of one of the
+                # typeddicts that defines both keys. Worse, because of
+                # https://github.com/python/mypy/issues/8586, mypy does not
+                # infer the type of engine_prompt correctly because of the
+                # enumerate. So we need an unnecessary cast here.
+                engine_prompt = cast(Union[EmbedsPrompt, TokensPrompt],
+                                     engine_prompt)
+                if is_embeds_prompt(engine_prompt):
+                    input_length = len(engine_prompt["prompt_embeds"])
+                elif is_tokens_prompt(engine_prompt):
+                    input_length = len(engine_prompt["prompt_token_ids"])
+                else:
+                    assert_never(engine_prompt)
+                default_max_tokens = self.max_model_len - input_length
+
                 if request.use_beam_search:
                     sampling_params = request.to_beam_search_params(
                         default_max_tokens, self.default_sampling_params)
@@ -152,6 +176,11 @@ class OpenAIServingCompletion(OpenAIServing):
                 trace_headers = (None if raw_request is None else await
                                  self._get_trace_headers(raw_request.headers))
 
+                # Mypy inconsistently requires this second cast in different
+                # environments. It shouldn't be necessary (redundant from above)
+                # but pre-commit in CI fails without it.
+                engine_prompt = cast(Union[EmbedsPrompt, TokensPrompt],
+                                     engine_prompt)
                 if isinstance(sampling_params, BeamSearchParams):
                     generator = self.engine_client.beam_search(
                         prompt=engine_prompt,
@@ -211,7 +240,11 @@ class OpenAIServingCompletion(OpenAIServing):
                 # We did not pass it into vLLM engine to avoid being redundant
                 # with the inputs token IDs
                 if final_res.prompt is None:
-                    final_res.prompt = request_prompts[i]["prompt"]
+                    request_prompt = request_prompts[i]
+                    if is_text_tokens_prompt(request_prompt):
+                        final_res.prompt = request_prompt["prompt"]
+                    else:
+                        final_res.prompt = None
 
             final_res_batch_checked = cast(list[RequestOutput],
                                            final_res_batch)
@@ -276,8 +309,8 @@ class OpenAIServingCompletion(OpenAIServing):
                 prompt_text = res.prompt
 
                 # Prompt details are excluded from later streamed outputs
-                if res.prompt_token_ids is not None:
-                    num_prompt_tokens[prompt_idx] = len(res.prompt_token_ids)
+                if prompt_token_ids is not None:
+                    num_prompt_tokens[prompt_idx] = len(prompt_token_ids)
 
                 delta_token_ids: GenericSequence[int]
                 out_logprobs: Optional[GenericSequence[Optional[dict[
