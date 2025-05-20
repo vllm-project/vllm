@@ -33,6 +33,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.dp_size = dp_size
         self.quant_dtype = quant_dtype
         self.per_act_token = per_act_token
+
     def prepare(
         self,
         a1: torch.Tensor,
@@ -59,20 +60,20 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             assert topk == 1, (
                 "apply_router_weight_on_input is only implemented for topk=1")
             a1 = a1 * rank_topk_weights.to(a1.dtype)
-        
+
         repeat_cols = 4
         if self.per_act_token:
             repeat_rows = 1
             a1q, a1q_scale = moe_kernel_quantize_input(a1, None,
-                                                    self.quant_dtype,
-                                                    self.per_act_token,
-                                                    self.block_shape)
+                                                       self.quant_dtype,
+                                                       self.per_act_token,
+                                                       self.block_shape)
         else:
             repeat_rows = a1.shape[0]
             a1q, a1q_scale = moe_kernel_quantize_input(a1, a1_scale,
-                                                    self.quant_dtype,
-                                                    self.per_act_token,
-                                                    self.block_shape)
+                                                       self.quant_dtype,
+                                                       self.per_act_token,
+                                                       self.block_shape)
 
         a1q_scale = a1q_scale.repeat(repeat_rows, repeat_cols)
 
@@ -127,13 +128,13 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             out_expert_x_scale=expert_x_scale,
             dp_x=a1q,
             dp_x_scale=a1q_scale,
-            indices=rank_topk_ids,
+            indices=rank_topk_ids.to(torch.uint32),
             bound_m=bound_m,
         )
         if self.per_act_token:
             expert_x_scale = expert_x_scale[:, :, 0:1]
         else:
-            expert_x_scale = expert_x_scale[0:1, 0:1, 0:1]
+            expert_x_scale = expert_x_scale[0:1, 0:1, 0:1][0][0]
 
         return expert_x, expert_x_scale, expert_num_tokens
 
@@ -161,7 +162,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             topk_weights = torch.ones_like(topk_weights)
 
         self.a2a.combine(out_tokens=output,
-                         indices=topk_ids,
+                         indices=topk_ids.to(torch.uint32),
                          weights=topk_weights,
                          expert_y=fused_expert_output,
                          bound_m=bound_m)

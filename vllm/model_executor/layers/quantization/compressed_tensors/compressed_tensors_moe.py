@@ -87,6 +87,11 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             raise RuntimeError(
                 f"Unsupported FusedMoe scheme: {weight_quant}, {input_quant}")
 
+    # PPLX is not supported by default
+    def supports_pplx(self):
+        print("call from CompressedTensorsMoEMethod")
+        return False
+
 
 class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
@@ -395,7 +400,7 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
 
     def __init__(
             self,
-            quant_config: "CompressedTensorsConfig"  # type: ignore # noqa E501
+            quant_config: "CompressedTensorsConfig",  # type: ignore # noqa E501
     ):
         self.quant_config = quant_config
         self.weight_quant = self.quant_config.target_scheme_map["Linear"].get(
@@ -517,6 +522,9 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
                                      hidden_size,
                                      device=device,
                                      dtype=torch.int64)
+        # TODO remove after debugging
+        self.hidden_size = hidden_size
+        self.intermediate_size_per_partition = intermediate_size_per_partition
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Fp8 moe kernels require a single activation scale.
@@ -558,6 +566,37 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             layer.w13_weight_scale = torch.nn.Parameter(max_w13_scales,
                                                         requires_grad=False)
 
+    def set_prepare_finalize(
+        self,
+        dp_size: int,
+        world_size: int,
+        prepare_finalize,
+    ) -> bool:
+        from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+            CutlassExpertsFp8)
+        from vllm.model_executor.layers.fused_moe.modular_kernel import (
+            FusedMoEModularKernel)
+        
+        # self.moe should have been set by the caller
+        assert self.moe is not None
+        print("SET PREPARE FINALIZE")
+
+        experts = CutlassExpertsFp8(
+            (self.moe.num_experts + world_size - 1) // world_size,
+            # self.ab_strides1, self.c_strides1, self.ab_strides2,
+            # self.c_strides2,
+            self.moe.in_dtype,
+            self.input_quant.strategy == QuantizationStrategy.TOKEN,
+            self.weight_quant.strategy == QuantizationStrategy.CHANNEL)
+
+
+        self.fused_experts = FusedMoEModularKernel(
+            prepare_finalize,
+            experts,
+        )
+
+        return True
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -580,6 +619,8 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
         assert activation == "silu", (
             f"{activation} not supported for Cutlass MoE.")
 
+        # return torch.zeros(x.shape, device=x.device, dtype=x.dtype)
+
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -592,26 +633,40 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
 
-        from vllm.model_executor.layers.fused_moe import cutlass_moe_fp8
+        # from vllm.model_executor.layers.fused_moe import cutlass_moe_fp8
 
-        return cutlass_moe_fp8(
+        # print("APPLY TO SHAPES:")
+        # print("input shape:", x.shape)
+        # # print("input scale 1:", layer.w13_input_scale)
+        # # print("input scale 2:", layer.w2_input_scale)
+        # print("w13_weight shape:", layer.w13_weight.shape)
+        # print("w2_weight shape:", layer.w2_weight.shape)
+        # print("global_num_experts:", global_num_experts)
+        # print("hidden_size:", self.hidden_size)
+        # print("intermediate_size_per_partition:", self.intermediate_size_per_partition)
+        # # print("w13_weight_scale shape:", layer.w13_weight_scale.shape)
+        # # print("w2_weight_scale shape:", layer.w2_weight_scale.shape)
+        # # print("topk_weights shape:", topk_weights.shape)
+        # # print("topk_ids shape:", topk_ids.shape)
+
+        return self.fused_experts(
             x,
-            layer.w13_weight.transpose(1, 2),
-            layer.w2_weight.transpose(1, 2),
-            layer.w13_weight_scale,
-            layer.w2_weight_scale,
+            layer.w13_weight,
+            layer.w2_weight,
             topk_weights,
             topk_ids,
-            self.ab_strides1,
-            self.c_strides1,
-            self.ab_strides2,
-            self.c_strides2,
+            global_num_experts=global_num_experts,
+            expert_map=None,
+            w1_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
             a1_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
-            out_dtype=x.dtype,
-            expert_map=expert_map,
-            apply_router_weight_on_input=apply_router_weight_on_input,
         )
+
+
+    def supports_pplx(self):
+        print("call from CompressedTensorsW8A8Fp8MoECutlassMethod")
+        return True
 
 
 class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):

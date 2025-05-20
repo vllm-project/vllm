@@ -114,19 +114,23 @@ void run_cutlass_moe_mm_sm90(
   if (n >= 8192) {
     cutlass_group_gemm_caller<Cutlass3xGemmN8192>(
         out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
-        problem_sizes, a_strides, b_strides, c_strides, per_act_token, per_out_ch);
+        problem_sizes, a_strides, b_strides, c_strides, per_act_token,
+        per_out_ch);
   } else if (k >= 8192) {
     cutlass_group_gemm_caller<Cutlass3xGemmK8192>(
         out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
-        problem_sizes, a_strides, b_strides, c_strides, per_act_token, per_out_ch);
+        problem_sizes, a_strides, b_strides, c_strides, per_act_token,
+        per_out_ch);
   } else if (m <= 16) {
     cutlass_group_gemm_caller<Cutlass3xGemmM16>(
         out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
-        problem_sizes, a_strides, b_strides, c_strides, per_act_token, per_out_ch);
+        problem_sizes, a_strides, b_strides, c_strides, per_act_token,
+        per_out_ch);
   } else {
     cutlass_group_gemm_caller<Cutlass3xGemmDefault>(
         out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
-        problem_sizes, a_strides, b_strides, c_strides, per_act_token, per_out_ch);
+        problem_sizes, a_strides, b_strides, c_strides, per_act_token,
+        per_out_ch);
   }
 }
 
@@ -140,11 +144,13 @@ void dispatch_moe_mm_sm90(
   if (out_tensors.dtype() == torch::kBFloat16) {
     run_cutlass_moe_mm_sm90<cutlass::float_e4m3_t, cutlass::bfloat16_t>(
         out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
-        problem_sizes, a_strides, b_strides, c_strides, per_act_token, per_out_ch);
+        problem_sizes, a_strides, b_strides, c_strides, per_act_token,
+        per_out_ch);
   } else {
     run_cutlass_moe_mm_sm90<cutlass::float_e4m3_t, cutlass::half_t>(
         out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
-        problem_sizes, a_strides, b_strides, c_strides, per_act_token, per_out_ch);
+        problem_sizes, a_strides, b_strides, c_strides, per_act_token,
+        per_out_ch);
   }
 }
 

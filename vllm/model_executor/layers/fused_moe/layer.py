@@ -25,6 +25,8 @@ from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     is_rocm_aiter_moe_enabled)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+from compressed_tensors.quantization import (
+    QuantizationStrategy, QuantizationType)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
@@ -193,6 +195,7 @@ class MoEConfig:
     moe_parallel_config: FusedMoEParallelConfig
 
     in_dtype: torch.dtype  # The activation type.
+    quant_dtype: torch.dtype = None
 
     # TODO: add more quantization params, blocked, per-token, etc.
     block_size: int = 128
@@ -278,6 +281,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 class AllToAllCache:
 
     def __init__(self):
+        print("INIT AllToAllCache")
         self._cache: WeakValueDictionary = WeakValueDictionary()
         self._lock = threading.RLock()  # Reentrant lock for thread safety
 
@@ -301,7 +305,7 @@ class AllToAllCache:
                 # when all communications are within the same
                 # node.
                 logger.debug("Create AllToAll %s", kwargs)
-                instance = pplx.AllToAll.internode(**kwargs)
+                instance = pplx.AllToAll(**kwargs)
                 self._cache[key] = instance
             return instance
 
@@ -691,6 +695,11 @@ def _construct_prepare_finalize(
     if moe.use_pplx_kernels:
         logger.debug("using PplxPrepareAndFinalize")
 
+        if moe.block_size == moe.hidden_dim:
+            scale_elems = 4  # hack to circumvent pplx data format requirements
+        else:
+            scale_elems = (moe.hidden_dim + moe.block_size - 1) // moe.block_size
+
         all_to_all = get_all_to_all(
             max_num_tokens=max_num_tokens,
             num_experts=moe.num_experts,
@@ -699,23 +708,26 @@ def _construct_prepare_finalize(
             world_size=world_size,
             dp_size=dp_size,
             hidden_dim=moe.hidden_dim,
-            hidden_dim_bytes=moe.hidden_dim * moe.in_dtype.itemsize,
+            hidden_dim_bytes=moe.hidden_dim * moe.quant_dtype.itemsize,
             # For blocked per token: set to
             #   ceil_div(hidden_dim, block_size) * sizeof(float32)
             # For per-token: set to sizeof(float32)
-            hidden_dim_scale_bytes=(0 if moe.in_dtype.itemsize != 1 else
-                                    ((moe.hidden_dim + moe.block_size - 1) //
-                                     moe.block_size * torch.float32.itemsize)))
+            hidden_dim_scale_bytes=(0 if moe.quant_dtype.itemsize != 1 else
+                                    scale_elems * torch.float32.itemsize))
 
+        print("CALL PplxPrepareAndFinalize")
         return PplxPrepareAndFinalize(
             all_to_all,
             max_num_tokens=max_num_tokens,
             world_size=world_size,
             rank=rank,
             dp_size=dp_size,
-            quant_dtype=moe.in_dtype,
+            quant_dtype=moe.quant_dtype,
+            per_act_token=quant_config.target_scheme_map["Linear"].get(
+                "weights").strategy == QuantizationStrategy.TOKEN,
         )
 
+    print("RETURN NO PPLX KERNEL")
     return None
 
 
@@ -764,7 +776,6 @@ class FusedMoE(torch.nn.Module):
         activation: str = "silu",
     ):
         super().__init__()
-
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
@@ -824,14 +835,23 @@ class FusedMoE(torch.nn.Module):
             from vllm_hpu_extension.ops import DynamicFusedMOE
             self.hpu_fused_moe = DynamicFusedMOE(self.global_num_experts)
 
+        # Only support float8 for now.
+        quant_dtype = params_dtype
+        if quant_config is not None:
+            input_quant = quant_config.target_scheme_map["Linear"].get(
+                "input_activations")
+            if (input_quant is not None and input_quant.num_bits == 8 and
+                input_quant.type == QuantizationType.FLOAT):
+                quant_dtype = torch.float8_e4m3fn
+
         moe = MoEConfig(
             num_experts=self.global_num_experts,
             experts_per_token=top_k,
             hidden_dim=hidden_size,
             num_local_experts=self.local_num_experts,
             moe_parallel_config=self.moe_parallel_config,
-            # TODO (bnell): this needs to be fixed for quantized types.
             in_dtype=params_dtype,
+            quant_dtype=quant_dtype,
         )
 
         # Note: get_quant_method will look at the layer's local_num_experts
@@ -843,8 +863,17 @@ class FusedMoE(torch.nn.Module):
             prepare_finalize = _construct_prepare_finalize(moe, quant_config)
         else:
             quant_method = quant_config.get_quant_method(self, prefix)
-            # No pplx for quantized types yet.
-            prepare_finalize = None
+            print("quant_method:", quant_method)
+            # print("strategy:", quant_config.target_scheme_map["Linear"].get(
+            # "weights").strategy)
+            if quant_method.supports_pplx():
+                print("prepare finalize for quantized method")
+                prepare_finalize = _construct_prepare_finalize(moe, quant_config)
+                quant_method.moe = moe
+            else:
+                print("no prepare finalize for quantized method")
+                # No pplx for other quantized types yet.
+                prepare_finalize = None
 
         assert quant_method is not None
         assert isinstance(quant_method, FusedMoEMethodBase)
@@ -1271,7 +1300,6 @@ class FusedMoE(torch.nn.Module):
         def process_chunk(chunk_start, chunk_end, skip_result_store=False):
             hidden_states = full_hidden_states[chunk_start:chunk_end, :]
             router_logits = full_router_logits[chunk_start:chunk_end, :]
-
             # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
                 layer=self,

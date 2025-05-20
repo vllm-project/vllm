@@ -9,7 +9,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
-from vllm.model_executor.layers.fused_moe.utils import _fp8_perm, _resize_cache
+from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.scalar_type import scalar_types
 
 
@@ -18,22 +18,22 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(
         self,
         max_experts_per_worker: int,
-        max_num_tokens: int,
-        ab_strides1: torch.Tensor,
-        c_strides1: torch.Tensor,
-        ab_strides2: torch.Tensor,
-        c_strides2: torch.Tensor,
+        # max_num_tokens: int,
+        # ab_strides1: torch.Tensor,
+        # c_strides1: torch.Tensor,
+        # ab_strides2: torch.Tensor,
+        # c_strides2: torch.Tensor,
         out_dtype: torch.dtype,
         per_act_token: bool,
         per_out_ch: bool,
     ):
         super().__init__()
         self.max_experts_per_worker = max_experts_per_worker
-        self.max_num_tokens = max_num_tokens
-        self.ab_strides1 = ab_strides1
-        self.c_strides1 = c_strides1
-        self.ab_strides2 = ab_strides2
-        self.c_strides2 = c_strides2
+        # self.max_num_tokens = max_num_tokens
+        # self.ab_strides1 = ab_strides1
+        # self.c_strides1 = c_strides1
+        # self.ab_strides2 = ab_strides2
+        # self.c_strides2 = c_strides2
         self.out_dtype = out_dtype
         self.per_act_token = per_act_token
         self.per_out_ch = per_out_ch
@@ -48,9 +48,21 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         num_experts: int,
     ) -> tuple[int, int, torch.dtype]:
         # Note that K, N are transposed
-        # N, K = K, N
-        workspace1 = self.max_experts_per_worker * self.max_num_tokens * max(2 * N, K)
-        workspace2 = self.max_experts_per_worker * self.max_num_tokens * N
+        N, K = K, N
+        print("WORKSPACE SHAPES: max_experts_per_worker:",
+              self.max_experts_per_worker, "max_num_tokens:", M,
+              "N:", N, "K:", K, "A:", a.shape, "num_experts:", num_experts)
+        
+        max_num_tokens = M
+        world_size = (num_experts + self.max_experts_per_worker - 1) // self.max_experts_per_worker
+
+        # workspace1 = world_size * self.max_experts_per_worker * max_num_tokens * max(
+        #     2 * N, K)
+        # workspace2 = world_size * self.max_experts_per_worker * max_num_tokens * N
+
+        #TODO make this depend on variables
+        workspace1 = self.max_experts_per_worker * 512 * max(2 * N, K)
+        workspace2 = self.max_experts_per_worker * 512 * N
         return (workspace1, workspace2, self.out_dtype)
 
     def apply(
@@ -59,6 +71,10 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         w1: torch.Tensor,
         w2: torch.Tensor,
         topk_ids: torch.Tensor,
+        # ab_strides1: torch.Tensor,
+        # c_strides1: torch.Tensor,
+        # ab_strides2: torch.Tensor,
+        # c_strides2: torch.Tensor,
         activation: str,
         global_num_experts: int,
         expert_map: Optional[torch.Tensor],
@@ -72,17 +88,20 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         workspace2: torch.Tensor,
         expert_num_tokens: Optional[torch.Tensor],
     ) -> torch.Tensor:
+        # return torch.zeros(hidden_states.shape, device=hidden_states.device, dtype=self.out_dtype)
+    
         a1q = hidden_states
 
         # return torch.zeros(a1q.shape, device=a1q.device, dtype=self.out_dtype)
 
-        # print("a1q:", a1q.shape)
-        # print("w1 val:", w1)
-        # print("w1 scale val:", w1_scale)
-        # print("w2:", w2.shape)
-        # print("a1q_scale:", a1q_scale.shape)
-        # print("w1_scale:", w1_scale.shape)
-        # print("w2_scale:", w2_scale.shape)
+        print("a1q:", a1q.shape)
+        print("w1:", w1.shape)
+        print("w1 scale:", w1_scale.shape)
+        print("w2:", w2.shape)
+        print("a1q_scale:", a1q_scale.shape)
+        print("a2_scale:", a2_scale.shape if a2_scale is not None else None)
+        print("w1_scale:", w1_scale.shape)
+        print("w2_scale:", w2_scale.shape)
         # print("ab_strides1:", self.ab_strides1)
         # print("c_strides1:", self.c_strides1)
         # print("ab_strides2:", self.ab_strides2)
@@ -93,6 +112,8 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         # print("w1_scale:", w1_scale.shape, "w1:", w1.shape)
         # print("a1_scale:", a1q_scale.shape, "a1:", a1q.shape)
         # print(a1q_scale)
+        if a2_scale is not None:
+            assert a2_scale.dim() == 0 or a2_scale.shape[0] == 1 or a2_scale.shape[0] == a1q.shape[0], "Intermediate scale shape mismatch"
 
         assert w1_scale is not None
         assert w2_scale is not None
@@ -113,19 +134,20 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
             0], "w1 scales expert number mismatch"
         assert w1.shape[0] == w2_scale.shape[
             0], "w2 scales expert number mismatch"
-        assert a2_scale is None or a1q_scale is None or a2_scale.shape == a1q_scale.shape, "Intermediate scale shape mismatch"  # noqa: E501
-        assert self.ab_strides1.shape[0] == w1.shape[
-            0], "AB Strides 1 expert number mismatch"
-        assert self.c_strides1.shape[0] == w1.shape[
-            0], "C Strides 1 expert number mismatch"
-        assert self.ab_strides2.shape[0] == w2.shape[
-            0], "AB Strides 2 expert number  mismatch"
-        assert self.c_strides2.shape[0] == w2.shape[
-            0], "C Strides 2 expert number mismatch"
-        # print(self.ab_strides1.shape, w1.shape)
-        # print(self.c_strides1.shape, w1.shape)
-        # print(self.ab_strides2.shape, w2.shape)
-        # print(self.c_strides2.shape, w2.shape)
+        assert a2_scale is None or a1q_scale is None or a1q_scale.shape[
+            0] == 1 and a2_scale.dim() == 0 or a1q_scale.shape == a2_scale.shape, "Intermediate scale shape mismatch"  # noqa: E501
+        # assert ab_strides1.shape[0] == w1.shape[
+        #     0], "AB Strides 1 expert number mismatch"
+        # assert c_strides1.shape[0] == w1.shape[
+        #     0], "C Strides 1 expert number mismatch"
+        # assert ab_strides2.shape[0] == w2.shape[
+        #     0], "AB Strides 2 expert number  mismatch"
+        # assert c_strides2.shape[0] == w2.shape[
+        #     0], "C Strides 2 expert number mismatch"
+        # print(ab_strides1.shape, w1.shape)
+        # print(c_strides1.shape, w1.shape)
+        # print(ab_strides2.shape, w2.shape)
+        # print(c_strides2.shape, w2.shape)
         assert self.out_dtype in [torch.half,
                                   torch.bfloat16], "Invalid output dtype"
 
@@ -152,10 +174,12 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         _, K, N = w2.shape  # because w1 + w2 are transposed
         device = a1q.device
 
-        # self.ab_strides1 = torch.full((w1.shape[0], ), K, device=device, dtype=torch.int64)
-        # self.c_strides1 = torch.full((w1.shape[0], ), 2 * N, device=device, dtype=torch.int64)
-        # self.ab_strides2 = torch.full((w1.shape[0], ), N, device=device, dtype=torch.int64)
-        # self.c_strides2 = torch.full((w1.shape[0], ), K, device=device, dtype=torch.int64)
+        # TODO the strides should be there from the start, we should only fill
+        # them with fill_(K) etc.
+        ab_strides1 = torch.full((w1.shape[0], ), K, device=device, dtype=torch.int64)
+        c_strides1 = torch.full((w1.shape[0], ), 2 * N, device=device, dtype=torch.int64)
+        ab_strides2 = torch.full((w1.shape[0], ), N, device=device, dtype=torch.int64)
+        c_strides2 = torch.full((w1.shape[0], ), K, device=device, dtype=torch.int64)
 
         # print("ab_strides1:", self.ab_strides1)
         # print("c_strides1:", self.c_strides1)
@@ -221,7 +245,7 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         problem_sizes2 = torch.empty((local_E, 3),
                                      dtype=torch.int32,
                                      device=device)
-        
+
         # TODO write a new get_cutlass_moe_mm_data kernel for this
         for idx in range(local_E):
             expert_offsets[idx] = idx * a1q.shape[1]
@@ -250,6 +274,7 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         # c3 = _resize_cache(workspace13, (local_E * topk, K))
 
         # print("I need size:",local_E, padded_M, 2 * N, K, N)
+        print("Resize: local_E:", local_E, "padded_M:", padded_M, "N:", N, "K:", K)
         c1 = _resize_cache(workspace13, (local_E * padded_M, N * 2))
         c2 = _resize_cache(workspace2, (local_E * padded_M, N))
         c3 = _resize_cache(workspace13, (local_E * padded_M, K))
@@ -268,11 +293,12 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         # print("w2_scale shape", w2_scale.shape)
 
         # print("first run")
-        ops.cutlass_moe_mm(c1, a1q, w1, a1q_scale.contiguous(), w1_scale.contiguous(),
-                           expert_offsets[:-1], problem_sizes1,
-                           self.ab_strides1, self.ab_strides1, self.c_strides1,
-                           self.per_act_token, self.per_out_ch)
-        
+        ops.cutlass_moe_mm(c1, a1q, w1, a1q_scale.contiguous(),
+                           w1_scale.contiguous(), expert_offsets[:-1],
+                           problem_sizes1, ab_strides1, ab_strides1,
+                           c_strides1, self.per_act_token,
+                           self.per_out_ch)
+
         # print("C1:", c1.view(local_E, padded_M, N * 2))
         # print("C1:", c1.t()[0])
 
@@ -294,10 +320,11 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         # print("a2q local:", a2q_scale.reshape((local_E, -1, 1))[:, 0:5, :])
 
         # print("second run")
-        ops.cutlass_moe_mm(c3, a2q, w2, a2q_scale.contiguous(), w2_scale.contiguous(),
-                           expert_offsets[:-1], problem_sizes2,
-                           self.ab_strides2, self.ab_strides2, self.c_strides2,
-                           self.per_act_token, self.per_out_ch)
+        ops.cutlass_moe_mm(c3, a2q, w2, a2q_scale.contiguous(),
+                           w2_scale.contiguous(), expert_offsets[:-1],
+                           problem_sizes2, ab_strides2, ab_strides2,
+                           c_strides2, self.per_act_token,
+                           self.per_out_ch)
 
         # print("UNMAPPED C3:", c3.view(local_E, padded_M, K))
         # print("TOPK IDS:", topk_ids)
@@ -307,6 +334,8 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
 
 #TODO make the grouped gemm kernel consistent with scaled gemm kernel
 def cutlass_moe_fp8(
+    max_experts_per_worker: int,
+    max_num_tokens: int,
     a: torch.Tensor,
     w1_q: torch.Tensor,
     w2_q: torch.Tensor,
@@ -323,6 +352,8 @@ def cutlass_moe_fp8(
     out_dtype: torch.dtype = torch.half,
     expert_map: Optional[torch.Tensor] = None,
     apply_router_weight_on_input: bool = False,
+    per_act_token: bool = False,
+    per_out_ch: bool = False,
 ) -> torch.Tensor:
     """
     This function computes a a8w8-quantized Mixture of Experts (MoE) layer
@@ -367,8 +398,8 @@ def cutlass_moe_fp8(
     Returns:
     - torch.Tensor: The fp16 output tensor after applying the MoE layer.
     """
-    per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
-        a2_scale.numel() != 1 if a2_scale is not None else False)
+    # per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
+    #     a2_scale.numel() != 1 if a2_scale is not None else False)
 
     fn = mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(
@@ -376,11 +407,15 @@ def cutlass_moe_fp8(
             quant_dtype=torch.float8_e4m3fn,
         ),
         CutlassExpertsFp8(
+            max_experts_per_worker,
+            max_num_tokens,
             ab_strides1,
             c_strides1,
             ab_strides2,
             c_strides2,
             out_dtype,
+            per_act_token,
+            per_out_ch,
         ),
     )
 
