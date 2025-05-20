@@ -35,10 +35,10 @@ from vllm.model_executor.utils import set_weight_attrs
 class Mixer2RMSNormGated(CustomOp):
 
     def __init__(self,
-                 full_hidden_size,
-                 full_n_groups,
+                 full_hidden_size: int,
+                 full_n_groups: int,
                  use_rms_norm: bool = True,
-                 eps=1e-6):
+                 eps: float = 1e-6):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
