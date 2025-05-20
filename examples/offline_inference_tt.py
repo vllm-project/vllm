@@ -37,7 +37,9 @@ def register_tt_models():
     ModelRegistry.register_model("TTMllamaForConditionalGeneration", "models.tt_transformers.tt.generator_vllm:MllamaForConditionalGeneration")
 
     # Qwen2.5 - Text
-    ModelRegistry.register_model("TTQwen2ForCausalLM", "models.tt_transformers.tt.generator_vllm:Qwen2ForCausalLM")
+    path_qwen_text = "models.tt_transformers.tt.generator_vllm:QwenForCausalLM"
+    ModelRegistry.register_model("TTQwen2ForCausalLM", path_qwen_text)
+    ModelRegistry.register_model("TTQwen3ForCausalLM", path_qwen_text)
 
     # Mistral
     ModelRegistry.register_model("TTMistralForCausalLM", "models.tt_transformers.tt.generator_vllm:MistralForCausalLM")
@@ -88,6 +90,12 @@ def check_tt_model_supported(model):
         "Qwen/Qwen2.5-7B-Instruct",
         "Qwen/Qwen2.5-72B",
         "Qwen/Qwen2.5-72B-Instruct",
+        "Qwen/Qwen3-0.6B",
+        "Qwen/Qwen3-1.7B",
+        "Qwen/Qwen3-4B",
+        "Qwen/Qwen3-8B",
+        "Qwen/Qwen3-14B",
+        "Qwen/Qwen3-32B",
         "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
         "mistralai/Mistral-7B-Instruct-v0.3",
     ]
