@@ -5,11 +5,11 @@ from typing import Any, Callable, Optional
 import torch
 
 import vllm.envs as envs
-import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
-                                                  FusedMoeWeightScaleSupported)
+                                                  FusedMoeWeightScaleSupported,
+                                                  fused_experts)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     OCP_MX_BLOCK_SIZE, dequant_mxfp4)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -212,8 +212,6 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
     ) -> torch.Tensor:
-        from vllm.model_executor.layers.fused_moe import fused_experts
-
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -240,7 +238,8 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
             a1_scale=layer.w13_input_scale,
-            a2_scale=layer.w2_input_scale)
+            a2_scale=layer.w2_input_scale,
+            activation=activation)
 
 
 class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
@@ -260,7 +259,21 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
                 f"{weight_qscheme}, {input_qscheme}")  # noqa E501
 
         self.static_input_scales = not self.input_quant.get("is_dynamic")
-        self.emulate = not current_platform.supports_mx()
+
+        if self.static_input_scales:
+            raise NotImplementedError(
+                "QuarkW4A4MXFp4MoEMethod with static input scales is currently "
+                "not implemented. Please open an issue.")
+
+        if not current_platform.supports_mx():
+            self.emulate = True
+            logger.warning_once(
+                "The current platform does not support native MXFP4 "
+                "computation. Simulated weight dequantization and activation "
+                "QDQ (quantize and dequantize) will be used, with the linear "
+                "layers computed in high precision.")
+        else:
+            self.emulate = False
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,

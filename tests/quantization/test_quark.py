@@ -4,18 +4,33 @@
 Run `pytest tests/quantization/test_quark.py`.
 """
 
+import importlib
+import importlib.metadata
 import os
 from dataclasses import dataclass
 
+import huggingface_hub
 import lm_eval
 import pytest
 import torch
+from packaging import version
 
 from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
     QuarkLinearMethod, QuarkW4A4MXFP4, QuarkW8A8Fp8, QuarkW8A8Int8)
 from vllm.model_executor.layers.quantization.quark.quark_moe import (
     QuarkW4A4MXFp4MoEMethod)
 from vllm.platforms import current_platform
+
+QUARK_MXFP4_AVAILABLE = importlib.util.find_spec(
+    "quark") is not None and version.parse(
+        importlib.metadata.version("amd-quark")) >= version.parse('0.9')
+
+try:
+    huggingface_hub.list_repo_refs(
+        "amd/Llama-3.3-70B-Instruct-WMXFP4-AMXFP4-KVFP8-Scale-UINT8-SQ")
+    HF_HUB_AMD_ORG_ACCESS = True
+except huggingface_hub.errors.RepositoryNotFoundError:
+    HF_HUB_AMD_ORG_ACCESS = False
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -108,9 +123,12 @@ class ModelCase:
     ModelCase("fxmarty/deepseek_r1_3_layers_mxfp4", tp=8),
     ModelCase("fxmarty/Llama-4-Scout-17B-16E-Instruct-2-layers-mxfp4", tp=1)
 ])
+@pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE,
+                    reason="amd-quark>=0.9 is not available")
 def test_mxfp4_loading_and_execution(vllm_runner, model_case: ModelCase):
     with vllm_runner(model_case.model_id,
-                     tensor_parallel_size=model_case.tp) as llm:
+                     tensor_parallel_size=model_case.tp,
+                     load_format="dummy") as llm:
 
         def check_model(model):
             layer = model.model.layers[0]
@@ -152,7 +170,12 @@ ACCURACY_CONFIGS = [
 
 
 @pytest.mark.parametrize("config", ACCURACY_CONFIGS)
-def test_gsm8k_correctness(config: GSM8KAccuracyTestConfig):
+@pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE,
+                    reason="amd-quark>=0.9 is not available")
+@pytest.mark.skipif(
+    not HF_HUB_AMD_ORG_ACCESS,
+    reason="Read access to huggingface.co/amd is required for this test.")
+def test_mxfp4_gsm8k_correctness(config: GSM8KAccuracyTestConfig):
     task = "gsm8k"
     rtol = 0.03
 

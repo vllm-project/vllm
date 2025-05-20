@@ -6,12 +6,15 @@ import torch
 import torch.nn.functional as F
 
 import vllm.envs as envs
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     OCP_MX_BLOCK_SIZE, dequant_mxfp4, quant_dequant_mxfp4)
 from vllm.model_executor.parameter import (GroupQuantScaleParameter,
                                            PackedvLLMParameter)
 from vllm.platforms import current_platform
+
+logger = init_logger(__name__)
 
 __all__ = ["QuarkW4A4MXFP4"]
 
@@ -24,7 +27,23 @@ class QuarkW4A4MXFP4(QuarkScheme):
         self.qscheme = "per_group"
         self.weight_quant_spec = weight_quant_spec
         self.input_quant_spec = input_quant_spec
-        self.emulate = not current_platform.supports_mx()
+
+        self.static_input_scales = not input_quant_spec.get("is_dynamic")
+
+        if self.static_input_scales:
+            raise NotImplementedError(
+                "QuarkW4A4MXFP4 with static input scales is currently not "
+                "implemented. Please open an issue.")
+
+        if not current_platform.supports_mx():
+            self.emulate = True
+            logger.warning_once(
+                "The current platform does not support native MXFP4 "
+                "computation. Simulated weight dequantization and activation "
+                "QDQ (quantize and dequantize) will be used, with the linear "
+                "layers computed in high precision.")
+        else:
+            self.emulate = False
 
     @classmethod
     def get_min_capability(cls) -> int:
