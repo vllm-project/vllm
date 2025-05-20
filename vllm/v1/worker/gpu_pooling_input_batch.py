@@ -24,6 +24,7 @@ class CachedRequestState:
     mm_positions: list[PlaceholderRange]
     pooling_params: PoolingParams
 
+    block_ids: list[list[int]]
     num_computed_tokens: int
 
     mrope_positions: Optional[torch.Tensor] = None
