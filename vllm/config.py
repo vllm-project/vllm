@@ -4334,9 +4334,11 @@ class VllmConfig:
                 "prefill and prefix caching to be disabled.")
 
         if self.model_config and self.model_config.pooler_config:
-            disable_chunked_prefill_reasons.append(
-                "Loaded model for pooling; forcing chunked "
-                "prefill and prefix caching to be disabled.")
+            if self.model_config.pooler_config.pooling_type.lower() != "last":
+                disable_chunked_prefill_reasons.append(
+                    "Only \"last\" pooling supports chunked "
+                    "prefill and prefix caching; disabling both.")
+
             disable_cascade_reasons.append(
                 "Loaded model for pooling; disabling cascade attention.")
 
@@ -4345,6 +4347,7 @@ class VllmConfig:
                 logger.info(reason)
             self.scheduler_config.enable_chunked_prefill = False
             self.scheduler_config.chunked_prefill_enabled = False
+            self.scheduler_config.long_prefill_token_threshold = 0
             self.scheduler_config.max_num_batched_tokens = max(
                 self.scheduler_config.max_model_len,
                 _DEFAULT_MAX_NUM_BATCHED_TOKENS)

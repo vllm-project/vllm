@@ -109,9 +109,6 @@ class InputBatch(BaseInputBatch):
         self.lora_id_to_lora_request: dict[int, LoRARequest] = {}
         self.pooling_params: dict[str, PoolingParams] = {}
 
-        # This is updated each time the batch constituents change.
-        self.pooling_metadata = self._make_pooling_metadata()
-
     @property
     def token_type_ids_cpu(self) -> np.ndarray:
         if self._token_type_ids_cpu is None:
@@ -284,10 +281,7 @@ class InputBatch(BaseInputBatch):
         # Trim lists to the batch size.
         del self._req_ids[self.num_reqs:]
 
-    def refresh_pooling_metadata(self):
-        self.pooling_metadata = self._make_pooling_metadata()
-
-    def _make_pooling_metadata(self) -> PoolingMetadata:
+    def make_pooling_metadata(self) -> PoolingMetadata:
         prompt_token_ids = self._make_prompt_token_ids_tensor()
 
         # Note, for now this assumes that all request in the batch

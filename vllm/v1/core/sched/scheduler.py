@@ -755,9 +755,9 @@ class Scheduler(SchedulerInterface):
                     del new_token_ids[num_new:]  # Trim new tokens if needed.
                     break
 
-            pooler_output = pooler_outputs[
-                req_index] if pooler_outputs else None
+            pooler_output = None
             if pooler_outputs:
+                pooler_output = pooler_outputs[req_index]
                 stopped = check_stop(request, self.max_model_len,
                                      pooler_output)
 
@@ -788,7 +788,8 @@ class Scheduler(SchedulerInterface):
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
-            if new_token_ids or pooler_outputs or kv_transfer_params:
+            if new_token_ids or pooler_output is not None \
+                or kv_transfer_params:
 
                 # Add EngineCoreOutput for this Request.
                 outputs.append(

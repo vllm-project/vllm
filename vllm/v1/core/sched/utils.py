@@ -18,8 +18,8 @@ def check_stop(request: Request,
         request.status = RequestStatus.FINISHED_STOPPED
         return True
 
-    last_token_id = request.output_token_ids[-1]
     if (sampling_params := request.sampling_params) is not None:
+        last_token_id = request.output_token_ids[-1]
         if (not sampling_params.ignore_eos
                 and last_token_id == request.eos_token_id):
             request.status = RequestStatus.FINISHED_STOPPED

@@ -419,11 +419,6 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
 
             # NOTE(woosuk): `num_tokens` here may include spec decode tokens.
             self.input_batch.num_tokens[req_index] = end_token_index
-
-        # Check if the batch has changed. If not, we can skip copying the
-        # sampling metadata from CPU to GPU.
-        batch_changed = len(removed_req_indices) > 0 or len(req_ids_to_add) > 0
-
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
         removed_req_indices.sort(reverse=True)
@@ -441,15 +436,12 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
         if removed_req_indices:
             self.input_batch.condense(removed_req_indices)
 
-        batch_reordered = self._may_reorder_batch(scheduler_output)
-
-        if batch_changed or batch_reordered:
-            self.input_batch.refresh_pooling_metadata()
+        self._may_reorder_batch(scheduler_output)
 
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> dict[str, FlashAttentionMetadata]:
+    ) -> tuple[dict[str, FlashAttentionMetadata], np.ndarray]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -596,7 +588,7 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
         if self.lora_config:
             self.set_active_loras(self.input_batch, num_scheduled_tokens)
 
-        return attn_metadata
+        return attn_metadata, num_scheduled_tokens
 
     def _calc_mrope_positions(self, scheduler_output: "SchedulerOutput"):
         mrope_pos_ptr = 0
@@ -777,7 +769,8 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
             return self.kv_connector_no_forward(scheduler_output)
 
         # Prepare the decoder inputs.
-        attn_metadata = self._prepare_inputs(scheduler_output)
+        attn_metadata, scheduled_tokens_np = self._prepare_inputs(
+            scheduler_output)
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
@@ -863,7 +856,7 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
                                  num_tokens=num_input_tokens,
                                  seq_lens=seq_lens):
             self.maybe_setup_kv_connector(scheduler_output)
-            output = self.model(
+            outputs = self.model(
                 input_ids=input_ids,
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
@@ -875,15 +868,29 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
             finished_sending, finished_recving = (
                 self.get_finished_kv_transfers(scheduler_output))
 
-        hidden_states = output
-
         if not get_pp_group().is_last_rank:
             # For mid-pipeline stages, return the hidden states.
-            return hidden_states
+            return outputs
 
-        pooler_output = self.model.pooler(
-            hidden_states=hidden_states,
-            pooling_metadata=self.input_batch.pooling_metadata)
+        offset = 0
+        hidden_states = list[torch.Tensor]()
+        for seq_len in scheduled_tokens_np:
+            hidden_states.append(outputs[offset:offset + seq_len])
+            offset += seq_len
+
+        pooling_metadata = self.input_batch.make_pooling_metadata()
+        raw_pooler_output = self.model.pooler(
+            hidden_states=hidden_states, pooling_metadata=pooling_metadata)
+
+        pooler_output: list[Optional[torch.Tensor]] = []
+
+        for raw_output, seq_len, prompt_len in zip(
+                raw_pooler_output, seq_lens, pooling_metadata.prompt_lens):
+
+            if seq_len == prompt_len:
+                pooler_output.append(raw_output.data.to("cpu"))
+            else:
+                pooler_output.append(None)
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
@@ -892,7 +899,9 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
             spec_token_ids=None,
             logprobs=None,
             prompt_logprobs_dict={},
-            pooler_output=[o.data.to("cpu") for o in pooler_output.outputs],
+            pooler_output=pooler_output,
+            finished_sending=finished_sending,
+            finished_recving=finished_recving,
         )
 
     def kv_connector_no_forward(
@@ -968,7 +977,7 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
         self,
         num_tokens: int,
         skip_attn: bool = True,
-    ) -> tuple[torch.Tensor, int]:
+    ) -> tuple[list[torch.Tensor], int]:
 
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
@@ -1061,6 +1070,12 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
             positions = self.positions[:num_tokens].zero_()
             hidden_states = outputs
 
+        offset = 0
+        hidden_states = list[torch.Tensor]()
+        for seq_len in seq_lens:
+            hidden_states.append(outputs[offset:offset + seq_len])
+            offset += seq_len
+
         return hidden_states, num_reqs
 
     @torch.inference_mode()
@@ -1068,7 +1083,7 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
         self,
         num_tokens: int,
         num_reqs: int,
-        hidden_states: torch.Tensor,
+        hidden_states: list[torch.Tensor],
     ) -> torch.Tensor:
 
         req_num_tokens = num_tokens // num_reqs
@@ -1333,14 +1348,16 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
                         head_size=attn_module.head_size,
                         dtype=self.kv_cache_dtype,
                         sliding_window=attn_module.sliding_window,
-                        use_mla=use_mla)
+                        use_mla=use_mla,
+                        attn_type=str(attn_module.attn_type))
                 else:
                     kv_cache_spec[layer_name] = FullAttentionSpec(
                         block_size=block_size,
                         num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
                         dtype=self.kv_cache_dtype,
-                        use_mla=use_mla)
+                        use_mla=use_mla,
+                        attn_type=str(attn_module.attn_type))
             elif attn_module.attn_type in (AttentionType.ENCODER,
                                            AttentionType.ENCODER_DECODER):
                 raise NotImplementedError
