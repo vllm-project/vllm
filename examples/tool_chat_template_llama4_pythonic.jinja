@@ -1,7 +1,7 @@
 {{- bos_token }}
 {%- if custom_tools is defined and custom_tools%}
     {%- set tools = custom_tools %}
-{%- set tool_definition = tool_definition ~ (tools | tojson(indent=4)) ~ "\n" %}
+{%- set tool_definition = tool_definition ~ (tools | tojson(indent=4)) %}
 {%- endif %}
 {%- if not tools is defined %}
     {%- set tools = none %}
