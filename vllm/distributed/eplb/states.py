@@ -12,9 +12,9 @@ from torch.distributed import all_reduce
 from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_ep_group
 from vllm.logger import init_logger
-from vllm.model_executor.models.interfaces import IsMixtureOfExperts
+from vllm.model_executor.models.interfaces import MixtureOfExperts
 
-from .rebalance import rebalance_experts
+from .rebalance_algo import rebalance_experts
 from .rebalance_execute import rearrange_expert_weights_inplace
 
 logger = init_logger(__name__)
@@ -89,7 +89,7 @@ class EplbState:
     @classmethod
     def build(
         cls,
-        model: IsMixtureOfExperts,
+        model: MixtureOfExperts,
         device: torch.device,
         parallel_config: ParallelConfig,
     ) -> "EplbState":
@@ -163,7 +163,7 @@ class EplbState:
             expert_rearrangement_step_interval=eplb_step_interval,
         )
 
-    def step(self, model: IsMixtureOfExperts) -> None:
+    def step(self, model: MixtureOfExperts) -> None:
         """
         Step the EPLB state.
         """
@@ -183,7 +183,7 @@ class EplbState:
             self.expert_rearrangement_step = 0
             self.rearrange(model)
 
-    def rearrange(self, model: IsMixtureOfExperts) -> None:
+    def rearrange(self, model: MixtureOfExperts) -> None:
         """
         Rearrange the experts according to the current load.
         """

@@ -425,7 +425,7 @@ def is_hybrid(
 
 
 @runtime_checkable
-class IsMixtureOfExperts(Protocol):
+class MixtureOfExperts(Protocol):
     """
     Check if the model is a mixture of experts (MoE) model.
     """
@@ -463,8 +463,8 @@ class IsMixtureOfExperts(Protocol):
     """Number of redundant experts in this model."""
 
 
-def is_mixture_of_experts(model: object) -> TypeIs[IsMixtureOfExperts]:
-    return isinstance(model, IsMixtureOfExperts)
+def is_mixture_of_experts(model: object) -> TypeIs[MixtureOfExperts]:
+    return isinstance(model, MixtureOfExperts)
 
 
 @runtime_checkable
