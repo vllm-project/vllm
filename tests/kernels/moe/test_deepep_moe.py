@@ -3,23 +3,25 @@
 Test deepep dispatch-combine logic
 """
 
-import pytest
-import traceback
 import dataclasses
-from typing import Callable, Tuple, Optional
-from typing_extensions import Concatenate, ParamSpec
+import traceback
+from typing import Callable, Optional
 
+import pytest
 import torch.distributed
 from torch.distributed import ProcessGroup
 from torch.multiprocessing import (
     spawn)  # pyright: ignore[reportPrivateImportUsage]
+from typing_extensions import Concatenate, ParamSpec
 
-from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
-from vllm.model_executor.layers.fused_moe import TritonExperts
-from vllm.platforms import current_platform
-from vllm.model_executor.layers.fused_moe.deepep_prepare_finalize import DeepEPPrepareAndFinalize
-from vllm.model_executor.layers.activation import SiluAndMul
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.fused_moe import TritonExperts
+from vllm.model_executor.layers.fused_moe.deepep_prepare_finalize import (
+    DeepEPPrepareAndFinalize)
+from vllm.model_executor.layers.fused_moe.modular_kernel import (
+    FusedMoEModularKernel)
+from vllm.platforms import current_platform
 
 try:
     import deep_ep
@@ -32,8 +34,8 @@ requires_deep_ep = pytest.mark.skipif(
     reason="Requires deep_ep kernels",
 )
 
-
 P = ParamSpec("P")
+
 
 @dataclasses.dataclass
 class ProcessGroupInfo:
@@ -43,6 +45,7 @@ class ProcessGroupInfo:
     node_rank: int
     local_rank: int
     device: torch.device
+
 
 def _worker_parallel_launch(
     local_rank: int,
@@ -87,6 +90,7 @@ def _worker_parallel_launch(
     finally:
         torch.distributed.destroy_process_group()
 
+
 def parallel_launch(
     world_size: int,
     worker: Callable[Concatenate[ProcessGroupInfo, P], None],
@@ -107,7 +111,10 @@ def parallel_launch(
         join=True,
     )
 
-def make_weights(e, n, k, dtype) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+
+def make_weights(
+        e, n, k, dtype
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Return weights w1, w2, w1_scale, w2_scale
     """
@@ -133,12 +140,11 @@ def make_weights(e, n, k, dtype) -> Tuple[torch.Tensor, torch.Tensor, torch.Tens
                            dtype=torch.float32)
     for expert in range(e):
         w1_q[expert], w1_scale[expert] = ops.scaled_fp8_quant(
-            w1[expert],
-            use_per_token_if_dynamic=True)
+            w1[expert], use_per_token_if_dynamic=True)
         w2_q[expert], w2_scale[expert] = ops.scaled_fp8_quant(
-            w2[expert],
-            use_per_token_if_dynamic=True)
+            w2[expert], use_per_token_if_dynamic=True)
     return w1_q, w2_q, w1_scale, w2_scale
+
 
 @dataclasses.dataclass
 class TestConfig:
@@ -149,11 +155,12 @@ class TestConfig:
     n: int
     num_experts: int
 
+
 @dataclasses.dataclass
 class TestTensors:
-    rank_tokens: torch.Tensor # all ranks make this many tokens
+    rank_tokens: torch.Tensor  # all ranks make this many tokens
     rank_token_scales: Optional[torch.Tensor]
-    topk: torch.Tensor 
+    topk: torch.Tensor
     topk_weights: torch.Tensor
     config: TestConfig
 
@@ -161,53 +168,68 @@ class TestTensors:
     def make(config: TestConfig) -> "TestTensors":
         # TODO (varun) - check that float16 works ?
         assert config.dtype in [torch.bfloat16, torch.float8_e4m3fn]
-        token_dtype = torch.bfloat16 if config.dtype == torch.float8_e4m3fn else config.dtype
-        rank_tokens = torch.randn((config.m, config.k), device="cuda", dtype=token_dtype) / 10
+        token_dtype = (torch.bfloat16 if config.dtype == torch.float8_e4m3fn
+                       else config.dtype)
+        rank_tokens = torch.randn(
+            (config.m, config.k), device="cuda", dtype=token_dtype) / 10
         rank_token_scales = None
         if config.dtype == torch.float8_e4m3fn:
-            _, rank_token_scales = ops.scaled_fp8_quant(rank_tokens, use_per_token_if_dynamic=True)
+            _, rank_token_scales = ops.scaled_fp8_quant(
+                rank_tokens, use_per_token_if_dynamic=True)
 
-        topk = torch.randint(low=0, high=config.num_experts, size=(config.m, config.topk), device="cuda").to(dtype=torch.int64)
-        topk_weights = torch.randn(topk.shape, dtype=torch.float32, device="cuda")
-        return TestTensors(rank_tokens = rank_tokens,
-                           rank_token_scales = rank_token_scales,
-                           topk = topk,
-                           topk_weights = topk_weights,
-                           config = config)
+        topk = torch.randint(low=0,
+                             high=config.num_experts,
+                             size=(config.m, config.topk),
+                             device="cuda").to(dtype=torch.int64)
+        topk_weights = torch.randn(topk.shape,
+                                   dtype=torch.float32,
+                                   device="cuda")
+        return TestTensors(rank_tokens=rank_tokens,
+                           rank_token_scales=rank_token_scales,
+                           topk=topk,
+                           topk_weights=topk_weights,
+                           config=config)
 
-def deep_ep_moe_impl(pg: ProcessGroup,
-                     pgi: ProcessGroupInfo,
-                     dp_size: int,
-                     test_tensors: TestTensors,
-                     w1: torch.Tensor,
-                     w2: torch.Tensor,
-                     w1_scale: Optional[torch.Tensor],
+
+def deep_ep_moe_impl(pg: ProcessGroup, pgi: ProcessGroupInfo, dp_size: int,
+                     test_tensors: TestTensors, w1: torch.Tensor,
+                     w2: torch.Tensor, w1_scale: Optional[torch.Tensor],
                      w2_scale: Optional[torch.Tensor],
                      num_experts: int) -> torch.Tensor:
+
+    num_local_experts = w1.size(0)
 
     def make_a2a():
         # TODO (varun) : Expand to using pplx also
         # TODO (varun) : make tests for low-latency mode also
-        num_nvl_bytes = 1024 * 1024 * 1024 # 1GB
+        num_nvl_bytes = 1024 * 1024 * 1024  # 1GB
         # low-latency mode
         num_rdma_bytes, low_latency_mode, num_qps_per_rank = 0, False, 1
-        buffer = deep_ep.Buffer(group = pg, 
-                                num_nvl_bytes = num_nvl_bytes,
-                                num_rdma_bytes = num_rdma_bytes,
-                                low_latency_mode = low_latency_mode,
-                                num_qps_per_rank = num_qps_per_rank)
-        q_dtype = torch.float8_e4m3fn if w1.dtype == torch.float8_e4m3fn else None
-        return DeepEPPrepareAndFinalize(buffer = buffer,
-                                        world_size = pgi.world_size,
-                                        rank = pgi.rank,
-                                        dp_size = dp_size,
-                                        quant_dtype = q_dtype)
+        buffer = deep_ep.Buffer(group=pg,
+                                num_nvl_bytes=num_nvl_bytes,
+                                num_rdma_bytes=num_rdma_bytes,
+                                low_latency_mode=low_latency_mode,
+                                num_qps_per_rank=num_qps_per_rank)
+        q_dtype = (torch.float8_e4m3fn
+                   if w1.dtype == torch.float8_e4m3fn else None)
+        return DeepEPPrepareAndFinalize(buffer=buffer,
+                                        world_size=pgi.world_size,
+                                        rank=pgi.rank,
+                                        dp_size=dp_size,
+                                        rank_expert_offset=pgi.rank *
+                                        num_local_experts,
+                                        quant_dtype=q_dtype)
 
     def build_expert_map():
         num_local_experts = w1.size(0)
-        expert_map = torch.full((num_experts, ), fill_value = -1, dtype=torch.int32)
-        expert_map[:num_local_experts] = torch.tensor(list(range(num_local_experts)))
-        return expert_map.to(device=torch.cuda.current_device(), dtype=torch.int32)
+        expert_map = torch.full((num_experts, ),
+                                fill_value=-1,
+                                dtype=torch.int32)
+        s = pgi.rank * num_local_experts
+        e = s + num_local_experts
+        expert_map[s:e] = torch.tensor(list(range(num_local_experts)))
+        return expert_map.to(device=torch.cuda.current_device(),
+                             dtype=torch.int32)
 
     is_quantized = w1.dtype == torch.float8_e4m3fn
 
@@ -219,34 +241,32 @@ def deep_ep_moe_impl(pg: ProcessGroup,
                                   use_int4_w4a16=False,
                                   per_channel_quant=False)
     mk = FusedMoEModularKernel(prepare_finalize=a2a,
-                               fused_experts=fused_experts) 
-    
-    out = mk.forward(hidden_states = test_tensors.rank_tokens,
-               w1 = w1,
-               w2 = w2,
-               topk_weights = test_tensors.topk_weights, 
-               topk_ids = test_tensors.topk,
-               inplace = False,
-               activation="silu",
-               global_num_experts=num_experts,
-               expert_map = build_expert_map(),
-               w1_scale = w1_scale,
-               w2_scale = w2_scale,
-               w1_zp = None,
-               w2_zp = None,
-               a1_scale = test_tensors.rank_token_scales,
-               a2_scale = None,
-               apply_router_weight_on_input=False)
+                               fused_experts=fused_experts)
+
+    out = mk.forward(hidden_states=test_tensors.rank_tokens,
+                     w1=w1,
+                     w2=w2,
+                     topk_weights=test_tensors.topk_weights,
+                     topk_ids=test_tensors.topk,
+                     inplace=False,
+                     activation="silu",
+                     global_num_experts=num_experts,
+                     expert_map=build_expert_map(),
+                     w1_scale=w1_scale,
+                     w2_scale=w2_scale,
+                     w1_zp=None,
+                     w2_zp=None,
+                     a1_scale=test_tensors.rank_token_scales,
+                     a2_scale=None,
+                     apply_router_weight_on_input=False)
 
     return out
 
-def torch_moe_impl(test_tensors: TestTensors,
-                   w1: torch.Tensor,
-                   w2: torch.Tensor,
-                   w1_scale: Optional[torch.Tensor],
+
+def torch_moe_impl(test_tensors: TestTensors, w1: torch.Tensor,
+                   w2: torch.Tensor, w1_scale: Optional[torch.Tensor],
                    w2_scale: Optional[torch.Tensor]):
     is_quantized = w1.dtype == torch.float8_e4m3fn
-
 
     a = test_tensors.rank_tokens
     a_dtype = a.dtype
@@ -260,19 +280,21 @@ def torch_moe_impl(test_tensors: TestTensors,
     out = torch.zeros_like(a)
 
     for i in range(m):
-        a_i = a[i] 
-        o_i = out[i] 
-        for j in range (topk): 
+        a_i = a[i]
+        o_i = out[i]
+        for j in range(topk):
             e = test_tensors.topk[i][j]
             e_w = test_tensors.topk_weights[i][j]
             w1_e = w1[e]
             w2_e = w2[e]
-            o_i += (SiluAndMul()(a_i @ w1_e.transpose(0, 1)) @ w2_e.transpose(0, 1)) * e_w 
+            o_i += (SiluAndMul()
+                    (a_i @ w1_e.transpose(0, 1)) @ w2_e.transpose(0, 1)) * e_w
 
     if is_quantized:
         out = out.to(dtype=a_dtype)
 
     return out
+
 
 def _deep_ep_moe(
     pgi: ProcessGroupInfo,
@@ -290,7 +312,7 @@ def _deep_ep_moe(
         w1_scale = w1_scale.to(device=torch.cuda.current_device())
         w2_scale = w2_scale.to(device=torch.cuda.current_device())
 
-    pg= torch.distributed.new_group(list(range(pgi.world_size)))
+    pg = torch.distributed.new_group(list(range(pgi.world_size)))
     test_tensors = TestTensors.make(config)
 
     torch_combined = torch_moe_impl(test_tensors, w1, w2, w1_scale, w2_scale)
@@ -305,9 +327,15 @@ def _deep_ep_moe(
     if is_quantized:
         w1_scale_ep = w1_scale[e_start:e_end]
         w2_scale_ep = w2_scale[e_start:e_end]
-    deepep_combined = deep_ep_moe_impl(pg, pgi, dp_size, test_tensors, w1_ep, w2_ep, w1_scale_ep, w2_scale_ep, config.num_experts)
+    deepep_combined = deep_ep_moe_impl(pg, pgi, dp_size, test_tensors, w1_ep,
+                                       w2_ep, w1_scale_ep, w2_scale_ep,
+                                       config.num_experts)
 
-    torch.testing.assert_close(torch_combined, deepep_combined, atol=6e-2, rtol=6e-2)
+    torch.testing.assert_close(torch_combined,
+                               deepep_combined,
+                               atol=6e-2,
+                               rtol=6e-2)
+
 
 MNKs = [
     (1, 128, 128),
@@ -319,7 +347,8 @@ MNKs = [
     (222, 1024, 2048),
 ]
 
-DTYPES=[torch.bfloat16, torch.float8_e4m3fn]
+DTYPES = [torch.bfloat16, torch.float8_e4m3fn]
+
 
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("mnk", MNKs)
@@ -329,7 +358,7 @@ DTYPES=[torch.bfloat16, torch.float8_e4m3fn]
 @requires_deep_ep
 def test_deep_ep_moe(
     dtype: torch.dtype,
-    mnk: Tuple[int, int, int],
+    mnk: tuple[int, int, int],
     num_experts: int,
     topk: int,
     world_dp_size: tuple[int, int],
@@ -337,13 +366,14 @@ def test_deep_ep_moe(
     current_platform.seed_everything(7)
     world_size, dp_size = world_dp_size
     m, n, k = mnk
-    config = TestConfig(dtype = dtype,
-                        topk = topk,
-                        m = m,
-                        k = k,
-                        n = n,
-                        num_experts = num_experts)
+    config = TestConfig(dtype=dtype,
+                        topk=topk,
+                        m=m,
+                        k=k,
+                        n=n,
+                        num_experts=num_experts)
 
     w1, w2, w1_scale, w2_scale = make_weights(num_experts, n, k, dtype)
 
-    parallel_launch(world_size, _deep_ep_moe, dp_size, config, w1, w2, w1_scale, w2_scale)
+    parallel_launch(world_size, _deep_ep_moe, dp_size, config, w1, w2,
+                    w1_scale, w2_scale)
