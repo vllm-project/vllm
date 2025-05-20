@@ -42,7 +42,6 @@ theme:
   custom_dir: docs/mkdocs/overrides
 
 hooks:
-  - transpile_docs.py  # temporary
   - docs/mkdocs/hooks/remove_announcement.py
   - docs/mkdocs/hooks/generate_examples.py
   - docs/mkdocs/hooks/url_schemes.py
