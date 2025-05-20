@@ -4328,7 +4328,13 @@ class VllmConfig:
         if self.parallel_config.enable_microbatching:
             # Microbatching is not supported with piecewise compilation yet.
             #  More specifically piecewise cuda-graphs
-            self.compilation_config.level = CompilationLevel.DYNAMO_ONCE
+            if self.compilation_config.level >= CompilationLevel.PIECEWISE:
+                logger.warning_once(
+                    "Piecewise compilation is not supported with "
+                    "microbatching. Disabling piecewiseching compilation.")
+                self.parallel_config.enable_microbatching = False
+                self.compilation_config.level = CompilationLevel.DYNAMO_ONCE
+             
 
         if self.model_config and self.model_config.use_mla and \
             not (current_platform.is_cuda() or current_platform.is_rocm()):
