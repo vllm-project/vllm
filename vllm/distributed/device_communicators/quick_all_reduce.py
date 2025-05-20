@@ -23,10 +23,10 @@ except Exception:
 class QuickReduceAlgo(Enum):
     OneShotFP = 0
     TwoShotFP = 1
-    TwoShotQ8SYMM = 2
-    TwoShotQ4SYMM = 3
-    TwoShotQ8ASYMM = 4
-    TwoShotQ4ASYMM = 5
+    TwoShotQ8Symm = 2
+    TwoShotQ4Symm = 3
+    TwoShotQ8Asymm = 4
+    TwoShotQ4Asymm = 5
 
 
 class QuickAllReduce:
