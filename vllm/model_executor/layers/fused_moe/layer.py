@@ -460,6 +460,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 use_int8_w8a8=False,
                 use_int8_w8a16=False,
                 use_int4_w4a16=False,
+                use_mxfp4_w4a4=False,
                 block_shape=None,
                 per_channel_quant=False,
             )
@@ -973,6 +974,7 @@ class FusedMoE(torch.nn.Module):
 
         # Index the loaded weight for tp sharding.
         # gate_up_proj: "MergedColumnParallel", so tp sharding on output_dim
+
         shard_size = expert_data.shape[shard_dim] // 2
         loaded_weight = loaded_weight.narrow(shard_dim, shard_size * tp_rank,
                                              shard_size)
@@ -984,6 +986,7 @@ class FusedMoE(torch.nn.Module):
         else:
             assert shard_id == "w3"
             expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
+
         expert_data.copy_(loaded_weight)
 
     def _load_w2(self,
