@@ -16,8 +16,8 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils import LazyLoader
 from vllm.v1.structured_output.backend_types import (StructuredOutputGrammar,
                                                      StructuredOutputOptions)
-from vllm.v1.structured_output.bitmasking_grammar import (
-    BitmaskGrammar, BitmaskStructuredOutputBackend)
+from vllm.v1.structured_output.bitmasking_typing import (BitmaskGrammar,
+                                                         BitmaskStrategy)
 from vllm.v1.structured_output.request import get_structured_output_key
 
 if TYPE_CHECKING:
@@ -60,7 +60,7 @@ def process_for_additional_properties(
     return guide_json_obj
 
 
-class GuidanceBackend(BitmaskStructuredOutputBackend):
+class GuidanceStrategy(BitmaskStrategy):
 
     def __init__(self, vllm_config: VllmConfig, tokenizer: AnyTokenizer,
                  vocab_size: int, reasoner: ReasoningParser):

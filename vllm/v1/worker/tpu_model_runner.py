@@ -1096,9 +1096,13 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         )  # Normally a backend is initialised after a request is made
         # but we need to precompile the backend here so we initialise the
         # backend here - which will try to use the vllm configs decoding_config
-        self.structured_output_manager.precompile(self.num_reqs_paddings,
-                                                  self.device,
-                                                  self._hidden_states_dtype)
+        for num_reqs in self.num_reqs_paddings:
+            dummy_logits = torch.zeros((num_reqs, self.vocab_size),
+                                       device=self.device,
+                                       dtype=self._hidden_states_dtype)
+            self.structured_output_manager.precompile(dummy_logits)
+            logger.info("  -- num_seqs: %d", num_reqs)
+
         xm.wait_device_ops()
         end = time.perf_counter()
         logger.info("Compilation finished in %.2f [secs].", end - start)

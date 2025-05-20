@@ -7,18 +7,21 @@ from typing import TYPE_CHECKING, Optional
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.reasoning import ReasoningParserManager
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import LazyLoader
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.structured_output.backend_guidance import (
-    GuidanceBackend, validate_guidance_grammar)
+    GuidanceStrategy, validate_guidance_grammar)
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend, StructuredOutputBatchMetaData,
     StructuredOutputGrammar)
 from vllm.v1.structured_output.backend_xgrammar import (
-    XgrammarBackend, validate_xgrammar_grammar)
+    XgrammarStrategy, validate_xgrammar_grammar)
+from vllm.v1.structured_output.bitmasking_gpu_backend import BitmaskGPUBackend
+from vllm.v1.structured_output.bitmasking_tpu_backend import BitmaskTPUBackend
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
 if TYPE_CHECKING:
@@ -77,21 +80,36 @@ class StructuredOutputManager:
                 backend = self.vllm_config.decoding_config.backend
             else:
                 backend = "xgrammar"  # default to xgrammar
+
         vocab_size = self.vllm_config.model_config.get_vocab_size()
-        if backend == "xgrammar":
-            self.backend = XgrammarBackend(
-                self.vllm_config,
-                tokenizer=self.tokenizer,
-                vocab_size=vocab_size,
-                reasoner=self.reasoner,
-            )
-        elif backend == "guidance":
-            self.backend = GuidanceBackend(
-                self.vllm_config,
-                tokenizer=self.tokenizer,
-                vocab_size=vocab_size,
-                reasoner=self.reasoner,
-            )
+
+        if backend in ["xgrammar", "guidance"]:  # Bitmasking Backends
+            if backend == "xgrammar":
+                strategy = XgrammarStrategy(
+                    self.vllm_config,
+                    tokenizer=self.tokenizer,
+                    vocab_size=vocab_size,
+                    reasoner=self.reasoner,
+                )
+            else:  # Guidance
+                strategy = GuidanceStrategy(  # type: ignore[assignment]
+                    self.vllm_config,
+                    tokenizer=self.tokenizer,
+                    vocab_size=vocab_size,
+                    reasoner=self.reasoner,
+                )
+            if not current_platform.is_tpu():
+                self.backend = BitmaskGPUBackend(self.vllm_config,
+                                                 tokenizer=self.tokenizer,
+                                                 vocab_size=vocab_size,
+                                                 reasoner=self.reasoner,
+                                                 strategy=strategy)
+            else:
+                self.backend = BitmaskTPUBackend(self.vllm_config,
+                                                 tokenizer=self.tokenizer,
+                                                 vocab_size=vocab_size,
+                                                 reasoner=self.reasoner,
+                                                 strategy=strategy)
         else:
             raise ValueError(
                 f"Unsupported structured output backend: {backend}")
@@ -185,7 +203,7 @@ class StructuredOutputManager:
         self, requests: dict[str, Request],
         structured_output_request_ids: dict[str, int],
         scheduled_spec_decode_tokens: dict[str, list[int]]
-    ) -> StructuredOutputBatchMetaData:
+    ) -> StructuredOutputBatchMetaData | None:
         """
         Called in the v1/core/sched/Scheduler.schedule to initialize
         the batch of requests.
@@ -208,11 +226,14 @@ class StructuredOutputManager:
         """
 
         assert self.backend is not None
-        return self.backend.init_batch(
-            requests,
-            structured_output_request_ids,
-            scheduled_spec_decode_tokens,
-        )
+        if not structured_output_request_ids:
+            return None
+        else:
+            return self.backend.init_batch(
+                requests,
+                structured_output_request_ids,
+                scheduled_spec_decode_tokens,
+            )
 
     def should_advance(self, request: Request) -> bool:
         if not request.use_structured_output:
@@ -245,8 +266,7 @@ class StructuredOutputManager:
         if self.backend is not None:
             self.backend.destroy()
 
-    def precompile(self, num_reqs_paddings: list[int], device: torch.device,
-                   hidden_states_dtype: torch.dtype):
+    def precompile(self, dummy_logits: torch.Tensor):
         """
         Allow backend precompilation for the device
             - Currently only used in the TPU model runner
@@ -260,7 +280,7 @@ class StructuredOutputManager:
                 hidden states.
         """
         assert self.backend is not None
-        self.backend.precompile(num_reqs_paddings, device, hidden_states_dtype)
+        self.backend.precompile(dummy_logits)
 
     @staticmethod
     def validate_request(params: SamplingParams,
