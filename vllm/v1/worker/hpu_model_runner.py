@@ -2390,6 +2390,11 @@ class HPUModelRunner:
 
         end_time = time.perf_counter()
         end_mem = HabanaMemoryProfiler.current_device_memory_usage()
+        if os.getenv('VLLM_FULL_WARMUP',
+                     'true').strip().lower() in ("1", "true"):
+            # Since the model is warmed up for all possible tensor sizes,
+            # Dynamo can skip checking the guards
+            torch.compiler.set_stance(skip_guard_eval_unsafe=True)
         elapsed_time = end_time - start_time
         msg = (
             f"Warmup finished in {elapsed_time:.0f} secs, "
