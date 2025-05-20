@@ -41,7 +41,7 @@ def on_page_markdown(
     def replace_auto_link(match: re.Match) -> str:
         type = match.group("type")
         path = match.group("path")
-        title = f"{titles[type]}/{path}"
+        title = f"{titles[type]}{path}"
         url = f"{urls[type]}/{path}"
         if fragment := match.group("fragment"):
             url += f"#{fragment}"
