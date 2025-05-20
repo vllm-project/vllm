@@ -1673,7 +1673,8 @@ class ParallelConfig:
             self.get_next_dp_init_port(),
             self.data_parallel_rank,
             self.data_parallel_size,
-            backend="gloo")
+            # backend="gloo")
+            backend="hccl")
 
         return dp_group
 
