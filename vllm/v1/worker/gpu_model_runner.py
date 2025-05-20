@@ -159,13 +159,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 if self.speculative_config.method == "ngram":
                     self.drafter = NgramProposer(self.vllm_config)
                 elif self.speculative_config.use_eagle():
-                    self.drafter = EagleProposer(self.vllm_config,
-                                                 self.device)  # type: ignore
-                    if self.speculative_config.method == "eagle3":
-                        self.use_aux_hidden_state_outputs = True
-                elif self.speculative_config.method == "mtp":
-                    self.drafter = MtpProposer(self.vllm_config,
-                                               self)  # type: ignore
+                    if self.speculative_config.method == "deepseek_mtp":
+                        self.drafter = MtpProposer(self.vllm_config,
+                                                self)  # type: ignore
+                    else:
+                        self.drafter = EagleProposer(self.vllm_config,
+                                                    self.device)  # type: ignore
+                        if self.speculative_config.method == "eagle3":
+                            self.use_aux_hidden_state_outputs = True
                 elif self.speculative_config.method == "medusa":
                     self.drafter = MedusaProposer(
                         vllm_config=self.vllm_config,
@@ -1337,9 +1338,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 target_hidden_states=hidden_states,
                 sampling_metadata=sampling_metadata,
             )
-        elif (self.speculative_config.use_eagle() or
-              self.speculative_config.draft_model_config.hf_config.model_type \
-                == "deepseek_mtp"):
+        elif self.speculative_config.use_eagle():
             assert isinstance(self.drafter, (EagleProposer, MtpProposer))
             # TODO(woosuk): Refactor the loop.
             next_token_ids: list[int] = []
@@ -1361,6 +1360,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                           device=self.device)
             eagle_attn_metadata = attn_metadata[self.drafter.attn_layer_name]
 
+            # NOTE: deepseek_mtp uses MLA which does not have `block_table`
+            if hasattr(eagle_attn_metadata, "block_table"):
+                block_table = eagle_attn_metadata.block_table
+            else:
+                block_table = None
+            
             if spec_decode_metadata is None:
                 # input_ids can be None for multimodal models.
                 target_token_ids = self.input_ids[:num_scheduled_tokens]
@@ -1398,7 +1403,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     target_hidden_states = hidden_states[token_indices]
                 target_slot_mapping = eagle_attn_metadata.slot_mapping[
                     token_indices]
-
+                
+                
             draft_token_ids = self.drafter.propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
@@ -1406,7 +1412,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 target_slot_mapping=target_slot_mapping,
                 next_token_ids=next_token_ids,
                 cu_num_tokens=cu_num_tokens,
-                block_table=eagle_attn_metadata.block_table,
+                block_table=block_table,
                 sampling_metadata=sampling_metadata,
             )
             spec_token_ids = draft_token_ids.tolist()

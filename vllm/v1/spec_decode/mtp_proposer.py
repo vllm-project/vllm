@@ -3,13 +3,17 @@ import torch
 import torch.nn as nn
 import triton
 import triton.language as tl
+from typing import Optional
 
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.attention.layer import Attention
+from vllm.config import (VllmConfig,
+                         get_layers_from_vllm_config, set_current_vllm_config)
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.model_loader.loader import get_model_loader, _process_weights_after_loading
-from vllm.model_executor.model_loader.utils import set_default_torch_dtype
+from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.model_loader.utils import set_default_torch_dtype, process_weights_after_loading
 from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
 
 # FIXME(woosuk): The logic here is duplicated with the main sampling code.
@@ -120,7 +124,7 @@ class MtpProposer:
         # [batch_size + 1] starting with 0
         cu_num_tokens: torch.Tensor,
         # [batch_size, max_num_blocks_per_req]
-        block_table: torch.Tensor,
+        block_table: Optional[torch.Tensor],
         sampling_metadata: SamplingMetadata,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         num_tokens = target_token_ids.shape[0]
@@ -137,6 +141,11 @@ class MtpProposer:
 
         query_lens = cu_num_tokens[1:] - cu_num_tokens[:-1]
         max_query_len = query_lens.max().item()
+        
+        seq_lens = (target_positions[last_token_indices] + 1)
+        
+        common_attn_metadata = CommonAttentionMetadata(
+            query_start_loc=cu_num_tokens, seq_lens=seq_lens)
 
         # FIXME: reorder_batch() needs to be called before build()
         # because fields of attn_metadata_builder needs to be updated.
@@ -149,11 +158,13 @@ class MtpProposer:
         #     scheduler_output=self.runner.scheduler_output,
         # )
 
-        attn_metadata = self.runner.attn_metadata_builder.build(
+        # FIXME: need to consider multiple kv_cache_groups
+        attn_metadata = self.runner.attn_metadata_builders[0].build(
             num_reqs=batch_size,
             num_actual_tokens=num_tokens,
             max_query_len=max_query_len,
             common_prefix_len=0,
+            common_attn_metadata=common_attn_metadata,
         )
 
         with set_forward_context(attn_metadata, self.vllm_config):
@@ -172,7 +183,9 @@ class MtpProposer:
 
     def load_model(self, target_model: nn.Module) -> None:
         loader = get_model_loader(self.vllm_config.load_config)
-
+        target_attn_layer_names = set(
+            get_layers_from_vllm_config(self.vllm_config, Attention).keys())
+        
         draft_model_config = \
             self.vllm_config.speculative_config.draft_model_config
         # FIXME(lily): This does not handle with distributed inference.
@@ -182,27 +195,26 @@ class MtpProposer:
         with set_default_torch_dtype(
                 draft_model_config.dtype), set_current_vllm_config(
                     self.vllm_config):
-            #self.model = DeepSeekMTP(
-            #    vllm_config=self.vllm_config).to(target_device)
 
             with target_device:
                 self.model = DeepSeekMTP(
                     vllm_config=self.vllm_config)
             
+            draft_attn_layer_names = (
+            get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
+            target_attn_layer_names)
+            assert len(draft_attn_layer_names) == 1
+            self.attn_layer_name = next(iter(draft_attn_layer_names))
             self.model.load_weights(
                 loader.get_all_weights(
                     self.vllm_config.speculative_config.draft_model_config,
                     self.model))
                 
-            _process_weights_after_loading(
+            process_weights_after_loading(
                 self.model, 
                 self.vllm_config.speculative_config.draft_model_config,
                 target_device)
             
-        # self.model.load_weights(
-        #     loader.get_all_weights(
-        #         self.vllm_config.speculative_config.draft_model_config,
-        #         self.model))
 
 
 @triton.jit
