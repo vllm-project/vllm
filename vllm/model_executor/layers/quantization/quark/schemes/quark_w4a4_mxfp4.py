@@ -140,6 +140,11 @@ class QuarkW4A4MXFP4(QuarkScheme):
                             layer.weight.shape[0],
                             device=x_q.device,
                             dtype=self.out_dtype)
-            gemm_afp4wfp4(x_q, layer.weight.T, y, x_s, layer.weight_scale.T,
-                          self.out_dtype)
+            
+            gemm_afp4wfp4(x_q, layer.weight.T.contiguous(), y, x_s, layer.weight_scale.T.contiguous(), self.out_dtype)
+
+            # TODO: This should be fused in gemm_afp4wfp4.
+            if bias is not None:
+                y = y + bias
+
             return y
