@@ -5,7 +5,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections import deque
-from dataclasses import asdict
+from dataclasses import asdict, is_dataclass
 from itertools import count
 from queue import Queue
 from typing import Any, Callable, Optional, Union
@@ -288,9 +288,13 @@ class EventPublisherFactory:
         config_dict = asdict(config)
 
         kind = config_dict.pop("publisher", "null")
-        config_dict.pop("enable_kv_cache_events")
+        init_config = config_dict.pop("config", {})
+
+        if is_dataclass(init_config) and not isinstance(init_config, type):
+            init_config = asdict(init_config)
+
         try:
             constructor = cls._registry[kind]
         except KeyError as exc:
             raise ValueError(f"Unknown event publisher '{kind}'") from exc
-        return constructor(**config_dict)
+        return constructor(**init_config)

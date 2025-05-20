@@ -7,7 +7,7 @@ import msgspec.msgpack
 import pytest
 import zmq
 
-from vllm.config import KVEventsConfig
+from vllm.config import KVEventsConfig, ZMQPublisherConfig
 from vllm.distributed.kv_events import EventPublisherFactory
 
 from .test_events import SampleBatch
@@ -33,11 +33,12 @@ def publisher_config(random_port, request):
 
     return KVEventsConfig(enable_kv_cache_events=True,
                           publisher="zmq",
-                          endpoint=endpoint,
-                          replay_endpoint=replay_endpoint,
-                          buffer_steps=100,
-                          hwm=1000,
-                          topic="test")
+                          config=ZMQPublisherConfig(
+                              endpoint=endpoint,
+                              replay_endpoint=replay_endpoint,
+                              buffer_steps=100,
+                              hwm=1000,
+                              topic="test"))
 
 
 @pytest.fixture
@@ -51,15 +52,16 @@ def publisher(publisher_config):
 @pytest.fixture
 def subscriber(publisher_config):
     """Create and return a subscriber for testing"""
-    endpoint = publisher_config.endpoint
-    replay_endpoint = publisher_config.replay_endpoint
+    config = publisher_config.config
+    endpoint = config.endpoint
+    replay_endpoint = config.replay_endpoint
 
     if endpoint.startswith("tcp://*"):
         endpoint = endpoint.replace("*", "127.0.0.1")
     if replay_endpoint and replay_endpoint.startswith("tcp://*"):
         replay_endpoint = replay_endpoint.replace("*", "127.0.0.1")
 
-    sub = MockSubscriber(endpoint, replay_endpoint, publisher_config.topic)
+    sub = MockSubscriber(endpoint, replay_endpoint, config.topic)
     yield sub
     sub.close()
 

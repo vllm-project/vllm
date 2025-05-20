@@ -5,7 +5,9 @@ import time
 import msgspec
 import pytest
 
-from vllm.distributed.kv_events import (EventBatch, EventPublisherFactory,
+from vllm.config import KVEventsConfig
+from vllm.distributed.kv_events import (EventBatch, EventPublisher,
+                                        EventPublisherFactory,
                                         NullEventPublisher)
 
 
@@ -92,7 +94,7 @@ def test_replay_mechanism(publisher, subscriber):
 
 def test_buffer_limit(publisher, subscriber, publisher_config):
     """Test buffer limit behavior"""
-    buffer_size = publisher_config.buffer_steps
+    buffer_size = publisher_config.config.buffer_steps
 
     # Publish more events than the buffer can hold
     for i in range(buffer_size + 10):
@@ -117,15 +119,14 @@ def test_topic_filtering(publisher_config):
     """
     Test that a subscriber only receives messages matching its topic filter
     """
-    publisher_config.replay_endpoint = None
-
-    cfg = publisher_config.model_copy()
-    cfg.topic = "foo"
-    pub = EventPublisherFactory.create(cfg)
+    config = publisher_config.config
+    config.replay_endpoint = None
+    config.topic = "foo"
+    pub = EventPublisherFactory.create(publisher_config)
 
     from .conftest import MockSubscriber
-    sub_foo = MockSubscriber(cfg.endpoint, None, "foo")
-    sub_bar = MockSubscriber(cfg.endpoint, None, "bar")
+    sub_foo = MockSubscriber(config.endpoint, None, "foo")
+    sub_bar = MockSubscriber(config.endpoint, None, "bar")
 
     try:
         time.sleep(0.1)
@@ -191,3 +192,26 @@ def test_null_publisher():
     batch = create_test_events(5)
     publisher.publish(batch)
     publisher.shutdown()
+
+
+def test_factory_new_publisher():
+    """Test that EventPublisherFactory can create a new publisher"""
+
+    class TestPublisher(EventPublisher):
+
+        def __init__(self, x: int):
+            self.x = x
+
+        def publish(self, events) -> None:
+            pass
+
+        def shutdown(self) -> None:
+            pass
+
+    EventPublisherFactory.register_publisher("test", TestPublisher)
+    assert EventPublisherFactory._registry["test"] == TestPublisher
+
+    config = KVEventsConfig(publisher="test", config={"x": 1})
+    publisher = EventPublisherFactory.create(config=config)
+    assert isinstance(publisher, TestPublisher)
+    assert publisher.x == 1

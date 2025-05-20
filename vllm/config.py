@@ -3585,10 +3585,26 @@ class KVEventsConfig:
     Events can be published externally by zmq using the event publisher config.
     """
 
-    publisher: str = "null"
+    publisher: Union[Literal["null", "zmq"], str] = "null"
     """The publisher to use for publishing kv events. Can be "null", "zmq".
+    Publishers can be registered via the `register_publisher` method at runtime.
     """
 
+    config: Optional[Union["ZMQPublisherConfig",
+                           dict[str, Any]]] = field(default_factory=dict)
+    """The config for the publisher. Publishers can be registered via the 
+    `register_publisher` and this field used to pass arguments to the 
+    constructor.
+    """
+
+    def __post_init__(self):
+        if isinstance(self.config, dict) and self.publisher == "zmq":
+            self.config = ZMQPublisherConfig(**self.config)
+
+
+@config
+@dataclass
+class ZMQPublisherConfig:
     endpoint: str = "tcp://*:5557"
     """The zmq endpoint to use for publishing kv events.
     """

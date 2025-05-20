@@ -289,9 +289,9 @@ def test_kv_cache_events(
             executor_class=executor_class,
             log_stats=False,
         )
-        endpoint = publisher_config.endpoint.replace("*", "127.0.0.1")
+        endpoint = publisher_config.config.endpoint.replace("*", "127.0.0.1")
         subscriber = MockSubscriber(endpoint,
-                                    topic=publisher_config.topic,
+                                    topic=publisher_config.config.topic,
                                     decode_type=KVEventBatch)
 
         try:
