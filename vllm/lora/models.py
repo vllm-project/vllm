@@ -220,7 +220,22 @@ class LoRAModel(AdapterModel):
         new_embeddings_bin_file_path = os.path.join(lora_dir,
                                                     "new_embeddings.bin")
         tensors: dict[str, torch.Tensor] = {}
-        unexpected_modules: list[Union[list[str], str]]
+        unexpected_modules: list[Union[list[str], str]] = []
+
+        def check_unexpected_modules(modules: dict):
+            for lora_module in modules.keys():  # noqa
+                module_name, _, _ = parse_fine_tuned_lora_name(
+                    lora_module, weights_mapper)
+                part_name = module_name.split(".")[-1]
+                if part_name not in expected_lora_modules:
+                    unexpected_modules.append(module_name)
+            if unexpected_modules:
+                raise ValueError(
+                    f"While loading {lora_dir}, expected"
+                    f" target modules in {expected_lora_modules}"
+                    f" but received {unexpected_modules}."
+                    f" Please verify that the loaded LoRA module is correct")
+
         if tensorizer_config_dict:
             from tensorizer import TensorDeserializer
 
@@ -234,6 +249,7 @@ class LoRAModel(AdapterModel):
             tensors = TensorDeserializer(lora_tensor_path,
                                          dtype=tensorizer_config.dtype,
                                          **tensorizer_args.deserializer_params)
+            check_unexpected_modules(tensors)
 
         elif os.path.isfile(lora_tensor_path):
             # Find unexpected modules.
@@ -245,20 +261,8 @@ class LoRAModel(AdapterModel):
             unexpected_modules = []
             with safetensors.safe_open(lora_tensor_path,
                                        framework="pt") as f:  # type: ignore
-                for lora_module in f.keys():  # noqa
-                    module_name, _, _ = parse_fine_tuned_lora_name(
-                        lora_module, weights_mapper)
-                    part_name = module_name.split(".")[-1]
-                    if part_name not in expected_lora_modules:
-                        unexpected_modules.append(module_name)
-                if unexpected_modules:
-                    raise ValueError(
-                        f"While loading {lora_dir}, expected"
-                        f" target modules in {expected_lora_modules}"
-                        f" but received {unexpected_modules}."
-                        f" Please verify that the loaded LoRA module is correct"
-                    )
                 # Load tensors if there are only expected modules.
+                check_unexpected_modules(f)
                 for module in f.keys():  # noqa
                     tensors[module] = f.get_tensor(module)
         elif os.path.isfile(lora_bin_file_path):

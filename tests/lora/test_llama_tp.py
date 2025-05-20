@@ -36,7 +36,10 @@ def v1(run_with_both_engines_lora):
     pass
 
 
-def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
+def do_sample(llm: vllm.LLM,
+              lora_path: str,
+              lora_id: int,
+              tensorizer_config_dict: dict = None) -> list[str]:
     prompts = [
         "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_74 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]",  # noqa: E501
         "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_11 (nationality VARCHAR, elector VARCHAR)\n\n question: When Anchero Pantaleone was the elector what is under nationality? [/user] [assistant]",  # noqa: E501
@@ -45,15 +48,28 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
         "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_60 (pick INTEGER, former_wnba_team VARCHAR)\n\n question: What pick was a player that previously played for the Minnesota Lynx? [/user] [assistant]",  # noqa: E501
         "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_28138035_4 (womens_doubles VARCHAR, mens_singles VARCHAR)\n\n question: Name the women's doubles for werner schlager [/user] [assistant]"  # noqa: E501
     ]
+
     sampling_params = vllm.SamplingParams(temperature=0,
                                           max_tokens=256,
                                           skip_special_tokens=False,
                                           stop=["[/assistant]"])
-    outputs = llm.generate(
-        prompts,
-        sampling_params,
-        lora_request=LoRARequest(str(lora_id), lora_id, lora_path)
-        if lora_id else None)
+
+    if tensorizer_config_dict is not None:
+        outputs = llm.generate(
+            prompts,
+            sampling_params,
+            lora_request=LoRARequest(
+                str(lora_id),
+                lora_id,
+                lora_path,
+                tensorizer_config_dict=tensorizer_config_dict)
+            if lora_id else None)
+    else:
+        outputs = llm.generate(
+            prompts,
+            sampling_params,
+            lora_request=LoRARequest(str(lora_id), lora_id, lora_path)
+            if lora_id else None)
     # Print the outputs.
     generated_texts: list[str] = []
     for output in outputs:
@@ -64,18 +80,30 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
     return generated_texts
 
 
-def generate_and_test(llm, sql_lora_files):
+def generate_and_test(llm, sql_lora_files, tensorizer_config_dict=None):
     print("lora adapter created")
-    assert do_sample(llm, sql_lora_files, lora_id=0) == EXPECTED_NO_LORA_OUTPUT
+    assert do_sample(llm,
+                     sql_lora_files,
+                     tensorizer_config_dict=tensorizer_config_dict,
+                     lora_id=0) == EXPECTED_NO_LORA_OUTPUT
 
     print("lora 1")
-    assert do_sample(llm, sql_lora_files, lora_id=1) == EXPECTED_LORA_OUTPUT
+    assert do_sample(llm,
+                     sql_lora_files,
+                     tensorizer_config_dict=tensorizer_config_dict,
+                     lora_id=1) == EXPECTED_LORA_OUTPUT
 
     print("no lora")
-    assert do_sample(llm, sql_lora_files, lora_id=0) == EXPECTED_NO_LORA_OUTPUT
+    assert do_sample(llm,
+                     sql_lora_files,
+                     tensorizer_config_dict=tensorizer_config_dict,
+                     lora_id=0) == EXPECTED_NO_LORA_OUTPUT
 
     print("lora 2")
-    assert do_sample(llm, sql_lora_files, lora_id=2) == EXPECTED_LORA_OUTPUT
+    assert do_sample(llm,
+                     sql_lora_files,
+                     tensorizer_config_dict=tensorizer_config_dict,
+                     lora_id=2) == EXPECTED_LORA_OUTPUT
 
     print("removing lora")
 
@@ -153,3 +181,41 @@ def test_llama_lora_tp4_fully_sharded_loras(sql_lora_files):
         enable_chunked_prefill=True,
     )
     generate_and_test(llm, sql_lora_files)
+
+
+@create_new_process_for_each_test()
+def test_serialize_and_deserialize_lora(tmp_path, sql_lora_files):
+
+    import gc
+
+    import torch
+
+    from vllm import LLM, EngineArgs
+    from vllm.model_executor.model_loader.tensorizer import (
+        TensorizerConfig, tensorize_lora_adapter, tensorize_vllm_model)
+
+    model_ref = "meta-llama/Llama-2-7b-hf"
+    lora_path = "yard1/llama-2-7b-sql-lora-test"
+
+    model_uri = tmp_path / (model_ref + ".tensors")
+    tensorizer_config = TensorizerConfig(tensorizer_uri=str(model_uri))
+    tensorizer_config.lora_dir = tensorizer_config.tensorizer_dir
+
+    args = EngineArgs(model=model_ref)
+
+    tensorize_lora_adapter(lora_path, tensorizer_config)
+    tensorize_vllm_model(args, tensorizer_config)
+
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    loaded_vllm_model = LLM(model=model_ref,
+                            load_format="tensorizer",
+                            trust_remote_code=True,
+                            model_loader_extra_config=tensorizer_config,
+                            enable_lora=True,
+                            max_lora_rank=128)
+
+    generate_and_test(loaded_vllm_model,
+                      sql_lora_files,
+                      tensorizer_config_dict=tensorizer_config.to_dict())

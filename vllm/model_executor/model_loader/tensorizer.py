@@ -166,6 +166,9 @@ class TensorizerConfig:
         cfg = TensorizerConfig(*args, **kwargs)
         return dataclasses.asdict(cfg)
 
+    def to_dict(self) -> dict[str, Any]:
+        return dataclasses.asdict(self)
+
     def _construct_tensorizer_args(self) -> "TensorizerArgs":
         tensorizer_args = {
             "tensorizer_uri": self.tensorizer_uri,
@@ -606,11 +609,6 @@ def tensorize_lora_adapter(lora_path: str,
     else:
         raise ValueError("Unsupported file: %s", tensor_path)
 
-    # Current LoRA loading logic in
-    # vllm.lora.models.LoRAModel.from_local_checkpoint assumes that
-    # the tensors and config filenames are adapter_model.safetensors and
-    # adapter_config.json respectively, so this logic makes the same
-    # assumption
     with open(config_path) as f:
         config = json.load(f)
 

@@ -28,7 +28,7 @@ https://github.com/coreweave/tensorizer
 To serialize a model, install vLLM from source, then run something 
 like this from the root level of this repository:
 
-python -m examples.other.tensorize_vllm_model \
+python examples/other/tensorize_vllm_model.py \
    --model facebook/opt-125m \
    serialize \
    --serialized-directory s3://my-bucket \
@@ -48,7 +48,7 @@ providing a `--keyfile` argument.
 To deserialize a model, you can run something like this from the root 
 level of this repository:
 
-python -m examples.other.tensorize_vllm_model \
+python examples/other/tensorize_vllm_model.py \
    --model EleutherAI/gpt-j-6B \
    --dtype float16 \
    deserialize \
