@@ -205,6 +205,15 @@ class SingleTypeKVCacheManager(ABC):
         self.block_pool.free_blocks(ordered_blocks)
         self.num_cached_block.pop(request_id, None)
 
+    def unschedule_request(self, request_id: str) -> None:
+        """
+        Sets is_scheduled flag of request to False in its respective
+        prefix trie. Used for forested cascade attention.
+        """
+        depth = self.req_to_depth.get(request_id, 0)
+        if depth:
+            self.depth_to_prefix_trie[depth].unschedule_request(request_id)
+
     @abstractmethod
     def get_num_common_prefix_blocks(self, request_id: str,
                                      num_running_requests: int) -> int:

@@ -215,7 +215,7 @@ class KVCacheBlockPrefixTrie:
         # node_id == 0 means node is a sentinel
         self.sentinel = KVCacheBlockPrefixTrieNode()
         # Values in dict are of the form (req_id, is_scheduled)
-        self.req_id_to_req_id_wrapper: dict[str, tuple[str, bool]] = {}
+        self.req_id_to_req_id_wrapper: dict[str, bool] = {}
         self.req_id_to_block_id: dict[str, int] = {}
         self.block_id_to_req_id: defaultdict[int, set[str]] = defaultdict(set)
         self.block_id_to_leaf_node: dict[int, KVCacheBlockPrefixTrieNode] = {}
@@ -258,7 +258,7 @@ class KVCacheBlockPrefixTrie:
             curr_block_node = parent_block_node.add_child(curr_block.block_id)
 
         leaf_block_id = curr_block_node.block_id
-        self.req_id_to_req_id_wrapper[req_id] = (req_id, True)
+        self.req_id_to_req_id_wrapper[req_id] = True
         self.req_id_to_block_id[req_id] = leaf_block_id
         self.block_id_to_req_id[leaf_block_id].add(req_id)
         self.block_id_to_leaf_node[leaf_block_id] = curr_block_node
@@ -327,7 +327,7 @@ class KVCacheBlockPrefixTrie:
                     groups_list.extend([(node.depth, i,i) for i in
                                         range(start_direct_leaf, start_of_next_group)])
                     node.num_groups = num_groups + start_of_next_group - len(request_list)
-                request_list.extend(list(map(lambda k: self.req_id_to_req_id_wrapper[k], node.node_req_ids)))
+                request_list.extend(list(map(lambda k: (k, self.req_id_to_req_id_wrapper[k]), node.node_req_ids)))
             else:
                 # Push current node back as visited (for post-order)
                 stack.append((node, True))
@@ -357,10 +357,13 @@ class KVCacheBlockPrefixTrie:
             groups_list.append((self.block_id_to_leaf_node[block_id].depth,
                                 len(request_list),
                                 len(request_list) + len(self.block_id_to_req_id[block_id]) - 1))
-            request_list.extend(list(map(self.req_id_to_req_id_wrapper.get,
+            request_list.extend(list(map(lambda k: (k, self.req_id_to_req_id_wrapper[k]),
                                          self.block_id_to_req_id[block_id])))
 
         return get_scheduled_requests(request_list, groups_list)
+
+    def unschedule_request(self, request_id):
+        self.req_id_to_req_id_wrapper[request_id] = False
 
 class KVCacheBlockPrefixTrieNode:
     """Node that stores each KVCacheBlock still in use by

@@ -291,6 +291,9 @@ class KVCacheManager:
         """
         self.single_type_manager.free(request.request_id)
 
+    def unschedule_request(self, request_id: str) -> None:
+        self.single_type_manager.unschedule_request(request_id)
+
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
         flows to invalidate prefix caching after the weights are updated,
@@ -352,7 +355,6 @@ class KVCacheManager:
                 request.request_id, num_running_requests)
         ]
 
-    #TODO: COME BACK
     def get_common_prefix_groups(self) -> CommonPrefixGroups | None:
         return self.single_type_manager.get_common_prefix_groups()
 
