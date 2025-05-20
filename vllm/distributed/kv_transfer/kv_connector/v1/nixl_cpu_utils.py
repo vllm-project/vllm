@@ -310,7 +310,8 @@ class NixlProtocolMsg(msgspec.Struct):
 
 
 def make_send_req_msg(
-    source_spec: SourceSpec
+    source_spec: SourceSpec,
+    req_uuid: str
 ) -> bytes:
     """Make the send request message.
 
@@ -322,7 +323,6 @@ def make_send_req_msg(
     """
     # Create the request message
     msg_type = "REQMSG"
-    req_uuid = str(uuid.uuid4())
     receiver_addr = None
     send_req_msg = NixlProtocolMsg(
         msg_type=msg_type,
@@ -433,15 +433,15 @@ class NixlCPUSender:
     
     def prepare_send(
         self,
-        destination_spec: DestinationSpec,
         source_spec: SourceSpec,
+        destination_spec: DestinationSpec,
     ) -> str:
         """Prepare the send operation by allocation the receive buffer 
         on the destination side.
 
         Args:
-            destination_spec (DestinationSpec): The destination spec.
             source_spec (SourceSpec): The source spec.
+            destination_spec (DestinationSpec): The destination spec.
 
         Returns:
             str: The uuid of the prepared send
@@ -454,10 +454,13 @@ class NixlCPUSender:
         remote_agent_name = self._remote_agents[dest_id]
 
         # Create the request message
-        msg = make_send_req_msg(source_spec)
+        req_uuid = str(uuid.uuid4())
+        msg = make_send_req_msg(source_spec, req_uuid)
 
         # Send it to the remote agent
         self._nixl_wrapper.send_notif(remote_agent_name, msg)
+
+        return req_uuid
 
     def check_and_remove_prepared_send(
         self,
@@ -479,11 +482,11 @@ class NixlCPUSender:
             for msg in notifs[remote_agent_name]:
                 # Decode the message
                 obj = self._msg_decoder.decode(msg)
-                if msg.msg_type == "READYMSG":
+                if obj.msg_type == "READYMSG":
                     # Add the request to the ready requests
                     self._ready_requests[obj.req_uuid] = remote_agent_name
                 else:
-                    logger.error("Unexpected message type: %s", msg.msg_type)
+                    logger.error("Unexpected message type: %s", obj.msg_type)
                     continue
 
         # Check if the send uuid is in the ready requests
@@ -509,10 +512,9 @@ class NixlCPUSender:
         local_meta = self._nixl_wrapper.get_agent_metadata()
         with zmq_ctx(zmq.REQ, path) as sock:
             # Send query for metadata
-            logger.info("Sending handshake request to %s", destination_spec)
+            logger.debug("Sending handshake request to %s", destination_spec)
             sock.send(local_meta)
 
-            logger.info("Waiting for handshake response from %s", destination_spec)
             metadata_bytes = sock.recv()
             
             # Get remote agent name and register it
@@ -522,7 +524,7 @@ class NixlCPUSender:
             # Store remote agent info
             self._remote_agents[destination_spec.get_id()] = remote_agent_name
             
-            logger.info("Successfully completed handshake with %s", 
+            logger.debug("Successfully completed handshake with %s", 
                          destination_spec)
 
 
@@ -556,24 +558,28 @@ class NixlCPUReceiver:
         self._remote_agents: dict[str, str] = {}
 
         self._nixl_wrapper, self._reg_dlist, self._local_xfer_dlist = \
-            init_nixl_agent(buffer_size, buffer_ptr, nixl_page_size)
+            init_nixl_agent(self._buffer_size, self._buffer_ptr, 
+                            nixl_page_size)
 
         # Add handshake listener thread
         self._handshake_listener_t: Optional[threading.Thread] = None
         self._stop_listener = threading.Event()
+
+        # Msg decoder
+        self._msg_decoder = msgspec.msgpack.Decoder(NixlProtocolMsg)
 
     def _process_msgs(self):
         """Process the received messages from the NIXL agent."""
         notifs = self._nixl_wrapper.get_new_notifs()
         for remote_agent_name in notifs:
             for msg in notifs[remote_agent_name]:
-                # Decode the message
+                # Decode the messag
                 obj = self._msg_decoder.decode(msg)
-                if msg.msg_type == "REQMSG":
+                if obj.msg_type == "REQMSG":
                     # Add the request to the pending allocation
                     self._pending_allocation[obj.req_uuid] = (obj.source_spec,
                                                              remote_agent_name)
-                elif msg.msg_type == "FINISHMSG":
+                elif obj.msg_type == "FINISHMSG":
                     # Add the request to the finished requests
                     if obj.req_uuid in self._inflight_requests:
                         source_spec = self._inflight_requests.pop(obj.req_uuid)
@@ -583,7 +589,7 @@ class NixlCPUReceiver:
                         logger.error("Request %s not found in inflight requests", 
                                      obj.req_uuid)
                 else:
-                    logger.error("Unexpected message type: %s", msg.msg_type)
+                    logger.error("Unexpected message type: %s", obj.msg_type)
                     continue
 
     def _process_allocation_requests(self):
@@ -668,31 +674,29 @@ class NixlCPUReceiver:
         # Setup ZMQ socket
         port = base_port + get_tensor_model_parallel_rank()
         path = make_zmq_path("tcp", host, port)
-        logger.info("Starting handshake listener on path: %s", path)
+        logger.debug("Starting handshake listener on path: %s", path)
         
         with zmq_ctx(zmq.ROUTER, path) as sock:
             ready_event.set()
-            logger.info("Handshake listener is ready")
             
             while not self._stop_listener.is_set():
-                logger.info("Waiting for handshake request")
                 try:
                     identity, _, msg = sock.recv_multipart(flags=zmq.NOBLOCK)
                     remote_agent_name = self._nixl_wrapper.add_remote_agent(
                         msg)
                     self._remote_agents[identity] = remote_agent_name
-                    logger.info("Successfully received handshake from %s", 
+                    logger.debug("Successfully received handshake from %s", 
                                  identity)
                     # Send back the local metadata to the sender
                     sock.send_multipart([identity, b"", local_meta])
-                    logger.info("Sent local metadata back to %s", identity)
+                    logger.debug("Sent local metadata back to %s", identity)
                 except zmq.error.Again:
                     # No message available
                     time.sleep(0.1)
                 except Exception as e:
                     logger.error("Error in handshake listener: %s", e)
                     break
-            logger.info("Stopping handshake listener")
+            logger.debug("Stopping handshake listener")
 
     def stop_handshake_listener(self) -> None:
         """Stop the handshake listener thread."""

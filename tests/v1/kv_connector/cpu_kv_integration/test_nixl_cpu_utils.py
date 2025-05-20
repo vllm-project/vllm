@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-import multiprocessing as mp
+import torch.multiprocessing as mp
 import pytest
 import torch
 import threading
@@ -56,13 +56,19 @@ def run_sender(buffer_config, host, base_port, rank, receiver_ready_event):
         import vllm.distributed.kv_transfer.kv_connector.v1.nixl_cpu_utils as utils
         utils.get_tensor_model_parallel_rank = lambda: rank
 
+        # Create ring buffer allocator
+        allocator = utils.RingBufferAllocator(
+            size=buffer_config['buffer_size'],
+            align_to=buffer_config['nixl_page_size']
+        )
+
         # Wait for receiver to be ready
         receiver_ready_event.wait()
 
         # Create sender and perform handshake
         sender = NixlCPUSender(
             buffer_size=buffer_config['buffer_size'],
-            buffer_ptr=buffer_config['buffer_ptr'],
+            buffer_ptr=allocator.get_buffer_ptr(),
             nixl_page_size=buffer_config['nixl_page_size']
         )
         
@@ -124,13 +130,19 @@ def run_sender_with_protocol(buffer_config, host, base_port, rank, receiver_read
         import vllm.distributed.kv_transfer.kv_connector.v1.nixl_cpu_utils as utils
         utils.get_tensor_model_parallel_rank = lambda: rank
 
+        # Create ring buffer allocator
+        allocator = utils.RingBufferAllocator(
+            size=buffer_config['buffer_size'],
+            align_to=buffer_config['nixl_page_size']
+        )
+
         # Wait for receiver to be ready
         receiver_ready_event.wait()
 
         # Create sender
         sender = NixlCPUSender(
             buffer_size=buffer_config['buffer_size'],
-            buffer_ptr=buffer_config['buffer_ptr'],
+            buffer_ptr=allocator.get_buffer_ptr(),
             nixl_page_size=buffer_config['nixl_page_size']
         )
         
@@ -153,14 +165,14 @@ def run_sender_with_protocol(buffer_config, host, base_port, rank, receiver_read
         )
         
         # Prepare send and wait for completion
-        sender.prepare_send(source_spec, dest_spec)
+        uid = sender.prepare_send(source_spec, dest_spec)
         
         max_retries = 100
         retry_count = 0
         remote_agent = None
         
         while retry_count < max_retries:
-            remote_agent = sender.check_and_remove_prepared_send(source_spec, dest_spec)
+            remote_agent = sender.check_and_remove_prepared_send(uid)
             if remote_agent is not None:
                 break
             time.sleep(0.1)
@@ -176,6 +188,11 @@ def run_sender_with_protocol(buffer_config, host, base_port, rank, receiver_read
 @pytest.mark.skipif(not NIXL_AVAILABLE, reason="NIXL is not available")
 class TestNixlCPUUtils:
     """Test cases for NixlCPUSender and NixlCPUReceiver."""
+
+    @classmethod
+    def setup_class(cls):
+        """Set up the test class."""
+        pass
 
     @pytest.fixture
     def buffer_config(self):
@@ -255,6 +272,9 @@ class TestNixlCPUUtils:
         test_base_port = 50051
         test_rank = 0
 
+        old_start_method = mp.get_start_method(allow_none=True)
+        mp.set_start_method("spawn", force=True)
+
         # Create events for process synchronization
         receiver_ready = mp.Event()
         stop_receiver = mp.Event()
@@ -291,12 +311,18 @@ class TestNixlCPUUtils:
             if sender_process.is_alive():
                 sender_process.terminate()
 
+            mp.set_start_method(old_start_method, force=True)
+
     def test_nixl_protocol_communication(self, buffer_config):
         """Test the full protocol communication between sender and receiver."""
         # Setup test parameters
         test_host = "127.0.0.1"
         test_base_port = 50052
         test_rank = 0
+
+        # Set multiprocessing start method
+        old_start_method = mp.get_start_method(allow_none=True)
+        mp.set_start_method("spawn", force=True)
 
         # Create events for process synchronization
         receiver_ready = mp.Event()
@@ -338,4 +364,6 @@ class TestNixlCPUUtils:
                 receiver_process.terminate()
             if sender_process.is_alive():
                 sender_process.terminate()
+            
+            mp.set_start_method(old_start_method, force=True)
 
