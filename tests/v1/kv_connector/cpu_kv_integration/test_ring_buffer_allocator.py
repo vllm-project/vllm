@@ -2,7 +2,7 @@
 import pytest
 import torch
 
-from vllm.distributed.kv_transfer.kv_connector.v1.cpu_connector import RingBufferAllocator
+from vllm.distributed.kv_transfer.kv_connector.v1.cpu_connector_utils import RingBufferAllocator
 
 def test_basic_allocation():
     """Test basic allocation and deallocation behavior."""
