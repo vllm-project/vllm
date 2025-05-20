@@ -36,7 +36,17 @@ class KVConnectorBase(ABC):
         local_rank: int,
         config: "VllmConfig",
     ):
-        raise NotImplementedError
+        """
+        Initialize the KV connector.
+
+        Args:
+            rank (int): The global rank of the current process.
+            local_rank (int): The local rank of the current process.
+            config (VllmConfig): The configuration object for vLLM.
+        """
+        self.config = config
+        self.rank = rank
+        self.local_rank = local_rank
 
     @abstractmethod
     def close(self) -> None:
@@ -84,6 +94,46 @@ class KVConnectorBase(ABC):
 
         raise NotImplementedError
 
+    def send_kv_caches_and_hidden_states_with_ori_input(
+        self,
+        model_executable: torch.nn.Module,
+        model_input: "ModelInputForGPUWithSamplingMetadata",
+        model_input_before_recv: "ModelInputForGPUWithSamplingMetadata",
+        kv_caches: list[torch.Tensor],
+        hidden_or_intermediate_states: Union[torch.Tensor,
+                                             IntermediateTensors],
+    ) -> None:
+        """
+        Send KV caches and hidden states to the connector.
+
+        This method processes the input tokens, KV caches, and
+        hidden/intermediate states for a given model and sends the data to the
+        decode instance.
+
+        Args:
+            model_executable (torch.nn.Module): The model executable containing
+                start and end layer information.
+            model_input (ModelInputForGPUWithSamplingMetadata): The input
+                metadata from vLLM.
+            model_input_before_recv (ModelInputForGPUWithSamplingMetadata): The
+                original input metadata from vLLM before receiving data.
+            kv_caches (list[torch.Tensor]): List of KV caches (keys and values)
+                for each layer.
+            hidden_or_intermediate_states (Union[torch.Tensor,
+            IntermediateTensors]):
+                The hidden or intermediate states associated with the tokens.
+
+        Returns:
+            None
+
+        """
+
+        self.send_kv_caches_and_hidden_states(
+            model_executable=model_executable,
+            model_input=model_input,
+            kv_caches=kv_caches,
+            hidden_or_intermediate_states=hidden_or_intermediate_states)
+
     @abstractmethod
     def recv_kv_caches_and_hidden_states(
         self, model_executable: torch.nn.Module,
@@ -122,6 +172,10 @@ class KVConnectorBase(ABC):
         """
 
         raise NotImplementedError
+
+    def get_config(self) -> "VllmConfig":
+        """Get the vllmConfig."""
+        return self.config
 
 
 KVConnectorBaseType = Union[KVConnectorBase, KVConnectorBase_V1]

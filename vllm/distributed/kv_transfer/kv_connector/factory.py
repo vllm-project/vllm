@@ -46,7 +46,9 @@ class KVConnectorFactory:
 
         connector_cls = cls._registry[connector_name]()
         assert issubclass(connector_cls, KVConnectorBase)
-        return connector_cls(rank, local_rank, config)
+        connector = connector_cls(rank, local_rank, config)
+        KVConnectorBase.__init__(connector, rank, local_rank, config)
+        return connector
 
     @classmethod
     def create_connector_v1(
@@ -104,6 +106,11 @@ KVConnectorFactory.register_connector(
     "MooncakeStoreConnector",
     "vllm.distributed.kv_transfer.kv_connector.mooncake_store_connector",
     "MooncakeStoreConnector")
+
+KVConnectorFactory.register_connector(
+    "MultiConnectorV0",
+    "vllm.distributed.kv_transfer.kv_connector.multi_connector",
+    "MultiConnectorV0")
 
 KVConnectorFactory.register_connector(
     "SharedStorageConnector",
