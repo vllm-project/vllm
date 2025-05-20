@@ -99,7 +99,8 @@ class Llama4VisionMLP(nn.Module):
         use_data_parallel: bool = False,
     ):
         super().__init__()
-        cls_fc1 = ReplicatedLinear if use_data_parallel else ColumnParallelLinear
+        cls_fc1 = (ReplicatedLinear
+                   if use_data_parallel else ColumnParallelLinear)
         self.fc1 = cls_fc1(
             input_size=input_size,
             output_size=intermediate_size,

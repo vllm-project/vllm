@@ -423,7 +423,8 @@ class EngineArgs:
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
     pt_load_map_location: str = LoadConfig.pt_load_map_location
 
-    enable_vision_encoder_data_parallel: bool = ParallelConfig.enable_vision_encoder_data_parallel
+    enable_vision_encoder_data_parallel: bool = \
+        ParallelConfig.enable_vision_encoder_data_parallel
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
