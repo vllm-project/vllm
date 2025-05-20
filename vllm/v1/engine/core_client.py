@@ -1100,9 +1100,7 @@ class RayDPClient(DPAsyncMPClient):
                 log_stats=log_stats,
                 input_address=input_address,
                 output_address=output_address,
-                local_engine_count=local_engine_count,
-                start_index=start_index,
-                local_start_index=local_start_index)
+                local_engine_count=local_engine_count)
 
             self.core_engine = self.core_engines[0]
 
