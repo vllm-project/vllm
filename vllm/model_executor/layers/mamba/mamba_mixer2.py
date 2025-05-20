@@ -37,7 +37,7 @@ class Mixer2RMSNormGated(CustomOp):
     def __init__(self,
                  full_hidden_size,
                  full_n_groups,
-                 use_rms_norm=True,
+                 use_rms_norm: bool = True,
                  eps=1e-6):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
