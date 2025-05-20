@@ -204,12 +204,10 @@ class EagleProposer:
             # === Input tensors ===
             draft_token_ids,
             positions,
-            hidden_states,
 
             # === Model input buffers to be updated ===
             self.input_ids[:batch_size],
             self.positions[:batch_size],
-            self.hidden_states[:batch_size],
 
             # === Metadata tensors ===
             attn_metadata.seq_lens,
@@ -219,11 +217,14 @@ class EagleProposer:
             # === Scalar configuration ===
             self.max_model_len,
             self.block_size,
+            self.max_model_len // self.block_size,
 
             # === Execution control ===
             batch_size,
             BLOCK_SIZE=1024,
             PADDING_SLOT_ID=PADDING_SLOT_ID)
+
+        self.hidden_states[:batch_size] = hidden_states
 
         # Increment the sequence lengths.
         attn_metadata.max_seq_len += 1
@@ -419,12 +420,10 @@ def prepare_input_kernel(
 def advance_state_kernel(
     draft_token_ids_ptr,
     positions_ptr,
-    hidden_states_ptr,
 
     # === Model input buffers to be updated ===
     model_input_ids_ptr,
     model_positions_ptr,
-    model_hidden_states_ptr,
 
     # === Metadata tensors ===
     seq_lens_ptr,
@@ -434,6 +433,7 @@ def advance_state_kernel(
     # === Scalar configuration ===
     model_max_len: int,
     model_block_size: int,
+    model_block_stride: int,
 
     # === Execution control ===
     n_elements: int,
@@ -447,7 +447,6 @@ def advance_state_kernel(
     draft_token_list_last = tl.load(draft_token_ids_ptr + offsets, mask=mask)
     position = tl.load(positions_ptr + offsets, mask=mask)
     seq_lens = tl.load(seq_lens_ptr + offsets, mask=mask)
-    hidden_states = tl.load(hidden_states_ptr + offsets, mask=mask)
 
     # Update the inputs.
     # cast to int32 is crucial when eagle model is compiled.
@@ -474,8 +473,9 @@ def advance_state_kernel(
     block_numbers = clamped_position // model_block_size
     block_offsets = clamped_position % model_block_size
 
-    # Gather from block_table[0, block_numbers]
-    block_ids = tl.load(block_table_ptr + block_numbers, mask=mask)
+    block_ids = tl.load(block_table_ptr + model_block_stride * offsets +
+                        block_numbers,
+                        mask=mask)
 
     # Compute slot mapping
     slot_mapping = block_ids * model_block_size + block_offsets
@@ -491,4 +491,3 @@ def advance_state_kernel(
     tl.store(model_positions_ptr + offsets, clamped_position, mask=mask)
     tl.store(seq_lens_ptr + offsets, seq_lens, mask=mask)
     tl.store(slot_mapping_ptr + offsets, slot_mapping, mask=mask)
-    tl.store(model_hidden_states_ptr + offsets, hidden_states, mask=mask)
