@@ -57,7 +57,7 @@ In v0, the following metrics are exposed via a Prometheus-compatible `/metrics` 
 - `vllm:spec_decode_num_draft_tokens_total` (Counter)
 - `vllm:spec_decode_num_emitted_tokens_total` (Counter)
 
-These are documented under [Inferencing and Serving -> Production Metrics](project:../../serving/metrics.md).
+These are documented under [Inferencing and Serving -> Production Metrics](../../serving/metrics.md).
 
 ### Grafana Dashboard
 
@@ -467,7 +467,7 @@ In general:
    hatch](https://kubernetes.io/docs/concepts/cluster-administration/system-metrics/#show-hidden-metrics)
    for some time before deleting them.
 
-See the [deprecation policy](project:../../contributing/deprecation_policy.md) for
+See the [deprecation policy](../../contributing/deprecation_policy.md) for
 the project-wide deprecation policy.
 
 ### Unimplemented - `vllm:tokens_total`
