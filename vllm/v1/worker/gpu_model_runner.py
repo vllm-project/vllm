@@ -22,7 +22,8 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.distributed.parallel_state import (
-    get_pp_group, graph_capture, prepare_communication_buffer_for_model)
+    get_pp_group, get_tp_group, graph_capture,
+    prepare_communication_buffer_for_model)
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
@@ -47,6 +48,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.eagle import EagleProposer
+from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.spec_decode.utils import is_spec_decode_supported
@@ -156,6 +158,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                                  self.device)  # type: ignore
                     if self.speculative_config.method == "eagle3":
                         self.use_aux_hidden_state_outputs = True
+                elif self.speculative_config.method == "medusa":
+                    self.drafter = MedusaProposer(
+                        vllm_config=self.vllm_config,
+                        device=self.device)  # type: ignore
                 else:
                     raise ValueError("Unknown speculative decoding method: "
                                      f"{self.speculative_config.method}")
@@ -1050,6 +1056,40 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             indices=out_indices,
         )
 
+    def sync_and_slice_intermediate_tensors(
+            self, num_tokens: int, intermediate_tensors: IntermediateTensors,
+            sync_self: bool) -> IntermediateTensors:
+
+        assert self.intermediate_tensors is not None
+
+        tp = self.vllm_config.parallel_config.tensor_parallel_size
+        enabled_sp = self.vllm_config.compilation_config.pass_config. \
+            enable_sequence_parallelism
+        if enabled_sp:
+            # When sequence parallelism is enabled, we always pad num_tokens
+            # to be a multiple of tensor_parallel_size (tp) earlier
+            assert num_tokens % tp == 0
+        is_residual_scattered = tp > 1 and enabled_sp \
+            and num_tokens % tp == 0
+
+        # When sequence parallelism is enabled, the "residual" tensor is sharded
+        # across tensor parallel ranks, so each rank only needs its own slice.
+        if sync_self:
+            assert intermediate_tensors is not None
+            for k, v in intermediate_tensors.items():
+                is_scattered = "residual" and is_residual_scattered
+                copy_len = num_tokens // tp if is_scattered else \
+                    num_tokens
+                self.intermediate_tensors[k][:copy_len].copy_(
+                    v[:copy_len], non_blocking=True)
+
+        return IntermediateTensors({
+            k:
+            v[:num_tokens // tp]
+            if k == "residual" and is_residual_scattered else v[:num_tokens]
+            for k, v in self.intermediate_tensors.items()
+        })
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1125,15 +1165,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if get_pp_group().is_first_rank:
             intermediate_tensors = None
         else:
-            assert intermediate_tensors is not None
-            assert self.intermediate_tensors is not None
-            for k, v in intermediate_tensors.items():
-                self.intermediate_tensors[k][:num_input_tokens].copy_(
-                    v[:num_input_tokens], non_blocking=True)
-            intermediate_tensors = IntermediateTensors({
-                k: v[:num_input_tokens]
-                for k, v in self.intermediate_tensors.items()
-            })
+            intermediate_tensors = self.sync_and_slice_intermediate_tensors(
+                num_input_tokens, intermediate_tensors, True)
 
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
@@ -1157,13 +1190,32 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states, aux_hidden_states = model_output
         else:
             hidden_states = model_output
-
+        # Broadcast PP output for external_launcher (torchrun)
+        # to make sure we are synced across pp ranks
+        # TODO: Support overlapping mirco-batches
+        # https://github.com/vllm-project/vllm/issues/18019
+        broadcast_pp_output = \
+            self.parallel_config.distributed_executor_backend \
+            == "external_launcher" and len(get_pp_group().ranks) > 0
         if not get_pp_group().is_last_rank:
             # For mid-pipeline stages, return the hidden states.
-            return hidden_states
-
-        sample_hidden_states = hidden_states[logits_indices]
-        logits = self.model.compute_logits(sample_hidden_states, None)
+            if not broadcast_pp_output:
+                return hidden_states
+            assert isinstance(hidden_states, IntermediateTensors)
+            get_pp_group().send_tensor_dict(hidden_states.tensors,
+                                            all_gather_group=get_tp_group())
+            logits = None
+        else:
+            sample_hidden_states = hidden_states[logits_indices]
+            logits = self.model.compute_logits(sample_hidden_states, None)
+        if broadcast_pp_output:
+            model_output_broadcast_data = {
+                "logits": logits.contiguous(),
+            } if logits is not None else {}
+            model_output_broadcast_data = get_pp_group().broadcast_tensor_dict(
+                model_output_broadcast_data, src=len(get_pp_group().ranks) - 1)
+            assert model_output_broadcast_data is not None
+            logits = model_output_broadcast_data["logits"]
 
         # Apply structured output bitmasks if present
         if scheduler_output.grammar_bitmask is not None:
@@ -1181,6 +1233,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # creates a new tensor with separate storage from the original
             # logits tensor. This means any in-place operations on bonus_logits
             # won't affect the original logits tensor.
+            assert logits is not None
             bonus_logits = logits[spec_decode_metadata.bonus_logits_indices]
             sampler_output = self.sampler(
                 logits=bonus_logits,
@@ -1254,6 +1307,27 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert isinstance(self.drafter, NgramProposer)
             spec_token_ids = self.generate_draft_token_ids(
                 valid_sampled_token_ids, sampling_metadata)
+        elif self.speculative_config.method == "medusa":
+            assert isinstance(self.drafter, MedusaProposer)
+            if max_gen_len == 1:
+                hidden_states = sample_hidden_states
+            else:
+                indices = []
+                offset = 0
+                for num_draft, tokens in zip(
+                        spec_decode_metadata.num_draft_tokens,
+                        valid_sampled_token_ids):
+                    indices.append(offset + len(tokens) - 1)
+                    offset += num_draft + 1
+
+                indices = torch.tensor(indices,
+                                       device=sample_hidden_states.device)
+                hidden_states = sample_hidden_states[indices]
+
+            spec_token_ids = self.drafter.propose(
+                target_hidden_states=hidden_states,
+                sampling_metadata=sampling_metadata,
+            )
         elif self.speculative_config.use_eagle():
             assert isinstance(self.drafter, EagleProposer)
             # TODO(woosuk): Refactor the loop.
@@ -1611,10 +1685,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                             batch_size=self.max_num_tokens,
                             dtype=self.model_config.dtype,
                             device=self.device))
-                intermediate_tensors = IntermediateTensors({
-                    k: v[:num_tokens]
-                    for k, v in self.intermediate_tensors.items()
-                })
+
+                intermediate_tensors = self.sync_and_slice_intermediate_tensors(
+                    num_tokens, None, False)
 
             with set_forward_context(attn_metadata,
                                      self.vllm_config,
