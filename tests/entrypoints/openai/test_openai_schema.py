@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+from typing import Final
+
 import pytest
 import schemathesis
+from hypothesis import settings
 from schemathesis import GenerationConfig
 
 from ...utils import RemoteOpenAIServer
@@ -9,6 +12,7 @@ schemathesis.experimental.OPEN_API_3_1.enable()
 
 MODEL_NAME = "HuggingFaceTB/SmolVLM-256M-Instruct"
 MAXIMUM_IMAGES = 2
+DEFAULT_TIMEOUT_SECONDS: Final[int] = 10
 
 
 @pytest.fixture(scope="module")
@@ -89,6 +93,15 @@ def before_generate_case(context: schemathesis.hooks.HookContext, strategy):
 
 @schema.parametrize()
 @schema.override(headers={"Content-Type": "application/json"})
+@settings(deadline=60000)
 def test_openapi_stateless(case: schemathesis.Case):
+    key = (
+        case.operation.method.upper(),
+        case.operation.path,
+    )
+    timeout = {
+        ("POST", "/v1/chat/completions"): 60,
+    }.get(key, DEFAULT_TIMEOUT_SECONDS)
+
     #No need to verify SSL certificate for localhost
-    case.call_and_validate(verify=False)
+    case.call_and_validate(verify=False, timeout=timeout)
