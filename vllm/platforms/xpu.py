@@ -82,9 +82,9 @@ class XPUPlatform(Platform):
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
 
-        # Instances created using VllmConfig() typically have model_config as None by default.
-        # The modification involves adding a check to prevent potential null exceptions
-        # check and update model config
+        # Instances created using VllmConfig() typically have model_config as
+        # None by default. The modification involves adding a check to prevent
+        # potential null exceptions check and update model config.
         if vllm_config.model_config is not None:
             model_config = vllm_config.model_config
             if model_config.dtype == torch.bfloat16:
