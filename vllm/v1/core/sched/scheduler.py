@@ -224,6 +224,7 @@ class Scheduler(SchedulerInterface):
                 # NOTE(woosuk): Here, by doing `continue` instead of `break`,
                 # we do not strictly follow the FCFS scheduling policy and
                 # allow the lower-priority requests to be scheduled.
+                self.kv_cache_manager.unschedule_request(request.request_id)
                 req_index += 1
                 continue
 
