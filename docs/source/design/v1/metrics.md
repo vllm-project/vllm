@@ -415,8 +415,8 @@ The discussion in <gh-issue:10582> about adding prefix cache metrics yielded
 some interesting points which may be relevant to how we approach
 future metrics.
 
-Every time the prefix cache is queried, we record the number of blocks
-queried and the number of queried blocks present in the cache
+Every time the prefix cache is queried, we record the number of tokens
+queried and the number of queried tokens present in the cache
 (i.e. hits).
 
 However, the metric of interest is the hit rate - i.e. the number of

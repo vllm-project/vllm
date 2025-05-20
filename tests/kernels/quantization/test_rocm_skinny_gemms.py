@@ -8,7 +8,7 @@ from vllm.platforms import current_platform
 
 DTYPES = [torch.bfloat16, torch.float16]
 M = [16, 32, 64, 128, 256, 512, 1024, 4096, 8192]
-K = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]  # k % 8 == 0
+K = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 6144, 8192]  # k % 8 == 0
 N = [1, 2, 3, 4]
 SEEDS = [0]
 
@@ -58,8 +58,9 @@ def test_rocm_wvsplitk_kernel(n, k, m, dtype, seed):
 @pytest.mark.parametrize("m", M + [28672])  # m >= 16
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.skipif(not current_platform.is_rocm(),
-                    reason="only test for rocm")
+@pytest.mark.skipif(
+    not (current_platform.is_rocm() and current_platform.supports_fp8()),
+    reason="only test for rocm fp8")
 def test_rocm_wvsplitk_fp8_kernel(n, k, m, dtype, seed):
     torch.manual_seed(seed)
 

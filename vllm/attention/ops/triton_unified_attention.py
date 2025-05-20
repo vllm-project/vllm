@@ -31,8 +31,8 @@ def apply_softcap(S, x):
 def kernel_unified_attention_2d(
     output_ptr,  # [num_tokens, num_query_heads, head_size]
     query_ptr,  # [num_tokens, num_query_heads, head_size]
-    key_cache_ptr,  # [num_blks, num_kv_heads, head_size // x, blk_size, x]
-    value_cache_ptr,  # [num_blks, num_kv_heads, head_size, blk_size]
+    key_cache_ptr,  # [num_blks, blk_size, num_kv_heads, head_size]
+    value_cache_ptr,  # [num_blks, blk_size, num_kv_heads, head_size]
     block_tables_ptr,  # [num_seqs, max_num_blocks_per_seq]
     seq_lens_ptr,  # [num_seqs]
     alibi_slopes_ptr,  # [num_query_heads]
@@ -56,11 +56,11 @@ def kernel_unified_attention_2d(
     stride_k_cache_0: tl.int64,  # int
     stride_k_cache_1: tl.int64,  # int
     stride_k_cache_2: tl.int64,  # int
-    stride_k_cache_3: tl.int64,  # int
+    stride_k_cache_3: tl.constexpr,  # int
     stride_v_cache_0: tl.int64,  # int
     stride_v_cache_1: tl.int64,  # int
     stride_v_cache_2: tl.int64,  # int
-    stride_v_cache_3: tl.int64,  # int
+    stride_v_cache_3: tl.constexpr,  # int
     query_start_len_ptr,  # [num_seqs+1]
     BLOCK_Q: tl.constexpr,  # int
     num_seqs: tl.int32,
@@ -267,6 +267,10 @@ def unified_attention(
 ):
     assert causal, "Only causal attention is supported"
     assert q_descale is None, "Q scales not supported"
+
+    block_size = v.shape[1]
+    assert q.element_size() >= 2 or block_size >= 32, \
+        "Block size must be at least 32 for fp8"
 
     use_alibi_slopes = alibi_slopes is not None
 

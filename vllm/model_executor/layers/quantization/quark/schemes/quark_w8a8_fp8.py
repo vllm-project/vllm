@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Callable, List, Optional
+from typing import Callable, Optional
 
 import torch
 from torch.nn import Parameter
@@ -34,21 +34,24 @@ class QuarkW8A8Fp8(QuarkScheme):
         # tensor scales (thus N scales being passed to the kernel),
         # requantize so we can always run per tensor
         if self.qscheme == "per_tensor":
-            max_w_scale, weight = requantize_with_max_scale(
-                weight=layer.weight,
-                weight_scale=layer.weight_scale,
-                logical_widths=layer.logical_widths,
-            )
-
-            if current_platform.is_fp8_fnuz():
+            if current_platform.is_rocm():
                 input_scale = getattr(layer, 'input_scale', None)
                 weight, max_w_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
-                    weight=weight,
-                    weight_scale=max_w_scale,
+                    weight=layer.weight,
+                    weight_scale=layer.weight_scale,
                     input_scale=input_scale)
                 if input_scale is not None:
                     layer.input_scale = Parameter(input_scale,
                                                   requires_grad=False)
+            else:
+                max_w_scale = layer.weight_scale
+                weight = layer.weight
+
+            max_w_scale, weight = requantize_with_max_scale(
+                weight=weight,
+                weight_scale=max_w_scale,
+                logical_widths=layer.logical_widths,
+            )
 
             layer.weight = Parameter(weight.t(), requires_grad=False)
             layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
@@ -85,7 +88,7 @@ class QuarkW8A8Fp8(QuarkScheme):
             layer.input_scale = None
 
     def create_weights(self, layer: torch.nn.Module,
-                       output_partition_sizes: List[int],
+                       output_partition_sizes: list[int],
                        input_size_per_partition: int,
                        params_dtype: torch.dtype, weight_loader: Callable,
                        **kwargs):
