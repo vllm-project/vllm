@@ -461,21 +461,27 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                        hidden_size: int, intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
         # Fused gate_up_proj (column parallel)
-        w13_weight = torch.nn.Parameter(torch.empty(
+        w13_weight_raw = torch.empty(
             num_experts,
             2 * intermediate_size_per_partition,
             hidden_size,
-            dtype=params_dtype),
+            dtype=params_dtype)
+        if envs.VLLM_USE_EXP_TRITON_KERNEL:
+            w13_weight_raw = w13_weight_raw.transpose(-2, -1).contiguous()
+        w13_weight = torch.nn.Parameter(w13_weight_raw,
                                         requires_grad=False)
         layer.register_parameter("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
 
         # down_proj (row parallel)
-        w2_weight = torch.nn.Parameter(torch.empty(
+        w2_weight_raw = torch.empty(
             num_experts,
             hidden_size,
             intermediate_size_per_partition,
-            dtype=params_dtype),
+            dtype=params_dtype)
+        if envs.VLLM_USE_EXP_TRITON_KERNEL:
+            w2_weight_raw = w2_weight_raw.transpose(-2, -1).contiguous()
+        w2_weight = torch.nn.Parameter(w2_weight_raw,
                                        requires_grad=False)
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
@@ -572,43 +578,69 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
     ) -> torch.Tensor:
+        if envs.VLLM_USE_EXP_TRITON_KERNEL:
+            # feature check
+            # assert renormalize == True, "renormalize can only be True in new triton MoE kernel, false not supported"
+            # assert use_grouped_topk == False, "use_grouped_topk is not supported in new triton MoE kernel"
+            # assert topk_group is None, "topk_group is not supported in new triton MoE kernel"
+            # assert num_expert_group is None, "num_expert_group is not supported in new triton MoE kernel"
+            # assert custom_routing_function is None, "custom_routing_function is not supported in new triton MoE kernel"
+            # assert scoring_func == "softmax", "scoring_func is not supported in new triton MoE kernel"
+            # assert e_score_correction_bias is None, "e_score_correction_bias is not supported in new triton MoE kernel"
 
-        topk_weights, topk_ids = FusedMoE.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias,
-            indices_type=self.topk_indices_dtype)
+            from triton_kernels.routing import (routing)
 
-        if self.rocm_aiter_moe_enabled:
-            assert expert_map is None
-            return self.rocm_aiter_fused_experts(
+            routing_data, gather_idx, scatter_idx = routing(router_logits, top_k, renormalize)
+
+            return fused_experts_triton_exp(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                activation=activation,
-                apply_router_weight_on_input=apply_router_weight_on_input)
-        else:
-            return self.fused_experts(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                inplace=True,
+                routing_data=routing_data,
+                gather_indx=gather_idx,
+                scatter_indx=scatter_idx,
                 activation=activation,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
-                expert_map=expert_map,
+                expert_map=expert_map
             )
+        else:
+            topk_weights, topk_ids = FusedMoE.select_experts(
+                hidden_states=x,
+                router_logits=router_logits,
+                use_grouped_topk=use_grouped_topk,
+                top_k=top_k,
+                renormalize=renormalize,
+                topk_group=topk_group,
+                num_expert_group=num_expert_group,
+                custom_routing_function=custom_routing_function,
+                scoring_func=scoring_func,
+                e_score_correction_bias=e_score_correction_bias,
+                indices_type=torch.uint32 if self.moe.use_pplx_kernels else None)
+
+            if self.rocm_aiter_moe_enabled:
+                assert expert_map is None
+                return self.rocm_aiter_fused_experts(
+                    hidden_states=x,
+                    w1=layer.w13_weight,
+                    w2=layer.w2_weight,
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                    activation=activation,
+                    apply_router_weight_on_input=apply_router_weight_on_input)
+            else:
+                return self.fused_experts(  
+                    hidden_states=x,
+                    w1=layer.w13_weight,
+                    w2=layer.w2_weight,
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                    inplace=True,
+                    activation=activation,
+                    apply_router_weight_on_input=apply_router_weight_on_input,
+                    global_num_experts=global_num_experts,
+                    expert_map=expert_map,
+                )
 
     def forward_cpu(
         self,
@@ -1031,6 +1063,8 @@ class FusedMoE(torch.nn.Module):
         # Index the loaded weight for tp sharding.
         # gate_up_proj: "MergedColumnParallel", so tp sharding on output_dim
         shard_size = expert_data.shape[shard_dim] // 2
+        if envs.VLLM_USE_EXP_TRITON_KERNEL:
+            loaded_weight = loaded_weight.transpose(-2, -1).contiguous()
         loaded_weight = loaded_weight.narrow(shard_dim, shard_size * tp_rank,
                                              shard_size)
         # Narrow parameter and load.
@@ -1054,6 +1088,8 @@ class FusedMoE(torch.nn.Module):
         # down_proj: "RowParallel" so tp sharding on input_dim
         # Narrow parameter and load.
         shard_size = expert_data.shape[shard_dim]
+        if envs.VLLM_USE_EXP_TRITON_KERNEL:
+            loaded_weight = loaded_weight.transpose(-2, -1).contiguous()
         if not load_full:
             loaded_weight = loaded_weight.narrow(shard_dim,
                                                  shard_size * tp_rank,
@@ -1124,6 +1160,8 @@ class FusedMoE(torch.nn.Module):
         # should be flipped. Required by GPTQ, compressed-tensors
         # should be whatever dimension intermediate_size_per_partition is
         is_transposed = getattr(param, "is_transposed", False)
+        if envs.VLLM_USE_EXP_TRITON_KERNEL:
+            is_transposed = not is_transposed
         shard_dim = SHARD_ID_TO_SHARDED_DIM[shard_id]
         if is_transposed:
             shard_dim = int(not shard_dim)
