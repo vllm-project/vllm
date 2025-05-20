@@ -188,8 +188,10 @@ class EplbState:
         Rearrange the experts according to the current load.
         """
 
-        ep_group = get_ep_group()
+        ep_group = get_ep_group().device_group
         ep_rank = ep_group.rank()
+
+        time_start = None
         is_main_rank = ep_rank == 0
         if is_main_rank:
             torch.cuda.synchronize()
@@ -248,7 +250,12 @@ class EplbState:
             ep_group,
         )
 
+        self.physical_to_logical_map.copy_(new_physical_to_logical_map)
+        self.logical_to_physical_map.copy_(new_logical_to_physical_map)
+        self.logical_replica_count.copy_(new_logical_replica_count)
+
         if is_main_rank:
+            assert time_start is not None
             torch.cuda.synchronize()
             time_end = time.perf_counter()
             logger.info(
