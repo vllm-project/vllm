@@ -30,17 +30,19 @@ sampling_params = SamplingParams(**param_kwargs)
 
 def main():
     # Create an LLM.
-    llm = LLM(model="deepseek-ai/DeepSeek-V2-Lite", 
-              enforce_eager=False,
+    model = "deepseek-ai/DeepSeek-V2-Lite"
+    # model = "facebook/opt-125m"
+    llm = LLM(model=model, 
+              enforce_eager=True,
               compilation_config=2,
               ###############
               trust_remote_code=True,
               max_model_len=1024,
               #load_format="dummy",
               ###############
-              tensor_parallel_size=2,
+              tensor_parallel_size=4,
               #data_parallel_size=2,
-              enable_expert_parallel=True,
+              enable_expert_parallel=False,
               ###############
               enable_microbatching=True, 
     )
