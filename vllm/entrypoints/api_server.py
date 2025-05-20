@@ -8,6 +8,7 @@ change `vllm/entrypoints/openai/api_server.py` instead.
 """
 import asyncio
 import json
+import os
 import ssl
 from argparse import Namespace
 from collections.abc import AsyncGenerator
@@ -126,6 +127,12 @@ async def run_server(args: Namespace,
     app = await init_app(args, llm_engine)
     assert engine is not None
 
+    # Load logging config for uvicorn if specified
+    log_config = None
+    if getattr(args, "log_config_file", None):
+        with open(args.log_config_file, "r") as f:
+            log_config = json.load(f)
+
     shutdown_task = await serve_http(
         app,
         sock=None,
@@ -138,6 +145,7 @@ async def run_server(args: Namespace,
         ssl_certfile=args.ssl_certfile,
         ssl_ca_certs=args.ssl_ca_certs,
         ssl_cert_reqs=args.ssl_cert_reqs,
+        log_config=log_config,
         **uvicorn_kwargs,
     )
 
@@ -171,6 +179,12 @@ if __name__ == "__main__":
         default=None,
         help="FastAPI root_path when app is behind a path based routing proxy")
     parser.add_argument("--log-level", type=str, default="debug")
+    parser.add_argument(
+        "--log-config-file",
+        type=str,
+        default=os.environ.get("VLLM_LOGGING_CONFIG_PATH", None),
+        help="Path to logging config JSON file for both vllm and uvicorn",
+    )
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
 

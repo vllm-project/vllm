@@ -5,6 +5,7 @@ import atexit
 import gc
 import importlib
 import inspect
+import json
 import multiprocessing
 import os
 import re
@@ -1321,6 +1322,12 @@ async def run_server(args, **uvicorn_kwargs) -> None:
 
     signal.signal(signal.SIGTERM, signal_handler)
 
+    # Load logging config for uvicorn if specified
+    log_config = None
+    if getattr(args, "log_config_file", None):
+        with open(args.log_config_file, "r") as f:
+            log_config = json.load(f)
+
     async with build_async_engine_client(args) as engine_client:
         app = build_app(args)
 
@@ -1352,6 +1359,7 @@ async def run_server(args, **uvicorn_kwargs) -> None:
             ssl_certfile=args.ssl_certfile,
             ssl_ca_certs=args.ssl_ca_certs,
             ssl_cert_reqs=args.ssl_cert_reqs,
+            log_config=log_config,
             **uvicorn_kwargs,
         )
 
