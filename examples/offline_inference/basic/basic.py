@@ -30,10 +30,15 @@ sampling_params = SamplingParams(**param_kwargs)
 
 def main():
     # Create an LLM.
-    llm = LLM(model="facebook/opt-125m", 
+    llm = LLM(model="deepseek-ai/DeepSeek-V2-Lite", 
               enforce_eager=False,
               compilation_config=2,
-              enable_microbatching=True,)
+              enable_microbatching=True,
+              trust_remote_code=True,
+              tensor_parallel_size=4,
+              max_model_len=1024,
+              #load_format="dummy",
+    )
     # Generate texts from the prompts.
     # The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.
