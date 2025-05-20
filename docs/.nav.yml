@@ -46,5 +46,5 @@ nav:
     - api/README.md
     - api/vllm/*
   - Community:
-    - vLLM Blog: https://blog.vllm.ai
     - community/*
+    - vLLM Blog: https://blog.vllm.ai
