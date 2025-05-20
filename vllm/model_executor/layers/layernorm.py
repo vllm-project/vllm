@@ -177,7 +177,7 @@ class RMSNorm(CustomOp):
             return self.forward_native(x, residual)
         if residual is not None:
             orig_shape = x.shape
-            residual += x.view(residual.shape)
+            residual = residual + x.view(residual.shape)
             # Note: HPUFusedRMSNorm requires 3D tensors as inputs
             x = HPUFusedRMSNorm.apply(residual, self.weight,
                                       self.variance_epsilon)
