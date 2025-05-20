@@ -1294,10 +1294,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 return num_tokens, *self._get_model_inputs(tokens_slice, scheduler_output)
         
         @torch.inference_mode()
-        def process_batch(i, is_dummy_ubatch, is_dummy_run, attn_metadata, vllm_config, model, num_tokens, input_ids, positions, inputs_embeds, intermediate_tensors, results):
-            with set_forward_context(attn_metadata[i] if attn_metadata is not None else None,
+        def process_batch(save_results, attn_metadata, vllm_config, model, num_tokens, input_ids, positions, inputs_embeds, intermediate_tensors, results, stream):
+            with set_forward_context(attn_metadata,
                                     vllm_config,
                                     num_tokens=num_tokens):
+                torch.cuda.set_stream(stream)
+                
                 model_output = model(
                     input_ids=input_ids,
                     positions=positions,
@@ -1305,7 +1307,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     inputs_embeds=inputs_embeds,
                 )
                 
-                if not is_dummy_ubatch or is_dummy_run:
+                if save_results:
                     results.append(model_output.clone())
 
         def threaded_processing(ubatch_slices, attn_metadata, vllm_config, model, is_dummy_run=False):
@@ -1320,10 +1322,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     model_inputs(tokens_slice, is_dummy_ubatch)
 
                 thread = threading.Thread(target=process_batch, args=(
-                    i, 
-                    is_dummy_ubatch, 
-                    is_dummy_run, 
-                    attn_metadata, 
+                    not is_dummy_ubatch or is_dummy_run,
+                    attn_metadata[i] if attn_metadata is not None else None, 
                     vllm_config, 
                     model, 
                     num_tokens, 
@@ -1332,6 +1332,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     inputs_embeds, 
                     intermediate_tensors,
                     results,
+                    torch.cuda.current_stream()
                 ))
                 thread.start()
                 thread.join()

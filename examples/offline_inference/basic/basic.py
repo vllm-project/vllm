@@ -34,8 +34,9 @@ def main():
               enforce_eager=False,
               compilation_config=2,
               enable_microbatching=True,
+              enable_expert_parallel=True,
               trust_remote_code=True,
-              tensor_parallel_size=4,
+              tensor_parallel_size=2,
               max_model_len=1024,
               #load_format="dummy",
     )
