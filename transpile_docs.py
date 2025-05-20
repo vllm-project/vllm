@@ -75,12 +75,12 @@ def replace_links(line: str) -> str:
 
     line = myst_anchor_pattern.sub(replace_myst_anchor, line)
     # Fix references to these anchors
-    myst_anchor_ref_pattern = re.compile(r"\[(.*?)\]\(#(.*?)\)")
+    myst_anchor_ref_pattern = re.compile(r"\[(?P<title>.*?)\]\(#(?P<anchor>.*?)\)")
 
     def replace_myst_anchor_ref(match: re.Match) -> str:
-        anchor = match.group(2)
+        anchor = match.group("anchor")
         if anchor in MYST_ANCHORS:
-            title = match.group(1)
+            title = match.group("title")
             if not title:
                 title = anchor.replace("-", " ").title()
             return f"[{title}][{anchor}]"
