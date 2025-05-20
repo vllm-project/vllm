@@ -205,18 +205,3 @@ shellcheck*/
 
 # Ingore moe/marlin_moe gen code
 csrc/moe/marlin_moe_wna16/kernel_*
-
-docs/assets
-docs/api
-docs/community
-docs/contributing
-docs/deployment
-docs/integration
-docs/design
-docs/features
-docs/getting_started
-docs/models
-docs/performance
-docs/serving
-docs/training
-docs/README.md

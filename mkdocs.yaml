@@ -2,8 +2,6 @@ site_name: vLLM
 site_url: https://docs.vllm.ai
 repo_url: https://github.com/vllm-project/vllm
 exclude_docs: |
-  # The old docs we're transpiling from
-  source/**
   *.inc.md
   *.template.md
 theme:
