@@ -16,16 +16,16 @@ from vllm.config import LoRAConfig
 from vllm.lora.fully_sharded_layers import (
     ColumnParallelLinearWithShardedLoRA,
     MergedColumnParallelLinearWithShardedLoRA,
-    MergedQKVParallelLinearWithShardedLora, QKVParallelLinearWithShardedLora,
+    MergedQKVParallelLinearWithShardedLoRA, QKVParallelLinearWithShardedLoRA,
     RowParallelLinearWithShardedLoRA)
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
-                              LinearScalingRotaryEmbeddingWithLora,
+                              LinearScalingRotaryEmbeddingWithLoRA,
                               LogitsProcessorWithLoRA, LoRAMapping,
                               MergedColumnParallelLinearWithLoRA,
-                              MergedQKVParallelLinearWithLora,
-                              QKVParallelLinearWithLora,
+                              MergedQKVParallelLinearWithLoRA,
+                              QKVParallelLinearWithLoRA,
                               ReplicatedLinearWithLoRA,
                               RowParallelLinearWithLoRA,
                               VocabParallelEmbeddingWithLoRA)
@@ -293,7 +293,9 @@ def test_embeddings(dist_init, num_loras, device, vocab_size, stage) -> None:
                                        vocab_size,
                                        lora_config.lora_extra_vocab_size)
 
-        lora_result = lora_embedding(torch.cat(inputs))
+        # TODO - remove reshape once we move to flat tensors
+        lora_result = lora_embedding(
+            torch.cat(inputs).reshape(num_loras * 3, -1))
 
         expected_results: list[torch.Tensor] = []
         for input_, lora_id in zip(inputs, prompt_mapping):
@@ -305,7 +307,11 @@ def test_embeddings(dist_init, num_loras, device, vocab_size, stage) -> None:
             )
             result += (after_a @ lora.lora_b)
             expected_results.append(result)
+        # TODO - remove reshape once we move to flat tensors
+        lora_shape = lora_result.shape
         expected_result = torch.cat(expected_results)
+        expected_result = expected_result.reshape(lora_shape[0], lora_shape[1],
+                                                  lora_shape[2])
 
         rtol, atol = TOLERANCES[lora_result.dtype]
         torch.testing.assert_close(lora_result,
@@ -340,8 +346,11 @@ def test_embeddings(dist_init, num_loras, device, vocab_size, stage) -> None:
                                        vocab_size,
                                        lora_config.lora_extra_vocab_size)
 
-        lora_result = lora_embedding(torch.cat(inputs))
-        expected_result = embedding(torch.cat(inputs))
+        # TODO - remove reshape once we move to flat tensors
+        lora_result = lora_embedding(
+            torch.cat(inputs).reshape(num_loras * 3, -1))
+        expected_result = embedding(
+            torch.cat(inputs).reshape(num_loras * 3, -1))
 
         rtol, atol = TOLERANCES[lora_result.dtype]
         torch.testing.assert_close(lora_result,
@@ -449,7 +458,9 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device,
                                   (embeddings_tensor_len *
                                    max_loras)] = torch.cat(embeddings_tensors)
 
-        lora_result = lora_embedding(torch.cat(original_inputs))
+        # TODO - remove reshape once we move to flat tensors
+        lora_result = lora_embedding(
+            torch.cat(original_inputs).reshape(num_loras * 3, -1))
 
         expected_results: list[torch.Tensor] = []
         for input_, original_input_, lora_id in zip(inputs, original_inputs,
@@ -462,7 +473,11 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device,
             )
             result += (after_a @ lora.lora_b)
             expected_results.append(result)
+        # TODO - remove reshape once we move to flat tensors
+        lora_shape = lora_result.shape
         expected_result = torch.cat(expected_results)
+        expected_result = expected_result.reshape(lora_shape[0], lora_shape[1],
+                                                  lora_shape[2])
 
         rtol, atol = TOLERANCES[lora_result.dtype]
         torch.testing.assert_close(lora_result,
@@ -497,8 +512,11 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device,
         punica_wrapper.update_metadata(lora_mapping, id_to_index, max_loras,
                                        vocab_size,
                                        lora_config.lora_extra_vocab_size)
-        lora_result = lora_embedding(torch.cat(original_inputs))
-        expected_result = expanded_embedding(torch.cat(inputs))
+        # TODO - remove reshape once we move to flat tensors
+        lora_result = lora_embedding(
+            torch.cat(original_inputs).reshape(num_loras * 3, -1))
+        expected_result = expanded_embedding(
+            torch.cat(inputs).reshape(num_loras * 3, -1))
 
         rtol, atol = TOLERANCES[lora_result.dtype]
         torch.testing.assert_close(lora_result,
@@ -993,9 +1011,9 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
                                        params_dtype=torch.bfloat16)
             linear.weight.data = torch.rand_like(linear.weight.data,
                                                  device=device)
-            lora_linear = (MergedQKVParallelLinearWithLora(linear)
+            lora_linear = (MergedQKVParallelLinearWithLoRA(linear)
                            if not fully_shard else
-                           MergedQKVParallelLinearWithShardedLora(linear))
+                           MergedQKVParallelLinearWithShardedLoRA(linear))
         else:
             linear = QKVParallelLinear(4096,
                                        64,
@@ -1004,9 +1022,9 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
                                        params_dtype=torch.bfloat16)
             linear.weight.data = torch.rand_like(linear.weight.data,
                                                  device=device)
-            lora_linear = QKVParallelLinearWithLora(
+            lora_linear = QKVParallelLinearWithLoRA(
                 linear
-            ) if not fully_shard else QKVParallelLinearWithShardedLora(linear)
+            ) if not fully_shard else QKVParallelLinearWithShardedLoRA(linear)
 
         @dataclass
         class FakeConfig:
@@ -1168,7 +1186,7 @@ def _test_rotary_embedding_long_context(dist_init, num_loras, device,
                     base,
                     is_neox_style,
                     dtype=torch.bfloat16)
-    lora_rope = LinearScalingRotaryEmbeddingWithLora(rope)
+    lora_rope = LinearScalingRotaryEmbeddingWithLoRA(rope)
     lora_rope.set_mapping(punica_wrapper)
     lora_rope.create_lora_weights(max_loras, lora_config)
     linear_rope = get_rope(head_size,
