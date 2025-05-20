@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Inference-only FalconH1 model."""
 from collections.abc import Iterable
-from typing import Optional, set, tuple
+from typing import Optional
 
 import torch
 from torch import nn
