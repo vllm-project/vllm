@@ -18,7 +18,6 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
-from json import JSONDecodeError
 from typing import Annotated, Optional, Union
 
 import prometheus_client
@@ -962,7 +961,7 @@ async def invocations(raw_request: Request):
     """
     try:
         body = await raw_request.json()
-    except JSONDecodeError as e:
+    except json.JSONDecodeError as e:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST.value,
                             detail=f"JSON decode error: {e}") from e
 
@@ -1325,8 +1324,12 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     # Load logging config for uvicorn if specified
     log_config = None
     if getattr(args, "log_config_file", None):
-        with open(args.log_config_file, "r") as f:
-            log_config = json.load(f)
+        try:
+            with open(args.log_config_file, "r") as f:
+                log_config = json.load(f)
+        except Exception as e:
+            logger.warning("Failed to load log config from file %s: error %e",
+                           args.log_config_file, e)
 
     async with build_async_engine_client(args) as engine_client:
         app = build_app(args)

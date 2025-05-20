@@ -130,8 +130,12 @@ async def run_server(args: Namespace,
     # Load logging config for uvicorn if specified
     log_config = None
     if getattr(args, "log_config_file", None):
-        with open(args.log_config_file, "r") as f:
-            log_config = json.load(f)
+        try:
+            with open(args.log_config_file, "r") as f:
+                log_config = json.load(f)
+        except Exception as e:
+            logger.warning("Failed to load log config from file %s: error %e",
+                           args.log_config_file, e)
 
     shutdown_task = await serve_http(
         app,
