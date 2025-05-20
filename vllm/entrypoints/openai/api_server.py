@@ -931,7 +931,7 @@ async def invocations(raw_request: Request):
     """
     try:
         body = await raw_request.json()
-    except JSONDecodeError as e:
+    except json.JSONDecodeError as e:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST.value,
                             detail=f"JSON decode error: {e}") from e
 
@@ -1328,8 +1328,12 @@ async def run_server_worker(listen_address,
     # Load logging config for uvicorn if specified
     log_config = None
     if getattr(args, "log_config_file", None):
-        with open(args.log_config_file, "r") as f:
-            log_config = json.load(f)
+        try:
+            with open(args.log_config_file, "r") as f:
+                log_config = json.load(f)
+        except Exception as e:
+            logger.warning("Failed to load log config from file %s: error %e",
+                           args.log_config_file, e)
 
     async with build_async_engine_client(args, client_config) as engine_client:
         app = build_app(args)
