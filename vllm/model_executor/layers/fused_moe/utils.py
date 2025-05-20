@@ -14,6 +14,11 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
 from vllm.platforms import current_platform
 from vllm.utils import cdiv
 
+try:
+    from aiter.ops.triton.quant import dynamic_mxfp4_quant
+except ImportError:
+    dynamic_mxfp4_quant = None
+
 
 def _resize_cache(x: torch.Tensor, v: tuple[int, ...]) -> torch.Tensor:
     """
@@ -79,14 +84,15 @@ def _mxfp4_quantize(
     A_scale: Optional[torch.Tensor],
     per_act_token: bool,
     block_shape: Optional[list[int]] = None,
-) -> tuple[torch.Tensor, None]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     assert block_shape is None
     if not current_platform.supports_mx():
         A = quant_dequant_mxfp4(A)
     else:
-        raise NotImplementedError()
+        assert dynamic_mxfp4_quant is not None
+        A, A_scale = dynamic_mxfp4_quant(A)
 
-    return A, None
+    return A, A_scale
 
 
 def moe_kernel_quantize_input(

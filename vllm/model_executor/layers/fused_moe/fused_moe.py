@@ -27,6 +27,11 @@ from vllm.utils import direct_register_custom_op
 
 from .rocm_aiter_fused_moe import is_rocm_aiter_moe_enabled
 
+try:
+    from aiter.ops.triton.moe_op_mxfp4 import fused_moe_mxfp4
+except ImportError:
+    fused_moe_mxfp4 = None
+
 logger = init_logger(__name__)
 
 
@@ -481,11 +486,15 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
                             use_int8_w8a8: bool,
                             use_int8_w8a16: bool,
                             use_int4_w4a16: bool,
+                            use_mxfp4_w4a4: bool,
                             per_channel_quant: bool,
                             block_shape: Optional[list[int]] = None) -> None:
     assert topk_weights is not None or not mul_routed_weight
     assert topk_weights is None or topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1
+
+    M = A.shape[0]
+    num_tokens = M * top_k
 
     if use_fp8_w8a8 or use_int8_w8a8:
         assert B_scale is not None
@@ -497,12 +506,21 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
     elif use_int8_w8a16 or use_int4_w4a16:
         assert B_scale is not None
         assert block_shape is None or block_shape[0] == 0
+    elif use_mxfp4_w4a4 and current_platform.supports_mx():
+        assert fused_moe_mxfp4 is not None
+        assert A_scale is not None
+        assert B_scale is not None
+        # # Need dummy scales for MoE MXFP4 kernel
+        # _a_scale = torch.ones(1, dtype=torch.float32, device=C.device)
+        # _b_scale = torch.ones(B.shape[0], dtype=torch.float32, device=C.device)
+        fused_moe_mxfp4(A, B, C, None, None, A_scale, B_scale,
+                        topk_weights, num_tokens, sorted_token_ids, expert_ids,
+                        num_tokens_post_padded, mul_routed_weight, top_k,
+                        False, False, config, compute_type)
+        return
     else:
         assert A_scale is None
         assert B_scale is None
-
-    M = A.shape[0]
-    num_tokens = M * top_k
 
     EM = sorted_token_ids.shape[0]
     if A.shape[0] < config["BLOCK_SIZE_M"]:
@@ -1290,14 +1308,28 @@ def fused_experts_impl(
                              use_int4_w4a16=use_int4_w4a16,
                              use_mxfp4_w4a4=use_mxfp4_w4a4)
 
-    get_config_func = functools.partial(
-        try_get_optimal_moe_config,
-        w1.shape,
-        w2.shape,
-        top_k_num,
-        config_dtype,
-        block_shape=block_shape,
-    )
+    if not use_mxfp4_w4a4:
+        get_config_func = functools.partial(
+            try_get_optimal_moe_config,
+            w1.shape,
+            w2.shape,
+            top_k_num,
+            config_dtype,
+            block_shape=block_shape,
+        )
+    else:
+        # [WIP] For now we only return a single config for MXFP4 MoE
+        get_config_func = lambda *args, **kwargs: {
+            "BLOCK_SIZE_M": 128,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 4,
+            "num_warps": 8,
+            "num_stages": 2,
+            "waves_per_eu": 0,
+            "matrix_instr_nonkdim": 16,
+            "kpack": 1
+        }
 
     config = get_config_func(M)
 
@@ -1327,7 +1359,6 @@ def fused_experts_impl(
         out_hidden_states = hidden_states
     else:
         out_hidden_states = torch.empty_like(hidden_states)
-
     if use_mxfp4_w4a4 and not current_platform.supports_mx(
     ) and envs.VLLM_QUARK_EMU_MEM_OPT:
         # Weight has to be dequantized for mxfp4 emulation.
@@ -1366,7 +1397,7 @@ def fused_experts_impl(
             qtype=qtype,
             per_channel_quant=per_channel_quant,
             block_shape=block_shape)
-
+    
         sorted_token_ids, expert_ids, num_tokens_post_padded = (
             moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'],
                                  global_num_experts, expert_map))
@@ -1389,6 +1420,7 @@ def fused_experts_impl(
                                 use_int8_w8a8=use_int8_w8a8,
                                 use_int8_w8a16=use_int8_w8a16,
                                 use_int4_w4a16=use_int4_w4a16,
+                                use_mxfp4_w4a4=use_mxfp4_w4a4,
                                 per_channel_quant=per_channel_quant,
                                 block_shape=block_shape)
 
@@ -1426,6 +1458,7 @@ def fused_experts_impl(
                                 use_int8_w8a8=use_int8_w8a8,
                                 use_int8_w8a16=use_int8_w8a16,
                                 use_int4_w4a16=use_int4_w4a16,
+                                use_mxfp4_w4a4=use_mxfp4_w4a4,
                                 per_channel_quant=per_channel_quant,
                                 block_shape=block_shape)
 
@@ -1696,6 +1729,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                 use_int8_w8a8=self.use_int8_w8a8,
                                 use_int8_w8a16=self.use_int8_w8a16,
                                 use_int4_w4a16=self.use_int4_w4a16,
+                                use_mxfp4_w4a4=self.use_mxfp4_w4a4,
                                 per_channel_quant=self.per_channel_quant,
                                 block_shape=self.block_shape)
 

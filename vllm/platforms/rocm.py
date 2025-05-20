@@ -98,7 +98,7 @@ def with_amdsmi_context(fn):
 @cache
 def on_mi250_mi300() -> bool:
     GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
-    return any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942"])
+    return any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
 
 
 @cache
@@ -118,7 +118,7 @@ def use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
             and (qtype == torch.half or qtype == torch.bfloat16)
             and (head_size == 64 or head_size == 128)
             and (block_size == 16 or block_size == 32)
-            and (gqa_ratio >= 1 and gqa_ratio <= 16) and max_seq_len <= 32768
+            and (gqa_ratio >= 1 and gqa_ratio <= 16) and max_seq_len <= 131072
             and (envs.VLLM_ROCM_CUSTOM_PAGED_ATTN)
             and not (envs.VLLM_ROCM_USE_AITER_PAGED_ATTN
                      and envs.VLLM_ROCM_USE_AITER))
