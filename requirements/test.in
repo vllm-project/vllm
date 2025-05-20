@@ -33,6 +33,7 @@ num2words # required for smolvlm test
 opencv-python-headless >= 4.11.0 # required for video test
 datamodel_code_generator # required for minicpm3 test
 lm-eval[api]==0.4.8 # required for model evaluation test
+mteb>=1.38.11, <2 # required for mteb test
 transformers==4.51.3
 tokenizers==0.21.1
 huggingface-hub[hf_xet]>=0.30.0  # Required for Xet downloads.
