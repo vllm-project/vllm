@@ -84,7 +84,7 @@ def _mxfp4_quantize(
     A_scale: Optional[torch.Tensor],
     per_act_token: bool,
     block_shape: Optional[list[int]] = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
     assert block_shape is None
     if not current_platform.supports_mx():
         A = quant_dequant_mxfp4(A)
