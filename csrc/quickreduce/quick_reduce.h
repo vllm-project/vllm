@@ -21,15 +21,12 @@ static_assert(sizeof(void*) == sizeof(fptr_t));
 enum QuickReduceAlgo {
   ONESHOT_FP16 = 0,
   TWOSHOT_FP16 = 1,
-  TWOSHOT_Q8 = 2,
-  TWOSHOT_Q4 = 3,
-  TWOSHOT_MAX_MIN_Q8 = 4,
-  TWOSHOT_MAX_MIN_Q4 = 5,
+  TWOSHOT_SYMM_Q8 = 2,
+  TWOSHOT_SYMM_Q4 = 3,
+  TWOSHOT_ASYMM_Q8 = 4,
+  TWOSHOT_ASYMM_Q4 = 5,
 };
 
-// ============================================================
-// KERNEL
-// ============================================================
 template <typename AllReduceKernel, typename T>
 __global__ __quickreduce_launch_bounds__ static void allreduce_prototype(
     T const* A, T* B, int N, int num_blocks, int world_size, int rank,
@@ -44,9 +41,6 @@ __global__ __quickreduce_launch_bounds__ static void allreduce_prototype(
   }
 }
 
-// ============================================================
-// DISPATCH
-// ============================================================
 #define TWOSHOT_DISPATCH(__codec)                                             \
   if (world_size == 2) {                                                      \
     using LineCodec = __codec<T, 2>;                                          \
@@ -71,11 +65,6 @@ __global__ __quickreduce_launch_bounds__ static void allreduce_prototype(
                        flag_color);                                           \
   }
 
-/*
-===============================================================
-Desc:
-    Device Comms Handle
-*/
 struct DeviceComms {
   // Workgroup scope = Tile = (256 threads x 16B x 8 atoms)
   static long constexpr kTileSize = 256 * 16 * 8;
@@ -172,7 +161,7 @@ struct DeviceComms {
   }
 
   template <typename T>
-  void allreduce(int profile, hipStream_t stream, T const* A, T* B, int N) {
+  void allreduce(int algo_int, hipStream_t stream, T const* A, T* B, int N) {
     if (world_size != 2 && world_size != 4 && world_size != 8) {
       throw std::runtime_error("All Reduce not supported for world_size = " +
                                std::to_string(world_size));
@@ -181,10 +170,10 @@ struct DeviceComms {
     // Configuration.
     long msg_size = N * sizeof(T);
     unsigned long num_blocks = divceil(msg_size, kTileSize);
-    unsigned long grid = min(304 * 4, num_blocks);
-    // -------------------------------------------------
+    unsigned long grid = min(kMaxNumBlocks, num_blocks);
+
     // All reduce dispatch.
-    QuickReduceAlgo algo = static_cast<QuickReduceAlgo>(profile);
+    QuickReduceAlgo algo = static_cast<QuickReduceAlgo>(algo_int);
 
     switch (algo) {
       case QuickReduceAlgo::ONESHOT_FP16:
@@ -194,16 +183,16 @@ struct DeviceComms {
                            num_blocks, world_size, rank, dbuffer_list,
                            data_offset, flag_color);
         break;
-      case QuickReduceAlgo::TWOSHOT_Q8:
+      case QuickReduceAlgo::TWOSHOT_SYMM_Q8:
         TWOSHOT_DISPATCH(CodecQ8Symm)
         break;
-      case QuickReduceAlgo::TWOSHOT_MAX_MIN_Q8:
+      case QuickReduceAlgo::TWOSHOT_ASYMM_Q8:
         TWOSHOT_DISPATCH(CodecQ8Asymm)
         break;
-      case QuickReduceAlgo::TWOSHOT_Q4:
+      case QuickReduceAlgo::TWOSHOT_SYMM_Q4:
         TWOSHOT_DISPATCH(CodecQ4Symm)
         break;
-      case QuickReduceAlgo::TWOSHOT_MAX_MIN_Q4:
+      case QuickReduceAlgo::TWOSHOT_ASYMM_Q4:
         TWOSHOT_DISPATCH(CodecQ4Asymm)
         break;
       default:
@@ -212,7 +201,6 @@ struct DeviceComms {
     }
     HIP_CHECK(cudaGetLastError());
 
-    // -------------------------------------------------
     // Rotate the flag color.
     flag_color++;
   }

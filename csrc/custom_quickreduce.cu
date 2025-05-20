@@ -66,9 +66,11 @@ void qr_all_reduce(quickreduce::fptr_t _fa, torch::Tensor& inp,
                         reinterpret_cast<half*>(inp.data_ptr()),
                         reinterpret_cast<half*>(out.data_ptr()), out.numel());
   } else if (out.scalar_type() == at::ScalarType::BFloat16) {
-    fa->allreduce<nv_bfloat16>(
-        algo_int, stream, reinterpret_cast<nv_bfloat16*>(inp.data_ptr()),
-        reinterpret_cast<nv_bfloat16*>(out.data_ptr()), out.numel());
+    fa->allreduce<quickreduce::nv_bfloat16>(
+        algo_int, stream,
+        reinterpret_cast<quickreduce::nv_bfloat16*>(inp.data_ptr()),
+        reinterpret_cast<quickreduce::nv_bfloat16*>(out.data_ptr()),
+        out.numel());
   } else {
     throw std::runtime_error(
         "quick allreduce only supports float16 and bfloat16");
