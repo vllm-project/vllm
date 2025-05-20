@@ -1343,8 +1343,8 @@ async def run_server_worker(listen_address,
 
         logger.info("Starting vLLM API server %d on %s", server_index,
                     listen_address)
-        shutdown_task = await serve_http(
-            app,
+        serve_http_kwargs = dict(
+            app=app,
             sock=sock,
             enable_ssl_refresh=args.enable_ssl_refresh,
             host=args.host,
@@ -1358,10 +1358,12 @@ async def run_server_worker(listen_address,
             ssl_certfile=args.ssl_certfile,
             ssl_ca_certs=args.ssl_ca_certs,
             ssl_cert_reqs=args.ssl_cert_reqs,
-            log_config=log_config,
             **uvicorn_kwargs,
         )
+        if log_config is not None:
+            serve_http_kwargs['log_config'] = log_config
 
+        shutdown_task = await serve_http(**serve_http_kwargs)
     # NB: Await server shutdown only after the backend context is exited
     try:
         await shutdown_task
