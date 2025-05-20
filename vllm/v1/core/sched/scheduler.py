@@ -352,8 +352,7 @@ class Scheduler(SchedulerInterface):
                             request)
                 else:
                     # P/D: skip checking prefix cache if loaded from remote kvs.
-                    new_computed_blocks = KVCacheBlocks.create_empty(
-                        self.kv_cache_manager.group_to_manager)
+                    new_computed_blocks = KVCacheBlocks.create_empty()
                     num_native_computed_tokens = 0
 
                 # Get externally-cached tokens if using a KVConnector.

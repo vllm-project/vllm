@@ -2,7 +2,7 @@
 
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, ClassVar, Optional
 
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
@@ -20,21 +20,25 @@ logger = init_logger(__name__)
 @dataclass
 class KVCacheBlocks:
     blocks: list[list[KVCacheBlockBundle]]
-    group_to_manager: list[tuple[int, int]]
+    """
+    blocks[i][j].blocks[k] refers to the i-th single_type_manager, the j-th 
+    block of the tokens, and the k-th kv cache group managed by that 
+    single_type_manager.
+    """
+    group_to_manager: ClassVar[list[tuple[int, int]]] = []
+    """
+    tuple(manager_id, group_id_in_manager) for each kv cache group.
+    """
 
     def __add__(self, other: "KVCacheBlocks") -> "KVCacheBlocks":
         """Adds two KVCacheBlocks instances."""
-        assert self.group_to_manager is other.group_to_manager
         return KVCacheBlocks(
-            [blk1 + blk2 for blk1, blk2 in zip(self.blocks, other.blocks)],
-            self.group_to_manager)
+            [blk1 + blk2 for blk1, blk2 in zip(self.blocks, other.blocks)])
 
     @classmethod
-    def create_empty(
-            cls, group_to_manager: list[tuple[int, int]]) -> "KVCacheBlocks":
+    def create_empty(cls) -> "KVCacheBlocks":
         """Creates a new KVCacheBlocks instance with no blocks."""
-        return cls([[] for _ in range(len(group_to_manager))],
-                   group_to_manager)
+        return cls([[] for _ in range(len(cls.group_to_manager))])
 
     def get_block_ids(self) -> list[list[int]]:
         """
@@ -92,6 +96,7 @@ class KVCacheManager:
             enable_kv_cache_events=enable_kv_cache_events,
         )
         self.group_to_manager = self.coordinator.group_to_manager
+        KVCacheBlocks.group_to_manager = self.group_to_manager
         self.block_pool = self.coordinator.block_pool
 
         self.all_block_sizes = set(g.kv_cache_spec.block_size
@@ -145,7 +150,7 @@ class KVCacheManager:
         # When the request requires prompt logprobs, we skip prefix caching.
         if (not self.enable_caching
                 or request.sampling_params.prompt_logprobs is not None):
-            return KVCacheBlocks.create_empty(self.group_to_manager), 0
+            return KVCacheBlocks.create_empty(), 0
 
         # The block hashes for the request may already be computed
         # if the scheduler has tried to schedule the request before.
@@ -178,8 +183,7 @@ class KVCacheManager:
             self.prefix_cache_stats.queries += len(request.all_token_ids)
             self.prefix_cache_stats.hits += num_new_computed_tokens
 
-        return KVCacheBlocks(computed_blocks,
-                             self.group_to_manager), num_new_computed_tokens
+        return KVCacheBlocks(computed_blocks), num_new_computed_tokens
 
     def allocate_slots(
         self,
@@ -281,7 +285,7 @@ class KVCacheManager:
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.
         if not self.enable_caching or delay_cache_blocks:
-            return KVCacheBlocks(new_blocks, self.group_to_manager)
+            return KVCacheBlocks(new_blocks)
 
         # Speculated tokens might be rejected in the future, so we does
         # not cache any speculated tokens. We only cache blocks with
@@ -290,7 +294,7 @@ class KVCacheManager:
             request, self.req_to_block_hashes[request.request_id],
             num_computed_tokens + num_new_tokens - len(request.spec_token_ids))
 
-        return KVCacheBlocks(new_blocks, self.group_to_manager)
+        return KVCacheBlocks(new_blocks)
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
@@ -379,5 +383,5 @@ class KVCacheManager:
 
     def get_block_ids(self, request_id: str) -> list[list[int]]:
         """Get the block ids of a request."""
-        return KVCacheBlocks(self.coordinator.get_block_ids(request_id),
-                             self.group_to_manager).get_block_ids()
+        return KVCacheBlocks(
+            self.coordinator.get_block_ids(request_id)).get_block_ids()
