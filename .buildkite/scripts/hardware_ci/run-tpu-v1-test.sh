@@ -35,6 +35,7 @@ python3 -m pip install --progress-bar off git+https://github.com/thuml/depyf.git
 echo "--- Python dependencies installed ---"
 export VLLM_USE_V1=1
 export VLLM_XLA_CHECK_RECOMPILATION=1
+export VLLM_XLA_CACHE_PATH=
 echo "Using VLLM V1"
 
 echo "--- Hardware Information ---"
