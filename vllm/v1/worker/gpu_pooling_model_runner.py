@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
 import gc
 import inspect
 import time
@@ -18,8 +19,11 @@ from vllm.attention.layer import Attention
 from vllm.attention.utils.fa_utils import get_flash_attn_version
 from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config)
+from vllm.distributed.kv_transfer import (get_kv_transfer_group,
+                                          has_kv_transfer_group)
+from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.distributed.parallel_state import get_pp_group, graph_capture
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model
@@ -39,6 +43,8 @@ from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
                                         SlidingWindowSpec)
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.pool.metadata import PoolingMetadata
+from vllm.v1.utils import bind_kv_cache
+from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.gpu_pooling_input_batch import (CachedRequestState,
                                                     InputBatch)
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
@@ -92,7 +98,6 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
         self.kv_cache_dtype_str = str(self.kv_cache_dtype).split('.')[-1]
 
         self.is_multimodal_model = model_config.is_multimodal_model
-
         self.max_model_len = model_config.max_model_len
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
@@ -101,8 +106,7 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
         self.num_query_heads = model_config.get_num_attention_heads(
             parallel_config)
         self.hidden_size = model_config.get_hidden_size()
-        assert model_config.attention_chunk_size is None
-        self.attention_chunk_size = None
+        self.attention_chunk_size = model_config.attention_chunk_size
 
         assert self.model_config.disable_cascade_attn
 
@@ -121,6 +125,7 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
         # Lazy initializations
         # self.model: nn.Module  # Set after load_model
         # Initialize in initialize_kv_cache
+        self.kv_caches: list[torch.Tensor] = []
         self.attn_metadata_builders: list[AttentionMetadataBuilder] = []
         self.attn_backends: list[type[AttentionBackend]] = []
         # self.kv_cache_config: KVCacheConfig
@@ -212,7 +217,6 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
                                          dtype=torch.int32,
                                          device="cpu",
                                          pin_memory=self.pin_memory)
-        self.input_ids_np = self.input_ids_cpu.numpy()
         self.positions_cpu = torch.zeros(self.max_num_tokens,
                                          dtype=torch.int64,
                                          device="cpu",
@@ -385,7 +389,8 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
             # Update the block IDs.
             if not req_data.resumed_from_preemption:
                 # Append the new blocks to the existing block IDs.
-                req_state.block_ids.extend(req_data.new_block_ids)
+                for i in range(len(self.kv_cache_config.kv_cache_groups)):
+                    req_state.block_ids[i].extend(req_data.new_block_ids[i])
             else:
                 # The request is resumed from preemption.
                 # Replace the existing block IDs with the new ones.
@@ -402,7 +407,8 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
             # Update the persistent batch.
             self.input_batch.num_computed_tokens_cpu[req_index] = (
                 num_computed_tokens)
-
+            self.input_batch.block_table.append_row(req_data.new_block_ids,
+                                                    req_index)
             # Add new_token_ids to token_ids_cpu.
             start_token_index = num_computed_tokens
             end_token_index = num_computed_tokens + len(req_data.new_token_ids)
@@ -448,6 +454,10 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
+
+        # OPTIMIZATION: Start copying the block table first.
+        # This way, we can overlap the copy with the following CPU operations.
+        self.input_batch.block_table.commit(num_reqs)
 
         # Get the number of scheduled tokens for each request.
         req_ids = self.input_batch.req_ids
@@ -504,6 +514,30 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
             # Copy the tensors to the GPU.
             self.get_token_type_ids()[:total_num_scheduled_tokens]\
                 .copy_(token_type_ids, non_blocking=True)
+
+        # Calculate the slot mapping for each KV cache group.
+        for kv_cache_group_id, kv_cache_group_spec in enumerate(
+                self.kv_cache_config.kv_cache_groups):
+            block_size = kv_cache_group_spec.kv_cache_spec.block_size
+            block_table: BlockTable = self.input_batch.block_table[
+                kv_cache_group_id]
+            # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+            # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
+            # where K is the max_num_blocks_per_req and the block size is 2.
+            # NOTE(woosuk): We can't simply use `token_indices // block_size`
+            # here because M (max_model_len) is not necessarily divisible by
+            # block_size.
+            block_table_indices = (
+                req_indices * block_table.max_num_blocks_per_req +
+                positions_np // block_size)
+            block_table_cpu = block_table.get_cpu_tensor()
+            block_numbers = block_table_cpu.flatten(
+            )[block_table_indices].numpy()
+            block_offsets = positions_np % block_size
+            np.add(
+                block_numbers * block_size,
+                block_offsets,
+                out=block_table.slot_mapping_np[:total_num_scheduled_tokens])
 
         # Prepare the attention metadata.
         self.query_start_loc_np[0] = 0
@@ -736,8 +770,11 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
 
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
-            # Return empty ModelRunnerOutput if there's no work to do.
-            return EMPTY_MODEL_RUNNER_OUTPUT
+            if not has_kv_transfer_group():
+                # Return empty ModelRunnerOutput if there's no work to do.
+                return EMPTY_MODEL_RUNNER_OUTPUT
+
+            return self.kv_connector_no_forward(scheduler_output)
 
         # Prepare the decoder inputs.
         attn_metadata = self._prepare_inputs(scheduler_output)
@@ -825,6 +862,7 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
                                  self.vllm_config,
                                  num_tokens=num_input_tokens,
                                  seq_lens=seq_lens):
+            self.maybe_setup_kv_connector(scheduler_output)
             output = self.model(
                 input_ids=input_ids,
                 positions=positions,
@@ -833,16 +871,15 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
                 **model_kwargs,
             )
 
+            self.maybe_wait_for_kv_save()
+            finished_sending, finished_recving = (
+                self.get_finished_kv_transfers(scheduler_output))
+
         hidden_states = output
 
         if not get_pp_group().is_last_rank:
             # For mid-pipeline stages, return the hidden states.
             return hidden_states
-
-        assert self.input_batch.num_reqs ==\
-                len(self.input_batch.pooling_params), \
-        "Either all or none of the requests in" \
-        " a batch must be pooling request"
 
         pooler_output = self.model.pooler(
             hidden_states=hidden_states,
@@ -857,6 +894,52 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
             prompt_logprobs_dict={},
             pooler_output=[o.data.to("cpu") for o in pooler_output.outputs],
         )
+
+    def kv_connector_no_forward(
+            self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
+        # KV send/recv even if no work to do.
+        with set_forward_context(None, self.vllm_config):
+            self.maybe_setup_kv_connector(scheduler_output)
+            finished_sending, finished_recving = (
+                self.get_finished_kv_transfers(scheduler_output))
+
+        if not finished_sending and not finished_recving:
+            return EMPTY_MODEL_RUNNER_OUTPUT
+
+        output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
+        output.finished_sending = finished_sending
+        output.finished_recving = finished_recving
+        return output
+
+    @staticmethod
+    def maybe_setup_kv_connector(scheduler_output: "SchedulerOutput"):
+        # Update KVConnector with the KVConnector metadata forward().
+        if has_kv_transfer_group():
+            kv_connector = get_kv_transfer_group()
+            assert isinstance(kv_connector, KVConnectorBase_V1)
+            assert scheduler_output.kv_connector_metadata is not None
+            kv_connector.bind_connector_metadata(
+                scheduler_output.kv_connector_metadata)
+
+            # Background KV cache transfers happen here.
+            # These transfers are designed to be async and the requests
+            # involved may be disjoint from the running requests.
+            # Do this here to save a collective_rpc.
+            kv_connector.start_load_kv(get_forward_context())
+
+    @staticmethod
+    def maybe_wait_for_kv_save() -> None:
+        if has_kv_transfer_group():
+            get_kv_transfer_group().wait_for_save()
+
+    @staticmethod
+    def get_finished_kv_transfers(
+        scheduler_output: "SchedulerOutput",
+    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+        if has_kv_transfer_group():
+            return get_kv_transfer_group().get_finished(
+                scheduler_output.finished_req_ids)
+        return None, None
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
@@ -1163,8 +1246,9 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
                         f"{attn_backend_name}, FlashAttention version is "
                         f"{flash_attn_version}.")
 
+            block_table_i = self.input_batch.block_table[i]
             attn_metadata_builder_i = attn_backend_i.get_builder_cls()(
-                weakref.proxy(self), None, None)
+                weakref.proxy(self), kv_cache_spec, block_table_i)
             self.attn_backends.append(attn_backend_i)
             self.attn_metadata_builders.append(attn_metadata_builder_i)
 
@@ -1176,11 +1260,6 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
             cache size of each layer
         """
         self.kv_cache_config = kv_cache_config
-        if len(kv_cache_config.kv_cache_groups) != 1:
-            raise NotImplementedError(
-                "Hybrid models with more than one KV cache type are not "
-                "supported yet.")
-        self.kv_cache_config = kv_cache_config
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
@@ -1188,8 +1267,46 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
             device=self.device,
             pin_memory=self.pin_memory,
             vocab_size=self.model_config.get_vocab_size(),
+            kv_cache_config=kv_cache_config,
         )
         self.initialize_attn_backend(kv_cache_config)
+
+        kv_caches: dict[str, torch.Tensor] = {}
+
+        for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+            kv_cache_spec = kv_cache_group.kv_cache_spec
+            for layer_name in kv_cache_group.layer_names:
+                tensor_config = kv_cache_config.tensors[layer_name]
+                assert tensor_config.size % kv_cache_spec.page_size_bytes == 0
+                num_blocks = tensor_config.size // kv_cache_spec.page_size_bytes
+                # `num_blocks` is the number of blocks the model runner can use.
+                # `kv_cache_config.num_blocks` is the number of blocks that
+                # KVCacheManager may allocate.
+                # Since different GPUs may have different number of layers and
+                # different memory capacities, `num_blocks` can be different on
+                # different GPUs, and `kv_cache_config.num_blocks` is set to
+                # the min of all `num_blocks`. Verify it here.
+                assert num_blocks >= kv_cache_config.num_blocks
+                if isinstance(kv_cache_spec, AttentionSpec):
+                    kv_cache_shape = self.attn_backends[i].get_kv_cache_shape(
+                        num_blocks, kv_cache_spec.block_size,
+                        kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
+                    dtype = kv_cache_spec.dtype
+                    kv_caches[layer_name] = torch.zeros(kv_cache_shape,
+                                                        dtype=dtype,
+                                                        device=self.device)
+                else:
+                    # TODO: add new branches when introducing more types of
+                    # KV cache specs.
+                    raise ValueError("Unknown KV cache spec type.")
+
+        bind_kv_cache(
+            kv_caches,
+            self.vllm_config.compilation_config.static_forward_context,
+            self.kv_caches)
+
+        if has_kv_transfer_group():
+            get_kv_transfer_group().register_kv_caches(kv_caches)
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
@@ -1199,12 +1316,6 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
             KVCacheSpec: A dictionary mapping layer names to their KV cache
             format. Layers that do not need KV cache are not included.
         """
-
-        # The KV cache spec has to be returned even though we're not
-        # actually using a KV cache here. Unless we create a specialized
-        # scheduler for pooling, the default scheduler is tightly coupled
-        # with the kv_cache_manager. But at least this will make the
-        # scheduler schedule based on memory usage.
 
         layers = get_layers_from_vllm_config(self.vllm_config, Attention)
         block_size = self.vllm_config.cache_config.block_size

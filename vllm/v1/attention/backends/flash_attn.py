@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Attention layer with FlashAttention."""
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, cast
+from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
 import torch
@@ -85,8 +85,8 @@ class FlashAttentionMetadata:
     query_start_loc: torch.Tensor
     max_seq_len: int
     seq_lens: torch.Tensor
-    block_table: Optional[torch.Tensor]
-    slot_mapping: Optional[torch.Tensor]
+    block_table: torch.Tensor
+    slot_mapping: torch.Tensor
 
     # For cascade attention.
     use_cascade: bool
@@ -291,9 +291,8 @@ def _get_sliding_window_configs(
 
 class FlashAttentionMetadataBuilder:
 
-    def __init__(self, runner: "GPUModelRunner",
-                 kv_cache_spec: Optional[AttentionSpec],
-                 block_table: Optional[BlockTable]):
+    def __init__(self, runner: "GPUModelRunner", kv_cache_spec: AttentionSpec,
+                 block_table: BlockTable):
         model_config = runner.model_config
         compilation_config = runner.vllm_config.compilation_config
 
@@ -303,7 +302,7 @@ class FlashAttentionMetadataBuilder:
         self.num_heads_kv = model_config.get_num_kv_heads(
             runner.parallel_config)
         self.headdim = model_config.get_head_size()
-        self.block_size = kv_cache_spec.block_size if kv_cache_spec else None
+        self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
         self.block_table = block_table
 
@@ -329,20 +328,17 @@ class FlashAttentionMetadataBuilder:
         max_seq_len = self.runner.seq_lens_np[:num_reqs].max()
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
-        block_table_tensor: Optional[torch.Tensor] = None
-        slot_mapping: Optional[torch.Tensor] = None
-        if self.block_table is not None:
-            block_table = self.block_table
-            block_table_tensor = block_table.get_device_tensor()[:num_reqs]
+        block_table = self.block_table
+        block_table_tensor = block_table.get_device_tensor()[:num_reqs]
 
-            block_table.slot_mapping[:num_actual_tokens].copy_(
-                block_table.slot_mapping_cpu[:num_actual_tokens],
-                non_blocking=True)
-            # Fill unused with -1. Needed for reshape_and_cache in full
-            # cuda graph mode.
-            block_table.slot_mapping[num_actual_tokens:].fill_(-1)
+        block_table.slot_mapping[:num_actual_tokens].copy_(
+            block_table.slot_mapping_cpu[:num_actual_tokens],
+            non_blocking=True)
+        # Fill unused with -1. Needed for reshape_and_cache in full cuda graph
+        # mode.
+        block_table.slot_mapping[num_actual_tokens:].fill_(-1)
 
-            slot_mapping = block_table.slot_mapping[:num_actual_tokens]
+        slot_mapping = block_table.slot_mapping[:num_actual_tokens]
 
         if self.aot_sliding_window is None:
             self.aot_sliding_window = (-1, -1)
@@ -381,14 +377,13 @@ class FlashAttentionMetadataBuilder:
         # for local attention
         local_attn_metadata = None
         if self.runner.attention_chunk_size is not None:
-            assert block_table_tensor is not None
             seqlens_q_local_np, virt_q_cu_seqlens_np, virt_k_seqlens_np, \
                 virt_block_table_tensor = make_local_attention_virtual_batches(
                     self.runner.attention_chunk_size,
                     self.runner.query_start_loc_np[:num_reqs + 1],
                     self.runner.seq_lens_np[:num_reqs],
                     block_table_tensor,
-                    cast(int, self.block_size),
+                    self.block_size,
                 )
             local_query_start_loc = torch.from_numpy(virt_q_cu_seqlens_np).to(
                 self.runner.device, non_blocking=True)
@@ -575,37 +570,32 @@ class FlashAttentionImpl(AttentionImpl):
         # performance to make sure it does not introduce any overhead.
 
         num_actual_tokens = attn_metadata.num_actual_tokens
-        if attn_metadata.block_table is not None:
-            # Reshape the input keys and values and store them in the cache.
-            # NOTE(woosuk): Here, key and value are padded while slot_mapping
-            # is not padded. However, we don't need to do
-            # key[:num_actual_tokens] and value[:num_actual_tokens] because
-            # the reshape_and_cache_flash op uses the slot_mapping's shape
-            # to determine the number of actual tokens.
-            key_cache, value_cache = kv_cache.unbind(0)
-            torch.ops._C_cache_ops.reshape_and_cache_flash(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                attn_metadata.slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
-            )
+        # Reshape the input keys and values and store them in the cache.
+        # NOTE(woosuk): Here, key and value are padded while slot_mapping is
+        # not padded. However, we don't need to do key[:num_actual_tokens] and
+        # value[:num_actual_tokens] because the reshape_and_cache_flash op uses
+        # the slot_mapping's shape to determine the number of actual tokens.
+        key_cache, value_cache = kv_cache.unbind(0)
+        torch.ops._C_cache_ops.reshape_and_cache_flash(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            attn_metadata.slot_mapping,
+            self.kv_cache_dtype,
+            layer._k_scale,
+            layer._v_scale,
+        )
 
-            if self.kv_cache_dtype.startswith("fp8"):
-                key_cache = key_cache.view(torch.float8_e4m3fn)
-                value_cache = value_cache.view(torch.float8_e4m3fn)
-                num_tokens, num_heads, head_size = query.shape
-                query, _ = ops.scaled_fp8_quant(
-                    query.reshape(
-                        (num_tokens, num_heads * head_size)).contiguous(),
-                    layer._q_scale)
-                query = query.reshape((num_tokens, num_heads, head_size))
-        else:
-            key_cache = key
-            value_cache = value
+        if self.kv_cache_dtype.startswith("fp8"):
+            key_cache = key_cache.view(torch.float8_e4m3fn)
+            value_cache = value_cache.view(torch.float8_e4m3fn)
+            num_tokens, num_heads, head_size = query.shape
+            query, _ = ops.scaled_fp8_quant(
+                query.reshape(
+                    (num_tokens, num_heads * head_size)).contiguous(),
+                layer._q_scale)
+            query = query.reshape((num_tokens, num_heads, head_size))
 
         # Compute attention and update output up to `num_actual_tokens`.
         use_local_attn = \
@@ -631,49 +621,27 @@ class FlashAttentionImpl(AttentionImpl):
 
             descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
 
-            if attn_metadata.block_table is not None:
-                flash_attn_varlen_func(
-                    q=query[:num_actual_tokens],
-                    k=key_cache,
-                    v=value_cache,
-                    out=output[:num_actual_tokens],
-                    cu_seqlens_q=cu_seqlens_q,
-                    max_seqlen_q=max_seqlen_q,
-                    seqused_k=seqused_k,
-                    max_seqlen_k=max_seqlen_k,
-                    softmax_scale=self.scale,
-                    causal=_get_causal_option(self.attn_type),
-                    alibi_slopes=self.alibi_slopes,
-                    window_size=self.sliding_window,
-                    block_table=block_table,
-                    softcap=self.logits_soft_cap,
-                    scheduler_metadata=scheduler_metadata,
-                    fa_version=self.vllm_flash_attn_version,
-                    q_descale=layer._q_scale.expand(descale_shape),
-                    k_descale=layer._k_scale.expand(descale_shape),
-                    v_descale=layer._v_scale.expand(descale_shape),
-                )
-            else:
-                flash_attn_varlen_func(
-                    q=query[:num_actual_tokens],
-                    k=key,
-                    v=value,
-                    out=output[:num_actual_tokens],
-                    cu_seqlens_q=attn_metadata.query_start_loc,
-                    max_seqlen_q=attn_metadata.max_query_len,
-                    #seqused_k=attn_metadata.seq_lens,
-                    cu_seqlens_k=attn_metadata.query_start_loc,
-                    max_seqlen_k=attn_metadata.max_seq_len,
-                    softmax_scale=self.scale,
-                    causal=_get_causal_option(self.attn_type),
-                    alibi_slopes=self.alibi_slopes,
-                    window_size=self.sliding_window,
-                    softcap=self.logits_soft_cap,
-                    fa_version=self.vllm_flash_attn_version,
-                    q_descale=layer._q_scale.expand(descale_shape),
-                    k_descale=layer._k_scale.expand(descale_shape),
-                    v_descale=layer._v_scale.expand(descale_shape),
-                )
+            flash_attn_varlen_func(
+                q=query[:num_actual_tokens],
+                k=key_cache,
+                v=value_cache,
+                out=output[:num_actual_tokens],
+                cu_seqlens_q=cu_seqlens_q,
+                max_seqlen_q=max_seqlen_q,
+                seqused_k=seqused_k,
+                max_seqlen_k=max_seqlen_k,
+                softmax_scale=self.scale,
+                causal=_get_causal_option(self.attn_type),
+                alibi_slopes=self.alibi_slopes,
+                window_size=self.sliding_window,
+                block_table=block_table,
+                softcap=self.logits_soft_cap,
+                scheduler_metadata=scheduler_metadata,
+                fa_version=self.vllm_flash_attn_version,
+                q_descale=layer._q_scale.expand(descale_shape),
+                k_descale=layer._k_scale.expand(descale_shape),
+                v_descale=layer._v_scale.expand(descale_shape),
+            )
             return output
 
         assert not use_local_attn, (

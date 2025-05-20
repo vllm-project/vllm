@@ -10,7 +10,9 @@ import torch
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.pooling_params import PoolingParams
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.pool.metadata import PoolingMetadata
+from vllm.v1.worker.block_table import MultiGroupBlockTable
 from vllm.v1.worker.interfaces import BaseInputBatch
 
 
@@ -53,6 +55,7 @@ class InputBatch(BaseInputBatch):
         device: torch.device,
         pin_memory: bool,
         vocab_size: int,
+        kv_cache_config: KVCacheConfig,
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
@@ -88,6 +91,16 @@ class InputBatch(BaseInputBatch):
         )
         self.num_computed_tokens_cpu = \
             self.num_computed_tokens_cpu_tensor.numpy()
+
+        # Block table.
+        self.block_table = MultiGroupBlockTable(
+            max_num_reqs=max_num_reqs,
+            max_model_len=max_model_len,
+            max_num_batched_tokens=max_num_batched_tokens,
+            pin_memory=pin_memory,
+            device=device,
+            kv_cache_config=kv_cache_config,
+        )
 
         # lora related
         self.request_lora_mapping = np.zeros((self.max_num_reqs, ),
@@ -150,6 +163,7 @@ class InputBatch(BaseInputBatch):
         self.num_tokens[req_index] = request.num_tokens
 
         self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens
+        self.block_table.add_row(request.block_ids, req_index)
 
         assert request.pooling_params is not None
         self.pooling_params[req_id] = request.pooling_params
@@ -219,6 +233,8 @@ class InputBatch(BaseInputBatch):
         self.request_lora_mapping[i1], self.request_lora_mapping[i2] =\
             self.request_lora_mapping[i2], self.request_lora_mapping[i1]
 
+        self.block_table.swap_row(i1, i2)
+
     def condense(self, empty_req_indices: list[int]) -> None:
         num_reqs = self.num_reqs
         if num_reqs == 0:
@@ -257,6 +273,7 @@ class InputBatch(BaseInputBatch):
                 last_req_index]
             self.num_computed_tokens_cpu[
                 empty_index] = self.num_computed_tokens_cpu[last_req_index]
+            self.block_table.move_row(last_req_index, empty_index)
 
             self.request_lora_mapping[empty_index] = self.request_lora_mapping[
                 last_req_index]
