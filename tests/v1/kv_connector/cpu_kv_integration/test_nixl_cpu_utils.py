@@ -82,11 +82,13 @@ def run_sender(buffer_config, host, base_port, rank, receiver_ready_event):
         # Verify handshake results
         assert dest_spec.get_id() in sender._remote_agents
         assert sender._remote_agents[dest_spec.get_id()] is not None
+        peer_name = sender._remote_agents[dest_spec.get_id()]
+        assert sender._remote_xfer_handlers[peer_name] is not None
         
         return True
     except Exception as e:
         print(f"Sender process error: {e}")
-        return False
+        raise
 
 def run_receiver_with_progress(buffer_config, host, base_port, rank, ready_event, stop_event, progress_interval=0.001):
     """Process function for running the receiver with progress loop."""
@@ -100,6 +102,7 @@ def run_receiver_with_progress(buffer_config, host, base_port, rank, ready_event
             size=buffer_config['buffer_size'],
             align_to=buffer_config['nixl_page_size']
         )
+        allocator._buffer.fill_(0)
 
         # Create and start receiver
         receiver = NixlCPUReceiver(
@@ -112,6 +115,26 @@ def run_receiver_with_progress(buffer_config, host, base_port, rank, ready_event
         ready_event.set()
         
         # Run progress loop until stop signal
+        while not receiver.get_finished():
+            receiver.progress()
+            time.sleep(progress_interval)
+
+        finished = receiver.get_finished(clear = True)
+        assert len(finished) == 1
+        source_spec, vaddr = finished[0]
+        paddr = allocator.virtual_to_physical(vaddr)
+
+        # Check if the numbers are all correct (should be uint8 all 1)
+        num_elements = source_spec.get_size()
+        should_1 = allocator._buffer[paddr : paddr + num_elements]
+        should_0_a = allocator._buffer[:paddr]
+        should_0_b = allocator._buffer[paddr + num_elements:]
+        assert (should_1 == 1).all(), "Buffer data mismatch"
+        if len(should_0_a) > 0:
+            assert (should_0_a == 0).all(), "Buffer data mismatch"
+        if len(should_0_b) > 0:
+            assert (should_0_b == 0).all(), "Buffer data mismatch"
+
         while not stop_event.is_set():
             receiver.progress()
             time.sleep(progress_interval)
@@ -172,12 +195,30 @@ def run_sender_with_protocol(buffer_config, host, base_port, rank, receiver_read
         remote_agent = None
         
         while retry_count < max_retries:
-            remote_agent = sender.check_and_remove_prepared_send(uid)
+            remote_agent, receiver_paddr = \
+                    sender.check_and_remove_prepared_send(uid)
             if remote_agent is not None:
                 break
             time.sleep(0.1)
             retry_count += 1
-        
+
+        assert remote_agent is not None, "Failed to get remote agent"
+        assert receiver_paddr != -1, "Failed to get receiver virtual address"
+
+        # Test the real send
+        vaddr, buffer = allocator.allocate(source_spec.get_size())
+        paddr = allocator.virtual_to_physical(vaddr)
+
+        buffer.fill_(1)  # Fill with dummy data
+
+        handle = sender.send(
+            paddr, receiver_paddr, source_spec.get_size(),
+            uid, dest_spec)
+
+        while not sender.is_send_finished(handle):
+            time.sleep(0.1)
+        print("Send completed successfully")
+
         if remote_agent is not None:
             success_event.set()
             

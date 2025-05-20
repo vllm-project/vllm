@@ -35,10 +35,12 @@ logger = init_logger(__name__)
 
 try:
     from nixl._api import nixl_agent as NixlWrapper
+    from nixl._api import nixl_xfer_handle
     logger.info("NIXL is available")
 except ImportError:
     logger.warning("NIXL is not available")
     NixlWrapper = None
+    nixl_xfer_handle = int
 
 ###################################################################
 # Helper classes and functions
@@ -48,7 +50,7 @@ def init_nixl_agent(
     buffer_size: int,
     buffer_ptr: int,
     nixl_page_size: int = 4096,
-) -> tuple[NixlWrapper, Any, Any]:
+) -> tuple[NixlWrapper, Any, Any, Any]:
     """Initialize the NIXL agent.
 
     Args:
@@ -60,6 +62,7 @@ def init_nixl_agent(
         NixlWrapper: The NIXL agent.
         reg_dlist: the registered memory descriptor list.
         xfer_dlist: the local transfer descriptor list.
+        prepped_xfer_handler: the prepped transfer handler.
     """
     if NixlWrapper is None:
         raise RuntimeError("NIXL is not available")
@@ -79,11 +82,11 @@ def init_nixl_agent(
                            nixl_page_size):
         xfer_desc.append((base_addr, nixl_page_size, 0))
 
-    descs = nixl_agent.get_xfer_descs(xfer_desc, mem_type="DRAM")
-    local_xfer_dlist = nixl_agent.prep_xfer_dlist(
-            "", descs, mem_type="DRAM")
+    xfer_descs = nixl_agent.get_xfer_descs(xfer_desc, mem_type="DRAM")
+    xfer_handler = nixl_agent.prep_xfer_dlist(
+            "", xfer_descs, mem_type="DRAM")
 
-    return nixl_agent, reg_descs, local_xfer_dlist
+    return nixl_agent, reg_descs, xfer_descs, xfer_handler
 
 @dataclass
 class DestinationSpec:
@@ -279,7 +282,7 @@ class RingBufferAllocator:
         Returns:
             torch.Tensor: The physical address of the buffer.
         """
-        return vaddr + self._size
+        return vaddr % self._size
 
     def get_size(self) -> int:
         """Get the size of the ring buffer.
@@ -305,7 +308,7 @@ class NixlProtocolMsg(msgspec.Struct):
     msg_type: str
     req_uuid: str
     source_spec: Optional[SourceSpec] = None
-    receiver_addr: Optional[int] = None
+    receiver_paddr: Optional[int] = None
 
 
 
@@ -323,12 +326,12 @@ def make_send_req_msg(
     """
     # Create the request message
     msg_type = "REQMSG"
-    receiver_addr = None
+    receiver_paddr = None
     send_req_msg = NixlProtocolMsg(
         msg_type=msg_type,
         req_uuid=req_uuid,
         source_spec=source_spec,
-        receiver_addr=receiver_addr
+        receiver_paddr=receiver_paddr
     )
     # Encode the message
     send_req_msg_bytes = msgspec.msgpack.encode(send_req_msg)
@@ -336,13 +339,13 @@ def make_send_req_msg(
 
 def make_receive_ready_msg(
         req_uuid: str,
-        receiver_addr: int,
+        receiver_paddr: int,
 ) -> bytes:
     """Make the receive ready message.
 
     Args:
         req_uuid (str): The request uuid.
-        receiver_addr (int): The receiver address.
+        receiver_paddr (int): The receiver's physical address.
 
     Returns:
         bytes: The receive ready message.
@@ -354,7 +357,7 @@ def make_receive_ready_msg(
         msg_type=msg_type,
         req_uuid=req_uuid,
         source_spec=source_spec,
-        receiver_addr=receiver_addr
+        receiver_paddr=receiver_paddr
     )
     # Encode the message
     receive_ready_msg_bytes = msgspec.msgpack.encode(receive_ready_msg)
@@ -374,12 +377,12 @@ def make_send_finish_msg(
     # Create the request message
     msg_type = "FINISHMSG"
     source_spec = None
-    receiver_addr = None
+    receiver_paddr = None
     send_finish_msg = NixlProtocolMsg(
         msg_type=msg_type,
         req_uuid=req_uuid,
         source_spec=source_spec,
-        receiver_addr=receiver_addr
+        receiver_paddr=receiver_paddr
     )
     # Encode the message
     send_finish_msg_bytes = msgspec.msgpack.encode(send_finish_msg)
@@ -400,15 +403,21 @@ class NixlCPUSender:
         # Destination spec id -> peer name
         self._remote_agents: dict[str, str] = {}
 
-        self._nixl_wrapper, self._reg_dlist, self._local_xfer_dlist = \
+        self._nixl_wrapper, \
+                self._reg_dlist, \
+                self._local_xfer_dlist, \
+                self._local_xfer_handlers = \
             init_nixl_agent(buffer_size, buffer_ptr, nixl_page_size)
+
+        # Remote xfer dlists, peer name -> prepped xfer handlers 
+        self._remote_xfer_handlers: dict[str, Any] = {}
 
         # Add ZMQ context for handshakes
         self._zmq_ctx = zmq.Context()
 
         # Requests that are ready to send
-        # uuid -> remote agent name
-        self._ready_requests: dict[str, str] = {}
+        # uuid -> (remote agent name, receiver paddr)
+        self._ready_requests: dict[str, tuple[str, int]] = {}
 
         # NOTE(ApostaC): we don't track the requests that are waiting for the 
         # receiver to be ready, and may want to add this in the future
@@ -416,20 +425,83 @@ class NixlCPUSender:
         # Msg decoder
         self._msg_decoder = msgspec.msgpack.Decoder(NixlProtocolMsg)
 
+
+    def _get_desc_idxs(self, paddr: int, size: int) -> list[int]:
+        """Get the sender descriptor indexes for the given physical address
+        and size.
+
+        Args:
+            paddr (int): The physical address.
+            size (int): The size of the data.
+
+        Returns:
+            list[int]: The list of sender descriptor indexes.
+        """
+        # Get the sender descriptor indexes
+        assert paddr % self._nixl_page_size == 0, \
+            "Physical address is not aligned to the page size"
+        start_idx = paddr // self._nixl_page_size
+        end_idx = (paddr + size) // self._nixl_page_size
+        return [i for i in range(start_idx, end_idx)]
+
     def send(
         self,
-        src_addr: int,
-        dst_addr: int,
-        data_size: int
-    ) -> None:
+        src_paddr: int,
+        dst_paddr: int,
+        data_size: int,
+        req_uuid: int,
+        destination_spec: DestinationSpec,
+    ) -> nixl_xfer_handle:
         """Send data from src_addr to dst_addr using NIXL.
 
         Args:
-            src_addr (int): Source address.
-            dst_addr (int): Destination address.
+            src_paddr (int): Source physical address.
+            dst_paddr (int): Destination physical address.
             data_size (int): Size of the data in bytes to be sent.
+            req_uuid (int): The request uuid.
+            destination_spec (DestinationSpec): The destination spec.
+
+        Returns:
+            nixl_xfer_handle: The handle of the transfer.
         """
-        pass
+        # Get the sender descriptor indexes
+        desc_idxs = self._get_desc_idxs(src_paddr, data_size)
+        # Get the receiver descriptor indexes
+        r_desc_idxs = self._get_desc_idxs(dst_paddr, data_size)
+        # Get the remote agent name
+        remote_agent_name = self._remote_agents[destination_spec.get_id()]
+        # Get the remote xfer dlist
+        remote_xfer_handlers = self._remote_xfer_handlers[remote_agent_name]
+        # Notif msg
+        notif_msg = make_send_finish_msg(req_uuid)
+        # Transfer
+        handle = self._nixl_wrapper.make_prepped_xfer(
+            "WRITE",
+            self._local_xfer_handlers,
+            desc_idxs,
+            remote_xfer_handlers,
+            r_desc_idxs,
+            notif_msg
+        )
+
+        self._nixl_wrapper.transfer(handle)
+
+        return handle
+
+    def is_send_finished(self, handle: "nixl_xfer_handle") -> bool:
+        """Check if the send operation is finished.
+
+        Args:
+            handle (nixl_xfer_handle): The handle of the transfer.
+
+        Returns:
+            bool: True if the send operation is finished, False otherwise.
+        """
+        status = self._nixl_wrapper.check_xfer_state(handle)
+        if status == "ERR":
+            logger.error("Error in send operation")
+            return False
+        return status == "DONE"
     
     def prepare_send(
         self,
@@ -465,7 +537,7 @@ class NixlCPUSender:
     def check_and_remove_prepared_send(
         self,
         send_uuid: str,
-    ) -> Optional[str]:
+    ) -> tuple[Optional[str], int]:
         """Check if the prepared send is ready to be sent.
         If the send is ready, remove it from the ready requests.
 
@@ -475,6 +547,8 @@ class NixlCPUSender:
         Returns:
             Optional[str]: The remote agent name if the send is ready,
                 None otherwise.
+            int: The virtual address of the receiver if the send is ready,
+                -1 otherwise.
         """
         # Update the ready requests
         notifs = self._nixl_wrapper.get_new_notifs()
@@ -482,9 +556,13 @@ class NixlCPUSender:
             for msg in notifs[remote_agent_name]:
                 # Decode the message
                 obj = self._msg_decoder.decode(msg)
+
                 if obj.msg_type == "READYMSG":
                     # Add the request to the ready requests
-                    self._ready_requests[obj.req_uuid] = remote_agent_name
+                    assert obj.receiver_paddr is not None, \
+                        "Receiver address is None in READYMSG"
+                    self._ready_requests[obj.req_uuid] = (remote_agent_name,
+                                                          obj.receiver_paddr)
                 else:
                     logger.error("Unexpected message type: %s", obj.msg_type)
                     continue
@@ -492,10 +570,10 @@ class NixlCPUSender:
         # Check if the send uuid is in the ready requests
         if send_uuid in self._ready_requests:
             # Remove the request from the ready requests
-            remote_agent_name = self._ready_requests.pop(send_uuid)
-            return remote_agent_name
+            remote_agent_name, vaddr = self._ready_requests.pop(send_uuid)
+            return remote_agent_name, vaddr
         else:
-            return None
+            return None, -1
 
     def _nixl_handshake(self, destination_spec: DestinationSpec) -> None:
         """Perform handshake with a remote NIXL CPU instance.
@@ -523,6 +601,18 @@ class NixlCPUSender:
             
             # Store remote agent info
             self._remote_agents[destination_spec.get_id()] = remote_agent_name
+
+            sock.send(b"get_xfer_descs")
+            # Receive the remote xfer descs
+            s_remote_xfer_descs = sock.recv()
+            remote_xfer_dlist = self._nixl_wrapper.deserialize_descs(
+                s_remote_xfer_descs)
+            
+
+            remote_xfer_handlers = self._nixl_wrapper.prep_xfer_dlist(
+                remote_agent_name, remote_xfer_dlist, mem_type="DRAM")
+
+            self._remote_xfer_handlers[remote_agent_name] = remote_xfer_handlers
             
             logger.debug("Successfully completed handshake with %s", 
                          destination_spec)
@@ -557,7 +647,10 @@ class NixlCPUReceiver:
         # source zmq id -> peer name
         self._remote_agents: dict[str, str] = {}
 
-        self._nixl_wrapper, self._reg_dlist, self._local_xfer_dlist = \
+        self._nixl_wrapper, \
+                self._reg_dlist, \
+                self._local_xfer_dlist, \
+                self._local_xfer_handlers = \
             init_nixl_agent(self._buffer_size, self._buffer_ptr, 
                             nixl_page_size)
 
@@ -629,14 +722,21 @@ class NixlCPUReceiver:
         self._process_msgs()
         self._process_allocation_requests()
 
-    def get_finished(self) -> list[tuple[SourceSpec, int]]:
+    def get_finished(self, clear = False) -> list[tuple[SourceSpec, int]]:
         """Get the requests that finishes receiving.
+
+        Args:
+            clear (bool): Whether to clear the finished requests or not.
 
         Returns:
             list[tuple[SourceSpec, int]]: A list of tuples containing the source 
                 spec and the address.
         """
-        pass
+        ret = [(source_spec, vaddr) for source_spec, vaddr in 
+                self._finished_requests.values()]
+        if clear:
+            self._finished_requests.clear()
+        return ret
 
     def start_handshake_listener(self, host: str, base_port: int) -> None:
         """Start the background thread that listens for handshake requests.
@@ -682,14 +782,24 @@ class NixlCPUReceiver:
             while not self._stop_listener.is_set():
                 try:
                     identity, _, msg = sock.recv_multipart(flags=zmq.NOBLOCK)
-                    remote_agent_name = self._nixl_wrapper.add_remote_agent(
-                        msg)
-                    self._remote_agents[identity] = remote_agent_name
-                    logger.debug("Successfully received handshake from %s", 
-                                 identity)
-                    # Send back the local metadata to the sender
-                    sock.send_multipart([identity, b"", local_meta])
-                    logger.debug("Sent local metadata back to %s", identity)
+
+                    if msg == b"get_xfer_descs":
+                        # Send back the local xfer descs
+                        s_local_xfer_descs = self._nixl_wrapper.get_serialized_descs(
+                            self._local_xfer_dlist)
+                        sock.send_multipart([identity, b"", s_local_xfer_descs])
+                        logger.debug("Sent back the local xfer descs to %s", identity)
+                    else:
+                        # Send the agent metadata
+                        remote_agent_name = self._nixl_wrapper.add_remote_agent(
+                            msg)
+                        self._remote_agents[identity] = remote_agent_name
+                        logger.debug("Successfully received handshake from %s", 
+                                     identity)
+                        # Send back the local metadata to the sender
+                        sock.send_multipart([identity, b"", local_meta])
+                        logger.debug("Sent local metadata back to %s", identity)
+
                 except zmq.error.Again:
                     # No message available
                     time.sleep(0.1)
