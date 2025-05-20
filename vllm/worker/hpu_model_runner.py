@@ -2637,6 +2637,10 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
             tensor = torch.cat([tensor, padding])
         return tensor
 
+    def has_logits_processors(self, sampling_metadata):
+        return any(seq_group.sampling_params.logits_processors
+                   for seq_group in sampling_metadata.seq_groups)
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -2652,6 +2656,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
         warmup_mode = kwargs.get('warmup_mode', False)
         previous_hidden_states = kwargs.get('previous_hidden_states')
 
+        self.has_patched_prev_output = False
         use_delayed_sampling = VLLM_DELAYED_SAMPLING and not warmup_mode
         assert not (use_delayed_sampling and num_steps != 1), \
             'Delayed sampling is not compatible with MSS!'
@@ -2891,6 +2896,13 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                     fake_output = self._delayed_sampler_outputs(model_input)
                     return [fake_output]
 
+                if (use_delayed_sampling and self.is_driver_worker
+                        and self.has_logits_processors(sampling_metadata)):
+                    # when use_delayed_sampling if the computation
+                    # of logits depends on the sampled results
+                    # we obtain the actual sampled results in advance
+                    self._patch_prev_output()
+
                 # Compute the logits.
                 with self.profiler.record_event(
                         'internal',
@@ -3119,6 +3131,8 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
         return SamplerOutput(sampler_outputs)
 
     def _patch_prev_output(self):
+        if self.has_patched_prev_output:
+            return
         assert len(self.cached_step_inputs) == len(self.cached_step_outputs), \
             f'''Inputs and outputs are out of sync!
             {len(self.cached_step_inputs)} vs {len(self.cached_step_outputs)}'''
@@ -3146,3 +3160,4 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
             # a cache recomputation and we only need to update the last token
             seq_data.output_token_ids_array[-1] = real_out
             seq_data._cached_all_token_ids[-1] = real_out
+        self.has_patched_prev_output = True
