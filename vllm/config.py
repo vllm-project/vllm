@@ -1743,6 +1743,15 @@ class ParallelConfig:
     
     enable_microbatching: bool = False
     """Enable microbatching for the model executor."""
+    
+    always_microbatch_if_enabled: bool = True
+    """Always microbatch if microbatching is enabled. Easier to sync bewteen
+       dp workers."""
+    
+    microbatching_token_threshold: int = 4
+    """The threshold for microbatching. If the number of tokens in the
+    request is greater than this threshold, microbatching will be used.
+    Otherwise, the request will be processed in a single batch."""
 
     @property
     def world_size_across_dp(self) -> int:
