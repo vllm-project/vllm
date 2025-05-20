@@ -9,7 +9,7 @@ struct CodecBase {
   const int thread;
   const int rank;
   const int group_leader;
-  __device_inline__ CodecBase(int thread, int rank)
+  __quickreduce_device_inline__ CodecBase(int thread, int rank)
       : thread(thread),
         rank(rank),
         group_leader((threadIdx.x / kThreadGroupSize) * kThreadGroupSize) {}
@@ -32,18 +32,19 @@ struct CodecFP16 : public CodecBase {
   static constexpr int kTransmittedTileSize =
       kRankTransmittedTileSize * kWorldSize;
 
-  __device_inline__ CodecFP16(int thread, int rank) : CodecBase(thread, rank) {}
+  __quickreduce_device_inline__ CodecFP16(int thread, int rank)
+      : CodecBase(thread, rank) {}
 
-  __device_inline__ void send(int32x4_t* __restrict__ send_buffer,
-                              int32x4_t const* __restrict__ data) {
+  __quickreduce_device_inline__ void send(int32x4_t* __restrict__ send_buffer,
+                                          int32x4_t const* __restrict__ data) {
     for (int i = 0; i < kRankAtoms; i++) {
       __builtin_nontemporal_store(data[i], send_buffer + thread);
       send_buffer += kAtomStride;
     }
   }
 
-  __device_inline__ void recv(int32x4_t** __restrict__ recv_buffer,
-                              int32x4_t* __restrict__ data) {
+  __quickreduce_device_inline__ void recv(int32x4_t** __restrict__ recv_buffer,
+                                          int32x4_t* __restrict__ data) {
     for (int i = 0; i < kRankAtoms; i++) {
       data[i] = __builtin_nontemporal_load(*recv_buffer + thread);
       *recv_buffer += kAtomStride;
@@ -96,14 +97,14 @@ struct CodecQ4Symm : public CodecBase {
   // {+8, +8}, int16x2_t
   static constexpr int kRangeBias = 0x00080008;
 
-  __device_inline__ CodecQ4Symm(int thread, int rank)
+  __quickreduce_device_inline__ CodecQ4Symm(int thread, int rank)
       : CodecBase(thread, rank) {
     // if constexpr (std::is_same<T, half>::value)
     //   set_fp16_ovfl(true);
   }
 
-  __device_inline__ void send(int32x4_t* __restrict__ send_buffer,
-                              int32x4_t const* __restrict__ data) {
+  __quickreduce_device_inline__ void send(int32x4_t* __restrict__ send_buffer,
+                                          int32x4_t const* __restrict__ data) {
     for (int k = 0; k < kRankAtoms; k++) {
       int32x4_t const atom = data[k];
 
@@ -157,8 +158,8 @@ struct CodecQ4Symm : public CodecBase {
     }
   }
 
-  __device_inline__ void recv(int32x4_t** __restrict__ recv_buffer,
-                              int32x4_t* __restrict__ data) {
+  __quickreduce_device_inline__ void recv(int32x4_t** __restrict__ recv_buffer,
+                                          int32x4_t* __restrict__ data) {
     for (int k = 0; k < kRankAtoms; k++) {
       // Directly read quantized atom from recv_buffer
       uint8_t* atom_ptr = reinterpret_cast<uint8_t*>(*recv_buffer);
@@ -243,14 +244,14 @@ struct CodecQ4Asymm : public CodecBase {
       std::is_same<T, half>::value ? 0x4B804B80 : 0x41704170;
 
   static unsigned char constexpr kMask0F = 0x0F;
-  __device_inline__ CodecQ4Asymm(int thread, int rank)
+  __quickreduce_device_inline__ CodecQ4Asymm(int thread, int rank)
       : CodecBase(thread, rank) {
     // if constexpr (std::is_same<T, half>::value)
     //   set_fp16_ovfl(true);
   }
 
-  __device_inline__ void send(int32x4_t* __restrict__ send_buffer,
-                              int32x4_t const* __restrict__ data) {
+  __quickreduce_device_inline__ void send(int32x4_t* __restrict__ send_buffer,
+                                          int32x4_t const* __restrict__ data) {
     for (int k = 0; k < kRankAtoms; k++) {
       int32x4_t const atom = data[k];
 
@@ -307,8 +308,8 @@ struct CodecQ4Asymm : public CodecBase {
     }
   }
 
-  __device_inline__ void recv(int32x4_t** __restrict__ recv_buffer,
-                              int32x4_t* __restrict__ data) {
+  __quickreduce_device_inline__ void recv(int32x4_t** __restrict__ recv_buffer,
+                                          int32x4_t* __restrict__ data) {
     for (int k = 0; k < kRankAtoms; k++) {
       // Directly read quantized atom from recv_buffer
       uint8_t* atom_ptr = reinterpret_cast<uint8_t*>(*recv_buffer);
@@ -391,14 +392,14 @@ struct CodecQ8Symm : public CodecBase {
   // {+128, +128}, int16x2_t
   static constexpr int kRangeBias = 0x00800080;
 
-  __device_inline__ CodecQ8Symm(int thread, int rank)
+  __quickreduce_device_inline__ CodecQ8Symm(int thread, int rank)
       : CodecBase(thread, rank) {
     // if constexpr (std::is_same<T, half>::value)
     //   set_fp16_ovfl(true);
   }
 
-  __device_inline__ void send(int32x4_t* __restrict__ send_buffer,
-                              int32x4_t const* __restrict__ data) {
+  __quickreduce_device_inline__ void send(int32x4_t* __restrict__ send_buffer,
+                                          int32x4_t const* __restrict__ data) {
     for (int k = 0; k < kRankAtoms; k++) {
       int32x4_t const atom = data[k];
 
@@ -452,8 +453,8 @@ struct CodecQ8Symm : public CodecBase {
     }
   }
 
-  __device_inline__ void recv(int32x4_t** __restrict__ recv_buffer,
-                              int32x4_t* __restrict__ output) {
+  __quickreduce_device_inline__ void recv(int32x4_t** __restrict__ recv_buffer,
+                                          int32x4_t* __restrict__ output) {
     for (int k = 0; k < kRankAtoms; k++) {
       // Directly read quantized atom from recv_buffer
       uint8_t* atom_ptr = reinterpret_cast<uint8_t*>(*recv_buffer);
@@ -540,14 +541,14 @@ struct CodecQ8Asymm : public CodecBase {
   // {+128, +128}, int16x2_t
   static constexpr int kRangeBias = 0x00800080;
 
-  __device_inline__ CodecQ8Asymm(int thread, int rank)
+  __quickreduce_device_inline__ CodecQ8Asymm(int thread, int rank)
       : CodecBase(thread, rank) {
     // if constexpr (std::is_same<T, half>::value)
     //   set_fp16_ovfl(true);
   }
 
-  __device_inline__ void send(int32x4_t* __restrict__ send_buffer,
-                              int32x4_t const* __restrict__ input) {
+  __quickreduce_device_inline__ void send(int32x4_t* __restrict__ send_buffer,
+                                          int32x4_t const* __restrict__ input) {
     for (int k = 0; k < kRankAtoms; k++) {
       int32x4_t const atom = input[k];
 
@@ -602,8 +603,8 @@ struct CodecQ8Asymm : public CodecBase {
     }
   }
 
-  __device_inline__ void recv(int32x4_t** __restrict__ recv_buffer,
-                              int32x4_t* __restrict__ data) {
+  __quickreduce_device_inline__ void recv(int32x4_t** __restrict__ recv_buffer,
+                                          int32x4_t* __restrict__ data) {
     for (int k = 0; k < kRankAtoms; k++) {
       // Directly read quantized atom from recv_buffer
       uint8_t* atom_ptr = reinterpret_cast<uint8_t*>(*recv_buffer);
