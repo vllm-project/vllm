@@ -19,8 +19,8 @@ If you are using NVIDIA GPUs, you can install vLLM using [pip](https://pypi.org/
 It's recommended to use [uv](https://docs.astral.sh/uv/), a very fast Python environment manager, to create and manage Python environments. Please follow the [documentation](https://docs.astral.sh/uv/#getting-started) to install `uv`. After installing `uv`, you can create a new Python environment and install vLLM using the following commands:
 
 ```console
-uv venv myenv --python 3.12 --seed
-source myenv/bin/activate
+uv venv --python 3.12 --seed
+source .venv/bin/activate
 uv pip install vllm
 ```
 
@@ -82,6 +82,11 @@ llm = LLM(model="facebook/opt-125m")
 
 :::{note}
 By default, vLLM downloads models from [Hugging Face](https://huggingface.co/). If you would like to use models from [ModelScope](https://www.modelscope.cn), set the environment variable `VLLM_USE_MODELSCOPE` before initializing the engine.
+
+```shell
+export VLLM_USE_MODELSCOPE=True
+```
+
 :::
 
 Now, the fun part! The outputs are generated using `llm.generate`. It adds the input prompts to the vLLM engine's waiting queue and executes the vLLM engine to generate the outputs with high throughput. The outputs are returned as a list of `RequestOutput` objects, which include all of the output tokens.

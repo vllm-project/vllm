@@ -14,6 +14,8 @@ from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonImpl,
                                                    MLACommonMetadata,
                                                    MLACommonMetadataBuilder)
+from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.worker.block_table import BlockTable
 
 # yapf: enable
 
@@ -59,18 +61,19 @@ class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
 
 class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
-    def __init__(self, runner):
-        super().__init__(runner)
+    def __init__(self, runner, kv_cache_spec: AttentionSpec,
+                 block_table: BlockTable):
+        super().__init__(runner, kv_cache_spec, block_table)
         max_model_len = self.runner.model_config.max_model_len
         assert max_model_len == 32768,\
             "AITER MLA requires max_model_len=32768"
-        assert self.runner.block_size == 1, "AITER MLA" \
+        assert self.kv_cache_spec.block_size == 1, "AITER MLA" \
             "only supports block size 1."
 
     def _get_paged_kv_tensors(
             self, block_table: torch.Tensor,
             seq_lens: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        page_size = self.runner.block_size
+        page_size = self.kv_cache_spec.block_size
         block_table_bounds = (seq_lens + page_size - 1) // page_size
 
         mask = (torch.arange(block_table.size(1),
@@ -95,17 +98,17 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             paged_kv_last_page_len,
         )
 
-    def _build_decode(self, block_table: torch.Tensor,
+    def _build_decode(self, block_table_tensor: torch.Tensor,
                       seq_lens: torch.Tensor) -> AiterMLADecodeMetadata:
 
         (
             paged_kv_indices,
             paged_kv_indptr,
             paged_last_page_len,
-        ) = self._get_paged_kv_tensors(block_table, seq_lens)
+        ) = self._get_paged_kv_tensors(block_table_tensor, seq_lens)
 
         attn_metadata = AiterMLADecodeMetadata(
-            block_table=block_table,
+            block_table=block_table_tensor,
             seq_lens=seq_lens,
             paged_kv_indptr=paged_kv_indptr,
             paged_kv_indices=paged_kv_indices,
