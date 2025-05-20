@@ -28,6 +28,36 @@ if current_platform.is_rocm():
     from vllm.triton_utils import tl, triton
     from vllm.utils import direct_register_custom_op
 
+    def convert_block_table(
+        block_table: torch.Tensor,
+        block_size: int,
+        cu_seqlens_k: torch.Tensor,
+    ) -> torch.Tensor:
+
+        batches, pages = block_table.shape
+        kv_page_indices = torch.empty([cu_seqlens_k[-1]], dtype=torch.int32, device="cuda")
+
+        cur_pos = 0
+        for b_idx in range(batches):
+            for p_idx in range(pages):
+                if cur_pos >= cu_seqlens_k[b_idx + 1]:
+                    break
+
+                start = cur_pos
+                end = min(cur_pos + block_size, cu_seqlens_k[b_idx + 1])
+
+                block_start_pos = block_table[b_idx, p_idx] * block_size
+                block_end_pos = block_start_pos + end - start
+                kv_page_indices[start:end] = torch.arange(
+                    block_start_pos,
+                    block_end_pos,
+                    dtype=torch.int32,
+                    device="cuda",
+                )
+
+                cur_pos = end
+        return kv_page_indices
+
     @triton.jit
     def _vllm_layout_trans_kernel(
         k_buffer_ptr,
@@ -111,23 +141,43 @@ if current_platform.is_rocm():
         window_size: Optional[list[int]],  # -1 means infinite context window
         alibi_slopes: Optional[list[float]],
         block_table: torch.Tensor,
+        kv_page_indices: torch.Tensor,
     ) -> torch.Tensor:
-        k, v = vllm_layout_trans(cu_seqlens_k, block_table, k_cache, v_cache,
-                                 max_seqlen_k, total_tokens)
-        output = aiter.flash_attn_varlen_func(
+
+        # k, v = vllm_layout_trans(cu_seqlens_k, block_table, k_cache, v_cache,
+        #                          max_seqlen_k, total_tokens)
+        # output = aiter.flash_attn_varlen_func(
+        #     q=q,
+        #     k=k,
+        #     v=v,
+        #     cu_seqlens_q=cu_seqlens_q,
+        #     max_seqlen_q=max_seqlen_q,
+        #     cu_seqlens_k=cu_seqlens_k,
+        #     max_seqlen_k=max_seqlen_k,
+        #     softmax_scale=softmax_scale,
+        #     causal=True,
+        #     alibi_slopes=alibi_slopes,
+        #     window_size=window_size,
+        #     out=out,
+        # )
+
+        output = aiter.mha_batch_prefill_func(
             q=q,
-            k=k,
-            v=v,
+            k=k_cache,
+            v=v_cache,
             cu_seqlens_q=cu_seqlens_q,
+            kv_indptr=cu_seqlens_k,
+            kv_page_indices=block_table,
             max_seqlen_q=max_seqlen_q,
-            cu_seqlens_k=cu_seqlens_k,
             max_seqlen_k=max_seqlen_k,
             softmax_scale=softmax_scale,
             causal=True,
+            is_chunked_prefill=True,
             alibi_slopes=alibi_slopes,
             window_size=window_size,
             out=out,
         )
+
         return output
 
     def flash_attn_varlen_func_fake(
@@ -144,6 +194,7 @@ if current_platform.is_rocm():
         window_size: Optional[list[int]],  # -1 means infinite context window
         alibi_slopes: Optional[list[float]],
         block_table: torch.Tensor,
+        kv_page_indices: torch.Tensor,
     ) -> torch.Tensor:
         return torch.empty(q.shape[0],
                            q.shape[1],
@@ -288,6 +339,12 @@ class AiterFlashAttentionMetadataBuilder:
                                           max_seq_len=max_seq_len,
                                           causal=True)
 
+        kv_page_indices = convert_block_table(
+            block_table_tensor,
+            self.block_size,
+            cu_seq_lens,
+        )
+
         attn_metadata = AiterFlashAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
@@ -304,6 +361,7 @@ class AiterFlashAttentionMetadataBuilder:
             cu_prefix_query_lens=cu_prefix_query_lens,
             prefix_kv_lens=prefix_kv_lens,
             suffix_kv_lens=suffix_kv_lens,
+            kv_page_indices=kv_page_indices,
             local_attn_metadata=local_attn_metadata,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
         )
@@ -367,6 +425,7 @@ class AiterFlashAttentionMetadata:
     cu_seq_lens: torch.Tensor
     total_tokens: int
     block_table: torch.Tensor
+    kv_page_indices: torch.Tensor
     slot_mapping: torch.Tensor
 
     # For cascade attention.
@@ -554,6 +613,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     window_size=list(self.sliding_window),
                     block_table=block_table,
                     cu_seqlens_k=cu_seq_lens,
+                    kv_page_indices=attn_metadata.kv_page_indices,
                 )
 
             _, num_heads, head_size = query.shape
