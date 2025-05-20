@@ -29,43 +29,41 @@ def apply_softcap(S, x):
 
 @triton.jit
 def kernel_unified_attention_2d(
-        output_ptr,  # [num_tokens, num_query_heads, head_size]
-        query_ptr,  # [num_tokens, num_query_heads, head_size]
-        key_cache_ptr,  # [num_blks, num_kv_heads, head_size // x, blk_size, x]
-        value_cache_ptr,  # [num_blks, num_kv_heads, head_size, blk_size]
-        block_tables_ptr,  # [num_seqs, max_num_blocks_per_seq]
-        seq_lens_ptr,  # [num_seqs]
-        alibi_slopes_ptr,  # [num_query_heads]
-        scale,  # float32
-        k_scale,  # float32
-        v_scale,  # float32
-        fp8_out_scale,  # float32
-        softcap,  # float32
-        num_query_heads: tl.constexpr,  # int
-        num_queries_per_kv: tl.constexpr,  # int
-        block_table_stride: tl.int64,  # int
-        query_stride_0: tl.int64,  # int
-        query_stride_1: tl.int64,  # int, should be equal to head_size
-        output_stride_0: tl.int64,  # int
-        output_stride_1: tl.int64,  # int, should be equal to head_size
-        BLOCK_SIZE: tl.constexpr,  # int
-        HEAD_SIZE: tl.constexpr,  # int
-        HEAD_SIZE_PADDED: tl.constexpr,  # int, must be power of 2
-        USE_ALIBI_SLOPES: tl.constexpr,  # bool
-        USE_SOFTCAP: tl.constexpr,  # bool
-        SLIDING_WINDOW: tl.constexpr,  # int
-        stride_k_cache_0: tl.int64,  # int
-        stride_k_cache_1: tl.int64,  # int
-        stride_k_cache_2: tl.int64,  # int
-        stride_k_cache_3: tl.constexpr,  # int
-        stride_v_cache_0: tl.int64,  # int
-        stride_v_cache_1: tl.int64,  # int
-        stride_v_cache_2: tl.int64,  # int
-        stride_v_cache_3: tl.constexpr,  # int
-        query_start_len_ptr,  # [num_seqs+1]
-        BLOCK_Q: tl.constexpr,  # int
-        num_seqs: tl.int32,
-        FP8_OUT: tl.constexpr,  # bool
+    output_ptr,  # [num_tokens, num_query_heads, head_size]
+    query_ptr,  # [num_tokens, num_query_heads, head_size]
+    key_cache_ptr,  # [num_blks, num_kv_heads, head_size // x, blk_size, x]
+    value_cache_ptr,  # [num_blks, num_kv_heads, head_size, blk_size]
+    block_tables_ptr,  # [num_seqs, max_num_blocks_per_seq]
+    seq_lens_ptr,  # [num_seqs]
+    alibi_slopes_ptr,  # [num_query_heads]
+    scale,  # float32
+    k_scale,  # float32
+    v_scale,  # float32
+    softcap,  # float32
+    num_query_heads: tl.constexpr,  # int
+    num_queries_per_kv: tl.constexpr,  # int
+    block_table_stride: tl.int64,  # int
+    query_stride_0: tl.int64,  # int
+    query_stride_1: tl.int64,  # int, should be equal to head_size
+    output_stride_0: tl.int64,  # int
+    output_stride_1: tl.int64,  # int, should be equal to head_size
+    BLOCK_SIZE: tl.constexpr,  # int
+    HEAD_SIZE: tl.constexpr,  # int
+    HEAD_SIZE_PADDED: tl.constexpr,  # int, must be power of 2
+    USE_ALIBI_SLOPES: tl.constexpr,  # bool
+    USE_SOFTCAP: tl.constexpr,  # bool
+    SLIDING_WINDOW: tl.constexpr,  # int
+    stride_k_cache_0: tl.int64,  # int
+    stride_k_cache_1: tl.int64,  # int
+    stride_k_cache_2: tl.int64,  # int
+    stride_k_cache_3: tl.constexpr,  # int
+    stride_v_cache_0: tl.int64,  # int
+    stride_v_cache_1: tl.int64,  # int
+    stride_v_cache_2: tl.int64,  # int
+    stride_v_cache_3: tl.constexpr,  # int
+    query_start_len_ptr,  # [num_seqs+1]
+    BLOCK_Q: tl.constexpr,  # int
+    num_seqs: tl.int32,
 ):
 
     q_block_global_idx = tl.program_id(0)
@@ -237,9 +235,6 @@ def kernel_unified_attention_2d(
     # epilogue
     acc = acc / L[:, None]
 
-    if FP8_OUT:
-        acc = (acc / tl.load(fp8_out_scale))
-
     output_offset = (query_offset_0[:, None] * output_stride_0 +
                      query_offset_1[:, None] * output_stride_1 +
                      offs_d[None, :])
@@ -269,7 +264,6 @@ def unified_attention(
     k_descale,
     v_descale,
     alibi_slopes=None,
-    fp8_out_scale=None,
 ):
     assert causal, "Only causal attention is supported"
     assert q_descale is None, "Q scales not supported"
@@ -315,7 +309,6 @@ def unified_attention(
         scale=softmax_scale,
         k_scale=k_descale,
         v_scale=v_descale,
-        fp8_out_scale=fp8_out_scale,
         softcap=softcap,
         num_query_heads=num_query_heads,
         num_queries_per_kv=num_queries_per_kv,
@@ -341,5 +334,4 @@ def unified_attention(
         query_start_len_ptr=cu_seqlens_q,
         BLOCK_Q=BLOCK_Q,
         num_seqs=num_seqs,
-        FP8_OUT=fp8_out_scale is not None,
     )

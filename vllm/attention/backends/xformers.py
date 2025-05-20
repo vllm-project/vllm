@@ -430,7 +430,6 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         value: Optional[torch.Tensor],
         kv_cache: torch.Tensor,
         attn_metadata: "XFormersMetadata",
-        fp8_out_scale: Optional[torch.Tensor] = None,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.

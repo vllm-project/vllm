@@ -115,6 +115,10 @@ def process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
             # of process_weights_after_loading
             module.process_weights_after_loading(model_config.dtype)
 
+    if hasattr(model, "process_weights_after_loading"):
+        with device_loading_context(model, target_device):
+            model.process_weights_after_loading()
+
 
 @contextmanager
 def device_loading_context(module: torch.nn.Module,

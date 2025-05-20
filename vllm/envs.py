@@ -14,8 +14,6 @@ if TYPE_CHECKING:
     VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
     VLLM_NCCL_SO_PATH: Optional[str] = None
     LD_LIBRARY_PATH: Optional[str] = None
-    VLLM_ROCM_PREFER_TORCH: bool = False
-    VLLM_ROCM_PREFER_TRITON: bool = True
     VLLM_USE_SDPA_ATTENTION: bool = False
     VLLM_USE_TRITON_FLASH_ATTN: bool = True
     VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT: bool = True
@@ -82,7 +80,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
-    VLLM_USE_V1: bool = False
+    VLLM_USE_V1: bool = True
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
@@ -97,9 +95,9 @@ if TYPE_CHECKING:
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
-    Q_SCALE_CONSTANT: int = 20
-    K_SCALE_CONSTANT: int = 20
-    V_SCALE_CONSTANT: int = 10
+    Q_SCALE_CONSTANT: int = 200
+    K_SCALE_CONSTANT: int = 200
+    V_SCALE_CONSTANT: int = 100
     VLLM_SERVER_DEV_MODE: bool = False
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
     VLLM_MLA_DISABLE: bool = False
@@ -290,16 +288,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # library file in the locations specified by `LD_LIBRARY_PATH`
     "LD_LIBRARY_PATH":
     lambda: os.environ.get("LD_LIBRARY_PATH", None),
-
-    # flag to tell vllm to prefer torch on ROCm
-    "VLLM_ROCM_PREFER_TORCH":
-    lambda: (os.environ.get("VLLM_ROCM_PREFER_TORCH", "False").lower() in
-             ("true", "1")),
-
-    # flag to tell vllm to prefer triton on ROCm
-    "VLLM_ROCM_PREFER_TRITON":
-    lambda: (os.environ.get("VLLM_ROCM_PREFER_TRITON", "True").lower() in
-             ("true", "1")),
 
     # flag to control if vllm should use naive scaled dot-product attention
     "VLLM_USE_SDPA_ATTENTION":
@@ -697,17 +685,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Divisor for dynamic query scale factor calculation for FP8 KV Cache
     "Q_SCALE_CONSTANT":
-    lambda: int(os.getenv("Q_SCALE_CONSTANT", "20")),
-
-    # Divisor for dynamic key scale factor calculation
-    # for FP8 KV Cache and attention
+    lambda: int(os.getenv("Q_SCALE_CONSTANT", "200")),
+    # Divisor for dynamic key scale factor calculation for FP8 KV Cache
     "K_SCALE_CONSTANT":
-    lambda: int(os.getenv("K_SCALE_CONSTANT", "20")),
-
-    # Divisor for dynamic value scale factor calculation
-    # for FP8 KV Cache and attention
+    lambda: int(os.getenv("K_SCALE_CONSTANT", "200")),
+    # Divisor for dynamic value scale factor calculation for FP8 KV Cache
     "V_SCALE_CONSTANT":
-    lambda: int(os.getenv("V_SCALE_CONSTANT", "10")),
+    lambda: int(os.getenv("V_SCALE_CONSTANT", "100")),
+
     # If set, enable multiprocessing in LLM for the V1 code path.
     "VLLM_ENABLE_V1_MULTIPROCESSING":
     lambda: bool(int(os.getenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1"))),

@@ -237,7 +237,6 @@ def test_paged_attention(
             dtype=torch.float32,
         )
         max_logits = torch.empty_like(exp_sums)
-
         if version == "v2":
             ops.paged_attention_v2(
                 output,
@@ -287,14 +286,13 @@ def test_paged_attention(
                 kv_cache_dtype,
                 k_scale,
                 v_scale,
-                None,
             )
 
             opcheck(torch.ops._rocm_C.paged_attention,
                     (output, exp_sums, max_logits, tmp_output, query,
                      key_cache, value_cache, num_kv_heads, scale, block_tables,
                      seq_lens, block_size, max_seq_len, alibi_slopes,
-                     kv_cache_dtype, k_scale, v_scale, None),
+                     kv_cache_dtype, k_scale, v_scale),
                     cond=(head_size == HEAD_SIZES[0]
                           and block_size == BLOCK_SIZES[0]))
 

@@ -137,7 +137,6 @@ class TritonAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: FlashAttentionMetadata,
-        fp8_out_scale: Optional[torch.Tensor],
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
@@ -255,7 +254,7 @@ class TritonAttentionImpl(AttentionImpl):
                                          alibi_slopes=self.alibi_slopes,
                                          sliding_window=self.sliding_window[0],
                                          sm_scale=self.scale,
-                                         fp8_out_scale=fp8_out_scale)
+                                         fp8_out_scale=layer._out_scale)
 
         else:
             descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
@@ -278,7 +277,6 @@ class TritonAttentionImpl(AttentionImpl):
                 q_descale=None,  # Not supported
                 k_descale=layer._k_scale.expand(descale_shape),
                 v_descale=layer._v_scale.expand(descale_shape),
-                fp8_out_scale=fp8_out_scale,
             )
 
         return output
