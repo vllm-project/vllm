@@ -12,9 +12,9 @@ from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
-from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.vllm.v1.spec_decode.utils import prepare_input_kernel
 
 logger = init_logger(__name__)
 
@@ -389,29 +389,3 @@ def compute_probs_and_sample_next_token(
             next_token_ids,
         )
     return next_token_ids, probs
-
-
-@triton.jit
-def prepare_input_kernel(
-    out_ptr,
-    cu_query_lens_ptr,
-    cu_num_tokens_ptr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    pid = tl.program_id(0)
-
-    # [start_pos, end_pos)
-    start_pos = tl.load(cu_num_tokens_ptr + pid)
-    end_pos = tl.load(cu_num_tokens_ptr + pid + 1)
-    num_tokens = end_pos - start_pos
-
-    index_start = tl.load(cu_query_lens_ptr + pid)
-
-    num_blocks = tl.cdiv(num_tokens, BLOCK_SIZE)
-    for i in tl.range(num_blocks):
-        offset = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        tl.store(
-            out_ptr + start_pos + offset,
-            index_start + offset,
-            mask=offset < num_tokens,
-        )

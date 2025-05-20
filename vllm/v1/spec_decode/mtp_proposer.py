@@ -1,19 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
-import torch
-import torch.nn as nn
-import triton
-import triton.language as tl
 from typing import Optional
 
+import torch
+import torch.nn as nn
+
 from vllm.attention.layer import Attention
-from vllm.config import (VllmConfig,
-                         get_layers_from_vllm_config, set_current_vllm_config)
+from vllm.config import (VllmConfig, get_layers_from_vllm_config,
+                         set_current_vllm_config)
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.model_loader import get_model_loader
-from vllm.model_executor.model_loader.utils import set_default_torch_dtype, process_weights_after_loading
+from vllm.model_executor.model_loader.utils import (
+    process_weights_after_loading, set_default_torch_dtype)
 from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP
-from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.vllm.v1.spec_decode.utils import prepare_input_kernel
 
 
 # FIXME(woosuk): The logic here is duplicated with the main sampling code.
@@ -141,9 +142,9 @@ class MtpProposer:
 
         query_lens = cu_num_tokens[1:] - cu_num_tokens[:-1]
         max_query_len = query_lens.max().item()
-        
+
         seq_lens = (target_positions[last_token_indices] + 1)
-        
+
         common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=cu_num_tokens, seq_lens=seq_lens)
 
@@ -185,7 +186,7 @@ class MtpProposer:
         loader = get_model_loader(self.vllm_config.load_config)
         target_attn_layer_names = set(
             get_layers_from_vllm_config(self.vllm_config, Attention).keys())
-        
+
         draft_model_config = \
             self.vllm_config.speculative_config.draft_model_config
         # FIXME(lily): This does not handle with distributed inference.
@@ -197,47 +198,18 @@ class MtpProposer:
                     self.vllm_config):
 
             with target_device:
-                self.model = DeepSeekMTP(
-                    vllm_config=self.vllm_config)
-            
-            draft_attn_layer_names = (
-            get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
-            target_attn_layer_names)
+                self.model = DeepSeekMTP(vllm_config=self.vllm_config)
+
+            draft_attn_layer_names = (get_layers_from_vllm_config(
+                self.vllm_config, Attention).keys() - target_attn_layer_names)
             assert len(draft_attn_layer_names) == 1
             self.attn_layer_name = next(iter(draft_attn_layer_names))
             self.model.load_weights(
                 loader.get_all_weights(
                     self.vllm_config.speculative_config.draft_model_config,
                     self.model))
-                
+
             process_weights_after_loading(
-                self.model, 
+                self.model,
                 self.vllm_config.speculative_config.draft_model_config,
                 target_device)
-            
-
-
-@triton.jit
-def prepare_input_kernel(
-    out_ptr,
-    cu_query_lens_ptr,
-    cu_num_tokens_ptr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    pid = tl.program_id(0)
-
-    # [start_pos, end_pos)
-    start_pos = tl.load(cu_num_tokens_ptr + pid)
-    end_pos = tl.load(cu_num_tokens_ptr + pid + 1)
-    num_tokens = end_pos - start_pos
-
-    index_start = tl.load(cu_query_lens_ptr + pid)
-
-    num_blocks = tl.cdiv(num_tokens, BLOCK_SIZE)
-    for i in tl.range(num_blocks):
-        offset = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        tl.store(
-            out_ptr + start_pos + offset,
-            index_start + offset,
-            mask=offset < num_tokens,
-        )

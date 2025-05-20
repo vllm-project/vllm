@@ -151,9 +151,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.use_aux_hidden_state_outputs = False
         if self.speculative_config:
             self.use_spec_decode = True
-            
+
             # NOTE(Jiayi): currently we put the entire draft model on
-            # the last PP rank. This is not ideal if there are many 
+            # the last PP rank. This is not ideal if there are many
             # layers in the draft model.
             if get_pp_group().is_last_rank:
                 if self.speculative_config.method == "ngram":
@@ -161,10 +161,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 elif self.speculative_config.use_eagle():
                     if self.speculative_config.method == "deepseek_mtp":
                         self.drafter = MtpProposer(self.vllm_config,
-                                                self)  # type: ignore
+                                                   self)  # type: ignore
                     else:
-                        self.drafter = EagleProposer(self.vllm_config,
-                                                    self.device)  # type: ignore
+                        self.drafter = EagleProposer(
+                            self.vllm_config, self.device)  # type: ignore
                         if self.speculative_config.method == "eagle3":
                             self.use_aux_hidden_state_outputs = True
                 elif self.speculative_config.method == "medusa":
@@ -1365,7 +1365,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 block_table = eagle_attn_metadata.block_table
             else:
                 block_table = None
-            
+
             if spec_decode_metadata is None:
                 # input_ids can be None for multimodal models.
                 target_token_ids = self.input_ids[:num_scheduled_tokens]
@@ -1403,8 +1403,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     target_hidden_states = hidden_states[token_indices]
                 target_slot_mapping = eagle_attn_metadata.slot_mapping[
                     token_indices]
-                
-                
+
             draft_token_ids = self.drafter.propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
@@ -1416,7 +1415,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 sampling_metadata=sampling_metadata,
             )
             spec_token_ids = draft_token_ids.tolist()
-        
+
         # Clear KVConnector state after all KVs are generated.
         if has_kv_transfer_group():
             get_kv_transfer_group().clear_connector_metadata()

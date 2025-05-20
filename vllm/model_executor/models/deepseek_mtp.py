@@ -19,7 +19,6 @@ from vllm.sequence import IntermediateTensors
 
 from .deepseek_v2 import (DeepseekV2DecoderLayer,
                           get_spec_layer_idx_from_weight_name)
-
 from .interfaces import SupportsPP
 from .utils import maybe_prefix
 
