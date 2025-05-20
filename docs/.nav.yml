@@ -1,6 +1,6 @@
 nav:
   - Home: 
-    - Home: README.md
+    - vLLM: README.md
     - Getting Started:
       - getting_started/quickstart.md
       - getting_started/installation
