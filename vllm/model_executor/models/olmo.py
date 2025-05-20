@@ -382,19 +382,7 @@ class OlmoForCausalLM(nn.Module, SupportsPP):
                                                    torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
-            skip_prefixes=([
-                "rotary_emb.inv_freq",
-                # Models trained using ColossalAI may include these tensors in
-                # the checkpoint. Skip them.
-                "rotary_emb.cos_cached",
-                "rotary_emb.sin_cached",
-                "lm_head.weight"
-            ] if self.config.tie_word_embeddings else [
-                "rotary_emb.inv_freq",
-                # Models trained using ColossalAI may include these tensors in
-                # the checkpoint. Skip them.
-                "rotary_emb.cos_cached",
-                "rotary_emb.sin_cached"
-            ]),
+            skip_prefixes=(["lm_head.weight"]
+                           if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)
