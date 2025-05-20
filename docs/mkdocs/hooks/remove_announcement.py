@@ -7,7 +7,7 @@ def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
     if os.getenv('READTHEDOCS_VERSION_TYPE') == "tag":
         # remove the warning banner if the version is a tagged release
         docs_dir = os.path.dirname(__file__)
-        announcement_path = os.path.join(docs_dir, "overrides/main.html")
+        announcement_path = os.path.join(docs_dir, "mkdocs/overrides/main.html")
         # The file might be removed already if the build is triggered multiple times
         # (readthedocs build both HTML and PDF versions separately)
         if os.path.exists(announcement_path):

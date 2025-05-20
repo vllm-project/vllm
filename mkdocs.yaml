@@ -41,13 +41,13 @@ theme:
     - search.highlight
     - search.share
     - toc.follow
-  custom_dir: docs/overrides
+  custom_dir: docs/mkdocs/overrides
 
 hooks:
   - transpile_docs.py  # temporary
-  - docs/remove_announcement.py
-  - docs/gen_examples.py
-  - docs/url_schemes.py
+  - docs/mkdocs/hooks/remove_announcement.py
+  - docs/mkdocs/hooks/generate_examples.py
+  - docs/mkdocs/hooks/url_schemes.py
 
 # Required to stop api-autonav from raising an error
 # https://github.com/tlambert03/mkdocs-api-autonav/issues/16
@@ -116,5 +116,5 @@ markdown_extensions:
       enable_dollar_delimiter: true
 
 extra_javascript:
-  - javascript/run_llm_widget.js
+  - mkdocs/javascript/run_llm_widget.js
   - https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS_HTML

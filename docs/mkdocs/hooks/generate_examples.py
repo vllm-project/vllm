@@ -6,10 +6,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-ROOT_DIR = Path(__file__).parent.parent
-ROOT_DIR_RELATIVE = '../../..'
+ROOT_DIR = Path(__file__).parent.parent.parent.parent
+ROOT_DIR_RELATIVE = '../../../../..'
 EXAMPLE_DIR = ROOT_DIR / "examples"
 EXAMPLE_DOC_DIR = ROOT_DIR / "docs/getting_started/examples"
+print(ROOT_DIR.resolve())
+print(EXAMPLE_DIR.resolve())
+print(EXAMPLE_DOC_DIR.resolve())
 
 
 def fix_case(text: str) -> str:
