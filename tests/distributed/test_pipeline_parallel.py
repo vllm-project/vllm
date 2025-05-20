@@ -100,9 +100,8 @@ class PPTestSettings:
                               eager_mode=True,
                               chunked_prefill=False),
             ],
-            # only ray is supported for V1
-            distributed_backends=["mp", "ray", "ray"],
-            vllm_major_versions=["0", "0", "1"],
+            distributed_backends=["mp", "mp", "ray", "ray"],
+            vllm_major_versions=["0", "1", "0", "1"],
             task=task,
             test_options=PPTestOptions(multi_node_only=multi_node_only,
                                        load_format=load_format),
@@ -186,7 +185,7 @@ TEXT_GENERATION_MODELS = {
     "mosaicml/mpt-7b": PPTestSettings.fast(),
     "nvidia/Minitron-8B-Base": PPTestSettings.fast(),
     "allenai/OLMo-1B-hf": PPTestSettings.fast(),
-    "shanearora/OLMo-7B-1124-hf": PPTestSettings.fast(),
+    "allenai/OLMo-2-0425-1B": PPTestSettings.fast(),
     "allenai/OLMoE-1B-7B-0924-Instruct": PPTestSettings.fast(),
     "facebook/opt-iml-max-1.3b": PPTestSettings.fast(),
     "OrionStarAI/Orion-14B-Chat": PPTestSettings.fast(),
@@ -350,6 +349,11 @@ def _compare_tp(
         # Temporary. Currently when zeromq + SPMD is used, it does not properly
         # terminate because of a Ray Compiled Graph issue.
         common_args.append("--disable-frontend-multiprocessing")
+    elif distributed_backend == "mp":
+        # Both V0/V1 of multiprocessing executor support PP
+        pp_env = {
+            "VLLM_USE_V1": vllm_major_version,
+        }
     else:
         pp_env = None
 

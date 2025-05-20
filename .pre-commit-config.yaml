@@ -16,6 +16,8 @@ repos:
   hooks:
   - id: ruff
     args: [--output-format, github, --fix]
+  - id: ruff-format
+    files: ^(.buildkite|benchmarks)/.*
 - repo: https://github.com/codespell-project/codespell
   rev: v2.4.1
   hooks:
@@ -125,8 +127,6 @@ repos:
     name: Update Dockerfile dependency graph
     entry: tools/update-dockerfile-graph.sh
     language: script
-    files: ^docker/Dockerfile$
-    pass_filenames: false
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion

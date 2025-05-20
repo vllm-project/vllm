@@ -399,10 +399,8 @@ class LLMEngine:
                 self.scheduler,
                 self.seq_counter,
                 get_tokenizer_for_seq,
-                stop_checker=StopChecker(
-                    self.scheduler_config.max_model_len,
-                    get_tokenizer_for_seq,
-                ),
+                stop_checker=StopChecker(self.scheduler_config.max_model_len,
+                                         get_tokenizer_for_seq),
             ))
 
         self.seq_id_to_seq_group: Dict[str, SequenceGroupBase] = {}
@@ -410,6 +408,9 @@ class LLMEngine:
         # Flag to set when an input fails to process and the engine should run
         # the next step without re-scheduling.
         self._skip_scheduling_next_step = False
+
+        # Don't keep the dummy data in memory
+        self.reset_mm_cache()
 
     def _initialize_kv_caches(self) -> None:
         """Initialize the KV cache in the worker(s).
@@ -914,6 +915,10 @@ class LLMEngine:
         Returns True if there are unfinished requests for the virtual engine.
         """
         return self.scheduler[virtual_engine].has_unfinished_seqs()
+
+    def reset_mm_cache(self) -> bool:
+        """Reset the multi-modal cache."""
+        return self.input_preprocessor.mm_registry.reset_processor_cache()
 
     def reset_prefix_cache(self, device: Optional[Device] = None) -> bool:
         """Reset prefix cache for all devices."""
@@ -2021,7 +2026,7 @@ class LLMEngine:
         if not prompt_ids:
             if prompt_type == "encoder" and model_config.is_multimodal_model:
                 pass  # Mllama may have empty encoder inputs for text-only data
-            if prompt_inputs["type"] == "embeds":
+            elif prompt_inputs["type"] == "embeds":
                 pass
             else:
                 raise ValueError(f"The {prompt_type} prompt cannot be empty")
