@@ -347,8 +347,8 @@ def chunked_prefill_paged_decode(
             v_scale=v_scale,
         )
     else:
-        # we use a "static launch grid" for the kernel, in order to cache it.
-        #  Therefore, we assuem a maximum batch_size of 4096.
+        # We use a "static launch grid" for the kernel in order to cache it.
+        #  Therefore, we assume a maximum batch_size of 4096.
         assert num_seqs <= 4096
         kernel_paged_attention_2d[(
             num_seqs,

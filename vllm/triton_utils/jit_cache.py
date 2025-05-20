@@ -86,10 +86,10 @@ class PreparedKernel:
 
         self.arg_list = []
         self.update_args_index = {}
-        # We construct the list of arguments that are passed to the combiled
+        # We construct the list of arguments that are passed to the compiled
         # kernel beforehand. For the arguments that could change each time the
         # kernel is called, store a dummy value that will be set each time
-        # __call__ is called. For the arguments that are labelled as assume to
+        # __call__ is called. For the arguments that are labeled as assumed to
         # be constant, we skip this step and use the initial stored values.
         for i, arg_n in enumerate(bound_args.keys()):
             if arg_n in update_only_arg_names:
@@ -104,7 +104,7 @@ class PreparedKernel:
 
     def _init_handles(self):
         """
-        more or less redo what CompiledKernel._init_hanles is doing
+        more or less redo what CompiledKernel._init_handles is doing
         (c.f. triton/python/triton/runtime/compiler.py:379)
         """
         self.run = driver.active.launcher_cls(self.kernel.src,
@@ -395,7 +395,7 @@ def jitcache(
     :type check_keys: list[str]
     :param cache_lock: The CacheLock used for this JitCache.
     :type cache_lock: CacheLock
-    :param chache_launch_grid: Indicate if the launch grid size is static and
+    :param cache_launch_grid: Indicate if the launch grid size is static and
                                should be cached (False by default).
     :type cache_launch_grid: bool
     :param assume_const: A list of parameters that are NOT marked as
