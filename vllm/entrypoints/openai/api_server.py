@@ -1347,8 +1347,8 @@ async def run_server(args, **uvicorn_kwargs) -> None:
                     "s" if is_ssl else "", _listen_addr(sock_addr[0]),
                     sock_addr[1])
 
-        shutdown_task = await serve_http(
-            app,
+        serve_http_kwargs = dict(
+            app=app,
             sock=sock,
             enable_ssl_refresh=args.enable_ssl_refresh,
             host=args.host,
@@ -1362,10 +1362,12 @@ async def run_server(args, **uvicorn_kwargs) -> None:
             ssl_certfile=args.ssl_certfile,
             ssl_ca_certs=args.ssl_ca_certs,
             ssl_cert_reqs=args.ssl_cert_reqs,
-            log_config=log_config,
             **uvicorn_kwargs,
         )
+        if log_config is not None:
+            serve_http_kwargs['log_config'] = log_config
 
+        shutdown_task = await serve_http(**serve_http_kwargs)
     # NB: Await server shutdown only after the backend context is exited
     try:
         await shutdown_task

@@ -137,8 +137,8 @@ async def run_server(args: Namespace,
             logger.warning("Failed to load log config from file %s: error %e",
                            args.log_config_file, e)
 
-    shutdown_task = await serve_http(
-        app,
+    serve_http_kwargs = dict(
+        app=app,
         sock=None,
         enable_ssl_refresh=args.enable_ssl_refresh,
         host=args.host,
@@ -149,9 +149,12 @@ async def run_server(args: Namespace,
         ssl_certfile=args.ssl_certfile,
         ssl_ca_certs=args.ssl_ca_certs,
         ssl_cert_reqs=args.ssl_cert_reqs,
-        log_config=log_config,
         **uvicorn_kwargs,
     )
+    if log_config is not None:
+        serve_http_kwargs['log_config'] = log_config
+
+    shutdown_task = await serve_http(**serve_http_kwargs)
 
     await shutdown_task
 
