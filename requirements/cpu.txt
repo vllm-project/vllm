@@ -2,6 +2,8 @@
 -r common.txt
 
 # Dependencies for CPUs
+packaging>=24.2
+setuptools>=77.0.3,<80.0.0
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.7.0+cpu; platform_machine == "x86_64"
 torch==2.7.0; platform_system == "Darwin"
