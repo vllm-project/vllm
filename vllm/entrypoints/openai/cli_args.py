@@ -7,6 +7,7 @@ purposes.
 
 import argparse
 import json
+import os
 import ssl
 from collections.abc import Sequence
 from typing import Optional, Union, get_args
@@ -242,6 +243,13 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "Special the tool parser plugin write to parse the model-generated tool"
         " into OpenAI API format, the name register in this plugin can be used "
         "in ``--tool-call-parser``.")
+
+    parser.add_argument(
+        "--log-config-file",
+        type=str,
+        default=os.environ.get("VLLM_LOGGING_CONFIG_PATH", None),
+        help="Path to logging config JSON file for both vllm and uvicorn",
+    )
 
     parser = AsyncEngineArgs.add_cli_args(parser)
 
