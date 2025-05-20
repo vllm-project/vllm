@@ -36,42 +36,20 @@ class DeepEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # combine function.
         self.handle = None
 
-    def prepare(
-        self,
-        a1: torch.Tensor,
-        a1_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
-        rank_topk_weights: torch.Tensor,
-        rank_topk_ids: torch.Tensor,
-        num_experts: int,
-        expert_map: Optional[torch.Tensor],  # TODO (varun) : Unused - remove
-        apply_router_weight_on_input: bool,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
-        # TODO (varun) : Exercise x2_scale in tests
-        do_debug = False
+    def _do_quant(self, tokens: torch.Tensor,
+                  token_scales: Optional[torch.Tensor], per_act_token: bool):
 
-        if do_debug:
-            torch.cuda.synchronize()
-            s = f"topk_ids {rank_topk_ids} \n"
-            s += f"num_experts {num_experts} \n"
-            print(s, flush=True)
+        tokens, token_scales = moe_kernel_quantize_input(
+            tokens, token_scales, self.quant_dtype, per_act_token,
+            self.block_shape)
+        return tokens, token_scales
 
-        # TODO (varun) : application of router weights and quantization is
-        # common to all implementations - factor out
-        if apply_router_weight_on_input:
-            topk = rank_topk_ids.size(1)
-            # TODO: this only works for topK=1, will need to update for topK>1
-            assert topk == 1, (
-                "apply_router_weight_on_input is only implemented for topk=1")
-            a1 = a1 * rank_topk_weights.to(a1.dtype)
+    def _do_dispatch(self, tokens: torch.Tensor,
+                     token_scales: Optional[torch.Tensor],
+                     rank_topk_ids: torch.Tensor,
+                     rank_topk_weights: torch.Tensor, num_experts: int):
 
-        per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
-            a2_scale.numel() != 1 if a2_scale is not None else False)
-
-        a1q, a1q_scale = moe_kernel_quantize_input(a1, a1_scale,
-                                                   self.quant_dtype,
-                                                   per_act_token,
-                                                   self.block_shape)
+        has_scales = token_scales is not None
 
         (num_tokens_per_rank, num_tokens_per_rdma_rank, expert_num_tokens,
          is_token_in_rank, event) = self.buffer.get_dispatch_layout(
@@ -81,17 +59,9 @@ class DeepEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
              async_finish=False,
              allocate_on_comm_stream=False)
 
-        if do_debug:
-            torch.cuda.synchronize()
-            s = f"num_tokens_per_rank {num_tokens_per_rank} \n"
-            s += f"num_tokens_per_rdma_rank {num_tokens_per_rdma_rank} \n"
-            s += f"num_tokens_per_expert {expert_num_tokens} \n"
-            s += f"is_token_in_rank {is_token_in_rank} \n"
-            print(s, flush=True)
-
-        token_data = a1q
-        if a1q_scale is not None:
-            token_data = (a1q, a1q_scale)
+        token_data = tokens
+        if has_scales:
+            token_data = (tokens, token_scales)
 
         (
             token_data, expert_topk_ids, expert_topk_weights,
@@ -106,27 +76,13 @@ class DeepEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             topk_idx=rank_topk_ids,
             topk_weights=rank_topk_weights,
             expert_alignment=
-            1,  # TODO (varun) : set this properly and avoid moe_alighn kernel ?
+            1,  # TODO (varun) : set this properly and avoid moe_align kernel ?
             config=None,
             previous_event=None,
             async_finish=False,
             allocate_on_comm_stream=False)
 
-        if do_debug:
-            torch.cuda.synchronize()
-            s = ""
-            if isinstance(token_data, tuple):
-                s += f"expert_x : {token_data[0].shape} {token_data[0]}"
-                s += f"expert_x_scale : {token_data[1].shape} {token_data[1]}"
-            else:
-                s += f"expert_x : {token_data.shape} {token_data} \n"
-            s += f"expert_topk_ids : {expert_topk_ids} \n"
-            s += f"expert_topk_weights : {expert_topk_weights} \n"
-            s += ("expert_num_tokens_per_expert_list : "
-                  "{expert_num_tokens_per_expert_list} \n")
-            print(s, flush=True)
-
-        if self.quant_dtype is not None:
+        if has_scales:
             expert_x, expert_x_scale = token_data
         else:
             expert_x, expert_x_scale = token_data, None
@@ -146,6 +102,57 @@ class DeepEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             expert_topk_ids == -1,
             num_experts - 1 if self.rank_expert_offset == 0 else 0,
             expert_topk_ids + self.rank_expert_offset)
+
+        return (expert_x, expert_x_scale, expert_num_tokens, expert_topk_ids,
+                expert_topk_weights)
+
+    def prepare(
+        self,
+        a1: torch.Tensor,
+        a1_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        rank_topk_weights: torch.Tensor,
+        rank_topk_ids: torch.Tensor,
+        num_experts: int,
+        expert_map: Optional[torch.Tensor],  # TODO (varun) : Unused - remove
+        apply_router_weight_on_input: bool,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+
+        # TODO (varun) : application of router weights and quantization is
+        # common to all implementations - factor out
+        if apply_router_weight_on_input:
+            topk = rank_topk_ids.size(1)
+            # TODO: this only works for topK=1, will need to update for topK>1
+            assert topk == 1, (
+                "apply_router_weight_on_input is only implemented for topk=1")
+            a1 = a1 * rank_topk_weights.to(a1.dtype)
+
+        per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
+            a2_scale.numel() != 1 if a2_scale is not None else False)
+
+        if per_act_token:
+            a1q, a1q_scale = self._do_quant(a1, a1_scale, per_act_token=True)
+            (expert_x, expert_x_scale, expert_num_tokens, expert_topk_ids,
+             expert_topk_weights) = self._do_dispatch(
+                 tokens=a1q,
+                 token_scales=a1q_scale,
+                 rank_topk_ids=rank_topk_ids,
+                 rank_topk_weights=rank_topk_weights,
+                 num_experts=num_experts)
+        else:
+            # DeepEP kernels only support dispatching per-token-quant
+            # quantization. dispatch in bfloat16.
+            (expert_x, _, expert_num_tokens, expert_topk_ids,
+             expert_topk_weights) = self._do_dispatch(
+                 tokens=a1,
+                 token_scales=None,
+                 rank_topk_ids=rank_topk_ids,
+                 rank_topk_weights=rank_topk_weights,
+                 num_experts=num_experts)
+            # quantize now
+            expert_x, expert_x_scale = self._do_quant(expert_x,
+                                                      a1_scale,
+                                                      per_act_token=False)
 
         return (expert_x, expert_x_scale, expert_num_tokens, expert_topk_ids,
                 expert_topk_weights)

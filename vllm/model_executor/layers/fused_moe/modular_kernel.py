@@ -314,7 +314,6 @@ class FusedMoEModularKernel(torch.nn.Module):
         Returns:
         - torch.Tensor: The output tensor after applying the MoE layer.
         """
-
         a1 = hidden_states
         E, _, N, K, top_k = _moe_problem_size(a1, w1, w2, topk_ids)
 
@@ -323,13 +322,14 @@ class FusedMoEModularKernel(torch.nn.Module):
 
         output = a1 if inplace else torch.zeros_like(a1)
 
-
-        a1q, a1q_scale, expert_num_tokens, _expert_topk_ids, _expert_topk_weights = self.prepare_finalize.prepare(
-            a1, a1_scale, a2_scale, topk_weights, topk_ids, global_num_experts,
-            expert_map, apply_router_weight_on_input)
+        (a1q, a1q_scale, expert_num_tokens, _expert_topk_ids,
+         _expert_topk_weights) = self.prepare_finalize.prepare(
+             a1, a1_scale, a2_scale, topk_weights, topk_ids,
+             global_num_experts, expert_map, apply_router_weight_on_input)
         # Maybe prepare gathered topk_ids and topk_weights from other EP ranks.
         topk_ids = topk_ids if _expert_topk_ids is None else _expert_topk_ids
-        topk_weights = topk_weights if _expert_topk_weights is None else _expert_topk_weights
+        topk_weights = (topk_weights if _expert_topk_weights is None else
+                        _expert_topk_weights)
 
         M = a1q.size(0)
 
