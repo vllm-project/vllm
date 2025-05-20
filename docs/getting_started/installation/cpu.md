@@ -3,48 +3,40 @@
 vLLM is a Python library that supports the following CPU variants. Select your CPU type to see vendor specific instructions:
 
 === "Intel/AMD x86"
-        
+
     --8<-- "docs/getting_started/installation/cpu/x86.inc.md:installation"
-                
 
 === "ARM AArch64"
-    
+
     --8<-- "docs/getting_started/installation/cpu/arm.inc.md:installation"
-                
 
 === "Apple silicon"
-    
+
     --8<-- "docs/getting_started/installation/cpu/apple.inc.md:installation"
-                
 
 === "IBM Z (S390X)"
-    
+
     --8<-- "docs/getting_started/installation/cpu/s390x.inc.md:installation"
-                
 
 ## Requirements
 
 - Python: 3.9 -- 3.12
 
 === "Intel/AMD x86"
-    
+
     --8<-- "docs/getting_started/installation/cpu/x86.inc.md:requirements"
-                
 
 === "ARM AArch64"
-    
+
     --8<-- "docs/getting_started/installation/cpu/arm.inc.md:requirements"
-                
 
 === "Apple silicon"
-    
+
     --8<-- "docs/getting_started/installation/cpu/apple.inc.md:requirements"
-                
 
 === "IBM Z (S390X)"
-    
+
     --8<-- "docs/getting_started/installation/cpu/s390x.inc.md:requirements"
-                
 
 ## Set up using Python
 
@@ -59,33 +51,28 @@ Currently, there are no pre-built CPU wheels.
 ### Build wheel from source
 
 === "Intel/AMD x86"
-    
+
     --8<-- "docs/getting_started/installation/cpu/x86.inc.md:build-wheel-from-source"
-                
 
 === "ARM AArch64"
-    
+
     --8<-- "docs/getting_started/installation/cpu/arm.inc.md:build-wheel-from-source"
-                
 
 === "Apple silicon"
-    
+
     --8<-- "docs/getting_started/installation/cpu/apple.inc.md:build-wheel-from-source"
-                
 
 === "IBM Z (s390x)"
-    
+
     --8<-- "docs/getting_started/installation/cpu/s390x.inc.md:build-wheel-from-source"
-                
 
 ## Set up using Docker
 
 ### Pre-built images
 
 === "Intel/AMD x86"
-    
+
     --8<-- "docs/getting_started/installation/cpu/x86.inc.md:pre-built-images"
-                
 
 ### Build image from source
 

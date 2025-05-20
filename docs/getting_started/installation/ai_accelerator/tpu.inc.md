@@ -178,19 +178,18 @@ docker run --privileged --net host --shm-size=16G -it vllm-tpu
 
 !!! tip
     If you encounter the following error:
-    
+
     ```console
     from torch._C import *  # noqa: F403
     ImportError: libopenblas.so.0: cannot open shared object file: No such
     file or directory
     ```
-    
+
     Install OpenBLAS with the following command:
-    
+
     ```console
     sudo apt-get install libopenblas-base libopenmpi-dev libomp-dev
     ```
-    
 
 # --8<-- [end:build-image-from-source]
 # --8<-- [start:extra-information]

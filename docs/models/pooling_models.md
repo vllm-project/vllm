@@ -126,13 +126,12 @@ Our [OpenAI-Compatible Server][openai-compatible-server] provides endpoints that
 
 !!! warning
     Not all embedding models are trained using Matryoshka Representation Learning. To avoid misuse of the `dimensions` parameter, vLLM returns an error for requests that attempt to change the output dimension of models that do not support Matryoshka Embeddings.
-    
+
     For example, setting `dimensions` parameter while using the `BAAI/bge-m3` model will result in the following error.
-    
+
     ```json
     {"object":"error","message":"Model \"BAAI/bge-m3\" does not support matryoshka representation, changing output dimensions will lead to poor results.","type":"BadRequestError","param":null,"code":400}
     ```
-    
 
 ### Manually enable Matryoshka Embeddings
 

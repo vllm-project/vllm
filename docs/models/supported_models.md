@@ -46,10 +46,10 @@ If a model is neither supported natively by vLLM or Transformers, it can still b
 For a model to be compatible with the Transformers backend for vLLM it must:
 
 - be a Transformers compatible custom model (see [Transformers - Customizing models](https://huggingface.co/docs/transformers/en/custom_models)):
-  * The model directory must have the correct structure (e.g. `config.json` is present).
-  * `config.json` must contain `auto_map.AutoModel`.
+    * The model directory must have the correct structure (e.g. `config.json` is present).
+    * `config.json` must contain `auto_map.AutoModel`.
 - be a Transformers backend for vLLM compatible model (see [writing-custom-models][writing-custom-models]):
-  * Customisation should be done in the base model (e.g. in `MyModel`, not `MyModelForCausalLM`).
+    * Customisation should be done in the base model (e.g. in `MyModel`, not `MyModelForCausalLM`).
 
 If the compatible model is:
 
@@ -77,20 +77,20 @@ from torch import nn
 
 class MyAttention(nn.Module):
 
-  def forward(self, hidden_states, **kwargs):
-    ...
-    attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
-    attn_output, attn_weights = attention_interface(
-      self,
-      query_states,
-      key_states,
-      value_states,
-      **kwargs,
-    )
-    ...
+    def forward(self, hidden_states, **kwargs):
+        ...
+        attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+        attn_output, attn_weights = attention_interface(
+            self,
+            query_states,
+            key_states,
+            value_states,
+            **kwargs,
+        )
+        ...
 
 class MyModel(PreTrainedModel):
-  _supports_attention_backend = True
+    _supports_attention_backend = True
 ```
 
 Here is what happens in the background when this model is loaded:
@@ -108,27 +108,27 @@ For your model to be compatible with vLLM's tensor parallel and/or pipeline para
 from transformers import PretrainedConfig
 
 class MyConfig(PretrainedConfig):
-  base_model_tp_plan = {
-    "layers.*.self_attn.k_proj": "colwise",
-    "layers.*.self_attn.v_proj": "colwise",
-    "layers.*.self_attn.o_proj": "rowwise",
-    "layers.*.mlp.gate_proj": "colwise",
-    "layers.*.mlp.up_proj": "colwise",
-    "layers.*.mlp.down_proj": "rowwise",
-  }
-  base_model_pp_plan = {
-    "embed_tokens": (["input_ids"], ["inputs_embeds"]),
-    "layers": (["hidden_states", "attention_mask"], ["hidden_states"]),
-    "norm": (["hidden_states"], ["hidden_states"]),
-  }
+    base_model_tp_plan = {
+        "layers.*.self_attn.k_proj": "colwise",
+        "layers.*.self_attn.v_proj": "colwise",
+        "layers.*.self_attn.o_proj": "rowwise",
+        "layers.*.mlp.gate_proj": "colwise",
+        "layers.*.mlp.up_proj": "colwise",
+        "layers.*.mlp.down_proj": "rowwise",
+    }
+    base_model_pp_plan = {
+        "embed_tokens": (["input_ids"], ["inputs_embeds"]),
+        "layers": (["hidden_states", "attention_mask"], ["hidden_states"]),
+        "norm": (["hidden_states"], ["hidden_states"]),
+    }
 ```
 
 - `base_model_tp_plan` is a `dict` that maps fully qualified layer name patterns to tensor parallel styles (currently only `"colwise"` and `"rowwise"` are supported).
 - `base_model_pp_plan` is a `dict` that maps direct child layer names to `tuple`s of `list`s of `str`s:
-  * You only need to do this for layers which are not present on all pipeline stages
-  * vLLM assumes that there will be only one `nn.ModuleList`, which is distributed across the pipeline stages
-  * The `list` in the first element of the `tuple` contains the names of the input arguments
-  * The `list` in the last element of the `tuple` contains the names of the variables the layer outputs to in your modeling code
+    * You only need to do this for layers which are not present on all pipeline stages
+    * vLLM assumes that there will be only one `nn.ModuleList`, which is distributed across the pipeline stages
+    * The `list` in the first element of the `tuple` contains the names of the input arguments
+    * The `list` in the last element of the `tuple` contains the names of the variables the layer outputs to in your modeling code
 
 ## Loading a Model
 
@@ -144,21 +144,21 @@ The [Transformers backend][transformers-backend] enables you to run models direc
 
 !!! tip
     The easiest way to check if your model is really supported at runtime is to run the program below:
-    
+
     ```python
     from vllm import LLM
-    
+
     # For generative models (task=generate) only
     llm = LLM(model=..., task="generate")  # Name or path of your model
     output = llm.generate("Hello, my name is")
     print(output)
-    
+
     # For pooling models (task={embed,classify,reward,score}) only
     llm = LLM(model=..., task="embed")  # Name or path of your model
     output = llm.encode("Hello, my name is")
     print(output)
     ```
-    
+
     If vLLM successfully returns text (for generative models) or hidden states (for pooling models), it indicates that your model is supported.
 
 Otherwise, please refer to [Adding a New Model][new-model] for instructions on how to implement your model in vLLM.
@@ -405,7 +405,7 @@ Specified using `--task embed`.
 !!! note
     The HF implementation of `Alibaba-NLP/gte-Qwen2-1.5B-instruct` is hardcoded to use causal attention despite what is shown in `config.json`. To compare vLLM vs HF results,
     you should set `--hf-overrides '{"is_causal": true}'` in vLLM so that the two implementations are consistent with each other.
-    
+
     For both the 1.5B and 7B variants, you also need to enable `--trust-remote-code` for the correct tokenizer to be loaded.
     See [relevant issue on HF Transformers](https://github.com/huggingface/transformers/issues/34882).
 
@@ -481,26 +481,25 @@ See [this page][multimodal-inputs] on how to pass multi-modal inputs to the mode
 !!! warning
     **To enable multiple multi-modal items per text prompt in vLLM V0**, you have to set `limit_mm_per_prompt` (offline inference)
     or `--limit-mm-per-prompt` (online serving). For example, to enable passing up to 4 images per text prompt:
-    
+
     Offline inference:
-    
+
     ```python
     from vllm import LLM
-    
+
     llm = LLM(
         model="Qwen/Qwen2-VL-7B-Instruct",
         limit_mm_per_prompt={"image": 4},
     )
     ```
-    
+
     Online serving:
-    
+
     ```bash
     vllm serve Qwen/Qwen2-VL-7B-Instruct --limit-mm-per-prompt '{"image":4}'
     ```
-    
+
     **This is no longer required if you are using vLLM V1.**
-    
 
 !!! note
     vLLM currently only supports adding LoRA to the language backbone of multimodal models.
@@ -563,18 +562,18 @@ Specified using `--task generate`.
 !!! warning
     Both V0 and V1 support `Gemma3ForConditionalGeneration` for text-only inputs.
     However, there are differences in how they handle text + image inputs:
-    
+
     V0 correctly implements the model's attention pattern:
     - Uses bidirectional attention between the image tokens corresponding to the same image
     - Uses causal attention for other tokens
     - Implemented via (naive) PyTorch SDPA with masking tensors
     - Note: May use significant memory for long prompts with image
-    
+
     V1 currently uses a simplified attention pattern:
     - Uses causal attention for all tokens, including image tokens
     - Generates reasonable outputs but does not match the original model's attention for text + image inputs, especially when `{"do_pan_and_scan": true}`
     - Will be updated in the future to support the correct behavior
-    
+
     This limitation exists because the model's mixed attention pattern (bidirectional for images, causal otherwise) is not yet supported by vLLM's attention backends.
 
 !!! note
@@ -585,9 +584,9 @@ Specified using `--task generate`.
 
 !!! warning
     The output quality of `AllenAI/Molmo-7B-D-0924` (especially in object localization tasks) has deteriorated in recent updates.
-    
+
     For the best results, we recommend using the following dependency versions (tested on A10 and L40):
-    
+
     ```text
     # Core vLLM-compatible dependencies with Molmo accuracy setup (tested on L40)
     torch==2.5.1
@@ -596,7 +595,7 @@ Specified using `--task generate`.
     tokenizers==0.21.0
     tiktoken==0.7.0
     vllm==0.7.0
-    
+
     # Optional but recommended for improved performance and stability
     triton==3.1.0
     xformers==0.0.28.post3
@@ -605,11 +604,11 @@ Specified using `--task generate`.
     openai==1.60.2
     opencv-python-headless==4.11.0.86
     pillow==10.4.0
-    
+
     # Installed FlashAttention (for float16 only)
     flash-attn>=2.5.6  # Not used in float32, but should be documented
     ```
-    
+
     **Note:** Make sure you understand the security implications of using outdated packages.
 
 !!! note
@@ -622,7 +621,7 @@ Specified using `--task generate`.
 !!! note
     To use Qwen2.5-Omni, you have to install Hugging Face Transformers library from source via
     `pip install git+https://github.com/huggingface/transformers.git`.
-    
+
     Read audio from video pre-processing is currently supported on V0 (but not V1), because overlapping modalities is not yet supported in V1.
     `--mm-processor-kwargs '{"use_audio_in_video": true}'`.
 

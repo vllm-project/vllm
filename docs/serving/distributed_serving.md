@@ -107,7 +107,7 @@ To make tensor parallel performant, you should make sure the communication betwe
 
 !!! warning
     Please make sure you downloaded the model to all the nodes (with the same path), or the model is downloaded to some distributed file system that is accessible by all nodes.
-    
+
     When you use huggingface repo id to refer to the model, you should append your huggingface token to the `run_cluster.sh` script, e.g. `-e HF_TOKEN=`. The recommended way is to download the model first, and then use the path to refer to the model.
 
 !!! warning

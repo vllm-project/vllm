@@ -21,10 +21,10 @@ client = OpenAI(
 )
 
 completion = client.chat.completions.create(
-  model="NousResearch/Meta-Llama-3-8B-Instruct",
-  messages=[
-    {"role": "user", "content": "Hello!"}
-  ]
+    model="NousResearch/Meta-Llama-3-8B-Instruct",
+    messages=[
+        {"role": "user", "content": "Hello!"}
+    ]
 )
 
 print(completion.choices[0].message)
@@ -36,7 +36,7 @@ print(completion.choices[0].message)
 
 !!! warning
     By default, the server applies `generation_config.json` from the Hugging Face model repository if it exists. This means the default values of certain sampling parameters can be overridden by those recommended by the model creator.
-    
+
     To disable this behavior, please pass `--generation-config vllm` when launching the server.
 
 ## Supported APIs
@@ -44,31 +44,31 @@ print(completion.choices[0].message)
 We currently support the following OpenAI APIs:
 
 - [Completions API][completions-api] (`/v1/completions`)
-  - Only applicable to [text generation models](../models/generative_models.md) (`--task generate`).
-  - *Note: `suffix` parameter is not supported.*
+    - Only applicable to [text generation models](../models/generative_models.md) (`--task generate`).
+    - *Note: `suffix` parameter is not supported.*
 - [Chat Completions API][chat-api] (`/v1/chat/completions`)
-  - Only applicable to [text generation models](../models/generative_models.md) (`--task generate`) with a [chat template][chat-template].
-  - *Note: `parallel_tool_calls` and `user` parameters are ignored.*
+    - Only applicable to [text generation models](../models/generative_models.md) (`--task generate`) with a [chat template][chat-template].
+    - *Note: `parallel_tool_calls` and `user` parameters are ignored.*
 - [Embeddings API][embeddings-api] (`/v1/embeddings`)
-  - Only applicable to [embedding models](../models/pooling_models.md) (`--task embed`).
+    - Only applicable to [embedding models](../models/pooling_models.md) (`--task embed`).
 - [Transcriptions API][transcriptions-api] (`/v1/audio/transcriptions`)
-  - Only applicable to Automatic Speech Recognition (ASR) models (OpenAI Whisper) (`--task generate`).
+    - Only applicable to Automatic Speech Recognition (ASR) models (OpenAI Whisper) (`--task generate`).
 
 In addition, we have the following custom APIs:
 
 - [Tokenizer API][tokenizer-api] (`/tokenize`, `/detokenize`)
-  - Applicable to any model with a tokenizer.
+    - Applicable to any model with a tokenizer.
 - [Pooling API][pooling-api] (`/pooling`)
-  - Applicable to all [pooling models](../models/pooling_models.md).
+    - Applicable to all [pooling models](../models/pooling_models.md).
 - [Classification API][classification-api] (`/classify`)
-  - Only applicable to [classification models](../models/pooling_models.md) (`--task classify`).
+    - Only applicable to [classification models](../models/pooling_models.md) (`--task classify`).
 - [Score API][score-api] (`/score`)
-  - Applicable to embedding models and [cross-encoder models](../models/pooling_models.md) (`--task score`).
+    - Applicable to embedding models and [cross-encoder models](../models/pooling_models.md) (`--task score`).
 - [Re-rank API][rerank-api] (`/rerank`, `/v1/rerank`, `/v2/rerank`)
-  - Implements [Jina AI's v1 re-rank API](https://jina.ai/reranker/)
-  - Also compatible with [Cohere's v1 & v2 re-rank APIs](https://docs.cohere.com/v2/reference/rerank)
-  - Jina and Cohere's APIs are very similar; Jina's includes extra information in the rerank endpoint's response.
-  - Only applicable to [cross-encoder models](../models/pooling_models.md) (`--task score`).
+    - Implements [Jina AI's v1 re-rank API](https://jina.ai/reranker/)
+    - Also compatible with [Cohere's v1 & v2 re-rank APIs](https://docs.cohere.com/v2/reference/rerank)
+    - Jina and Cohere's APIs are very similar; Jina's includes extra information in the rerank endpoint's response.
+    - Only applicable to [cross-encoder models](../models/pooling_models.md) (`--task score`).
 
 [](){ #chat-template }
 
@@ -96,10 +96,10 @@ both a `type` and a `text` field. An example is provided below:
 
 ```python
 completion = client.chat.completions.create(
-  model="NousResearch/Meta-Llama-3-8B-Instruct",
-  messages=[
-    {"role": "user", "content": [{"type": "text", "text": "Classify this sentiment: vLLM is wonderful!"}]}
-  ]
+    model="NousResearch/Meta-Llama-3-8B-Instruct",
+    messages=[
+        {"role": "user", "content": [{"type": "text", "text": "Classify this sentiment: vLLM is wonderful!"}]}
+    ]
 )
 ```
 
@@ -110,9 +110,9 @@ request. vLLM provides best-effort support to detect this automatically, which i
 the detected format, which can be one of:
 
 - `"string"`: A string.
-  - Example: `"Hello world"`
+    - Example: `"Hello world"`
 - `"openai"`: A list of dictionaries, similar to OpenAI schema.
-  - Example: `[{"type": "text", "text": "Hello world!"}]`
+    - Example: `[{"type": "text", "text": "Hello world!"}]`
 
 If the result is not what you expect, you can set the `--chat-template-content-format` CLI argument
 to override which format to use.
@@ -125,13 +125,13 @@ Or directly merge them into the JSON payload if you are using HTTP call directly
 
 ```python
 completion = client.chat.completions.create(
-  model="NousResearch/Meta-Llama-3-8B-Instruct",
-  messages=[
-    {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"}
-  ],
-  extra_body={
-    "guided_choice": ["positive", "negative"]
-  }
+    model="NousResearch/Meta-Llama-3-8B-Instruct",
+    messages=[
+        {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"}
+    ],
+    extra_body={
+        "guided_choice": ["positive", "negative"]
+    }
 )
 ```
 
@@ -147,22 +147,22 @@ with `--enable-request-id-headers`.
 
 ```python
 completion = client.chat.completions.create(
-  model="NousResearch/Meta-Llama-3-8B-Instruct",
-  messages=[
-    {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"}
-  ],
-  extra_headers={
-    "x-request-id": "sentiment-classification-00001",
-  }
+    model="NousResearch/Meta-Llama-3-8B-Instruct",
+    messages=[
+        {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"}
+    ],
+    extra_headers={
+        "x-request-id": "sentiment-classification-00001",
+    }
 )
 print(completion._request_id)
 
 completion = client.completions.create(
-  model="NousResearch/Meta-Llama-3-8B-Instruct",
-  prompt="A robot may not injure a human being",
-  extra_headers={
-    "x-request-id": "completion-test",
-  }
+    model="NousResearch/Meta-Llama-3-8B-Instruct",
+    prompt="A robot may not injure a human being",
+    extra_headers={
+        "x-request-id": "completion-test",
+    }
 )
 print(completion._request_id)
 ```
@@ -238,28 +238,28 @@ You can pass multi-modal inputs to embedding models by defining a custom chat te
 and passing a list of `messages` in the request. Refer to the examples below for illustration.
 
 === "VLM2Vec"
-    
+
     To serve the model:
-    
+
     ```bash
     vllm serve TIGER-Lab/VLM2Vec-Full --task embed \
       --trust-remote-code --max-model-len 4096 --chat-template examples/template_vlm2vec.jinja
     ```
-    
+
     !!! warning
         Since VLM2Vec has the same model architecture as Phi-3.5-Vision, we have to explicitly pass `--task embed`
         to run this model in embedding mode instead of text generation mode.
-        
+
         The custom chat template is completely different from the original one for this model,
         and can be found here: <gh-file:examples/template_vlm2vec.jinja>
-        
+
     Since the request schema is not defined by OpenAI client, we post a request to the server using the lower-level `requests` library:
-    
+
     ```python
     import requests
-    
+
     image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
-    
+
     response = requests.post(
         "http://localhost:8000/v1/embeddings",
         json={
@@ -278,27 +278,25 @@ and passing a list of `messages` in the request. Refer to the examples below for
     response_json = response.json()
     print("Embedding output:", response_json["data"][0]["embedding"])
     ```
-    
 
 === "DSE-Qwen2-MRL"
-    
+
     To serve the model:
-    
+
     ```bash
     vllm serve MrLight/dse-qwen2-2b-mrl-v1 --task embed \
       --trust-remote-code --max-model-len 8192 --chat-template examples/template_dse_qwen2_vl.jinja
     ```
-    
+
     !!! warning
         Like with VLM2Vec, we have to explicitly pass `--task embed`.
-        
+
         Additionally, `MrLight/dse-qwen2-2b-mrl-v1` requires an EOS token for embeddings, which is handled
         by a custom chat template: <gh-file:examples/template_dse_qwen2_vl.jinja>
-        
+
     !!! warning
         `MrLight/dse-qwen2-2b-mrl-v1` requires a placeholder image of the minimum image size for text query embeddings. See the full code
         example below for details.
-        
 
 Full example: <gh-file:examples/online_serving/openai_chat_embedding_client_for_multimodal.py>
 

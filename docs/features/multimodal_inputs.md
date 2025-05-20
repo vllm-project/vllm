@@ -214,10 +214,10 @@ Our OpenAI-compatible server accepts multi-modal data via the [Chat Completions 
 !!! warning
     A chat template is **required** to use Chat Completions API.
     For HF format models, the default chat template is defined inside `chat_template.json` or `tokenizer_config.json`.
-    
+
     If no default chat template is available, we will first look for a built-in fallback in <gh-file:vllm/transformers_utils/chat_templates/registry.py>.
     If no fallback is available, an error is raised and you have to provide the chat template manually via the `--chat-template` argument.
-    
+
     For certain models, we provide alternative chat templates inside <gh-dir:vllm/examples>.
     For example, VLM2Vec uses <gh-file:examples/template_vlm2vec.jinja> which is different from the default one for Phi-3-Vision.
 
@@ -294,11 +294,10 @@ Full example: <gh-file:examples/online_serving/openai_chat_completion_client_for
 !!! note
     By default, the timeout for fetching images through HTTP URL is `5` seconds.
     You can override this by setting the environment variable:
-    
+
     ```console
     export VLLM_IMAGE_FETCH_TIMEOUT=<timeout>
     ```
-    
 
 ### Video Inputs
 
@@ -356,11 +355,10 @@ Full example: <gh-file:examples/online_serving/openai_chat_completion_client_for
 !!! note
     By default, the timeout for fetching videos through HTTP URL is `30` seconds.
     You can override this by setting the environment variable:
-    
+
     ```console
     export VLLM_VIDEO_FETCH_TIMEOUT=<timeout>
     ```
-    
 
 ### Audio Inputs
 
@@ -459,11 +457,10 @@ Full example: <gh-file:examples/online_serving/openai_chat_completion_client_for
 !!! note
     By default, the timeout for fetching audios through HTTP URL is `10` seconds.
     You can override this by setting the environment variable:
-    
+
     ```console
     export VLLM_AUDIO_FETCH_TIMEOUT=<timeout>
     ```
-    
 
 ### Embedding Inputs
 

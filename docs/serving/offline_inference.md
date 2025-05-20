@@ -83,12 +83,12 @@ llm = LLM(model="ibm-granite/granite-3.1-8b-instruct",
 !!! warning
     To ensure that vLLM initializes CUDA correctly, you should avoid calling related functions (e.g. [torch.cuda.set_device][])
     before initializing vLLM. Otherwise, you may run into an error like `RuntimeError: Cannot re-initialize CUDA in forked subprocess`.
-    
+
     To control which devices are used, please instead set the `CUDA_VISIBLE_DEVICES` environment variable.
 
 !!! note
     With tensor parallelism enabled, each process will read the whole model and split it into chunks, which makes the disk reading time even longer (proportional to the size of tensor parallelism).
-    
+
     You can convert the model checkpoint to a sharded checkpoint using <gh-file:examples/offline_inference/save_sharded_state.py>. The conversion process might take some time, but later you can load the sharded checkpoint much faster. The model loading time should remain constant regardless of the size of tensor parallelism.
 
 #### Quantization

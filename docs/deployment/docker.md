@@ -41,31 +41,29 @@ You can add any other [engine-args][engine-args] you need after the image tag (`
 
 !!! note
     Optional dependencies are not included in order to avoid licensing issues (e.g. <gh-issue:8030>).
-    
+
     If you need to use those dependencies (having accepted the license terms),
     create a custom Dockerfile on top of the base image with an extra layer that installs them:
-    
+
     ```Dockerfile
     FROM vllm/vllm-openai:v0.8.3
-    
+
     # e.g. install the `audio` optional dependencies
     # NOTE: Make sure the version of vLLM matches the base image!
     RUN uv pip install --system vllm[audio]==0.8.3
     ```
-    
 
 !!! tip
     Some new models may only be available on the main branch of [HF Transformers](https://github.com/huggingface/transformers).
-    
+
     To use the development version of `transformers`, create a custom Dockerfile on top of the base image
     with an extra layer that installs their code from source:
-    
+
     ```Dockerfile
     FROM vllm/vllm-openai:latest
-    
+
     RUN uv pip install --system git+https://github.com/huggingface/transformers.git
     ```
-    
 
 [](){ #deployment-docker-build-image-from-source }
 
@@ -82,7 +80,7 @@ DOCKER_BUILDKIT=1 docker build . --target vllm-openai --tag vllm/vllm-openai --f
     By default vLLM will build for all GPU types for widest distribution. If you are just building for the
     current GPU type the machine is running on, you can add the argument `--build-arg torch_cuda_arch_list=""`
     for vLLM to find the current GPU type and build for that.
-    
+
     If you are using Podman instead of Docker, you might need to disable SELinux labeling by
     adding `--security-opt label=disable` when running `podman build` command to avoid certain [existing issues](https://github.com/containers/buildah/discussions/4184).
 
