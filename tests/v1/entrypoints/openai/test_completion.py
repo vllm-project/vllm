@@ -11,7 +11,6 @@ import pytest_asyncio
 import regex as re
 from httpx import Request, Response
 from openai import BadRequestError
-from pytest_httpx import HTTPXMock
 
 from tests.utils import LocalOpenAIServer
 from vllm.entrypoints.openai.protocol import (CompletionRequest,
@@ -61,17 +60,19 @@ async def client():
 
 
 @pytest.fixture
-def register_completion(httpx_mock: HTTPXMock):
-    """Register a callback for the completion endpoint."""
+def request_handler(local_openai_server):
+    return make_handle_request_no_streaming(local_openai_server.server_logic)
 
-    def _register(handler):
-        httpx_mock.add_callback(
-            handler,
-            url="http://localhost:8000/v1/completions",
-            method="POST",
-        )
 
-    return _register
+@pytest.fixture(autouse=True)
+def setup_httpx_mock(httpx_mock, request_handler):
+    httpx_mock.add_callback(
+        request_handler,
+        url="http://localhost:8000/v1/completions",
+        method="POST",
+        is_reusable=True,
+        is_optional=True,
+    )
 
 
 def make_handle_request_no_streaming(server_logic):
@@ -123,12 +124,7 @@ def convert_to_json(chunk_str: str):
     "model_name",
     [MODEL_NAME],
 )
-async def test_single_completion(local_openai_server,
-                                 client: openai.AsyncOpenAI,
-                                 register_completion, model_name: str):
-    handle_request = make_handle_request_no_streaming(
-        local_openai_server.server_logic)
-    register_completion(handle_request)
+async def test_single_completion(client: openai.AsyncOpenAI, model_name: str):
 
     completion = await client.completions.create(model=model_name,
                                                  prompt="Hello, my name is",
@@ -143,8 +139,6 @@ async def test_single_completion(local_openai_server,
     assert choice.finish_reason == "length"
     assert completion.usage == openai.types.CompletionUsage(
         completion_tokens=5, prompt_tokens=6, total_tokens=11)
-
-    register_completion(handle_request)
 
     # test using token IDs
     completion = await client.completions.create(
@@ -162,12 +156,7 @@ async def test_single_completion(local_openai_server,
     "model_name",
     [MODEL_NAME],
 )
-async def test_no_logprobs(local_openai_server, client: openai.AsyncOpenAI,
-                           register_completion, model_name: str):
-    handle_request = make_handle_request_no_streaming(
-        local_openai_server.server_logic)
-    register_completion(handle_request)
-    # test using token IDs
+async def test_no_logprobs(client: openai.AsyncOpenAI, model_name: str):
     completion = await client.completions.create(
         model=model_name,
         prompt=[0, 0, 0, 0, 0],
@@ -184,11 +173,7 @@ async def test_no_logprobs(local_openai_server, client: openai.AsyncOpenAI,
     "model_name",
     [MODEL_NAME],
 )
-async def test_zero_logprobs(local_openai_server, client: openai.AsyncOpenAI,
-                             register_completion, model_name: str):
-    handle_request = make_handle_request_no_streaming(
-        local_openai_server.server_logic)
-    register_completion(handle_request)
+async def test_zero_logprobs(client: openai.AsyncOpenAI, model_name: str):
     # test using token IDs
     completion = await client.completions.create(
         model=model_name,
@@ -209,11 +194,7 @@ async def test_zero_logprobs(local_openai_server, client: openai.AsyncOpenAI,
     "model_name",
     [MODEL_NAME],
 )
-async def test_some_logprobs(local_openai_server, client: openai.AsyncOpenAI,
-                             register_completion, model_name: str):
-    handle_request = make_handle_request_no_streaming(
-        local_openai_server.server_logic)
-    register_completion(handle_request)
+async def test_some_logprobs(client: openai.AsyncOpenAI, model_name: str):
     # test using token IDs
     completion = await client.completions.create(
         model=model_name,
@@ -236,11 +217,7 @@ async def test_some_logprobs(local_openai_server, client: openai.AsyncOpenAI,
 )
 async def test_too_many_completion_logprobs(local_openai_server,
                                             client: openai.AsyncOpenAI,
-                                            register_completion,
                                             model_name: str):
-    handle_request = make_handle_request_no_streaming(
-        local_openai_server.server_logic)
-    register_completion(handle_request)
     with pytest.raises(
         (openai.BadRequestError, openai.APIError)):  # test using token IDs
         await client.completions.create(
@@ -279,7 +256,7 @@ async def test_too_many_completion_logprobs(local_openai_server,
     assert error_found
 
     # the server should still work afterwards
-    register_completion(handle_request)
+    # register_completion(handle_request)
     completion = await client.completions.create(
         model=model_name,
         prompt=[0, 0, 0, 0, 0],
@@ -294,13 +271,9 @@ async def test_too_many_completion_logprobs(local_openai_server,
                                                          (MODEL_NAME, 0),
                                                          (MODEL_NAME, 1),
                                                          (MODEL_NAME, None)])
-async def test_prompt_logprobs_completion(local_openai_server,
-                                          client: openai.AsyncOpenAI,
-                                          register_completion, model_name: str,
+async def test_prompt_logprobs_completion(client: openai.AsyncOpenAI,
+                                          model_name: str,
                                           prompt_logprobs: Optional[int]):
-    handle_request = make_handle_request_no_streaming(
-        local_openai_server.server_logic)
-    register_completion(handle_request)
     params: dict = {
         "prompt": ["A robot may not injure another robot", "My name is"],
         "model": model_name,
@@ -331,12 +304,9 @@ async def test_prompt_logprobs_completion(local_openai_server,
 )
 async def test_completion_streaming(local_openai_server,
                                     client: openai.AsyncOpenAI,
-                                    register_completion, model_name: str):
-    handle_request = make_handle_request_no_streaming(
-        local_openai_server.server_logic)
+                                    model_name: str):
     prompt = "What is an LLM?"
 
-    register_completion(handle_request)
     single_completion = await client.completions.create(
         model=model_name,
         prompt=prompt,
@@ -377,12 +347,8 @@ async def test_completion_streaming(local_openai_server,
     "model_name",
     [MODEL_NAME],
 )
-async def test_parallel_no_streaming(local_openai_server,
-                                     client: openai.AsyncOpenAI,
-                                     register_completion, model_name: str):
-    handle_request = make_handle_request_no_streaming(
-        local_openai_server.server_logic)
-    register_completion(handle_request)
+async def test_parallel_no_streaming(client: openai.AsyncOpenAI,
+                                     model_name: str):
     """Parallel sampling without streaming.
     A single request output contains a list of completions.
     """
@@ -501,9 +467,7 @@ async def test_parallel_streaming(local_openai_server, model_name: str):
 )
 async def test_completion_stream_options(local_openai_server,
                                          client: openai.AsyncOpenAI,
-                                         register_completion, model_name: str):
-    handle_request = make_handle_request_no_streaming(
-        local_openai_server.server_logic)
+                                         model_name: str):
     prompt = "What is the capital of France?"
 
     # Test stream=True, stream_options=
@@ -623,7 +587,6 @@ async def test_completion_stream_options(local_openai_server,
 
     # Test stream=False, stream_options=
     #     {"include_usage": None}
-    register_completion(handle_request)
     with pytest.raises(BadRequestError):
         await client.completions.create(model=model_name,
                                         prompt=prompt,
@@ -634,7 +597,6 @@ async def test_completion_stream_options(local_openai_server,
 
     # Test stream=False, stream_options=
     #    {"include_usage": True}
-    register_completion(handle_request)
     with pytest.raises(BadRequestError):
         await client.completions.create(model=model_name,
                                         prompt=prompt,
@@ -645,7 +607,6 @@ async def test_completion_stream_options(local_openai_server,
 
     # Test stream=False, stream_options=
     #     {"continuous_usage_stats": None}
-    register_completion(handle_request)
     with pytest.raises(BadRequestError):
         await client.completions.create(
             model=model_name,
@@ -657,7 +618,6 @@ async def test_completion_stream_options(local_openai_server,
 
     # Test stream=False, stream_options=
     #    {"continuous_usage_stats": True}
-    register_completion(handle_request)
     with pytest.raises(BadRequestError):
         await client.completions.create(
             model=model_name,
@@ -674,14 +634,9 @@ async def test_completion_stream_options(local_openai_server,
     [MODEL_NAME],
 )
 async def test_batch_completions(local_openai_server,
-                                 client: openai.AsyncOpenAI,
-                                 register_completion, model_name: str):
-    handle_request = make_handle_request_no_streaming(
-        local_openai_server.server_logic)
-
+                                 client: openai.AsyncOpenAI, model_name: str):
     for prompts in (["Hello, my name is"] * 2, [[0, 0, 0, 0, 0]] * 2):
         # test simple list
-        register_completion(handle_request)
         batch = await client.completions.create(
             model=model_name,
             prompt=prompts,
@@ -692,7 +647,6 @@ async def test_batch_completions(local_openai_server,
         assert batch.choices[0].text == batch.choices[1].text
 
         # test n = 2
-        register_completion(handle_request)
         batch = await client.completions.create(
             model=model_name,
             prompt=prompts,
@@ -739,16 +693,11 @@ async def test_batch_completions(local_openai_server,
     [MODEL_NAME],
 )
 @pytest.mark.parametrize("logprobs_arg", [1, 0])
-async def test_echo_logprob_completion(local_openai_server,
-                                       client: openai.AsyncOpenAI,
-                                       register_completion, model_name: str,
-                                       logprobs_arg: int):
-    handle_request = make_handle_request_no_streaming(
-        local_openai_server.server_logic)
+async def test_echo_logprob_completion(client: openai.AsyncOpenAI,
+                                       model_name: str, logprobs_arg: int):
     tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
     # test using text and token IDs
     for prompt in ("Hello, my name is", [0, 0, 0, 0, 0]):
-        register_completion(handle_request)
         completion = await client.completions.create(model=model_name,
                                                      prompt=prompt,
                                                      max_tokens=5,
