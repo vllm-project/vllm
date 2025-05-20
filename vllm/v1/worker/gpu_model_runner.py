@@ -1287,6 +1287,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 sampling_metadata=sampling_metadata,
             )
             spec_token_ids = draft_token_ids.tolist()
+        
+        import torch.distributed as dist
+        if dist.get_rank() == 0:
+            print(f"valid_sampled_token_ids: {valid_sampled_token_ids}")
+            print(f"spec_token_ids: {spec_token_ids}")
 
         # Clear KVConnector state after all KVs are generated.
         if has_kv_transfer_group():

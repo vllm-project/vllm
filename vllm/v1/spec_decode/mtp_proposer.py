@@ -6,7 +6,7 @@ import triton.language as tl
 
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.model_loader.loader import get_model_loader
+from vllm.model_executor.model_loader.loader import get_model_loader, _process_weights_after_loading
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -182,13 +182,27 @@ class MtpProposer:
         with set_default_torch_dtype(
                 draft_model_config.dtype), set_current_vllm_config(
                     self.vllm_config):
-            self.model = DeepSeekMTP(
-                vllm_config=self.vllm_config).to(target_device)
+            #self.model = DeepSeekMTP(
+            #    vllm_config=self.vllm_config).to(target_device)
 
-        self.model.load_weights(
-            loader.get_all_weights(
+            with target_device:
+                self.model = DeepSeekMTP(
+                    vllm_config=self.vllm_config)
+            
+            self.model.load_weights(
+                loader.get_all_weights(
+                    self.vllm_config.speculative_config.draft_model_config,
+                    self.model))
+                
+            _process_weights_after_loading(
+                self.model, 
                 self.vllm_config.speculative_config.draft_model_config,
-                self.model))
+                target_device)
+            
+        # self.model.load_weights(
+        #     loader.get_all_weights(
+        #         self.vllm_config.speculative_config.draft_model_config,
+        #         self.model))
 
 
 @triton.jit
