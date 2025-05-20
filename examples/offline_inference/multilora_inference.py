@@ -15,7 +15,7 @@ from vllm.lora.request import LoRARequest
 
 
 def create_test_prompts(
-        lora_path: str
+    lora_path: str,
 ) -> list[tuple[str, SamplingParams, Optional[LoRARequest]]]:
     """Create a list of test prompts with their sampling parameters.
 
@@ -26,38 +26,49 @@ def create_test_prompts(
     first adapter have finished.
     """
     return [
-        ("A robot may not injure a human being",
-         SamplingParams(temperature=0.0,
-                        logprobs=1,
-                        prompt_logprobs=1,
-                        max_tokens=128), None),
-        ("To be or not to be,",
-         SamplingParams(temperature=0.8,
-                        top_k=5,
-                        presence_penalty=0.2,
-                        max_tokens=128), None),
+        (
+            "A robot may not injure a human being",
+            SamplingParams(
+                temperature=0.0, logprobs=1, prompt_logprobs=1, max_tokens=128
+            ),
+            None,
+        ),
+        (
+            "To be or not to be,",
+            SamplingParams(
+                temperature=0.8, top_k=5, presence_penalty=0.2, max_tokens=128
+            ),
+            None,
+        ),
         (
             "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_74 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]",  # noqa: E501
-            SamplingParams(temperature=0.0,
-                           logprobs=1,
-                           prompt_logprobs=1,
-                           max_tokens=128,
-                           stop_token_ids=[32003]),
-            LoRARequest("sql-lora", 1, lora_path)),
+            SamplingParams(
+                temperature=0.0,
+                logprobs=1,
+                prompt_logprobs=1,
+                max_tokens=128,
+                stop_token_ids=[32003],
+            ),
+            LoRARequest("sql-lora", 1, lora_path),
+        ),
         (
             "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_74 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]",  # noqa: E501
-            SamplingParams(temperature=0.0,
-                           logprobs=1,
-                           prompt_logprobs=1,
-                           max_tokens=128,
-                           stop_token_ids=[32003]),
-            LoRARequest("sql-lora2", 2, lora_path)),
+            SamplingParams(
+                temperature=0.0,
+                logprobs=1,
+                prompt_logprobs=1,
+                max_tokens=128,
+                stop_token_ids=[32003],
+            ),
+            LoRARequest("sql-lora2", 2, lora_path),
+        ),
     ]
 
 
-def process_requests(engine: LLMEngine,
-                     test_prompts: list[tuple[str, SamplingParams,
-                                              Optional[LoRARequest]]]):
+def process_requests(
+    engine: LLMEngine,
+    test_prompts: list[tuple[str, SamplingParams, Optional[LoRARequest]]],
+):
     """Continuously process a list of prompts and handle the outputs."""
     request_id = 0
 
@@ -65,10 +76,9 @@ def process_requests(engine: LLMEngine,
     while test_prompts or engine.has_unfinished_requests():
         if test_prompts:
             prompt, sampling_params, lora_request = test_prompts.pop(0)
-            engine.add_request(str(request_id),
-                               prompt,
-                               sampling_params,
-                               lora_request=lora_request)
+            engine.add_request(
+                str(request_id), prompt, sampling_params, lora_request=lora_request
+            )
             request_id += 1
 
         request_outputs: list[RequestOutput] = engine.step()
@@ -88,12 +98,14 @@ def initialize_engine() -> LLMEngine:
     #   numbers will cause higher memory usage. If you know that all LoRAs will
     #   use the same rank, it is recommended to set this as low as possible.
     # max_cpu_loras: controls the size of the CPU LoRA cache.
-    engine_args = EngineArgs(model="meta-llama/Llama-2-7b-hf",
-                             enable_lora=True,
-                             max_loras=1,
-                             max_lora_rank=8,
-                             max_cpu_loras=2,
-                             max_num_seqs=256)
+    engine_args = EngineArgs(
+        model="meta-llama/Llama-2-7b-hf",
+        enable_lora=True,
+        max_loras=1,
+        max_lora_rank=8,
+        max_cpu_loras=2,
+        max_num_seqs=256,
+    )
     return LLMEngine.from_engine_args(engine_args)
 
 
@@ -105,5 +117,5 @@ def main():
     process_requests(engine, test_prompts)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

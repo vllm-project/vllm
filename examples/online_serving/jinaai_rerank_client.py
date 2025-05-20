@@ -5,6 +5,7 @@ Jina and Cohere https://jina.ai/reranker
 
 run: vllm serve BAAI/bge-reranker-base
 """
+
 import json
 
 import requests
@@ -14,14 +15,13 @@ url = "http://127.0.0.1:8000/rerank"
 headers = {"accept": "application/json", "Content-Type": "application/json"}
 
 data = {
-    "model":
-    "BAAI/bge-reranker-base",
-    "query":
-    "What is the capital of France?",
+    "model": "BAAI/bge-reranker-base",
+    "query": "What is the capital of France?",
     "documents": [
         "The capital of Brazil is Brasilia.",
-        "The capital of France is Paris.", "Horses and cows are both animals"
-    ]
+        "The capital of France is Paris.",
+        "Horses and cows are both animals",
+    ],
 }
 
 

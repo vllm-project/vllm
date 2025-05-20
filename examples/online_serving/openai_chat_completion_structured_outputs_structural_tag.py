@@ -14,11 +14,10 @@ def main():
         api_key="-",
     )
 
-    messages = [{
-        "role":
-        "user",
-        "content":
-        """
+    messages = [
+        {
+            "role": "user",
+            "content": """
 You have access to the following function to retrieve the weather in a city:
 
     {
@@ -55,29 +54,28 @@ You are a helpful assistant.
 
 Given the previous instructions, what is the weather in New York City, Boston,
 and San Francisco?
-"""
-    }]
+""",
+        }
+    ]
 
     response = client.chat.completions.create(
         model=client.models.list().data[0].id,
         messages=messages,
         response_format={
-            "type":
-            "structural_tag",
-            "structures": [{
-                "begin": "<function=get_weather>",
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "city": {
-                            "type": "string"
-                        }
-                    }
-                },
-                "end": "</function>"
-            }],
-            "triggers": ["<function="]
-        })
+            "type": "structural_tag",
+            "structures": [
+                {
+                    "begin": "<function=get_weather>",
+                    "schema": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    },
+                    "end": "</function>",
+                }
+            ],
+            "triggers": ["<function="],
+        },
+    )
     print(response)
 
 

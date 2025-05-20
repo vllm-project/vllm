@@ -20,9 +20,11 @@ from openai import OpenAI
 
 
 # Now, simulate a tool call
-def get_current_weather(city: str, state: str, unit: 'str'):
-    return ("The weather in Dallas, Texas is 85 degrees fahrenheit. It is "
-            "partly cloudly, with highs in the 90's.")
+def get_current_weather(city: str, state: str, unit: "str"):
+    return (
+        "The weather in Dallas, Texas is 85 degrees fahrenheit. It is "
+        "partly cloudly, with highs in the 90's."
+    )
 
 
 available_tools = {"get_current_weather": get_current_weather}
@@ -31,49 +33,47 @@ available_tools = {"get_current_weather": get_current_weather}
 openai_api_key = "EMPTY"
 openai_api_base = "http://localhost:8000/v1"
 
-tools = [{
-    "type": "function",
-    "function": {
-        "name": "get_current_weather",
-        "description": "Get the current weather in a given location",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "city": {
-                    "type":
-                    "string",
-                    "description":
-                    "The city to find the weather for, e.g. 'San Francisco'"
-                },
-                "state": {
-                    "type":
-                    "string",
-                    "description":
-                    "the two-letter abbreviation for the state that the city is"
-                    " in, e.g. 'CA' which would mean 'California'"
-                },
-                "unit": {
-                    "type": "string",
-                    "description": "The unit to fetch the temperature in",
-                    "enum": ["celsius", "fahrenheit"]
-                }
+properties = {
+    "city": {
+        "type": "string",
+        "description": "The city to find the weather for, e.g. 'San Francisco'",
+    },
+    "state": {
+        "type": "string",
+        "description": "the two-letter abbreviation for the state that the city is"
+        " in, e.g. 'CA' which would mean 'California'",
+    },
+    "unit": {
+        "type": "string",
+        "description": "The unit to fetch the temperature in",
+        "enum": ["celsius", "fahrenheit"],
+    },
+}
+
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_current_weather",
+            "description": "Get the current weather in a given location",
+            "parameters": {
+                "type": "object",
+                "properties": properties,
+                "required": ["city", "state", "unit"],
             },
-            "required": ["city", "state", "unit"]
-        }
+        },
     }
-}]
-messages = [{
-    "role": "user",
-    "content": "Hi! How are you doing today?"
-}, {
-    "role": "assistant",
-    "content": "I'm doing well! How can I help you?"
-}, {
-    "role":
-    "user",
-    "content":
-    "Can you tell me what the temperate will be in Dallas, in fahrenheit?"
-}]
+]
+messages = [
+    {"role": "user", "content": "Hi! How are you doing today?"},
+    {"role": "assistant", "content": "I'm doing well! How can I help you?"},
+    {
+        "role": "user",
+        "content": (
+            "Can you tell me what the temperate will be in Dallas, in fahrenheit?"
+        ),
+    },
+]
 
 
 def extract_reasoning_and_calls(chunks: list):
@@ -110,73 +110,55 @@ def main():
     models = client.models.list()
     model = models.data[0].id
 
-    print(
-        "---------Full Generate With Automatic Function Calling-------------")
-    tool_calls = client.chat.completions.create(messages=messages,
-                                                model=model,
-                                                tools=tools)
-    print(
-        f"reasoning_content: {tool_calls.choices[0].message.reasoning_content}"
+    print("---------Full Generate With Automatic Function Calling-------------")
+    tool_calls = client.chat.completions.create(
+        messages=messages, model=model, tools=tools
     )
-    print(f"function name: "
-          f"{tool_calls.choices[0].message.tool_calls[0].function.name}")
-    print(f"function arguments: "
-          f"{tool_calls.choices[0].message.tool_calls[0].function.arguments}")
-
+    print(f"reasoning_content: {tool_calls.choices[0].message.reasoning_content}")
+    print(f"function name: {tool_calls.choices[0].message.tool_calls[0].function.name}")
     print(
-        "----------Stream Generate With Automatic Function Calling-----------")
-    tool_calls_stream = client.chat.completions.create(messages=messages,
-                                                       model=model,
-                                                       tools=tools,
-                                                       stream=True)
+        f"function arguments: "
+        f"{tool_calls.choices[0].message.tool_calls[0].function.arguments}"
+    )
+
+    print("----------Stream Generate With Automatic Function Calling-----------")
+    tool_calls_stream = client.chat.completions.create(
+        messages=messages, model=model, tools=tools, stream=True
+    )
 
     chunks = list(tool_calls_stream)
 
-    reasoning_content, arguments, function_names = extract_reasoning_and_calls(
-        chunks)
+    reasoning_content, arguments, function_names = extract_reasoning_and_calls(chunks)
 
     print(f"reasoning_content: {reasoning_content}")
     print(f"function name: {function_names[0]}")
     print(f"function arguments: {arguments[0]}")
 
-    print(
-        "----------Full Generate With Named Function Calling-----------------")
-    tool_calls = client.chat.completions.create(messages=messages,
-                                                model=model,
-                                                tools=tools,
-                                                tool_choice={
-                                                    "type": "function",
-                                                    "function": {
-                                                        "name":
-                                                        "get_current_weather"
-                                                    }
-                                                })
+    print("----------Full Generate With Named Function Calling-----------------")
+    tool_calls = client.chat.completions.create(
+        messages=messages,
+        model=model,
+        tools=tools,
+        tool_choice={"type": "function", "function": {"name": "get_current_weather"}},
+    )
 
     tool_call = tool_calls.choices[0].message.tool_calls[0].function
-    print(
-        f"reasoning_content: {tool_calls.choices[0].message.reasoning_content}"
-    )
+    print(f"reasoning_content: {tool_calls.choices[0].message.reasoning_content}")
     print(f"function name: {tool_call.name}")
     print(f"function arguments: {tool_call.arguments}")
-    print(
-        "----------Stream Generate With Named Function Calling--------------")
+    print("----------Stream Generate With Named Function Calling--------------")
 
     tool_calls_stream = client.chat.completions.create(
         messages=messages,
         model=model,
         tools=tools,
-        tool_choice={
-            "type": "function",
-            "function": {
-                "name": "get_current_weather"
-            }
-        },
-        stream=True)
+        tool_choice={"type": "function", "function": {"name": "get_current_weather"}},
+        stream=True,
+    )
 
     chunks = list(tool_calls_stream)
 
-    reasoning_content, arguments, function_names = extract_reasoning_and_calls(
-        chunks)
+    reasoning_content, arguments, function_names = extract_reasoning_and_calls(chunks)
     print(f"reasoning_content: {reasoning_content}")
     print(f"function name: {function_names[0]}")
     print(f"function arguments: {arguments[0]}")

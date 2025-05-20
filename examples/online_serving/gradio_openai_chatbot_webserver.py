@@ -17,6 +17,7 @@ you can install it manually by following these steps:
 2. Rename the downloaded file to: frpc_linux_amd64_v0.3
 3. Move the file to this location: /home/user/.cache/huggingface/gradio/frpc
 """
+
 import argparse
 
 import gradio as gr
@@ -24,16 +25,12 @@ from openai import OpenAI
 
 
 def format_history_to_openai(history):
-    history_openai_format = [{
-        "role": "system",
-        "content": "You are a great AI assistant."
-    }]
+    history_openai_format = [
+        {"role": "system", "content": "You are a great AI assistant."}
+    ]
     for human, assistant in history:
         history_openai_format.append({"role": "user", "content": human})
-        history_openai_format.append({
-            "role": "assistant",
-            "content": assistant
-        })
+        history_openai_format.append({"role": "assistant", "content": assistant})
     return history_openai_format
 
 
@@ -49,17 +46,17 @@ def predict(message, history, client, model_name, temp, stop_token_ids):
         temperature=temp,
         stream=True,
         extra_body={
-            'repetition_penalty':
-            1,
-            'stop_token_ids':
-            [int(id.strip())
-             for id in stop_token_ids.split(',')] if stop_token_ids else []
-        })
+            "repetition_penalty": 1,
+            "stop_token_ids": [int(id.strip()) for id in stop_token_ids.split(",")]
+            if stop_token_ids
+            else [],
+        },
+    )
 
     # Collect all chunks and concatenate them into a full message
     full_message = ""
     for chunk in stream:
-        full_message += (chunk.choices[0].delta.content or "")
+        full_message += chunk.choices[0].delta.content or ""
 
     # Return the full message as a single response
     return full_message
@@ -67,38 +64,34 @@ def predict(message, history, client, model_name, temp, stop_token_ids):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description='Chatbot Interface with Customizable Parameters')
-    parser.add_argument('--model-url',
-                        type=str,
-                        default='http://localhost:8000/v1',
-                        help='Model URL')
-    parser.add_argument('-m',
-                        '--model',
-                        type=str,
-                        required=True,
-                        help='Model name for the chatbot')
-    parser.add_argument('--temp',
-                        type=float,
-                        default=0.8,
-                        help='Temperature for text generation')
-    parser.add_argument('--stop-token-ids',
-                        type=str,
-                        default='',
-                        help='Comma-separated stop token IDs')
+        description="Chatbot Interface with Customizable Parameters"
+    )
+    parser.add_argument(
+        "--model-url", type=str, default="http://localhost:8000/v1", help="Model URL"
+    )
+    parser.add_argument(
+        "-m", "--model", type=str, required=True, help="Model name for the chatbot"
+    )
+    parser.add_argument(
+        "--temp", type=float, default=0.8, help="Temperature for text generation"
+    )
+    parser.add_argument(
+        "--stop-token-ids", type=str, default="", help="Comma-separated stop token IDs"
+    )
     parser.add_argument("--host", type=str, default=None)
     parser.add_argument("--port", type=int, default=8001)
     return parser.parse_args()
 
 
 def build_gradio_interface(client, model_name, temp, stop_token_ids):
-
     def chat_predict(message, history):
-        return predict(message, history, client, model_name, temp,
-                       stop_token_ids)
+        return predict(message, history, client, model_name, temp, stop_token_ids)
 
-    return gr.ChatInterface(fn=chat_predict,
-                            title="Chatbot Interface",
-                            description="A simple chatbot powered by vLLM")
+    return gr.ChatInterface(
+        fn=chat_predict,
+        title="Chatbot Interface",
+        description="A simple chatbot powered by vLLM",
+    )
 
 
 def main():
@@ -113,12 +106,13 @@ def main():
     client = OpenAI(api_key=openai_api_key, base_url=openai_api_base)
 
     # Define the Gradio chatbot interface using the predict function
-    gradio_interface = build_gradio_interface(client, args.model, args.temp,
-                                              args.stop_token_ids)
+    gradio_interface = build_gradio_interface(
+        client, args.model, args.temp, args.stop_token_ids
+    )
 
-    gradio_interface.queue().launch(server_name=args.host,
-                                    server_port=args.port,
-                                    share=True)
+    gradio_interface.queue().launch(
+        server_name=args.host, server_port=args.port, share=True
+    )
 
 
 if __name__ == "__main__":

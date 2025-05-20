@@ -5,12 +5,12 @@ import os
 from vllm import LLM, SamplingParams
 
 # creates XLA hlo graphs for all the context length buckets.
-os.environ['NEURON_CONTEXT_LENGTH_BUCKETS'] = "128,512,1024,2048"
+os.environ["NEURON_CONTEXT_LENGTH_BUCKETS"] = "128,512,1024,2048"
 # creates XLA hlo graphs for all the token gen buckets.
-os.environ['NEURON_TOKEN_GEN_BUCKETS'] = "128,512,1024,2048"
+os.environ["NEURON_TOKEN_GEN_BUCKETS"] = "128,512,1024,2048"
 # Quantizes neuron model weight to int8 ,
 # The default config for quantization is int8 dtype.
-os.environ['NEURON_QUANT_DTYPE'] = "s8"
+os.environ["NEURON_QUANT_DTYPE"] = "s8"
 
 # Sample prompts.
 prompts = [
@@ -44,7 +44,8 @@ def main():
         override_neuron_config={
             "cast_logits_dtype": "bfloat16",
         },
-        tensor_parallel_size=2)
+        tensor_parallel_size=2,
+    )
     # Generate texts from the prompts. The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.
     outputs = llm.generate(prompts, sampling_params)

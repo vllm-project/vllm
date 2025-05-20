@@ -28,9 +28,7 @@ llm_config = LLMConfig(
     },
     # Change to the accelerator type of the node
     accelerator_type="H100",
-    runtime_env={"env_vars": {
-        "VLLM_USE_V1": "1"
-    }},
+    runtime_env={"env_vars": {"VLLM_USE_V1": "1"}},
     # Customize engine arguments as needed (e.g. vLLM engine kwargs)
     engine_kwargs={
         "tensor_parallel_size": 8,

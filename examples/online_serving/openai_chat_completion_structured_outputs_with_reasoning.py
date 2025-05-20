@@ -27,21 +27,22 @@ openai_api_base = "http://localhost:8000/v1"
 
 
 def print_completion_details(completion):
-    print("reasoning_content: ",
-          completion.choices[0].message.reasoning_content)
+    print("reasoning_content: ", completion.choices[0].message.reasoning_content)
     print("content: ", completion.choices[0].message.content)
 
 
 # Guided decoding by Regex
 def guided_regex_completion(client: OpenAI, model: str):
-    prompt = ("What is the capital of France?")
+    prompt = "What is the capital of France?"
 
     completion = client.chat.completions.create(
         model=model,
-        messages=[{
-            "role": "user",
-            "content": prompt,
-        }],
+        messages=[
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ],
         extra_body={
             "guided_regex": "(Paris|London)",
         },
@@ -57,13 +58,15 @@ class People(BaseModel):
 def guided_json_completion(client: OpenAI, model: str):
     json_schema = People.model_json_schema()
 
-    prompt = ("Generate a JSON with the name and age of one random person.")
+    prompt = "Generate a JSON with the name and age of one random person."
     completion = client.chat.completions.create(
         model=model,
-        messages=[{
-            "role": "user",
-            "content": prompt,
-        }],
+        messages=[
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ],
         extra_body={"guided_json": json_schema},
     )
     print_completion_details(completion)
@@ -86,14 +89,18 @@ class CarDescription(BaseModel):
 def guided_car_json_completion(client: OpenAI, model: str):
     json_schema = CarDescription.model_json_schema()
 
-    prompt = ("Generate a JSON with the brand, model and car_type of"
-              "the most iconic car from the 90's")
+    prompt = (
+        "Generate a JSON with the brand, model and car_type of"
+        "the most iconic car from the 90's"
+    )
     completion = client.chat.completions.create(
         model=model,
-        messages=[{
-            "role": "user",
-            "content": prompt,
-        }],
+        messages=[
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ],
         extra_body={"guided_json": json_schema},
     )
     print_completion_details(completion)
@@ -116,14 +123,18 @@ def guided_grammar_completion(client: OpenAI, model: str):
     """
 
     # This may be very slow https://github.com/vllm-project/vllm/issues/12122
-    prompt = ("Generate an SQL query to show the 'username' and 'email'"
-              "from the 'users' table.")
+    prompt = (
+        "Generate an SQL query to show the 'username' and 'email'"
+        "from the 'users' table."
+    )
     completion = client.chat.completions.create(
         model=model,
-        messages=[{
-            "role": "user",
-            "content": prompt,
-        }],
+        messages=[
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ],
         extra_body={"guided_grammar": simplified_sql_grammar},
     )
     print_completion_details(completion)

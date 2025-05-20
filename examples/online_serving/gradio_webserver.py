@@ -17,6 +17,7 @@ you can install it manually by following these steps:
 2. Rename the downloaded file to: frpc_linux_amd64_v0.3
 3. Move the file to this location: /home/user/.cache/huggingface/gradio/frpc
 """
+
 import argparse
 import json
 
@@ -31,14 +32,11 @@ def http_bot(prompt):
         "stream": True,
         "max_tokens": 128,
     }
-    response = requests.post(args.model_url,
-                             headers=headers,
-                             json=pload,
-                             stream=True)
+    response = requests.post(args.model_url, headers=headers, json=pload, stream=True)
 
-    for chunk in response.iter_lines(chunk_size=8192,
-                                     decode_unicode=False,
-                                     delimiter=b"\n"):
+    for chunk in response.iter_lines(
+        chunk_size=8192, decode_unicode=False, delimiter=b"\n"
+    ):
         if chunk:
             data = json.loads(chunk.decode("utf-8"))
             output = data["text"][0]
@@ -48,10 +46,10 @@ def http_bot(prompt):
 def build_demo():
     with gr.Blocks() as demo:
         gr.Markdown("# vLLM text completion demo\n")
-        inputbox = gr.Textbox(label="Input",
-                              placeholder="Enter text and press ENTER")
-        outputbox = gr.Textbox(label="Output",
-                               placeholder="Generated result from the model")
+        inputbox = gr.Textbox(label="Input", placeholder="Enter text and press ENTER")
+        outputbox = gr.Textbox(
+            label="Output", placeholder="Generated result from the model"
+        )
         inputbox.submit(http_bot, [inputbox], [outputbox])
     return demo
 
@@ -60,17 +58,15 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default=None)
     parser.add_argument("--port", type=int, default=8001)
-    parser.add_argument("--model-url",
-                        type=str,
-                        default="http://localhost:8000/generate")
+    parser.add_argument(
+        "--model-url", type=str, default="http://localhost:8000/generate"
+    )
     return parser.parse_args()
 
 
 def main(args):
     demo = build_demo()
-    demo.queue().launch(server_name=args.host,
-                        server_port=args.port,
-                        share=True)
+    demo.queue().launch(server_name=args.host, server_port=args.port, share=True)
 
 
 if __name__ == "__main__":

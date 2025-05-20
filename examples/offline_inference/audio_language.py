@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-This example shows how to use vLLM for running offline inference 
+This example shows how to use vLLM for running offline inference
 with the correct prompt format on audio language models.
 
 For most models, the prompt format should follow corresponding examples
 on HuggingFace model repository.
 """
+
 import os
 from dataclasses import asdict
 from typing import NamedTuple, Optional
@@ -22,7 +23,7 @@ audio_assets = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
 question_per_audio_count = {
     0: "What is 1+1?",
     1: "What is recited in the audio?",
-    2: "What sport and what nursery rhyme are referenced?"
+    2: "What sport and what nursery rhyme are referenced?",
 }
 
 
@@ -72,8 +73,7 @@ def run_granite_speech(question: str, audio_count: int) -> ModelRequestData:
 # MiniCPM-O
 def run_minicpmo(question: str, audio_count: int) -> ModelRequestData:
     model_name = "openbmb/MiniCPM-o-2_6"
-    tokenizer = AutoTokenizer.from_pretrained(model_name,
-                                              trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     engine_args = EngineArgs(
         model=model_name,
         trust_remote_code=True,
@@ -82,19 +82,18 @@ def run_minicpmo(question: str, audio_count: int) -> ModelRequestData:
         limit_mm_per_prompt={"audio": audio_count},
     )
 
-    stop_tokens = ['<|im_end|>', '<|endoftext|>']
+    stop_tokens = ["<|im_end|>", "<|endoftext|>"]
     stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
 
     audio_placeholder = "(<audio>./</audio>)" * audio_count
     audio_chat_template = "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n<|spk_bos|><|spk|><|spk_eos|><|tts_bos|>' }}{% endif %}"  # noqa: E501
-    messages = [{
-        'role': 'user',
-        'content': f'{audio_placeholder}\n{question}'
-    }]
-    prompt = tokenizer.apply_chat_template(messages,
-                                           tokenize=False,
-                                           add_generation_prompt=True,
-                                           chat_template=audio_chat_template)
+    messages = [{"role": "user", "content": f"{audio_placeholder}\n{question}"}]
+    prompt = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        chat_template=audio_chat_template,
+    )
 
     return ModelRequestData(
         engine_args=engine_args,
@@ -113,7 +112,7 @@ def run_phi4mm(question: str, audio_count: int) -> ModelRequestData:
     # Since the vision-lora and speech-lora co-exist with the base model,
     # we have to manually specify the path of the lora weights.
     speech_lora_path = os.path.join(model_path, "speech-lora")
-    placeholders = "".join([f"<|audio_{i+1}|>" for i in range(audio_count)])
+    placeholders = "".join([f"<|audio_{i + 1}|>" for i in range(audio_count)])
 
     prompts = f"<|user|>{placeholders}{question}<|end|><|assistant|>"
 
@@ -145,15 +144,19 @@ def run_qwen2_audio(question: str, audio_count: int) -> ModelRequestData:
         limit_mm_per_prompt={"audio": audio_count},
     )
 
-    audio_in_prompt = "".join([
-        f"Audio {idx+1}: "
-        f"<|audio_bos|><|AUDIO|><|audio_eos|>\n" for idx in range(audio_count)
-    ])
+    audio_in_prompt = "".join(
+        [
+            f"Audio {idx + 1}: <|audio_bos|><|AUDIO|><|audio_eos|>\n"
+            for idx in range(audio_count)
+        ]
+    )
 
-    prompt = ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-              "<|im_start|>user\n"
-              f"{audio_in_prompt}{question}<|im_end|>\n"
-              "<|im_start|>assistant\n")
+    prompt = (
+        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+        "<|im_start|>user\n"
+        f"{audio_in_prompt}{question}<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
 
     return ModelRequestData(
         engine_args=engine_args,
@@ -172,19 +175,22 @@ def run_qwen2_5_omni(question: str, audio_count: int):
         limit_mm_per_prompt={"audio": audio_count},
     )
 
-    audio_in_prompt = "".join([
-        "<|audio_bos|><|AUDIO|><|audio_eos|>\n" for idx in range(audio_count)
-    ])
+    audio_in_prompt = "".join(
+        ["<|audio_bos|><|AUDIO|><|audio_eos|>\n" for idx in range(audio_count)]
+    )
 
     default_system = (
         "You are Qwen, a virtual human developed by the Qwen Team, Alibaba "
         "Group, capable of perceiving auditory and visual inputs, as well as "
-        "generating text and speech.")
+        "generating text and speech."
+    )
 
-    prompt = (f"<|im_start|>system\n{default_system}<|im_end|>\n"
-              "<|im_start|>user\n"
-              f"{audio_in_prompt}{question}<|im_end|>\n"
-              "<|im_start|>assistant\n")
+    prompt = (
+        f"<|im_start|>system\n{default_system}<|im_end|>\n"
+        "<|im_start|>user\n"
+        f"{audio_in_prompt}{question}<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
     return ModelRequestData(
         engine_args=engine_args,
         prompt=prompt,
@@ -196,13 +202,10 @@ def run_ultravox(question: str, audio_count: int) -> ModelRequestData:
     model_name = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    messages = [{
-        'role': 'user',
-        'content': "<|audio|>\n" * audio_count + question
-    }]
-    prompt = tokenizer.apply_chat_template(messages,
-                                           tokenize=False,
-                                           add_generation_prompt=True)
+    messages = [{"role": "user", "content": "<|audio|>\n" * audio_count + question}]
+    prompt = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
 
     engine_args = EngineArgs(
         model=model_name,
@@ -220,8 +223,7 @@ def run_ultravox(question: str, audio_count: int) -> ModelRequestData:
 
 # Whisper
 def run_whisper(question: str, audio_count: int) -> ModelRequestData:
-    assert audio_count == 1, (
-        "Whisper only support single audio input per prompt")
+    assert audio_count == 1, "Whisper only support single audio input per prompt"
     model_name = "openai/whisper-large-v3-turbo"
 
     prompt = "<|startoftranscript|>"
@@ -252,27 +254,33 @@ model_example_map = {
 
 def parse_args():
     parser = FlexibleArgumentParser(
-        description='Demo on using vLLM for offline inference with '
-        'audio language models')
-    parser.add_argument('--model-type',
-                        '-m',
-                        type=str,
-                        default="ultravox",
-                        choices=model_example_map.keys(),
-                        help='Huggingface "model_type".')
-    parser.add_argument('--num-prompts',
-                        type=int,
-                        default=1,
-                        help='Number of prompts to run.')
-    parser.add_argument("--num-audios",
-                        type=int,
-                        default=1,
-                        choices=[0, 1, 2],
-                        help="Number of audio items per prompt.")
-    parser.add_argument("--seed",
-                        type=int,
-                        default=None,
-                        help="Set the seed when initializing `vllm.LLM`.")
+        description="Demo on using vLLM for offline inference with "
+        "audio language models"
+    )
+    parser.add_argument(
+        "--model-type",
+        "-m",
+        type=str,
+        default="ultravox",
+        choices=model_example_map.keys(),
+        help='Huggingface "model_type".',
+    )
+    parser.add_argument(
+        "--num-prompts", type=int, default=1, help="Number of prompts to run."
+    )
+    parser.add_argument(
+        "--num-audios",
+        type=int,
+        default=1,
+        choices=[0, 1, 2],
+        help="Number of audio items per prompt.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Set the seed when initializing `vllm.LLM`.",
+    )
 
     return parser.parse_args()
 
@@ -283,29 +291,30 @@ def main(args):
         raise ValueError(f"Model type {model} is not supported.")
 
     audio_count = args.num_audios
-    req_data = model_example_map[model](question_per_audio_count[audio_count],
-                                        audio_count)
+    req_data = model_example_map[model](
+        question_per_audio_count[audio_count], audio_count
+    )
 
     # Disable other modalities to save memory
     default_limits = {"image": 0, "video": 0, "audio": 0}
     req_data.engine_args.limit_mm_per_prompt = default_limits | dict(
-        req_data.engine_args.limit_mm_per_prompt or {})
+        req_data.engine_args.limit_mm_per_prompt or {}
+    )
 
     engine_args = asdict(req_data.engine_args) | {"seed": args.seed}
     llm = LLM(**engine_args)
 
     # We set temperature to 0.2 so that outputs can be different
     # even when all prompts are identical when running batch inference.
-    sampling_params = SamplingParams(temperature=0.2,
-                                     max_tokens=64,
-                                     stop_token_ids=req_data.stop_token_ids)
+    sampling_params = SamplingParams(
+        temperature=0.2, max_tokens=64, stop_token_ids=req_data.stop_token_ids
+    )
 
     mm_data = {}
     if audio_count > 0:
         mm_data = {
             "audio": [
-                asset.audio_and_sample_rate
-                for asset in audio_assets[:audio_count]
+                asset.audio_and_sample_rate for asset in audio_assets[:audio_count]
             ]
         }
 
@@ -315,8 +324,9 @@ def main(args):
         # Batch inference
         inputs = [inputs] * args.num_prompts
     # Add LoRA request if applicable
-    lora_request = (req_data.lora_requests *
-                    args.num_prompts if req_data.lora_requests else None)
+    lora_request = (
+        req_data.lora_requests * args.num_prompts if req_data.lora_requests else None
+    )
 
     outputs = llm.generate(
         inputs,

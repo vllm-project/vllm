@@ -25,7 +25,8 @@ def main():
         echo=False,
         n=2,
         stream=stream,
-        logprobs=3)
+        logprobs=3,
+    )
 
     print("-" * 50)
     print("Completion results:")
