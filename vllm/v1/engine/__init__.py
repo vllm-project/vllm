@@ -104,7 +104,13 @@ class EngineCoreOutput(
     finish_reason: Optional[FinishReason] = None
     stop_reason: Union[int, str, None] = None
     events: Optional[list[EngineCoreEvent]] = None
-
+    # Time related.
+    total_schedule_time: Optional[float] = None
+    begin_schedule_time: Optional[float] = None
+    # Length related.
+    output_tokens_num: Optional[int] = None
+    all_tokens_num: Optional[int] = None
+    prompt_tokens_num: Optional[int] = None
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None

@@ -114,7 +114,7 @@ class AsyncLLM(EngineClient):
         core_client_class = AsyncMPClient if (
             vllm_config.parallel_config.data_parallel_size
             == 1) else DPAsyncMPClient
-
+        logger.info(f"Current core_client_class : {core_client_class}.")
         self.engine_core = core_client_class(
             vllm_config=vllm_config,
             executor_class=executor_class,
@@ -248,8 +248,8 @@ class AsyncLLM(EngineClient):
         # Add the EngineCoreRequest to EngineCore (separate process).
         await self.engine_core.add_request_async(request)
 
-        if self.log_requests:
-            logger.info("Added request %s.", request.request_id)
+        # if self.log_requests:
+        #     logger.info("Added request %s.", request.request_id)
 
     # TODO: we should support multiple prompts in one call, as you
     # can do with LLM.generate. So that for multi-prompt completion

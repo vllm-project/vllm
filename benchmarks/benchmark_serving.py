@@ -32,7 +32,8 @@ from collections.abc import AsyncGenerator, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional
-
+import logging
+from vllm.logger import  init_logger
 import numpy as np
 from backend_request_func import (ASYNC_REQUEST_FUNCS,
                                   OPENAI_COMPATIBLE_BACKENDS, RequestFuncInput,
@@ -56,9 +57,8 @@ from benchmark_dataset import (AIMODataset, ASRDataset, BurstGPTDataset,
                                SampleRequest, ShareGPTDataset, SonnetDataset,
                                VisionArenaDataset)
 from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
-
+logger = init_logger(__name__)
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
-
 
 @dataclass
 class BenchmarkMetrics:
@@ -114,12 +114,12 @@ async def get_request(
             (burstiness > 1) results in a more uniform arrival of requests.
     """
     input_requests: Iterable[SampleRequest] = iter(input_requests)
-
+    
     # Calculate scale parameter theta to maintain the desired request_rate.
     assert burstiness > 0, (
         f"A positive burstiness factor is expected, but given {burstiness}.")
     theta = 1.0 / (request_rate * burstiness)
-
+    
     for request in input_requests:
         yield request
 
@@ -289,6 +289,7 @@ async def benchmark(
     )
 
     test_output = await request_func(request_func_input=test_input)
+
     if not test_output.success:
         raise ValueError(
             "Initial test run failed - Please make sure benchmark arguments "
@@ -659,6 +660,7 @@ def main(args: argparse.Namespace):
 
         try:
             input_requests = dataset_mapping[args.dataset_name]()
+            print(f"try to use{args.dataset_name}:{len(input_requests)}")
         except KeyError as err:
             raise ValueError(f"Unknown dataset: {args.dataset_name}") from err
     goodput_config_dict = check_goodput_args(args)

@@ -70,6 +70,10 @@ class Request:
         self.output_token_ids = ConstantList(self._output_token_ids)
         self.all_token_ids = ConstantList(self._all_token_ids)
 
+        # Record the timestamp of scheduling this request.
+        self.begin_schedule_time : float = 0.0
+        self.end_schedule_time : float = 0.0
+
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
         if request.mm_inputs is not None:
@@ -113,7 +117,7 @@ class Request:
     @property
     def num_output_tokens(self) -> int:
         return len(self._output_token_ids)
-
+    
     def is_finished(self) -> bool:
         return RequestStatus.is_finished(self.status)
 

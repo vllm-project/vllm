@@ -55,6 +55,9 @@ class LoggingStatLogger(StatLoggerBase):
         self.spec_decoding_logging = SpecDecodingLogging()
         self.last_prompt_throughput: float = 0.0
         self.last_generation_throughput: float = 0.0
+        
+        # Count the number of total tokens processed by the engine
+        self.total_tokens_processed = 0
 
     def _reset(self, now):
         self.last_log_time = now
@@ -68,6 +71,9 @@ class LoggingStatLogger(StatLoggerBase):
         self.num_prompt_tokens.append(iteration_stats.num_prompt_tokens)
         self.num_generation_tokens.append(
             iteration_stats.num_generation_tokens)
+        
+        # Count the number of total tokens processed by the engine
+        # self.total_tokens_processed += iteration_stats.num_generation_tokens
 
     def _get_throughput(self, tracked_stats: list[int], now: float) -> float:
         # Compute summary metrics for tracked stats

@@ -168,11 +168,13 @@ class Scheduler(SchedulerInterface):
 
         # First, schedule the RUNNING requests.
         req_index = 0
+
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
 
             num_new_tokens = (request.num_tokens_with_spec -
                               request.num_computed_tokens)
+
             if (0 < self.scheduler_config.long_prefill_token_threshold <
                     num_new_tokens):
                 num_new_tokens = (
@@ -214,6 +216,7 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens,
                     num_lookahead_tokens=self.num_lookahead_tokens)
                 if new_blocks is None:
+                    logger.info("When kv cache allocate in schedule running, new_blocks is None.")
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
                     preempted_req = self.running.pop()
@@ -252,6 +255,7 @@ class Scheduler(SchedulerInterface):
             num_scheduled_tokens[request.request_id] = num_new_tokens
             token_budget -= num_new_tokens
             req_index += 1
+
 
             # Speculative decode related.
             if request.spec_token_ids:
@@ -360,6 +364,7 @@ class Scheduler(SchedulerInterface):
                     num_lookahead_tokens=self.num_lookahead_tokens,
                 )
                 if new_blocks is None:
+                    logger.info("When kv cache allocate in schedule waiting, new_blocks is None.")
                     # The request cannot be scheduled.
                     break
 
@@ -381,6 +386,8 @@ class Scheduler(SchedulerInterface):
                 if self.log_stats:
                     request.record_event(EngineCoreEventType.SCHEDULED,
                                          scheduled_timestamp)
+                    request.begin_schedule_time = time.time()
+
                 if request.status == RequestStatus.WAITING:
                     scheduled_new_reqs.append(request)
                 elif request.status == RequestStatus.PREEMPTED:
@@ -422,7 +429,11 @@ class Scheduler(SchedulerInterface):
         # len(self.running).
         assert (len(scheduled_new_reqs) + len(scheduled_resumed_reqs) +
                 len(scheduled_running_reqs) <= len(self.running))
-
+        # logger.info("scheduler.output total num : "
+        #             f"{len(scheduled_running_reqs)+len(scheduled_resumed_reqs)+len(scheduled_new_reqs)}. "
+        #             f"running_reqs.lenth:{len(scheduled_running_reqs)}, "
+        #             f"resumed_reqs.length:{len(scheduled_resumed_reqs)}, "
+        #             f"new_reqs.length:{len(scheduled_new_reqs)}.")
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.
         num_common_prefix_blocks = 0
@@ -696,6 +707,7 @@ class Scheduler(SchedulerInterface):
                 if stopped:
                     self._free_request(request)
                     del new_token_ids[num_new:]  # Trim new tokens if needed.
+                    request.end_schedule_time = time.time()
                     break
 
             # Extract sample logprobs if needed.
@@ -723,7 +735,13 @@ class Scheduler(SchedulerInterface):
                         new_logprobs=new_logprobs,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         stop_reason=request.stop_reason,
-                        events=request.take_events()))
+                        events=request.take_events(),
+                        total_schedule_time=request.end_schedule_time-request.begin_schedule_time if stopped else None,
+                        begin_schedule_time=request.begin_schedule_time,
+                        output_tokens_num=request.num_output_tokens,
+                        all_tokens_num=request.num_tokens, # Without spec token
+                        prompt_tokens_num=request.num_prompt_tokens
+                        ))
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
@@ -740,6 +758,7 @@ class Scheduler(SchedulerInterface):
             outputs=outputs,
             scheduler_stats=self.make_stats(spec_decoding_stats),
         )
+        # True, if DP size > 1.
         if self.include_finished_set:
             #TODO currently sending duplicates here, improve this
             engine_core_outputs.finished_requests = (

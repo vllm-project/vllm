@@ -364,7 +364,7 @@ class ShareGPTDataset(BenchmarkDataset):
     Implements the ShareGPT dataset.  Loads data from a JSON file and generates
     sample requests based on conversation turns.
     """
-
+    
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.load_data()

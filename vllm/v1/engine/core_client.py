@@ -14,6 +14,7 @@ from typing import Any, Callable, Optional, TypeVar, Union
 
 import zmq
 import zmq.asyncio
+import aiofiles
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -901,6 +902,39 @@ class DPAsyncMPClient(AsyncMPClient):
                     
                     # self.semaphore.release()
                     # logger.info(f"Semaphore release, current value:{self.semaphore._value}")
+        # Collect data about time.
+        for output in outputs.outputs:
+            if output.finished:
+                time_data = {
+                    'req_id': output.request_id,
+                    'engine_index': outputs.engine_index,
+                    'begin_schedule_time': output.begin_schedule_time,
+                    'end_schedule_time': output.begin_schedule_time + output.total_schedule_time if output.total_schedule_time else None,
+                    'total_schedule_time': output.total_schedule_time,
+                    #TODO: Need to record information about tokens length.
+                    'decode_tokens_num': output.output_tokens_num,
+                    'prompt_tokens_num': output.prompt_tokens_num,
+                    'all_tokens_num': output.all_tokens_num,
+                }
+            
+                try:
+                    async def write_time_data_to_file():
+                        import os
+                        log_dir = os.path.join(os.getcwd(), "engine_logs")
+                        os.makedirs(log_dir, exist_ok=True)
+        
+                        log_file = os.path.join(log_dir, f"engine_{outputs.engine_index}_time_data.log")
+                        async with aiofiles.open(log_file, 'a') as f:
+                            import json
+                            await f.write(json.dumps(time_data) + "\n")
+                    
+                    asyncio.create_task(write_time_data_to_file())
+                except Exception as e:
+                    import logging
+                    logging.error(f"write file error: {e}")
+
+
+
         if outputs.wave_complete is not None:
             # Current wave is complete, move to next wave number
             # and mark engines as paused.
