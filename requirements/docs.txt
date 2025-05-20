@@ -6,4 +6,3 @@ mkdocs-gen-files
 mkdocs-awesome-nav
 python-markdown-math
 ruff
-tabulate  # only needed as long as we are transpiling
