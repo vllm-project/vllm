@@ -56,11 +56,11 @@ def kernel_unified_attention_2d(
     stride_k_cache_0: tl.int64,  # int
     stride_k_cache_1: tl.int64,  # int
     stride_k_cache_2: tl.int64,  # int
-    stride_k_cache_3: tl.int64,  # int
+    stride_k_cache_3: tl.constexpr,  # int
     stride_v_cache_0: tl.int64,  # int
     stride_v_cache_1: tl.int64,  # int
     stride_v_cache_2: tl.int64,  # int
-    stride_v_cache_3: tl.int64,  # int
+    stride_v_cache_3: tl.constexpr,  # int
     query_start_len_ptr,  # [num_seqs+1]
     BLOCK_Q: tl.constexpr,  # int
     num_seqs: tl.int32,

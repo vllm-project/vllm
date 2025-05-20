@@ -265,7 +265,8 @@ class CustomAllreduce:
 
     def close(self):
         if not self.disabled and self._ptr:
-            ops.dispose(self._ptr)
+            if ops is not None:
+                ops.dispose(self._ptr)
             self._ptr = 0
             self.free_shared_buffer(self.meta_ptrs, rank=self.rank)
             self.free_shared_buffer(self.buffer_ptrs, rank=self.rank)
@@ -298,4 +299,5 @@ class CustomAllreduce:
                            rank: Optional[int] = 0) -> None:
         if rank is None:
             rank = dist.get_rank(group=group)
-        ops.free_shared_buffer(pointers[rank])
+        if ops is not None:
+            ops.free_shared_buffer(pointers[rank])
