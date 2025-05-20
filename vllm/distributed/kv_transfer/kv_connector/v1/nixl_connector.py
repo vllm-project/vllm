@@ -845,7 +845,9 @@ class NixlConnectorWorker:
         # just notify P worker that we have the blocks we need.
         num_local_blocks = len(local_block_ids)
         if num_local_blocks == 0:
-            self.nixl_wrapper.send_notif(dst_engine_id, notif_msg=notif_id)
+            remote_rank = self.rank // tp_ratio
+            remote_agent = self._remote_agents[dst_engine_id][remote_rank]
+            self.nixl_wrapper.send_notif(remote_agent, notif_msg=notif_id)
             return
 
         # Partial prefix cache hit: just read uncomputed blocks.
@@ -912,7 +914,7 @@ class NixlConnectorWorker:
         self.nixl_wrapper.transfer(handle)
 
         # Use handle to check completion in future step().
-        # TODO surface xfer elapsed time
+        # TODO (NickLucche) surface xfer elapsed time
         self._recving_transfers[request_id].append(
             (handle, time.perf_counter()))
 
