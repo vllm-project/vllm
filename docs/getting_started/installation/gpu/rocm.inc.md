@@ -24,8 +24,8 @@ Currently, there are no pre-built ROCm wheels.
 
 0. Install prerequisites (skip if you are already in an environment/docker with the following installed):
 
-- [ROCm](https://rocm.docs.amd.com/en/latest/deploy/linux/index.html)
-- [PyTorch](https://pytorch.org/)
+    - [ROCm](https://rocm.docs.amd.com/en/latest/deploy/linux/index.html)
+    - [PyTorch](https://pytorch.org/)
 
     For installing PyTorch, you can start from a fresh docker image, e.g, `rocm/pytorch:rocm6.3_ubuntu24.04_py3.12_pytorch_release_2.4.0`, `rocm/pytorch-nightly`. If you are using docker image, you can skip to Step 3.
 
@@ -52,7 +52,7 @@ Currently, there are no pre-built ROCm wheels.
     cd ../..
     ```
 
-!!! note
+    !!! note
         If you see HTTP issue related to downloading packages during building triton, please try again as the HTTP error is intermittent.
 
 2. Optionally, if you choose to use CK flash attention, you can install [flash attention for ROCm](https://github.com/ROCm/flash-attention)
@@ -71,7 +71,7 @@ Currently, there are no pre-built ROCm wheels.
     cd ..
     ```
 
-!!! note
+    !!! note
         You might need to downgrade the "ninja" version to 1.10 it is not used when compiling flash-attention-2 (e.g. `pip install ninja==1.10.2.4`)
 
 3. If you choose to build AITER yourself to use a certain branch or commit, you can build AITER using the following steps:
@@ -85,7 +85,7 @@ Currently, there are no pre-built ROCm wheels.
     python3 setup.py develop
     ```
 
-!!! note
+    !!! note
         You will need to config the `$AITER_BRANCH_OR_COMMIT` for your purpose.
 
 4. Build vLLM. For example, vLLM on ROCM 6.3 can be built with the following steps:
@@ -108,11 +108,11 @@ Currently, there are no pre-built ROCm wheels.
 
     This may take 5-10 minutes. Currently, `pip install .` does not work for ROCm installation.
 
-!!! tip
-       - Triton flash attention is used by default. For benchmarking purposes, it is recommended to run a warm up step before collecting perf numbers.
-       - Triton flash attention does not currently support sliding window attention. If using half precision, please use CK flash-attention for sliding window support.
-       - To use CK flash-attention or PyTorch naive attention, please use this flag `export VLLM_USE_TRITON_FLASH_ATTN=0` to turn off triton flash attention.
-       - The ROCm version of PyTorch, ideally, should match the ROCm driver version.
+    !!! tip
+        - Triton flash attention is used by default. For benchmarking purposes, it is recommended to run a warm up step before collecting perf numbers.
+        - Triton flash attention does not currently support sliding window attention. If using half precision, please use CK flash-attention for sliding window support.
+        - To use CK flash-attention or PyTorch naive attention, please use this flag `export VLLM_USE_TRITON_FLASH_ATTN=0` to turn off triton flash attention.
+        - The ROCm version of PyTorch, ideally, should match the ROCm driver version.
 
 !!! tip
     - For MI300x (gfx942) users, to achieve optimal performance, please refer to [MI300x tuning guide](https://rocm.docs.amd.com/en/latest/how-to/tuning-guides/mi300x/index.html) for performance optimization and tuning tips on system and workflow level.

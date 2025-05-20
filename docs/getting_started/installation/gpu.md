@@ -122,4 +122,3 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 === "Intel XPU"
 
     --8<-- "docs/getting_started/installation/gpu/xpu.inc.md:supported-features"
-

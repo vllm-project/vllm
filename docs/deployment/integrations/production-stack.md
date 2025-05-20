@@ -115,7 +115,7 @@ To remove the deployment, run:
 sudo helm uninstall vllm
 ```
 
-------
+---
 
 ### (Advanced) Configuring vLLM production stack
 

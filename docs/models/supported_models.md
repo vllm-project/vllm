@@ -658,7 +658,7 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 | Architecture   | Models   | Example HF Models   | [LoRA][lora-adapter]   | [PP][distributed-serving]   |
 |----------------|----------|---------------------|------------------------|-----------------------------|
 
-_________________
+---
 
 ## Model Support Policy
 
@@ -668,7 +668,7 @@ At vLLM, we are committed to facilitating the integration and support of third-p
 
 2. **Best-Effort Consistency**: While we aim to maintain a level of consistency between the models implemented in vLLM and other frameworks like transformers, complete alignment is not always feasible. Factors like acceleration techniques and the use of low-precision computations can introduce discrepancies. Our commitment is to ensure that the implemented models are functional and produce sensible results.
 
-!!! tip
+    !!! tip
         When comparing the output of `model.generate` from Hugging Face Transformers with the output of `llm.generate` from vLLM, note that the former reads the model's generation config file (i.e., [generation_config.json](https://github.com/huggingface/transformers/blob/19dabe96362803fb0a9ae7073d03533966598b17/src/transformers/generation/utils.py#L1945)) and applies the default parameters for generation, while the latter only uses the parameters passed to the function. Ensure all sampling parameters are identical when comparing outputs.
 
 3. **Issue Resolution and Model Updates**: Users are encouraged to report any bugs or issues they encounter with third-party models. Proposed fixes should be submitted via PRs, with a clear explanation of the problem and the rationale behind the proposed solution. If a fix for one model impacts another, we rely on the community to highlight and address these cross-model dependencies. Note: for bugfix PRs, it is good etiquette to inform the original author to seek their feedback.

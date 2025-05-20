@@ -7,7 +7,7 @@ title: Frequently Asked Questions
 
 A: Assuming that you're referring to using OpenAI compatible server to serve multiple models at once, that is not currently supported, you can run multiple instances of the server (each serving a different model) at the same time, and have another layer to route the incoming request to the correct server accordingly.
 
-______________________________________________________________________
+---
 
 > Q: Which model to use for offline inference embedding?
 
@@ -18,7 +18,7 @@ By extracting hidden states, vLLM can automatically convert text generation mode
 [Mistral-7B-Instruct-v0.3](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3) into embedding models,
 but they are expected to be inferior to models that are specifically trained on embedding tasks.
 
-______________________________________________________________________
+---
 
 > Q: Can the output of a prompt vary across runs in vLLM?
 

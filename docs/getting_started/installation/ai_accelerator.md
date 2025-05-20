@@ -115,4 +115,3 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 === "AWS Neuron"
 
     --8<-- "docs/getting_started/installation/ai_accelerator/neuron.inc.md:extra-information"
-

@@ -150,7 +150,8 @@ def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
 
     # Generate the example documentation
     for example in sorted(examples, key=lambda e: e.path.stem):
-        doc_path = EXAMPLE_DOC_DIR / example.category / f"{example.path.stem}.md"
+        example_name = f"{example.path.stem}.md"
+        doc_path = EXAMPLE_DOC_DIR / example.category / example_name
         print(doc_path)
         if not doc_path.parent.exists():
             doc_path.parent.mkdir(parents=True)
