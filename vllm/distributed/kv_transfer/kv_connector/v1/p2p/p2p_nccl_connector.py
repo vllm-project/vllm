@@ -288,7 +288,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
             "num_computed_tokens:%d", num_external_tokens,
             len(request.prompt_token_ids), num_computed_tokens)
 
-        return num_external_tokens, True
+        return num_external_tokens, False
 
     def update_state_after_alloc(self, request: "Request",
                                  blocks: "KVCacheBlocks",
