@@ -328,7 +328,7 @@ def test_qwen2_vl_image_embeddings_input(vllm_runner, image_assets, model,
                                          size_factors, dtype, max_tokens,
                                          num_logprobs, monkeypatch) -> None:
 
-    # Test V1: this test hangs during setup on single-scale input.
+    # Test V1: this test hangs after the first generate_greedy_logprobs call
     # TODO: figure out why and re-enable this on V1.
     monkeypatch.setenv("VLLM_USE_V1", "0")
 
