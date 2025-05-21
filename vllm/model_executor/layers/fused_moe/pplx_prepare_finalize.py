@@ -77,6 +77,10 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         if a1q_scale is not None:
             a1q_scale = a1q_scale.repeat(repeat_rows, repeat_cols)
 
+        if a1q_scale is not None and a1q_scale.dim() == 1:
+            assert a1q_scale.numel() == 1
+            a1q_scale = a1q_scale.view(1, 1)
+
         # rem_experts need to be 0 for pplx to work properly.
         rem_experts = num_experts % self.world_size
         assert rem_experts == 0
@@ -114,6 +118,8 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # This argument is optional, defaults to indices.size(0)
         # There's not much point setting this unless it is != indices.size(0)
         bound_m: Optional[torch.Tensor] = None
+
+        #print(f"SCALE= {a1q_scale.shape}")
 
         self.a2a.dispatch(
             out_expert_num_tokens=expert_num_tokens,

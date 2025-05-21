@@ -29,17 +29,27 @@ class BatchedMMTensors:
 
     @staticmethod
     def make_tensors(config: BatchedMMConfig):
+        if config.dtype == torch.torch.float8_e4m3fn:
+            config_dtype = torch.bfloat16
+        else:
+            config_dtype = config.dtype
+
         A = torch.randn(
             (config.num_experts, config.max_tokens_per_expert, config.K),
             device="cuda",
-            dtype=config.dtype) / 10
+            dtype=config_dtype) / 10
         B = torch.randn((config.num_experts, config.N, config.K),
                         device="cuda",
-                        dtype=config.dtype)
+                        dtype=config_dtype)
         C = torch.zeros(
             (config.num_experts, config.max_tokens_per_expert, config.N),
             device="cuda",
-            dtype=config.dtype)
+            dtype=config_dtype)
+
+        A = A.to(config.dtype)
+        B = B.to(config.dtype)
+        C = C.to(config.dtype)
+
         num_expert_tokens = torch.randint(low=0,
                                           high=config.max_tokens_per_expert,
                                           size=(config.num_experts, ),
@@ -67,8 +77,9 @@ def ref_impl(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
                          [32, 64, 128, 192, 224, 256, 512])
 @pytest.mark.parametrize("K", [128, 256, 1024])
 @pytest.mark.parametrize("N", [128, 256, 512, 1024])
-@pytest.mark.parametrize("dtype",
-                         [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "dtype",
+    [torch.torch.float8_e4m3fn, torch.float32, torch.float16, torch.bfloat16])
 def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
                     N: int, dtype: torch.dtype):
 
@@ -79,6 +90,7 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
     ref_output = test_output.clone()
 
     compute_tl_dtype = {
+        torch.torch.float8_e4m3fn: tl.bfloat16,
         torch.float16: tl.float16,
         torch.bfloat16: tl.bfloat16,
         torch.float32: tl.float32
@@ -94,7 +106,7 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
         None,
         None,
         # Quantization schemes
-        False,
+        dtype == torch.torch.float8_e4m3fn,
         False,
         False,
         config={
@@ -107,6 +119,7 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
                           tensors.num_expert_tokens)
 
     rtol, atol = {
+        torch.torch.float8_e4m3fn: (6e-2, 6e-2),
         torch.float16: (6e-2, 6e-2),
         torch.bfloat16: (6e-2, 6e-2),
         torch.float32: (1e-2, 1e-2),

@@ -14,7 +14,8 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
+from vllm.model_executor.layers.fused_moe import (MOE_DP_CHUNK_SIZE, FusedMoE,
+                                                  FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
@@ -471,6 +472,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             block_shape=self.quant_config.weight_block_size,
             allow_deep_gemm=self.allow_deep_gemm)
 
+        self.use_pplx_kernels = False
+        self.rocm_aiter_moe_enabled = False
+
     def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
@@ -780,13 +784,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         assert not self.use_marlin and not self.rocm_aiter_moe_enabled, (
             "Marlin and ROCm AITER are not supported with all2all yet.")
 
-        experts: Optional[Union[BatchedTritonOrDeepGemmExperts,
-                                TritonOrDeepGemmExperts]] = None
         max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
         use_batched_experts = max_num_tokens_per_rank is not None
 
         if use_batched_experts:
-            experts = BatchedTritonOrDeepGemmExperts(
+            return BatchedTritonOrDeepGemmExperts(
                 max_num_tokens=max_num_tokens_per_rank,
                 world_size=prepare_finalize.world_size,
                 dp_size=prepare_finalize.dp_size,
@@ -799,14 +801,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 allow_deep_gemm=self.allow_deep_gemm,
             )
         else:
-            experts = TritonOrDeepGemmExperts(
+            return TritonOrDeepGemmExperts(
                 use_fp8_w8a8=True,
                 block_shape=self.quant_config.weight_block_size,
                 allow_deep_gemm=self.allow_deep_gemm,
             )
-
-        assert experts is not None
-        return experts
 
     def apply(
         self,
