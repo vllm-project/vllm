@@ -13,11 +13,11 @@ from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.worker.abstract import BaseInputBatch, BaseRequestState
 
 
-@dataclass(kw_only=True)
+@dataclass
 class PoolingRequestState(BaseRequestState):
 
-    token_type_ids: Optional[list[int]]
-    pooling_params: PoolingParams
+    token_type_ids: Optional[list[int]] = None
+    pooling_params: PoolingParams = PoolingParams()
 
     def __post_init__(self):
         self.num_prompt_tokens = len(self.prompt_token_ids)

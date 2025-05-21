@@ -12,7 +12,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.block_table import MultiGroupBlockTable
 
 
-@dataclass(kw_only=True)
+@dataclass
 class BaseRequestState:
 
     req_id: str

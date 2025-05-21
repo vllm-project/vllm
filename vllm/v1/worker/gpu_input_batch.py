@@ -17,12 +17,12 @@ from vllm.v1.worker.abstract import BaseInputBatch, BaseRequestState
 _SAMPLING_EPS = 1e-5
 
 
-@dataclass(kw_only=True)
+@dataclass
 class SamplingRequestState(BaseRequestState):
 
-    sampling_params: SamplingParams
-    generator: Optional[torch.Generator]
-    output_token_ids: list[int]
+    sampling_params: SamplingParams = SamplingParams()
+    generator: Optional[torch.Generator] = None
+    output_token_ids: list[int] = []
 
     @property
     def num_tokens(self) -> int:
