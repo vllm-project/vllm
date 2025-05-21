@@ -1071,16 +1071,14 @@ if __name__ == "__main__":
         "--custom-output-len",
         type=int,
         default=256,
-        help=
-        "Number of output tokens per request, used only for custom dataset.",
+        help="Number of output tokens per request, used only for custom dataset.",
     )
     custom_group.add_argument(
         "--custom-skip-chat-template",
         action="store_true",
-        help=
-        "Skip applying chat template to prompt, used only for custom dataset.",
+        help="Skip applying chat template to prompt, used only for custom dataset.",
     )
-    
+
     sonnet_group = parser.add_argument_group("sonnet dataset options")
     sonnet_group.add_argument(
         "--sonnet-input-len",
