@@ -329,7 +329,8 @@ class NixlConnectorWorker:
         self.tp_group = get_tp_group()
 
         self.local_rank = get_world_group().local_rank
-        logger.debug("NIXL worker %s local rank %s", self.engine_id)
+        logger.debug("NIXL worker %s local rank %s", self.engine_id,
+                     self.local_rank)
 
         # KV Caches and nixl tracking data.
         self.kv_caches: dict[str, torch.Tensor] = {}
