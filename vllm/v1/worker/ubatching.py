@@ -6,6 +6,8 @@ import torch.profiler as profiler
 from typing import Optional
 from torch.library import Library
 from torch.library import custom_op, register_kernel
+
+from vllm.utils import current_stream
 from vllm import forward_context
 
 class UBatchContext:
@@ -21,7 +23,7 @@ class UBatchContext:
         self.signal_event = signal_event
         self.schedule = schedule
         self.stream = stream
-        self.original_stream = torch.cuda.current_stream()
+        self.original_stream = current_stream()
         self.done_evt = torch.cuda.Event()
         self.forward_context = None
 
@@ -32,7 +34,7 @@ class UBatchContext:
         global _CURRENT_CONTEXT
         _CURRENT_CONTEXT[threading.get_ident()] = self
         
-        self.original_stream = torch.cuda.current_stream()
+        self.original_stream = current_stream()
         self.original_forward_context = forward_context._forward_context
         self.forward_context = self.original_forward_context
 
