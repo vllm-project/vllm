@@ -604,10 +604,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 #endif
 
   // Store Tensor to pinned memory
-  ops.def("store_tensor(Tensor device_tensor, Tensor host_tensor) -> ()");
+  ops.def("store_tensor(Tensor device_tensor, Tensor! host_tensor) -> ()");
   ops.impl("store_tensor", torch::kCUDA, &store_tensor);
   // Load Tensor from pinned memory
-  ops.def("load_tensor(Tensor host_tensor, Tensor device_tensor) -> ()");
+  ops.def("load_tensor(Tensor host_tensor, Tensor! device_tensor) -> ()");
   ops.impl("load_tensor", torch::kCUDA, &load_tensor);
 }
 
