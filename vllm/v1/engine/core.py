@@ -57,6 +57,10 @@ class EngineCore:
                  executor_fail_callback: Optional[Callable] = None):
         assert vllm_config.model_config.runner_type != "pooling"
 
+        # plugins need to be loaded at the engine/scheduler level too
+        from vllm.plugins import load_general_plugins
+        load_general_plugins()
+
         self.vllm_config = vllm_config
         logger.info("Initializing a V1 LLM engine (v%s) with config: %s",
                     VLLM_VERSION, vllm_config)
