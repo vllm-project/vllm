@@ -8,14 +8,16 @@ ARG USER_NAME=root
 ARG GROUP_ID=0
 ARG GROUP_NAME=root
 
-RUN (getent group ${GROUP_ID} || groupadd --gid ${GROUP_ID} ${GROUP_NAME}) && \
-    (getent passwd ${USER_ID} || useradd --gid ${GROUP_ID} --uid ${USER_ID} --create-home --no-log-init --shell /bin/bash ${USER_NAME})
+RUN (sudo getent group ${GROUP_ID} || sudo groupadd --gid ${GROUP_ID} ${GROUP_NAME}) && \
+    (sudo getent passwd ${USER_ID} || sudo useradd --gid ${GROUP_ID} --uid ${USER_ID} --create-home --no-log-init --shell /bin/bash ${USER_NAME})
 
-RUN apt-get update && \
-    apt-get install -y sudo && \
-    adduser ${USER_NAME} sudo && \
-    echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+RUN sudo apt-get update && \
+    sudo apt-get install -y sudo && \
+    sudo adduser ${USER_NAME} sudo
 
+RUN sudo sh -c "echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers" && \
+    sudo apt-get clean && \
+    sudo rm -rf /var/lib/apt/lists/*
+
+    
 USER ${USER_NAME}

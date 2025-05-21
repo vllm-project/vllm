@@ -622,9 +622,9 @@ def get_requirements() -> list[str]:
             modified_requirements.append(req)
         requirements = modified_requirements
         # Add direct dependency on BOK project for CUDA builds
-        requirements.append(
-            "bok @ git+ssh://git@gitlab-master.nvidia.com:12051/jdebache/bok.git"
-        )
+        # requirements.append(
+        #     "bok @ git+ssh://git@gitlab-master.nvidia.com:12051/jdebache/bok.git"
+        # )
     elif _is_hip():
         requirements = _read_requirements("rocm.txt")
     elif _is_neuron():
@@ -697,7 +697,8 @@ setup(
         "fastsafetensors": ["fastsafetensors >= 0.1.10"],
         "runai": ["runai-model-streamer", "runai-model-streamer-s3", "boto3"],
         "audio": ["librosa", "soundfile"],  # Required for audio processing
-        "video": []  # Kept for backwards compatibility
+        "video": [],  # Kept for backwards compatibility
+        "bok": ["bok @ git+ssh://git@gitlab-master.nvidia.com:12051/jdebache/bok.git"]  # BOK project for CUDA builds
     },
     cmdclass=cmdclass,
     package_data=package_data,

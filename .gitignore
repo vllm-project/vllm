@@ -205,3 +205,6 @@ csrc/moe/marlin_moe_wna16/kernel_*
 
 # Hf token
 token
+
+# HF Cache
+tmp/hf_cache/*
