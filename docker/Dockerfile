@@ -41,13 +41,16 @@ ARG GET_PIP_URL="https://bootstrap.pypa.io/get-pip.py"
 # default indexes. By letting them empty by default, PIP will use its default
 # indexes if the build process doesn't override the indexes.
 #
-# The PPIP_PYTORCH_* variable follow the same naming convention, but are not
-# standard, so they have to be passed via --extra-index-url on the pip command
-# line.
+# Uv uses different variables. We set them by default to the same values as
+# PIP, but they can be overridden.
 ARG PIP_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL
-ARG PIP_PYTORCH_CUDA_INDEX_BASE_URL=https://download.pytorch.org/whl
-ARG PIP_PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL=https://download.pytorch.org/whl/nightly
+ARG UV_INDEX_URL=${PIP_INDEX_URL}
+ARG UV_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
+
+# PyTorch provides its own indexes for standard and nightly builds
+ARG PYTORCH_CUDA_INDEX_BASE_URL=https://download.pytorch.org/whl
+ARG PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL=https://download.pytorch.org/whl/nightly
 
 # PIP supports multiple authentication schemes, including keyring
 # By parameterizing the PIP_KEYRING_PROVIDER variable and setting it to
@@ -57,6 +60,7 @@ ARG PIP_PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL=https://download.pytorch.org/whl/nig
 #
 # Reference: https://pip.pypa.io/en/stable/topics/authentication/#keyring-support
 ARG PIP_KEYRING_PROVIDER=disabled
+ARG UV_KEYRING_PROVIDER=${PIP_KEYRING_PROVIDER}
 
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
@@ -96,11 +100,11 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && curl -sS ${GET_PIP_URL} | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
 
-ARG PIP_INDEX_URL
-ARG PIP_EXTRA_INDEX_URL
-ARG PIP_PYTORCH_CUDA_INDEX_BASE_URL
-ARG PIP_PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL
-ARG PIP_KEYRING_PROVIDER
+ARG PIP_INDEX_URL UV_INDEX_URL
+ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
+ARG PYTORCH_CUDA_INDEX_BASE_URL
+ARG PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL
+ARG PIP_KEYRING_PROVIDER UV_KEYRING_PROVIDER
 
 # Install uv for faster pip installs
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -136,10 +140,10 @@ WORKDIR /workspace
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
         uv pip install --system \
-            --index-url ${PIP_PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+            --index-url ${PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
             "torch==2.8.0.dev20250318+cu128" "torchvision==0.22.0.dev20250319";  \
         uv pip install --system \
-            --index-url ${PIP_PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+            --index-url ${PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
             --pre pytorch_triton==3.3.0+gitab727c40; \
     fi
 
@@ -147,7 +151,7 @@ COPY requirements/common.txt requirements/common.txt
 COPY requirements/cuda.txt requirements/cuda.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements/cuda.txt \
-    --extra-index-url ${PIP_PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+    --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 # cuda arch list used by torch
 # can be useful for both `dev` and `test`
@@ -164,9 +168,9 @@ ENV VLLM_FA_CMAKE_GPU_ARCHES=${vllm_fa_cmake_gpu_arches}
 FROM base AS build
 ARG TARGETPLATFORM
 
-ARG PIP_INDEX_URL
-ARG PIP_EXTRA_INDEX_URL
-ARG PIP_PYTORCH_CUDA_INDEX_BASE_URL
+ARG PIP_INDEX_URL UV_INDEX_URL
+ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
+ARG PYTORCH_CUDA_INDEX_BASE_URL
 
 # install build dependencies
 COPY requirements/build.txt requirements/build.txt
@@ -178,7 +182,7 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements/build.txt \
-    --extra-index-url ${PIP_PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+    --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 COPY . .
 ARG GIT_REPO_CHECK=0
@@ -245,9 +249,9 @@ RUN if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
 #################### DEV IMAGE ####################
 FROM base as dev
 
-ARG PIP_INDEX_URL
-ARG PIP_EXTRA_INDEX_URL
-ARG PIP_PYTORCH_CUDA_INDEX_BASE_URL
+ARG PIP_INDEX_URL UV_INDEX_URL
+ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
+ARG PYTORCH_CUDA_INDEX_BASE_URL
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
@@ -263,7 +267,7 @@ COPY requirements/test.txt requirements/test.txt
 COPY requirements/dev.txt requirements/dev.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements/dev.txt \
-    --extra-index-url ${PIP_PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+    --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 #################### DEV IMAGE ####################
 
 #################### vLLM installation IMAGE ####################
@@ -312,11 +316,11 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && curl -sS ${GET_PIP_URL} | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
 
-ARG PIP_INDEX_URL
-ARG PIP_EXTRA_INDEX_URL
-ARG PIP_PYTORCH_CUDA_INDEX_BASE_URL
-ARG PIP_PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL
-ARG PIP_KEYRING_PROVIDER
+ARG PIP_INDEX_URL UV_INDEX_URL
+ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
+ARG PYTORCH_CUDA_INDEX_BASE_URL
+ARG PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL
+ARG PIP_KEYRING_PROVIDER UV_KEYRING_PROVIDER
 
 # Install uv for faster pip installs
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -340,10 +344,10 @@ RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
         uv pip install --system \
-            --index-url ${PIP_PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+            --index-url ${PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
             "torch==2.8.0.dev20250318+cu128" "torchvision==0.22.0.dev20250319" ; \
         uv pip install --system \
-            --index-url ${PIP_PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+            --index-url ${PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
             --pre pytorch_triton==3.3.0+gitab727c40 ; \
     fi
 
@@ -351,7 +355,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system dist/*.whl --verbose \
-        --extra-index-url ${PIP_PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 # If we need to build FlashInfer wheel before its release:
 # $ # Note we remove 7.0 from the arch list compared to the list below, since FlashInfer only supports sm75+
@@ -402,7 +406,7 @@ uv pip list
 COPY requirements/build.txt requirements/build.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements/build.txt \
-        --extra-index-url ${PIP_PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 #################### vLLM installation IMAGE ####################
 
@@ -413,8 +417,8 @@ FROM vllm-base AS test
 
 ADD . /vllm-workspace/
 
-ARG PIP_INDEX_URL
-ARG PIP_EXTRA_INDEX_URL
+ARG PIP_INDEX_URL UV_INDEX_URL
+ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
@@ -459,8 +463,8 @@ RUN mv mkdocs.yaml test_docs/
 FROM vllm-base AS vllm-openai-base
 ARG TARGETPLATFORM
 
-ARG PIP_INDEX_URL
-ARG PIP_EXTRA_INDEX_URL
+ARG PIP_INDEX_URL UV_INDEX_URL
+ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
