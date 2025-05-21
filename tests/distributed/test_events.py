@@ -119,13 +119,12 @@ def test_topic_filtering(publisher_config):
     """
     publisher_config.replay_endpoint = None
 
-    cfg = publisher_config.model_copy()
-    cfg.topic = "foo"
-    pub = EventPublisherFactory.create(cfg)
+    publisher_config.topic = "foo"
+    pub = EventPublisherFactory.create(publisher_config)
 
     from .conftest import MockSubscriber
-    sub_foo = MockSubscriber(cfg.endpoint, None, "foo")
-    sub_bar = MockSubscriber(cfg.endpoint, None, "bar")
+    sub_foo = MockSubscriber(publisher_config.endpoint, None, "foo")
+    sub_bar = MockSubscriber(publisher_config.endpoint, None, "bar")
 
     try:
         time.sleep(0.1)
