@@ -9,8 +9,6 @@ cd /vllm-workspace/
 
 # uninstall vllm
 pip3 uninstall -y vllm
-# restore the original files
-mv test_docs/vllm ./vllm
 
 # remove all compilers
 apt remove --purge build-essential -y
