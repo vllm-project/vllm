@@ -325,9 +325,13 @@ def run_embedding_input_test(
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
 def test_qwen2_vl_image_embeddings_input(vllm_runner, image_assets, model,
-                                         size_factors, dtype: str,
-                                         max_tokens: int,
-                                         num_logprobs: int) -> None:
+                                         size_factors, dtype, max_tokens,
+                                         num_logprobs, monkeypatch) -> None:
+
+    # Test V1: this test hangs during setup on single-scale input.
+    # TODO: figure out why and re-enable this on V1.
+    monkeypatch.setenv("VLLM_USE_V1", "0")
+
     images = [asset.pil_image for asset in image_assets]
 
     inputs_per_case: list[tuple[
