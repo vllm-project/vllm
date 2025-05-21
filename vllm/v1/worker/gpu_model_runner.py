@@ -6,6 +6,7 @@ import os
 import time
 import weakref
 from typing import TYPE_CHECKING, Optional, TypeAlias, Union
+import contextlib
 
 import numpy as np
 import torch
@@ -26,7 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.distributed.parallel_state import (
     get_pp_group, get_tp_group, graph_capture,
     prepare_communication_buffer_for_model)
-from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.forward_context import get_forward_context, set_forward_context, create_forward_context, override_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model
@@ -1289,93 +1290,93 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         def model_inputs(tokens_slice: slice, use_dummy_input: bool) -> tuple:
             if use_dummy_input:
                 num_tokens = num_scheduled_tokens or 1
-                return num_tokens, *self._get_dummy_model_inputs(num_tokens)
+                return self._get_dummy_model_inputs(num_tokens)
             else:
                 assert scheduler_output is not None
-                num_tokens = tokens_slice.stop - tokens_slice.start
-                return num_tokens, *self._get_model_inputs(tokens_slice, scheduler_output)
+                return self._get_model_inputs(tokens_slice, scheduler_output)
             
             
-        def _run(token_slice: slice, attn_metadata, use_dummy_input: bool = False, 
-                 ubatch_context: Optional[UBatchContext]=None,
-                 setup_done_evt: Optional[threading.Event]=None):
-            num_tokens, input_ids, positions, inputs_embeds, intermediate_tensors = \
+        def _run(token_slice: slice, context, use_dummy_input: bool = False):
+            input_ids, positions, inputs_embeds, intermediate_tensors = \
                 model_inputs(token_slice, use_dummy_input)
-            with set_forward_context(attn_metadata,
-                                     self.vllm_config,
-                                     num_tokens=num_tokens):
-                if ubatch_context:
-                    # Update the forward context now that its available
-                    ubatch_context.update_forward_context()
-                    
-                if setup_done_evt is not None:
-                    # Wait for the setup to be done
-                    setup_done_evt.set()
-                
+            with context:
+                if isinstance(context, UBatchContext):
+                    print("running ubatch ctx", context.id)
                 model_output = self.model(
                     input_ids=input_ids,
                     positions=positions,
                     intermediate_tensors=intermediate_tensors,
                     inputs_embeds=inputs_embeds,
                 )
+                if isinstance(context, UBatchContext):
+                    print("done ubatch ctx", context.id)
+                if isinstance(context, UBatchContext):
+                    # Clone before we leave the ubatch context
+                    model_output = model_output.clone()
+                    
             return model_output
         
         @torch.inference_mode()
         def _ubatch_thread(ubatch_ctx, root_stream, token_slice, attn_metadata, results, save_results, use_dummy_input, setup_done_evt):
-            with ubatch_ctx:
-                # an event to enable the start of the ubatch execution on the GPU
-                # since different ubatches may be on different streams than this one
-                # they all need to wait on the gpu kernels launched in 
-                # _prepare_inputs before continuing
-                if current_stream() != root_stream:                
-                    start_evt = torch.cuda.Event()
-                    # Make sure we wait then record so we don't miss the event
-                    current_stream().wait_event(start_evt)
-                    root_stream.record_event(start_evt)
+            ubatch_ctx.stream.wait_stream(root_stream)
+            
+            model_output = _run(token_slice, ubatch_ctx, use_dummy_input)
 
-                model_output = _run(token_slice, attn_metadata, use_dummy_input, ubatch_ctx, setup_done_evt)
-
-                if save_results:
-                    results.append(model_output.clone())
-
-                if current_stream() != root_stream:
-                    # Make the root stream for the ubatch to finish
-                    # Make sure we wait then record so we don't miss the event
-                    root_stream.wait_event(ubatch_ctx.done_evt)
-                    current_stream().record_event(ubatch_ctx.done_evt)
+            if save_results:
+                results.append(model_output)
 
         def _run_ubatches(ubatch_slices, attn_metadata, is_dummy_run):
             results = []
             assert len(ubatch_slices) == 2, "Only two ubatches has been tested"
             root_stream = current_stream()
-            ubatch_ctxs = make_ubatch_context_chain(len(ubatch_slices),
-                                                    stream=root_stream, # Only works currently if everything is run on the same stream
-                                                    device=self.device)
+            
+            if not hasattr(self, "ubatch_streams"):
+                # Create the ubatch streams
+                self.ubatch_streams = [torch.cuda.Stream(self.device)  for _ in range(len(ubatch_slices))]
+                            
+            ubatch_fwd_ctxs = [create_forward_context(
+                    attn_metadata[i], self.vllm_config, num_tokens=(tokens_slice.stop - tokens_slice.start)
+                ) for i, (_, tokens_slice) in enumerate(ubatch_slices)]
+            ubatch_ctxs, start_hook = make_ubatch_context_chain(
+                len(ubatch_slices),
+                fwd_ctxs=ubatch_fwd_ctxs,
+                streams=self.ubatch_streams, #stream=root_stream, # Only works currently if everything is run on the same stream
+                device=self.device)
             setup_done = threading.Event()
             ubatch_threads = []
+            
+            # Ubatches will manually manage the forward context, so we override
+            # it to None here so we can have it restored correctly later
+            with override_forward_context(None):
+                ubatch_threads = []
+                for i, (_, tokens_slice) in enumerate(ubatch_slices):
+                    is_dummy_ubatch = tokens_slice.stop <= tokens_slice.start
+                    assert not is_dummy_ubatch or i == len(ubatch_slices) - 1 or is_dummy_run
+                    
+                    thread = threading.Thread(target=_ubatch_thread, args=(
+                        ubatch_ctxs[i],
+                        root_stream,
+                        tokens_slice,
+                        attn_metadata[i] if attn_metadata is not None else None,
+                        results,
+                        not is_dummy_ubatch or is_dummy_run,
+                        is_dummy_ubatch or is_dummy_run,
+                        setup_done,
+                    ))
+                    ubatch_threads.append(thread)
+                    thread.start()
+                    
+                # Single the first ubatch to start
+                start_hook(root_stream)
+                print("started first ubatch")
+                    
+                for thread in ubatch_threads:
+                    thread.join()
+                    
+            for ubatch_ctx in ubatch_ctxs:
+                root_stream.wait_stream(ubatch_ctx.stream)
 
-            for i, (_, tokens_slice) in enumerate(ubatch_slices):
-                is_dummy_ubatch = tokens_slice.stop <= tokens_slice.start
-                assert not is_dummy_ubatch or i == len(ubatch_slices) - 1 or is_dummy_run
-                
-                thread = threading.Thread(target=_ubatch_thread, args=(
-                    ubatch_ctxs[i],
-                    root_stream,
-                    tokens_slice,
-                    attn_metadata[i] if attn_metadata is not None else None,
-                    results,
-                    not is_dummy_ubatch or is_dummy_run,
-                    is_dummy_ubatch or is_dummy_run,
-                    setup_done,
-                ))
-                #ubatch_threads.append(thread)
-                thread.start()
-                setup_done.wait()
-                thread.join()
-
-            # for thread in ubatch_threads:
-            #     thread.join()
-
+            print("torch cat")
             torch.cuda.set_stream(root_stream)
             return torch.cat(results, dim=0)
 
@@ -1386,7 +1387,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # run single batch
         else:
             model_output = _run(
-                slice(0, num_scheduled_tokens), attn_metadata, is_dummy_run)
+                slice(0, num_scheduled_tokens), 
+                set_forward_context(
+                    attn_metadata, 
+                    vllm_config=self.vllm_config, 
+                    num_tokens=num_scheduled_tokens or 1), 
+                is_dummy_run)
             
         return model_output
 

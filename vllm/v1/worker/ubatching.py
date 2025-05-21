@@ -15,55 +15,59 @@ class UBatchContext:
     Context manager for micro-batching synchronization using threading events.
     """
     def __init__(self,
+                 id: int,
                  stream: torch.cuda.Stream,
-                 wait_event: threading.Event, 
-                 signal_event: threading.Event,
+                 fwd_ctx: forward_context.ForwardContext,
+                 cpu_wait_event: threading.Event, 
+                 cpu_signal_event: threading.Event,
+                 gpu_wait_event: torch.cuda.Event,
+                 gpu_signal_event: torch.cuda.Event,
                  schedule="default"):
-        self.wait_event = wait_event
-        self.signal_event = signal_event
-        self.schedule = schedule
+        self.id = id
         self.stream = stream
         self.original_stream = current_stream()
-        self.done_evt = torch.cuda.Event()
-        self.forward_context = None
-
-    def update_forward_context(self):
-        self.forward_context = forward_context._forward_context
+        self.forward_context = fwd_ctx
+        self.cpu_wait_event = cpu_wait_event
+        self.cpu_signal_event = cpu_signal_event
+        self.gpu_wait_event = gpu_wait_event
+        self.gpu_signal_event = gpu_signal_event
+        self.schedule = schedule
+        self.done_event = torch.cuda.Event()
 
     def __enter__(self):
         global _CURRENT_CONTEXT
         _CURRENT_CONTEXT[threading.get_ident()] = self
-        
-        self.original_stream = current_stream()
-        self.original_forward_context = forward_context._forward_context
-        self.forward_context = self.original_forward_context
-
-        # Set micro-batch stream
-        torch.cuda.set_stream(self.stream)
+        self._wait()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         global _CURRENT_CONTEXT
         _CURRENT_CONTEXT[threading.get_ident()] = None
-
         torch.cuda.set_stream(self.original_stream)
-        forward_context._forward_context = self.original_forward_context
+        self._signal()
         return False
 
-    def yield_(self):
-        # Signal that this batch reached the barrier and wait for the other
-        self.signal_event.set()
-        # Wait for the next batch to signal back
-        self.wait_event.wait()
-        self.wait_event.clear()
+    def _restore_context(self):
         # When we resume i.e. switch back to this micro-batch, we make sure
         # we have the correct stream and forward context
         torch.cuda.set_stream(self.stream)
         forward_context._forward_context = self.forward_context
-            
-    def wait(self):
-        self.wait_event.wait()
-        self.wait_event.clear()
+
+    def yield_(self):
+        self._signal()
+        self._wait()
+
+    def _signal(self):
+        # Wait for the next batch to signal back
+        self.gpu_signal_event.record(self.stream)
+        # Signal that this batch reached the barrier
+        self.cpu_signal_event.set()
+
+    def _wait(self):
+        self.stream.wait_event(self.gpu_wait_event)
+        self.cpu_wait_event.wait()
+        self.cpu_wait_event.clear()
+        self._restore_context()
 
 _CURRENT_CONTEXT: dict = {}
 
@@ -90,21 +94,34 @@ def yield_(x: torch.Tensor, schedule: str="default") -> None:
 """
 def make_ubatch_context_chain(
     num_micro_batches: int,
-    stream: Optional[torch.Stream] = None,
+    fwd_ctxs: forward_context.ForwardContext,
+    streams: Optional[list[torch.Stream]] = None,
     device: Optional[torch.device] = None
 ) -> list[UBatchContext]:
+    assert num_micro_batches == 2, "only been tested with 2 micro-batches"
+    
     """
     Create a context manager for micro-batching synchronization.
     """
-    events = [threading.Event() for _ in range(num_micro_batches)]
+    cpu_events = [threading.Event() for _ in range(num_micro_batches)]
+    gpu_events = [torch.cuda.Event() for _ in range(num_micro_batches)]
     device = device or torch.cuda.current_device()
     
     ctxs = []
     for i in range(num_micro_batches):
-        wait_event = events[i]
-        signal_event = events[(i + 1) % num_micro_batches]
-        ctx = UBatchContext(stream or torch.cuda.Stream(device),
-                            wait_event, signal_event)
+        stream = (streams[i] if streams else None) or torch.cuda.Stream(device)
+        ctx = UBatchContext(id=i,
+                            stream=stream, 
+                            fwd_ctx=fwd_ctxs[i],
+                            cpu_wait_event=cpu_events[i],
+                            cpu_signal_event=cpu_events[(i + 1) % num_micro_batches],
+                            gpu_wait_event=gpu_events[i],
+                            gpu_signal_event=gpu_events[(i + 1) % num_micro_batches],
+                )
         ctxs.append(ctx)
+        
+    def start_hook(from_stream: torch.cuda.Stream):
+        ctxs[0].cpu_wait_event.set()
+        ctxs[0].gpu_wait_event.record(from_stream)        
 
-    return ctxs
+    return ctxs, start_hook

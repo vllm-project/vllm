@@ -58,20 +58,11 @@ def get_forward_context() -> ForwardContext:
         "Please use `set_forward_context` to set the forward context.")
     return _forward_context
 
-
-@contextmanager
-def set_forward_context(attn_metadata: Any,
-                        vllm_config: VllmConfig,
-                        virtual_engine: int = 0,
-                        num_tokens: int = 0):
-    """A context manager that stores the current forward context,
-    can be attention metadata, etc.
-    Here we can inject common logic for every model forward pass.
-    """
-    global forward_start_time
-    need_to_track_batchsize = track_batchsize and attn_metadata is not None
-    if need_to_track_batchsize:
-        forward_start_time = time.perf_counter()
+def create_forward_context(attn_metadata: Any,
+                           vllm_config: VllmConfig,
+                           virtual_engine: int = 0,
+                           num_tokens: int = 0
+):
     dp_metadata: Optional[DPMetadata] = None
     if vllm_config.parallel_config.data_parallel_size > 1:
         dp_size = vllm_config.parallel_config.data_parallel_size
@@ -96,17 +87,49 @@ def set_forward_context(attn_metadata: Any,
         dp_metadata = DPMetadata(max_tokens_across_dp_cpu,
                                  cu_tokens_across_dp_cpu)
 
-    global _forward_context
-    prev_context = _forward_context
-    _forward_context = ForwardContext(
+    return ForwardContext(
         no_compile_layers=vllm_config.compilation_config.
         static_forward_context,
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
         dp_metadata=dp_metadata)
 
+@contextmanager
+def override_forward_context(forward_context: Optional[ForwardContext]):
+    """A context manager that overrides the current forward context.
+    This is used to override the forward context for a specific
+    forward pass.
+    """
+    global _forward_context
+    prev_context = _forward_context
+    print("overriding forward context with", forward_context)
+    _forward_context = forward_context
     try:
         yield
+    finally:
+        _forward_context = prev_context
+
+
+@contextmanager
+def set_forward_context(attn_metadata: Any,
+                        vllm_config: VllmConfig,
+                        virtual_engine: int = 0,
+                        num_tokens: int = 0):
+    """A context manager that stores the current forward context,
+    can be attention metadata, etc.
+    Here we can inject common logic for every model forward pass.
+    """
+    global forward_start_time
+    need_to_track_batchsize = track_batchsize and attn_metadata is not None
+    if need_to_track_batchsize:
+        forward_start_time = time.perf_counter()
+
+    forward_context = create_forward_context(
+        attn_metadata, vllm_config, virtual_engine, num_tokens)
+
+    try:
+        with override_forward_context(forward_context):
+            yield
     finally:
         global last_logging_time, batchsize_logging_interval
         if need_to_track_batchsize:
@@ -140,5 +163,3 @@ def set_forward_context(attn_metadata: Any,
                     logger.info(("Batchsize forward time stats "
                                  "(batchsize, count, median_time(ms)): %s"),
                                 forward_stats)
-
-        _forward_context = prev_context
