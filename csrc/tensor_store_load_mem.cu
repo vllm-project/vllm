@@ -23,7 +23,7 @@ __global__ void load_kernel(const scalar_t* host_ptr, scalar_t* device_ptr,
 
 // Templated wrapper function: Store Tensor to pinned memory
 template <typename scalar_t>
-void store_tensor_impl(torch::Tensor device_tensor, torch::Tensor host_tensor) {
+void store_tensor_impl(torch::Tensor& device_tensor, torch::Tensor& host_tensor) {
   const auto num_elements = device_tensor.numel();
   const int threads = 256;
   const int blocks = (num_elements + threads - 1) / threads;
@@ -38,7 +38,7 @@ void store_tensor_impl(torch::Tensor device_tensor, torch::Tensor host_tensor) {
 
 // Templated wrapper function: Load Tensor from pinned memory
 template <typename scalar_t>
-void load_tensor_impl(torch::Tensor host_tensor, torch::Tensor device_tensor) {
+void load_tensor_impl(torch::Tensor& host_tensor, torch::Tensor& device_tensor) {
   const auto num_elements = host_tensor.numel();
   const int threads = 256;
   const int blocks = (num_elements + threads - 1) / threads;
@@ -52,7 +52,7 @@ void load_tensor_impl(torch::Tensor host_tensor, torch::Tensor device_tensor) {
 }
 
 // Type-dispatched wrapper function
-void store_tensor(torch::Tensor device_tensor, torch::Tensor host_tensor) {
+void store_tensor(torch::Tensor& device_tensor, torch::Tensor& host_tensor) {
   // Validate arguments
   AT_ASSERT(device_tensor.is_cuda(), "Input tensor must be a CUDA tensor");
   AT_ASSERT(host_tensor.is_pinned(), "Output tensor must be pinned memory");
@@ -77,7 +77,7 @@ void store_tensor(torch::Tensor device_tensor, torch::Tensor host_tensor) {
   }
 }
 
-void load_tensor(torch::Tensor host_tensor, torch::Tensor device_tensor) {
+void load_tensor(torch::Tensor& host_tensor, torch::Tensor& device_tensor) {
   // Validate arguments
   AT_ASSERT(device_tensor.is_cuda(), "Output tensor must be a CUDA tensor");
   AT_ASSERT(host_tensor.is_pinned(), "Input tensor must be pinned memory");
