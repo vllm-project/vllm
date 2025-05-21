@@ -4330,7 +4330,8 @@ class VllmConfig:
                 "prefill and prefix caching to be disabled.")
 
         if self.model_config and self.model_config.pooler_config:
-            if self.model_config.pooler_config.pooling_type.lower() != "last":
+            pooling_type = self.model_config.pooler_config.pooling_type
+            if pooling_type is None or pooling_type.lower() != "last":
                 disable_chunked_prefill_reasons.append(
                     "Only \"last\" pooling supports chunked "
                     "prefill and prefix caching; disabling both.")
