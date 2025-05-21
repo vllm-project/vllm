@@ -70,6 +70,11 @@ class BatchedMMTensors:
 
     @staticmethod
     def make_tensors(config: BatchedMMConfig):
+        if config.dtype == torch.torch.float8_e4m3fn:
+            config_dtype = torch.bfloat16
+        else:
+            config_dtype = config.dtype
+
         A = torch.randn(
             (config.num_experts, config.max_tokens_per_expert, config.K),
             device="cuda",
@@ -97,7 +102,7 @@ class BatchedMMTensors:
 @pytest.mark.parametrize("K", [128, 256, 1024])
 @pytest.mark.parametrize("N", [128, 256, 512, 1024])
 @pytest.mark.parametrize("dtype",
-                         [torch.float32, torch.float16, torch.bfloat16])
+                         [torch.torch.float8_e4m3fn, torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("block_shape", [None])
 @pytest.mark.parametrize("per_act_token_quant", [False])
 def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
@@ -151,6 +156,7 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
     q_ref_output = torch.zeros(out_shape, dtype=act_dtype, device="cuda")
 
     compute_tl_dtype = {
+        torch.torch.float8_e4m3fn: tl.bfloat16,
         torch.float16: tl.float16,
         torch.bfloat16: tl.bfloat16,
         torch.float32: tl.float32
@@ -196,6 +202,7 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
                                                       block_shape)
 
     rtol, atol = {
+        torch.torch.float8_e4m3fn: (6e-2, 6e-2),
         torch.float16: (6e-2, 6e-2),
         torch.bfloat16: (6e-2, 6e-2),
         torch.float32: (1e-2, 1e-2),

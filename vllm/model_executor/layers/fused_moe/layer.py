@@ -378,6 +378,47 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input)
 
+    def set_prepare_finalize(
+        self,
+        dp_size: int,
+        world_size: int,
+        prepare_finalize: FusedMoEPrepareAndFinalize,
+    ) -> bool:
+        assert self.fused_experts == fused_experts
+
+        experts: Optional[FusedMoEPermuteExpertsUnpermute] = None
+
+        if isinstance(prepare_finalize,
+                      (BatchedPrepareAndFinalize, PplxPrepareAndFinalize)):
+            logger.debug("BatchedTritonExperts %s", self.moe)
+            experts = BatchedTritonExperts(
+                max_num_tokens=MOE_DP_CHUNK_SIZE,
+                world_size=world_size,
+                dp_size=dp_size,
+                use_fp8_w8a8=False,  #moe.in_dtype == torch.float8_e4m3fn,
+                use_int8_w8a8=False,
+                use_int8_w8a16=False,
+                use_int4_w4a16=False,
+                block_shape=None,
+            )
+        else:
+            logger.debug("TritonExperts %s", self.moe)
+            experts = TritonExperts(
+                use_fp8_w8a8=False,
+                use_int8_w8a8=False,
+                use_int8_w8a16=False,
+                use_int4_w4a16=False,
+                block_shape=None,
+                per_channel_quant=False,
+            )
+
+        self.fused_experts = FusedMoEModularKernel(
+            prepare_finalize,
+            experts,
+        )
+
+        return True
+
     def forward_cuda(
         self,
         layer: torch.nn.Module,
@@ -1298,6 +1339,8 @@ class FusedMoE(torch.nn.Module):
                                           src=src.to(expert_load_view))
 
             topk_ids = topk_ids.to(dtype=indices_type)
+
+        assert topk_ids.dtype == indices_type
 
         return topk_weights, topk_ids
 
