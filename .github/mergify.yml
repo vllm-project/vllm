@@ -163,6 +163,17 @@ pull_request_rules:
 
        https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/working-with-forks/syncing-a-fork
 
+- name: assign reviewer for tensorizer changes
+  conditions:
+      - files~=^vllm/model_executor/model_loader/tensorizer.py
+      - files~=^vllm/model_executor/model_loader/tensorizer_loader.py
+      - files~=^tests/entrypoints/openai/test_tensorizer_entrypoint.py
+      - files~=^tests/tensorizer_loader/
+  actions:
+    assign:
+      users:
+        - "sangstar"
+
 - name: remove 'needs-rebase' label when conflict is resolved
   conditions:
       - -conflict

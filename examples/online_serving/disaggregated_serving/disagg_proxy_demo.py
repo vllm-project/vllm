@@ -4,7 +4,7 @@ This file provides a disaggregated prefilling proxy demo to demonstrate an
 example usage of XpYd disaggregated prefilling.
 We can launch multiple vllm instances (2 for prefill and 2 for decode), and
 launch this proxy demo through:
-  python3 examples/online_serving/disagg_examples/disagg_proxy_demo.py  \
+  python3 examples/online_serving/disaggregated_serving/disagg_proxy_demo.py  \
        --model $model_name  \
        --prefill localhost:8100 localhost:8101   \
        --decode localhost:8200 localhost:8201   \
@@ -414,7 +414,7 @@ class ProxyServer:
         server.run()
 
 
-if __name__ == "__main__":
+def parse_args():
     # Todo: allow more config
     parser = argparse.ArgumentParser("vLLM disaggregated proxy server.")
     parser.add_argument("--model",
@@ -445,6 +445,10 @@ if __name__ == "__main__":
         default=8000,
         help="Server port number",
     )
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = parse_args()
     proxy_server = ProxyServer(args=args)
     proxy_server.run_server()
