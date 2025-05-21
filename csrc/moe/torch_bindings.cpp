@@ -10,7 +10,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
 
   // Calculate the result of moe by summing up the partial results
   // from all selected experts.
-  m.def("moe_sum(Tensor! input, Tensor output) -> ()");
+  m.def("moe_sum(Tensor input, Tensor! output) -> ()");
   m.impl("moe_sum", torch::kCUDA, &moe_sum);
 
   // Aligning the number of tokens to be processed by each expert such
