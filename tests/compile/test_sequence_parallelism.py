@@ -10,7 +10,7 @@ from vllm.compilation.fx_utils import (find_auto_fn, find_auto_fn_maybe,
                                        find_specified_fn_maybe, is_func)
 from vllm.compilation.sequence_parallelism import SequenceParallelismPass
 from vllm.config import (CompilationConfig, DeviceConfig, ModelConfig,
-                         VllmConfig)
+                         PassConfig, VllmConfig)
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (init_distributed_environment,
                                              initialize_model_parallel)
@@ -126,9 +126,8 @@ def sequence_parallelism_pass_on_test_model(local_rank: int, world_size: int,
 
     # configure vllm config for SequenceParallelismPass
     vllm_config = VllmConfig()
-    vllm_config.compilation_config = CompilationConfig(
-        pass_config=CompilationConfig.PassConfig(
-            enable_sequence_parallelism=True, ), )
+    vllm_config.compilation_config = CompilationConfig(pass_config=PassConfig(
+        enable_sequence_parallelism=True))
     vllm_config.device_config = DeviceConfig(device=torch.device("cuda"))
 
     # this is a fake model name to construct the model config

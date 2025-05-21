@@ -1,16 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 import torch
 import torch.nn as nn
-import triton
-import triton.language as tl
 
-from vllm.config import CompilationLevel, VllmConfig, set_current_vllm_config
+from vllm.attention.layer import Attention
+from vllm.config import (CompilationLevel, VllmConfig,
+                         get_layers_from_vllm_config, set_current_vllm_config)
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.loader import get_model_loader
+from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
 
@@ -27,23 +29,25 @@ class EagleProposer:
         device: torch.device,
     ):
         self.vllm_config = vllm_config
-        self.method = self.vllm_config.speculative_config.method
-        self.num_speculative_tokens = (
-            vllm_config.speculative_config.num_speculative_tokens)
-        self.max_model_len = vllm_config.model_config.max_model_len
-        self.block_size = vllm_config.cache_config.block_size
+        self.speculative_config = vllm_config.speculative_config
+        self.draft_model_config = self.speculative_config.draft_model_config
+        self.method = self.speculative_config.method
 
         self.dtype = vllm_config.model_config.dtype
-
-        self.max_num_tokens = vllm_config.scheduler_config \
-            .max_num_batched_tokens
-
-        self.hidden_size = vllm_config.model_config.get_hidden_size()
+        self.max_model_len = vllm_config.model_config.max_model_len
+        self.block_size = vllm_config.cache_config.block_size
+        self.num_speculative_tokens = (
+            self.speculative_config.num_speculative_tokens)
+        self.max_num_tokens = (
+            vllm_config.scheduler_config.max_num_batched_tokens)
+        # We need to get the hidden size from the draft model config because
+        # the draft model's hidden size can be different from the target model's
+        # hidden size (e.g., Llama 3.3 70B).
+        self.hidden_size = self.draft_model_config.get_hidden_size()
 
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE and
                                not self.vllm_config.model_config.enforce_eager)
-
         self.cudagraph_batch_sizes = list(
             reversed(
                 self.vllm_config.compilation_config.cudagraph_capture_sizes))
@@ -55,7 +59,6 @@ class EagleProposer:
         self.positions = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int64,
                                      device=device)
-
         self.hidden_states = torch.zeros(
             (self.max_num_tokens, self.hidden_size),
             dtype=self.dtype,
@@ -130,7 +133,6 @@ class EagleProposer:
             num_input_tokens = num_tokens
         # copy inputs to buffer for cudagraph
         self.positions[:num_tokens] = target_positions
-
         self.hidden_states[:num_tokens] = target_hidden_states
 
         with set_forward_context(attn_metadata,
@@ -208,7 +210,6 @@ class EagleProposer:
             # copy inputs to buffer for cudagraph
             self.input_ids[:batch_size] = input_ids
             self.positions[:batch_size] = clamped_positions
-
             self.hidden_states[:batch_size] = hidden_states
 
             # Run the model.
@@ -223,6 +224,8 @@ class EagleProposer:
             hidden_states = hidden_states[:batch_size]
             logits = self.model.compute_logits(last_hidden_states[:batch_size],
                                                None)
+
+            # TODO(wenlong): get more than one token for tree attention
             draft_token_ids = logits.argmax(dim=-1)
             draft_token_ids_list.append(draft_token_ids)
 
@@ -251,6 +254,8 @@ class EagleProposer:
         # [a, b, c] -> [a - n1, b - n2, c - n3]
         num_tokens_per_req = query_len_per_req - num_rejected_tokens
 
+        # [a - n1, b - n2, c - n3] ->
+        # [0, a - n1, a + b - n1 - n2, a + b + c - n1 - n2 - n3]
         cu_num_tokens = torch.empty_like(cu_target_query_lens)
         torch.cumsum(num_tokens_per_req, dim=0, out=cu_num_tokens[1:])
         cu_num_tokens[0] = 0
@@ -277,6 +282,8 @@ class EagleProposer:
         loader = get_model_loader(self.vllm_config.load_config)
         target_layer_num = self.vllm_config.model_config.get_num_layers(
             self.vllm_config.parallel_config)
+        target_attn_layer_names = set(
+            get_layers_from_vllm_config(self.vllm_config, Attention).keys())
 
         draft_model_config = \
             self.vllm_config.speculative_config.draft_model_config
@@ -293,14 +300,37 @@ class EagleProposer:
                 vllm_config=self.vllm_config,
                 start_layer_id=target_layer_num).to(target_device)
 
+        draft_attn_layer_names = (
+            get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
+            target_attn_layer_names)
+        assert len(draft_attn_layer_names) == 1
+        self.attn_layer_name = next(iter(draft_attn_layer_names))
         loaded_weights = self.model.load_weights(
             loader.get_all_weights(draft_model_config, self.model))
-        if self.vllm_config.speculative_config.method == "eagle3":
-            if "model.embed_tokens.weight" not in loaded_weights:
-                logger.info(
-                    "Loading EAGLE embedding weights from the target model.")
-                self.model.model.embed_tokens = target_model.model.embed_tokens
+
+        # share embed_tokens with the target model if needed
+        if get_pp_group().world_size == 1:
+            assert "model.embed_tokens.weight" not in loaded_weights, \
+            "For PP = 1, Eagle draft should share embed with target model"
+            logger.info(
+                "The EAGLE head shares the same vocab embedding" \
+                " with the target model."
+            )
+            self.model.model.embed_tokens = target_model.model.embed_tokens
         else:
+            assert "model.embed_tokens.weight" in loaded_weights, \
+            "For PP > 1, Eagle draft checkpoint should its own copy of "
+            " the model.embed_tokens.weight"
+            logger.info(
+                "Since PP > 1, the EAGLE head loaded its own vocab embedding" \
+                " weights instead of sharing them with the target model."
+            )
+
+        # share lm_head with the target model if needed
+        # some model definition do not define lm_head explicitly
+        # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
+        if self.vllm_config.speculative_config.method != "eagle3" and \
+                hasattr(target_model, "lm_head"):
             logger.info("Loading EAGLE LM head weights from the target model.")
             self.model.lm_head = target_model.lm_head
 

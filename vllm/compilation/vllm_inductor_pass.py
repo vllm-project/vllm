@@ -4,7 +4,7 @@ import time
 
 import torch
 
-from vllm.config import CompilationConfig, VllmConfig
+from vllm.config import PassConfig, VllmConfig
 # yapf: disable
 from vllm.distributed import get_tensor_model_parallel_rank as get_tp_rank
 from vllm.distributed import (
@@ -56,10 +56,7 @@ class VllmInductorPass(InductorPass):
 
 class PrinterInductorPass(VllmInductorPass):
 
-    def __init__(self,
-                 name: str,
-                 config: CompilationConfig.PassConfig,
-                 always=False):
+    def __init__(self, name: str, config: PassConfig, always=False):
         super().__init__(config)
         self.name = name
         self.always = always

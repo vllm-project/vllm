@@ -10,16 +10,15 @@ import subprocess
 import sys
 import tempfile
 from abc import ABC, abstractmethod
+from collections.abc import Set
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import (AbstractSet, Callable, Dict, List, Optional, Tuple, Type,
-                    TypeVar, Union)
+from typing import Callable, Optional, TypeVar, Union
 
 import cloudpickle
 import torch.nn as nn
 
 from vllm.logger import init_logger
-from vllm.utils import is_in_doc_build
 
 from .interfaces import (has_inner_state, has_noops, is_attention_free,
                          is_hybrid, supports_cross_encoding,
@@ -65,6 +64,7 @@ _TEXT_GENERATION_MODELS = {
     "GPTNeoXForCausalLM": ("gpt_neox", "GPTNeoXForCausalLM"),
     "GraniteForCausalLM": ("granite", "GraniteForCausalLM"),
     "GraniteMoeForCausalLM": ("granitemoe", "GraniteMoeForCausalLM"),
+    "GraniteMoeHybridForCausalLM": ("granitemoehybrid", "GraniteMoeHybridForCausalLM"),   # noqa: E501
     "GraniteMoeSharedForCausalLM": ("granitemoeshared", "GraniteMoeSharedForCausalLM"),   # noqa: E501
     "GritLM": ("gritlm", "GritLM"),
     "Grok1ModelForCausalLM": ("grok1", "Grok1ForCausalLM"),
@@ -88,6 +88,7 @@ _TEXT_GENERATION_MODELS = {
     # transformers's mpt class has lower case
     "MptForCausalLM": ("mpt", "MPTForCausalLM"),
     "MPTForCausalLM": ("mpt", "MPTForCausalLM"),
+    "MiMoForCausalLM": ("mimo", "MiMoForCausalLM"),
     "NemotronForCausalLM": ("nemotron", "NemotronForCausalLM"),
     "OlmoForCausalLM": ("olmo", "OlmoForCausalLM"),
     "Olmo2ForCausalLM": ("olmo2", "Olmo2ForCausalLM"),
@@ -126,7 +127,8 @@ _EMBEDDING_MODELS = {
     "Gemma2Model": ("gemma2", "Gemma2ForCausalLM"),
     "GlmForCausalLM": ("glm", "GlmForCausalLM"),
     "GritLM": ("gritlm", "GritLM"),
-    "GteModel": ("bert", "GteEmbeddingModel"),
+    "GteModel": ("bert_with_rope", "SnowflakeGteNewModel"),
+    "GteNewModel": ("bert_with_rope", "GteNewModel"),
     "InternLM2ForRewardModel": ("internlm2", "InternLM2ForRewardModel"),
     "JambaForSequenceClassification": ("jamba", "JambaForSequenceClassification"),  # noqa: E501
     "LlamaModel": ("llama", "LlamaForCausalLM"),
@@ -136,7 +138,8 @@ _EMBEDDING_MODELS = {
         if arch == "LlamaForCausalLM"
     },
     "MistralModel": ("llama", "LlamaForCausalLM"),
-    "NomicBertModel": ("bert", "NomicBertEmbeddingModel"),
+    "ModernBertModel": ("modernbert", "ModernBertModel"),
+    "NomicBertModel": ("bert_with_rope", "NomicBertModel"),
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
     "Qwen2Model": ("qwen2", "Qwen2EmbeddingModel"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
@@ -195,7 +198,7 @@ _MULTIMODAL_MODELS = {
     "Mistral3ForConditionalGeneration": ("mistral3", "Mistral3ForConditionalGeneration"),  # noqa: E501
     "MolmoForCausalLM": ("molmo", "MolmoForCausalLM"),
     "NVLM_D": ("nvlm_d", "NVLM_D_Model"),
-    "Ovis2ForConditionalGeneration": ("ovis2", "Ovis2ForConditionalGeneration"),
+    "Ovis": ("ovis", "Ovis"),
     "PaliGemmaForConditionalGeneration": ("paligemma", "PaliGemmaForConditionalGeneration"),  # noqa: E501
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
     "PixtralForConditionalGeneration": ("pixtral", "PixtralForConditionalGeneration"),  # noqa: E501
@@ -215,6 +218,7 @@ _MULTIMODAL_MODELS = {
 }
 
 _SPECULATIVE_DECODING_MODELS = {
+    "MiMoMTPModel": ("mimo_mtp", "MiMoMTP"),
     "EAGLEModel": ("eagle", "EAGLE"),
     "EagleLlamaForCausalLM": ("llama_eagle", "EagleLlamaForCausalLM"),
     "Eagle3LlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
@@ -262,7 +266,7 @@ class _ModelInfo:
     supports_v0_only: bool
 
     @staticmethod
-    def from_model_cls(model: Type[nn.Module]) -> "_ModelInfo":
+    def from_model_cls(model: type[nn.Module]) -> "_ModelInfo":
         return _ModelInfo(
             architecture=model.__name__,
             is_text_generation_model=is_text_generation_model(model),
@@ -286,7 +290,7 @@ class _BaseRegisteredModel(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def load_model_cls(self) -> Type[nn.Module]:
+    def load_model_cls(self) -> type[nn.Module]:
         raise NotImplementedError
 
 
@@ -297,10 +301,10 @@ class _RegisteredModel(_BaseRegisteredModel):
     """
 
     interfaces: _ModelInfo
-    model_cls: Type[nn.Module]
+    model_cls: type[nn.Module]
 
     @staticmethod
-    def from_model_cls(model_cls: Type[nn.Module]):
+    def from_model_cls(model_cls: type[nn.Module]):
         return _RegisteredModel(
             interfaces=_ModelInfo.from_model_cls(model_cls),
             model_cls=model_cls,
@@ -309,7 +313,7 @@ class _RegisteredModel(_BaseRegisteredModel):
     def inspect_model_cls(self) -> _ModelInfo:
         return self.interfaces
 
-    def load_model_cls(self) -> Type[nn.Module]:
+    def load_model_cls(self) -> type[nn.Module]:
         return self.model_cls
 
 
@@ -326,7 +330,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
         return _run_in_subprocess(
             lambda: _ModelInfo.from_model_cls(self.load_model_cls()))
 
-    def load_model_cls(self) -> Type[nn.Module]:
+    def load_model_cls(self) -> type[nn.Module]:
         mod = importlib.import_module(self.module_name)
         return getattr(mod, self.class_name)
 
@@ -335,7 +339,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
 def _try_load_model_cls(
     model_arch: str,
     model: _BaseRegisteredModel,
-) -> Optional[Type[nn.Module]]:
+) -> Optional[type[nn.Module]]:
     from vllm.platforms import current_platform
     current_platform.verify_model_arch(model_arch)
     try:
@@ -362,26 +366,26 @@ def _try_inspect_model_cls(
 @dataclass
 class _ModelRegistry:
     # Keyed by model_arch
-    models: Dict[str, _BaseRegisteredModel] = field(default_factory=dict)
+    models: dict[str, _BaseRegisteredModel] = field(default_factory=dict)
 
-    def get_supported_archs(self) -> AbstractSet[str]:
+    def get_supported_archs(self) -> Set[str]:
         return self.models.keys()
 
     def register_model(
         self,
         model_arch: str,
-        model_cls: Union[Type[nn.Module], str],
+        model_cls: Union[type[nn.Module], str],
     ) -> None:
         """
         Register an external model to be used in vLLM.
 
-        :code:`model_cls` can be either:
+        `model_cls` can be either:
 
-        - A :class:`torch.nn.Module` class directly referencing the model.
-        - A string in the format :code:`<module>:<class>` which can be used to
+        - A {class}`torch.nn.Module` class directly referencing the model.
+        - A string in the format `<module>:<class>` which can be used to
           lazily import the model. This is useful to avoid initializing CUDA
           when importing the model and thus the related error
-          :code:`RuntimeError: Cannot re-initialize CUDA in forked subprocess`.
+          `RuntimeError: Cannot re-initialize CUDA in forked subprocess`.
         """
         if not isinstance(model_arch, str):
             msg = f"`model_arch` should be a string, not a {type(model_arch)}"
@@ -400,8 +404,7 @@ class _ModelRegistry:
                 raise ValueError(msg)
 
             model = _LazyRegisteredModel(*split_str)
-        elif isinstance(model_cls, type) and (is_in_doc_build() or issubclass(
-                model_cls, nn.Module)):
+        elif isinstance(model_cls, type) and issubclass(model_cls, nn.Module):
             model = _RegisteredModel.from_model_cls(model_cls)
         else:
             msg = ("`model_cls` should be a string or PyTorch model class, "
@@ -410,7 +413,7 @@ class _ModelRegistry:
 
         self.models[model_arch] = model
 
-    def _raise_for_unsupported(self, architectures: List[str]):
+    def _raise_for_unsupported(self, architectures: list[str]):
         all_supported_archs = self.get_supported_archs()
 
         if any(arch in all_supported_archs for arch in architectures):
@@ -423,7 +426,7 @@ class _ModelRegistry:
             f"Supported architectures: {all_supported_archs}")
 
     def _try_load_model_cls(self,
-                            model_arch: str) -> Optional[Type[nn.Module]]:
+                            model_arch: str) -> Optional[type[nn.Module]]:
         if model_arch not in self.models:
             return None
 
@@ -437,8 +440,8 @@ class _ModelRegistry:
 
     def _normalize_archs(
         self,
-        architectures: Union[str, List[str]],
-    ) -> List[str]:
+        architectures: Union[str, list[str]],
+    ) -> list[str]:
         if isinstance(architectures, str):
             architectures = [architectures]
         if not architectures:
@@ -455,8 +458,8 @@ class _ModelRegistry:
 
     def inspect_model_cls(
         self,
-        architectures: Union[str, List[str]],
-    ) -> Tuple[_ModelInfo, str]:
+        architectures: Union[str, list[str]],
+    ) -> tuple[_ModelInfo, str]:
         architectures = self._normalize_archs(architectures)
 
         for arch in architectures:
@@ -468,8 +471,8 @@ class _ModelRegistry:
 
     def resolve_model_cls(
         self,
-        architectures: Union[str, List[str]],
-    ) -> Tuple[Type[nn.Module], str]:
+        architectures: Union[str, list[str]],
+    ) -> tuple[type[nn.Module], str]:
         architectures = self._normalize_archs(architectures)
 
         for arch in architectures:
@@ -481,77 +484,77 @@ class _ModelRegistry:
 
     def is_text_generation_model(
         self,
-        architectures: Union[str, List[str]],
+        architectures: Union[str, list[str]],
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.is_text_generation_model
 
     def is_pooling_model(
         self,
-        architectures: Union[str, List[str]],
+        architectures: Union[str, list[str]],
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.is_pooling_model
 
     def is_cross_encoder_model(
         self,
-        architectures: Union[str, List[str]],
+        architectures: Union[str, list[str]],
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.supports_cross_encoding
 
     def is_multimodal_model(
         self,
-        architectures: Union[str, List[str]],
+        architectures: Union[str, list[str]],
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.supports_multimodal
 
     def is_pp_supported_model(
         self,
-        architectures: Union[str, List[str]],
+        architectures: Union[str, list[str]],
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.supports_pp
 
     def model_has_inner_state(
         self,
-        architectures: Union[str, List[str]],
+        architectures: Union[str, list[str]],
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.has_inner_state
 
     def is_attention_free_model(
         self,
-        architectures: Union[str, List[str]],
+        architectures: Union[str, list[str]],
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.is_attention_free
 
     def is_hybrid_model(
         self,
-        architectures: Union[str, List[str]],
+        architectures: Union[str, list[str]],
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.is_hybrid
 
     def is_noops_model(
         self,
-        architectures: Union[str, List[str]],
+        architectures: Union[str, list[str]],
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.has_noops
 
     def is_transcription_model(
         self,
-        architectures: Union[str, List[str]],
+        architectures: Union[str, list[str]],
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.supports_transcription
 
     def is_v1_compatible(
         self,
-        architectures: Union[str, List[str]],
+        architectures: Union[str, list[str]],
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return not model_cls.supports_v0_only

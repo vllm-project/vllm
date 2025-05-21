@@ -28,6 +28,7 @@ AITER_MODEL_LIST = [
     "Qwen/Qwen-7B-Chat",
     "Qwen/Qwen2.5-0.5B-Instruct",
     "TitanML/tiny-mixtral",
+    "Qwen/Qwen3-8B",
 ]
 
 
@@ -78,6 +79,9 @@ AITER_MODEL_LIST = [
             "Qwen/Qwen2.5-0.5B-Instruct",  # qwen2
             marks=[pytest.mark.core_model],
         ),
+        pytest.param(
+            "Qwen/Qwen3-8B",  # qwen (text-only)
+        ),
         pytest.param("stabilityai/stablelm-3b-4e1t"),  # stablelm
         pytest.param("bigcode/starcoder2-3b"),  # starcoder2
         pytest.param(
@@ -109,12 +113,15 @@ def test_models(hf_runner, vllm_runner, example_prompts, model: str,
         # in parts of the operators
         pytest.skip(f"Skipping '{model}' model test with AITER kernel.")
 
+    use_prompt_embeds = os.getenv("VLLM_USE_V1") == "0"
+
     with hf_runner(model) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs)
 
-        prompt_embeds: Optional[list[torch.Tensor]] = [] if os.getenv(
-            "VLLM_USE_V1") == "0" else None
+        prompt_embeds: Optional[list[torch.Tensor]] = ([] if use_prompt_embeds
+                                                       else None)
+
         prompt_token_ids = []
         for prompt in example_prompts:
             token_ids = hf_model.tokenizer(prompt,
@@ -131,6 +138,7 @@ def test_models(hf_runner, vllm_runner, example_prompts, model: str,
             tokenizer_mode=model_info.tokenizer_mode,
             trust_remote_code=model_info.trust_remote_code,
             max_num_seqs=2,
+            enable_prompt_embeds=use_prompt_embeds,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)

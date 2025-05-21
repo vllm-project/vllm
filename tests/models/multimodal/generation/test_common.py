@@ -8,13 +8,14 @@ from collections import defaultdict
 from pathlib import PosixPath
 
 import pytest
-from transformers import AutoModelForImageTextToText, AutoModelForVision2Seq
+from transformers import (AutoModel, AutoModelForImageTextToText,
+                          AutoModelForTextToWaveform, AutoModelForVision2Seq)
 
 from vllm.platforms import current_platform
 from vllm.utils import identity
 
-from ....conftest import (IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets,
-                          _VideoAssets)
+from ....conftest import (IMAGE_ASSETS, AudioTestAssets, HfRunner,
+                          ImageTestAssets, VideoTestAssets, VllmRunner)
 from ....utils import (create_new_process_for_each_test, large_gpu_mark,
                        multi_gpu_marks)
 from ...utils import check_outputs_equal
@@ -140,7 +141,7 @@ VLM_TEST_SETTINGS = {
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
     "qwen2_5_omni": VLMTestInfo(
-        models=["Qwen/Qwen2.5-Omni-7B"],
+        models=["Qwen/Qwen2.5-Omni-3B"],
         test_type=(
             VLMTestType.IMAGE,
             VLMTestType.MULTI_IMAGE,
@@ -151,9 +152,21 @@ VLM_TEST_SETTINGS = {
         video_idx_to_prompt=lambda idx: "<|vision_bos|><|VIDEO|><|vision_eos|>", # noqa: E501
         max_model_len=4096,
         max_num_seqs=2,
-        auto_cls=AutoModelForVision2Seq,
+        auto_cls=AutoModelForTextToWaveform,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
+        patch_hf_runner=model_utils.qwen2_5_omni_patch_hf_runner,
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+    ),
+    "ultravox": VLMTestInfo(
+        models = ["fixie-ai/ultravox-v0_5-llama-3_2-1b"],
+        test_type=VLMTestType.AUDIO,
+        prompt_formatter=lambda audio_prompt: f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{audio_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n", # noqa: E501
+        audio_idx_to_prompt=lambda idx: "<|audio|>",
+        max_model_len=4096,
+        max_num_seqs=2,
+        auto_cls=AutoModel,
+        hf_output_post_proc=model_utils.ultravox_trunc_hf_output,
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
     #### Extended model tests
@@ -391,7 +404,6 @@ VLM_TEST_SETTINGS = {
                 formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",   # noqa: E501
             ),
             limit_mm_per_prompt={"video": 4},
-            runner_mm_key="videos",
         )],
     ),
     "llava_next_video": VLMTestInfo(
@@ -474,6 +486,31 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         patch_hf_runner=model_utils.molmo_patch_hf_runner,
     ),
+    "ovis1_6-gemma2": VLMTestInfo(
+        models=["AIDC-AI/Ovis1.6-Gemma2-9B"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<bos><start_of_turn>user\n{img_prompt}<end_of_turn>\n<start_of_turn>model\n", # noqa: E501
+        img_idx_to_prompt=lambda idx: "<image>\n", # noqa: E501
+        max_model_len=4096,
+        max_num_seqs=2,
+        dtype="half",
+        # use sdpa mode for hf runner since ovis2 didn't work with flash_attn
+        hf_model_kwargs={"llm_attn_implementation": "sdpa"},
+        patch_hf_runner=model_utils.ovis_patch_hf_runner,
+        marks=[large_gpu_mark(min_gb=32)],
+    ),
+    "ovis1_6": VLMTestInfo(
+        models=["AIDC-AI/Ovis1.6-Llama3.2-3B"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nYou are a helpful and honest multimodal assistant.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n{img_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n", # noqa: E501
+        img_idx_to_prompt=lambda idx: "<image>\n", # noqa: E501
+        max_model_len=4096,
+        max_num_seqs=2,
+        dtype="half",
+        # use sdpa mode for hf runner since ovis2 didn't work with flash_attn
+        hf_model_kwargs={"llm_attn_implementation": "sdpa"},
+        patch_hf_runner=model_utils.ovis_patch_hf_runner,
+    ),
     "ovis2": VLMTestInfo(
         models=["AIDC-AI/Ovis2-1B"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
@@ -484,7 +521,7 @@ VLM_TEST_SETTINGS = {
         dtype="half",
         # use sdpa mode for hf runner since ovis2 didn't work with flash_attn
         hf_model_kwargs={"llm_attn_implementation": "sdpa"},
-        patch_hf_runner=model_utils.ovis2_patch_hf_runner,
+        patch_hf_runner=model_utils.ovis_patch_hf_runner,
     ),
     "phi3v": VLMTestInfo(
         models=["microsoft/Phi-3.5-vision-instruct"],
@@ -679,6 +716,7 @@ VLM_TEST_SETTINGS = _mark_splits(VLM_TEST_SETTINGS, num_groups=2)
 # - multi-image
 # - image embeddings
 # - video
+# - audio
 # - custom inputs
 @pytest.mark.parametrize(
     "model_type,test_case",
@@ -691,7 +729,7 @@ def test_single_image_models(tmp_path: PosixPath, model_type: str,
                              test_case: ExpandableVLMTestArgs,
                              hf_runner: type[HfRunner],
                              vllm_runner: type[VllmRunner],
-                             image_assets: _ImageAssets, monkeypatch):
+                             image_assets: ImageTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
@@ -716,7 +754,7 @@ def test_multi_image_models(tmp_path: PosixPath, model_type: str,
                             test_case: ExpandableVLMTestArgs,
                             hf_runner: type[HfRunner],
                             vllm_runner: type[VllmRunner],
-                            image_assets: _ImageAssets, monkeypatch):
+                            image_assets: ImageTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
@@ -741,7 +779,7 @@ def test_image_embedding_models(model_type: str,
                                 test_case: ExpandableVLMTestArgs,
                                 hf_runner: type[HfRunner],
                                 vllm_runner: type[VllmRunner],
-                                image_assets: _ImageAssets, monkeypatch):
+                                image_assets: ImageTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
@@ -763,7 +801,7 @@ def test_image_embedding_models(model_type: str,
     ))
 def test_video_models(model_type: str, test_case: ExpandableVLMTestArgs,
                       hf_runner: type[HfRunner], vllm_runner: type[VllmRunner],
-                      video_assets: _VideoAssets, monkeypatch):
+                      video_assets: VideoTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
@@ -773,6 +811,28 @@ def test_video_models(model_type: str, test_case: ExpandableVLMTestArgs,
         hf_runner=hf_runner,
         vllm_runner=vllm_runner,
         video_assets=video_assets,
+    )
+
+
+@pytest.mark.parametrize(
+    "model_type,test_case",
+    get_parametrized_options(
+        VLM_TEST_SETTINGS,
+        test_type=VLMTestType.AUDIO,
+        create_new_process_for_each_test=False,
+    ))
+def test_audio_models(model_type: str, test_case: ExpandableVLMTestArgs,
+                      hf_runner: type[HfRunner], vllm_runner: type[VllmRunner],
+                      audio_assets: AudioTestAssets, monkeypatch):
+    if model_type in REQUIRES_V0_MODELS:
+        monkeypatch.setenv("VLLM_USE_V1", "0")
+    model_test_info = VLM_TEST_SETTINGS[model_type]
+    runners.run_audio_test(
+        model_test_info=model_test_info,
+        test_case=test_case,
+        hf_runner=hf_runner,
+        vllm_runner=vllm_runner,
+        audio_assets=audio_assets,
     )
 
 
@@ -814,7 +874,7 @@ def test_single_image_models_heavy(tmp_path: PosixPath, model_type: str,
                                    test_case: ExpandableVLMTestArgs,
                                    hf_runner: type[HfRunner],
                                    vllm_runner: type[VllmRunner],
-                                   image_assets: _ImageAssets, monkeypatch):
+                                   image_assets: ImageTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
@@ -840,7 +900,7 @@ def test_multi_image_models_heavy(tmp_path: PosixPath, model_type: str,
                                   test_case: ExpandableVLMTestArgs,
                                   hf_runner: type[HfRunner],
                                   vllm_runner: type[VllmRunner],
-                                  image_assets: _ImageAssets, monkeypatch):
+                                  image_assets: ImageTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
@@ -866,7 +926,8 @@ def test_image_embedding_models_heavy(model_type: str,
                                       test_case: ExpandableVLMTestArgs,
                                       hf_runner: type[HfRunner],
                                       vllm_runner: type[VllmRunner],
-                                      image_assets: _ImageAssets, monkeypatch):
+                                      image_assets: ImageTestAssets,
+                                      monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
@@ -889,7 +950,7 @@ def test_image_embedding_models_heavy(model_type: str,
 def test_video_models_heavy(model_type: str, test_case: ExpandableVLMTestArgs,
                             hf_runner: type[HfRunner],
                             vllm_runner: type[VllmRunner],
-                            video_assets: _VideoAssets, monkeypatch):
+                            video_assets: VideoTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
@@ -899,6 +960,29 @@ def test_video_models_heavy(model_type: str, test_case: ExpandableVLMTestArgs,
         hf_runner=hf_runner,
         vllm_runner=vllm_runner,
         video_assets=video_assets,
+    )
+
+
+@pytest.mark.parametrize(
+    "model_type,test_case",
+    get_parametrized_options(
+        VLM_TEST_SETTINGS,
+        test_type=VLMTestType.AUDIO,
+        create_new_process_for_each_test=True,
+    ))
+def test_audio_models_heavy(model_type: str, test_case: ExpandableVLMTestArgs,
+                            hf_runner: type[HfRunner],
+                            vllm_runner: type[VllmRunner],
+                            audio_assets: AudioTestAssets, monkeypatch):
+    if model_type in REQUIRES_V0_MODELS:
+        monkeypatch.setenv("VLLM_USE_V1", "0")
+    model_test_info = VLM_TEST_SETTINGS[model_type]
+    runners.run_audio_test(
+        model_test_info=model_test_info,
+        test_case=test_case,
+        hf_runner=hf_runner,
+        vllm_runner=vllm_runner,
+        audio_assets=audio_assets,
     )
 
 

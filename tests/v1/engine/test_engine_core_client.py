@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import os
+import signal
 import time
 import uuid
 from threading import Thread
 from typing import Optional
 
-import psutil
 import pytest
 from transformers import AutoTokenizer
 
@@ -20,6 +21,7 @@ from vllm.v1.engine.core import EngineCore
 from vllm.v1.engine.core_client import (AsyncMPClient, EngineCoreClient,
                                         SyncMPClient)
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.utils import CoreEngineProcManager
 
 from ...distributed.conftest import MockSubscriber
 from ...utils import create_new_process_for_each_test
@@ -288,7 +290,6 @@ def test_kv_cache_events(
             log_stats=False,
         )
         endpoint = publisher_config.endpoint.replace("*", "127.0.0.1")
-        time.sleep(0.1)
         subscriber = MockSubscriber(endpoint,
                                     topic=publisher_config.topic,
                                     decode_type=KVEventBatch)
@@ -337,34 +338,40 @@ def test_kv_cache_events(
                 "Token ids should be the same as the custom tokens")
         finally:
             client.shutdown()
-        return
 
 
-@pytest.mark.timeout(10)
+@pytest.mark.timeout(20)
 def test_startup_failure(monkeypatch: pytest.MonkeyPatch):
 
     with monkeypatch.context() as m, pytest.raises(Exception) as e_info:
         m.setenv("VLLM_USE_V1", "1")
 
+        # Monkey-patch to extract core process pid while it's starting.
+        core_proc_pid = [None]
+        cepm_ctor = CoreEngineProcManager.__init__
+
+        def patched_cepm_ctor(self: CoreEngineProcManager, *args, **kwargs):
+            cepm_ctor(self, *args, **kwargs)
+            core_proc_pid[0] = self.processes[0].pid
+
+        m.setattr(CoreEngineProcManager, "__init__", patched_cepm_ctor)
+
+        t = time.time()
         engine_args = EngineArgs(model=MODEL_NAME)
         vllm_config = engine_args.create_engine_config(
             usage_context=UsageContext.UNKNOWN_CONTEXT)
         executor_class = Executor.get_class(vllm_config)
+        print(f"VllmConfig creation took {time.time() - t:.2f} seconds.")
 
         # Start another thread to wait for engine core process to start
         # and kill it - simulate fatal uncaught process exit.
-        this_proc = psutil.Process()
-        children_before = set(this_proc.children())
 
         def kill_first_child():
-            while True:
+            while (child_pid := core_proc_pid[0]) is None:
                 time.sleep(0.5)
-                children = set(this_proc.children()) - children_before
-                if children:
-                    child = children.pop()
-                    print("Killing child core process", child.pid)
-                    child.kill()
-                    break
+            print(f"Killing child core process {child_pid}")
+            assert isinstance(child_pid, int)
+            os.kill(child_pid, signal.SIGKILL)
 
         Thread(target=kill_first_child, daemon=True).start()
 

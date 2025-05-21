@@ -75,3 +75,4 @@ else
 fi
 
 aws s3 cp "$wheel" "s3://vllm-wheels/$version/"
+aws s3 cp index.html "s3://vllm-wheels/$version/vllm/index.html"

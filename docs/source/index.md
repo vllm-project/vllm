@@ -90,6 +90,8 @@ models/extensions/index
 :maxdepth: 1
 
 features/quantization/index
+features/multimodal_inputs
+features/prompt_embeds
 features/lora
 features/tool_calling
 features/reasoning_outputs
@@ -117,7 +119,7 @@ training/rlhf.md
 
 serving/offline_inference
 serving/openai_compatible_server
-serving/multimodal_inputs
+serving/serve_args
 serving/distributed_serving
 serving/metrics
 serving/engine_args
@@ -194,11 +196,8 @@ contributing/vulnerability_management
 :caption: API Reference
 :maxdepth: 2
 
-api/offline_inference/index
-api/engine/index
-api/inference_params
-api/multimodal/index
-api/model/index
+api/summary
+api/vllm/vllm
 :::
 
 % Latest news and acknowledgements

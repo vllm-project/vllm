@@ -16,7 +16,7 @@ from transformers import (AutoConfig, AutoTokenizer, BatchFeature,
 from vllm.sequence import SampleLogprobs
 from vllm.transformers_utils.tokenizer import patch_padding_side
 
-from .....conftest import HfRunner, ImageAsset, _ImageAssets
+from .....conftest import HfRunner, ImageAsset, ImageTestAssets
 from .types import RunnerOutput
 
 
@@ -237,15 +237,27 @@ def minimax_vl_01_hf_output(hf_output: RunnerOutput,
     return output_ids, output_str, out_logprobs
 
 
+def ultravox_trunc_hf_output(hf_output: RunnerOutput,
+                             model: str) -> RunnerOutput:
+    output_ids, output_str, out_logprobs = hf_output
+
+    tokenizer = AutoTokenizer.from_pretrained(model)
+    eos_token_id = tokenizer.eos_token_id
+    eos_token = tokenizer.decode(eos_token_id)
+    if output_str.endswith(eos_token):
+        output_str = output_str.split(eos_token)[0]
+    return output_ids, output_str, out_logprobs
+
+
 ####### Functions for converting image assets to embeddings
-def get_llava_embeddings(image_assets: _ImageAssets):
+def get_llava_embeddings(image_assets: ImageTestAssets):
     return [asset.image_embeds for asset in image_assets]
 
 
 ####### Prompt path encoders for models that need models on disk
 def qwen_prompt_path_encoder(
-        tmp_path: PosixPath, prompt: str, assets: Union[list[ImageAsset],
-                                                        _ImageAssets]) -> str:
+        tmp_path: PosixPath, prompt: str,
+        assets: Union[list[ImageAsset], ImageTestAssets]) -> str:
     """Given a temporary dir path, export one or more image assets into the
     tempdir & replace its contents with the local path to the string so that
     the HF version of Qwen-VL can resolve the path and load the image in its
@@ -678,12 +690,8 @@ def molmo_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     return hf_model
 
 
-def ovis2_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+def ovis_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for Ovis2."""
-    hf_model.model.visual_tokenizer.to(hf_model.dtype)
-    hf_model.model.vte.to(hf_model.dtype)
-    hf_model.model.llm.to(hf_model.dtype)
-
     hf_model.model.get_output_embeddings = lambda: \
         hf_model.model.llm.get_output_embeddings()
 
@@ -691,7 +699,16 @@ def ovis2_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         text_tokenizer = hf_model.model.get_text_tokenizer()
         images = [images] if isinstance(images, Image) else images
 
-        text = text.split("<|im_start|>user\n")[1].split("<|im_end|>\n")[0]
+        prompt_start_and_end = {
+            "qwen2": ("<|im_start|>user\n", "<|im_end|>\n"),
+            "llama":
+            ("<|start_header_id|>user<|end_header_id|>\n\n", "<|eot_id|>"),
+            "gemma2": ("<start_of_turn>user\n", "<end_of_turn>\n"),
+        }
+        for start, end in prompt_start_and_end.values():
+            if start in text and end in text:
+                text = text.split(start)[1].split(end)[0]
+                break
 
         prompt, input_ids, pixel_values = hf_model.model.preprocess_inputs(
             text_or_conversations=text, images=images)
@@ -705,4 +722,12 @@ def ovis2_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         return BatchFeature(data=inputs, tensor_type="pt")
 
     hf_model.processor = processor
+    return hf_model
+
+
+def qwen2_5_omni_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    """Patches and returns an instance of the HfRunner for Qwen2.5-Omni."""
+    thinker = hf_model.model.thinker
+    thinker.get_output_embeddings = lambda: thinker.lm_head
+    hf_model.model = thinker
     return hf_model

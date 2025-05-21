@@ -47,7 +47,7 @@ def get_mixed_modalities_query() -> QueryResult:
                 "image":
                 ImageAsset("cherry_blossom").pil_image.convert("RGB"),
                 "video":
-                VideoAsset(name="sample_demo_1", num_frames=16).np_ndarrays,
+                VideoAsset(name="baby_reading", num_frames=16).np_ndarrays,
             },
         },
         limit_mm_per_prompt={
@@ -65,7 +65,7 @@ def get_use_audio_in_video_query() -> QueryResult:
               "<|im_start|>user\n<|vision_bos|><|VIDEO|><|vision_eos|>"
               f"{question}<|im_end|>\n"
               f"<|im_start|>assistant\n")
-    asset = VideoAsset(name="sample_demo_1", num_frames=16)
+    asset = VideoAsset(name="baby_reading", num_frames=16)
     audio = asset.get_audio(sampling_rate=16000)
     assert not envs.VLLM_USE_V1, ("V1 does not support use_audio_in_video. "
                                   "Please launch this example with "
@@ -140,7 +140,7 @@ def main(args):
         print(generated_text)
 
 
-if __name__ == "__main__":
+def parse_args():
     parser = FlexibleArgumentParser(
         description='Demo on using vLLM for offline inference with '
         'audio language models')
@@ -155,5 +155,9 @@ if __name__ == "__main__":
                         default=None,
                         help="Set the seed when initializing `vllm.LLM`.")
 
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = parse_args()
     main(args)
