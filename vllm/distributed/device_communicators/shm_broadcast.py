@@ -28,6 +28,15 @@ logger = init_logger(__name__)
 
 
 class SpinTimer:
+
+    def record_activity(self):
+        pass
+
+    def spin(self):
+        sched_yield()
+
+
+class SpinSleepTimer(SpinTimer):
     """
     In setups which have long inactivity periods it is desirable to reduce
     system power consumption when vllm does nothing. This would lead to more
@@ -265,7 +274,7 @@ class MessageQueue:
         self.local_reader_rank = -1
         # rank does not matter for remote readers
         self._is_remote_reader = False
-        self._read_spin_timer: Optional[SpinTimer] = None
+        self._read_spin_timer = SpinTimer()
 
         self.handle = Handle(
             local_reader_ranks=local_reader_ranks,
@@ -282,7 +291,9 @@ class MessageQueue:
         return self.handle
 
     @staticmethod
-    def create_from_handle(handle: Handle, rank) -> "MessageQueue":
+    def create_from_handle(handle: Handle,
+                           rank,
+                           sleep_on_idle: bool = False) -> "MessageQueue":
         self = MessageQueue.__new__(MessageQueue)
         self.handle = handle
         self._is_writer = False
@@ -305,7 +316,8 @@ class MessageQueue:
 
             self.remote_socket = None
 
-            self._read_spin_timer = SpinTimer()
+            self._read_spin_timer = SpinSleepTimer(
+            ) if sleep_on_idle else SpinTimer()
         else:
             self.buffer = None  # type: ignore
             self.current_idx = -1
@@ -421,7 +433,6 @@ class MessageQueue:
                      timeout: Optional[float] = None,
                      cancel: Optional[Event] = None):
         assert self._is_local_reader, "Only readers can acquire read"
-        assert self._read_spin_timer is not None
         start_time = time.monotonic()
         n_warning = 1
         while True:
@@ -525,11 +536,12 @@ class MessageQueue:
             return self.dequeue()
 
     @staticmethod
-    def create_from_process_group(pg: Union[ProcessGroup,
-                                            StatelessProcessGroup],
-                                  max_chunk_bytes,
-                                  max_chunks,
-                                  writer_rank=0) -> "MessageQueue":
+    def create_from_process_group(
+            pg: Union[ProcessGroup, StatelessProcessGroup],
+            max_chunk_bytes,
+            max_chunks,
+            writer_rank=0,
+            sleep_on_idle: bool = False) -> "MessageQueue":
         if isinstance(pg, ProcessGroup):
             group_rank = dist.get_rank(pg)
             group_world_size = dist.get_world_size(pg)
@@ -570,6 +582,7 @@ class MessageQueue:
                 handle = recv[0]  # type: ignore
             else:
                 handle = pg.broadcast_obj(None, writer_rank)
-            buffer_io = MessageQueue.create_from_handle(handle, group_rank)
+            buffer_io = MessageQueue.create_from_handle(
+                handle, group_rank, sleep_on_idle=sleep_on_idle)
         buffer_io.wait_until_ready()
         return buffer_io
