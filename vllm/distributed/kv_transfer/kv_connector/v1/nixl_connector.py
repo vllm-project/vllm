@@ -427,10 +427,12 @@ class NixlConnectorWorker:
         # or where we have a single ZMQ socket in the scheduler.
 
         # We need to connect to the correct remote port based on the DP rank.
-        # Assuming the remote's DP rank is the same as ours to keep connections
-        # consistent
+        # Calculate the unique rank the same way as in the listener
         dp_rank = get_dp_group().rank_in_group
-        remote_unique_rank = port + dp_rank
+        tp_rank = self.rank
+        world_size = self.world_size
+        # Use the same unique rank calculation as the listener
+        remote_unique_rank = port + ((tp_rank * world_size) + dp_rank)
         path = make_zmq_path("tcp", host, remote_unique_rank)
 
         logger.debug("Querying metadata on path: %s (DP rank: %s)", path,
