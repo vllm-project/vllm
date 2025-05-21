@@ -640,6 +640,7 @@ setuptools==77.0.3
     # via
     #   mamba-ssm
     #   pytablewriter
+    #   torch
     #   triton
 shellingham==1.5.4
     # via typer
@@ -700,6 +701,7 @@ tokenizers==0.21.1
     #   -r requirements/test.in
     #   transformers
 tomli==2.2.1
+    # via schemathesis
 tomli-w==1.2.0
     # via schemathesis
 torch==2.7.0+cu128
