@@ -779,8 +779,12 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             from_input_batch(self.input_batch, padded_num_reqs, self.device)
         if scheduler_output.structured_output_meta is not None:
             self.structured_output_manager.filter_logits(
-                self.input_batch, self.device, scheduler_output, logits,
-                hidden_states)
+                self.input_batch,
+                self.device,
+                scheduler_output,
+                logits,
+                hidden_states,
+                max_num_reqs=self.max_num_reqs)
         selected_token_ids = self.sample_from_logits(logits,
                                                      tpu_sampling_metadata)
 
@@ -1100,7 +1104,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             dummy_logits = torch.zeros((num_reqs, self.vocab_size),
                                        device=self.device,
                                        dtype=self._hidden_states_dtype)
-            self.structured_output_manager.precompile(dummy_logits)
+            self.structured_output_manager.precompile(
+                dummy_logits, max_num_reqs=self.max_num_reqs)
             logger.info("  -- num_seqs: %d", num_reqs)
 
         xm.wait_device_ops()
