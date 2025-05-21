@@ -91,7 +91,7 @@ class PEFTHelper:
     @classmethod
     def from_local_dir(cls, lora_path: str,
                        max_position_embeddings: Optional[int],
-                       tensorizer_config_dict: Optional[dict]) -> "PEFTHelper":
+                       tensorizer_config_dict: Optional[dict] = None) -> "PEFTHelper":
         lora_config_path = os.path.join(lora_path, "adapter_config.json")
 
         if tensorizer_config_dict:
