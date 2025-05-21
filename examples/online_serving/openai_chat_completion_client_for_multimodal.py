@@ -1,23 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
-"""An example showing how to use vLLM to serve multimodal models 
+"""An example showing how to use vLLM to serve multimodal models
 and run online serving with OpenAI client.
 
 Launch the vLLM server with the following command:
 
 (single image inference with Llava)
-vllm serve llava-hf/llava-1.5-7b-hf --chat-template template_llava.jinja
+vllm serve llava-hf/llava-1.5-7b-hf
 
 (multi-image inference with Phi-3.5-vision-instruct)
 vllm serve microsoft/Phi-3.5-vision-instruct --task generate \
-    --trust-remote-code --max-model-len 4096 --limit-mm-per-prompt image=2
+    --trust-remote-code --max-model-len 4096 --limit-mm-per-prompt '{"image":2}'
 
 (audio inference with Ultravox)
-vllm serve fixie-ai/ultravox-v0_5-llama-3_2-1b --max-model-len 4096
+vllm serve fixie-ai/ultravox-v0_5-llama-3_2-1b \
+    --max-model-len 4096 --trust-remote-code
+
+run the script with
+python openai_chat_completion_client_for_multimodal.py --chat-type audio
 """
+
 import base64
 
 import requests
 from openai import OpenAI
+from utils import get_first_model
 
 from vllm.utils import FlexibleArgumentParser
 
@@ -31,9 +37,6 @@ client = OpenAI(
     base_url=openai_api_base,
 )
 
-models = client.models.list()
-model = models.data[0].id
-
 
 def encode_base64_content_from_url(content_url: str) -> str:
     """Encode a content retrieved from a remote url to base64 format."""
@@ -46,7 +49,7 @@ def encode_base64_content_from_url(content_url: str) -> str:
 
 
 # Text-only inference
-def run_text_only() -> None:
+def run_text_only(model: str) -> None:
     chat_completion = client.chat.completions.create(
         messages=[{
             "role": "user",
@@ -61,7 +64,7 @@ def run_text_only() -> None:
 
 
 # Single-image input inference
-def run_single_image() -> None:
+def run_single_image(model: str) -> None:
 
     ## Use image url in the payload
     image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
@@ -117,7 +120,7 @@ def run_single_image() -> None:
 
 
 # Multi-image input inference
-def run_multi_image() -> None:
+def run_multi_image(model: str) -> None:
     image_url_duck = "https://upload.wikimedia.org/wikipedia/commons/d/da/2015_Kaczka_krzy%C5%BCowka_w_wodzie_%28samiec%29.jpg"
     image_url_lion = "https://upload.wikimedia.org/wikipedia/commons/7/77/002_The_lion_king_Snyggve_in_the_Serengeti_National_Park_Photo_by_Giles_Laurent.jpg"
     chat_completion_from_url = client.chat.completions.create(
@@ -152,7 +155,7 @@ def run_multi_image() -> None:
 
 
 # Video input inference
-def run_video() -> None:
+def run_video(model: str) -> None:
     video_url = "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4"
     video_base64 = encode_base64_content_from_url(video_url)
 
@@ -208,7 +211,7 @@ def run_video() -> None:
 
 
 # Audio input inference
-def run_audio() -> None:
+def run_audio(model: str) -> None:
     from vllm.assets.audio import AudioAsset
 
     audio_url = AudioAsset("winning_call").url
@@ -303,12 +306,7 @@ example_function_map = {
 }
 
 
-def main(args) -> None:
-    chat_type = args.chat_type
-    example_function_map[chat_type]()
-
-
-if __name__ == "__main__":
+def parse_args():
     parser = FlexibleArgumentParser(
         description='Demo on using OpenAI client for online serving with '
         'multimodal language models served with vLLM.')
@@ -318,5 +316,15 @@ if __name__ == "__main__":
                         default="single-image",
                         choices=list(example_function_map.keys()),
                         help='Conversation type with multimodal data.')
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+def main(args) -> None:
+    chat_type = args.chat_type
+    model = get_first_model(client)
+    example_function_map[chat_type](model)
+
+
+if __name__ == "__main__":
+    args = parse_args()
     main(args)

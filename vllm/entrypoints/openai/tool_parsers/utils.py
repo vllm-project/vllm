@@ -98,7 +98,7 @@ def find_all_indices(string: str, substring: str) -> list[int]:
 
 
 # partial_json_parser doesn't support extra data and
-# JSONDecorder.raw_decode doesn't support partial JSON
+# JSONDecoder.raw_decode doesn't support partial JSON
 def partial_json_loads(input_str: str, flags: Allow) -> tuple[Any, int]:
     try:
         return (partial_json_parser.loads(input_str, flags), len(input_str))

@@ -22,7 +22,7 @@ class ModelRequestData(NamedTuple):
 def run_florence2():
     engine_args = EngineArgs(
         model="microsoft/Florence-2-large",
-        tokenizer="facebook/bart-large",
+        tokenizer="Isotr0py/Florence-2-tokenizer",
         max_num_seqs=8,
         trust_remote_code=True,
         limit_mm_per_prompt={"image": 1},
@@ -56,7 +56,7 @@ def run_florence2():
 def run_mllama():
     engine_args = EngineArgs(
         model="meta-llama/Llama-3.2-11B-Vision-Instruct",
-        max_model_len=4096,
+        max_model_len=8192,
         max_num_seqs=2,
         limit_mm_per_prompt={"image": 1},
         dtype="half",
@@ -126,12 +126,34 @@ model_example_map = {
 }
 
 
+def parse_args():
+    parser = FlexibleArgumentParser(
+        description='Demo on using vLLM for offline inference with '
+        'vision language models for text generation')
+    parser.add_argument('--model-type',
+                        '-m',
+                        type=str,
+                        default="mllama",
+                        choices=model_example_map.keys(),
+                        help='Huggingface "model_type".')
+    parser.add_argument("--seed",
+                        type=int,
+                        default=None,
+                        help="Set the seed when initializing `vllm.LLM`.")
+    return parser.parse_args()
+
+
 def main(args):
     model = args.model_type
     if model not in model_example_map:
         raise ValueError(f"Model type {model} is not supported.")
 
     req_data = model_example_map[model]()
+
+    # Disable other modalities to save memory
+    default_limits = {"image": 0, "video": 0, "audio": 0}
+    req_data.engine_args.limit_mm_per_prompt = default_limits | dict(
+        req_data.engine_args.limit_mm_per_prompt or {})
 
     engine_args = asdict(req_data.engine_args) | {"seed": args.seed}
     llm = LLM(**engine_args)
@@ -143,6 +165,7 @@ def main(args):
         temperature=0,
         top_p=1.0,
         max_tokens=64,
+        skip_special_tokens=False,
     )
 
     start = time.time()
@@ -166,19 +189,5 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = FlexibleArgumentParser(
-        description='Demo on using vLLM for offline inference with '
-        'vision language models for text generation')
-    parser.add_argument('--model-type',
-                        '-m',
-                        type=str,
-                        default="mllama",
-                        choices=model_example_map.keys(),
-                        help='Huggingface "model_type".')
-    parser.add_argument("--seed",
-                        type=int,
-                        default=None,
-                        help="Set the seed when initializing `vllm.LLM`.")
-
-    args = parser.parse_args()
+    args = parse_args()
     main(args)

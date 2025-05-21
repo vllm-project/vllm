@@ -32,9 +32,10 @@ def run_prefill(prefill_done):
     # This instance is the prefill node (kv_producer, rank 0).
     # The number of parallel instances for KV cache transfer is set to 2,
     # as required for PyNcclConnector.
-    ktc = KVTransferConfig.from_cli(
-        '{"kv_connector":"PyNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2}'
-    )
+    ktc = KVTransferConfig(kv_connector="PyNcclConnector",
+                           kv_role="kv_producer",
+                           kv_rank=0,
+                           kv_parallel_size=2)
 
     # Set GPU memory utilization to 0.8 for an A6000 GPU with 40GB
     # memory. You may need to adjust the value to fit your GPU.
@@ -71,9 +72,10 @@ def run_decode(prefill_done):
     # This instance is the decode node (kv_consumer, rank 1).
     # The number of parallel instances for KV cache transfer is set to 2,
     # as required for PyNcclConnector.
-    ktc = KVTransferConfig.from_cli(
-        '{"kv_connector":"PyNcclConnector","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":2}'
-    )
+    ktc = KVTransferConfig(kv_connector="PyNcclConnector",
+                           kv_role="kv_consumer",
+                           kv_rank=1,
+                           kv_parallel_size=2)
 
     # Set GPU memory utilization to 0.8 for an A6000 GPU with 40GB
     # memory. You may need to adjust the value to fit your GPU.
@@ -95,7 +97,7 @@ def run_decode(prefill_done):
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
 
-if __name__ == "__main__":
+def main():
     prefill_done = Event()
     prefill_process = Process(target=run_prefill, args=(prefill_done, ))
     decode_process = Process(target=run_decode, args=(prefill_done, ))
@@ -109,3 +111,7 @@ if __name__ == "__main__":
     # Terminate the prefill node when decode is finished
     decode_process.join()
     prefill_process.terminate()
+
+
+if __name__ == "__main__":
+    main()

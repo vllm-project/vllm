@@ -2,8 +2,8 @@
 from typing import Optional
 
 import torch
-import triton
-import triton.language as tl
+
+from vllm.triton_utils import tl, triton
 
 
 # Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
@@ -66,7 +66,10 @@ def merge_attn_states_kernel(
     max_lse = tl.maximum(p_lse, s_lse)
     p_lse = p_lse - max_lse
     s_lse = s_lse - max_lse
-    out_se = (tl.exp(p_lse) + tl.exp(s_lse))
+    # Will reuse precomputed Exp values for scale factor computation.
+    p_se = tl.exp(p_lse)
+    s_se = tl.exp(s_lse)
+    out_se = (p_se + s_se)
 
     if OUTPUT_LSE:
         out_lse = tl.log(out_se) + max_lse
@@ -84,8 +87,8 @@ def merge_attn_states_kernel(
     # NOTE(woosuk): Be careful with the numerical stability.
     # We should compute the scale first, and then multiply it with the output.
     # Do not multiply the output with tl.exp(p_lse) or tl.exp(s_lse) directly.
-    p_scale = tl.exp(p_lse) / out_se
-    s_scale = tl.exp(s_lse) / out_se
+    p_scale = p_se / out_se
+    s_scale = s_se / out_se
     out = p_out * p_scale + s_out * s_scale
     tl.store(output + token_idx * num_heads * HEAD_SIZE +
              head_idx * HEAD_SIZE + head_arange,

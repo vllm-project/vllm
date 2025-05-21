@@ -18,7 +18,8 @@ models = ["llava-hf/llava-1.5-7b-hf"]
 def test_context_length_too_short(vllm_runner, image_assets, model):
     images = [asset.pil_image for asset in image_assets]
 
-    with pytest.raises(ValueError, match="too long to fit into the model"):
+    with pytest.raises(ValueError,
+                       match="longer than the maximum model length"):
         vllm_model = vllm_runner(
             model,
             max_model_len=128,  # LLaVA has a feature size of 576

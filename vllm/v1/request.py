@@ -1,19 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import enum
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
+from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
+from vllm.utils import is_list_of
 from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
                             EngineCoreRequest, FinishReason)
 from vllm.v1.structured_output.request import StructuredOutputRequest
 from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
-
     from vllm.lora.request import LoRARequest
-    from vllm.multimodal import MultiModalKwargs
-    from vllm.multimodal.inputs import PlaceholderRange
 
 
 class Request:
@@ -21,16 +20,16 @@ class Request:
     def __init__(
         self,
         request_id: str,
-        prompt: Optional[str],
         prompt_token_ids: list[int],
-        multi_modal_inputs: Optional[list["MultiModalKwargs"]],
+        multi_modal_inputs: Optional[list[MultiModalKwargs]],
         multi_modal_hashes: Optional[list[str]],
-        multi_modal_placeholders: Optional[list["PlaceholderRange"]],
+        multi_modal_placeholders: Optional[list[PlaceholderRange]],
         sampling_params: SamplingParams,
         eos_token_id: Optional[int],
         arrival_time: float,
         lora_request: Optional["LoRARequest"] = None,
         structured_output_request: Optional["StructuredOutputRequest"] = None,
+        cache_salt: Optional[str] = None,
     ) -> None:
         self.request_id = request_id
         self.sampling_params = sampling_params
@@ -47,13 +46,13 @@ class Request:
         assert sampling_params.max_tokens is not None
         self.max_tokens = sampling_params.max_tokens
 
-        self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
         self.num_prompt_tokens = len(self.prompt_token_ids)
         self._output_token_ids: list[int] = []
         self._all_token_ids: list[int] = self.prompt_token_ids.copy()
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
+        self.cache_salt: Optional[str] = cache_salt
 
         # Multi-modal related
         self.mm_positions = multi_modal_placeholders or []
@@ -62,22 +61,31 @@ class Request:
         self.num_encoder_inputs = len(self.mm_inputs)
         self.has_encoder_inputs = self.num_encoder_inputs > 0
 
+        # P/D: Connector-specific KV transfer parameters.
+        kv_params = (None if sampling_params.extra_args is None else
+                     sampling_params.extra_args.get("kv_transfer_params"))
+        self.kv_transfer_params: Optional[dict[str, Any]] = kv_params
+
         # Sanity check
         assert len(self.mm_inputs) == len(self.mm_positions)
         if self.mm_hashes:
             assert len(self.mm_inputs) == len(self.mm_hashes)
 
         # Read-only views
-        # Prevent directly appending to the these lists since
+        # Prevent directly appending to these lists since
         # they should also be updated simultaneously.
         self.output_token_ids = ConstantList(self._output_token_ids)
         self.all_token_ids = ConstantList(self._all_token_ids)
 
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
+        if request.mm_inputs is not None:
+            assert isinstance(request.mm_inputs, list)
+            assert is_list_of(request.mm_inputs, MultiModalKwargs), (
+                "mm_inputs was not updated in EngineCore.add_request")
+
         return cls(
             request_id=request.request_id,
-            prompt=request.prompt,
             prompt_token_ids=request.prompt_token_ids,
             multi_modal_inputs=request.mm_inputs,
             multi_modal_hashes=request.mm_hashes,
@@ -88,6 +96,7 @@ class Request:
             lora_request=request.lora_request,
             structured_output_request=StructuredOutputRequest(
                 sampling_params=request.sampling_params),
+            cache_salt=request.cache_salt,
         )
 
     def append_output_token_ids(
@@ -146,6 +155,7 @@ class RequestStatus(enum.IntEnum):
     """Status of a request."""
     WAITING = enum.auto()
     WAITING_FOR_FSM = enum.auto()
+    WAITING_FOR_REMOTE_KVS = enum.auto()
     RUNNING = enum.auto()
     PREEMPTED = enum.auto()
     # Note: anything after PREEMPTED will be considered

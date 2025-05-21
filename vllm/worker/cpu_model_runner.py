@@ -19,11 +19,11 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
-from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_lora, supports_multimodal
-from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
-                             MultiModalKwargs, MultiModalPlaceholderMap)
+from vllm.multimodal import (BatchedTensorInputs, MultiModalKwargs,
+                             MultiModalPlaceholderMap)
 from vllm.sequence import (IntermediateTensors, SequenceData,
                            SequenceGroupMetadata)
 from vllm.worker.model_runner_base import (
@@ -154,7 +154,6 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         self.sliding_window = self.runner.sliding_window
         self.block_size = self.runner.block_size
         self.device = self.runner.device
-        self.multi_modal_input_mapper = self.runner.multi_modal_input_mapper
         self.enable_lora = self.runner.lora_config is not None
         if self.runner.attn_backend is not None:
             # spec decode (e.g. Medusa) does not have atten backend
@@ -359,21 +358,13 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         computed_len = seq_data.get_num_computed_tokens()
         seq_len = self.input_data.seq_lens[-1]
 
-        # NOTE: mm_data only includes the subset of multi-modal items that
+        # NOTE: mm_kwargs only includes the subset of multi-modal items that
         # intersect with the current prefill positions.
-        mm_data, placeholder_maps = MultiModalPlaceholderMap.from_seq_group(
+        mm_kwargs, placeholder_maps = MultiModalPlaceholderMap.from_seq_group(
             seq_group_metadata, range(computed_len, seq_len))
 
-        if not mm_data:
+        if not mm_kwargs:
             return
-
-        if self.runner.mm_registry.has_processor(self.runner.model_config):
-            mm_kwargs = mm_data
-        else:
-            mm_kwargs = self.multi_modal_input_mapper(
-                mm_data,
-                seq_group_metadata.mm_processor_kwargs,
-            )
 
         # special processing for mrope position deltas.
         if self.runner.model_config.uses_mrope:
@@ -382,11 +373,17 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
 
             image_grid_thw = mm_kwargs.get("image_grid_thw", None)
             video_grid_thw = mm_kwargs.get("video_grid_thw", None)
-            assert image_grid_thw is not None or video_grid_thw is not None, (
-                "mrope embedding type requires multi-modal input mapper "
-                "returns 'image_grid_thw' or 'video_grid_thw'.")
+            audio_feature_lengths = mm_kwargs.get("audio_feature_lengths",
+                                                  None)
+            assert (
+                image_grid_thw is not None or video_grid_thw is not None
+                or audio_feature_lengths is not None), (
+                    "mrope embedding type requires multi-modal input mapper "
+                    "returns 'image_grid_thw' or 'video_grid_thw' or "
+                    "'audio_feature_lengths'.")
 
             second_per_grid_ts = mm_kwargs.get("second_per_grid_ts", None)
+            use_audio_in_video = mm_kwargs.get("use_audio_in_video", False)
             hf_config = self.runner.model_config.hf_config
             token_ids = seq_data.get_token_ids()
 
@@ -398,6 +395,8 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                     video_grid_thw=video_grid_thw,
                     second_per_grid_ts=second_per_grid_ts,
                     context_len=computed_len,
+                    audio_feature_lengths=audio_feature_lengths,
+                    use_audio_in_video=use_audio_in_video,
                 )
             seq_data.mrope_position_delta = mrope_position_delta
 
@@ -472,16 +471,11 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
             use_mla=self.model_config.use_mla,
         ) if needs_attn_backend else None
 
-        # Multi-modal data support
-        self.mm_registry = MULTIMODAL_REGISTRY
-        self.multi_modal_input_mapper = self.mm_registry \
-            .create_input_mapper(self.model_config)
-        self.mm_registry.init_mm_limits_per_prompt(self.model_config)
-
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
         # Set after load_model.
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
+        self.sampler = get_sampler()
 
         if hasattr(self, "_builder_cls"):
             # multi-step model runner does not have `_builder_cls`
@@ -499,13 +493,8 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
                 logger.warning("Regarding multimodal models, vLLM currently "
                                "only supports adding LoRA to language model.")
 
-            # It's necessary to distinguish between the max_position_embeddings
-            # of VLMs and LLMs.
-            if hasattr(self.model.config, "max_position_embeddings"):
-                max_pos_embeddings = self.model.config.max_position_embeddings
-            else:
-                max_pos_embeddings = (
-                    self.model.config.text_config.max_position_embeddings)
+            # Use get_text_config() in case of multimodal models
+            text_config = self.model_config.hf_config.get_text_config()
 
             self.lora_manager = LRUCacheWorkerLoRAManager(
                 self.scheduler_config.max_num_seqs,
@@ -515,7 +504,7 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
                 self.device,
                 self.model.embedding_modules,
                 self.model.embedding_padding_modules,
-                max_position_embeddings=max_pos_embeddings,
+                max_position_embeddings=text_config.max_position_embeddings,
             )
             self.model = self.lora_manager.create_lora_manager(self.model)
 
@@ -536,11 +525,6 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
         self.builder.set_seq_group_list(seq_group_metadata_list)
 
         return self.builder.build()  # type: ignore
-
-    # sampler property will be used by spec_decode_worker
-    @property
-    def sampler(self):
-        return self.model.sampler
 
     @property
     def vocab_size(self) -> int:
@@ -669,7 +653,7 @@ class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
             return []
 
         # Sample the next token.
-        output = self.model.sample(
+        output = self.sampler(
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
         )

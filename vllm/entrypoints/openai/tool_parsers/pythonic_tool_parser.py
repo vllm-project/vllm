@@ -28,7 +28,7 @@ class _UnexpectedAstError(Exception):
 class PythonicToolParser(ToolParser):
     """
     Tool call parser for models that produce tool calls in a pythonic style,
-    such as Llama 3.2 models.
+    such as Llama 3.2 and Llama 4 models.
 
     Used when --enable-auto-tool-choice --tool-call-parser pythonic are all set
     """
@@ -280,6 +280,7 @@ def _compute_tool_delta(previously_sent_args: str, new_call: ToolCall,
         new_call_args = new_call_args[:-len(withheld_suffix)]
     if not previously_sent_args:
         return DeltaToolCall(id=new_call.id,
+                             type="function",
                              index=index,
                              function=DeltaFunctionCall(
                                  name=new_call.function.name,
@@ -288,5 +289,5 @@ def _compute_tool_delta(previously_sent_args: str, new_call: ToolCall,
 
     arg_diff = new_call_args[len(previously_sent_args):]
     return DeltaToolCall(
-        id="", index=index, function=DeltaFunctionCall(
+        id=None, index=index, function=DeltaFunctionCall(
             arguments=arg_diff)) if arg_diff else None

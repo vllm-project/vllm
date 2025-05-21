@@ -23,10 +23,15 @@ def sync_openai():
     with open(str(mary_had_lamb), "rb") as f:
         transcription = client.audio.transcriptions.create(
             file=f,
-            model="openai/whisper-small",
+            model="openai/whisper-large-v3",
             language="en",
             response_format="json",
-            temperature=0.0)
+            temperature=0.0,
+            # Additional sampling params not provided by OpenAI API.
+            extra_body=dict(
+                seed=4419,
+                repetition_penalty=1.3,
+            ))
         print("transcription result:", transcription.text)
 
 
@@ -41,11 +46,15 @@ async def stream_openai_response():
         "model": "openai/whisper-large-v3",
     }
     url = openai_api_base + "/audio/transcriptions"
+    headers = {"Authorization": f"Bearer {openai_api_key}"}
     print("transcription result:", end=' ')
     async with httpx.AsyncClient() as client:
         with open(str(winning_call), "rb") as f:
-            async with client.stream('POST', url, files={'file': f},
-                                     data=data) as response:
+            async with client.stream('POST',
+                                     url,
+                                     files={'file': f},
+                                     data=data,
+                                     headers=headers) as response:
                 async for line in response.aiter_lines():
                     # Each line is a JSON object prefixed with 'data: '
                     if line:

@@ -29,20 +29,23 @@ from pathlib import Path
 from vllm import LLM, EngineArgs
 from vllm.utils import FlexibleArgumentParser
 
-parser = FlexibleArgumentParser()
-EngineArgs.add_cli_args(parser)
-parser.add_argument("--output",
-                    "-o",
-                    required=True,
-                    type=str,
-                    help="path to output checkpoint")
-parser.add_argument("--file-pattern",
-                    type=str,
-                    help="string pattern of saved filenames")
-parser.add_argument("--max-file-size",
-                    type=str,
-                    default=5 * 1024**3,
-                    help="max size (in bytes) of each safetensors file")
+
+def parse_args():
+    parser = FlexibleArgumentParser()
+    EngineArgs.add_cli_args(parser)
+    parser.add_argument("--output",
+                        "-o",
+                        required=True,
+                        type=str,
+                        help="path to output checkpoint")
+    parser.add_argument("--file-pattern",
+                        type=str,
+                        help="string pattern of saved filenames")
+    parser.add_argument("--max-file-size",
+                        type=str,
+                        default=5 * 1024**3,
+                        help="max size (in bytes) of each safetensors file")
+    return parser.parse_args()
 
 
 def main(args):
@@ -87,5 +90,5 @@ def main(args):
 
 
 if __name__ == "__main__":
-    args = parser.parse_args()
+    args = parse_args()
     main(args)

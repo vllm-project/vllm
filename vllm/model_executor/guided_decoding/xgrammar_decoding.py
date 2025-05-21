@@ -6,10 +6,11 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, List
+from typing import TYPE_CHECKING, Any
 
 import torch
 
+import vllm.envs
 from vllm.logger import init_logger
 
 try:
@@ -131,8 +132,13 @@ class GrammarCompilerCache:
                 encoded_vocab=config_data.encoded_vocab,
                 metadata=config_data.metadata,
             )
+            cache_size = vllm.envs.VLLM_XGRAMMAR_CACHE_MB * 1024 * 1024
             cls._cache[cache_key] = xgr.GrammarCompiler(
-                tokenizer_info, max_threads=config.max_threads)
+                tokenizer_info,
+                max_threads=config.max_threads,
+                cache_enabled=True,
+                cache_limit_bytes=cache_size,
+            )
 
         return cls._cache[cache_key]
 
@@ -146,6 +152,7 @@ class GrammarConfig:
     grammar_str: str | None = None
     json_object: bool | None = None
     any_whitespace: bool = True
+    regex_str: str | None = None
     max_threads: int = 8
 
     @classmethod
@@ -168,8 +175,7 @@ class GrammarConfig:
             else:
                 json_str = guided_params.json
 
-            any_whitespace = 'disable-any-whitespace' not in \
-                    guided_params.backend_options()
+            any_whitespace = not guided_params.disable_any_whitespace
 
             # Check and log if model with xgrammar and whitespace have history
             # of runaway generation of whitespaces.
@@ -184,11 +190,10 @@ class GrammarConfig:
                 model_with_warn = 'Qwen'
 
             if model_with_warn is not None and any_whitespace:
-                msg = (f"{model_with_warn} "
-                       f"model detected, consider set "
-                       f"`guided_backend=xgrammar:disable-any-whitespace` "
-                       f"to prevent runaway generation of whitespaces.")
-                logger.info_once(msg)
+                logger.info_once(
+                    "%s model detected, consider setting `disable_any_whitespace` to prevent runaway generation of whitespaces.",  # noqa: E501
+                    model_with_warn,
+                )
             # Validate the schema and raise ValueError here if it is invalid.
             # This is to avoid exceptions in model execution, which will crash
             # the engine worker process.
@@ -249,6 +254,13 @@ class GrammarConfig:
                 max_threads=max_threads,
                 tokenizer_data=tokenizer_data,
             )
+        elif guided_params.regex:
+            return cls(
+                regex_str=guided_params.regex,
+                tokenizer_hash=tokenizer_hash,
+                max_threads=max_threads,
+                tokenizer_data=tokenizer_data,
+            )
         else:
             raise ValueError(
                 "Currently only support JSON and EBNF grammar mode for xgrammar"
@@ -261,7 +273,7 @@ class GrammarConfig:
         return re.sub(r'(["\\])', r'\\\1', s)
 
     @staticmethod
-    def choice_as_grammar(choice: List[str] | None) -> str:
+    def choice_as_grammar(choice: list[str] | None) -> str:
         if choice is None:
             raise ValueError("Choice is not set")
         escaped_choices = (GrammarConfig.escape_ebnf_string(c) for c in choice)
@@ -324,6 +336,8 @@ class XGrammarLogitsProcessor:
                 self.ctx = compiler\
                     .compile_json_schema('{"type": "object"}',
                                          any_whitespace=any_whitespace)
+            elif self.config.regex_str:
+                self.ctx = compiler.compile_regex(self.config.regex_str)
             else:
                 raise ValueError(
                     "Invalid configuration for xgrammar logits processor")
@@ -332,7 +346,7 @@ class XGrammarLogitsProcessor:
                  scores: torch.Tensor) -> torch.Tensor:
 
         # Skip the structured logits processing if reasoning is not finished.
-        # reasoner is not None only when `--enable-reasoning` is set.
+        # reasoner is not None only when `--reasoning-parser` is set.
         if self.reasoner is not None and \
         not self.reasoner.is_reasoning_end(
                 input_ids):

@@ -18,6 +18,8 @@ WORKDIR /workspace/
 ARG PYTHON_VERSION=3.12
 ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu"
 
+ENV LD_PRELOAD=""
+
 # Install minimal dependencies and uv
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -32,6 +34,7 @@ ENV CMAKE_CXX_COMPILER_LAUNCHER=ccache
 
 ENV PATH="/root/.local/bin:$PATH"
 ENV VIRTUAL_ENV="/opt/venv"
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python
 RUN uv venv --python ${PYTHON_VERSION} --seed ${VIRTUAL_ENV}
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
@@ -118,6 +121,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ADD ./tests/ ./tests/
 ADD ./examples/ ./examples/
 ADD ./benchmarks/ ./benchmarks/
+ADD ./vllm/collect_env.py .
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \

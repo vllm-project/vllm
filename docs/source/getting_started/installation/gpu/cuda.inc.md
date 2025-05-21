@@ -1,6 +1,6 @@
 # Installation
 
-vLLM contains pre-compiled C++ and CUDA (12.1) binaries.
+vLLM contains pre-compiled C++ and CUDA (12.6) binaries.
 
 ## Requirements
 
@@ -23,12 +23,12 @@ Therefore, it is recommended to install vLLM with a **fresh new** environment. I
 You can install vLLM using either `pip` or `uv pip`:
 
 ```console
-# Install vLLM with CUDA 12.4.
+# Install vLLM with CUDA 12.6.
 pip install vllm # If you are using pip.
 uv pip install vllm # If you are using uv.
 ```
 
-As of now, vLLM's binaries are compiled with CUDA 12.4 and public PyTorch release versions by default. We also provide vLLM binaries compiled with CUDA 12.1, 11.8, and public PyTorch release versions:
+As of now, vLLM's binaries are compiled with CUDA 12.6 and public PyTorch release versions by default. We also provide vLLM binaries compiled with CUDA 12.8, 11.8, and public PyTorch release versions:
 
 ```console
 # Install vLLM with CUDA 11.8.
@@ -46,7 +46,7 @@ LLM inference is a fast-evolving field, and the latest code may contain bug fixe
 ##### Install the latest code using `pip`
 
 ```console
-pip install vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
+pip install -U vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
 ```
 
 `--pre` is required for `pip` to consider pre-released versions.
@@ -65,8 +65,10 @@ Note that the wheels are built with Python 3.8 ABI (see [PEP 425](https://peps.p
 Another way to install the latest code is to use `uv`:
 
 ```console
-uv pip install vllm --extra-index-url https://wheels.vllm.ai/nightly
+uv pip install -U vllm --extra-index-url https://wheels.vllm.ai/nightly
 ```
+
+##### Install specific revisions using `uv`
 
 If you want to access the wheels for previous commits (e.g. to bisect the behavior change, performance regression), you can specify the commit hash in the URL:
 
@@ -151,7 +153,7 @@ git clone https://github.com/vllm-project/vllm.git
 cd vllm
 python use_existing_torch.py
 pip install -r requirements/build.txt
-pip install -e . --no-build-isolation
+pip install --no-build-isolation -e .
 ```
 
 ##### Use the local cutlass for compilation

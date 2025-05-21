@@ -16,6 +16,7 @@
 """Wrapper around `transformers` models"""
 import re
 from itertools import chain
+from collections.abc import Iterable
 from contextlib import contextmanager
 from typing import Iterable, Literal, Optional, Union
 
@@ -36,7 +37,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -91,7 +91,7 @@ def replace_linear_class(
 ) -> Union[ColumnParallelLinear, RowParallelLinear]:
     """
     Replace nn.Linear with one of vLLM's tensor parallel linear classes.
-    
+
     Args:
         linear (nn.Linear): `nn.Linear` to be replaced.
         style (str): Tensor parallel style of the new linear, e.g. "colwise".
@@ -544,7 +544,7 @@ class TransformersModel(nn.Module):
                 new_param = type(param)(new_param)
                 module._parameters[name] = new_param
         for child in module.children():
-            self.meta_to_empty(child)
+            self.init_parameters(child)
 
     def get_input_embeddings(self) -> nn.Module:
         return self.model.get_input_embeddings()
@@ -587,6 +587,7 @@ class TransformersModel(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters())
+
         loaded_params = set[str]()
         for name, loaded_weight in weights:
             # Use "model" instead of base_model_prefix because
@@ -639,8 +640,6 @@ class TransformersForCausalLM(nn.Module, SupportsQuant, SupportsLoRA,
         else:
             self.lm_head = PPMissingLayer()
 
-        self.sampler = get_sampler()
-
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
@@ -677,12 +676,6 @@ class TransformersForCausalLM(nn.Module, SupportsQuant, SupportsLoRA,
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
-
-    def sample(self, logits: torch.Tensor,
-               sampling_metadata: SamplingMetadata) -> Optional[SamplerOutput]:
-
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
