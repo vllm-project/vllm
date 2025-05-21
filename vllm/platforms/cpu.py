@@ -27,7 +27,7 @@ class CpuPlatform(Platform):
     dispatch_key: str = "CPU"
 
     @classmethod
-    def has_apple_silicon_bf16_support(cls) -> bool:
+    def bf16_support_mac(cls) -> bool:
         """Check if the Apple Silicon device supports bf16.
         
         This checks both hardware capabilities and PyTorch support for bf16
@@ -65,7 +65,7 @@ class CpuPlatform(Platform):
             return [torch.bfloat16, torch.float32]
         elif sys.platform.startswith("darwin") and self.get_cpu_architecture() == CpuArchEnum.ARM:
             # Check for bf16 support on Apple Silicon
-            if self.has_apple_silicon_bf16_support():
+            if self.bf16_support_mac():
                 return [torch.bfloat16, torch.float16, torch.float32]
             return [torch.float16, torch.float32]
         # x86/aarch64 CPU has supported both bf16 and fp16 natively.

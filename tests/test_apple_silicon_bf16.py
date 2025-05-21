@@ -21,7 +21,7 @@ class TestAppleSiliconBF16(unittest.TestCase):
         if not self.is_apple_silicon:
             self.skipTest("Test only runs on Apple Silicon")
             
-        has_support = CpuPlatform.has_apple_silicon_bf16_support()
+        has_support = CpuPlatform.bf16_support_mac()
         print(f"BF16 support detected: {has_support}")
         
         # Test PyTorch MPS backend
@@ -36,7 +36,6 @@ class TestAppleSiliconBF16(unittest.TestCase):
                 print("Successfully created bf16 tensor on MPS device")
             except Exception as e:
                 self.fail(f"Failed to create bf16 tensor: {str(e)}")
-
     def test_supported_dtypes(self):
         """Test if supported dtypes are correctly reported"""
         if not self.is_apple_silicon:
@@ -50,7 +49,7 @@ class TestAppleSiliconBF16(unittest.TestCase):
         self.assertIn(torch.float32, dtypes)
         
         # Check bf16 support
-        has_bf16 = CpuPlatform.has_apple_silicon_bf16_support()
+        has_bf16 = CpuPlatform.bf16_support_mac()
         if has_bf16:
             self.assertIn(torch.bfloat16, dtypes)
         else:
