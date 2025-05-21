@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import (TYPE_CHECKING, List, Optional, Protocol, Type, Union,
-                    overload, runtime_checkable)
+from typing import (TYPE_CHECKING, Optional, Protocol, Union, overload,
+                    runtime_checkable)
 
 import torch
 import torch.nn as nn
@@ -11,10 +11,8 @@ from vllm.logger import init_logger
 from vllm.utils import supports_kw
 
 if TYPE_CHECKING:
-    from vllm.attention import AttentionMetadata
     from vllm.config import VllmConfig
     from vllm.model_executor.layers.pooler import PoolerOutput
-    from vllm.model_executor.layers.sampler import SamplerOutput
     from vllm.model_executor.pooling_metadata import PoolingMetadata
     from vllm.model_executor.sampling_metadata import SamplingMetadata
 
@@ -22,7 +20,7 @@ logger = init_logger(__name__)
 
 # The type of hidden states
 # Currently, T = torch.Tensor for all models except for Medusa
-# which has T = List[torch.Tensor]
+# which has T = list[torch.Tensor]
 T = TypeVar("T", default=torch.Tensor)
 T_co = TypeVar("T_co", default=torch.Tensor, covariant=True)
 
@@ -46,23 +44,21 @@ class VllmModel(Protocol[T_co]):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: "AttentionMetadata",
     ) -> T_co:
         ...
 
 
-def _check_vllm_model_init(model: Union[Type[object], object]) -> bool:
+def _check_vllm_model_init(model: Union[type[object], object]) -> bool:
     model_init = model.__init__
     return supports_kw(model_init, "vllm_config")
 
 
-def _check_vllm_model_forward(model: Union[Type[object], object]) -> bool:
+def _check_vllm_model_forward(model: Union[type[object], object]) -> bool:
     model_forward = getattr(model, "forward", None)
     if not callable(model_forward):
         return False
 
-    vllm_kws = ("input_ids", "positions", "kv_caches", "attn_metadata")
+    vllm_kws = ("input_ids", "positions")
     missing_kws = tuple(kw for kw in vllm_kws
                         if not supports_kw(model_forward, kw))
 
@@ -79,7 +75,7 @@ def _check_vllm_model_forward(model: Union[Type[object], object]) -> bool:
 
 
 @overload
-def is_vllm_model(model: Type[object]) -> TypeIs[Type[VllmModel]]:
+def is_vllm_model(model: type[object]) -> TypeIs[type[VllmModel]]:
     ...
 
 
@@ -89,8 +85,8 @@ def is_vllm_model(model: object) -> TypeIs[VllmModel]:
 
 
 def is_vllm_model(
-    model: Union[Type[object], object],
-) -> Union[TypeIs[Type[VllmModel]], TypeIs[VllmModel]]:
+    model: Union[type[object], object],
+) -> Union[TypeIs[type[VllmModel]], TypeIs[VllmModel]]:
     return _check_vllm_model_init(model) and _check_vllm_model_forward(model)
 
 
@@ -106,18 +102,10 @@ class VllmModelForTextGeneration(VllmModel[T], Protocol[T]):
         """Return `None` if TP rank > 0."""
         ...
 
-    def sample(
-        self,
-        logits: T,
-        sampling_metadata: "SamplingMetadata",
-    ) -> "SamplerOutput":
-        """Only called on TP rank 0."""
-        ...
-
 
 @overload
 def is_text_generation_model(
-        model: Type[object]) -> TypeIs[Type[VllmModelForTextGeneration]]:
+        model: type[object]) -> TypeIs[type[VllmModelForTextGeneration]]:
     ...
 
 
@@ -128,8 +116,8 @@ def is_text_generation_model(
 
 
 def is_text_generation_model(
-    model: Union[Type[object], object],
-) -> Union[TypeIs[Type[VllmModelForTextGeneration]],
+    model: Union[type[object], object],
+) -> Union[TypeIs[type[VllmModelForTextGeneration]],
            TypeIs[VllmModelForTextGeneration]]:
     if not is_vllm_model(model):
         return False
@@ -154,7 +142,7 @@ class VllmModelForPooling(VllmModel[T], Protocol[T]):
 
 
 @overload
-def is_pooling_model(model: Type[object]) -> TypeIs[Type[VllmModelForPooling]]:
+def is_pooling_model(model: type[object]) -> TypeIs[type[VllmModelForPooling]]:
     ...
 
 
@@ -164,8 +152,8 @@ def is_pooling_model(model: object) -> TypeIs[VllmModelForPooling]:
 
 
 def is_pooling_model(
-    model: Union[Type[object], object],
-) -> Union[TypeIs[Type[VllmModelForPooling]], TypeIs[VllmModelForPooling]]:
+    model: Union[type[object], object],
+) -> Union[TypeIs[type[VllmModelForPooling]], TypeIs[VllmModelForPooling]]:
     if not is_vllm_model(model):
         return False
 

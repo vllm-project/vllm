@@ -46,15 +46,15 @@ class HpuPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
 
         scheduler_config = vllm_config.scheduler_config
+        parallel_config = vllm_config.parallel_config
         if scheduler_config.is_multi_step:
-            raise NotImplementedError(
-                "Multi-step execution is not implemented for HPU")
+            parallel_config.worker_cls = \
+                "vllm.worker.multi_step_hpu_worker.MultiStepHPUWorker"
 
         if vllm_config.speculative_config is not None:
             raise NotImplementedError(
                 "Speculative decoding is not implemented for HPU")
 
-        parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.worker.hpu_worker.HPUWorker"
 
@@ -88,3 +88,7 @@ class HpuPlatform(Platform):
     @classmethod
     def get_punica_wrapper(cls) -> str:
         return "vllm.lora.punica_wrapper.punica_hpu.PunicaWrapperHPU"
+
+    @classmethod
+    def get_device_communicator_cls(cls) -> str:
+        return "vllm.distributed.device_communicators.hpu_communicator.HpuCommunicator"  # noqa

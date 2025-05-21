@@ -4,7 +4,7 @@
 # and https://arxiv.org/pdf/2401.06118.pdf
 
 import math
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import torch
 import torch.nn.functional as F
@@ -12,6 +12,7 @@ from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.utils import set_weight_attrs
@@ -97,7 +98,7 @@ def generic_dequantize_gemm(
     codebooks: torch.
     Tensor,  #  [num_codebooks, codebook_size, out_group_size, in_group_size]
     scales: torch.Tensor,  #  [num_out_groups, 1, 1, 1]
-    output_partition_sizes: List[int],
+    output_partition_sizes: list[int],
     bias: Optional[torch.Tensor],
 ) -> torch.Tensor:
     output_shape = input.shape[:-1] + (scales.shape[0], )
@@ -135,7 +136,7 @@ def optimized_dequantize_gemm(
     codebooks: torch.
     Tensor,  #  [num_codebooks, codebook_size, out_group_size, in_group_size]
     scales: torch.Tensor,  #  [num_out_groups, 1, 1, 1]
-    output_partition_sizes: List[int],
+    output_partition_sizes: list[int],
     bias: Optional[torch.Tensor],
 ) -> torch.Tensor:
     weights = ops.aqlm_dequant(codes, codebooks, output_partition_sizes)
@@ -169,6 +170,7 @@ class AQLMConfig(QuantizationConfig):
         num_codebooks: int,
         out_group_size: int,
     ) -> None:
+        super().__init__()
         self.in_group_size = in_group_size
         self.nbits_per_codebook = nbits_per_codebook
         self.num_codebooks = num_codebooks
@@ -185,11 +187,11 @@ class AQLMConfig(QuantizationConfig):
                 f"out_group_size={self.out_group_size})")
 
     @classmethod
-    def get_name(cls) -> str:
+    def get_name(cls) -> QuantizationMethods:
         return "aqlm"
 
     @classmethod
-    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
         return [torch.half]
 
     @classmethod
@@ -197,11 +199,11 @@ class AQLMConfig(QuantizationConfig):
         return 60
 
     @classmethod
-    def get_config_filenames(cls) -> List[str]:
+    def get_config_filenames(cls) -> list[str]:
         return []  # no extra configs.
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "AQLMConfig":
+    def from_config(cls, config: dict[str, Any]) -> "AQLMConfig":
         in_group_size = cls.get_from_keys(config, ["in_group_size"])
         nbits_per_codebook = cls.get_from_keys(config, ["nbits_per_codebook"])
         num_code_books = cls.get_from_keys(config, ["num_codebooks"])
@@ -228,7 +230,7 @@ class AQLMLinearMethod(LinearMethodBase):
 
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
-                       output_partition_sizes: List[int], input_size: int,
+                       output_partition_sizes: list[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
         del output_size  # Unused.

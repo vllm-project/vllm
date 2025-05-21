@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-
-from .base import MultiModalPlaceholderMap, MultiModalPlugin
+from .base import MultiModalPlaceholderMap
 from .hasher import MultiModalHashDict, MultiModalHasher
 from .inputs import (BatchedTensorInputs, ModalityData, MultiModalDataBuiltins,
                      MultiModalDataDict, MultiModalKwargs,
@@ -9,11 +8,12 @@ from .registry import MultiModalRegistry
 
 MULTIMODAL_REGISTRY = MultiModalRegistry()
 """
-The global :class:`~MultiModalRegistry` is used by model runners to
+The global {class}`~MultiModalRegistry` is used by model runners to
 dispatch data processing according to the target model.
 
-See also:
-    :ref:`mm-processing`
+:::{seealso}
+{ref}`mm-processing`
+:::
 """
 
 __all__ = [
@@ -26,7 +26,6 @@ __all__ = [
     "MultiModalKwargs",
     "MultiModalPlaceholderDict",
     "MultiModalPlaceholderMap",
-    "MultiModalPlugin",
     "NestedTensors",
     "MULTIMODAL_REGISTRY",
     "MultiModalRegistry",

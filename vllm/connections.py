@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from collections.abc import Mapping, MutableMapping
 from pathlib import Path
-from typing import Mapping, MutableMapping, Optional
+from typing import Optional
 from urllib.parse import urlparse
 
 import aiohttp
@@ -166,4 +167,4 @@ class HTTPConnection:
 
 
 global_http_connection = HTTPConnection()
-"""The global :class:`HTTPConnection` instance used by vLLM."""
+"""The global {class}`HTTPConnection` instance used by vLLM."""

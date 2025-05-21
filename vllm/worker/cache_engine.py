@@ -71,19 +71,36 @@ class CacheEngine:
         device: str,
     ) -> List[torch.Tensor]:
         """Allocates KV cache on the specified device."""
-        kv_cache_shape = self.attn_backend.get_kv_cache_shape(
+        kv_cache_generic_shape = self.attn_backend.get_kv_cache_shape(
             num_blocks, self.block_size, self.num_kv_heads, self.head_size)
         pin_memory = is_pin_memory_available() if device == "cpu" else False
         kv_cache: List[torch.Tensor] = []
+        try:
+            kv_cache_stride_order = self.attn_backend.get_kv_cache_stride_order(
+            )
+        except (AttributeError, NotImplementedError):
+            kv_cache_stride_order = tuple(range(len(kv_cache_generic_shape)))
+
+        # The allocation respects the backend-defined stride order to ensure
+        # the semantic remains consistent for each backend. We first obtain the
+        # generic kv cache shape and then permute it according to the stride
+        # order which could result in a non-contiguous tensor.
+        kv_cache_allocation_shape = tuple(kv_cache_generic_shape[i]
+                                          for i in kv_cache_stride_order)
+
         for _ in range(self.num_attention_layers):
             # null block in CpuGpuBlockAllocator requires at least that
             # block to be zeroed-out.
             # We zero-out everything for simplicity.
-            kv_cache.append(
-                torch.zeros(kv_cache_shape,
-                            dtype=self.dtype,
-                            pin_memory=pin_memory,
-                            device=device))
+            layer_kv_cache = torch.zeros(
+                kv_cache_allocation_shape,
+                dtype=self.dtype,
+                pin_memory=pin_memory,
+                device=device).permute(*kv_cache_stride_order)
+
+            # view back to (TOTAL_PAGES, PAGE_SIZE, entry_shape...) for cases
+            # when entry_shape is higher than 1D
+            kv_cache.append(layer_kv_cache)
         return kv_cache
 
     def swap_in(self, src_to_dst: torch.Tensor) -> None:
@@ -110,14 +127,18 @@ class CacheEngine:
         num_attention_layers = model_config.get_num_layers_by_block_type(
             parallel_config, LayerBlockType.attention)
 
-        key_cache_block = cache_config.block_size * num_heads * head_size
-        # For MLA there is no value cache, since the latent vector
-        # is joint keys and values.
-        value_cache_block = key_cache_block if not model_config.use_mla else 0
-        total = num_attention_layers * (key_cache_block + value_cache_block)
         if cache_config.cache_dtype == "auto":
             dtype = model_config.dtype
         else:
             dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
+
+        key_cache_entry = num_heads * head_size
+
+        # For MLA there is no value cache, since the latent vector
+        # is joint keys and values.
+        value_cache_entry = key_cache_entry if not model_config.use_mla else 0
+        total = num_attention_layers * cache_config.block_size * \
+            (key_cache_entry + value_cache_entry)
+
         dtype_size = get_dtype_size(dtype)
         return dtype_size * total

@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-from typing import Dict, Sequence, Union
+from collections.abc import Sequence
+from typing import Union
 
 import partial_json_parser
 from partial_json_parser.core.options import Allow
 
+from vllm.entrypoints.chat_utils import random_tool_call_id
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
@@ -19,7 +21,6 @@ from vllm.entrypoints.openai.tool_parsers.utils import (consume_space,
                                                         partial_json_loads)
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
@@ -136,7 +137,7 @@ class GraniteToolParser(ToolParser):
                 return None
 
             # select as the current tool call the one we're on the state at
-            current_tool_call: Dict = tool_call_arr[self.current_tool_id]
+            current_tool_call: dict = tool_call_arr[self.current_tool_id]
 
             delta = None
             # case: we are starting a new tool in the array
@@ -181,7 +182,7 @@ class GraniteToolParser(ToolParser):
                     delta = DeltaMessage(tool_calls=[
                         DeltaToolCall(index=self.current_tool_id,
                                       type="function",
-                                      id=f"chatcmpl-tool-{random_uuid()}",
+                                      id=random_tool_call_id(),
                                       function=DeltaFunctionCall(
                                           name=function_name).model_dump(
                                               exclude_none=True))

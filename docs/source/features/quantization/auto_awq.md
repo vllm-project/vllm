@@ -2,23 +2,17 @@
 
 # AutoAWQ
 
-:::{warning}
-Please note that AWQ support in vLLM is under-optimized at the moment. We would recommend using the unquantized version of the model for better
-accuracy and higher throughput. Currently, you can use AWQ as a way to reduce memory footprint. As of now, it is more suitable for low latency
-inference with small number of concurrent requests. vLLM's AWQ implementation have lower throughput than unquantized version.
-:::
-
 To create a new 4-bit quantized model, you can leverage [AutoAWQ](https://github.com/casper-hansen/AutoAWQ).
-Quantizing reduces the model's precision from FP16 to INT4 which effectively reduces the file size by ~70%.
+Quantization reduces the model's precision from BF16/FP16 to INT4 which effectively reduces the total model memory footprint.
 The main benefits are lower latency and memory usage.
 
-You can quantize your own models by installing AutoAWQ or picking one of the [400+ models on Huggingface](https://huggingface.co/models?sort=trending&search=awq).
+You can quantize your own models by installing AutoAWQ or picking one of the [6500+ models on Huggingface](https://huggingface.co/models?search=awq).
 
 ```console
 pip install autoawq
 ```
 
-After installing AutoAWQ, you are ready to quantize a model. Here is an example of how to quantize `mistralai/Mistral-7B-Instruct-v0.2`:
+After installing AutoAWQ, you are ready to quantize a model. Please refer to the [AutoAWQ documentation](https://casper-hansen.github.io/AutoAWQ/examples/#basic-quantization) for further details. Here is an example of how to quantize `mistralai/Mistral-7B-Instruct-v0.2`:
 
 ```python
 from awq import AutoAWQForCausalLM

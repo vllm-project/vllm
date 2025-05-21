@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-    This module implements a PyNccl pipe for sending and receiving 
-    Optional[torch.Tensor] between distributed ranks with advanced 
+    This module implements a PyNccl pipe for sending and receiving
+    Optional[torch.Tensor] between distributed ranks with advanced
     communication features.
 
     Key Features:
@@ -15,7 +15,7 @@
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Optional
 
 import torch
 
@@ -35,7 +35,7 @@ class BrokenPipeException(Exception):
         super().__init__(self.message)
 
 
-Metadata = Dict[str, Optional[torch.Tensor]]
+Metadata = dict[str, Optional[torch.Tensor]]
 
 
 class PyNcclPipe(KVPipeBase):
@@ -59,11 +59,13 @@ class PyNcclPipe(KVPipeBase):
             self.device = self._select_device(device)
 
         # build distributed connection and send/recv implementation
+        store_timeout = self.config.get_from_extra_config("store_timeout", 300)
         self.group = StatelessProcessGroup.create(
             host=self.config.kv_ip,
             port=self.config.kv_port + port_offset,
             rank=self.kv_rank,
             world_size=self.kv_parallel_size,
+            store_timeout=store_timeout,
         )
         # add a barrier to make sure the connection is initiated properly
         self.group.barrier()
@@ -81,7 +83,7 @@ class PyNcclPipe(KVPipeBase):
 
     def _get_device_send_recv_impl(
         self, group: StatelessProcessGroup
-    ) -> Tuple[Callable[[torch.Tensor, int], None], Callable[
+    ) -> tuple[Callable[[torch.Tensor, int], None], Callable[
         [torch.Tensor, int], None]]:
 
         send: Callable[[torch.Tensor, int], None]
@@ -134,11 +136,11 @@ class PyNcclPipe(KVPipeBase):
         Create a buffer to receive the tensor based on the provided metadata.
 
         Parameters:
-            - metadata: A dictionary with keys "dtype" and "shape", describing 
+            - metadata: A dictionary with keys "dtype" and "shape", describing
               the tensor's data type and shape.
 
         Returns:
-            - buffer: A tensor of the specified type and shape, allocated on 
+            - buffer: A tensor of the specified type and shape, allocated on
               self.device.
         """
         return torch.empty(metadata["shape"],
@@ -159,18 +161,18 @@ class PyNcclPipe(KVPipeBase):
         Receive the metadata dictionary from the target rank.
 
         Returns:
-            - metadata: A dictionary with keys "dtype" and "shape" describing 
+            - metadata: A dictionary with keys "dtype" and "shape" describing
               the tensor.
         """
         return self.group.recv_obj(self.target_rank_for_recv)
 
     def _send_impl(self, tensor: Optional[torch.Tensor]) -> None:
         """
-        The actual implementation of sending the tensor and its metadata to the 
+        The actual implementation of sending the tensor and its metadata to the
         target rank.
 
         Parameters:
-            - tensor: The input tensor to be sent, or None if no tensor is 
+            - tensor: The input tensor to be sent, or None if no tensor is
               being sent.
         """
         metadata = self._make_metadata(tensor)
@@ -181,7 +183,7 @@ class PyNcclPipe(KVPipeBase):
 
     def _recv_impl(self) -> Optional[torch.Tensor]:
         """
-        The actual implementation of receiving a tensor and its metadata from 
+        The actual implementation of receiving a tensor and its metadata from
         the target rank.
 
         Returns:
@@ -213,7 +215,7 @@ class PyNcclPipe(KVPipeBase):
 
     def block_if_full(self):
         """
-        Block the current thread if the buffer size is larger than the 
+        Block the current thread if the buffer size is larger than the
         threshold.
         """
         while self.buffer_size > self.buffer_size_thresh:
@@ -222,7 +224,7 @@ class PyNcclPipe(KVPipeBase):
 
     def send_tensor(self, tensor: Optional[torch.Tensor]) -> None:
         """
-        Sends a tensor and its metadata to the destination rank in a 
+        Sends a tensor and its metadata to the destination rank in a
         non-blocking way.
 
         Parameters:

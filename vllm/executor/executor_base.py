@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import time
 from abc import ABC, abstractmethod
 from typing import (Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple,
                     Union)
@@ -8,11 +9,11 @@ from typing import (Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple,
 import torch.nn as nn
 from typing_extensions import TypeVar
 
+import vllm.platforms
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest, PoolerOutput
 from vllm.utils import make_async
@@ -50,6 +51,7 @@ class ExecutorBase(ABC):
         self.observability_config = vllm_config.observability_config
         self._init_executor()
         self.is_sleeping = False
+        self.sleeping_tags: set[str] = set()
 
     @abstractmethod
     def _init_executor(self) -> None:
@@ -72,7 +74,7 @@ class ExecutorBase(ABC):
                 `self` argument, in addition to the arguments passed in `args`
                 and `kwargs`. The `self` argument will be the worker object.
             timeout: Maximum time in seconds to wait for execution. Raises a
-                :exc:`TimeoutError` on timeout. `None` means wait indefinitely.
+                {exc}`TimeoutError` on timeout. `None` means wait indefinitely.
             args: Positional arguments to pass to the worker method.
             kwargs: Keyword arguments to pass to the worker method.
 
@@ -108,8 +110,8 @@ class ExecutorBase(ABC):
         """
         # NOTE: This is logged in the executor because there can be >1 workers.
         logger.info("# %s blocks: %d, # CPU blocks: %d",
-                    current_platform.dispatch_key, num_gpu_blocks,
-                    num_cpu_blocks)
+                    vllm.platforms.current_platform.device_name,
+                    num_gpu_blocks, num_cpu_blocks)
         max_concurrency = (num_gpu_blocks * self.cache_config.block_size /
                            self.model_config.max_model_len)
         logger.info("Maximum concurrency for %s tokens per request: %.2fx",
@@ -200,15 +202,37 @@ class ExecutorBase(ABC):
         if self.is_sleeping:
             logger.warning("Executor is already sleeping.")
             return
+        time_before_sleep = time.perf_counter()
         self.collective_rpc("sleep", kwargs=dict(level=level))
+        time_after_sleep = time.perf_counter()
+        self.sleeping_tags = {"weights", "kv_cache"}
         self.is_sleeping = True
+        logger.info("It took %.6f seconds to fall asleep.",
+                    time_after_sleep - time_before_sleep)
 
-    def wake_up(self):
+    def wake_up(self, tags: Optional[list[str]] = None):
         if not self.is_sleeping:
             logger.warning("Executor is not sleeping.")
             return
-        self.collective_rpc("wake_up")
-        self.is_sleeping = False
+        if tags:
+            for tag in tags:
+                if tag not in self.sleeping_tags:
+                    logger.warning("Tag %s is not in sleeping tags %s", tag,
+                                   self.sleeping_tags)
+                    return
+        time_before_wakeup = time.perf_counter()
+        self.collective_rpc("wake_up", kwargs=dict(tags=tags))
+        time_after_wakeup = time.perf_counter()
+        logger.info("It took %.6f seconds to wake up tags %s.",
+                    time_after_wakeup - time_before_wakeup,
+                    tags if tags is not None else self.sleeping_tags)
+        if tags:
+            for tag in tags:
+                self.sleeping_tags.remove(tag)
+        else:
+            self.sleeping_tags.clear()
+        if not self.sleeping_tags:
+            self.is_sleeping = False
 
     def save_sharded_state(
         self,

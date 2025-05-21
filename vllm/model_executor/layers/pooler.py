@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from enum import IntEnum
-from typing import List, Optional, Union
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -46,7 +46,7 @@ class SimplePooler(nn.Module):
         normalize: bool,
         softmax: bool,
         step_tag_id: Optional[int] = None,
-        returned_token_ids: Optional[List[int]] = None,
+        returned_token_ids: Optional[list[int]] = None,
     ) -> "SimplePooler":
         if pooling_type == PoolingType.LAST:
             assert step_tag_id is None and returned_token_ids is None
@@ -97,7 +97,7 @@ class SimplePooler(nn.Module):
         pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
         pooled_data = self.extract_states(hidden_states, pooling_metadata)
-        pooled_data = self.head(pooled_data)
+        pooled_data = self.head(pooled_data, pooling_metadata)
         pooled_outputs = [self.build_output(data) for data in pooled_data]
         return PoolerOutput(outputs=pooled_outputs)
 
@@ -174,7 +174,7 @@ class StepPool(SimplePooler):
         normalize: bool,
         softmax: bool,
         step_tag_id: Optional[int] = None,
-        returned_token_ids: Optional[List[int]] = None,
+        returned_token_ids: Optional[list[int]] = None,
     ):
         super().__init__(normalize=normalize, softmax=softmax)
 
@@ -217,20 +217,41 @@ class PoolerHead(nn.Module):
         self.normalize = normalize
         self.softmax = softmax
 
-    def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor]):
+    def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
+                pooling_metadata: PoolingMetadata):
+
+        dimensions_list = [
+            pooling_param.dimensions
+            for _, pooling_param in pooling_metadata.seq_groups
+        ]
+        if any(d is not None for d in dimensions_list):
+            # change the output dimension
+            assert len(pooled_data) == len(dimensions_list)
+            pooled_data = [
+                vecs if d is None else vecs[..., :d]
+                for vecs, d in zip(pooled_data, dimensions_list)
+            ]
+
         if self.normalize:
             if isinstance(pooled_data, list):
                 pooled_data = [
-                    F.normalize(data, p=2, dim=1) for data in pooled_data
+                    F.normalize(data, p=2, dim=-1) for data in pooled_data
                 ]
             else:
-                pooled_data = F.normalize(pooled_data, p=2, dim=1)
+                pooled_data = F.normalize(pooled_data, p=2, dim=-1)
 
         if self.softmax:
             if isinstance(pooled_data, list):
-                pooled_data = [F.softmax(data, dim=-1) for data in pooled_data]
+                pooled_data = [
+                    F.softmax(data, dim=-1)
+                    if data.shape[-1] >= 2 else F.sigmoid(data)
+                    for data in pooled_data
+                ]
             else:
-                pooled_data = F.softmax(pooled_data, dim=-1)
+                if pooled_data.shape[-1] >= 2:
+                    pooled_data = F.softmax(pooled_data, dim=-1)
+                else:
+                    pooled_data = F.sigmoid(pooled_data)
 
         return pooled_data
 
@@ -245,7 +266,7 @@ class Pooler(nn.Module):
         normalize: bool,
         softmax: bool,
         step_tag_id: Optional[int] = None,
-        returned_token_ids: Optional[List[int]] = None,
+        returned_token_ids: Optional[list[int]] = None,
     ) -> SimplePooler:
         return SimplePooler.from_pooling_type(
             pooling_type=PoolingType[pooler_config.pooling_type]

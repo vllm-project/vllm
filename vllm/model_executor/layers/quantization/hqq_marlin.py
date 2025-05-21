@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import torch
 
@@ -8,6 +8,7 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
@@ -31,8 +32,9 @@ class HQQMarlinConfig(QuantizationConfig):
         self,
         weight_bits: int,
         group_size: int,
-        skip_modules: Optional[List[str]] = None,
+        skip_modules: Optional[list[str]] = None,
     ) -> None:
+        super().__init__()
         assert group_size == 64, ("The only supported HQQ group size is "
                                   "currently 64.")
         assert weight_bits == 4, ("The only supported HQQ quantization "
@@ -49,11 +51,11 @@ class HQQMarlinConfig(QuantizationConfig):
                 f"group_size={self.group_size})")
 
     @classmethod
-    def get_name(cls) -> str:
+    def get_name(cls) -> QuantizationMethods:
         return "hqq"
 
     @classmethod
-    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
         return [torch.half, torch.bfloat16]
 
     @classmethod
@@ -61,11 +63,11 @@ class HQQMarlinConfig(QuantizationConfig):
         return 80
 
     @classmethod
-    def get_config_filenames(cls) -> List[str]:
+    def get_config_filenames(cls) -> list[str]:
         return ["quantize_config.json"]
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "HQQMarlinConfig":
+    def from_config(cls, config: dict[str, Any]) -> "HQQMarlinConfig":
         wq_params = (config["quant_config"]["weight_quant_params"])
         weight_bits = cls.get_from_keys(wq_params, ["nbits"])
         group_size = cls.get_from_keys(wq_params, ["group_size"])
@@ -190,7 +192,7 @@ class HQQMarlinMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         input_size_per_partition: int,
-        output_partition_sizes: List[int],
+        output_partition_sizes: list[int],
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,
@@ -302,8 +304,10 @@ class HQQMarlinMethod(LinearMethodBase):
 
         marlin_out = ops.gptq_marlin_gemm(
             x,
+            None,
             layer.marlin_qweight,
             scales,
+            None,
             zeros,
             layer.g_idx,
             layer.g_idx_sort_indices,
@@ -313,7 +317,7 @@ class HQQMarlinMethod(LinearMethodBase):
             self.output_size_per_partition,
             self.input_size_per_partition,
             True,  # is_k_full
-            True,  # has_zp
+            False,  # use atomic add
             True,  # use 32-bit reduce
             True,  # use float zp
         )

@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-from typing import Dict, Sequence, Union
+from collections.abc import Sequence
+from typing import Union
 
 import partial_json_parser
 from partial_json_parser.core.options import Allow
 
+from vllm.entrypoints.chat_utils import random_tool_call_id
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
@@ -17,7 +19,6 @@ from vllm.entrypoints.openai.tool_parsers.utils import (
     extract_intermediate_diff)
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
@@ -90,7 +91,7 @@ class Internlm2ToolParser(ToolParser):
             # tool calls are generated in an object in inernlm2
             # it's not support parallel tool calls
             try:
-                tool_call_arr: Dict = partial_json_parser.loads(
+                tool_call_arr: dict = partial_json_parser.loads(
                     parsable_arr, flags)
             except partial_json_parser.core.exceptions.MalformedJSON:
                 logger.debug('not enough tokens to parse into JSON yet')
@@ -105,7 +106,7 @@ class Internlm2ToolParser(ToolParser):
                     delta = DeltaMessage(tool_calls=[
                         DeltaToolCall(index=self.current_tool_id,
                                       type="function",
-                                      id=f"chatcmpl-tool-{random_uuid()}",
+                                      id=random_tool_call_id(),
                                       function=DeltaFunctionCall(
                                           name=function_name).model_dump(
                                               exclude_none=True))

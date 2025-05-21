@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Dict, Type
-
 import torch.nn as nn
 
 from vllm.config import get_current_vllm_config
@@ -59,6 +57,11 @@ class CustomOp(nn.Module):
         # PyTorch-native implementation.
         return self.forward_native(*args, **kwargs)
 
+    def forward_neuron(self, *args, **kwargs):
+        # By default, we assume that Neuron ops are compatible with the
+        # PyTorch-native implementation.
+        return self.forward_native(*args, **kwargs)
+
     def forward_oot(self, *args, **kwargs):
         # By default, we assume that OOT ops are compatible with the
         # PyTorch-native implementation.
@@ -88,6 +91,8 @@ class CustomOp(nn.Module):
             return self.forward_tpu
         elif current_platform.is_xpu():
             return self.forward_xpu
+        elif current_platform.is_neuron():
+            return self.forward_neuron
         elif current_platform.is_out_of_tree():
             return self.forward_oot
         else:
@@ -100,9 +105,9 @@ class CustomOp(nn.Module):
         custom_ops = compilation_config.custom_ops
         if not hasattr(cls, "name"):
             logger.warning_once(
-                f"Custom op {cls.__name__} was not registered, "
-                f"which means it won't appear in the op registry. "
-                f"It will be enabled/disabled based on the global settings.")
+                "Custom op %s was not registered, which means it won't appear in the op registry. It will be enabled/disabled based on the global settings.",  # noqa: E501
+                cls.__name__,
+            )
             return CustomOp.default_on()
 
         enabled = f"+{cls.name}" in custom_ops
@@ -131,7 +136,7 @@ class CustomOp(nn.Module):
     # Examples:
     # - MyOp.enabled()
     # - op_registry["my_op"].enabled()
-    op_registry: Dict[str, Type['CustomOp']] = {}
+    op_registry: dict[str, type['CustomOp']] = {}
 
     # Decorator to register custom ops.
     @classmethod

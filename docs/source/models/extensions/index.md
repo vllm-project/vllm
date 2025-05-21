@@ -5,4 +5,5 @@
 
 runai_model_streamer
 tensorizer
+fastsafetensor
 :::

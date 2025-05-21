@@ -2,17 +2,18 @@
 
 import time
 from collections import deque
-from typing import List, Set, Tuple
+from typing import Optional
 from unittest.mock import MagicMock
 
 import pytest  # noqa
+import torch
 from torch import Use  # noqa
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus
 from vllm.core.scheduler import Scheduler, SchedulingBudget
 from vllm.lora.request import LoRARequest
-from vllm.sequence import SequenceGroup
+from vllm.sequence import SequenceGroup, SequenceStatus
 
 from .utils import (append_new_token, append_new_token_seq,
                     append_new_token_seq_group, create_dummy_prompt,
@@ -57,7 +58,7 @@ def test_scheduler_abort_seq_group():
 
     # Add multiple seq groups to scheduler.
     num_seq_group = 4
-    request_ids: Set[str] = set()
+    request_ids: set[str] = set()
     for i in range(num_seq_group):
         _, seq_group = create_dummy_prompt(str(i), block_size)
         scheduler.add_seq_group(seq_group)
@@ -83,7 +84,7 @@ def test_scheduler_schedule_simple():
     cache_config.num_cpu_blocks = 8
     cache_config.num_gpu_blocks = 8
     scheduler = Scheduler(scheduler_config, cache_config, None)
-    running: List[SequenceGroup] = []
+    running: list[SequenceGroup] = []
 
     # Add seq groups to scheduler.
     for i in range(num_seq_group):
@@ -221,7 +222,7 @@ def test_scheduler_max_seqs():
     cache_config.num_gpu_blocks = 8
     scheduler = Scheduler(scheduler_config, cache_config, None)
 
-    all_seq_groups: List[SequenceGroup] = []
+    all_seq_groups: list[SequenceGroup] = []
     # Add seq groups to scheduler.
     for i in range(num_seq_group):
         _, seq_group = create_dummy_prompt(str(i),
@@ -480,7 +481,7 @@ def test_prefill_schedule_max_lora():
                                      num_cpu_blocks=64,
                                      num_gpu_blocks=64)
     budget = create_token_budget(token_budget=120)
-    curr_loras: Set[int] = set()
+    curr_loras: set[int] = set()
     for i in range(2):
         _, seq_group = create_dummy_prompt(str(i),
                                            prompt_length=60,
@@ -491,7 +492,7 @@ def test_prefill_schedule_max_lora():
                                                lora_path="abc"))
         scheduler.add_seq_group(seq_group)
     # Add two more requests to verify lora is prioritized.
-    # 0: Lora, 1: Lora, 2: regular, 3: regular
+    # 0: LoRA, 1: LoRA, 2: regular, 3: regular
     # In the first iteration, index 0, 2 is scheduled.
     # If a request is not scheduled because it hits max lora, it is
     # prioritized. Verify that.
@@ -618,7 +619,6 @@ def test_schedule_decode_blocks_to_copy_update():
                                      num_gpu_blocks=16)
     _, seq_group = create_dummy_prompt("1",
                                        prompt_length=60,
-                                       best_of=2,
                                        block_size=block_size)
     curr_loras = None
     scheduler._allocate_and_set_running(seq_group)
@@ -651,8 +651,8 @@ def test_schedule_swapped_max_loras():
                                      block_size=block_size,
                                      num_cpu_blocks=32,
                                      num_gpu_blocks=32)
-    curr_loras: Set[int] = set()
-    blocks_to_swap_out: List[Tuple[int, int]] = []
+    curr_loras: set[int] = set()
+    blocks_to_swap_out: list[tuple[int, int]] = []
     for i in range(2):
         _, seq_group = create_dummy_prompt(str(i),
                                            prompt_length=60,
@@ -683,11 +683,10 @@ def test_schedule_swapped_cannot_swap_in():
                                      num_cpu_blocks=32,
                                      num_gpu_blocks=32)
     curr_loras = None
-    blocks_to_swap_out: List[Tuple[int, int]] = []
+    blocks_to_swap_out: list[tuple[int, int]] = []
     for i in range(2):
         _, seq_group = create_dummy_prompt(str(i),
                                            prompt_length=60,
-                                           best_of=2,
                                            block_size=block_size)
         scheduler._allocate_and_set_running(seq_group)
         append_new_token_seq_group(60, seq_group, 1)
@@ -714,11 +713,10 @@ def test_infeasible_swap():
                                      num_cpu_blocks=32,
                                      num_gpu_blocks=32)
     curr_loras = None
-    blocks_to_swap_out: List[Tuple[int, int]] = []
+    blocks_to_swap_out: list[tuple[int, int]] = []
     for i in range(2):
         _, seq_group = create_dummy_prompt(str(i),
                                            prompt_length=60,
-                                           best_of=2,
                                            block_size=block_size)
         scheduler._allocate_and_set_running(seq_group)
         append_new_token_seq_group(60, seq_group, 1)
@@ -748,11 +746,10 @@ def test_schedule_swapped_blocks_to_copy():
     curr_loras = None
     _, seq_group = create_dummy_prompt("1",
                                        prompt_length=60,
-                                       best_of=2,
                                        block_size=block_size)
     scheduler._allocate_and_set_running(seq_group)
     append_new_token_seq_group(60, seq_group, 1)
-    blocks_to_swap_out: List[Tuple[int, int]] = []
+    blocks_to_swap_out: list[tuple[int, int]] = []
     scheduler._swap_out(seq_group, blocks_to_swap_out)
     scheduler._add_seq_group_to_swapped(seq_group)
 
@@ -973,3 +970,73 @@ def test_no_multiple_partial_prefills_with_chunked_prefill_and_prefix_caching(
     ), "A partial prefix of C (4 tokens) should be prefilled, with the "
     "remaining tokens fit into 3 token budget (4-1 from the seqA). It will "
     "then be rounded down to 2 tokens on block size, thus 6 tokens in total."
+
+
+def test_no_batches_mixed_with_prompt_tokens_and_prompt_embeds():
+    """
+    Test that the scheduler does not schedule batches with prompt tokens and 
+    prompt embeddings co-mingled.
+    """
+    block_size = 2
+    max_seq_group = 3
+    scheduler = initialize_scheduler(
+        block_size=block_size,
+        num_cpu_blocks=16,
+        num_gpu_blocks=16,
+        max_num_seqs=max_seq_group,
+        max_model_len=100,
+        enable_prefix_caching=True,
+    )
+
+    # the odd indexed inputs should be passed in via embeddings,
+    # evens via token_ids
+    seq_length = 7
+    embedding_size = 5
+    num_seqs = 11
+    seq_tokens: list[list[int]] = []
+    seq_embeds: list[Optional[torch.Tensor]] = []
+    for i in range(num_seqs):
+        if i % 2:
+            seq_tokens.append(list(range(seq_length)))
+            seq_embeds.append(None)
+        else:
+            seq_tokens.append([0] * seq_length)
+            seq_embeds.append(torch.rand(embedding_size))
+
+    seq_and_seq_groups = [
+        create_dummy_prompt(f"{i}",
+                            prompt_tokens=seq_tokens[i],
+                            prompt_embeds=seq_embeds[i],
+                            block_size=block_size)
+        for i in range(len(seq_tokens))
+    ]
+
+    for _, seq_group in seq_and_seq_groups:
+        scheduler.add_seq_group(seq_group)
+
+    while not all(seq.is_finished() for seq, _ in seq_and_seq_groups):
+        unfinished_seq_groups = [
+            seq_group for _, seq_group in seq_and_seq_groups
+            if not seq_group.is_finished()
+        ]
+        _, out = schedule_and_update_computed_tokens(scheduler)
+        assert len(out.scheduled_seq_groups) > 0
+        batch_is_prompt_embeds = out.scheduled_seq_groups[
+            0].seq_group.uses_prompt_embeds()
+        expected_scheduled_seq_groups = [
+            seq_group for seq_group in unfinished_seq_groups
+            if seq_group.uses_prompt_embeds() == batch_is_prompt_embeds
+        ]
+
+        # We should have as many scheduled groups as possible, without mixing
+        assert len(out.scheduled_seq_groups) == min(
+            max_seq_group, len(expected_scheduled_seq_groups))
+        assert all(scheduled_seq_group.seq_group.uses_prompt_embeds() ==
+                   batch_is_prompt_embeds
+                   for scheduled_seq_group in out.scheduled_seq_groups)
+
+        # Finish the scheduled groups
+        for scheduled_seq_group in out.scheduled_seq_groups:
+            for seq in scheduled_seq_group.seq_group.seqs:
+                seq.status = SequenceStatus.FINISHED_STOPPED
+        scheduler.free_finished_seq_groups()

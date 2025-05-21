@@ -23,6 +23,9 @@ void cutlass_scaled_sparse_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
                                    torch::Tensor const& a_scales,
                                    torch::Tensor const& b_scales,
                                    std::optional<torch::Tensor> const& bias);
+
+using CompressorResult = std::tuple<torch::Tensor, torch::Tensor>;
+CompressorResult cutlass_sparse_compress_sm90(torch::Tensor const& a);
 #endif
 
 void cutlass_scaled_sparse_mm(torch::Tensor& c, torch::Tensor const& a,
@@ -55,7 +58,9 @@ void cutlass_scaled_sparse_mm(torch::Tensor& c, torch::Tensor const& a,
 
   // Guard against compilation issues for sm90 kernels
 #if defined ENABLE_SPARSE_SCALED_MM_C3X && ENABLE_SPARSE_SCALED_MM_C3X
-  if (version_num >= 90) {
+  // We build for 9.0a which is not forward compatible, so restrict this to
+  // Hopper only
+  if (version_num == 90) {
     cutlass_scaled_sparse_mm_sm90(c, a, bt_nzs, bt_meta, a_scales, b_scales,
                                   bias);
     return;
@@ -65,6 +70,35 @@ void cutlass_scaled_sparse_mm(torch::Tensor& c, torch::Tensor const& a,
   TORCH_CHECK_NOT_IMPLEMENTED(
       false,
       "No compiled cutlass_scaled_sparse_mm for a compute capability less than "
+      "CUDA device capability: ",
+      version_num);
+}
+
+std::vector<torch::Tensor> cutlass_sparse_compress(torch::Tensor const& a) {
+  // Check for strides and alignment
+  TORCH_CHECK(a.stride(1) == 1);      // Row-major
+  TORCH_CHECK(a.stride(0) % 8 == 0);  // 8 Byte Alignment for Compression
+
+  at::cuda::OptionalCUDAGuard const device_guard(device_of(a));
+  int32_t version_num = get_sm_version_num();
+
+  // Guard against compilation issues for sm90 kernels
+#if defined ENABLE_SPARSE_SCALED_MM_C3X && ENABLE_SPARSE_SCALED_MM_C3X
+  // We build for 9.0a which is not forward compatible, so restrict this to
+  // Hopper only
+  if (version_num == 90) {
+    std::vector<torch::Tensor> result_tensors;
+
+    auto [a_meta, a_nzs] = cutlass_sparse_compress_sm90(a);
+    result_tensors.push_back(std::move(a_nzs));
+    result_tensors.push_back(std::move(a_meta));
+    return result_tensors;
+  }
+#endif
+
+  TORCH_CHECK_NOT_IMPLEMENTED(
+      false,
+      "No compiled cutlass_sparse_compress for a compute capability less than "
       "CUDA device capability: ",
       version_num);
 }

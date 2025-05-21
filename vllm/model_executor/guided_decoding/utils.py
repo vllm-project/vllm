@@ -10,22 +10,26 @@ def has_xgrammar_unsupported_json_features(schema: dict) -> bool:
         if not isinstance(obj, dict):
             return False
 
-        # Check for pattern restrictions
-        if "pattern" in obj:
-            return True
-
         # Check for numeric ranges
-        if obj.get("type") in ("integer", "number") and any(
-                key in obj for key in [
-                    "minimum", "maximum", "exclusiveMinimum",
-                    "exclusiveMaximum", "multipleOf"
-                ]):
+        if obj.get("type") in ("integer", "number") and ("multipleOf" in obj):
             return True
 
         # Check for array unsupported keywords
         if obj.get("type") == "array" and any(key in obj for key in [
                 "uniqueItems", "contains", "minContains", "maxContains",
                 "minItems", "maxItems"
+        ]):
+            return True
+
+        # Unsupported keywords for strings
+        if obj.get("type") == "string" and any(
+                key in obj for key in ["minLength", "maxLength", "format"]):
+            return True
+
+        # Unsupported keywords for objects
+        if obj.get("type") == "object" and any(key in obj for key in [
+                "minProperties", "maxProperties", "propertyNames",
+                "patternProperties"
         ]):
             return True
 

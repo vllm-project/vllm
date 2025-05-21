@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for rejection sampling."""
-from typing import List, Tuple
 
 import pytest
 import torch
@@ -8,6 +7,15 @@ import torch.nn.functional as F
 
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.model_executor.utils import set_random_seed
+
+
+@pytest.fixture(scope="function", autouse=True)
+def use_v0_only(monkeypatch):
+    """
+    This file tests V0 internals, so set VLLM_USE_V1=0.
+    """
+    monkeypatch.setenv('VLLM_USE_V1', '0')
+
 
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
@@ -161,7 +169,10 @@ def test_no_crash_with_varying_dims(k: int, vocab_size: int, batch_size: int,
 @pytest.mark.parametrize("batch_size", [1, 8, 32, 128])
 @pytest.mark.parametrize("n_rep", [100])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-@pytest.mark.parametrize("use_flashinfer", [True, False])
+# @pytest.mark.parametrize("use_flashinfer", [True, False])
+# Not testing FlashInfer now, since 0.2.3 API removed the ability
+# to pass in uniform samples.
+@pytest.mark.parametrize("use_flashinfer", [False])
 @torch.inference_mode()
 def test_deterministic_when_seeded(k: int, vocab_size: int, batch_size: int,
                                    frac_seeded: float, n_rep: int, device: str,
@@ -206,7 +217,10 @@ def test_deterministic_when_seeded(k: int, vocab_size: int, batch_size: int,
 @pytest.mark.parametrize("vocab_size", [30_000, 50_000])
 @pytest.mark.parametrize("batch_size", [3, 8, 32, 128])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-@pytest.mark.parametrize("use_flashinfer", [True, False])
+# @pytest.mark.parametrize("use_flashinfer", [True, False])
+# Not testing FlashInfer now, since 0.2.3 API removed the ability
+# to pass in uniform samples.
+@pytest.mark.parametrize("use_flashinfer", [False])
 @torch.inference_mode()
 def test_mixed_seeded_batch(k: int, vocab_size: int, batch_size: int,
                             device: str, use_flashinfer: bool):
@@ -276,6 +290,10 @@ def test_compare_nonflashinfer_backend(k: int, vocab_size: int,
     Test the flashinfer and nonflashinfer backend generate 
     the same output metrics.
     """
+
+    pytest.skip("Not testing FlashInfer now, since 0.2.3 API removed "
+                "the ability to pass in uniform samples.")
+
     torch.set_default_device(device)
     torch.manual_seed(0)
     draft_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
@@ -416,8 +434,8 @@ def test_rejection_sampling_approximates_target_distribution(
         draft_and_target_probs_equal)
 
     sample_sizes = [10, 100, 1_000, 10_000, 100_000]
-    distance_wrt_reference: List[float] = []
-    distance_wrt_target: List[float] = []
+    distance_wrt_reference: list[float] = []
+    distance_wrt_target: list[float] = []
 
     for num_samples in sample_sizes:
         (reference_vs_rejsample_dist,
@@ -452,7 +470,7 @@ def test_rejection_sampling_approximates_target_distribution(
             expected_improvement_multiplier)
 
 
-def get_ratio_first_to_last(elements: List[float]) -> float:
+def get_ratio_first_to_last(elements: list[float]) -> float:
     return elements[0] / elements[-1]
 
 
@@ -477,7 +495,7 @@ class _CorrectnessTestHelper:
 
     def generate_probs_for_test(
         self, draft_and_target_probs_equal: bool
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         draft_probs, target_probs = (F.softmax(
             torch.rand(self.vocab_size, dtype=torch.float32),
             dim=-1,
@@ -499,7 +517,7 @@ class _CorrectnessTestHelper:
     def run_and_compare_distributions(self, draft_probs: torch.Tensor,
                                       target_probs: torch.Tensor,
                                       reference_probs: torch.Tensor,
-                                      num_samples: int) -> Tuple[float, float]:
+                                      num_samples: int) -> tuple[float, float]:
         # Sample using rejection sampling.
         rej_sample_probs = self._estimate_rejection_sampling_pdf(
             draft_probs, target_probs, num_samples)

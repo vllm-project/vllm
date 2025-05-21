@@ -1,50 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import itertools
-from typing import Iterable, List, Optional, Tuple
+from collections.abc import Iterable
+from typing import Optional, Union
 
 import torch
 from torch import nn
 from transformers import RobertaConfig
 
-from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.pooler import CrossEncodingPooler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.bert import BertEmbeddingModel, BertModel
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.transformers_utils.config import (
     get_cross_encoder_activation_function)
 
-from .interfaces import SupportsCrossEncoding
-
-
-def roberta_task_weights_filter(
-    all_weights: Iterable[Tuple[str, torch.Tensor]]
-) -> Tuple[Iterable[Tuple[str, torch.Tensor]], Iterable[Tuple[str,
-                                                              torch.Tensor]]]:
-    """
-    Separate task-specific weights that are applied on top
-    of the encoder-decoder bert base.
-    To do so, return two generators over the original iterator.
-    Also, remove the "roberta." prefix to make it loadable
-    from vanilla BertModel.
-    """
-    # Copy of a lazy iterator without in-memory overhead so both
-    # iterators can be iterated upon independently.
-    all_weights1, all_weights2 = itertools.tee(all_weights)
-
-    def encoder_decoder_weights():
-        for name, weight in all_weights1:
-            if name.startswith("roberta."):
-                yield (name[len("roberta."):], weight)
-
-    return encoder_decoder_weights(), ((n, w) for n, w in all_weights2
-                                       if not n.startswith("roberta."))
+from .bert_with_rope import BertWithRope, JinaRobertaModel
+from .interfaces import SupportsCrossEncoding, SupportsV0Only
 
 
 class RobertaEmbedding(nn.Module):
@@ -121,30 +98,6 @@ class RobertaEmbedding(nn.Module):
 
 
 # Adapted from transformers
-def create_position_ids_from_input_ids(input_ids,
-                                       padding_idx,
-                                       past_key_values_length=0):
-    """
-    Replace non-padding symbols with their position numbers.
-    Position numbers begin at padding_idx+1. Padding symbols
-    are ignored. This is modified from fairseq's `utils.make_positions`.
-
-    Args:
-        x: torch.Tensor x:
-
-    Returns: torch.Tensor
-    """
-    # The series of casts and type-conversions here are carefully
-    # balanced to both work with ONNX export and XLA.
-    mask = input_ids.ne(padding_idx).int()
-
-    incremental_indices = (torch.cumsum(mask, dim=0).type_as(mask) +
-                           past_key_values_length) * mask
-
-    return incremental_indices.long() + padding_idx
-
-
-# Adapted from transformers
 class RobertaClassificationHead(nn.Module):
     """Head for sentence-level classification tasks."""
 
@@ -174,12 +127,16 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
 
     def _build_model(self,
                      vllm_config: VllmConfig,
-                     prefix: str = "") -> BertModel:
-        return BertModel(vllm_config=vllm_config,
-                         prefix=prefix,
-                         embedding_class=RobertaEmbedding)
+                     prefix: str = "") -> Union[BertModel, BertWithRope]:
+        if (vllm_config.model_config.hf_config.position_embedding_type ==
+                "rotary"):
+            return JinaRobertaModel(vllm_config=vllm_config, prefix=prefix)
+        else:
+            return BertModel(vllm_config=vllm_config,
+                             prefix=prefix,
+                             embedding_class=RobertaEmbedding)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         weights = self.hf_to_vllm_mapper.apply(weights)
         # Separate weights in "roberta"-prefixed and all else (not in memory).
         # For use with models like FacebookAI/roberta-base.
@@ -192,7 +149,8 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
         assert len(loaded), "Unable to load RobertaEmbeddingModel"
 
 
-class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
+class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding,
+                                       SupportsV0Only):
     """A model that uses Roberta to provide embedding functionalities.
 
    This class encapsulates the BertModel and provides an interface for
@@ -202,6 +160,18 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
        roberta: An instance of BertModel used for forward operations.
        _pooler: An instance of Pooler used for pooling operations.
    """
+
+    jina_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={
+            'emb_ln': "embeddings.LayerNorm",
+            'layers': "layer",
+            'mixer.Wqkv': "attention.self.qkv_proj",
+            'mixer.out_proj': "attention.output.dense",
+            'norm1': "attention.output.LayerNorm",
+            'mlp.fc1': "intermediate.dense",
+            'mlp.fc2': "output.dense",
+            'norm2': "output.LayerNorm",
+        })
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -218,9 +188,10 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
         self.classifier = RobertaClassificationHead(config)
         self._pooler = CrossEncodingPooler(config, self.classifier)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         bert_weights, task_weights = roberta_task_weights_filter(weights)
+        bert_weights = self.jina_to_vllm_mapper.apply(bert_weights)
+
         self.roberta.load_weights(bert_weights)
 
         params_dict = dict(self.named_parameters())
@@ -243,16 +214,60 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
         self,
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         token_type_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         return self.roberta(input_ids=input_ids,
                             position_ids=positions,
-                            kv_caches=kv_caches,
                             inputs_embeds=inputs_embeds,
                             intermediate_tensors=intermediate_tensors,
-                            attn_metadata=attn_metadata,
                             token_type_ids=token_type_ids)
+
+
+# Adapted from transformers
+def create_position_ids_from_input_ids(input_ids,
+                                       padding_idx,
+                                       past_key_values_length=0):
+    """
+    Replace non-padding symbols with their position numbers.
+    Position numbers begin at padding_idx+1. Padding symbols
+    are ignored. This is modified from fairseq's `utils.make_positions`.
+
+    Args:
+        x: torch.Tensor x:
+
+    Returns: torch.Tensor
+    """
+    # The series of casts and type-conversions here are carefully
+    # balanced to both work with ONNX export and XLA.
+    mask = input_ids.ne(padding_idx).int()
+
+    incremental_indices = (torch.cumsum(mask, dim=0).type_as(mask) +
+                           past_key_values_length) * mask
+
+    return incremental_indices.long() + padding_idx
+
+
+def roberta_task_weights_filter(
+    all_weights: Iterable[tuple[str, torch.Tensor]]
+) -> tuple[Iterable[tuple[str, torch.Tensor]], Iterable[tuple[str,
+                                                              torch.Tensor]]]:
+    """
+    Separate task-specific weights that are applied on top
+    of the encoder-decoder bert base.
+    To do so, return two generators over the original iterator.
+    Also, remove the "roberta." prefix to make it loadable
+    from vanilla BertModel.
+    """
+    # Copy of a lazy iterator without in-memory overhead so both
+    # iterators can be iterated upon independently.
+    all_weights1, all_weights2 = itertools.tee(all_weights)
+
+    def encoder_decoder_weights():
+        for name, weight in all_weights1:
+            if name.startswith("roberta."):
+                yield (name[len("roberta."):], weight)
+
+    return encoder_decoder_weights(), ((n, w) for n, w in all_weights2
+                                       if not n.startswith("roberta."))

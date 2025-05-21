@@ -4,7 +4,6 @@ import argparse
 import dataclasses
 import os
 import time
-from typing import List
 
 import numpy as np
 import torch_xla.debug.profiler as xp
@@ -24,7 +23,7 @@ def main(args: argparse.Namespace):
 
     engine_args = EngineArgs.from_cli_args(args)
     llm = LLM(**dataclasses.asdict(engine_args))
-    _ = xp.start_server(9012)
+    server = xp.start_server(9012)  # noqa: F841
 
     sampling_params = SamplingParams(
         temperature=0.0,
@@ -35,7 +34,7 @@ def main(args: argparse.Namespace):
     dummy_prompt_token_ids = np.random.randint(10000,
                                                size=(args.batch_size,
                                                      args.input_len))
-    dummy_prompts: List[PromptType] = [{
+    dummy_prompts: list[PromptType] = [{
         "prompt_token_ids": batch
     } for batch in dummy_prompt_token_ids.tolist()]
 

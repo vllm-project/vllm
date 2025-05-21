@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List, Optional
-from typing import Sequence as GenericSequence
+from collections.abc import Sequence as GenericSequence
+from typing import Optional
 
 import torch
 import torch.types
@@ -125,11 +125,11 @@ class PackedLoRALayerWeights(LoRALayerWeights):
         self,
         module_name: str,
         rank: int,
-        lora_alphas: List[Optional[int]],
-        lora_a: List[Optional[torch.Tensor]],
-        lora_b: List[Optional[torch.Tensor]],
-        bias: Optional[List[Optional[torch.Tensor]]] = None,
-        scaling: Optional[List[float]] = None,
+        lora_alphas: list[Optional[int]],
+        lora_a: list[Optional[torch.Tensor]],
+        lora_b: list[Optional[torch.Tensor]],
+        bias: Optional[list[Optional[torch.Tensor]]] = None,
+        scaling: Optional[list[float]] = None,
     ) -> None:
         super().__init__(
             module_name=module_name,

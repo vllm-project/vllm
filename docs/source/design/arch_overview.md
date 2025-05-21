@@ -52,8 +52,8 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
-More API details can be found in the {doc}`Offline Inference
-</api/offline_inference/index>` section of the API docs.
+More API details can be found in the [Offline Inference]
+(#offline-inference-api) section of the API docs.
 
 The code for the `LLM` class can be found in <gh-file:vllm/entrypoints/llm.py>.
 
@@ -66,7 +66,7 @@ This server can be started using the `vllm serve` command.
 vllm serve <model>
 ```
 
-The code for the `vllm` CLI can be found in <gh-file:vllm/scripts.py>.
+The code for the `vllm` CLI can be found in <gh-file:vllm/entrypoints/cli/main.py>.
 
 Sometimes you may see the API server entrypoint used directly instead of via the
 `vllm` CLI command. For example:

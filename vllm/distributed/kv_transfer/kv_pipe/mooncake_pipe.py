@@ -2,13 +2,15 @@
 
 import json
 import os
-import pickle
+import struct
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Optional, Union
 
 import torch
 import zmq
+from safetensors.torch import load as safetensors_load
+from safetensors.torch import save as safetensors_save
 
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_pipe.base import KVPipeBase
@@ -56,14 +58,14 @@ class MooncakeTransferEngine:
 
     def __init__(self, kv_rank: int, local_rank: int):
         try:
-            import mooncake_vllm_adaptor as mva
+            from mooncake.engine import TransferEngine
         except ImportError as e:
             raise ImportError(
                 "Please install mooncake by following the instructions at "
                 "https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/build.md "  # noqa: E501
                 "to run vLLM with MooncakeConnector.") from e
 
-        self.engine = mva.mooncake_vllm_adaptor()
+        self.engine = TransferEngine()
         self.local_rank = local_rank
 
         try:
@@ -114,14 +116,14 @@ class MooncakeTransferEngine:
         p_rank_offset = int(p_port) + 8 + self.local_rank * 2
         d_rank_offset = int(d_port) + 8 + self.local_rank * 2
         if kv_rank == 0:
-            self.sender_socket.bind(f"tcp://*:{p_rank_offset + 1}")
+            self.sender_socket.bind(f"tcp://{p_host}:{p_rank_offset + 1}")
             self.receiver_socket.connect(f"tcp://{d_host}:{d_rank_offset + 1}")
             self.sender_ack.connect(f"tcp://{d_host}:{d_rank_offset + 2}")
-            self.receiver_ack.bind(f"tcp://*:{p_rank_offset + 2}")
+            self.receiver_ack.bind(f"tcp://{p_host}:{p_rank_offset + 2}")
         else:
             self.receiver_socket.connect(f"tcp://{p_host}:{p_rank_offset + 1}")
-            self.sender_socket.bind(f"tcp://*:{d_rank_offset + 1}")
-            self.receiver_ack.bind(f"tcp://*:{d_rank_offset + 2}")
+            self.sender_socket.bind(f"tcp://{d_host}:{d_rank_offset + 1}")
+            self.receiver_ack.bind(f"tcp://{d_host}:{d_rank_offset + 2}")
             self.sender_ack.connect(f"tcp://{p_host}:{p_rank_offset + 2}")
 
     def initialize(self, local_hostname: str, metadata_server: str,
@@ -137,14 +139,14 @@ class MooncakeTransferEngine:
             if metadata_backend not in supported_backend:
                 raise ValueError(
                     "Mooncake Configuration error. `metadata_backend`"
-                    f"should be one of {supported_backend}.")
+                    f" should be one of {supported_backend}.")
 
-            self.engine.initializeExt(local_hostname, metadata_server,
-                                      protocol, device_name, metadata_backend)
+            self.engine.initialize_ext(local_hostname, metadata_server,
+                                       protocol, device_name, metadata_backend)
 
     def allocate_managed_buffer(self, length: int) -> int:
         """Allocate a managed buffer of the specified length."""
-        ret = self.engine.allocateManagedBuffer(length)
+        ret = self.engine.allocate_managed_buffer(length)
         if ret <= 0:
             logger.error("Allocation Return Error")
             raise Exception("Allocation Return Error")
@@ -152,13 +154,13 @@ class MooncakeTransferEngine:
 
     def free_managed_buffer(self, buffer: int, length: int) -> int:
         """Free a previously allocated managed buffer."""
-        return self.engine.freeManagedBuffer(buffer, length)
+        return self.engine.free_managed_buffer(buffer, length)
 
     def transfer_sync(self, buffer: int, peer_buffer_address: int,
                       length: int) -> int:
         """Synchronously transfer data to the specified address."""
-        ret = self.engine.transferSync(self.remote_url, buffer,
-                                       peer_buffer_address, length)
+        ret = self.engine.transfer_sync_read(self.remote_url, buffer,
+                                             peer_buffer_address, length)
         if ret < 0:
             logger.error("Transfer Return Error")
             raise Exception("Transfer Return Error")
@@ -167,15 +169,15 @@ class MooncakeTransferEngine:
     def write_bytes_to_buffer(self, buffer: int, user_data: bytes,
                               length: int) -> int:
         """Write bytes to the allocated buffer."""
-        return self.engine.writeBytesToBuffer(buffer, user_data, length)
+        return self.engine.write_bytes_to_buffer(buffer, user_data, length)
 
     def read_bytes_from_buffer(self, buffer: int, length: int) -> bytes:
         """Read bytes from the allocated buffer."""
-        return self.engine.readBytesFromBuffer(buffer, length)
+        return self.engine.read_bytes_from_buffer(buffer, length)
 
     def wait_for_ack(self, src_ptr: int, length: int) -> None:
         """Asynchronously wait for ACK from the receiver."""
-        ack = self.sender_ack.recv_pyobj()
+        ack = self.sender_ack.recv()
         if ack != b'ACK':
             logger.error("Failed to receive ACK from the receiver")
 
@@ -186,18 +188,22 @@ class MooncakeTransferEngine:
         length = len(user_data)
         src_ptr = self.allocate_managed_buffer(length)
         self.write_bytes_to_buffer(src_ptr, user_data, length)
-        self.sender_socket.send_pyobj((src_ptr, length))
+        self.sender_socket.send_multipart(
+            [struct.pack("!Q", src_ptr),
+             struct.pack("!Q", length)])
         self.buffer_cleaner.submit(self.wait_for_ack, src_ptr, length)
 
     def recv_bytes(self) -> bytes:
         """Receive bytes from the remote process."""
-        src_ptr, length = self.receiver_socket.recv_pyobj()
+        data = self.receiver_socket.recv_multipart()
+        src_ptr = struct.unpack("!Q", data[0])[0]
+        length = struct.unpack("!Q", data[1])[0]
         dst_ptr = self.allocate_managed_buffer(length)
         self.transfer_sync(dst_ptr, src_ptr, length)
         ret = self.read_bytes_from_buffer(dst_ptr, length)
 
         # Buffer cleanup
-        self.receiver_ack.send_pyobj(b'ACK')
+        self.receiver_ack.send(b'ACK')
         self.free_managed_buffer(dst_ptr, length)
 
         return ret
@@ -237,14 +243,13 @@ class MooncakePipe(KVPipeBase):
         return hash(tensor.data_ptr())
 
     def _send_impl(self, tensor: torch.Tensor) -> None:
-        """Implement the tensor sending logic."""
-        value_bytes = pickle.dumps(tensor)
-        self.transfer_engine.send_bytes(value_bytes)
+        """Implement the tensor sending logic using safetensors."""
+        self.transfer_engine.send_bytes(safetensors_save({"tensor": tensor}))
 
     def _recv_impl(self) -> torch.Tensor:
-        """Implement the tensor receiving logic."""
+        """Implement the tensor receiving logic using safetensors."""
         data = self.transfer_engine.recv_bytes()
-        return pickle.loads(data)
+        return safetensors_load(data)["tensor"].to(self.device)
 
     def send_tensor(self, tensor: Optional[torch.Tensor]) -> None:
         """Send tensor to the target process."""

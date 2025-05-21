@@ -21,7 +21,13 @@ static __device__ __forceinline__ int8_t float_to_int8_rn(float const x) {
   // round
   float dst = std::nearbyint(x);
   // saturate
-  dst = std::clamp(dst, i8_min, i8_max);
+
+  // See https://github.com/pytorch/pytorch/issues/127666
+  // See https://github.com/llvm/llvm-project/issues/95183
+  // hip-clang std::clamp __glibcxx_assert_fail host function when building on
+  // Arch/gcc14. The following replaces std::clamp usage with similar logic
+  // dst = std::clamp(dst, i8_min, i8_max);
+  dst = (dst < i8_min) ? i8_min : (dst > i8_max) ? i8_max : dst;
   return static_cast<int8_t>(dst);
 #else
   // CUDA path
@@ -31,9 +37,11 @@ static __device__ __forceinline__ int8_t float_to_int8_rn(float const x) {
 #endif
 }
 
-static __device__ __forceinline__ FP8_TYPE float_to_fp8(float const x) {
-  float const r = fmax(-FP8_E4M3_MAX, fmin(x, FP8_E4M3_MAX));
-  return static_cast<FP8_TYPE>(r);
+template <typename fp8_type>
+static __device__ __forceinline__ fp8_type float_to_fp8(float const x) {
+  float const r =
+      fmax(-quant_type_max_v<fp8_type>, fmin(x, quant_type_max_v<fp8_type>));
+  return static_cast<fp8_type>(r);
 }
 
 template <typename quant_type_t, bool is_scale_inverted, typename enable = void>
@@ -54,15 +62,16 @@ struct ScaledQuant<
 };
 
 template <typename quant_type_t, bool is_scale_inverted>
-struct ScaledQuant<
-    quant_type_t, is_scale_inverted,
-    typename std::enable_if_t<std::is_same_v<quant_type_t, FP8_TYPE>>> {
+struct ScaledQuant<quant_type_t, is_scale_inverted,
+                   typename std::enable_if_t<
+                       std::is_same_v<quant_type_t, c10::Float8_e4m3fn> ||
+                       std::is_same_v<quant_type_t, c10::Float8_e4m3fnuz>>> {
   static __device__ __forceinline__ quant_type_t quant_fn(float const x,
                                                           float const scale) {
     if constexpr (is_scale_inverted) {
-      return float_to_fp8(x * scale);
+      return float_to_fp8<quant_type_t>(x * scale);
     } else {
-      return float_to_fp8(x / scale);
+      return float_to_fp8<quant_type_t>(x / scale);
     }
   }
 };

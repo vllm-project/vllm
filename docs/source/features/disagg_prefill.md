@@ -21,11 +21,11 @@ Disaggregated prefill DOES NOT improve throughput.
 
 ## Usage example
 
-Please refer to `examples/online_serving/disaggregated_prefill.sh` for the example usage of disaggregated prefilling.
+Please refer to <gh-file:examples/online_serving/disaggregated_prefill.sh> for the example usage of disaggregated prefilling.
 
 ## Benchmarks
 
-Please refer to `benchmarks/disagg_benchmarks/` for disaggregated prefilling benchmarks.
+Please refer to <gh-file:benchmarks/disagg_benchmarks> for disaggregated prefilling benchmarks.
 
 ## Development
 

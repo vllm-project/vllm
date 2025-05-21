@@ -24,7 +24,15 @@ To isolate the model downloading and loading issue, you can use the `--load-form
 
 ## Out of memory
 
-If the model is too large to fit in a single GPU, you will get an out-of-memory (OOM) error. Consider [using tensor parallelism](#distributed-serving) to split the model across multiple GPUs. In that case, every process will read the whole model and split it into chunks, which makes the disk reading time even longer (proportional to the size of tensor parallelism). You can convert the model checkpoint to a sharded checkpoint using <gh-file:examples/offline_inference/save_sharded_state.py>. The conversion process might take some time, but later you can load the sharded checkpoint much faster. The model loading time should remain constant regardless of the size of tensor parallelism.
+If the model is too large to fit in a single GPU, you will get an out-of-memory (OOM) error. Consider adopting [these options](#reducing-memory-usage) to reduce the memory consumption.
+
+## Generation quality changed
+
+In v0.8.0, the source of default sampling parameters was changed in <gh-pr:12622>. Prior to v0.8.0, the default sampling parameters came from vLLM's set of neutral defaults. From v0.8.0 onwards, the default sampling parameters come from the `generation_config.json` provided by the model creator.
+
+In most cases, this should lead to higher quality responses, because the model creator is likely to know which sampling parameters are best for their model. However, in some cases the defaults provided by the model creator can lead to degraded performance.
+
+You can check if this is happening by trying the old defaults with `--generation-config vllm` for online and `generation_config="vllm"` for offline. If, after trying this, your generation quality improves we would recommend continuing to use the vLLM defaults and petition the model creator on <https://huggingface.co> to update their default `generation_config.json` so that it produces better quality generations.
 
 ## Enable more logging
 
@@ -94,20 +102,20 @@ pynccl.disabled = False
 s = torch.cuda.Stream()
 with torch.cuda.stream(s):
     data.fill_(1)
-    pynccl.all_reduce(data, stream=s)
-    value = data.mean().item()
+    out = pynccl.all_reduce(data, stream=s)
+    value = out.mean().item()
     assert value == world_size, f"Expected {world_size}, got {value}"
 
 print("vLLM NCCL is successful!")
 
 g = torch.cuda.CUDAGraph()
 with torch.cuda.graph(cuda_graph=g, stream=s):
-    pynccl.all_reduce(data, stream=torch.cuda.current_stream())
+    out = pynccl.all_reduce(data, stream=torch.cuda.current_stream())
 
 data.fill_(1)
 g.replay()
 torch.cuda.current_stream().synchronize()
-value = data.mean().item()
+value = out.mean().item()
 assert value == world_size, f"Expected {world_size}, got {value}"
 
 print("vLLM NCCL with cuda graph is successful!")
@@ -253,6 +261,10 @@ ValueError: Model architectures ['<arch>'] are not supported for now. Supported 
 ```
 
 But you are sure that the model is in the [list of supported models](#supported-models), there may be some issue with vLLM's model resolution. In that case, please follow [these steps](#model-resolution) to explicitly specify the vLLM implementation for the model.
+
+## Failed to infer device type
+
+If you see an error like `RuntimeError: Failed to infer device type`, it means that vLLM failed to infer the device type of the runtime environment. You can check [the code](gh-file:vllm/platforms/__init__.py) to see how vLLM infers the device type and why it is not working as expected. After [this PR](gh-pr:14195), you can also set the environment variable `VLLM_LOGGING_LEVEL=DEBUG` to see more detailed logs to help debug the issue.
 
 ## Known Issues
 
