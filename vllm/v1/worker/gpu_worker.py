@@ -257,16 +257,12 @@ class Worker(WorkerBase):
             max_num_reqs = min(self.scheduler_config.max_num_seqs,
                                self.scheduler_config.max_num_batched_tokens)
 
-            if isinstance(self.model_runner, GPUPoolingModelRunner):
-                hidden_states, num_reqs = \
-                    self.model_runner._dummy_run(num_tokens=max_num_reqs)
-                self.model_runner._dummy_pooler_run(max_num_reqs, num_reqs,
-                                                    hidden_states)
-            else:
-                last_hidden_states = \
-                    self.model_runner._dummy_run(num_tokens=max_num_reqs)
-                self.model_runner._dummy_sampler_run(
-                    hidden_states=last_hidden_states)
+            hidden_states, num_scheduled_tokens = self.model_runner._dummy_run(
+                num_tokens=max_num_reqs)
+
+            self.model_runner._dummy_task_run(hidden_states,
+                                              num_scheduled_tokens,
+                                              max_num_reqs)
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.

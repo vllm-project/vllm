@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import Optional, cast
+from typing import Generic, Optional, TypeVar, cast
 
 import numpy as np
 import torch
@@ -38,7 +38,10 @@ class BaseRequestState:
         raise NotImplementedError
 
 
-class BaseInputBatch:
+RequestState = TypeVar("RequestState", bound=BaseRequestState)
+
+
+class BaseInputBatch(Generic[RequestState]):
 
     def __init__(
         self,
@@ -99,15 +102,25 @@ class BaseInputBatch:
         self.lora_id_to_request_ids: dict[int, set[str]] = {}
         self.lora_id_to_lora_request: dict[int, LoRARequest] = {}
 
+    def refresh(self):
+        pass
+
     @property
     def req_ids(self) -> list[str]:
         # None elements should only be present transiently
         # while performing state updates to the batch.
         return cast(list[str], self._req_ids)
 
+    def add_request(
+        self,
+        request: RequestState,
+        req_index: Optional[int] = None,
+    ) -> None:
+        raise NotImplementedError
+
     def _add_request(
         self,
-        request: "BaseRequestState",
+        request: RequestState,
         req_index: Optional[int] = None,
     ) -> int:
         if req_index is None:

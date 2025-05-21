@@ -12,7 +12,8 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
-from vllm.v1.worker.abstract import BaseInputBatch, BaseRequestState
+from vllm.v1.worker.gpu_base_input_batch import (BaseInputBatch,
+                                                 BaseRequestState)
 
 _SAMPLING_EPS = 1e-5
 
@@ -35,7 +36,7 @@ class SamplingRequestState(BaseRequestState):
             return self.output_token_ids[idx - self.num_prompt_tokens]
 
 
-class InputBatch(BaseInputBatch):
+class InputBatch(BaseInputBatch[SamplingRequestState]):
 
     def __init__(
         self,
@@ -359,7 +360,7 @@ class InputBatch(BaseInputBatch):
 
         super().condense(empty_req_indices)
 
-    def refresh_sampling_metadata(self):
+    def refresh(self):
         self.sampling_metadata = self._make_sampling_metadata()
 
     def _make_sampling_metadata(self) -> SamplingMetadata:

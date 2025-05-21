@@ -24,7 +24,7 @@ from vllm.v1.worker.block_table import BlockTable
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.worker.abstract import BaseInputBatch
+    from vllm.v1.worker.gpu_base_input_batch import BaseInputBatch
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 if current_platform.is_cuda():

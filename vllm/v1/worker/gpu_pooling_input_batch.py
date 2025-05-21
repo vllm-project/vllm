@@ -10,7 +10,8 @@ import torch
 from vllm.pooling_params import PoolingParams
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.pool.metadata import PoolingMetadata
-from vllm.v1.worker.abstract import BaseInputBatch, BaseRequestState
+from vllm.v1.worker.gpu_base_input_batch import (BaseInputBatch,
+                                                 BaseRequestState)
 
 
 @dataclass
