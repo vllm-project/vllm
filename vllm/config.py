@@ -398,7 +398,7 @@ class ModelConfig:
                 # only the attention layer itself is aware of the sliding
                 # window, and use the window size to compute the attention.
                 self.hf_text_config.interleaved_sliding_window = sliding_window
-                delattr(self.hf_text_config, "sliding_window")
+                # delattr(self.hf_text_config, "sliding_window")
                 sliding_window = None
 
         self.max_model_len = _get_and_verify_max_len(
@@ -865,7 +865,7 @@ class ModelConfig:
         if self.is_attention_free:
             return 0
 
-        if hasattr(self.hf_text_config, "head_dim"):
+        if hasattr(self.hf_text_config, "head_dim") and self.hf_text_config.head_dim is not None:
             return self.hf_text_config.head_dim
         # FIXME(woosuk): This may not be true for all models.
         return (self.hf_text_config.hidden_size //

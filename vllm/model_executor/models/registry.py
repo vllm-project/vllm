@@ -174,6 +174,7 @@ _MULTIMODAL_MODELS = {
     "GLM4VForCausalLM": ("glm4v", "GLM4VForCausalLM"),
     "H2OVLChatModel": ("h2ovl", "H2OVLChatModel"),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
+    # "InternVLForConditionalGeneration": ("internvl", "InternVLForConditionalGeneration"), # noqa: E501
     "Idefics3ForConditionalGeneration":("idefics3","Idefics3ForConditionalGeneration"),
     "LlavaForConditionalGeneration": ("llava", "LlavaForConditionalGeneration"),
     "LlavaNextForConditionalGeneration": ("llava_next", "LlavaNextForConditionalGeneration"),  # noqa: E501
@@ -210,8 +211,8 @@ _SPECULATIVE_DECODING_MODELS = {
 }
 
 _TRANSFORMERS_MODELS = {
-    "TransformersForCausalLM": ("transformers", "TransformersForCausalLM"),
     "TransformersForMultimodalLM": ("transformers", "TransformersForMultimodalLM"),
+    "TransformersForCausalLM": ("transformers", "TransformersForCausalLM"),
 }
 # yapf: enable
 
@@ -438,7 +439,9 @@ class _ModelRegistry:
 
         # make sure Transformers backend is put at the last as a fallback
         if len(normalized_arch) != len(architectures):
-            normalized_arch.extend(["TransformersForCausalLM", "TransformersForMultimodalLM"])
+            # The order matters. If causal comes first, checks on MM model fails because it is not registered in MultimodalRegistry
+            # TODO: needs help from vLLM team
+            normalized_arch.extend(["TransformersForMultimodalLM", "TransformersForCausalLM"])
         return normalized_arch
 
     def inspect_model_cls(
@@ -446,7 +449,6 @@ class _ModelRegistry:
         architectures: Union[str, List[str]],
     ) -> Tuple[_ModelInfo, str]:
         architectures = self._normalize_archs(architectures)
-
         for arch in architectures:
             model_info = self._try_inspect_model_cls(arch)
             if model_info is not None:
