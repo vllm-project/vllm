@@ -218,7 +218,7 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder):
             )
         }
 
-        prompt_text = video_token*num_videos if num_videos else image_token*num_images
+        prompt_text = image_token*num_images
         return ProcessorInputs(
             prompt_text=prompt_text,
             mm_data=mm_data,
@@ -544,7 +544,7 @@ class TransformersModel(nn.Module):
                 new_param = type(param)(new_param)
                 module._parameters[name] = new_param
         for child in module.children():
-            self.init_parameters(child)
+            self.meta_to_empty(child)
 
     def get_input_embeddings(self) -> nn.Module:
         return self.model.get_input_embeddings()
@@ -725,8 +725,6 @@ class TransformersForMultimodalLM(nn.Module, SupportsQuant, SupportsLoRA,
         else:
             self.lm_head = PPMissingLayer()
 
-        self.sampler = get_sampler()
-
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
@@ -771,12 +769,6 @@ class TransformersForMultimodalLM(nn.Module, SupportsQuant, SupportsLoRA,
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
-
-    def sample(self, logits: torch.Tensor,
-               sampling_metadata: SamplingMetadata) -> Optional[SamplerOutput]:
-
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
