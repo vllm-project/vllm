@@ -150,7 +150,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         assert (num_heads == 16 or num_heads == 128), (
             f"Aiter MLA only supports 16 or 128 number of heads.\n"
             f"Provided {num_heads} number of heads.\n"
-            "Try increasing tensor_parallel_size value.")
+            "Try adjusting tensor_parallel_size value.")
         unsupported_features = [
             alibi_slopes, sliding_window, blocksparse_params, logits_soft_cap
         ]
