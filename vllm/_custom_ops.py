@@ -1737,8 +1737,8 @@ def cutlass_mla_decode(out: torch.Tensor, q_nope: torch.Tensor,
 
 
 def store_tensor(device_tensor: torch.Tensor, host_tensor: torch.Tensor):
-    torch.ops._C.store_tensor(device_tensor, host_tensor)
+    torch.ops._C_mem_pool.store_tensor(device_tensor, host_tensor)
 
 
 def load_tensor(host_tensor: torch.Tensor, device_tensor: torch.Tensor):
-    torch.ops._C.load_tensor(host_tensor, device_tensor)
+    torch.ops._C_mem_pool.load_tensor(host_tensor, device_tensor)
