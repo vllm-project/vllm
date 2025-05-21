@@ -570,9 +570,9 @@ class NixlConnectorWorker:
             for block_id in range(self.num_blocks):
                 block_offset = block_id * self.block_len
                 # (addr, len, device id)
-                blocks_data.append((base_addr + block_offset, self.block_len,
-                                    self.unique_rank))
-        logger.debug("Created %s blocks for src engine %s and unique rank %s",
+                blocks_data.append(
+                    (base_addr + block_offset, self.block_len, self.rank))
+        logger.debug("Created %s blocks for src engine %s and TP rank %s",
                      len(blocks_data), self.engine_id, self.unique_rank)
 
         # Register with NIXL.
@@ -587,10 +587,10 @@ class NixlConnectorWorker:
             for block_id in range(nixl_agent_meta.num_blocks):
                 block_offset = block_id * self.block_len
                 # (addr, len, device id)
-                blocks_data.append((base_addr + block_offset, self.block_len,
-                                    self.unique_rank))
-        logger.debug("Created %s blocks for dst engine %s and unique rank %s",
-                     len(blocks_data), engine_id, self.unique_rank)
+                blocks_data.append(
+                    (base_addr + block_offset, self.block_len, self.rank))
+        logger.debug("Created %s blocks for dst engine %s and TP rank %s",
+                     len(blocks_data), engine_id, self.rank)
 
         # Register with NIXL.
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, "VRAM")
