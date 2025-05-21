@@ -537,7 +537,8 @@ class ModelConfig:
         self.dtype = _get_and_verify_dtype(self.hf_config, self.dtype)
 
         # Workaround for Gemma 2 which uses interleaved sliding window
-        # attention, but it's not specified in its config.
+        # attention, but it's not specified in its config. TODO: remove this
+        # when Gemma 2 is fixed in Transformers.
         if self.hf_text_config.model_type == "gemma2":
             self.hf_text_config.sliding_window_pattern = 2
 
