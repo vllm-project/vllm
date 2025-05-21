@@ -20,8 +20,6 @@ class HPUPagedAttentionMetadata:
     block_list: Optional[torch.Tensor]
     block_mapping: Optional[torch.Tensor]
     block_usage: Optional[torch.Tensor]
-    block_indices: Optional[torch.Tensor]
-    block_offsets: Optional[torch.Tensor]
     block_groups: Optional[torch.Tensor]
 
 
@@ -38,7 +36,7 @@ class HPUPagedAttention:
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
-        return (num_blocks, block_size, num_kv_heads, head_size)
+        return (num_blocks * block_size, num_kv_heads, head_size)
 
     @staticmethod
     def split_kv_cache(

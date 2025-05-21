@@ -412,18 +412,6 @@ class HpuModelAdapter(torch.nn.Module):
         metadata = TrimmedAttentionMetadata(**metadata_dict)  # type: ignore
         return metadata
 
-    def _set_indices_and_offsets(self, metadata, block_size, is_prompt):
-        slot_mapping = metadata.slot_mapping.flatten()
-        indices = torch.div(slot_mapping, block_size, rounding_mode="floor")
-        if is_prompt and metadata.block_list is None:
-            indices = indices.unflatten(0, (-1, block_size))[:, 0]
-            offsets = None
-        else:
-            offsets = torch.fmod(slot_mapping, block_size)
-        metadata = metadata._replace(block_offsets=offsets,
-                                     block_indices=indices)
-        return metadata
-
     def _update_metadata(self, attn_metadata, batch_size, seq_len, device,
                          dtype):
         if attn_metadata.is_prompt:
@@ -432,9 +420,6 @@ class HpuModelAdapter(torch.nn.Module):
         else:
             attn_metadata = self._set_block_mapping(attn_metadata, batch_size,
                                                     device, dtype)
-        attn_metadata = self._set_indices_and_offsets(attn_metadata,
-                                                      self.block_size,
-                                                      attn_metadata.is_prompt)
         return attn_metadata
 
     def _prepare_cos_sin(self, positions):
@@ -552,7 +537,7 @@ def trim_attn_metadata(metadata: HPUAttentionMetadataV1) -> object:
     attention_metadata = subtuple(metadata, 'TrimmedAttentionMetadata', [
         'attn_bias', 'seq_lens_tensor', 'context_lens_tensor', 'block_list',
         'block_mapping', 'block_usage', 'slot_mapping', 'is_prompt',
-        'block_indices', 'block_offsets', 'block_groups'
+        'block_size', 'block_groups'
     ])
     return attention_metadata
 
@@ -1262,7 +1247,9 @@ class HPUModelRunner:
                     num_prefill_tokens=sum(batch_num_scheduled_tokens),
                     input_positions=None,
                     slot_mapping=slot_mapping_device,
-                    block_list=block_list_device)
+                    block_list=block_list_device,
+                    block_size=self.block_size,
+                )
             else:
                 attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
                     seq_lens_tensor=seq_lens_tensor_device,
@@ -1270,6 +1257,7 @@ class HPUModelRunner:
                     num_prefill_tokens=sum(batch_num_scheduled_tokens),
                     input_positions=None,
                     slot_mapping=slot_mapping_device,
+                    block_size=self.block_size,
                 )
             # ATTN_METADATA.
             prefill_attn_metadata.append(attn_metadata)
@@ -1397,6 +1385,7 @@ class HPUModelRunner:
                 input_positions=None,
                 num_decode_tokens=num_decode_tokens_device,
                 slot_mapping=slot_mapping_device,
+                block_size=self.block_size,
             ))
 
     def _prepare_inputs(
@@ -1982,7 +1971,8 @@ class HPUModelRunner:
                 num_prefills=batch_size,
                 num_prefill_tokens=batch_size * seq_or_block,
                 input_positions=None,
-                slot_mapping=slot_mapping_device)
+                slot_mapping=slot_mapping_device,
+                block_size=self.block_size)
         else:
             block_tables = [
                 x.tolist()
@@ -2004,7 +1994,8 @@ class HPUModelRunner:
                 block_groups=block_groups_device,
                 num_decode_tokens=batch_size,
                 input_positions=None,
-                slot_mapping=slot_mapping_device)
+                slot_mapping=slot_mapping_device,
+                block_size=self.block_size)
 
         logits_indices = torch.arange(0, batch_size, device='cpu')
         logits_indices_device = _async_h2d_tensor_copy(logits_indices,
