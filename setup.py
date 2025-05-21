@@ -72,7 +72,7 @@ def is_ninja_available() -> bool:
 def is_cmake_available() -> bool:
     return which("cmake") is not None
 
-  
+
 def is_url_available(url: str) -> bool:
     from urllib.request import urlopen
 
