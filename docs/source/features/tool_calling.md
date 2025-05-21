@@ -164,7 +164,7 @@ Other tool calling formats like the built in python tool calling or custom tool 
 
 Known issues:
 
-1. Parallel tool calls are not supported for llama 3, but it is support in llama 4 models.
+1. Parallel tool calls are not supported for llama 3, but it is supported in llama 4 models.
 2. The model can generate parameters with a wrong format, such as generating
    an array serialized as string instead of an array.
 
