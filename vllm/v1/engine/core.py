@@ -373,13 +373,13 @@ class EngineCoreProc(EngineCore):
             coord_in_addr: Optional[str] = addresses.get("coord_in_address")
             coord_out_addr: Optional[str] = addresses.get("coord_out_address")
             self.client_count = len(output_addresses)
-            self.coordinator = coord_out_addr is not None
 
             # Update config which may have changed from the handshake.
             vllm_config.__post_init__()
 
             # Set up data parallel environment.
-            self._init_data_parallel(vllm_config)
+            has_coordinator = coord_out_addr is not None
+            self._init_data_parallel(vllm_config, has_coordinator)
 
             # Initialize engine core and model.
             super().__init__(vllm_config, executor_class, log_stats,
@@ -497,7 +497,8 @@ class EngineCoreProc(EngineCore):
             if engine_core is not None:
                 engine_core.shutdown()
 
-    def _init_data_parallel(self, vllm_config: VllmConfig):
+    def _init_data_parallel(self, vllm_config: VllmConfig,
+                            has_coordinator: bool):
         pass
 
     def run_busy_loop(self):
@@ -540,16 +541,6 @@ class EngineCoreProc(EngineCore):
         # Put EngineCoreOutputs into the output queue.
         for output in outputs.items():
             self.output_queue.put_nowait(output)
-
-        if self.coordinator:
-            # If there is a DP coordinator, publish our request counts
-            # (if they've changed)
-            counts = self.scheduler.get_request_counts()
-            if counts != self.last_counts:
-                self.last_counts = counts
-                stats = SchedulerStats(*counts)
-                self.output_queue.put_nowait(
-                    (-1, EngineCoreOutputs(scheduler_stats=stats)))
 
     def _handle_client_request(self, request_type: EngineCoreRequestType,
                                request: Any) -> None:
@@ -756,7 +747,8 @@ class DPEngineCoreProc(EngineCoreProc):
         super().__init__(vllm_config, on_head_node, handshake_address,
                          executor_class, log_stats, dp_rank)
 
-    def _init_data_parallel(self, vllm_config: VllmConfig):
+    def _init_data_parallel(self, vllm_config: VllmConfig,
+                            has_coordinator: bool):
 
         # Configure GPUs and stateless process group for data parallel.
         dp_rank = vllm_config.parallel_config.data_parallel_rank
@@ -765,6 +757,7 @@ class DPEngineCoreProc(EngineCoreProc):
 
         assert dp_size > 1
         assert 0 <= local_dp_rank <= dp_rank < dp_size
+        assert has_coordinator, "DP Coordinator process must be used for DP>1"
 
         from vllm.platforms import current_platform
         device_control_env_var = current_platform.device_control_env_var
@@ -808,6 +801,15 @@ class DPEngineCoreProc(EngineCoreProc):
         else:
             super()._handle_client_request(request_type, request)
 
+    def _maybe_publish_request_counts(self):
+        # Publish our request counts (if they've changed).
+        counts = self.scheduler.get_request_counts()
+        if counts != self.last_counts:
+            self.last_counts = counts
+            stats = SchedulerStats(*counts)
+            self.output_queue.put_nowait(
+                (-1, EngineCoreOutputs(scheduler_stats=stats)))
+
     def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""
 
@@ -821,6 +823,7 @@ class DPEngineCoreProc(EngineCoreProc):
             if local_unfinished_reqs:
                 # 2) Step the engine core.
                 self._process_engine_step()
+                self._maybe_publish_request_counts()
 
                 # Check if we have now finished all requests.
                 local_unfinished_reqs = (
@@ -833,6 +836,7 @@ class DPEngineCoreProc(EngineCoreProc):
                     # pass but will flush the finished requests to ensure
                     # up-to-date state is returned in the engine outputs.
                     self._process_engine_step()
+                    self._maybe_publish_request_counts()
 
                 if not self.engines_running:
                     # All engines are idle.
