@@ -262,6 +262,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                         device="cpu",
                                         pin_memory=self.pin_memory)
         self.seq_lens_np = self.seq_lens_cpu.numpy()
+        max_num_blocks_per_req = cdiv(self.max_model_len,
+                                      self.cache_config.block_size)
+        self.block_table_cpu_tensor = torch.zeros(
+            (self.max_num_reqs, max_num_blocks_per_req),
+            device="cpu",
+            dtype=torch.int32,
+            pin_memory=self.pin_memory,
+        )
+        self.slot_mapping_cpu_tensor = torch.zeros(self.max_num_tokens,
+                                                   dtype=torch.int64,
+                                                   device="cpu",
+                                                   pin_memory=self.pin_memory)
 
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> bool:
         """
@@ -1957,6 +1969,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             vocab_size=self.model_config.get_vocab_size(),
             kv_cache_config=kv_cache_config,
         )
+        self.input_batch.block_table.block_tables[0].init_block_table_cpu(
+            self.block_table_cpu_tensor, self.slot_mapping_cpu_tensor)
         self.initialize_attn_backend(kv_cache_config)
 
         kv_caches: dict[str, torch.Tensor] = {}

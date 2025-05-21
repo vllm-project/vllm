@@ -31,23 +31,18 @@ class BlockTable:
             device=self.device,
             dtype=torch.int32,
         )
-        self.block_table_cpu = torch.zeros(
-            (max_num_reqs, max_num_blocks_per_req),
-            device="cpu",
-            dtype=torch.int32,
-            pin_memory=pin_memory,
-        )
-        self.block_table_np = self.block_table_cpu.numpy()
         self.num_blocks_per_row = np.zeros(max_num_reqs, dtype=np.int32)
 
-        self.slot_mapping_cpu = torch.zeros(self.max_num_batched_tokens,
-                                            dtype=torch.int64,
-                                            device="cpu",
-                                            pin_memory=self.pin_memory)
-        self.slot_mapping_np = self.slot_mapping_cpu.numpy()
         self.slot_mapping = torch.zeros(self.max_num_batched_tokens,
                                         dtype=torch.int64,
                                         device=self.device)
+
+    def init_block_table_cpu(self, block_table_cpu_tensor: torch.Tensor,
+                             slot_mapping_cpu_tensor: torch.Tensor):
+        self.block_table_cpu = block_table_cpu_tensor
+        self.block_table_np = self.block_table_cpu.numpy()
+        self.slot_mapping_cpu = slot_mapping_cpu_tensor
+        self.slot_mapping_np = self.slot_mapping_cpu.numpy()
 
     def append_row(
         self,
