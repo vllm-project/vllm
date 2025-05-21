@@ -668,6 +668,9 @@ class ModelConfig:
     def _init_pooler_config(self) -> Optional["PoolerConfig"]:
 
         if self.runner_type == "pooling":
+            logger.warning("CUDA graph is not supported for pooling yet, "
+                           "fallback to the eager mode.")
+            self.enforce_eager = True
             if isinstance(self.override_pooler_config, dict):
                 self.override_pooler_config = PoolerConfig(
                     **self.override_pooler_config)
@@ -4310,26 +4313,49 @@ class VllmConfig:
                 "Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
+        disable_cascade_reasons: list[str] = []
+
         if self.compilation_config.full_cuda_graph and \
             not self.model_config.disable_cascade_attn:
-            logger.warning_once(
+            disable_cascade_reasons.append(
                 "full_cuda_graph is not supported with "
                 "cascade attention. Disabling cascade attention.")
-            self.model_config.disable_cascade_attn = True
+
+        disable_chunked_prefill_reasons: list[str] = []
 
         if self.model_config and self.model_config.use_mla and \
             not (current_platform.is_cuda() or current_platform.is_rocm()):
-            logger.info(
+            disable_chunked_prefill_reasons.append(
                 "MLA is enabled on a non-GPU platform; forcing chunked "
                 "prefill and prefix caching to be disabled.")
+
+        if self.model_config and self.model_config.pooler_config:
+            pooling_type = self.model_config.pooler_config.pooling_type
+            if pooling_type is None or pooling_type.lower() != "last":
+                disable_chunked_prefill_reasons.append(
+                    "Only \"last\" pooling supports chunked "
+                    "prefill and prefix caching; disabling both.")
+
+            disable_cascade_reasons.append(
+                "Loaded model for pooling; disabling cascade attention.")
+
+        if disable_chunked_prefill_reasons:
+            for reason in disable_chunked_prefill_reasons:
+                logger.info(reason)
             self.scheduler_config.enable_chunked_prefill = False
             self.scheduler_config.chunked_prefill_enabled = False
+            self.scheduler_config.long_prefill_token_threshold = 0
             self.scheduler_config.max_num_batched_tokens = max(
                 self.scheduler_config.max_model_len,
                 _DEFAULT_MAX_NUM_BATCHED_TOKENS)
 
             if self.cache_config is not None:
                 self.cache_config.enable_prefix_caching = False
+
+        if disable_cascade_reasons:
+            for reason in disable_cascade_reasons:
+                logger.info(reason)
+            self.model_config.disable_cascade_attn = True
 
         if (self.kv_events_config
                 and self.kv_events_config.enable_kv_cache_events
