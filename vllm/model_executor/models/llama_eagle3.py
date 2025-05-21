@@ -251,7 +251,6 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         loaded_weights = loader.load_weights(model_weights.items())
 
         if 'd2t' not in loaded_weights:
-            del self.draft_id_to_target_id
             self.draft_id_to_target_id = None
 
         return loaded_weights
