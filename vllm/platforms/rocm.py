@@ -327,7 +327,8 @@ class RocmPlatform(Platform):
     @classmethod
     def supports_mx(cls) -> bool:
         gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
-        return any(gfx in gcn_arch for gfx in ["gfx95"])
+        disable_mxfp4_kernels = os.getenv("VLLM_QUARK_DISABLE_MXFP4_KERNEL", "0").lower() in ("true", "1")
+        return any(gfx in gcn_arch for gfx in ["gfx95"]) and not disable_mxfp4_kernels
 
     @classmethod
     def supports_fp8(cls) -> bool:
