@@ -515,8 +515,7 @@ class LLM:
         Run a function directly on the model inside each worker,
         returning the result for each of them.
         """
-        executor = self.llm_engine.model_executor
-        return executor.apply_model(func)
+        return self.llm_engine.apply_model(func)
 
     def beam_search(
         self,

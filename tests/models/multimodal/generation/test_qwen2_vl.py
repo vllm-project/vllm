@@ -16,11 +16,9 @@ from ...utils import check_logprobs_close
 
 
 @pytest.fixture(scope="function", autouse=True)
-def use_v0_only(monkeypatch):
-    """
-    V1 Test: batch_make_xxxxx_embeddings calls a V0 internal
-    """
-    monkeypatch.setenv('VLLM_USE_V1', '0')
+def enable_pickle(monkeypatch):
+    """`LLM.apply_model` requires pickling a function."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
 
 models = ["Qwen/Qwen2-VL-2B-Instruct"]
@@ -127,7 +125,6 @@ def batch_make_image_embeddings(
             return visual(pixel_values_on_device,
                           grid_thw=image_grid_thw_on_device)
 
-    # V1 Test: this calls a V0 internal.
     image_embeds = torch.concat(llm.apply_model(get_image_embeds))
 
     # split into original batches
