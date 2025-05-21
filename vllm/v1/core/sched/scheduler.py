@@ -216,7 +216,7 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens,
                     num_lookahead_tokens=self.num_lookahead_tokens)
                 if new_blocks is None:
-                    logger.info("When kv cache allocate in schedule running, new_blocks is None.")
+                    # logger.info("When kv cache allocate in schedule running, new_blocks is None.")
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
                     preempted_req = self.running.pop()
@@ -364,7 +364,7 @@ class Scheduler(SchedulerInterface):
                     num_lookahead_tokens=self.num_lookahead_tokens,
                 )
                 if new_blocks is None:
-                    logger.info("When kv cache allocate in schedule waiting, new_blocks is None.")
+                    # logger.info("When kv cache allocate in schedule waiting, new_blocks is None.")
                     # The request cannot be scheduled.
                     break
 

@@ -838,7 +838,7 @@ class DPAsyncMPClient(AsyncMPClient):
         super().__init__(vllm_config, executor_class, log_stats)
         assert len(self.core_engines) > 1
 
-        # A semaphore is created, the concurrency isn't optimized.
+        # TODO: A semaphore is created, the concurrency isn't optimized.
         # The next step is to design an algorithm to control concurrency nums.
         # self.semaphore = asyncio.Semaphore(vllm_config.parallel_config.data_parallel_size * 256)
         # logger.info(f"Create semaphore: {self.semaphore}, semaphore's value:{self.semaphore._value}.")

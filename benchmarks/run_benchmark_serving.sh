@@ -1,15 +1,18 @@
 #!/bin/bash
 
+#start server command: 
+#vllm serve /home/test/test01/zhushengguang/models/DeepSeek-R1-Distill-Qwen-7B/ -dp 8 -tp 1 
+
 cd /home/test/test01/zhushengguang/CODES/vllm/benchmarks
 #MODEL="/home/test/test01/Llama-2-7b-chat-hf"
-MODEL="/home/test/test01/zhushengguang/models/DeepSeek-R1-Distill-Qwen-7B"
+MODEL="/home/test/test01/zhushengguang/models/DeepSeek-R1-Distill-Qwen-7B/"
 PORT=8000
-# DATASET="random"  # options: sharegpt, random, sonnet, hf, burstgpt
-DATASET="hf"
+DATASET="random"  # options: sharegpt, random, sonnet, hf, burstgpt
+# DATASET="hf"
 # DATASET_PATH="home/test/test01/zhushengguang/Datasets/NuminaMath-CoT"
 DATASET_PATH="AI-MO/aimo-validation-aime"
 # DATASET_PATH="AI-MO/NuminaMath-CoT"
-NUM_PROMPTS=4096
+NUM_PROMPTS=1024
 
 
 #使用cuda12.4
@@ -32,8 +35,9 @@ python3 benchmark_serving.py \
     --dataset-path ${DATASET_PATH} \
     --num-prompts ${NUM_PROMPTS} \
     --ignore-eos \
-    # --random-input-len 1024 \
-    # --random-output-len 128 \
+    --random-input-len 1024 \
+    --random-output-len 16384 \
+    --random-range-ratio 0.9
     # --save-result \
     # --result-dir ./benchmark_results \
     # --append-result \
