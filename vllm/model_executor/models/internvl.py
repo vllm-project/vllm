@@ -1057,8 +1057,8 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
         # Only one image in the current batch
         if len(num_patches) == 1:
-            return image_embeds.view(
-                -1, self.config.text_config.hidden_size).unsqueeze(0)
+            return (image_embeds.view(
+                -1, self.config.text_config.hidden_size), )
 
         # NOTE: Image embeddings are split into separate tensors for each image
         # by the size of each embedding.
@@ -1088,6 +1088,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def _set_visual_token_mask(self, input_ids: torch.Tensor) -> None:
         if self.is_mono:
+            assert self.img_context_token_id is not None
             self.visual_token_mask = (
                 input_ids == self.img_context_token_id).reshape(-1, 1)
         else:
@@ -1128,13 +1129,14 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
-            assert self.img_context_token_id is not None
+            context_token_ids = [token_id for token_id in (self.img_context_token_id, self.video_context_token_id) if token_id is not None]
+            assert len(context_token_ids) >= 1
             self._set_visual_token_mask(input_ids)
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids,
                 inputs_embeds,
                 multimodal_embeddings,
-                self.img_context_token_id,
+                context_token_ids,
             )
         return inputs_embeds
 
