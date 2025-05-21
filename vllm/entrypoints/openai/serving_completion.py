@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+import math
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
 from typing import Optional, Union, cast
@@ -454,6 +455,12 @@ class OpenAIServingCompletion(OpenAIServing):
                 else:
                     logprobs = None
 
+                if output.cumulative_logprob is not None and len(output.token_ids) > 0:
+                    perplexity = math.exp(-output.cumulative_logprob /
+                                          len(output.token_ids))
+                else:
+                    perplexity = None
+
                 choice_data = CompletionResponseChoice(
                     index=len(choices),
                     text=output_text,
@@ -461,6 +468,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     finish_reason=output.finish_reason,
                     stop_reason=output.stop_reason,
                     prompt_logprobs=final_res.prompt_logprobs,
+                    perplexity=perplexity,
                 )
                 choices.append(choice_data)
 

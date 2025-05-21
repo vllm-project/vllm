@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 import time
+import math
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
 from typing import Callable, Final, Optional, Union
@@ -1029,13 +1030,20 @@ class OpenAIServingChat(OpenAIServing):
                                       reasoning_content=reasoning_content,
                                       content=content)
 
+            if output.cumulative_logprob is not None and len(output.token_ids) > 0:
+                perplexity = math.exp(-output.cumulative_logprob /
+                                      len(output.token_ids))
+            else:
+                perplexity = None
+
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,
                 message=message,
                 logprobs=logprobs,
                 finish_reason="tool_calls" if auto_tools_called else
                 output.finish_reason if output.finish_reason else "stop",
-                stop_reason=output.stop_reason)
+                stop_reason=output.stop_reason,
+                perplexity=perplexity)
             choices.append(choice_data)
 
         if request.echo:
