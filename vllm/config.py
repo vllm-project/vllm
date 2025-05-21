@@ -327,6 +327,12 @@ class ModelConfig:
     preventing potential numerical issues. Note that even if this is set to
     False, cascade attention will be only used when the heuristic tells that
     it's beneficial."""
+    disable_forested_cascade_attn = False,
+    """Disable forested cascade attention for V1. While forested cascade attention
+    is beneficial when requests can be split into several groups with large
+    common prefixes, it can lead to high overhead when this is not the case. Like
+    disable_cascade_attn, forested cascade will only be set when heuristics tell it
+    is beneficial. """
     skip_tokenizer_init: bool = False
     """Skip initialization of tokenizer and detokenizer. Expects valid
     `prompt_token_ids` and `None` for prompt from the input. The generated
@@ -382,6 +388,17 @@ class ModelConfig:
     """Initialize non-default pooling config or override default pooling config
     for the pooling model. e.g. `{"pooling_type": "mean", "normalize": false}`.
     """
+    forested_cascade_config: Optional["ForestedCascadeConfig"] = field(init=False)
+    """Forested cascade config controls parameters relevant to forested 
+    cascade attention. Forested cascade is used when multiple groups of requests exist
+    with large common prefixes between each group's request."""
+    override_forested_cascade_config: (
+        Optional)[Union[dict, "ForestedCascadeConfig"]] = None
+    """Initialize non-default forested cascade config or override default config.
+    Increase the absorption threshold parameter when you want more groups or deeper
+    prefixes. Change the allocation method for gathering requests into groups based
+    on the location of their shared prefixes (default optimizes for many longer 
+    common prefixes)."""
     logits_processor_pattern: Optional[str] = None
     """Optional regex pattern specifying valid logits processor qualified names
     that can be passed with the `logits_processors` extra completion argument.
@@ -596,6 +613,7 @@ class ModelConfig:
             self.truncation_side = "right"
 
         self.pooler_config = self._init_pooler_config()
+        self.forested_cascade_config = self._init_forested_cascade_config()
 
         self._verify_quantization()
         self._verify_cuda_graph()
@@ -693,6 +711,15 @@ class ModelConfig:
             return pooler_config
 
         return None
+
+    def _init_forested_cascade_config(self) -> "ForestedCascadeConfig":
+        if isinstance(self.override_forested_cascade_config, dict):
+            self.override_forested_cascade_config = ForestedCascadeConfig(
+                **self.override_forested_cascade_config)
+        forested_cascade_config = (self.override_forested_cascade_config or
+                                   ForestedCascadeConfig())
+        return forested_cascade_config
+
 
     def _init_attention_free(self) -> bool:
         return self.registry.is_attention_free_model(self.architectures)
@@ -2906,8 +2933,9 @@ class PromptAdapterConfig:
 class MultiModalConfig:
     """Controls the behavior of multimodal models."""
 
-    limit_per_prompt: dict[str, int] = \
-        cast(dict[str, int], get_field(ModelConfig, "limit_mm_per_prompt"))
+    limit_per_prompt: dict[str, int] = field(
+        default_factory=lambda: cast(dict[str, int], get_field(ModelConfig, "limit_mm_per_prompt"))
+    )
     """
     The maximum number of input items allowed per prompt for each modality.
     Defaults to 1 (V0) or 999 (V1) for each modality.
@@ -3020,6 +3048,28 @@ class PoolerConfig:
                                usedforsecurity=False).hexdigest()
         return hash_str
 
+@config
+@dataclass
+class ForestedCascadeConfig:
+    """
+    If set to true, we group requests with common prefixes
+    together so that we can call forested cascade attention.
+    """
+    use_forested_prefix: bool = False
+    """
+    Threshold parameter that specifies whether to group leaves
+    under a parent node, or its child_map nodes.
+    """
+    absorption_threshold_ratio: float = 0.8
+    """
+    Specifies the method used to allocate groups for forested
+    cascade attention.
+    """
+    class GroupAllocationMethod(enum.Enum, str):
+        LEAF_PASS = "leaf_pass"
+        FULL_PASS = "full_pass"
+
+    allocate_method = GroupAllocationMethod.LEAF_PASS
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.float16,
@@ -4311,11 +4361,13 @@ class VllmConfig:
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
         if self.compilation_config.full_cuda_graph and \
-            not self.model_config.disable_cascade_attn:
+            not (self.model_config.disable_cascade_attn or
+                 self.model_config.disable_forested_cascade_attn):
             logger.warning_once(
                 "full_cuda_graph is not supported with "
                 "cascade attention. Disabling cascade attention.")
             self.model_config.disable_cascade_attn = True
+            self.model_config.disable_forested_cascade_attn = True
 
         if self.model_config and self.model_config.use_mla and \
             not (current_platform.is_cuda() or current_platform.is_rocm()):
@@ -4485,6 +4537,8 @@ class VllmConfig:
             f"chunked_prefill_enabled={self.scheduler_config.chunked_prefill_enabled}, "  # noqa
             f"use_async_output_proc={self.model_config.use_async_output_proc}, "
             f"pooler_config={self.model_config.pooler_config!r}, "
+            #TODO: FIX THIS
+            f"forested_cascade_config={self.model_config.forested_cascade_config!r}, "
             f"compilation_config={self.compilation_config!r}")
 
 

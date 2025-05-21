@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
     from vllm.sampling_params import SamplingParams
     from vllm.v1.request import Request
+    from vllm.v1.core.kv_cache_utils import CommonPrefixGroups
 
 
 @dataclass
@@ -134,7 +135,8 @@ class SchedulerOutput:
     # Number of common prefix blocks for all requests in each KV cache group.
     # This can be used for cascade attention.
     num_common_prefix_blocks: list[int]
-
+    # List composed request list and group indices at various depth prefix tries
+    common_prefix_list: Optional[list[CommonPrefixGroups]]
     # Request IDs that are finished in between the previous and the current
     # steps. This is used to notify the workers about the finished requests
     # so that they can free the cached states for those requests.

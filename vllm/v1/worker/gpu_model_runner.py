@@ -59,6 +59,7 @@ from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from .utils import (gather_mm_placeholders, sanity_check_mm_encoder_outputs,
                     scatter_mm_placeholders)
+from ..core.kv_cache_utils import CommonPrefixGroups
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -117,6 +118,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.attention_chunk_size = model_config.attention_chunk_size
 
         self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
+        self.forested_cascade_attn_enabled = not self.model_config.disable_forested_cascade_attn
 
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
@@ -139,8 +141,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.kv_caches: list[torch.Tensor] = []
         self.attn_metadata_builders: list[AttentionMetadataBuilder] = []
         self.attn_backends: list[type[AttentionBackend]] = []
-        # self.kv_cache_config: KVCacheConfig
-        # self.input_batch: InputBatch # Persistent batch.
 
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: dict[str, dict[int, torch.Tensor]] = {}
@@ -629,12 +629,28 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.attn_metadata_builders[kv_cache_group_id],
                 )
 
+            # Prepare for forested cascade attention if enabled & beneficial
+            group_indices = []
+            common_prefix_lens = []
+            if self.forested_cascade_attn_enabled:
+                group_indices, common_prefix_lens = self._compute_forested_cascade_attn_prefix_lens(
+                    num_scheduled_tokens,
+                    scheduler_output.common_prefix_list,
+                    kv_cache_group_spec.kv_cache_spec,
+                    self.attn_metadata_builders[kv_cache_group_id],
+                )
+
+            if not common_prefix_lens:
+                common_prefix_lens = [common_prefix_len]
+                group_indices = [0, total_num_scheduled_tokens]
+
             attn_metadata_i = (
                 self.attn_metadata_builders[kv_cache_group_id].build(
                     num_reqs=num_reqs,
                     num_actual_tokens=total_num_scheduled_tokens,
                     max_query_len=max_num_scheduled_tokens,
-                    common_prefix_len=common_prefix_len,
+                    group_indices=group_indices,
+                    common_prefix_len=common_prefix_lens,
                     common_attn_metadata=common_attn_metadata))
             for layer_name in kv_cache_group_spec.layer_names:
                 attn_metadata[layer_name] = attn_metadata_i
@@ -758,6 +774,46 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_sms=self.num_sms,
         )
         return common_prefix_len if use_cascade else 0
+
+    def _compute_forested_cascade_attn_prefix_lens(
+            self,
+            num_scheduled_tokens: np.ndarray,
+            common_prefix_list: list[CommonPrefixGroups],
+            kv_cache_spec: KVCacheSpec,
+            attn_metadata_builder: AttentionMetadataBuilder
+    ) -> tuple[list[int], list[int]]:
+        common_prefix_lens = []
+        group_indices = []
+        curr_req_index = 0
+        for prefix_trie in common_prefix_list:
+            groups_list = prefix_trie.group_metadata
+            for num_common_blocks, start, end in groups_list:
+                group_indices.append(curr_req_index)
+                num_requests = end - start + 1
+                common_prefix_len = min(
+                    num_common_blocks * kv_cache_spec.block_size,
+                    self.input_batch.num_computed_tokens_cpu[curr_req_index:
+                                                             curr_req_index + num_requests].min()
+                )
+                common_prefix_len = common_prefix_len // kv_cache_spec.block_size * kv_cache_spec.block_size
+                common_prefix_lens.append(common_prefix_len)
+                curr_req_index += num_requests
+        group_indices.append(curr_req_index)
+
+        use_sliding_window = (isinstance(kv_cache_spec, SlidingWindowSpec) or
+                              (isinstance(kv_cache_spec, FullAttentionSpec)
+                               and kv_cache_spec.sliding_window is not None))
+        assert isinstance(kv_cache_spec, AttentionSpec)
+        use_forested_cascade = attn_metadata_builder.use_forested_cascade_attention(
+            common_prefix_lens=common_prefix_lens,
+            query_lens=num_scheduled_tokens,
+            num_query_heads=self.num_query_heads,
+            num_kv_heads=kv_cache_spec.num_kv_heads,
+            use_alibi=self.use_alibi,
+            use_sliding_window=use_sliding_window,
+            num_sms=self.num_sms,
+        )
+        return group_indices, common_prefix_lens if use_forested_cascade else ([], [])
 
     def _calc_mrope_positions(self, scheduler_output: "SchedulerOutput"):
         mrope_pos_ptr = 0
@@ -1192,7 +1248,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states = model_output
         # Broadcast PP output for external_launcher (torchrun)
         # to make sure we are synced across pp ranks
-        # TODO: Support overlapping mirco-batches
+        # TODO: Support overlapping micro-batches
         # https://github.com/vllm-project/vllm/issues/18019
         broadcast_pp_output = \
             self.parallel_config.distributed_executor_backend \

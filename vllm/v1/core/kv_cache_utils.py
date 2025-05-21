@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """KV-Cache Utilities."""
+from __future__ import annotations
+
 import os
-from collections import deque
+from collections import deque, defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Callable, NamedTuple, Optional
@@ -14,6 +16,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheTensor, SlidingWindowSpec)
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
+from vllm.v1.utils import ConstantList
 
 logger = init_logger(__name__)
 
@@ -124,6 +127,8 @@ class KVCacheBlock:
     prev_free_block: Optional["KVCacheBlock"] = None
     next_free_block: Optional["KVCacheBlock"] = None
 
+    _block_depth: int = 0
+
     def incr_ref(self):
         self.ref_cnt += 1
 
@@ -144,6 +149,14 @@ class KVCacheBlock:
         """Reset the block hash when the block is evicted."""
         self._block_hash = None
 
+    @property
+    def block_depth(self) -> int:
+        return self._block_depth
+
+    @block_depth.setter
+    def block_depth(self, block_depth: int):
+        self._block_depth = block_depth
+
     def __repr__(self) -> str:
         # Use block_id instead of KVCacheBlock object to avoid calling __repr__
         # on KVCacheBlock object recursively.
@@ -157,6 +170,291 @@ class KVCacheBlock:
                 f"prev_free_block={prev_block_id}, "
                 f"next_free_block={next_block_id})")
 
+@dataclass
+class CommonPrefixGroups:
+    request_ids: ConstantList[str]
+    # Group metadata composed of (num_common_prefix_blocks, start_index, end_index)
+    # tuples where the index vars index into request_ids
+    group_metadata: ConstantList[tuple[int, int, int]]
+
+def get_scheduled_requests(request_list: list[tuple[str, bool]],
+                           groups_list: list[tuple[int, int, int]]) \
+        -> CommonPrefixGroups:
+
+    # Post-process request and group list to remove non-scheduled running requests
+    actual_request_list = []
+    actual_groups_list = []
+
+    for group_num_common_blocks, start_id, end_id in groups_list:
+        scheduled = [req_id for req_id, is_scheduled in request_list[start_id:end_id + 1] if
+                     is_scheduled]
+
+        actual_start_id = len(actual_request_list)
+        actual_request_list.extend(scheduled)
+
+        if scheduled:
+            actual_groups_list.append((group_num_common_blocks, actual_start_id,
+                                       len(actual_request_list)))
+
+    return CommonPrefixGroups(ConstantList(actual_request_list),
+                              ConstantList(actual_groups_list))
+
+
+class KVCacheBlockPrefixTrie:
+    """Prefix Trie of KVCacheBlocks for Forested Cascade Attention"""
+
+    def __init__(self, depth: int, absorption_threshold_ratio: float):
+        """
+        Args:
+            depth: The depth of the trees level 1 KVCacheBlock nodes.
+            absorption_threshold_ratio: Threshold parameter that specifies
+            whether to group leaves under a parent node, or its child nodes.
+        """
+        self.depth = depth
+        self.absorption_threshold_ratio = absorption_threshold_ratio
+        # node_id == 0 means node is a sentinel
+        self.sentinel = KVCacheBlockPrefixTrieNode()
+        # Values in dict are of the form (req_id, is_scheduled)
+        self.req_id_to_req_id_wrapper: dict[str, bool] = {}
+        self.req_id_to_block_id: dict[str, int] = {}
+        self.block_id_to_req_id: defaultdict[int, set[str]] = defaultdict(set)
+        self.block_id_to_leaf_node: dict[int, KVCacheBlockPrefixTrieNode] = {}
+        self.num_groups = 0
+
+        self.ALLOC_METHODS = {
+            "full_pass": self.alloc_full_pass,
+            "leaf_pass": self.alloc_leaf_pass,
+        }
+
+    def insert(self, request: Request, blocks: list[KVCacheBlock]):
+        """
+        Inserts blocks corresponding to the given request into the trie. If request
+        already exists in trie, update path to request.
+        Args:
+            request: Request whose blocks we parse.
+            blocks: Blocks which we add to the trie.
+        """
+        if not blocks:
+            return
+        req_id = request.request_id
+
+        # First check if request is already in trie. Start inserting from
+        # leaf block corresponding to the request if so, else start
+        # from sentinel.
+        curr_block_id = self.req_id_to_block_id.get(req_id, 0)
+        curr_block_node = self.sentinel
+        if curr_block_id:
+            req_ids = self.block_id_to_req_id[curr_block_id]
+            req_ids.remove(req_id)
+            if not req_id:
+                del self.block_id_to_req_id[curr_block_id]
+            curr_block_node = self.block_id_to_leaf_node[curr_block_id]
+            del self.block_id_to_leaf_node[curr_block_id]
+
+        for i in range(len(blocks)):
+            curr_block_node.add_request(req_id)
+            parent_block_node = curr_block_node
+            curr_block = blocks[i]
+            curr_block_node = parent_block_node.add_child(curr_block.block_id)
+
+        leaf_block_id = curr_block_node.block_id
+        self.req_id_to_req_id_wrapper[req_id] = True
+        self.req_id_to_block_id[req_id] = leaf_block_id
+        self.block_id_to_req_id[leaf_block_id].add(req_id)
+        self.block_id_to_leaf_node[leaf_block_id] = curr_block_node
+
+    def remove(self, req_id: str):
+        """
+        Calls remove_child on nodes corresponding to given request.
+        Args:
+            req_id: Request id of the request which we remove from trie.
+        """
+
+        if req_id not in self.req_id_to_block_id:
+            return
+        del self.req_id_to_req_id_wrapper[req_id]
+        block_id = self.req_id_to_block_id.pop(req_id)
+        self.block_id_to_req_id[block_id].remove(req_id)
+        if not self.block_id_to_req_id[block_id]:
+            del self.block_id_to_req_id[block_id]
+        node = self.block_id_to_leaf_node[block_id]
+
+        curr_node = node
+        if curr_node.block_id not in self.block_id_to_req_id:
+            del self.block_id_to_leaf_node[curr_node.block_id]
+
+        while curr_node and curr_node != self.sentinel:
+            curr_node.remove_request(req_id)
+            parent_node = curr_node.parent
+            parent_node.remove_child(curr_node.block_id)
+            curr_node = parent_node
+
+    def allocate_group(self, alloc_mode: str)-> CommonPrefixGroups:
+        return self.ALLOC_METHODS[alloc_mode]()
+
+    def alloc_full_pass(self) -> CommonPrefixGroups:
+        """
+        Allocates groups of requests based on the weight of each node.
+        Traverses the entire trie to find best groupings.
+        Returns:
+            A tuple consisting of:
+                request_list: List of requests which we group in model runner.
+                groups_list: List of indices of the form (num_common_prefix_blocks, start, end)
+                where all requests in request_list[start: end+1] form a group.
+        """
+        request_list: list[tuple[str, bool]] = []
+        groups_list: list[tuple[int, int, int]] = []
+
+        stack: list[tuple[KVCacheBlockPrefixTrieNode, bool]] = [(self.sentinel, False)]
+        while stack:
+            node, visited = stack.pop()
+            if node is None:
+                continue
+            if visited:
+                # Post-order logic
+                node.min_accessible_leaf_id = min(node.min_accessible_leaf_id, len(request_list))
+                child_group_weights = sum(child.groups_weight for child in node.child_list)
+                num_groups = sum(child.num_groups for child in node.child_list)
+                start_direct_leaf = len(request_list)
+                start_of_next_group = node.min_accessible_leaf_id + node.leaf_cnt
+                if node.weight >= self.absorption_threshold_ratio * child_group_weights:
+                    node.groups_weight = node.weight
+                    del groups_list[-1 * num_groups:]
+                    groups_list.append((node.depth, node.min_accessible_leaf_id, start_of_next_group - 1))
+                    node.num_groups = 1
+                else:
+                    node.groups_weight = child_group_weights
+                    groups_list.extend([(node.depth, i,i) for i in
+                                        range(start_direct_leaf, start_of_next_group)])
+                    node.num_groups = num_groups + start_of_next_group - len(request_list)
+                request_list.extend(list(map(lambda k: (k, self.req_id_to_req_id_wrapper[k]), node.node_req_ids)))
+            else:
+                # Push current node back as visited (for post-order)
+                stack.append((node, True))
+                for i in range(len(node.child_list) - 1, -1, -1):
+                    child_node = node.child_list[i]
+                    stack.append((child_node, False))
+
+                # Pre-order logic
+                node.min_accessible_leaf_id = float('inf')
+
+        return get_scheduled_requests(request_list, groups_list)
+
+    def alloc_leaf_pass(self) -> CommonPrefixGroups:
+        """
+        Allocates groups of requests based on the weight of each node.
+        Traverses only trie leaves to find best groupings.
+        Returns:
+            A tuple consisting of:
+                request_list: List of requests which we group in model runner.
+                groups_list: List of indices of the form (num_common_prefix_blocks, start, end)
+                where all requests in request_list[start: end+1] form a group.
+        """
+        request_list: list[tuple[str, bool]] = []
+        groups_list: list[tuple[int, int, int]] = []
+
+        for block_id in self.block_id_to_req_id:
+            groups_list.append((self.block_id_to_leaf_node[block_id].depth,
+                                len(request_list),
+                                len(request_list) + len(self.block_id_to_req_id[block_id]) - 1))
+            request_list.extend(list(map(lambda k: (k, self.req_id_to_req_id_wrapper[k]),
+                                         self.block_id_to_req_id[block_id])))
+
+        return get_scheduled_requests(request_list, groups_list)
+
+    def unschedule_request(self, request_id):
+        self.req_id_to_req_id_wrapper[request_id] = False
+
+class KVCacheBlockPrefixTrieNode:
+    """Node that stores each KVCacheBlock still in use by
+       the GPUModelRunner. The root of the Trie is a sentinel node which
+       points to KVCacheBlocks with distinct prefixes. A node is the child of
+       another Trie node if it contains the parent node as a prefix."""
+
+    def __init__(self,
+                 depth: int = 0,
+                 parent: "KVCacheBlockPrefixTrieNode" = None,
+                 block_id: int = 0,
+                 min_accessible_leaf_id: float = 0,
+                 leaf_cnt: int = 0):
+        """
+        Args:
+            depth: The depth of the KVCacheBlock encompassed by this node.
+            parent: The parent of this node.
+            block_id: The id of the KVCacheBlock encompassed by this node.
+            min_accessible_leaf_id: The minimum node_id of a leaf node traversable from this node.
+        """
+        self.depth: int = depth
+        self.parent: KVCacheBlockPrefixTrieNode = parent
+        self.child_map: dict[int, KVCacheBlockPrefixTrieNode] = {}
+        self.child_list: list[KVCacheBlockPrefixTrieNode] = []
+        self.node_req_ids: set[str] = set()
+        self.block_id = block_id
+        self.min_accessible_leaf_id = min_accessible_leaf_id
+        self.num_groups = 0
+        self.groups_weight = 0
+        self.leaf_cnt = leaf_cnt
+
+    def add_child(self, block_id: int) -> KVCacheBlockPrefixTrieNode:
+        """
+        Responsible for adding a child node corresponding to block with given
+        block_id. Manages the leaf_cnt of the child_node. Only parent nodes can edit
+        the leaf_cnt of their child_node.
+
+        Args:
+            block_id: The id of the block corresponding to the node we want to make
+            a child.
+        Returns:
+            The child node we added to children of self.
+        """
+
+        # Nodes cannot edit their own leaf_cnt. Only the leaf_cnt of their children.
+        if block_id in self.child_map:
+            child_node = self.child_map[block_id]
+            child_node.leaf_cnt += 1
+            return child_node
+        child_node = KVCacheBlockPrefixTrieNode(
+            depth=self.depth + 1,
+            parent=self,
+            block_id=block_id,
+            min_accessible_leaf_id=float('inf'),
+            leaf_cnt=1)
+        self.child_map[block_id] = child_node
+        self.child_list.append(child_node)
+        return child_node
+
+    def remove_child(self, block_id: int):
+        """
+        Called when we want to remove a request, and all nodes associated with that
+        request. Decrements ref_cnt of node with given block_id, and removes from
+        trie if ref_cnt becomes 0.
+
+        Args:
+            block_id: The id of the block corresponding to the node we want to make
+            a child.
+        """
+        if block_id not in self.child_map:
+            return
+        child_node = self.child_map[block_id]
+        child_node.leaf_cnt -= 1
+        if child_node.leaf_cnt == 0:
+            del self.child_map[block_id]
+            self.child_list.remove(child_node)
+            child_node.parent = None
+
+    def add_request(self, req_id: str):
+        self.node_req_ids.add(req_id)
+
+    def remove_request(self, req_id: str):
+        self.node_req_ids.remove(req_id)
+
+    @property
+    def weight(self) -> float:
+        """
+        Returns:
+            The importance given to a given node when allocating groups.
+        """
+        return self.depth * (self.leaf_cnt - 1)
 
 class FreeKVCacheBlockQueue:
     """This class organizes a list of KVCacheBlock objects to a doubly linked
@@ -616,7 +914,6 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
     Returns:
         The generated KVCacheConfig
     """
-
     page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
     assert len(page_sizes) == 1
     page_size = page_sizes.pop()
@@ -653,6 +950,7 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
         },
         kv_cache_groups=create_kv_cache_group_specs(kv_cache_spec,
                                                     grouped_layer_names),
+        forested_cascade_config=vllm_config.model_config.forested_cascade_config
     )
     return kv_cache_config
 

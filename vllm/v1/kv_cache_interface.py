@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
+import enum
 from dataclasses import dataclass
 from typing import Optional
 
@@ -174,6 +175,26 @@ class KVCacheGroupSpec:
     # The KV cache spec of this manager layer
     kv_cache_spec: KVCacheSpec
 
+class ForestedPrefixSpec:
+    """
+    If set to true, we group requests with common prefixes
+    together so that we can call forested cascade attention.
+    """
+    use_forested_prefix: bool = True
+    """
+    Threshold parameter that specifies whether to group leaves
+    under a parent node, or its child_map nodes.
+    """
+    absorption_threshold_ratio: float = 0.8
+    """
+    Specifies the method used to allocate groups for forested
+    cascade attention.
+    """
+    class GroupAllocationMethod(enum.Enum, str):
+        LEAF_PASS = "leaf_pass"
+        FULL_PASS = "full_pass"
+
+    allocate_method = GroupAllocationMethod.LEAF_PASS
 
 @dataclass
 class KVCacheConfig:
@@ -206,3 +227,5 @@ class KVCacheConfig:
     there are 3 groups, each of which represents 10 layers in the model.
     """
     kv_cache_groups: list[KVCacheGroupSpec]
+
+    forested_cascade_config: Optional[ForestedPrefixSpec] = None

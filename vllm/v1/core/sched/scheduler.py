@@ -224,6 +224,7 @@ class Scheduler(SchedulerInterface):
                 # NOTE(woosuk): Here, by doing `continue` instead of `break`,
                 # we do not strictly follow the FCFS scheduling policy and
                 # allow the lower-priority requests to be scheduled.
+                self.kv_cache_manager.unschedule_request(request.request_id)
                 req_index += 1
                 continue
 
@@ -521,6 +522,9 @@ class Scheduler(SchedulerInterface):
                 resumed_from_preemption=False,
             ) for req in scheduled_running_reqs
         ]
+
+        common_prefix_list = self.kv_cache_manager.get_common_prefix_groups()
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=resumed_reqs_data + running_reqs_data,
@@ -529,6 +533,7 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
             num_common_prefix_blocks=num_common_prefix_blocks,
+            common_prefix_list=common_prefix_list,
             # finished_req_ids is an existing state in the scheduler,
             # instead of being newly scheduled in this step.
             # It contains the request IDs that are finished in between
@@ -536,7 +541,7 @@ class Scheduler(SchedulerInterface):
             finished_req_ids=self.finished_req_ids,
             free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
             structured_output_request_ids=structured_output_request_ids,
-            grammar_bitmask=grammar_bitmask,
+            grammar_bitmask=grammar_bitmask
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
