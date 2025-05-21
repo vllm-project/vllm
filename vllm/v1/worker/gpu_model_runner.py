@@ -57,6 +57,7 @@ from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.v1.worker.ubatching import make_ubatch_context_chain, UBatchContext
 
 from .utils import (gather_mm_placeholders, sanity_check_mm_encoder_outputs,
                     scatter_mm_placeholders)
@@ -1284,104 +1285,108 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                    scheduler_output: Optional["SchedulerOutput"] = None,
                    is_dummy_run: bool = False):
         
-        def model_inputs(tokens_slice: slice, is_dummy: bool) -> tuple:
-            if is_dummy:
+        def model_inputs(tokens_slice: slice, use_dummy_input: bool) -> tuple:
+            if use_dummy_input:
                 num_tokens = num_scheduled_tokens or 1
                 return num_tokens, *self._get_dummy_model_inputs(num_tokens)
             else:
                 assert scheduler_output is not None
                 num_tokens = tokens_slice.stop - tokens_slice.start
                 return num_tokens, *self._get_model_inputs(tokens_slice, scheduler_output)
-        
-        @torch.inference_mode()
-        def process_batch(save_results, attn_metadata, vllm_config, model, num_tokens, input_ids, positions, inputs_embeds, intermediate_tensors, results, stream):
-            with set_forward_context(attn_metadata,
-                                    vllm_config,
-                                    num_tokens=num_tokens):
-                torch.cuda.set_stream(stream)
-                
-                model_output = model(
-                    input_ids=input_ids,
-                    positions=positions,
-                    intermediate_tensors=intermediate_tensors,
-                    inputs_embeds=inputs_embeds,
-                )
-                
-                if save_results:
-                    results.append(model_output.clone())
-
-        def threaded_processing(ubatch_slices, attn_metadata, vllm_config, model, is_dummy_run=False):
-            results = []
-            # print(f"UBATCH SLICES: {len(ubatch_slices)}")
-            for i, (_, tokens_slice) in enumerate(ubatch_slices):
-                # print("ITERATION")
-                is_dummy_ubatch = tokens_slice.stop <= tokens_slice.start
-                assert not is_dummy_ubatch or i == len(ubatch_slices) - 1 or is_dummy_run
-                
-                num_tokens, input_ids, positions, inputs_embeds, intermediate_tensors = \
-                    model_inputs(tokens_slice, is_dummy_ubatch)
-
-                thread = threading.Thread(target=process_batch, args=(
-                    not is_dummy_ubatch or is_dummy_run,
-                    attn_metadata[i] if attn_metadata is not None else None, 
-                    vllm_config, 
-                    model, 
-                    num_tokens, 
-                    input_ids, 
-                    positions, 
-                    inputs_embeds, 
-                    intermediate_tensors,
-                    results,
-                    torch.cuda.current_stream()
-                ))
-                thread.start()
-                thread.join()
-            # for i, (_, tokens_slice) in enumerate(ubatch_slices):
-            #     is_dummy_ubatch = tokens_slice.stop <= tokens_slice.start
-            #     assert not is_dummy_ubatch or i == len(ubatch_slices) - 1 or is_dummy_run
-            #     num_tokens, input_ids, positions, inputs_embeds, intermediate_tensors = \
-            #         model_inputs(tokens_slice, is_dummy_ubatch)
-            #     process_batch(
-            #         i, 
-            #         is_dummy_ubatch, 
-            #         is_dummy_run, 
-            #         attn_metadata, 
-            #         vllm_config, 
-            #         model, 
-            #         num_tokens, 
-            #         input_ids, 
-            #         positions, 
-            #         inputs_embeds, 
-            #         intermediate_tensors,
-            #         results,
-            #     )
-
-            if results:
-                return torch.cat(results, dim=0)
-            else:
-                return None
-
-        # run micro-batched
-        if ubatch_slices is not None:
-            model_output = threaded_processing(ubatch_slices, 
-                                               attn_metadata, 
-                                               self.vllm_config, 
-                                               self.model, 
-                                               is_dummy_run)
-            # print("FINISHED MODEL OUTPUT")
-        # run single batch
-        else:
+            
+            
+        def _run(token_slice: slice, attn_metadata, use_dummy_input: bool = False, 
+                 ubatch_context: Optional[UBatchContext]=None,
+                 setup_done_evt: Optional[threading.Event]=None):
             num_tokens, input_ids, positions, inputs_embeds, intermediate_tensors = \
-                model_inputs(slice(0, num_scheduled_tokens), is_dummy_run)
+                model_inputs(token_slice, use_dummy_input)
             with set_forward_context(attn_metadata,
                                      self.vllm_config,
                                      num_tokens=num_tokens):
+                if ubatch_context:
+                    # Update the forward context now that its available
+                    ubatch_context.update_forward_context()
+                    
+                if setup_done_evt is not None:
+                    # Wait for the setup to be done
+                    setup_done_evt.set()
+                
                 model_output = self.model(
                     input_ids=input_ids,
                     positions=positions,
                     intermediate_tensors=intermediate_tensors,
                     inputs_embeds=inputs_embeds,
                 )
+            return model_output
+        
+        @torch.inference_mode()
+        def _ubatch_thread(ubatch_ctx, root_stream, token_slice, attn_metadata, results, save_results, use_dummy_input, setup_done_evt):
+            with ubatch_ctx:
+                # an event to enable the start of the ubatch execution on the GPU
+                # since different ubatches may be on different streams than this one
+                # they all need to wait on the gpu kernels launched in 
+                # _prepare_inputs before continuing
+                if torch.cuda.current_stream() != root_stream:                
+                    start_evt = torch.cuda.Event()
+                    # Make sure we wait then record so we don't miss the event
+                    torch.cuda.current_stream().wait_event(start_evt)
+                    root_stream.record_event(start_evt)
+
+                model_output = _run(token_slice, attn_metadata, use_dummy_input, ubatch_ctx, setup_done_evt)
+
+                if save_results:
+                    results.append(model_output.clone())
+
+                if torch.cuda.current_stream() != root_stream:
+                    # Make the root stream for the ubatch to finish
+                    # Make sure we wait then record so we don't miss the event
+                    root_stream.wait_event(ubatch_ctx.done_evt)
+                    torch.cuda.current_stream().record_event(ubatch_ctx.done_evt)
+
+        def _run_ubatches(ubatch_slices, attn_metadata, is_dummy_run):
+            results = []
+            assert len(ubatch_slices) == 2, "Only two ubatches has been tested"
+            root_stream = torch.cuda.current_stream()
+            ubatch_ctxs = make_ubatch_context_chain(len(ubatch_slices),
+                                                    stream=root_stream, # Only works currently if everything is run on the same stream
+                                                    device=self.device)
+            setup_done = threading.Event()
+            ubatch_threads = []
+
+            for i, (_, tokens_slice) in enumerate(ubatch_slices):
+                is_dummy_ubatch = tokens_slice.stop <= tokens_slice.start
+                assert not is_dummy_ubatch or i == len(ubatch_slices) - 1 or is_dummy_run
+                
+                thread = threading.Thread(target=_ubatch_thread, args=(
+                    ubatch_ctxs[i],
+                    root_stream,
+                    tokens_slice,
+                    attn_metadata[i] if attn_metadata is not None else None,
+                    results,
+                    not is_dummy_ubatch or is_dummy_run,
+                    is_dummy_ubatch or is_dummy_run,
+                    setup_done,
+                ))
+                #ubatch_threads.append(thread)
+                thread.start()
+                setup_done.wait()
+                thread.join()
+
+            # for thread in ubatch_threads:
+            #     thread.join()
+
+            torch.cuda.set_stream(root_stream)
+            return torch.cat(results, dim=0)
+
+        # run micro-batched
+        if ubatch_slices is not None:
+            model_output = _run_ubatches(
+                ubatch_slices, attn_metadata, is_dummy_run)
+        # run single batch
+        else:
+            model_output = _run(
+                slice(0, num_scheduled_tokens), attn_metadata, is_dummy_run)
+            
         return model_output
 
     @torch.inference_mode()
