@@ -177,7 +177,7 @@ class InputBatch(BaseInputBatch):
 
         req_index = super()._add_request(request, req_index)
 
-        if req_index == len(self._req_ids):
+        if req_index == len(self.req_output_token_ids):
             self.req_output_token_ids.append(request.output_token_ids)
         else:
             self.req_output_token_ids[req_index] = request.output_token_ids
