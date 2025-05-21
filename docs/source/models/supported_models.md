@@ -392,6 +392,11 @@ Specified using `--task generate`.
   * `tiiuae/falcon-mamba-7b`, `tiiuae/falcon-mamba-7b-instruct`, etc.
   * ✅︎
   * ✅︎
+- * `FalconH1ForCausalLM`
+  * Falcon-H1
+  * `tiiuae/Falcon-H1-34B-Base`, `tiiuae/Falcon-H1-34B-Instruct`, etc.
+  * ✅︎
+  * ✅︎
 - * `GemmaForCausalLM`
   * Gemma
   * `google/gemma-2b`, `google/gemma-1.1-2b-it`, etc.
