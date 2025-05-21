@@ -33,11 +33,11 @@ steps:
 
 - label: Documentation Build # 2min
   mirror_hardwares: [amdexperimental]
-  working_dir: "/vllm-workspace"
+  working_dir: "/vllm-workspace/test_docs"
   fast_check: true
   no_gpu: True
   commands:
-  - pip install -r requirements/docs.txt
+  - pip install -r ../requirements/docs.txt
   # TODO: add `--strict` once warnings in docstrings are fixed
   - mkdocs build
 
