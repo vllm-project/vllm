@@ -10,23 +10,22 @@ from vllm.entrypoints.openai.protocol import FunctionCall
 from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 
 # Test cases similar to pythonic parser but with Llama4 specific format
-SIMPLE_FUNCTION_OUTPUT = "[get_weather(city='San Francisco', metric='celsius')]"
+SIMPLE_FUNCTION_OUTPUT = "[get_weather(city='LA', metric='C')]"
 SIMPLE_FUNCTION_CALL = FunctionCall(
     name="get_weather",
-    arguments='{"city": "San Francisco", "metric": "celsius"}',
+    arguments='{"city": "LA", "metric": "C"}',
 )
-MORE_TYPES_FUNCTION_OUTPUT = (
-    "[register_user(name='John Doe', "
-    "age=37, "
-    "address={'city': 'San Francisco', 'state': 'CA'}, "
-    "role=None, "
-    "passed_test=True, "
-    "aliases=['John', 'Johnny'])]")
+MORE_TYPES_FUNCTION_OUTPUT = ("[register_user(name='Doe', "
+                              "age=9, "
+                              "address={'city': 'LA', 'state': 'CA'}, "
+                              "role=None, "
+                              "passed_test=True, "
+                              "aliases=['John', 'Johnny'])]")
 MORE_TYPES_FUNCTION_CALL = FunctionCall(
     name="register_user",
-    arguments='{"name": "John Doe", '
-    '"age": 37, '
-    '"address": {"city": "San Francisco", "state": "CA"}, '
+    arguments='{"name": "Doe", '
+    '"age": 9, '
+    '"address": {"city": "LA", "state": "CA"}, '
     '"role": null, '
     '"passed_test": true, '
     '"aliases": ["John", "Johnny"]}',
@@ -53,8 +52,7 @@ ESCAPED_STRING_FUNCTION_CALL = FunctionCall(
     arguments='{"city": "Martha\'s Vineyard", "metric": "\\"cool units\\""}',
 )
 PYTHON_TAG_FUNCTION_OUTPUT = (
-    "<|python_start|>[get_weather(city='San Francisco', metric='celsius')]<|python_end|>"
-)
+    "<|python_start|>[get_weather(city='LA', metric='C')]<|python_end|>")
 
 
 @pytest.mark.parametrize("streaming", [True, False])
@@ -72,9 +70,13 @@ def test_no_tool_call(streaming: bool):
     assert len(tool_calls) == 0
 
 
+test_str = "<|python_start|>"
+test_str += "[get_weather(city='LA', metric='C'),"
+test_str += "register_user(name='Doe', age=9)]"
 TEST_CASES = [
     pytest.param(True,
-                 SIMPLE_FUNCTION_OUTPUT, [SIMPLE_FUNCTION_CALL],
+                 ESCAPED_STRING_FUNCTION_OUTPUT,
+                 [ESCAPED_STRING_FUNCTION_CALL],
                  id="simple_streaming"),
     pytest.param(False,
                  SIMPLE_FUNCTION_OUTPUT, [SIMPLE_FUNCTION_CALL],
@@ -113,20 +115,20 @@ TEST_CASES = [
                  id="escaped_string_nonstreaming"),
     pytest.param(
         True,
-        "[get_weather(city='San Francisco', metric='celsius'), register_user(name='John Doe', age=37)]",
+        "[get_weather(city='LA',metric='C'),register_user(name='Doe',age=9)]",
         [
             SIMPLE_FUNCTION_CALL,
             FunctionCall(name="register_user",
-                         arguments='{"name": "John Doe", "age": 37}')
+                         arguments='{"name": "Doe", "age": 9}')
         ],
         id="parallel_calls_streaming"),
     pytest.param(
         False,
-        "[get_weather(city='San Francisco', metric='celsius'), register_user(name='John Doe', age=37)]",
+        "[get_weather(city='LA',metric='C'),register_user(name='Doe',age=9)]",
         [
             SIMPLE_FUNCTION_CALL,
             FunctionCall(name="register_user",
-                         arguments='{"name": "John Doe", "age": 37}')
+                         arguments='{"name": "Doe", "age": 9}')
         ],
         id="parallel_calls_nonstreaming"),
     pytest.param(True,
@@ -135,24 +137,21 @@ TEST_CASES = [
     pytest.param(False,
                  PYTHON_TAG_FUNCTION_OUTPUT, [SIMPLE_FUNCTION_CALL],
                  id="python_tag_nonstreaming"),
-    pytest.param(
-        True,
-        "<|python_start|>[get_weather(city='San Francisco', metric='celsius'), register_user(name='John Doe', age=37)]",
-        [
-            SIMPLE_FUNCTION_CALL,
-            FunctionCall(name="register_user",
-                         arguments='{"name": "John Doe", "age": 37}')
-        ],
-        id="parallel_calls_streaming"),
-    pytest.param(
-        False,
-        "<|python_start|>[get_weather(city='San Francisco', metric='celsius'), register_user(name='John Doe', age=37)]",
-        [
-            SIMPLE_FUNCTION_CALL,
-            FunctionCall(name="register_user",
-                         arguments='{"name": "John Doe", "age": 37}')
-        ],
-        id="parallel_calls_nonstreaming"),
+    pytest.param(True,
+                 test_str, [
+                     SIMPLE_FUNCTION_CALL,
+                     FunctionCall(name="register_user",
+                                  arguments='{"name": "Doe", "age": 9}')
+                 ],
+                 id="parallel_calls_streaming"),
+    pytest.param(False,
+                 "<|python_start|>[get_weather(city='LA', metric='C'), " +
+                 "register_user(name='Doe', age=9)]", [
+                     SIMPLE_FUNCTION_CALL,
+                     FunctionCall(name="register_user",
+                                  arguments='{"name": "Doe", "age": 9}')
+                 ],
+                 id="parallel_calls_nonstreaming"),
 ]
 
 
@@ -180,8 +179,7 @@ def test_streaming_tool_call_with_large_steps():
     tool_parser: ToolParser = ToolParserManager.get_tool_parser(
         "llama4_pythonic")(mock_tokenizer)
     model_output_deltas = [
-        "<|python_start|>[get_weather(city='San",
-        " Francisco', metric='celsius'), "
+        "<|python_start|>[get_weather(city='LA', metric='C'), "
         "get_weather(), "
         "do_something_cool(steps=[])]<|python_end|>",
     ]
