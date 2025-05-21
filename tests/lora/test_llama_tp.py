@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
+import subprocess
+import sys
 from typing import Union
 
 import pytest
 import ray
 
 import vllm
+from vllm import LLM
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 
 from ..utils import create_new_process_for_each_test, multi_gpu_test
 
@@ -187,38 +191,55 @@ def test_llama_lora_tp4_fully_sharded_loras(sql_lora_files):
 
 
 @create_new_process_for_each_test()
-def test_serialize_and_deserialize_lora(tmp_path, sql_lora_files):
+def test_serialize_and_deserialize_lora(tmp_path, sql_lora_files,
+                                        sql_lora_huggingface_id):
 
-    import gc
+    # Run the tensorizing of the LoRA adapter and the model in a subprocess
+    # to guarantee cleanup
 
-    import torch
+    model_ref = MODEL_PATH
+    lora_path = sql_lora_huggingface_id
+    suffix = "test"
+    try:
+        result = subprocess.run([
+            sys.executable, "examples/other/tensorize_vllm_model.py",
+            "--model", MODEL_PATH, "--lora-path", lora_path, "serialize",
+            "--serialized-directory",
+            str(tmp_path), "--suffix", suffix
+        ],
+                                check=True,
+                                capture_output=True,
+                                text=True)
+    except subprocess.CalledProcessError as e:
+        print("Tensorizing failed.")
+        print("STDOUT:\n", e.stdout)
+        print("STDERR:\n", e.stderr)
+        raise
 
-    from vllm import LLM, EngineArgs
-    from vllm.model_executor.model_loader.tensorizer import (
-        TensorizerConfig, tensorize_lora_adapter, tensorize_vllm_model)
+    print("STDOUT:\n", result.stdout)
 
-    model_ref = "meta-llama/Llama-2-7b-hf"
-    lora_path = "yard1/llama-2-7b-sql-lora-test"
-
-    model_uri = tmp_path / (model_ref + ".tensors")
+    model_uri = tmp_path / "vllm" / model_ref / suffix / "model.tensors"
     tensorizer_config = TensorizerConfig(tensorizer_uri=str(model_uri))
     tensorizer_config.lora_dir = tensorizer_config.tensorizer_dir
 
-    args = EngineArgs(model=model_ref)
-
-    tensorize_lora_adapter(lora_path, tensorizer_config)
-    tensorize_vllm_model(args, tensorizer_config)
-
-    gc.collect()
-    torch.cuda.empty_cache()
-
     loaded_vllm_model = LLM(model=model_ref,
                             load_format="tensorizer",
-                            trust_remote_code=True,
-                            model_loader_extra_config=tensorizer_config,
                             enable_lora=True,
-                            max_lora_rank=128)
+                            model_loader_extra_config=tensorizer_config,
+                            max_num_seqs=13,
+                            max_loras=2,
+                            gpu_memory_utilization=0.3)
 
-    generate_and_test(loaded_vllm_model,
-                      sql_lora_files,
-                      tensorizer_config_dict=tensorizer_config.to_dict())
+    tensorizer_config_dict = tensorizer_config.to_dict()
+
+    print("lora adapter created")
+    assert do_sample(loaded_vllm_model,
+                     sql_lora_files,
+                     tensorizer_config_dict=tensorizer_config_dict,
+                     lora_id=0) == EXPECTED_NO_LORA_OUTPUT
+
+    print("lora 1")
+    assert do_sample(loaded_vllm_model,
+                     sql_lora_files,
+                     tensorizer_config_dict=tensorizer_config_dict,
+                     lora_id=1) == EXPECTED_LORA_OUTPUT
