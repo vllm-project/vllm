@@ -1,6 +1,6 @@
-#include <Python.h>
-#include <torch/extension.h>
-#include <ATen/cuda/CUDAContext.h>
+#include <torch/all.h>
+#include <cuda_runtime.h>
+#include <c10/util/Exception.h>
 
 // Template-based CUDA kernel: Copy from device memory to pinned host memory
 template <typename scalar_t>
@@ -55,11 +55,11 @@ void load_tensor_impl(torch::Tensor& host_tensor, torch::Tensor& device_tensor) 
 // Type-dispatched wrapper function
 void store_tensor(torch::Tensor& device_tensor, torch::Tensor& host_tensor) {
   // Validate arguments
-  AT_ASSERT(device_tensor.is_cuda(), "Input tensor must be a CUDA tensor");
-  AT_ASSERT(host_tensor.is_pinned(), "Output tensor must be pinned memory");
-  AT_ASSERT(device_tensor.numel() == host_tensor.numel(),
+  TORCH_CHECK(device_tensor.is_cuda(), "Input tensor must be a CUDA tensor");
+  TORCH_CHECK(host_tensor.is_pinned(), "Output tensor must be pinned memory");
+  TORCH_CHECK(device_tensor.numel() == host_tensor.numel(),
             "Tensors must have same number of elements");
-  AT_ASSERT(device_tensor.dtype() == host_tensor.dtype(),
+  TORCH_CHECK(device_tensor.dtype() == host_tensor.dtype(),
             "Tensors must have same dtype");
 
   // Type-based dispatch to different implementations
@@ -74,17 +74,17 @@ void store_tensor(torch::Tensor& device_tensor, torch::Tensor& host_tensor) {
       store_tensor_impl<at::BFloat16>(device_tensor, host_tensor);
       break;
     default:
-      AT_ERROR("Unsupported data type: ", device_tensor.scalar_type());
+      TORCH_CHECK("Unsupported data type: ", device_tensor.scalar_type());
   }
 }
 
 void load_tensor(torch::Tensor& host_tensor, torch::Tensor& device_tensor) {
   // Validate arguments
-  AT_ASSERT(device_tensor.is_cuda(), "Output tensor must be a CUDA tensor");
-  AT_ASSERT(host_tensor.is_pinned(), "Input tensor must be pinned memory");
-  AT_ASSERT(device_tensor.numel() == host_tensor.numel(),
+  TORCH_CHECK(device_tensor.is_cuda(), "Output tensor must be a CUDA tensor");
+  TORCH_CHECK(host_tensor.is_pinned(), "Input tensor must be pinned memory");
+  TORCH_CHECK(device_tensor.numel() == host_tensor.numel(),
             "Tensors must have same number of elements");
-  AT_ASSERT(device_tensor.dtype() == host_tensor.dtype(),
+  TORCH_CHECK(device_tensor.dtype() == host_tensor.dtype(),
             "Tensors must have same dtype");
 
   // Type-based dispatch to different implementations
@@ -99,15 +99,6 @@ void load_tensor(torch::Tensor& host_tensor, torch::Tensor& device_tensor) {
       load_tensor_impl<at::BFloat16>(host_tensor, device_tensor);
       break;
     default:
-      AT_ERROR("Unsupported data type: ", host_tensor.scalar_type());
+      TORCH_CHECK("Unsupported data type: ", host_tensor.scalar_type());
   }
 }
-
-// PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-//     m.def("store_tensor", &store_tensor,
-//           "Store CUDA tensor to pinned memory
-//           (supports float32, float16, bfloat16)");
-//     m.def("load_tensor", &load_tensor,
-//           "Load CUDA tensor from pinned memory
-//           (supports float32, float16, bfloat16)");
-// }
