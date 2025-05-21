@@ -79,10 +79,11 @@ class Phi4MiniJsonToolParser(ToolParser):
                         name=raw_function_call["name"],
                         # function call args are JSON but as a string
                         arguments=json.dumps(
-                            raw_function_call["arguments"] if "arguments" in
-                            raw_function_call else
-                            raw_function_call["parameters"])))
-                for raw_function_call in function_call_arr
+                            raw_function_call["arguments"]
+                            if "arguments" in raw_function_call else
+                            raw_function_call["parameters"],
+                            ensure_ascii=False),
+                    )) for raw_function_call in function_call_arr
             ]
 
             # get any content before the tool call
