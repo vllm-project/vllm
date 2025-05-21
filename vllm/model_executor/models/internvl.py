@@ -516,6 +516,12 @@ class BaseInternVLProcessor(ABC):
                 torch.tensor([len(item) for item in pixel_values_lst_video]),
             }
 
+            for pixel_values in pixel_values_lst_video:
+                num_patches = pixel_values.shape[0]
+
+                video_repl = self.get_video_repl(self.num_image_token, num_patches, self.video_token)
+                text = [t.replace('<video>', video_repl.full, 1) for t in text]
+
         text_inputs = self.tokenizer(text)
 
         return {
@@ -535,7 +541,7 @@ class InternVLProcessor(BaseInternVLProcessor):
     def video_token_id(self) -> Optional[int]:
         if self.video_token is None:
             return None
-        return self.tokenizer.get_vocab().get(self.video_token, None)
+        return self.tokenizer.get_vocab()[self.video_token]
 
     def get_image_repl(
         self,
@@ -556,8 +562,8 @@ class InternVLProcessor(BaseInternVLProcessor):
         repl_features = video_context_token * self.num_image_token
         repl_features_with_sep = IMG_START + repl_features + IMG_END
         # num_patches is equal to num_frames
-        repl_full = ''.join([f'Frame{i+1}: {repl_features_with_sep}\n'
-                             for i in range(len(num_patches))])
+        repl_full = ''.join([f'Frame{i+1}: {repl_features_with_sep}'
+                             for i in range(num_patches)])
 
         return PromptUpdateDetails.select_text(repl_full, video_context_token)
 
@@ -696,7 +702,7 @@ class InternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
                 pixel_values_flat_video=MultiModalFieldConfig.flat_from_sizes(
                 "video", video_num_patches),
                 video_num_patches=MultiModalFieldConfig.batched("video"),
-                image_token_id=MultiModalFieldConfig.shared("video", num_videos),
+                video_token_id=MultiModalFieldConfig.shared("video", num_videos),
             )
         else:
             video_field = {}
@@ -1074,7 +1080,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
                              "image_embeds") and "images" not in modalities:
                 modalities["images"] = self._parse_and_validate_image_input(
                     **kwargs)
-            if input_key in ("pixel_values_flat_video_videos", ) and "videos" not in modalities:
+            if input_key in ("pixel_values_flat_video", ) and "videos" not in modalities:
                 modalities["videos"] = self._parse_and_validate_video_input(
                     **kwargs)
 

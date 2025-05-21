@@ -335,9 +335,8 @@ def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
     engine_args = EngineArgs(
         model=model_name,
         trust_remote_code=True,
-        max_model_len=4096,
+        max_model_len=8192,
         limit_mm_per_prompt={modality: 1},
-        dtype="bfloat16",
     )
 
     if modality == "image":
