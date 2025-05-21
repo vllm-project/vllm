@@ -213,6 +213,9 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
     ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
+        if self.draft_id_to_target_id is None:
+            return logits
+
         base = torch.arange(self.config.draft_vocab_size, device=logits.device)
         targets = base + self.draft_id_to_target_id
         logits_new = logits.new_full((

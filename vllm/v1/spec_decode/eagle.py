@@ -334,6 +334,14 @@ class EagleProposer:
             logger.info("Loading EAGLE LM head weights from the target model.")
             self.model.lm_head = target_model.lm_head
 
+        if self.vllm_config.speculative_config.method == "eagle3" and \
+                hasattr(target_model, "draft_id_to_target_id") and \
+                "d2t" not in loaded_weights:
+            logger.info("Draft id to target id mapping not found. Assuming "
+                        "draft and target model share the same vocab.")
+            del self.model.draft_id_to_target_id
+            self.model.draft_id_to_target_id = None
+
     @torch.inference_mode()
     def dummy_run(
         self,
