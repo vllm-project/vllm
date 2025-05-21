@@ -263,7 +263,11 @@ if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
         export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0 10.0+PTX'; \
     else \
         export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0+PTX'; \
-    fi && \
+    fi; \
+    CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
+    if [ "$CUDA_MAJOR" -lt 12 ]; then \
+        export FLASHINFER_ENABLE_SM90=0; \
+    fi; \
     uv pip install --system --no-build-isolation "git+https://github.com/flashinfer-ai/flashinfer@21ea1d2545f74782b91eb8c08fd503ac4c0743fc" ; \
 fi
 COPY examples examples
