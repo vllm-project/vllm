@@ -248,12 +248,6 @@ def calculate_metrics(
     if warmup:
         dur_s = sum(e2els)/max_concurrency
 
-    # 以下是提代码前要删掉的：
-    # dur_s = last_request_recv_time - first_request_send_time
-    # request_dur_s = sum(e2els)/max_concurrency
-    # request_tps = (total_input + sum(actual_output_lens)) / request_dur_s
-    # print(f"first_request_send_time: {first_request_send_time}, last_request_recv_time: {last_request_recv_time}, dur_s: {dur_s}, request_dur_s: {request_dur_s}, request_tps:{request_tps}")
-
     metrics = BenchmarkMetrics(
         completed=completed,
         total_input=total_input,
