@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import copy
 import importlib
 
 import pytest
@@ -15,12 +16,13 @@ from vllm.v1.core.kv_cache_utils import (FreeKVCacheBlockQueue, KVCacheBlock,
                                          PrefixCachingMetrics,
                                          estimate_max_model_len,
                                          generate_block_hash_extra_keys,
+                                         get_kv_cache_config,
                                          hash_block_tokens,
                                          hash_request_tokens,
                                          unify_kv_cache_configs)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheGroupSpec, KVCacheTensor,
-                                        SlidingWindowSpec)
+                                        KVCacheGroupSpec, KVCacheSpec,
+                                        KVCacheTensor, SlidingWindowSpec)
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 
@@ -557,13 +559,76 @@ def test_merge_kv_cache_spec():
     assert merged_layer_spec.sliding_window == 1
 
 
+def test_get_kv_cache_config_cross_layer_kv_sharing():
+    # Create a VllmConfig
+    model_id = "Qwen/Qwen1.5-7B"
+    max_model_len = 16383
+    model_config = ModelConfig(
+        model_id,
+        task="generate",
+        tokenizer=model_id,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="float16",
+        max_model_len=max_model_len,
+    )
+    scheduler_config = SchedulerConfig(max_num_batched_tokens=32768)
+
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        scheduler_config=scheduler_config,
+    )
+
+    # Create KV cache specs
+
+    # max memory usage bytes calculated as:
+    # 1024 * 2 * 16 * 32 * 128 * 2
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=32,
+        head_size=128,
+        dtype=torch.float16,
+        use_mla=False,
+    )
+    assert spec.max_memory_usage_bytes(vllm_config) == 268435456
+    assert spec.page_size_bytes == 262144
+
+    # layer_1 shares KV cache with layer_0
+    spec_shared_0 = copy.copy(spec)
+    spec_shared_0.kv_sharing_target_layer_idx = 0
+    assert spec_shared_0.max_memory_usage_bytes(vllm_config) == 0
+
+    kv_cache_spec: dict[str, KVCacheSpec] = {
+        "layer_0": spec,
+        "layer_1": spec_shared_0,
+    }
+
+    available_memory = 268435456
+
+    kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
+                                          available_memory)
+    assert kv_cache_config.num_blocks == 1024
+    assert kv_cache_config.tensors["layer_0"].size == available_memory
+    assert kv_cache_config.tensors["layer_1"].size == 0
+    assert len(kv_cache_config.kv_cache_groups) == 1
+    kv_sharing_layer_mapping = (
+        kv_cache_config.kv_cache_groups[0].kv_sharing_layer_mapping)
+    assert kv_sharing_layer_mapping is not None
+    assert len(kv_sharing_layer_mapping) == 1
+    assert kv_sharing_layer_mapping['layer_1'] == 0
+
+
 @pytest.mark.parametrize(
-    ("model_id", "max_model_len", "want_estimated_max_len"), [
-        ("Qwen/Qwen1.5-7B", 16385, 16384),
-        ("Qwen/Qwen1.5-7B", 16383, 16383),
-    ])
+    ("model_id", "max_model_len", "want_estimated_max_len",
+     "kv_sharing_factor", "available_mem_gb"), [
+         ("Qwen/Qwen1.5-7B", 16385, 16384, 0, 8),
+         ("Qwen/Qwen1.5-7B", 16383, 16383, 0, 8),
+         ("Qwen/Qwen1.5-7B", 16383, 16383, 2, 4),
+     ])
 def test_estimate_max_model_len(model_id, max_model_len,
-                                want_estimated_max_len):
+                                want_estimated_max_len, kv_sharing_factor,
+                                available_mem_gb):
     # Create a VllmConfig
     model_config = ModelConfig(
         model_id,
@@ -585,17 +650,27 @@ def test_estimate_max_model_len(model_id, max_model_len,
     # Create KV cache specs
     kv_cache_spec = {}
     for i in range(32):
+        kv_sharing_target_layer_idx = None
+        if kv_sharing_factor > 0:
+            share_kv = (i + 1) % kv_sharing_factor == 0
+            if share_kv:
+                # layer idx 1 will use KV cache from idx 0, etc
+                kv_sharing_target_layer_idx = i - (kv_sharing_factor - 1)
+
         layer_name = f"layer_{i}"
-        kv_cache_spec[layer_name] = FullAttentionSpec(
+        spec = FullAttentionSpec(
             block_size=16,
             num_kv_heads=32,
             head_size=128,
             dtype=torch.float16,
             use_mla=False,
         )
-    # Estimate the maximum model length, 16384 model_len need 8GB
+        spec.kv_sharing_target_layer_idx = kv_sharing_target_layer_idx
+        kv_cache_spec[layer_name] = spec
+    # Estimate the maximum model length, 16384 model_len need 8GB normally
+    # with cross-layer KV sharing with sharing factor=2, we only need 4GB
     estimated_max_len = estimate_max_model_len(vllm_config, kv_cache_spec,
-                                               8 * GiB_bytes)
+                                               available_mem_gb * GiB_bytes)
     assert estimated_max_len == want_estimated_max_len
 
 

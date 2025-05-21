@@ -113,6 +113,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
         use_irope: bool = False,
+        kv_sharing_target_layer_idx: Optional[int] = None,
     ) -> None:
         if use_irope:
             logger.warning_once(
@@ -127,6 +128,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         self.num_kv_heads = num_kv_heads
         self.sliding_window = sliding_window
         self.logits_soft_cap = logits_soft_cap
+        self.kv_sharing_target_layer_idx = kv_sharing_target_layer_idx
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -180,9 +182,11 @@ class PallasAttentionBackendImpl(AttentionImpl):
         num_tokens, hidden_size = query.shape
         query = query.view(num_tokens, self.num_heads, self.head_size)
 
-        if kv_cache.numel() > 0:
-            slot_mapping = attn_metadata.slot_mapping
-            write_to_kv_cache(key, value, kv_cache, slot_mapping)
+        # if reusing KV cache from earlier layer, don't update KV cache
+        if self.kv_sharing_target_layer_idx is None:
+            if kv_cache.numel() > 0:
+                slot_mapping = attn_metadata.slot_mapping
+                write_to_kv_cache(key, value, kv_cache, slot_mapping)
 
         output = torch.ops.xla.ragged_paged_attention(
             query,

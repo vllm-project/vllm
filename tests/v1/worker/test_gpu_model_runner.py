@@ -2,6 +2,7 @@
 
 import pytest
 
+from vllm.attention import Attention
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, VllmConfig)
 from vllm.sampling_params import SamplingParams
@@ -48,8 +49,7 @@ def initialize_kv_cache(runner: GPUModelRunner):
     runner.initialize_attn_backend(kv_cache_config)
 
 
-@pytest.fixture
-def model_runner():
+def init_model_runner():
     scheduler_config = SchedulerConfig(
         max_num_seqs=10,
         max_num_batched_tokens=512,
@@ -80,6 +80,17 @@ def model_runner():
 
     device = "cuda"
     runner = GPUModelRunner(vllm_config, device)
+    return runner
+
+
+@pytest.fixture(autouse=True)
+def model_runner(request):
+    runner = init_model_runner()
+
+    if 'skipkvinit' in request.keywords:
+        # do not init kv cache for specific tests
+        return runner
+
     initialize_kv_cache(runner)
     return runner
 
@@ -321,3 +332,80 @@ def test_update_states_request_unscheduled(model_runner):
 
     assert _is_req_added(model_runner, req_ids[1])
     assert not _is_req_scheduled(model_runner, req_ids[1])
+
+
+@pytest.mark.skipkvinit
+def test_init_kv_cache_shared_valid(model_runner):
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=model_runner.model_config.get_num_kv_heads(
+            model_runner.parallel_config),
+        head_size=model_runner.model_config.get_head_size(),
+        dtype=model_runner.kv_cache_dtype,
+        use_mla=False,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=10,
+        tensors={
+            "layer.0": KVCacheTensor(size=spec.page_size_bytes * 12),
+            "layer.1": KVCacheTensor(size=0),
+        },
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                # intentionally switch order to check layer names are sorted
+                # such that layers that reuse KV cache from earlier layers
+                # are processed after all layers that allocate KV cache
+                layer_names=["layer.1", "layer.0"],
+                kv_cache_spec=spec,
+                kv_sharing_layer_mapping={"layer.1": 0}),
+        ])
+
+    fwd_context = (
+        model_runner.vllm_config.compilation_config.static_forward_context)
+    # populate forward context before init kv
+    fwd_context['layer.0'] = Attention(32, 128, 0.1)
+    fwd_context['layer.1'] = Attention(32, 128, 0.1)
+
+    model_runner.initialize_kv_cache(kv_cache_config)
+
+    # check memory references of KV caches for layer 0 and 1 are the same
+    assert id(model_runner.kv_caches[0]) == id(model_runner.kv_caches[1])
+    assert len(fwd_context["layer.0"].kv_cache) == 1
+    assert len(fwd_context["layer.1"].kv_cache) == 1
+    layer_1_kv_cache = fwd_context["layer.1"].kv_cache[0]
+    layer_2_kv_cache = fwd_context["layer.1"].kv_cache[0]
+    assert id(layer_1_kv_cache) == id(layer_2_kv_cache)
+
+
+@pytest.mark.skipkvinit
+@pytest.mark.parametrize("target_layer_idx", [1, 2])
+def test_init_kv_cache_shared_invalid(model_runner, target_layer_idx):
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=model_runner.model_config.get_num_kv_heads(
+            model_runner.parallel_config),
+        head_size=model_runner.model_config.get_head_size(),
+        dtype=model_runner.kv_cache_dtype,
+        use_mla=False,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=10,
+        tensors={
+            "layer.1": KVCacheTensor(size=spec.page_size_bytes * 12),
+            "layer.0": KVCacheTensor(size=0),
+        },
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=["layer.1", "layer.0"],
+                kv_cache_spec=spec,
+                kv_sharing_layer_mapping={"layer.0": target_layer_idx}),
+        ])
+
+    if target_layer_idx >= 2:
+        error_msg = "2 is an invalid layer index!"
+    else:
+        error_msg = ("layer.0 cannot share KV cache with layer.1 which comes"
+                     " after it")
+
+    with pytest.raises(AssertionError, match=error_msg):
+        model_runner.initialize_kv_cache(kv_cache_config)
