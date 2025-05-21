@@ -19,7 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
-    get_tp_group)
+    get_tp_group, get_world_group)
 from vllm.logger import init_logger
 from vllm.utils import make_zmq_path, make_zmq_socket, round_down
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -324,8 +324,12 @@ class NixlConnectorWorker:
         # Metadata.
         self.engine_id = engine_id
         self.rank = get_tensor_model_parallel_rank()
+        logger.debug("NIXL worker %s TP rank %s", self.engine_id, self.rank)
         self.world_size = get_tensor_model_parallel_world_size()
         self.tp_group = get_tp_group()
+
+        self.local_rank = get_world_group().local_rank
+        logger.debug("NIXL worker %s local rank %s", self.engine_id)
 
         # KV Caches and nixl tracking data.
         self.kv_caches: dict[str, torch.Tensor] = {}
