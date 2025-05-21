@@ -2,7 +2,23 @@
 
 import torch
 import torch.nn.functional as F
-from torch_xla.experimental.custom_kernel import _histogram
+
+
+def _histogram(input: torch.Tensor, min: int, max: int) -> torch.Tensor:
+    """
+  Compute the histogram of a int32 tensor. The bin edges are defined by the
+  min and max values, with step = 1.
+  """
+    assert input.dtype == torch.int32, "input must be of torch.int32 dtype."
+    assert min <= max, "min must be less than or equal to max."
+
+    def searchsorted(sorted_sequence: torch.Tensor,
+                     values_to_search: torch.Tensor) -> torch.Tensor:
+        return (sorted_sequence.unsqueeze(1) == values_to_search).sum(dim=1)
+
+    bin_edges = torch.linspace(min, max, max - min + 1,
+                               dtype=input.dtype).to(input.device)
+    return searchsorted(bin_edges, input).to(torch.int32)
 
 
 def fused_moe(
@@ -61,7 +77,7 @@ def fused_moe(
     x = torch.ops.xla.gmm(x, w2, group_sizes)
     x = x[topk_argsort_revert_indices].reshape(-1, topk, hidden_size)
 
-    x = x * topk_weights.unsqueeze_(dim=-1)
+    x = x * topk_weights.unsqueeze(dim=-1)
     x = x.sum(dim=-2)
     x = x.reshape(orig_shape)
     return x

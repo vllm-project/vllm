@@ -161,7 +161,7 @@ class UsageMessage:
                              usage_context: UsageContext,
                              extra_kvs: dict[str, Any]) -> None:
         self._report_usage_once(model_architecture, usage_context, extra_kvs)
-        self._report_continous_usage()
+        self._report_continuous_usage()
 
     def _report_usage_once(self, model_architecture: str,
                            usage_context: UsageContext,
@@ -219,7 +219,7 @@ class UsageMessage:
         self._write_to_file(data)
         self._send_to_server(data)
 
-    def _report_continous_usage(self):
+    def _report_continuous_usage(self):
         """Report usage every 10 minutes.
 
         This helps us to collect more data points for uptime of vLLM usages.

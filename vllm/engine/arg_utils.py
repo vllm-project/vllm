@@ -737,7 +737,9 @@ class EngineArgs:
             title="DeviceConfig",
             description=DeviceConfig.__doc__,
         )
-        device_group.add_argument("--device", **device_kwargs["device"])
+        device_group.add_argument("--device",
+                                  **device_kwargs["device"],
+                                  deprecated=True)
 
         # Speculative arguments
         speculative_group = parser.add_argument_group(
@@ -977,7 +979,7 @@ class EngineArgs:
         from vllm.platforms import current_platform
         current_platform.pre_register_and_update()
 
-        device_config = DeviceConfig(device=self.device)
+        device_config = DeviceConfig(device=current_platform.device_type)
         model_config = self.create_model_config()
 
         # * If VLLM_USE_V1 is unset, we enable V1 for "supported features"
@@ -1325,7 +1327,7 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
-        # Only Ngram speculative decoding so far.
+        # V1 supports N-gram, Medusa, and Eagle speculative decoding.
         is_ngram_enabled = False
         is_eagle_enabled = False
         is_medusa_enabled = False
@@ -1383,18 +1385,11 @@ class EngineArgs:
             return False
 
         if (self.pipeline_parallel_size > 1
-                and self.distributed_executor_backend not in ["ray", "mp"]):
+                and self.distributed_executor_backend
+                not in ("ray", "mp", "external_launcher")):
             name = "Pipeline Parallelism without Ray distributed executor " \
-                    "or multiprocessing executor"
+                    "or multiprocessing executor or external launcher"
             _raise_or_fallback(feature_name=name, recommend_to_remove=False)
-            return False
-
-        # ngram is supported on V1, but off by default for now.
-        if is_ngram_enabled and _warn_or_fallback("ngram"):
-            return False
-
-        # Eagle is under development, so we don't support it yet.
-        if is_eagle_enabled and _warn_or_fallback("Eagle"):
             return False
 
         # Non-[CUDA, TPU] may be supported on V1, but off by default for now.
