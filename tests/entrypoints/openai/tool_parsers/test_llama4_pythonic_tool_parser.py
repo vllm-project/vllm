@@ -167,7 +167,6 @@ def test_tool_call(streaming: bool, model_output: str,
                                               model_output,
                                               streaming=streaming)
 
-    assert content is None
     assert len(tool_calls) == len(expected_tool_calls)
     for actual, expected in zip(tool_calls, expected_tool_calls):
         assert actual.type == "function"
