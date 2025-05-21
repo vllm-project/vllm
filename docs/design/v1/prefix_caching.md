@@ -192,7 +192,7 @@ As can be seen, block 3 is a new full block and is cached. However, it is redund
 
 When a request is finished, we free all its blocks if no other requests are using them (reference count = 0). In this example, we free request 1 and block 2, 3, 4, 8 associated with it. We can see that the freed blocks are added to the tail of the free queue in the *reverse* order. This is because the last block of a request must hash more tokens and is less likely to be reused by other requests. As a result, it should be evicted first.
 
-![Free Queue after Free a Request](../../assets/design/v1/prefix_caching/free.png)
+![Free queue after a request us freed](../../assets/design/v1/prefix_caching/free.png)
 
 ### Eviction (LRU)
 

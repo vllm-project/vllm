@@ -72,7 +72,7 @@ Currently, there are no pre-built ROCm wheels.
     ```
 
     !!! note
-        You might need to downgrade the "ninja" version to 1.10 it is not used when compiling flash-attention-2 (e.g. `pip install ninja==1.10.2.4`)
+        You might need to downgrade the "ninja" version to 1.10 as it is not used when compiling flash-attention-2 (e.g. `pip install ninja==1.10.2.4`)
 
 3. If you choose to build AITER yourself to use a certain branch or commit, you can build AITER using the following steps:
 
