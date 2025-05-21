@@ -275,13 +275,13 @@ class Worker(WorkerBase):
 
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
-
-        if not get_pp_group().is_last_rank:
+        parallel_config = self.vllm_config.parallel_config
+        if parallel_config.distributed_executor_backend != "external_launcher" \
+            and not get_pp_group().is_last_rank:
             assert isinstance(output, IntermediateTensors)
             get_pp_group().send_tensor_dict(output.tensors,
                                             all_gather_group=get_tp_group())
             return None
-
         assert isinstance(output, ModelRunnerOutput)
         return output if self.is_driver_worker else None
 
@@ -318,7 +318,7 @@ class Worker(WorkerBase):
         pattern: Optional[str] = None,
         max_size: Optional[int] = None,
     ) -> None:
-        from vllm.model_executor.model_loader.loader import ShardedStateLoader
+        from vllm.model_executor.model_loader import ShardedStateLoader
         ShardedStateLoader.save_model(
             self.model_runner.model,
             path,
@@ -341,7 +341,8 @@ def init_worker_distributed_environment(
                                  distributed_init_method, local_rank)
 
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
-                                      parallel_config.pipeline_parallel_size)
+                                      parallel_config.pipeline_parallel_size,
+                                      parallel_config.enable_expert_parallel)
 
     ensure_kv_transfer_initialized(vllm_config)
 

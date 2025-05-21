@@ -6,8 +6,12 @@
 anything-llm
 bentoml
 cerebrium
+chatbox
+dify
 dstack
 helm
+litellm
+lobe-chat
 lws
 modal
 open-webui

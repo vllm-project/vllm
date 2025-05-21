@@ -261,6 +261,7 @@ class ReplicatedLinear(LinearBase):
         quant_config: Quantization configure.
         prefix: The name of the layer in the state dict, including all parents
                         (e.g. model.layers.0.qkv_proj)
+        return_bias: If true, return bias together with outputs in forward pass.
     """
 
     def __init__(
@@ -523,6 +524,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         quant_config: Quantization configure.
         prefix: The name of the layer in the state dict, including all parents
                         (e.g. model.layers.0.qkv_proj)
+        return_bias: If true, return bias together with outputs in forward pass.
     """
 
     def __init__(
@@ -805,6 +807,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         quant_config: Quantization configure.
         prefix: The name of the layer in the state dict, including all parents
                         (e.g. model.layers.0.qkv_proj)
+        return_bias: If true, return bias together with outputs in forward pass.
     """
 
     def __init__(
@@ -1155,7 +1158,13 @@ class RowParallelLinear(LinearBase):
                        bias can be fused with other element-wise operations.
                        We skip adding bias but instead return it.
         params_dtype: Data type for the parameters.
+        reduce_results: If true, call all-reduce on output and make Y available
+                       to all GPUs, otherwise, every GPU will have its output
+                       which is Y = X_iA_i
         quant_config: Quantization configure.
+        prefix: The name of the layer in the state dict, including all parents
+                        (e.g. model.layers.0.down_proj)
+        return_bias: If true, return bias together with outputs in forward pass.
     """
 
     def __init__(
@@ -1425,8 +1434,8 @@ class QKVCrossParallelLinear(LinearBase):
     ):
         missing_attrs_dict = {
             k: getattr(src_param, k)
-            for k in (set(src_param.__dict__.keys()) -
-                      set(tgt_param.__dict__.keys()))
+            for k in (set(vars(src_param).keys()) -
+                      set(vars(tgt_param).keys()))
         }
         # TODO(Isotr0py): handle bitsandbytes 8bit
         use_bitsandbytes_4bit = getattr(src_param, "use_bitsandbytes_4bit",

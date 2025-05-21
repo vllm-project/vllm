@@ -41,6 +41,9 @@ Slack="http://slack.vllm.ai/"
 [project.scripts]
 vllm = "vllm.entrypoints.cli.main:main"
 
+[project.entry-points."vllm.general_plugins"]
+lora_filesystem_resolver = "vllm.plugins.lora_resolvers.filesystem_resolver:register_filesystem_resolver"
+
 [tool.setuptools_scm]
 # no extra settings needed, presence enables setuptools-scm
 
@@ -50,6 +53,8 @@ include = ["vllm*"]
 
 [tool.yapfignore]
 ignore_patterns = [
+    ".buildkite/**",
+    "benchmarks/**",
     "build/**",
 ]
 
@@ -66,26 +71,15 @@ exclude = [
 "vllm/third_party/**" = ["ALL"]
 "vllm/version.py" = ["F401"]
 "vllm/_version.py" = ["ALL"]
-# Python 3.8 typing. TODO: Remove these excludes after v1.0.0
-"vllm/adapter_commons/**/*.py" = ["UP006", "UP035"]
+# Python 3.8 typing - skip V0 code
 "vllm/attention/**/*.py" = ["UP006", "UP035"]
-"vllm/compilation/**/*.py" = ["UP006", "UP035"]
 "vllm/core/**/*.py" = ["UP006", "UP035"]
-"vllm/device_allocator/**/*.py" = ["UP006", "UP035"]
-"vllm/distributed/**/*.py" = ["UP006", "UP035"]
 "vllm/engine/**/*.py" = ["UP006", "UP035"]
 "vllm/executor/**/*.py" = ["UP006", "UP035"]
-"vllm/lora/**/*.py" = ["UP006", "UP035"]
-"vllm/model_executor/**/*.py" = ["UP006", "UP035"]
-"vllm/platforms/**/*.py" = ["UP006", "UP035"]
-"vllm/plugins/**/*.py" = ["UP006", "UP035"]
-"vllm/profiler/**/*.py" = ["UP006", "UP035"]
 "vllm/prompt_adapter/**/*.py" = ["UP006", "UP035"]
 "vllm/spec_decode/**/*.py" = ["UP006", "UP035"]
-"vllm/transformers_utils/**/*.py" = ["UP006", "UP035"]
-"vllm/triton_utils/**/*.py" = ["UP006", "UP035"]
-"vllm/vllm_flash_attn/**/*.py" = ["UP006", "UP035"]
 "vllm/worker/**/*.py" = ["UP006", "UP035"]
+# Python 3.8 typing - skip utils for ROCm
 "vllm/utils.py" = ["UP006", "UP035"]
 
 [tool.ruff.lint]
@@ -102,6 +96,7 @@ select = [
     "SIM",
     # isort
     # "I",
+    # flake8-logging-format
     "G",
 ]
 ignore = [
@@ -150,6 +145,10 @@ ignore-words-list = "dout, te, indicies, subtile, ElementE"
 skip = "tests/models/fixtures/*,tests/prompts/*,benchmarks/sonnet.txt,tests/lora/data/*,build/*,vllm/third_party/*"
 
 [tool.isort]
+skip_glob = [
+    ".buildkite/*",
+    "benchmarks/*",
+]
 use_parentheses = true
 skip_gitignore = true
 
@@ -170,3 +169,9 @@ plugins.md013.enabled = false # line-length
 plugins.md041.enabled = false # first-line-h1
 plugins.md033.enabled = false # inline-html
 plugins.md024.allow_different_nesting = true # no-duplicate-headers
+
+[tool.ty]
+respect-ignore-files = true
+
+[tool.ty.environment]
+python = "./.venv"

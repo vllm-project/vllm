@@ -26,7 +26,7 @@ def test_sampler_different(model_name: str):
               enforce_eager=False,
               max_num_seqs=1,
               max_model_len=512,
-              max_num_batched_tokens=512)
+              max_num_batched_tokens=256)
     prompts = [
         "Write a short story about a robot that dreams for the first time."
     ]

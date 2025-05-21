@@ -21,7 +21,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Grok1 model."""
-from typing import Iterable, Optional, Set, Tuple, Union
+from collections.abc import Iterable
+from typing import Optional, Union
 
 import torch
 import torch.nn.functional as F
@@ -256,7 +257,7 @@ class Grok1DecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -358,8 +359,8 @@ class Grok1Model(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -377,7 +378,7 @@ class Grok1Model(nn.Module):
             num_experts=num_experts)
 
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
             if (self.quant_config is not None and
@@ -491,9 +492,7 @@ class Grok1ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.unpadded_vocab_size,
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
-            padding_size=DEFAULT_VOCAB_PADDING_SIZE
-            # We need bigger padding if using lora for kernel compatibility
-            if not lora_config else lora_config.lora_vocab_padding_size,
+            padding_size=DEFAULT_VOCAB_PADDING_SIZE,
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
@@ -533,12 +532,14 @@ class Grok1ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                        sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
-        skip_prefixes = ["rotary_emb.inv_freq"]
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         # Skip lm_head when tie_word_embeddings is True
-        if self.config.tie_word_embeddings:
-            skip_prefixes.append("lm_head")
+        skip_prefixes = (["lm_head"]
+                         if self.config.tie_word_embeddings else None)
 
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=skip_prefixes,
+        )
         return loader.load_weights(weights)

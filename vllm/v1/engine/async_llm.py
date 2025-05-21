@@ -120,8 +120,9 @@ class AsyncLLM(EngineClient):
             executor_class=executor_class,
             log_stats=self.log_stats,
         )
-        for stat_logger in self.stat_loggers[0]:
-            stat_logger.log_engine_initialized()
+        if self.stat_loggers:
+            for stat_logger in self.stat_loggers[0]:
+                stat_logger.log_engine_initialized()
         self.output_handler: Optional[asyncio.Task] = None
         try:
             # Start output handler eagerly if we are in the asyncio eventloop.
@@ -474,6 +475,11 @@ class AsyncLLM(EngineClient):
 
     async def stop_profile(self) -> None:
         await self.engine_core.profile_async(False)
+
+    async def reset_mm_cache(self) -> None:
+        self.processor.mm_registry.reset_processor_cache()
+        self.processor.mm_input_cache_client.reset()
+        await self.engine_core.reset_mm_cache_async()
 
     async def reset_prefix_cache(self,
                                  device: Optional[Device] = None) -> None:
