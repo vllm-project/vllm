@@ -28,6 +28,34 @@ VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
 logger = init_logger(__name__)
 
 
+class SpinTimer:
+    """
+    In setups which have long inactivity periods it is desirable to reduce
+    system power consumption when vllm does nothing. This would lead to more
+    CPU thermal headroom when a request eventually comes, especially when
+    multiple GPUs are connected as each GPU would otherwise pin one thread at
+    100% CPU usage.
+
+    The simplest solution is to reduce polling frequency when there is no
+    activity for a certain period of time.
+    """
+
+    def __init__(self, busy_loop_s: float = 3.0, wait_sleep_s: float = 0.1):
+        self.last_activity = time.monotonic()
+        self.busy_loop_s = busy_loop_s
+        self.wait_sleep_s = wait_sleep_s
+
+    def record_activity(self):
+        self.last_activity = time.monotonic()
+
+    def spin(self):
+        curr_time = time.monotonic()
+        if curr_time >= self.last_activity + self.busy_loop_s:
+            time.sleep(self.wait_sleep_s)
+        else:
+            sched_yield()
+
+
 class ShmRingBuffer:
 
     def __init__(self,
@@ -42,7 +70,7 @@ class ShmRingBuffer:
         of items that can be stored in the buffer are known in advance.
         In this case, we don't need to synchronize the access to
          the buffer.
-        
+
         Buffer memory layout:
                   data                                 metadata
                     |                                      |
@@ -238,6 +266,7 @@ class MessageQueue:
         self.local_reader_rank = -1
         # rank does not matter for remote readers
         self._is_remote_reader = False
+        self._read_spin_timer: Optional[SpinTimer] = None
 
         self.handle = Handle(
             local_reader_ranks=local_reader_ranks,
@@ -276,6 +305,8 @@ class MessageQueue:
             self.local_socket.connect(socket_addr)
 
             self.remote_socket = None
+
+            self._read_spin_timer = SpinTimer()
         else:
             self.buffer = None  # type: ignore
             self.current_idx = -1
@@ -391,6 +422,7 @@ class MessageQueue:
                      timeout: Optional[float] = None,
                      cancel: Optional[Event] = None):
         assert self._is_local_reader, "Only readers can acquire read"
+        assert self._read_spin_timer is not None
         start_time = time.monotonic()
         n_warning = 1
         while True:
@@ -407,7 +439,7 @@ class MessageQueue:
                     # we need to wait until it is written
 
                     # Release the processor to other threads
-                    sched_yield()
+                    self._read_spin_timer.spin()
 
                     # if we wait for a long time, log a message
                     if (time.monotonic() - start_time
@@ -438,6 +470,8 @@ class MessageQueue:
                 metadata_buffer[self.local_reader_rank + 1] = 1
                 self.current_idx = (self.current_idx +
                                     1) % self.buffer.max_chunks
+
+                self._read_spin_timer.record_activity()
                 break
 
     def enqueue(self, obj, timeout: Optional[float] = None):
