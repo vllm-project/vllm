@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from vllm.sampling_params import SamplingParams
-from vllm.utils import is_pin_memory_available, make_tensor_with_pad
+from vllm.utils import cdiv, is_pin_memory_available, make_tensor_with_pad
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheTensor)
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -232,6 +232,25 @@ def _construct_cached_request_state(req_id_suffix: int):
     )
 
 
+def setup_cpu_tensors(input_batch: InputBatch, kv_cache_config: KVCacheConfig):
+    block_table_cpu_tensor = torch.zeros(
+        (input_batch.max_num_reqs,
+         cdiv(input_batch.max_model_len,
+              kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size)),
+        device="cpu",
+        dtype=torch.int32,
+        pin_memory=input_batch.pin_memory,
+    )
+    slot_mapping_cpu_tensor = torch.zeros(
+        input_batch.max_num_batched_tokens,
+        device="cpu",
+        dtype=torch.int64,
+        pin_memory=input_batch.pin_memory,
+    )
+    input_batch.block_table.block_tables[0].init_block_table_cpu(
+        block_table_cpu_tensor, slot_mapping_cpu_tensor)
+
+
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("batch_size", [1, 2, 32, 64])
 def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
@@ -244,6 +263,7 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
     output of `make_sampling_metadata` is then compared against the expected
     results to ensure correctness.
     """
+    kv_cache_config = get_kv_cache_config()
     input_batch: InputBatch = InputBatch(
         max_num_reqs=batch_size,
         max_model_len=1024,
@@ -251,8 +271,9 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
         device=torch.device(device),
         pin_memory=is_pin_memory_available(),
         vocab_size=1024,
-        kv_cache_config=get_kv_cache_config(),
+        kv_cache_config=kv_cache_config,
     )
+    setup_cpu_tensors(input_batch, kv_cache_config)
     reqs: list[CachedRequestState] = []
     req_id_reqs = {}
     req_id_output_token_ids = {}
@@ -334,6 +355,7 @@ def test_swap_states_in_input_batch(device: str, batch_size: int,
     output of `make_sampling_metadata` is then compared against the expected
     results to ensure correctness.
     """
+    kv_cache_config = get_kv_cache_config()
     input_batch: InputBatch = InputBatch(
         max_num_reqs=batch_size,
         max_model_len=1024,
@@ -341,8 +363,9 @@ def test_swap_states_in_input_batch(device: str, batch_size: int,
         device=torch.device(device),
         pin_memory=is_pin_memory_available(),
         vocab_size=1024,
-        kv_cache_config=get_kv_cache_config(),
+        kv_cache_config=kv_cache_config,
     )
+    ref_kv_cache_config = get_kv_cache_config()
     ref_input_batch: InputBatch = InputBatch(
         max_num_reqs=batch_size,
         max_model_len=1024,
@@ -350,8 +373,10 @@ def test_swap_states_in_input_batch(device: str, batch_size: int,
         device=torch.device(device),
         pin_memory=is_pin_memory_available(),
         vocab_size=1024,
-        kv_cache_config=get_kv_cache_config(),
+        kv_cache_config=ref_kv_cache_config,
     )
+    setup_cpu_tensors(input_batch, kv_cache_config)
+    setup_cpu_tensors(ref_input_batch, ref_kv_cache_config)
 
     reqs: list[CachedRequestState] = []
     req_id_reqs = {}

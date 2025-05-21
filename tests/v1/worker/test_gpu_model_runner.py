@@ -13,6 +13,8 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
+from .test_gpu_input_batch import setup_cpu_tensors
+
 
 def initialize_kv_cache(runner: GPUModelRunner):
     """
@@ -45,6 +47,7 @@ def initialize_kv_cache(runner: GPUModelRunner):
         vocab_size=runner.model_config.get_vocab_size(),
         kv_cache_config=kv_cache_config,
     )
+    setup_cpu_tensors(runner.input_batch, kv_cache_config)
     runner.initialize_attn_backend(kv_cache_config)
 
 
