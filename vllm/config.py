@@ -1325,7 +1325,7 @@ class ModelConfig:
         return getattr(self.hf_config, "matryoshka_dimensions", None)
 
 
-BlockSize = Literal[1, 8, 16, 32, 64, 128]
+BlockSize = Literal[1, 8, 16, 32, 64, 128, 256]
 CacheDType = Literal["auto", "fp8", "fp8_e4m3", "fp8_e5m2", "fp8_inc"]
 PrefixCachingHashAlgo = Literal["builtin", "sha256"]
 
