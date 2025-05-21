@@ -24,13 +24,11 @@ class _UnexpectedAstError(Exception):
     pass
 
 
-@ToolParserManager.register_module("pythonic")
-class PythonicToolParser(ToolParser):
+@ToolParserManager.register_module("llama4_pythonic")
+class Llama4PythonicToolParser(ToolParser):
     """
-    Tool call parser for models that produce tool calls in a pythonic style,
-    such as Llama 3.2 and Llama 4 models.
-
-    Used when --enable-auto-tool-choice --tool-call-parser pythonic are all set
+    Toolcall parser for Llama4 that produce tool calls in a pythonic style
+    Use --enable-auto-tool-choice --tool-call-parser llama4_pythonic
     """
     # TODO(mdepinet): Possible future improvements:
     #   1. Support text + tools separated by either <|python_tag|> or \n\n
@@ -62,6 +60,11 @@ class PythonicToolParser(ToolParser):
         Extract the tool calls from a complete model response.
         """
 
+        # remove <|python_start|> and <|python_end|>
+        # as Llama 4 model sometime will output those tokens
+        if model_output.startswith("<|python_start|>"):
+            model_output = model_output[len("<|python_start|>"):]
+            model_output = model_output.replace("<|python_end|>", "")
         if not (self.TOOL_CALL_REGEX.match(model_output)):
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
@@ -100,10 +103,17 @@ class PythonicToolParser(ToolParser):
         request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
 
-        if not current_text.startswith("["):
+        if not current_text.startswith("[") and not current_text.startswith(
+                "<|python_start|>"):
             return DeltaMessage(content=delta_text)
 
         try:
+            # remove <|python_start|> and <|python_end|>
+            if current_text.startswith("<|python_start|>"):
+                current_text = current_text[len("<|python_start|>"):]
+            if current_text.endswith("<|python_end|>"):
+                current_text = current_text[:current_text.
+                                            rfind("<|python_end|>")]
             valid_and_added_text = _make_valid_python(current_text)
             if valid_and_added_text is None:
                 return None
@@ -152,11 +162,11 @@ class PythonicToolParser(ToolParser):
                         self.streamed_args_for_tool[
                             index] += delta.function.arguments
 
-            # HACK: serving_chat.py inspects the internal state of tool parsers
-            # when determining it's final streaming delta, automatically
-            # adding autocompleted JSON.
-            # These two lines avoid that nonsense while ensuring finish_reason
-            # is set to tool_calls when at least one tool is called.
+        # HACK: serving_chat.py inspects the internal state of tool parsers
+        # when determining it's final streaming delta, automatically
+        # adding autocompleted JSON.
+        # These two lines avoid that nonsense while ensuring finish_reason
+        # is set to tool_calls when at least one tool is called.
             if tool_deltas and not self.prev_tool_call_arr:
                 self.prev_tool_call_arr = [{"arguments": {}}]
 
