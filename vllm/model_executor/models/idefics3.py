@@ -279,6 +279,15 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
             height=image_processor.size["longest_edge"],
         )
 
+    def get_num_mm_encoder_tokens(
+        self,
+        num_image_tokens: int,
+    ) -> int:
+        hf_config = self.get_hf_config()
+        scale_factor = hf_config.scale_factor
+
+        return num_image_tokens * scale_factor**2
+
 
 class Idefics3DummyInputsBuilder(BaseDummyInputsBuilder[Idefics3ProcessingInfo]
                                  ):

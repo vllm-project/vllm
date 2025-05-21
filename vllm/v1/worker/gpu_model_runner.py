@@ -263,6 +263,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                         pin_memory=self.pin_memory)
         self.seq_lens_np = self.seq_lens_cpu.numpy()
 
+        # Multimodal LoRA support
+        if self.is_multimodal_model:
+            self.info = self.mm_registry.create_processor(
+                self.model_config, disable_cache=True).info
+            self.supports_mm_lora = hasattr(self.info,
+                                            "get_num_mm_encoder_tokens")
+        else:
+            self.supports_mm_lora = False
+
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> bool:
         """
         Update the order of requests in the batch based on the attention
@@ -892,12 +901,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return
 
         # Batch the multi-modal inputs.
+        mm_tokens = list[int]()
         mm_inputs = list[MultiModalKwargs]()
         req_ids_pos = list[tuple[str, int, PlaceholderRange]]()
         for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
             req_state = self.requests[req_id]
 
             for mm_input_id in encoder_input_ids:
+                mm_tokens.append(req_state.mm_positions[mm_input_id].length)
                 mm_inputs.append(req_state.mm_inputs[mm_input_id])
                 req_ids_pos.append(
                     (req_id, mm_input_id, req_state.mm_positions[mm_input_id]))
@@ -910,6 +921,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # multimodal inputs. The proper solution should be reordering the
         # encoder outputs.
         grouped_mm_inputs_list = group_mm_inputs_by_modality(mm_inputs)
+
+        if self.lora_config and self.supports_mm_lora:
+            mm_tokens = [
+                self.info.get_num_mm_encoder_tokens(num_token)
+                for num_token in mm_tokens
+            ]
+            num_scheduled_tokens = np.array(mm_tokens, dtype=np.int32)
+            self.set_active_loras(self.input_batch,
+                                  num_scheduled_tokens,
+                                  is_mm_input=True)
 
         encoder_outputs = []
         for grouped_mm_inputs in grouped_mm_inputs_list:
@@ -1826,22 +1847,38 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 encoder_budget, max_num_mm_items, dummy_data_modality)
 
             # Create dummy batch of multimodal inputs.
-            dummy_mm_kwargs = self.mm_registry.get_decoder_dummy_data(
+            dummy_mm_data = self.mm_registry.get_decoder_dummy_data(
                 model_config=self.model_config,
                 seq_len=self.max_num_tokens,
-                mm_counts={
-                    dummy_data_modality: 1
-                },
-            ).multi_modal_data
+                mm_counts={dummy_data_modality: 1},
+            )
+            dummy_mm_kwargs = dummy_mm_data.multi_modal_data
+            dummy_mm_token_ids = dummy_mm_data.multi_modal_token_ids
 
+            max_num_mm_items = 1  # temporary
             batched_dummy_mm_inputs = MultiModalKwargs.batch(
-                [dummy_mm_kwargs] * max_num_mm_items)
+                [dummy_mm_kwargs] * max_num_mm_items)  # ???
             batched_dummy_mm_inputs = MultiModalKwargs.as_kwargs(
                 batched_dummy_mm_inputs, device=self.device)
 
-            # Run multimodal encoder.
-            dummy_encoder_outputs = self.model.get_multimodal_embeddings(
-                **batched_dummy_mm_inputs)
+            if self.supports_mm_lora:
+                num_scheduled_tokens_list = [
+                    self.info.get_num_mm_encoder_tokens(
+                        len(dummy_mm_token_ids))
+                ] * max_num_mm_items
+                num_scheduled_tokens = np.array(num_scheduled_tokens_list,
+                                                dtype=np.int32)
+                lora_config = self.lora_config
+            else:
+                num_scheduled_tokens = None
+                lora_config = None
+
+            with self.maybe_dummy_run_with_lora(lora_config,
+                                                num_scheduled_tokens,
+                                                is_mm_input=True):
+                # Run multimodal encoder.
+                dummy_encoder_outputs = self.model.get_multimodal_embeddings(
+                    **batched_dummy_mm_inputs)
 
             sanity_check_mm_encoder_outputs(
                 dummy_encoder_outputs,

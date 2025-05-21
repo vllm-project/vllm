@@ -50,11 +50,13 @@ class LoRAModelRunnerMixin:
             model.embedding_padding_modules,
             max_position_embeddings=text_config.max_position_embeddings,
         )
-        return self.lora_manager.create_lora_manager(model)
+        return self.lora_manager.create_lora_manager(model, model_config)
 
-    def _set_active_loras(self, prompt_lora_mapping: tuple[int, ...],
+    def _set_active_loras(self,
+                          prompt_lora_mapping: tuple[int, ...],
                           token_lora_mapping: tuple[int, ...],
-                          lora_requests: set[LoRARequest]) -> None:
+                          lora_requests: set[LoRARequest],
+                          is_mm_input: bool = False) -> None:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
 
@@ -64,11 +66,14 @@ class LoRAModelRunnerMixin:
         # decode and this flag is generally ignored.
         lora_mapping = LoRAMapping(token_lora_mapping,
                                    prompt_lora_mapping,
-                                   is_prefill=True)
+                                   is_prefill=True,
+                                   is_mm_input=is_mm_input)
         self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
 
-    def set_active_loras(self, input_batch: InputBatch,
-                         num_scheduled_tokens: np.ndarray) -> None:
+    def set_active_loras(self,
+                         input_batch: InputBatch,
+                         num_scheduled_tokens: np.ndarray,
+                         is_mm_input: bool = False) -> None:
 
         prompt_lora_mapping: tuple[int, ...]  # of size input_batch.num_reqs
         token_lora_mapping: tuple[int,
@@ -77,11 +82,13 @@ class LoRAModelRunnerMixin:
         prompt_lora_mapping, token_lora_mapping, lora_requests = \
                             input_batch.make_lora_inputs(num_scheduled_tokens)
         return self._set_active_loras(prompt_lora_mapping, token_lora_mapping,
-                                      lora_requests)
+                                      lora_requests, is_mm_input)
 
     @contextmanager
-    def maybe_dummy_run_with_lora(self, lora_config: LoRAConfig,
-                                  num_scheduled_tokens: np.ndarray):
+    def maybe_dummy_run_with_lora(self,
+                                  lora_config: LoRAConfig,
+                                  num_scheduled_tokens: np.ndarray,
+                                  is_mm_input: bool = False):
         if lora_config is None:
             yield
         else:
@@ -117,7 +124,7 @@ class LoRAModelRunnerMixin:
 
                 self._set_active_loras(tuple(prompt_lora_mapping),
                                        tuple(token_lora_mapping),
-                                       lora_requests)
+                                       lora_requests, is_mm_input)
 
                 yield
 

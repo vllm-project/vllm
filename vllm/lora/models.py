@@ -17,14 +17,14 @@ from vllm.adapter_commons.models import (AdapterLRUCache, AdapterModel,
 from vllm.adapter_commons.utils import (add_adapter, deactivate_adapter,
                                         get_adapter, list_adapters,
                                         remove_adapter, set_adapter_mapping)
-from vllm.config import LoRAConfig
+from vllm.config import LoRAConfig, ModelConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import (BaseLayerWithLoRA,
                               LinearScalingRotaryEmbeddingWithLoRA,
                               LoRAMapping)
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.peft_helper import PEFTHelper
-from vllm.lora.punica_wrapper import get_punica_wrapper
+from vllm.lora.punica_wrapper import PunicaWrapperBase, get_punica_wrapper
 from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              get_supported_lora_modules,
                              is_regex_target_modules,
@@ -33,6 +33,7 @@ from vllm.model_executor.models import SupportsLoRA, supports_multimodal
 from vllm.model_executor.models.interfaces import is_pooling_model
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import PPMissingLayer, WeightsMapper
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.utils import is_pin_memory_available
 
 logger = init_logger(__name__)
@@ -311,6 +312,7 @@ class LoRAModelManager(AdapterModelManager):
         max_num_batched_tokens: int,
         vocab_size: int,
         lora_config: LoRAConfig,
+        model_config: Optional[ModelConfig],
         device: torch.device,
     ):
         """Create a LoRAModelManager and adapter for a given model.
@@ -357,6 +359,30 @@ class LoRAModelManager(AdapterModelManager):
             # In case the model only supports LoRA for
             # text modules (e.g. ChatGLM)
             and hasattr(self.model, "get_mm_mapping"))
+        # For v0 compatibility
+        if model_config is not None:
+            self.mm_registry = MULTIMODAL_REGISTRY
+            self.info = self.mm_registry.create_processor(
+                model_config, disable_cache=True).info
+            self.supports_mm_lora = self.supports_mm and hasattr(
+                self.info, "get_num_mm_encoder_tokens")
+        else:
+            self.supports_mm_lora = False
+        if self.supports_mm_lora:
+            self.mm_mapping: MultiModelKeys = self.model.get_mm_mapping()
+            self.mm_punica_wrapper_mapping = {
+                name:
+                get_punica_wrapper(
+                    self.info.get_num_mm_encoder_tokens(
+                        max_num_batched_tokens),
+                    max_batches=self.max_num_seqs,  #  TODO
+                    device=self.device,
+                    max_loras=self.lora_config.max_loras,
+                )
+                for name in self.mm_mapping.tower_model
+            }
+            self.mm_punica_wrapper_mapping[
+                self.mm_mapping.language_model[0]] = self.punica_wrapper
         self.is_pooling_model = is_pooling_model(self.model)
         self.packed_modules: dict[str, list[str]] = {}
         self.modules: dict[str, BaseLayerWithLoRA] = {}
@@ -452,14 +478,35 @@ class LoRAModelManager(AdapterModelManager):
 
     def _set_adapter_mapping(self, mapping: LoRAMapping) -> None:
         # update lora states
-        self.punica_wrapper.update_metadata(
-            mapping,
-            self.lora_index_to_id,
-            self.lora_slots + 1,
-            self.vocab_size,
-            self.lora_config.lora_extra_vocab_size,
-            self.long_lora_context,
-        )
+        if not self.supports_mm_lora:
+            self.punica_wrapper.update_metadata(
+                mapping,
+                self.lora_index_to_id,
+                self.lora_slots + 1,
+                self.vocab_size,
+                self.lora_config.lora_extra_vocab_size,
+                self.long_lora_context,
+            )
+        elif mapping.is_mm_input:
+            self.mm_punica_wrapper_mapping[
+                self.mm_mapping.tower_model[0]].update_metadata(
+                    mapping,
+                    self.lora_index_to_id,
+                    self.lora_slots + 1,
+                    self.vocab_size,
+                    self.lora_config.lora_extra_vocab_size,
+                    self.long_lora_context,
+                )
+        else:
+            self.mm_punica_wrapper_mapping[
+                self.mm_mapping.language_model[0]].update_metadata(
+                    mapping,
+                    self.lora_index_to_id,
+                    self.lora_slots + 1,
+                    self.vocab_size,
+                    self.lora_config.lora_extra_vocab_size,
+                    self.long_lora_context,
+                )
 
     def remove_all_adapters(self):
         """Remove all LoRAModels from the manager."""
@@ -476,7 +523,9 @@ class LoRAModelManager(AdapterModelManager):
                 continue
             # A temporary approach for multimodal models to support LoRA
             # TODO: Remove this restriction
-            if self._filter_unsupported_mm_module(module_name):
+            if (self._filter_unsupported_mm_module(module_name)
+                    and not self.supports_mm_lora
+                    or self._get_mm_punica_wrapper(module_name) is None):
                 logger.warning(
                     "Regarding multimodal models, vLLM currently only supports "
                     "adding LoRA to language model, %s will be ignored.",
@@ -519,7 +568,11 @@ class LoRAModelManager(AdapterModelManager):
             self.register_module(module_name, new_module)
             self._register_packed_modules(module_name)
             # All lora layers share the same punica_wrapper based on reference.
-            new_module.set_mapping(self.punica_wrapper)
+            if self.supports_mm_lora:
+                new_module.set_mapping(
+                    self._get_mm_punica_wrapper(module_name))
+            else:
+                new_module.set_mapping(self.punica_wrapper)
 
     def register_module(self, module_name: str, module: "BaseLayerWithLoRA"):
         assert isinstance(module, BaseLayerWithLoRA)
@@ -614,6 +667,19 @@ class LoRAModelManager(AdapterModelManager):
             return any(
                 [module_name.startswith(prefix) for prefix in prefix_lst])
         return False
+
+    def _get_mm_punica_wrapper(self, module_name: str) -> PunicaWrapperBase:
+        """
+        TODO
+        """
+        if self.supports_mm_lora:
+            for (
+                    prefix,
+                    punica_wrapper,
+            ) in self.mm_punica_wrapper_mapping.items():
+                if module_name.startswith(prefix):
+                    return punica_wrapper
+        return None
 
     def _register_packed_modules(self, module_full_name: str) -> None:
         parts = module_full_name.split(".")
@@ -713,9 +779,10 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
 
     def __init__(self, model: nn.Module, max_num_seqs: int,
                  max_num_batched_tokens: int, vocab_size: int,
-                 lora_config: LoRAConfig, device: torch.device):
+                 lora_config: LoRAConfig, model_config: ModelConfig,
+                 device: torch.device):
         super().__init__(model, max_num_seqs, max_num_batched_tokens,
-                         vocab_size, lora_config, device)
+                         vocab_size, lora_config, model_config, device)
         self._registered_adapters: LoRALRUCache = LoRALRUCache(
             self.capacity, self.deactivate_adapter)
         self._active_adapters: LoRALRUCache = LoRALRUCache(
@@ -785,6 +852,7 @@ def create_lora_manager(
         max_num_batched_tokens: int,
         vocab_size: int,
         lora_config: LoRAConfig,
+        model_config: ModelConfig,
         device: torch.device,
         lora_manager_cls: type[LoRAModelManager] = LoRAModelManager,
         **kwargs) -> LoRAModelManager:
@@ -797,6 +865,7 @@ def create_lora_manager(
         max_num_batched_tokens=max_num_batched_tokens,
         vocab_size=vocab_size,
         lora_config=lora_config,
+        model_config=model_config,
         device=device,
         **kwargs)
     return lora_manager

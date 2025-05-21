@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
 from abc import ABC
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -44,6 +45,7 @@ class DummyDecoderData(NamedTuple):
     prompt_token_ids: list[int]
     multi_modal_data: MultiModalKwargs
     multi_modal_placeholders: MultiModalPlaceholderDict
+    multi_modal_token_ids: list[int]
 
 
 _I = TypeVar("_I", bound=BaseProcessingInfo)
@@ -249,6 +251,7 @@ class MultiModalProfiler(Generic[_I]):
                 str(self._get_mm_num_tokens(mm_inputs)),
             )
 
+        multi_modal_token_ids = copy.deepcopy(prompt_token_ids)
         if total_len < seq_len:
             prompt_token_ids.extend([0] * (seq_len - total_len))
 
@@ -256,6 +259,7 @@ class MultiModalProfiler(Generic[_I]):
             prompt_token_ids=prompt_token_ids,
             multi_modal_data=mm_inputs["mm_kwargs"],
             multi_modal_placeholders=mm_inputs["mm_placeholders"],
+            multi_modal_token_ids=multi_modal_token_ids,
         )
 
     def get_mm_max_tokens(

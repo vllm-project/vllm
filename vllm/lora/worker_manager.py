@@ -10,7 +10,7 @@ from vllm.adapter_commons.utils import (add_adapter_worker,
                                         list_adapters_worker,
                                         set_active_adapters_worker)
 from vllm.adapter_commons.worker_manager import AbstractWorkerManager
-from vllm.config import LoRAConfig
+from vllm.config import LoRAConfig, ModelConfig
 from vllm.logger import init_logger
 from vllm.lora.models import (LoRAModel, LoRAModelManager,
                               LRUCacheLoRAModelManager, create_lora_manager)
@@ -200,6 +200,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
     def create_lora_manager(
         self,
         model: torch.nn.Module,
+        model_config: Optional[ModelConfig] = None,
     ) -> Any:
         lora_manager = create_lora_manager(
             model,
@@ -209,6 +210,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             lora_config=self.lora_config,
             device=self.device,
             max_num_batched_tokens=self.max_num_batched_tokens,
+            model_config=model_config,
         )
         self._adapter_manager = lora_manager
         return lora_manager.model
