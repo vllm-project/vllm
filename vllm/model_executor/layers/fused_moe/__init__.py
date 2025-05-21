@@ -4,7 +4,8 @@ from contextlib import contextmanager
 from typing import Any, Optional
 
 from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
+    MOE_DP_CHUNK_SIZE, FusedMoE, FusedMoEMethodBase,
+    FusedMoeWeightScaleSupported)
 from vllm.triton_utils import HAS_TRITON
 
 _config: Optional[dict[str, Any]] = None
@@ -29,6 +30,7 @@ __all__ = [
     "FusedMoeWeightScaleSupported",
     "override_config",
     "get_config",
+    "MOE_DP_CHUNK_SIZE",
 ]
 
 if HAS_TRITON:

@@ -492,6 +492,11 @@ class MPClient(EngineCoreClient):
                 (e for e in self.core_engines if e.identity == eng_identity),
                 None)
             if engine is None:
+                msg = msgspec.msgpack.decode(ready_msg_bytes)
+                status, local = msg["status"], msg["local"]
+                logger.debug(f"XXXXXX {status} message from "
+                             f"{'local' if local else 'remote'} "
+                             f"engine {eng_index}")
                 raise RuntimeError(f"Message from engine with unexpected data "
                                    f"parallel rank: {eng_index}")
             msg = msgspec.msgpack.decode(ready_msg_bytes)

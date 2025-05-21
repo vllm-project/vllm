@@ -9,7 +9,8 @@ import triton.language as tl
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     get_config_dtype_str, try_get_optimal_moe_config)
-from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+from vllm.model_executor.layers.fused_moe.utils import (_fp8_quantize,
+                                                        _resize_cache)
 
 
 @triton.jit
@@ -733,12 +734,27 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         #qintermediate_cache2 = intermediate_cache2
         a2q_scale = a2_scale
         # TODO (varun) : support w8a8
-        assert not self.use_fp8_w8a8
-        #if self.use_fp8_w8a8:
-        #    qintermediate_cache2, a2q_scale = _fp8_quantize(
-        #        intermediate_cache2, a2_scale, self.block_shape)
+        #assert not self.use_fp8_w8a8
+        if self.use_fp8_w8a8:
+            per_act_token = False
+            qintermediate_cache2 = torch.empty_like(intermediate_cache2,
+                                                    dtype=torch.float8_e4m3fn)
+            if per_act_token:
+                scale_shape = (E, num_tokens, 1)
+            else:
+                scale_shape = (E, 1)
+            a2q_scale = torch.empty(scale_shape,
+                                    dtype=torch.float32,
+                                    device=hidden_states.device)
+            for e in range(E):
+                qintermediate_cache2[e], a2q_scale[e] = _fp8_quantize(
+                    intermediate_cache2[e, :expert_num_tokens[e]],
+                    a2_scale[e] if a2_scale is not None else None,
+                    per_act_token, self.block_shape)
+        else:
+            qintermediate_cache2 = intermediate_cache2
 
-        invoke_moe_batched_triton_kernel(A=intermediate_cache2,
+        invoke_moe_batched_triton_kernel(A=qintermediate_cache2,
                                          B=w2,
                                          C=intermediate_cache3,
                                          expert_num_tokens=expert_num_tokens,

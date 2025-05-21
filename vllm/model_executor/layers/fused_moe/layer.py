@@ -56,7 +56,7 @@ logger = init_logger(__name__)
 
 # Note: this limit is somewhat arbitrary and might be changed later.
 # The size of the activations will be E x MOE_DP_CHUNK_SIZE x hidden_dim.
-MOE_DP_CHUNK_SIZE = 256
+MOE_DP_CHUNK_SIZE = 128
 
 
 @dataclass
@@ -72,7 +72,7 @@ class FusedMoEParallelConfig:
 
     @property
     def use_pplx_kernels(self):
-        return self.dp_size > 1 and self.use_ep and \
+        return self.dp_size > 1 and self.use_ep and has_pplx and \
              envs.VLLM_ALL2ALL_BACKEND == "pplx"
 
     @staticmethod
@@ -184,6 +184,7 @@ class FusedMoEParallelConfig:
 # Adapted from pplx-kernels tests/all_to_all_utils.py
 @dataclass
 class MoEConfig:
+    max_num_tokens: int
     num_experts: int
     experts_per_token: int
     hidden_dim: int
@@ -470,6 +471,47 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             e_score_correction_bias=e_score_correction_bias,
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input)
+
+    def set_prepare_finalize(
+        self,
+        dp_size: int,
+        world_size: int,
+        prepare_finalize: FusedMoEPrepareAndFinalize,
+    ) -> bool:
+        assert self.fused_experts == fused_experts
+
+        experts: Optional[FusedMoEPermuteExpertsUnpermute] = None
+
+        if isinstance(prepare_finalize,
+                      (BatchedPrepareAndFinalize, PplxPrepareAndFinalize)):
+            logger.debug("BatchedTritonExperts %s", self.moe)
+            experts = BatchedTritonExperts(
+                max_num_tokens=MOE_DP_CHUNK_SIZE,
+                world_size=world_size,
+                dp_size=dp_size,
+                use_fp8_w8a8=False,  #moe.in_dtype == torch.float8_e4m3fn,
+                use_int8_w8a8=False,
+                use_int8_w8a16=False,
+                use_int4_w4a16=False,
+                block_shape=None,
+            )
+        else:
+            logger.debug("TritonExperts %s", self.moe)
+            experts = TritonExperts(
+                use_fp8_w8a8=False,
+                use_int8_w8a8=False,
+                use_int8_w8a16=False,
+                use_int4_w4a16=False,
+                block_shape=None,
+                per_channel_quant=False,
+            )
+
+        self.fused_experts = FusedMoEModularKernel(
+            prepare_finalize,
+            experts,
+        )
+
+        return True
 
     def forward_cuda(
         self,
@@ -785,14 +827,17 @@ class FusedMoE(torch.nn.Module):
             from vllm_hpu_extension.ops import DynamicFusedMOE
             self.hpu_fused_moe = DynamicFusedMOE(self.global_num_experts)
 
+        logger.debug(f"PARAM DTYPE = {params_dtype}")
+        #assert params_dtype.itemsize == 1
+
         moe = MoEConfig(
+            max_num_tokens=MOE_DP_CHUNK_SIZE,
             num_experts=self.global_num_experts,
             experts_per_token=top_k,
             hidden_dim=hidden_size,
             num_local_experts=self.local_num_experts,
             moe_parallel_config=self.moe_parallel_config,
-            # TODO (bnell): this needs to be fixed for quantized types.
-            in_dtype=params_dtype,
+            in_dtype=moe.in_dtype,
             max_num_tokens=MOE_DP_CHUNK_SIZE,
         )
         self.moe_config = moe
@@ -1194,6 +1239,8 @@ class FusedMoE(torch.nn.Module):
                 renormalize=renormalize)
             if indices_type is not None:
                 topk_ids = topk_ids.to(dtype=indices_type)
+
+        assert topk_ids.dtype == indices_type
 
         return topk_weights, topk_ids
 
