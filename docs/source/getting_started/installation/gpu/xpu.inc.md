@@ -66,7 +66,6 @@ XPU platform supports **tensor parallel** inference/serving and also supports **
 python -m vllm.entrypoints.openai.api_server \
      --model=facebook/opt-13b \
      --dtype=bfloat16 \
-     --device=xpu \
      --max_model_len=1024 \
      --distributed-executor-backend=ray \
      --pipeline-parallel-size=2 \
