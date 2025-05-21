@@ -26,16 +26,47 @@ class CpuPlatform(Platform):
     device_type: str = "cpu"
     dispatch_key: str = "CPU"
 
+    @classmethod
+    def has_apple_silicon_bf16_support(cls) -> bool:
+        """Check if the Apple Silicon device supports bf16.
+        
+        This checks both hardware capabilities and PyTorch support for bf16
+        on Apple Silicon devices.
+        """
+        if not sys.platform.startswith("darwin"):
+            return False
+            
+        if cls.get_cpu_architecture() != CpuArchEnum.ARM:
+            return False
+            
+        # Check if we're on Apple Silicon
+        try:
+            import platform
+            if not platform.processor().startswith("arm"):
+                return False
+        except Exception:
+            return False
+            
+        # Check PyTorch MPS backend support
+        if not torch.backends.mps.is_available():
+            return False
+            
+        # Check if bf16 is supported by PyTorch on this device
+        try:
+            # Try to create a bf16 tensor on MPS
+            x = torch.zeros(1, dtype=torch.bfloat16, device="mps")
+            return True
+        except Exception:
+            return False
+
     @property
     def supported_dtypes(self) -> list:
         if self.get_cpu_architecture() == CpuArchEnum.POWERPC:
             return [torch.bfloat16, torch.float32]
-        elif sys.platform.startswith(
-                "darwin") and self.get_cpu_architecture() == CpuArchEnum.ARM:
-            # TODO: change this condition to check if the platform support bf16
-            # instead of checking the OS. For instance M2 shall supports bf16
-            # already. But we need to modify `cpu_extension.cmake` to activate
-            # the feature in the build.
+        elif sys.platform.startswith("darwin") and self.get_cpu_architecture() == CpuArchEnum.ARM:
+            # Check for bf16 support on Apple Silicon
+            if self.has_apple_silicon_bf16_support():
+                return [torch.bfloat16, torch.float16, torch.float32]
             return [torch.float16, torch.float32]
         # x86/aarch64 CPU has supported both bf16 and fp16 natively.
         return [torch.bfloat16, torch.float16, torch.float32]
