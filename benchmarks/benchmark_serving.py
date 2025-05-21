@@ -1017,7 +1017,7 @@ if __name__ == "__main__":
         action="store_true",
         help="Warmup before benchmark tests. "
         "it will add a warmup request in each process, "
-        "the result of warmup request will not be caculated in final results.",
+        "the result of warmup request will not be calculated in final results.",
     )
     parser.add_argument(
         "--save-result",
