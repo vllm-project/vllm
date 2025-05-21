@@ -107,7 +107,7 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
                 self.worker.model_runner.return_hidden_states = True
 
             if hasattr(self, "pard") and self.pard is True:
-                filtered_model_outputs = self.pard_infer(execute_model_req, sample_len)
+                filtered_model_outputs = self.pard_infer(expanded_request, sample_len)
                 return filtered_model_outputs, True
 
             for _ in range(sample_len):
