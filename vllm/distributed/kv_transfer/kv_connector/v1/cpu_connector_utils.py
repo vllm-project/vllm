@@ -19,8 +19,6 @@ from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
     get_tp_group)
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl_cpu_utils import (
-        DestinationSpec, SourceSpec, RingBufferAllocator)
 from vllm.logger import init_logger
 from vllm.utils import make_zmq_path, make_zmq_socket, round_down, cdiv
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -37,6 +35,74 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class DestinationSpec:
+    """DestinationSpec is used to specify the destination of kv sending task.
+
+    Attributes:
+        rank (int): The rank of the destination.
+        host (str): The path of the destination.
+        base_port (int): The base port of the destination.
+    """
+    rank: int
+    host: str
+    base_port: int
+
+    def __str__(self) -> str:
+        return f"DestinationSpec(rank={self.rank}, host={self.host}, base_port={self.base_port})"
+
+    def get_id(self) -> str:
+        """Get the id of the destination spec.
+
+        Returns:
+            str: The id of the destination spec.
+        """
+        return f"{self.rank}_{self.host}_{self.base_port}"
+
+class SourceSpec(msgspec.Struct):
+    """SourceSpec is used to specify the source of kv sending task.
+    """
+    # The request id of the kv cache
+    request_id: str
+
+    # The layer id of the kv cache
+    layer_id: int
+
+    # The range of tokens to be offloaded
+    start: int  # For token_range slice
+    stop: int   # For token_range slice
+
+    # The shape of the offloaded KV cache tensor as a tuple
+    shape: tuple[int, ...]
+
+    # The dtype of the offloaded KV cache tensor as a string
+    dtype_str: str
+
+    @property
+    def token_range(self) -> slice:
+        """Get the token range as a slice object."""
+        return slice(self.start, self.stop)
+
+    @property
+    def tensor_shape(self) -> torch.Size:
+        """Get the shape as a torch.Size object."""
+        return torch.Size(self.shape)
+
+    @property
+    def dtype(self) -> torch.dtype:
+        """Get the dtype as a torch.dtype object."""
+        return getattr(torch, self.dtype_str)
+
+    def get_size(self) -> int:
+        """Get the size in bytes of the cooresponding kv cache."""
+        return math.prod(self.shape) * self.dtype.itemsize
+
+    def __str__(self) -> str:
+        return (f"SourceSpec(request_id={self.request_id}, "
+                f"layer_id={self.layer_id}, "
+                f"token_range={self.token_range}, shape={self.tensor_shape})")
 
 
 
@@ -127,6 +193,11 @@ class SendTask:
         """
         return self.state.is_done()
 
+    def mark_sending(self) -> None:
+        """Mark the send task as sending.
+        """
+        self.state.is_sending = True
+
 class KVSenderInterface(ABC):
     """KVSenderInterface is an interface for sending KV cache data.
     """
@@ -166,7 +237,7 @@ class KVSenderInterface(ABC):
             should_add = True
 
             if task.is_ready() and not task.is_sending():
-                self._send(task)
+                self.send_task(task)
 
             if task.is_done():
                 self.free_task(task)
@@ -203,6 +274,7 @@ class KVSenderInterface(ABC):
     @abstractmethod
     def free_task(self, task: SendTask) -> None:
         """Free the send task.
+        Will be called in the pre-implemented progress() method.
 
         Args:
             task (SendTask): The send task to be freed.
@@ -212,6 +284,7 @@ class KVSenderInterface(ABC):
     @abstractmethod
     def send_task(self, task: SendTask) -> None:
         """Send the send task after it is ready.
+        Will be called in the pre-implemented progress() method.
 
         Args:
             task (SendTask): The send task to be sent.
@@ -237,97 +310,3 @@ class KVSenderInterface(ABC):
         raise NotImplementedError("post_progress_hook() not implemented")
 
 
-
-@dataclass
-class CPUSendTask(SendTask):
-    """CPUSendTask is a send task that uses CPU memory for the buffer.
-    """
-    buffer_addr: int
-    cuda_event: Optional[torch.cuda.Event] = None
-
-    def __post_init__(self) -> None:
-        self.creation_time = time.time()
-
-    @_lmcache_nvtx_annotate
-    def update_states(self) -> None:
-        """Update the states of the send task.
-        """
-        # Check the cuda event
-        if not self.state.sender_ready and self.cuda_event is not None \
-                and self.cuda_event.query():
-            self.state.sender_ready = True
-
-class CPUKVSender(KVSenderInterface):
-    """CPUKVSender is an implementation of KVSenderInterface that provides a
-    ring buffer allocator for managing pin memory allocation and deallocation.
-    """
-
-    def __init__(self, buffer_size: int) -> None: 
-        super().__init__()
-        self._buffer_size = buffer_size
-        self._allocator = RingBufferAllocator(self._buffer_size)
-
-    def create_send_task(
-            self,
-            source_spec: SourceSpec,
-            destination_spec: DestinationSpec,
-        ) -> SendTask:
-        """Create a non-ready send task with a CPU buffer allocated.
-
-        Args:
-            source_spec (SourceSpec): The source specification of the send 
-                task.
-            destination_spec (DestinationSpec): The destination 
-                specification of the send task.
-        """
-        # Allocate a buffer for the send task
-        size = source_spec.get_size()
-        address, buffer = self._allocator.allocate(size)
-        while address == -1:
-            # If allocation fails, wait for a while to process 
-            # and try again
-            time.sleep(0.001)
-            self.progress()
-            address, buffer = self._allocator.allocate(size)
-        assert buffer is not None, "Buffer allocation failed"
-
-        # Create a send task with the allocated buffer
-        task = CPUSendTask(
-            buffer=buffer,
-            source_spec=source_spec,
-            destination_spec=destination_spec,
-            state=SendTaskState(),
-            buffer_addr=address,
-        )
-        self.add_send_task(task)
-        return task
-
-    def free_task(self, task: SendTask) -> None:
-        """Free the send task.
-
-        Args:
-            task (SendTask): The send task to be freed.
-        """
-        # Free the buffer in the ring buffer allocator
-        self._allocator.free(task.buffer_addr)
-
-    def send_task(self, task: SendTask) -> None:
-        """Send the send task after it is ready.
-
-        Args:
-            task (SendTask): The send task to be sent.
-        """
-        # DEBUG IMPLEMENTATION
-        logger.error("CPUKVSender.send_task() not implemented, running a debug implementation!")
-        task.dbg_mark_sending()
-
-    def pre_progress_hook(self) -> None:
-        for task in self.get_send_tasks():
-            task.update_states()
-
-    def post_progress_hook(self) -> None:
-        pass
-
-    def _send(self, task: SendTask) -> None:
-        # NO IMPLEMENTATION YET
-        pass

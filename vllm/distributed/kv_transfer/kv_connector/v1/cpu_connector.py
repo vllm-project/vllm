@@ -19,7 +19,10 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.kv_transfer.kv_connector.v1.cpu_connector_utils import (
-    CPUSendTask, CPUKVSender, SourceSpec, DestinationSpec)
+    SourceSpec, DestinationSpec)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl_cpu_utils import (
+    NixlSendTask, NixlKVSender)
+
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
     get_tp_group)
@@ -271,7 +274,7 @@ class CPUConnector(KVConnectorBase_V1):
             pass
         elif role == KVConnectorRole.WORKER:
             # Prefiller side sender
-            self._cpu_kv_sender = CPUKVSender(1024 * 1024 * 1024) # 1GB for debug
+            self._kv_sender = NixlKVSender(1024 * 1024 * 1024) # 1GB for debug
 
         # request_id -> prefill request trackers
         self._prefill_reqs: dict[str, PrefillRequestTracker] = {}
@@ -286,7 +289,7 @@ class CPUConnector(KVConnectorBase_V1):
         self._cuda_stream = torch.cuda.Stream()
 
         # prefill offload tasks
-        self._inflight_copy_tasks: list[CPUSendTask] = []
+        self._inflight_copy_tasks: list[NixlSendTask] = []
 
     
     ############################################################
@@ -452,7 +455,7 @@ class CPUConnector(KVConnectorBase_V1):
         assert isinstance(meta, CPUConnectorMetadata), \
                 "Connector metadata is not of type CPUConnectorMetadata"
 
-        assert self._cpu_kv_sender is not None
+        assert self._kv_sender is not None
 
         for prefill_req in meta.prefill_meta:
             # Create a source spec with serializable types
@@ -474,12 +477,12 @@ class CPUConnector(KVConnectorBase_V1):
             )
 
             # Create the send task
-            task = self._cpu_kv_sender.create_send_task(
+            task = self._kv_sender.create_send_task(
                 source_spec=source_spec,
                 destination_spec=dest_spec,
             )
-            assert isinstance(task, CPUSendTask), \
-                    "Send task is not of type CPUSendTask"
+            assert isinstance(task, NixlSendTask), \
+                    "Send task is not of type NixlSendTask"
 
             # Start copying the data to the CPU buffer
             buffer = task.tensor
@@ -499,7 +502,7 @@ class CPUConnector(KVConnectorBase_V1):
             self._inflight_copy_tasks.append(task)
 
         # Check the task states and send the tasks
-        self._cpu_kv_sender.progress()
+        self._kv_sender.progress()
 
 
     @_lmcache_nvtx_annotate
@@ -515,6 +518,8 @@ class CPUConnector(KVConnectorBase_V1):
             if task.cuda_event is not None:
                 task.cuda_event.synchronize()
         self._inflight_copy_tasks.clear()
+
+        self._kv_sender.wait_for_all_tasks()
 
     def get_finished(
         self, finished_req_ids: set[str]

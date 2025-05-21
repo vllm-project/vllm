@@ -13,10 +13,15 @@ import msgspec
 import torch
 import zmq
 
+from lmcache.utils import _lmcache_nvtx_annotate
+
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+from vllm.distributed.kv_transfer.kv_connector.v1.cpu_connector_utils import (
+        SendTask, KVSenderInterface, SourceSpec, DestinationSpec, 
+        SendTaskState)
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
     get_tp_group)
@@ -87,73 +92,6 @@ def init_nixl_agent(
             "", xfer_descs, mem_type="DRAM")
 
     return nixl_agent, reg_descs, xfer_descs, xfer_handler
-
-@dataclass
-class DestinationSpec:
-    """DestinationSpec is used to specify the destination of kv sending task.
-
-    Attributes:
-        rank (int): The rank of the destination.
-        host (str): The path of the destination.
-        base_port (int): The base port of the destination.
-    """
-    rank: int
-    host: str
-    base_port: int
-
-    def __str__(self) -> str:
-        return f"DestinationSpec(rank={self.rank}, host={self.host}, base_port={self.base_port})"
-
-    def get_id(self) -> str:
-        """Get the id of the destination spec.
-
-        Returns:
-            str: The id of the destination spec.
-        """
-        return f"{self.rank}_{self.host}_{self.base_port}"
-
-class SourceSpec(msgspec.Struct):
-    """SourceSpec is used to specify the source of kv sending task.
-    """
-    # The request id of the kv cache
-    request_id: str
-
-    # The layer id of the kv cache
-    layer_id: int
-
-    # The range of tokens to be offloaded
-    start: int  # For token_range slice
-    stop: int   # For token_range slice
-
-    # The shape of the offloaded KV cache tensor as a tuple
-    shape: tuple[int, ...]
-
-    # The dtype of the offloaded KV cache tensor as a string
-    dtype_str: str
-
-    @property
-    def token_range(self) -> slice:
-        """Get the token range as a slice object."""
-        return slice(self.start, self.stop)
-
-    @property
-    def tensor_shape(self) -> torch.Size:
-        """Get the shape as a torch.Size object."""
-        return torch.Size(self.shape)
-
-    @property
-    def dtype(self) -> torch.dtype:
-        """Get the dtype as a torch.dtype object."""
-        return getattr(torch, self.dtype_str)
-
-    def get_size(self) -> int:
-        """Get the size in bytes of the cooresponding kv cache."""
-        return math.prod(self.shape) * self.dtype.itemsize
-
-    def __str__(self) -> str:
-        return (f"SourceSpec(request_id={self.request_id}, "
-                f"layer_id={self.layer_id}, "
-                f"token_range={self.token_range}, shape={self.tensor_shape})")
 
 class RingBufferAllocator:
     """RingBufferAllocator is a simple ring buffer allocator for managing
@@ -485,6 +423,7 @@ class NixlCPUSender:
         )
 
         self._nixl_wrapper.transfer(handle)
+        logger.info("Start trasnfer of the request %s", req_uuid)
 
         return handle
 
@@ -547,7 +486,7 @@ class NixlCPUSender:
         Returns:
             Optional[str]: The remote agent name if the send is ready,
                 None otherwise.
-            int: The virtual address of the receiver if the send is ready,
+            int: The physical address of the receiver if the send is ready,
                 -1 otherwise.
         """
         # Update the ready requests
@@ -668,6 +607,8 @@ class NixlCPUReceiver:
             for msg in notifs[remote_agent_name]:
                 # Decode the messag
                 obj = self._msg_decoder.decode(msg)
+                logger.info("Received message from %s: %s %s", 
+                            remote_agent_name, obj.msg_type, obj.req_uuid)
                 if obj.msg_type == "REQMSG":
                     # Add the request to the pending allocation
                     self._pending_allocation[obj.req_uuid] = (obj.source_spec,
@@ -691,8 +632,16 @@ class NixlCPUReceiver:
         for req_uuid, (source_spec, peer_name) in \
                 self._pending_allocation.items():
             # Try to allocate the buffer
-            vaddr, buffer = self._allocator.allocate(source_spec.get_size())
+            requested_size = source_spec.get_size()
+            if requested_size > self._buffer_size:
+                raise RuntimeError(
+                    f"Requested size {requested_size} is larger than the "
+                    f"nixl receiver buffer size {self._buffer_size}"
+                )
+
+            vaddr, buffer = self._allocator.allocate(requested_size)
             if vaddr == -1:
+                logger.info("No space available for request %s", req_uuid)
                 # No space available, skip all the requests
 
                 # NOTE: an alternative is to try allocation for other requests
@@ -703,6 +652,7 @@ class NixlCPUReceiver:
             # Add the request to the inflight requests
             self._inflight_requests[req_uuid] = source_spec
             self._inflight_request_vaddr[req_uuid] = vaddr
+            logger.info("Adding %s to inflight requests", req_uuid)
 
             # Send back the ready message
             paddr = self._allocator.virtual_to_physical(vaddr)
@@ -833,3 +783,157 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
     finally:
         if ctx is not None:
             ctx.destroy(linger=0)
+
+
+@dataclass
+class NixlSendTask(SendTask):
+    """NixlSendTask is a send task that uses CPU memory for the buffer and
+    Nixl for sending.
+    """
+    # Required fields
+    # virtual address of the src buffer
+    buffer_vaddr: int
+    # Parent nixl sender
+    parent_sender: NixlCPUSender
+    # nixl request uuid
+    request_uuid: str
+
+    # Optional fields that will be updated later
+    # Cuda event for h2d copy
+    cuda_event: Optional[torch.cuda.Event] = None
+    # Destination physical address
+    receiver_paddr: Optional[int] = None
+    # nixl transfer handle
+    transfer_handle: Optional[nixl_xfer_handle] = None
+
+
+    def __post_init__(self) -> None:
+        self.creation_time = time.time()
+
+    @_lmcache_nvtx_annotate
+    def update_states(self) -> None:
+        """Update the states of the send task.
+        """
+        # Check the cuda event
+        if not self.state.sender_ready and self.cuda_event is not None \
+                and self.cuda_event.query():
+            self.state.sender_ready = True
+
+        # check if the send is ready
+        if not self.state.receiver_ready and self.receiver_paddr is None:
+            rname, rpaddr = self.parent_sender.check_and_remove_prepared_send(
+                    self.request_uuid)
+            if rname is not None:
+                assert rpaddr != -1
+                self.receiver_paddr = rpaddr
+                self.state.receiver_ready = True
+
+        if not self.is_done() and self.transfer_handle is not None:
+            # Check if the transfer is finished
+            if self.parent_sender.is_send_finished(self.transfer_handle):
+                self.state.send_done = True
+
+
+class NixlKVSender(KVSenderInterface):
+    """NixlSendTask is an implementation of KVSenderInterface that provides a
+    ring buffer allocator for managing pin memory allocation and deallocation,
+    with NIXL for sending data.
+    """
+
+    def __init__(self, buffer_size: int) -> None: 
+        super().__init__()
+        nixl_page_size = 4096
+        self._buffer_size = buffer_size
+        self._allocator = RingBufferAllocator(self._buffer_size,
+                                              nixl_page_size)
+        self._nixl_sender = NixlCPUSender(
+                buffer_size, self._allocator.get_buffer_ptr(),
+                nixl_page_size)
+
+    def create_send_task(
+            self,
+            source_spec: SourceSpec,
+            destination_spec: DestinationSpec,
+        ) -> SendTask:
+        """Create a non-ready send task with a CPU buffer allocated.
+
+        Args:
+            source_spec (SourceSpec): The source specification of the send 
+                task.
+            destination_spec (DestinationSpec): The destination 
+                specification of the send task.
+        """
+        # Allocate a buffer for the send task
+        size = source_spec.get_size()
+        address, buffer = self._allocator.allocate(size)
+        while address == -1:
+            # If allocation fails, wait for a while to process 
+            # and try again
+            time.sleep(0.001)
+            self.progress()
+            address, buffer = self._allocator.allocate(size)
+        assert buffer is not None, "Buffer allocation failed"
+
+        # Prepare the send request in NixlSender
+        req_uuid = self._nixl_sender.prepare_send(
+                source_spec, destination_spec)
+
+        # Create a send task with the allocated buffer
+        task = NixlSendTask(
+            buffer=buffer,
+            source_spec=source_spec,
+            destination_spec=destination_spec,
+            state=SendTaskState(),
+            buffer_vaddr=address,
+            parent_sender=self._nixl_sender,
+            request_uuid=req_uuid
+        )
+        self.add_send_task(task)
+        return task
+
+    def free_task(self, task: SendTask) -> None:
+        """Free the send task.
+        Will be called in the pre-implemented progress() method.
+
+        Args:
+            task (SendTask): The send task to be freed.
+        """
+        # Free the buffer in the ring buffer allocator
+        self._allocator.free(task.buffer_vaddr)
+
+    def send_task(self, task: SendTask) -> None:
+        """Send the send task after it is ready.
+        Will be called in the pre-implemented progress() method.
+
+        Args:
+            task (SendTask): The send task to be sent.
+        """
+        assert isinstance(task, NixlSendTask), \
+            "Task is not a NixlSendTask"
+        handle = self._nixl_sender.send(
+                self._allocator.virtual_to_physical(task.buffer_vaddr),
+                task.receiver_paddr,
+                task.source_spec.get_size(),
+                task.request_uuid,
+                task.destination_spec)
+        task.transfer_handle = handle
+        task.mark_sending()
+        return 
+
+    def pre_progress_hook(self) -> None:
+        for task in self.get_send_tasks():
+            task.update_states()
+
+    def post_progress_hook(self) -> None:
+        pass
+
+    def wait_for_all_tasks(self) -> None:
+        """Wait for all tasks to finish.
+        """
+        # Wait for all tasks to finish
+        tasks = self.get_send_tasks()
+        while tasks:
+            self.progress()
+            time.sleep(1)
+            tasks = self.get_send_tasks()
+            logger.info("Still waiting for %d tasks to finish", len(tasks))
