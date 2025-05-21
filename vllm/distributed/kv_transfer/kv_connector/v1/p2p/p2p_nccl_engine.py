@@ -98,7 +98,7 @@ class P2pNcclEngine:
         self.comms: dict[str, Any] = {}  # remote_address: (ncclComm_t, rank)
 
         self.buffer_size = 0
-        self.buffer_size_threshold = self.config.kv_buffer_size
+        self.buffer_size_threshold = float(self.config.kv_buffer_size)
 
         self._listener_thread = threading.Thread(
             target=self._listen_for_requests, daemon=True)
