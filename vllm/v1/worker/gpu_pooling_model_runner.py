@@ -1089,7 +1089,7 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
         req_num_tokens = num_tokens // num_reqs
 
         dummy_metadata = PoolingMetadata(
-            prompt_lens=torch.tensor([req_num_tokens] * num_reqs,
+            prompt_lens=torch.tensor([h.shape[0] for h in hidden_states],
                                      device=self.device),
             prompt_token_ids=torch.zeros((num_reqs, req_num_tokens),
                                          dtype=torch.int32,

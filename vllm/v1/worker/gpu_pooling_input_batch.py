@@ -77,7 +77,7 @@ class InputBatch(BaseInputBatch):
         req_index: Optional[int] = None,
     ) -> None:
 
-        super()._add_request(request, req_index)
+        req_index = super()._add_request(request, req_index)
 
         num_prompt_tokens = len(request.prompt_token_ids)
         if request.token_type_ids is not None:
