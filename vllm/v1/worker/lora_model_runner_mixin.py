@@ -16,7 +16,7 @@ from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora, supports_multimodal
-from vllm.v1.worker.interfaces import BaseInputBatch
+from vllm.v1.worker.abstract import BaseInputBatch
 
 logger = init_logger(__name__)
 

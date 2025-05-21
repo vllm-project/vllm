@@ -23,8 +23,8 @@ from vllm.v1.worker.block_table import BlockTable
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.worker.abstract import BaseInputBatch
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-    from vllm.v1.worker.interfaces import BaseInputBatch
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
 
@@ -264,7 +264,7 @@ class FlashInferMetadataBuilder:
             if decode_idx < num_decodes:
                 break
 
-            input_batch.swap_states(prefills[i - 1], decode_idx)
+            input_batch.swap_or_move_states(prefills[i - 1], decode_idx)
             modified_batch = True
 
         # Save for next `build` call
