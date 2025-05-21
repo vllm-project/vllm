@@ -522,6 +522,9 @@ def internvl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
                 num_patches_images = [
                     pixel_value.shape[0] for pixel_value in pixel_values_images
                 ]
+            else:
+                pixel_values_images, num_patches_images = [], []
+
             if videos is not None:
                 pixel_values_videos = [
                     video_to_pixel_values_internvl(
@@ -535,10 +538,15 @@ def internvl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
                 num_patches_videos = [
                     pixel_value.shape[0] for pixel_value in pixel_values_videos
                 ]
+            else:
+                pixel_values_videos, num_patches_videos = [], []
+
             pixel_values = []
-            while ("<image>" in text or "<video>" in text):
-                if text.find("<image>") == -1 or (text.find("<video>")
-                                                  < text.find("<image>")):
+            while ("<image>" in text) or ("<video>" in text):
+                image_index = text.find("<image>")
+                video_index = text.find("<video>")
+                if image_index == -1 or (video_index > -1
+                                         and video_index < image_index):
                     num_patches = num_patches_videos.pop(0)
                     pixel_values.append(pixel_values_videos.pop(0))
                     context_tokens = IMG_START + \
