@@ -204,7 +204,9 @@ def calculate_metrics(
             e2els.append(outputs[i].latency)
             completed += 1
             if hasattr(outputs[i], "start_time") and hasattr(outputs[i], "end_time"):
-                if first_request_send_time == -1 or (outputs[i].start_time < first_request_send_time):
+                if first_request_send_time == -1 or (
+                    outputs[i].start_time < first_request_send_time
+                ):
                     first_request_send_time = outputs[i].start_time
                 if outputs[i].end_time > last_request_recv_time:
                     last_request_recv_time = outputs[i].end_time
@@ -243,10 +245,10 @@ def calculate_metrics(
             stacklevel=2,
         )
     # if concurrency = 1, dur_s = last_request_recv_time - first_request_send_time
-    # if concurrency > 1, dur_s = sum(e2els)/concurrency, 
-    # and in each request, e2el = last_request_recv_time - first_request_send_time.    
+    # if concurrency > 1, dur_s = sum(e2els)/concurrency,
+    # and in each request, e2el = last_request_recv_time - first_request_send_time.
     if warmup:
-        dur_s = sum(e2els)/max_concurrency
+        dur_s = sum(e2els) / max_concurrency
     else:
         dur_s = last_request_recv_time - first_request_send_time
 
@@ -769,7 +771,7 @@ def main(args: argparse.Namespace):
             raise ValueError(f"Unknown dataset: {args.dataset_name}") from err
     if args.warmup:
         for i, req in enumerate(input_requests):
-            setattr(req, "is_warmup", i < args.max_concurrency)
+            req.is_warmup = i < args.max_concurrency
     goodput_config_dict = check_goodput_args(args)
 
     # Collect the sampling parameters.
@@ -1015,7 +1017,7 @@ if __name__ == "__main__":
         action="store_true",
         help="Warmup before benchmark tests. "
         "it will add a warmup request in each process, "
-        "the result of warmup request will not be caculated in final results."
+        "the result of warmup request will not be caculated in final results.",
     )
     parser.add_argument(
         "--save-result",
