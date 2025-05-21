@@ -768,8 +768,6 @@ class VllmRunner:
         enforce_eager: Optional[bool] = False,
         **kwargs,
     ) -> None:
-        from vllm import envs
-        logger.info(f"VLLM_USE_V1: {envs.VLLM_USE_V1}")
         self.model = LLM(
             model=model_name,
             task=task,
