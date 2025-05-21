@@ -1,0 +1,72 @@
+// For format details, see https://aka.ms/devcontainer.json. For config options, see the README at:
+    // https://github.com/microsoft/vscode-dev-containers/tree/v0.245.2/containers/docker-existing-dockerfile
+    {
+        "name": "TRT-LLM clangd Devcontainer",
+        "dockerComposeFile": [
+          "./docker-compose.yml"
+        ],
+        "service": "tensorrt_llm-dev",
+        "remoteUser": "tensorrt_llm",
+        "containerEnv": {
+          // "CCACHE_DIR" : "/home/coder/${localWorkspaceFolderBasename}/cpp/.ccache",
+          // "CCACHE_BASEDIR" : "/home/coder/${localWorkspaceFolderBasename}",
+          "HISTFILE": "${containerWorkspaceFolder}/.cache/._bash_history",
+          "HF_HOME":"${containerWorkspaceFolder}"
+        },
+        "workspaceFolder": "/workspaces/tensorrt_llm",
+        // "workspaceFolder": "/home/coder/${localWorkspaceFolderBasename}",
+        // "workspaceMount": "source=${localWorkspaceFolder},target=/home/coder/${localWorkspaceFolderBasename},type=bind,consistency=consistent",
+        "mounts": [
+          "source=/home/scratch.trt_llm_data/,target=/home/scratch.trt_llm_data/,type=bind,consistency=consistent",
+          "source=/raid/data,target=/raid/data,type=bind,consistency=consistent"
+        ],
+        "customizations": {
+          "vscode": {
+            "extensions": [
+              // CPP
+              "ms-vscode.cpptools",
+              "llvm-vs-code-extensions.vscode-clangd",
+              // "xaver.clang-format",
+              // Python
+              "ms-python.python",
+              "eeyore.yapf",
+              // Build Tools
+              // "ms-azuretools.vscode-docker",
+              // "ms-vscode.makefile-tools",
+              // "ms-vscode.cmake-tools",
+              // Git & Github
+              // "GitHub.vscode-pull-request-github"
+              "eamodio.gitlens"
+            ],
+            "settings": {
+              "C_Cpp.intelliSenseEngine": "disabled",
+              "[python]": {
+                "editor.defaultFormatter": "eeyore.yapf"
+              },
+              "[cpp]": {
+                  "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd"
+                  // "editor.defaultFormatter": "xaver.clang-format",
+              },
+              // "clang-format.executable": "/usr/local/bin/clang-format",
+              "clangd.arguments": [
+                // "--compile-commands-dir=${workspaceFolder}/cpp/build_RelWithDebInfo"
+                "--compile-commands-dir=${workspaceFolder}"
+              ]
+            }
+          }
+        },
+        "features": {
+          "ghcr.io/devcontainers/features/common-utils:2": {
+            "username": "tensorrt_llm",
+            "installZsh": true,
+            "installOhMyZsh": true,
+            "configureZshAsDefaultShell": true,
+            "upgradePackages": false
+          },
+          "ghcr.io/devcontainers/features/git:1": {
+            "version": "latest"
+          }
+        },
+        "postCreateCommand": "./.devcontainer/install_llvm.sh"
+      }
+  
