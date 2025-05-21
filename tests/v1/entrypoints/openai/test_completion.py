@@ -46,15 +46,16 @@ async def local_openai_server(default_server_args, request):
     server_args = list(default_server_args)
     if hasattr(request, "param") and request.param:
         server_args.extend(request.param)
-    async with LocalOpenAIServer("facebook/opt-125m", server_args) as server:
-        yield server
+    async with LocalOpenAIServer("facebook/opt-125m",
+                                 server_args) as local_server:
+        yield local_server
 
 
 @pytest_asyncio.fixture(scope="module")
 async def client():
     yield openai.AsyncOpenAI(
         api_key="EMPTY",
-        base_url="http://localhost:8000/v1",
+        base_url="http://localhost:8001/v1",
         max_retries=0,
     )
 
@@ -68,7 +69,7 @@ def request_handler(local_openai_server):
 def setup_httpx_mock(httpx_mock, request_handler):
     httpx_mock.add_callback(
         request_handler,
-        url="http://localhost:8000/v1/completions",
+        url="http://localhost:8001/v1/completions",
         method="POST",
         is_reusable=True,
         is_optional=True,
@@ -256,7 +257,6 @@ async def test_too_many_completion_logprobs(local_openai_server,
     assert error_found
 
     # the server should still work afterwards
-    # register_completion(handle_request)
     completion = await client.completions.create(
         model=model_name,
         prompt=[0, 0, 0, 0, 0],
