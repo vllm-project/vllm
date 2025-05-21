@@ -18,8 +18,8 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.parallel_state import (
-    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
-    get_tp_group, get_world_group)
+    get_dp_group, get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size, get_tp_group)
 from vllm.logger import init_logger
 from vllm.utils import make_zmq_path, make_zmq_socket, round_down
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -324,13 +324,19 @@ class NixlConnectorWorker:
         # Metadata.
         self.engine_id = engine_id
         self.rank = get_tensor_model_parallel_rank()
+
         logger.debug("NIXL worker %s TP rank %s", self.engine_id, self.rank)
         self.world_size = get_tensor_model_parallel_world_size()
         self.tp_group = get_tp_group()
 
-        self.local_rank = get_world_group().local_rank
-        logger.debug("NIXL worker %s local rank %s", self.engine_id,
-                     self.local_rank)
+        # NOTE(weaton): Hack to get rank uniqueness across TP + DP ranks.
+        # Used for NIXL side channel communication.
+        self.unique_rank = (self.rank *
+                            self.world_size) + get_dp_group().local_rank
+        logger.debug(
+            "NIXL worker %s TP rank %s, DP local rank %s, unique rank %s",
+            self.engine_id, self.rank,
+            get_dp_group().local_rank, self.unique_rank)
 
         # KV Caches and nixl tracking data.
         self.kv_caches: dict[str, torch.Tensor] = {}
@@ -418,7 +424,7 @@ class NixlConnectorWorker:
         # NOTE(rob): we need each rank to have a unique port. This is
         # a hack to keep us moving. We will switch when moving to etcd
         # or where we have a single ZMQ socket in the scheduler.
-        path = make_zmq_path("tcp", host, port + self.rank)
+        path = make_zmq_path("tcp", host, port + self.unique_rank)
         logger.debug("Querying metadata on path: %s", path)
         with zmq_ctx(zmq.REQ, path) as sock:
             # Send query for the request.
@@ -525,7 +531,7 @@ class NixlConnectorWorker:
         ready_event = threading.Event()
         self._nixl_handshake_listener_t = threading.Thread(
             target=self._nixl_handshake_listener,
-            args=(metadata, ready_event, self.rank),
+            args=(metadata, ready_event, self.unique_rank),
             daemon=True,
             name="nixl_handshake_listener")
         self._nixl_handshake_listener_t.start()
@@ -547,10 +553,10 @@ class NixlConnectorWorker:
             for block_id in range(self.num_blocks):
                 block_offset = block_id * self.block_len
                 # (addr, len, device id)
-                blocks_data.append(
-                    (base_addr + block_offset, self.block_len, self.rank))
-        logger.debug("Created %s blocks for src engine %s and rank %s",
-                     len(blocks_data), self.engine_id, self.rank)
+                blocks_data.append((base_addr + block_offset, self.block_len,
+                                    self.unique_rank))
+        logger.debug("Created %s blocks for src engine %s and unique rank %s",
+                     len(blocks_data), self.engine_id, self.unique_rank)
 
         # Register with NIXL.
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, "VRAM")
@@ -564,10 +570,10 @@ class NixlConnectorWorker:
             for block_id in range(nixl_agent_meta.num_blocks):
                 block_offset = block_id * self.block_len
                 # (addr, len, device id)
-                blocks_data.append(
-                    (base_addr + block_offset, self.block_len, self.rank))
-        logger.debug("Created %s blocks for dst engine %s and rank %s",
-                     len(blocks_data), engine_id, self.rank)
+                blocks_data.append((base_addr + block_offset, self.block_len,
+                                    self.unique_rank))
+        logger.debug("Created %s blocks for dst engine %s and unique rank %s",
+                     len(blocks_data), engine_id, self.unique_rank)
 
         # Register with NIXL.
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, "VRAM")
