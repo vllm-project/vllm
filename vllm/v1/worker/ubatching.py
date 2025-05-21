@@ -64,9 +64,9 @@ class UBatchContext:
         self.cpu_signal_event.set()
 
     def _wait(self):
-        self.stream.wait_event(self.gpu_wait_event)
         self.cpu_wait_event.wait()
         self.cpu_wait_event.clear()
+        self.stream.wait_event(self.gpu_wait_event)
         self._restore_context()
 
 _CURRENT_CONTEXT: dict = {}
