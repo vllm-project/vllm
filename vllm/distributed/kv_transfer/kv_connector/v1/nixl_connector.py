@@ -384,7 +384,8 @@ class NixlConnectorWorker:
 
     @staticmethod
     def _nixl_handshake_listener(metadata: NixlAgentMetadata,
-                                 ready_event: threading.Event, rank: int):
+                                 ready_event: threading.Event,
+                                 unique_rank: int):
         """Background thread for getting new NIXL handshakes."""
         # NOTE(rob): this is a simple implementation. We will move
         # to a better approach like an ETCD server in the future.
@@ -405,7 +406,7 @@ class NixlConnectorWorker:
         # NOTE(rob): we need each rank to have a unique port. This
         # hack to keeps us moving. We will switch when moving to etcd
         # or where we have a single ZMQ socket in the scheduler.
-        port = envs.VLLM_NIXL_SIDE_CHANNEL_PORT + rank
+        port = envs.VLLM_NIXL_SIDE_CHANNEL_PORT + unique_rank
         path = make_zmq_path("tcp", host, port)
         logger.debug("Starting listening on path: %s", path)
         with zmq_ctx(zmq.ROUTER, path) as sock:
@@ -424,8 +425,16 @@ class NixlConnectorWorker:
         # NOTE(rob): we need each rank to have a unique port. This is
         # a hack to keep us moving. We will switch when moving to etcd
         # or where we have a single ZMQ socket in the scheduler.
-        path = make_zmq_path("tcp", host, port + self.unique_rank)
-        logger.debug("Querying metadata on path: %s", path)
+
+        # We need to connect to the correct remote port based on the DP rank.
+        # Assuming the remote's DP rank is the same as ours to keep connections
+        # consistent
+        dp_rank = get_dp_group().rank_in_group
+        remote_unique_rank = port + dp_rank
+        path = make_zmq_path("tcp", host, remote_unique_rank)
+
+        logger.debug("Querying metadata on path: %s (DP rank: %s)", path,
+                     dp_rank)
         with zmq_ctx(zmq.REQ, path) as sock:
             # Send query for the request.
             sock.send(GET_META_MSG)
@@ -445,6 +454,12 @@ class NixlConnectorWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
+
+        logger.debug(
+            "NIXL worker %s registering KV caches, TP rank: %s, DP rank: %s, " \
+            "unique rank: %s",
+            self.engine_id, self.rank,
+            get_dp_group().rank_in_group, self.unique_rank)
 
         _, first_kv_cache = next(iter(kv_caches.items()))
         kv_elem_size = first_kv_cache.element_size()
