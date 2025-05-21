@@ -1,11 +1,11 @@
-from typing import Optional
-
 from torch import nn
 
+from vllm.logger import init_logger
 from vllm.model_executor.model_loader.loader import BaseModelLoader
 from vllm.model_executor.model_loader.utils import get_model_architecture
-from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig, 
-                         ParallelConfig, SchedulerConfig)
+from vllm.config import CacheConfig, DeviceConfig, ModelConfig, ParallelConfig, SchedulerConfig
+
+logger = init_logger(__name__)
 
 
 class TTModelLoader(BaseModelLoader):
@@ -22,7 +22,18 @@ class TTModelLoader(BaseModelLoader):
         arch_names[0] = "TT" + arch_names[0]
         
         model_class, _ = get_model_architecture(model_config)
-        model = model_class.initialize_vllm_model(model_config.hf_config, device_config.device, scheduler_config.max_num_seqs)
+
+        data_parallel = 1
+        if model_config.override_tt_config and 'data_parallel' in model_config.override_tt_config:
+            data_parallel = model_config.override_tt_config['data_parallel']
+            logger.info(f"Overriding data_parallel to {data_parallel}")
+
+        model = model_class.initialize_vllm_model(
+            model_config.hf_config, 
+            device_config.device, 
+            scheduler_config.max_num_seqs, 
+            tt_data_parallel=data_parallel,
+        )
         return model
     
     def download_model(self, model_config: ModelConfig) -> None:
