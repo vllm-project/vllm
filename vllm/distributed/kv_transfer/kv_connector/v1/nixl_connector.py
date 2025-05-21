@@ -38,7 +38,7 @@ logger = init_logger(__name__)
 # Lazy import nixl_wrapper to avoid loading nixl_bindings if nixl is not used
 try:
     from nixl._api import nixl_agent as NixlWrapper
-    logger.info("WHOA NIXL is available")
+    logger.info("NIXL is available")
 except ImportError:
     logger.warning("NIXL is not available")
     NixlWrapper = None
@@ -217,7 +217,6 @@ class NixlConnectorScheduler:
             # The remote only sends fully computed blocks, so there is
             # nothing to transfer but we still need to notify the
             # prefill worker so that the remote blocks are freed.
-            logger.debug("Count it 0")
             if all(p in params for p in ("remote_engine_id", "remote_host",
                                          "remote_port")):
                 self._reqs_need_recv[request.request_id] = (request, [])
@@ -325,12 +324,8 @@ class NixlConnectorWorker:
         # Metadata.
         self.engine_id = engine_id
         self.rank = get_tensor_model_parallel_rank()
-        from vllm.distributed.parallel_state import get_dp_group
-
         self.world_size = get_tensor_model_parallel_world_size()
         self.tp_group = get_tp_group()
-        self.dp_group = get_dp_group()
-        logger.info(f"DP Group: {self.dp_group}")
 
         # KV Caches and nixl tracking data.
         self.kv_caches: dict[str, torch.Tensor] = {}
@@ -418,7 +413,7 @@ class NixlConnectorWorker:
         # NOTE(rob): we need each rank to have a unique port. This is
         # a hack to keep us moving. We will switch when moving to etcd
         # or where we have a single ZMQ socket in the scheduler.
-        path = make_zmq_path("tcp", host, port + self.rank + self.dp_group.rank)
+        path = make_zmq_path("tcp", host, port + self.rank)
         logger.debug("Querying metadata on path: %s", path)
         with zmq_ctx(zmq.REQ, path) as sock:
             # Send query for the request.
@@ -525,7 +520,7 @@ class NixlConnectorWorker:
         ready_event = threading.Event()
         self._nixl_handshake_listener_t = threading.Thread(
             target=self._nixl_handshake_listener,
-            args=(metadata, ready_event, self.rank + self.dp_group.rank),
+            args=(metadata, ready_event, self.rank),
             daemon=True,
             name="nixl_handshake_listener")
         self._nixl_handshake_listener_t.start()
