@@ -16,8 +16,8 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils import LazyLoader
 from vllm.v1.structured_output.backend_types import (StructuredOutputGrammar,
                                                      StructuredOutputOptions)
-from vllm.v1.structured_output.bitmasking_typing import (BitmaskGrammar,
-                                                         BitmaskStrategy)
+from vllm.v1.structured_output.bitmasking_backend import (BitmaskGrammar,
+                                                          BitmaskStrategy)
 from vllm.v1.structured_output.request import get_structured_output_key
 
 if TYPE_CHECKING:

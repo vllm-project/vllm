@@ -14,8 +14,8 @@ from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 from vllm.utils import LazyLoader
 from vllm.v1.structured_output.backend_types import (StructuredOutputGrammar,
                                                      StructuredOutputOptions)
-from vllm.v1.structured_output.bitmasking_typing import (BitmaskGrammar,
-                                                         BitmaskStrategy)
+from vllm.v1.structured_output.bitmasking_backend import (BitmaskGrammar,
+                                                          BitmaskStrategy)
 from vllm.v1.structured_output.utils import (choice_as_grammar,
                                              convert_lark_to_ebnf,
                                              grammar_is_likely_lark)

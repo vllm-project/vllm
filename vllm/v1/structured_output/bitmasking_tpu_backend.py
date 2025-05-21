@@ -9,7 +9,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import cdiv, is_pin_memory_available
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.structured_output.bitmasking_typing import (
+from vllm.v1.structured_output.bitmasking_backend import (
     BitmaskSOBatchMetaData, BitmaskStrategy, BitmaskStructuredOutputBackend)
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
@@ -31,23 +31,25 @@ class BitmaskTPUBackend(BitmaskStructuredOutputBackend):
         self._grammar_bitmask: Optional[torch.Tensor] = None
         self.max_num_reqs: Optional[int] = None
         self.tpu_vocab_size = self.vllm_config.model_config.get_vocab_size()
-        MIN_NUM_SEQS = 8
-        self.max_num_reqs = max(self.vllm_config.scheduler_config.max_num_seqs,
-                                MIN_NUM_SEQS)
-        pin_memory = is_pin_memory_available()
-        self.require_structured_out_cpu = torch.zeros((self.max_num_reqs),
-                                                      dtype=torch.bool,
-                                                      device="cpu",
-                                                      pin_memory=pin_memory)
-        self.structured_decode_arange = torch.arange(0,
-                                                     32,
-                                                     device="cpu",
-                                                     pin_memory=pin_memory)
+        self.pin_memory = is_pin_memory_available()
+        self.require_structured_out_cpu = torch.Tensor()
+        self.structured_decode_arange = torch.Tensor()
+        self.grammar_bitmask_cpu = torch.Tensor()
+
+    def init_tensors(self, max_num_reqs: int):
+        self.max_num_reqs = max_num_reqs
+        self.require_structured_out_cpu = torch.zeros(
+            (self.max_num_reqs),
+            dtype=torch.bool,
+            device="cpu",
+            pin_memory=self.pin_memory)
+        self.structured_decode_arange = torch.arange(
+            0, 32, device="cpu", pin_memory=self.pin_memory)
         self.grammar_bitmask_cpu = torch.zeros(
             (self.max_num_reqs, cdiv(self.tpu_vocab_size, 32)),
             dtype=torch.int32,
             device="cpu",
-            pin_memory=pin_memory)
+            pin_memory=self.pin_memory)
 
     def filter_logits(
         self,
@@ -56,7 +58,15 @@ class BitmaskTPUBackend(BitmaskStructuredOutputBackend):
         scheduler_output: SchedulerOutput,
         logits: torch.Tensor,
         sample_hidden_states: torch.Tensor,
+        **kwargs,
     ) -> None:
+        if self.max_num_reqs is None:
+            assert "max_num_reqs" in kwargs, "max_num_reqs must be provided"
+            max_num_reqs = kwargs.get("max_num_reqs")
+            assert isinstance(max_num_reqs, int), \
+                "max_num_reqs must be an integer"
+            self.init_tensors(max_num_reqs)
+
         require_struct_decoding, grammar_bitmask_padded, arange = \
         self.prepare_structured_decoding_input(logits,
                                             scheduler_output, input_batch)
@@ -138,7 +148,14 @@ class BitmaskTPUBackend(BitmaskStructuredOutputBackend):
         # Apply mask in-place
         logits.masked_fill_(mask_to_apply, -float("inf"))
 
-    def precompile(self, dummy_logits: torch.Tensor):
+    def precompile(self, dummy_logits: torch.Tensor, **kwargs):
+        if self.max_num_reqs is None:
+            assert "max_num_reqs" in kwargs, "max_num_reqs must be provided"
+            max_num_reqs = kwargs.get("max_num_reqs")
+            assert isinstance(max_num_reqs, int), \
+                "max_num_reqs must be an integer"
+            self.init_tensors(max_num_reqs)
+
         num_reqs = dummy_logits.shape[0]
         dummy_require_struct_decoding = \
             self.require_structured_out_cpu[:num_reqs].to(dummy_logits.device)

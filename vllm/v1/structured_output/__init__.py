@@ -177,6 +177,7 @@ class StructuredOutputManager:
         scheduler_output: SchedulerOutput,
         logits: torch.Tensor,
         sample_hidden_states: torch.Tensor,
+        **kwargs,
     ) -> None:
         """
         Filters the logits produced by the model's forward pass.
@@ -197,7 +198,7 @@ class StructuredOutputManager:
         """
         assert self.backend is not None
         self.backend.filter_logits(input_batch, device, scheduler_output,
-                                   logits, sample_hidden_states)
+                                   logits, sample_hidden_states, **kwargs)
 
     def init_batch(
         self, requests: dict[str, Request],
@@ -266,7 +267,7 @@ class StructuredOutputManager:
         if self.backend is not None:
             self.backend.destroy()
 
-    def precompile(self, dummy_logits: torch.Tensor):
+    def precompile(self, dummy_logits: torch.Tensor, **kwargs):
         """
         Allow backend precompilation for the device
             - Currently only used in the TPU model runner
@@ -280,7 +281,7 @@ class StructuredOutputManager:
                 hidden states.
         """
         assert self.backend is not None
-        self.backend.precompile(dummy_logits)
+        self.backend.precompile(dummy_logits, **kwargs)
 
     @staticmethod
     def validate_request(params: SamplingParams,

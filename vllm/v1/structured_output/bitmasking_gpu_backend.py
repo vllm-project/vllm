@@ -10,7 +10,7 @@ import xgrammar as xgr
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.structured_output.bitmasking_typing import (
+from vllm.v1.structured_output.bitmasking_backend import (
     BitmaskSOBatchMetaData, BitmaskStrategy, BitmaskStructuredOutputBackend)
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
@@ -99,6 +99,7 @@ class BitmaskGPUBackend(BitmaskStructuredOutputBackend):
         scheduler_output: SchedulerOutput,
         logits: torch.Tensor,
         sample_hidden_states: torch.Tensor,
+        **kwargs,
     ) -> None:
         BitmaskGPUBackend.apply_grammar_bitmask(
             input_batch,

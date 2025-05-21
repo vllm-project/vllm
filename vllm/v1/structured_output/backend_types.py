@@ -116,7 +116,7 @@ class StructuredOutputBackend(ABC):
 
     def filter_logits(self, input_batch: InputBatch, device: torch.device,
                       scheduler_output: SchedulerOutput, logits: torch.Tensor,
-                      sample_hidden_states: torch.Tensor) -> None:
+                      sample_hidden_states: torch.Tensor, **kwargs) -> None:
         return
 
     @abstractmethod
@@ -125,5 +125,5 @@ class StructuredOutputBackend(ABC):
         Backend-specific cleanup.
         """
 
-    def precompile(self, dummy_logits: torch.Tensor):
+    def precompile(self, dummy_logits: torch.Tensor, **kwargs):
         return
