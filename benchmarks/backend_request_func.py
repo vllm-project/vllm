@@ -329,6 +329,8 @@ async def async_request_openai_completions(
                         )
                     output.generated_text = generated_text
                     output.latency = most_recent_timestamp - st
+                    output.start_time = st
+                    output.end_time = most_recent_timestamp
                 else:
                     output.error = response.reason or ""
                     output.success = False

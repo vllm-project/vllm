@@ -151,6 +151,8 @@ async def get_request(
 
 
 def calculate_metrics(
+    max_concurrency: int,
+    warmup: bool,
     input_requests: list[SampleRequest],
     outputs: list[RequestFuncOutput],
     dur_s: float,
@@ -168,7 +170,12 @@ def calculate_metrics(
     all_tpots: list[float] = []
     ttfts: list[float] = []
     e2els: list[float] = []
+    first_request_send_time = -1
+    last_request_recv_time = -1
+
     for i in range(len(outputs)):
+        if getattr(input_requests[i], "is_warmup", False):
+            continue
         if outputs[i].success:
             output_len = outputs[i].output_tokens
 
@@ -196,6 +203,11 @@ def calculate_metrics(
             ttfts.append(outputs[i].ttft)
             e2els.append(outputs[i].latency)
             completed += 1
+            if hasattr(outputs[i], "start_time") and hasattr(outputs[i], "end_time"):
+                if first_request_send_time == -1 or (outputs[i].start_time < first_request_send_time):
+                    first_request_send_time = outputs[i].start_time
+                if outputs[i].end_time > last_request_recv_time:
+                    last_request_recv_time = outputs[i].end_time
         else:
             actual_output_lens.append(0)
 
@@ -230,6 +242,18 @@ def calculate_metrics(
             "on the benchmark arguments.",
             stacklevel=2,
         )
+    # for concurrency 1, dur_s = last_request_recv_time - first_request_send_time
+    # for concurrency > 1, dur_s = sum(e2els)/concurrency, 
+    # and in each request, e2el = last_request_recv_time - first_request_send_time.    
+    if warmup:
+        dur_s = sum(e2els)/max_concurrency
+
+    # 以下是提代码前要删掉的：
+    # dur_s = last_request_recv_time - first_request_send_time
+    # request_dur_s = sum(e2els)/max_concurrency
+    # request_tps = (total_input + sum(actual_output_lens)) / request_dur_s
+    # print(f"first_request_send_time: {first_request_send_time}, last_request_recv_time: {last_request_recv_time}, dur_s: {dur_s}, request_dur_s: {request_dur_s}, request_tps:{request_tps}")
+
     metrics = BenchmarkMetrics(
         completed=completed,
         total_input=total_input,
@@ -286,6 +310,7 @@ async def benchmark(
     ignore_eos: bool,
     goodput_config_dict: dict[str, float],
     max_concurrency: Optional[int],
+    warmup: bool,
     lora_modules: Optional[Iterable[str]],
     extra_body: Optional[dict],
 ):
@@ -422,6 +447,8 @@ async def benchmark(
     benchmark_duration = time.perf_counter() - benchmark_start_time
 
     metrics, actual_output_lens = calculate_metrics(
+        max_concurrency=max_concurrency,
+        warmup=warmup,
         input_requests=input_requests,
         outputs=outputs,
         dur_s=benchmark_duration,
@@ -621,6 +648,10 @@ def main(args: argparse.Namespace):
         trust_remote_code=args.trust_remote_code,
     )
 
+    if args.warmup:
+        # needs to add warmup requests
+        args.num_prompts += args.max_concurrency
+
     if args.dataset_name is None:
         raise ValueError(
             "Please specify '--dataset-name' and the corresponding "
@@ -731,7 +762,8 @@ def main(args: argparse.Namespace):
                 prefix_len=args.random_prefix_len,
                 input_len=args.random_input_len,
                 output_len=args.random_output_len,
-                range_ratio=args.random_range_ratio,
+                input_range_ratio=args.random_input_range_ratio,
+                output_range_ratio=args.random_output_range_ratio,
             ),
         }
 
@@ -739,6 +771,9 @@ def main(args: argparse.Namespace):
             input_requests = dataset_mapping[args.dataset_name]()
         except KeyError as err:
             raise ValueError(f"Unknown dataset: {args.dataset_name}") from err
+    if args.warmup:
+        for i, req in enumerate(input_requests):
+            setattr(req, "is_warmup", i < args.max_concurrency)
     goodput_config_dict = check_goodput_args(args)
 
     # Collect the sampling parameters.
@@ -785,6 +820,7 @@ def main(args: argparse.Namespace):
             ignore_eos=args.ignore_eos,
             goodput_config_dict=goodput_config_dict,
             max_concurrency=args.max_concurrency,
+            warmup=args.warmup,
             lora_modules=args.lora_modules,
             extra_body=sampling_params,
         )
@@ -979,6 +1015,13 @@ if __name__ == "__main__":
         "VLLM_TORCH_PROFILER_DIR to enable profiler.",
     )
     parser.add_argument(
+        "--warmup",
+        action="store_true",
+        help="Warmup before benchmark tests. "
+        "it will add a warmup request in each process, "
+        "the result of warmup request will not be caculated in final results."
+    )
+    parser.add_argument(
         "--save-result",
         action="store_true",
         help="Specify to save benchmark results to a json file",
@@ -1099,13 +1142,22 @@ if __name__ == "__main__":
         help="Number of output tokens per request, used only for random sampling.",
     )
     random_group.add_argument(
-        "--random-range-ratio",
+        "--random-input-range-ratio",
         type=float,
         default=0.0,
-        help="Range ratio for sampling input/output length, "
+        help="Range ratio for sampling input length, "
         "used only for random sampling. Must be in the range [0, 1) to define "
         "a symmetric sampling range"
-        "[length * (1 - range_ratio), length * (1 + range_ratio)].",
+        "[input_length * (1 - range_ratio), input_length * (1 + range_ratio)].",
+    )
+    random_group.add_argument(
+        "--random-output-range-ratio",
+        type=float,
+        default=0.0,
+        help="Range ratio for sampling output length, "
+        "used only for random sampling. Must be in the range [0, 1) to define "
+        "a symmetric sampling range"
+        "[output_length * (1 - range_ratio), output_length * (1 + range_ratio)].",
     )
     random_group.add_argument(
         "--random-prefix-len",
