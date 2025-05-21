@@ -1095,11 +1095,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         logger.info(
             "Compiling structured_decoding with different input shapes.")
         start = time.perf_counter()
-        self.structured_output_manager.init_backend(
-            "auto"
-        )  # Normally a backend is initialised after a request is made
+        # Normally a backend is initialised after a request is made
         # but we need to precompile the backend here so we initialise the
         # backend here - which will try to use the vllm configs decoding_config
+        self.structured_output_manager.init_backend("auto")
         for num_reqs in self.num_reqs_paddings:
             dummy_logits = torch.zeros((num_reqs, self.vocab_size),
                                        device=self.device,
