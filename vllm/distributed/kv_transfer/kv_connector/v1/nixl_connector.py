@@ -425,18 +425,9 @@ class NixlConnectorWorker:
         # NOTE(rob): we need each rank to have a unique port. This is
         # a hack to keep us moving. We will switch when moving to etcd
         # or where we have a single ZMQ socket in the scheduler.
-
-        # We need to connect to the correct remote port based on the DP rank.
-        # Calculate the unique rank the same way as in the listener
-        dp_rank = get_dp_group().rank_in_group
-        tp_rank = self.rank
-        world_size = self.world_size
-        # Use the same unique rank calculation as the listener
-        remote_unique_rank = port + ((tp_rank * world_size) + dp_rank)
-        path = make_zmq_path("tcp", host, remote_unique_rank)
-
-        logger.debug("Querying metadata on path: %s (DP rank: %s)", path,
-                     dp_rank)
+        path = make_zmq_path("tcp", host, port + self.unique_rank)
+        logger.debug("Querying metadata on path: %s (unique rank: %s)", path,
+                     self.unique_rank)
         with zmq_ctx(zmq.REQ, path) as sock:
             # Send query for the request.
             sock.send(GET_META_MSG)
