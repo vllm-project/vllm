@@ -824,7 +824,7 @@ class ModelConfig:
         optimized_quantization_methods = [
             "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",
             "awq_marlin", "fbgemm_fp8", "compressed-tensors", "experts_int8",
-            "quark", "nvfp4", "bitblas", "gptq_bitblas"
+            "quark", "modelopt_fp4", "bitblas", "gptq_bitblas"
         ]
         if self.quantization is not None:
             self.quantization = cast(QuantizationMethods,
@@ -2201,7 +2201,11 @@ class DeviceConfig:
     """Configuration for the device to use for vLLM execution."""
 
     device: Union[Device, torch.device] = "auto"
-    """Device type for vLLM execution."""
+    """Device type for vLLM execution.
+    This parameter is deprecated and will be 
+    removed in a future release. 
+    It will now be set automatically based 
+    on the current platform."""
     device_type: str = field(init=False)
     """Device type from the current platform. This is set in
     `__post_init__`."""
