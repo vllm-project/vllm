@@ -8,7 +8,7 @@
 ARG CUDA_VERSION=12.8.1
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
-FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04 AS base
+FROM docker.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04 AS base
 ARG CUDA_VERSION=12.8.1
 ARG PYTHON_VERSION=3.12
 ARG TARGETPLATFORM
@@ -43,9 +43,7 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 # as it was causing spam when compiling the CUTLASS kernels
 RUN apt-get install -y gcc-10 g++-10
 RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 110 --slave /usr/bin/g++ g++ /usr/bin/g++-10
-RUN <<EOF
-gcc --version
-EOF
+RUN gcc --version
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
@@ -182,7 +180,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
 # TODO: Restore to base image after FlashInfer AOT wheel fixed
-FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS vllm-base
+FROM docker.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS vllm-base
 ARG CUDA_VERSION=12.8.1
 ARG PYTHON_VERSION=3.12
 WORKDIR /vllm-workspace

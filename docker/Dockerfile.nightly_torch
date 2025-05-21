@@ -6,7 +6,7 @@ ARG CUDA_VERSION=12.8.0
 #
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
-FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04 AS base
+FROM docker.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04 AS base
 ARG CUDA_VERSION=12.8.0
 ARG PYTHON_VERSION=3.12
 ARG TARGETPLATFORM
@@ -183,7 +183,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 
 ################### VLLM INSTALLED IMAGE ####################
 # Setup clean environment for vLLM and its dependencies for test and api server using ubuntu22.04 with AOT flashinfer
-FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS vllm-base
+FROM docker.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS vllm-base
 # prepare for environment starts
 ARG CUDA_VERSION=12.8.0
 ARG PYTHON_VERSION=3.12

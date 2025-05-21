@@ -1,5 +1,5 @@
 # oneapi 2025.0.2 docker base image use rolling 2448 package. https://dgpu-docs.intel.com/releases/packages.html?release=Rolling+2448.13&os=Ubuntu+22.04, and we don't need install driver manually.
-FROM intel/deep-learning-essentials:2025.0.2-0-devel-ubuntu22.04 AS vllm-base
+FROM docker.io/intel/deep-learning-essentials:2025.0.2-0-devel-ubuntu22.04 AS vllm-base
 
 RUN rm /etc/apt/sources.list.d/intel-graphics.list
 
