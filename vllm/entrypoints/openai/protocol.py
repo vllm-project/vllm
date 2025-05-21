@@ -1212,6 +1212,7 @@ class CompletionResponseChoice(OpenAIBaseModel):
             "including encountering the EOS token"),
     )
     prompt_logprobs: Optional[list[Optional[dict[int, Logprob]]]] = None
+    perplexity: Optional[float] = None
 
 
 class CompletionResponse(OpenAIBaseModel):
@@ -1359,6 +1360,7 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     finish_reason: Optional[str] = "stop"
     # not part of the OpenAI spec but included in vLLM for legacy reasons
     stop_reason: Optional[Union[int, str]] = None
+    perplexity: Optional[float] = None
 
 
 class ChatCompletionResponse(OpenAIBaseModel):
