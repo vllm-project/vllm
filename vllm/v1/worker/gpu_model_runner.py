@@ -262,6 +262,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                         device="cpu",
                                         pin_memory=self.pin_memory)
         self.seq_lens_np = self.seq_lens_cpu.numpy()
+        # NOTE(Chen): a temporary fix for quantization + cpu offload
+        # https://github.com/vllm-project/vllm/issues/18425
+        # Initialize block_table_cpu_tensor and slot_mapping_cpu_tensor
+        # before self.load_model can fix the issue.
+        # Need to investigate more on the root cause.
         max_num_blocks_per_req = cdiv(self.max_model_len,
                                       self.cache_config.block_size)
         self.block_table_cpu_tensor = torch.zeros(
@@ -1969,6 +1974,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             vocab_size=self.model_config.get_vocab_size(),
             kv_cache_config=kv_cache_config,
         )
+
+        # NOTE(Chen): a temporary fix for quantization + cpu offload
+        # https://github.com/vllm-project/vllm/issues/18425
+        # Initialize block_table_cpu_tensor and slot_mapping_cpu_tensor
+        # before self.load_model can fix the issue.
+        # Need to investigate more on the root cause.
+        assert len(self.input_batch.block_table.block_tables) == 1
         self.input_batch.block_table.block_tables[0].init_block_table_cpu(
             self.block_table_cpu_tensor, self.slot_mapping_cpu_tensor)
         self.initialize_attn_backend(kv_cache_config)
