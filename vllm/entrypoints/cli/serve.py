@@ -112,7 +112,7 @@ def cmd_init() -> list[CLISubcommand]:
 def run_headless(args: argparse.Namespace):
 
     if args.api_server_count > 1:
-        raise RuntimeError("api_server_count can't be set in headless mode")
+        raise ValueError("api_server_count can't be set in headless mode")
 
     # Create the EngineConfig.
     engine_args = AsyncEngineArgs.from_cli_args(args)
@@ -120,7 +120,7 @@ def run_headless(args: argparse.Namespace):
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
     if not envs.VLLM_USE_V1:
-        raise RuntimeError("Headless mode is only supported for V1")
+        raise ValueError("Headless mode is only supported for V1")
 
     parallel_config = vllm_config.parallel_config
     local_engine_count = parallel_config.data_parallel_size_local
@@ -129,8 +129,8 @@ def run_headless(args: argparse.Namespace):
     handshake_address = get_tcp_uri(host, port)
 
     if local_engine_count <= 0:
-        raise RuntimeError("data_parallel_size_local must be > 0 in "
-                           "headless mode")
+        raise ValueError("data_parallel_size_local must be > 0 in "
+                         "headless mode")
 
     # Catch SIGTERM and SIGINT to allow graceful shutdown.
     def signal_handler(signum, frame):
@@ -180,11 +180,20 @@ def run_multi_api_server(args: argparse.Namespace):
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
     model_config = vllm_config.model_config
 
-    if num_api_servers > 1 and model_config.is_multimodal_model and not (
-            model_config.disable_mm_preprocessor_cache):
-        logger.warning("Multi-model preprocessor cache will be disabled for"
-                       " api_server_count > 1")
-        model_config.disable_mm_preprocessor_cache = True
+    if num_api_servers > 1:
+        if not envs.VLLM_USE_V1:
+            raise ValueError("api_server_count > 1 is only supported for V1")
+
+        if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
+            raise ValueError("VLLM_ALLOW_RUNTIME_LORA_UPDATING cannot be used "
+                             "with api_server_count > 1")
+
+        if model_config.is_multimodal_model and not (
+                model_config.disable_mm_preprocessor_cache):
+            logger.warning(
+                "Multi-model preprocessor cache will be disabled for"
+                " api_server_count > 1")
+            model_config.disable_mm_preprocessor_cache = True
 
     parallel_config = vllm_config.parallel_config
 
