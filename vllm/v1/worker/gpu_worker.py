@@ -294,7 +294,8 @@ class Worker(WorkerBase):
             self.profiler.stop()
 
     def execute_dummy_batch(self) -> None:
-        self.model_runner._dummy_run(1)
+        # TODO: adding allow_microbatching will break non-gpu backends
+        self.model_runner._dummy_run(1, allow_microbatching=True)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)

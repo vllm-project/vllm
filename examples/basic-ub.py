@@ -30,15 +30,21 @@ sampling_params = SamplingParams(**param_kwargs)
 
 def main():
     # Create an LLM.
-    llm = LLM(model="deepseek-ai/DeepSeek-V2-Lite", 
-              enforce_eager=False,
+    model = "deepseek-ai/DeepSeek-V2-Lite"
+    # model = "facebook/opt-125m"
+    llm = LLM(model=model, 
+              enforce_eager=True,
               compilation_config=2,
-              enable_microbatching=True,
-              enable_expert_parallel=True,
+              ###############
               trust_remote_code=True,
-              tensor_parallel_size=2,
               max_model_len=1024,
               #load_format="dummy",
+              ###############
+              tensor_parallel_size=2,
+              #data_parallel_size=2,
+              enable_expert_parallel=False,
+              ###############
+              enable_microbatching=True, 
     )
     # Generate texts from the prompts.
     # The output is a list of RequestOutput objects

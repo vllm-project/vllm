@@ -117,6 +117,7 @@ if TYPE_CHECKING:
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5557
     VLLM_ALL2ALL_BACKEND: str = "naive"
+    VLLM_CUDAGRAPH_SANITIZER: bool = False
 
 
 def get_default_cache_root():
@@ -811,6 +812,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # all2all backend for vllm's expert parallel communication
     "VLLM_ALL2ALL_BACKEND":
     lambda: os.getenv("VLLM_ALL2ALL_BACKEND", "naive"),
+
+    # check that the cudagraphs input addresses are correct before replaying
+    "VLLM_CUDAGRAPH_SANITIZER":
+    lambda: os.getenv("VLLM_CUDAGRAPH_SANITIZER", "0") == "1",
 }
 
 # end-env-vars-definition
