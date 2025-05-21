@@ -1028,7 +1028,7 @@ Specified using `--task generate`.
   * ✅︎
 - * `InternVLChatModel`
   * InternVL 3.0, InternVideo 2.5, InternVL 2.5, Mono-InternVL, InternVL 2.0
-  * T + I<sup>E+</sup>
+  * T + I<sup>E+</sup> + (V<sup>E+</sup>)
   * `OpenGVLab/InternVL3-9B`, `OpenGVLab/InternVideo2_5_Chat_8B`, `OpenGVLab/InternVL2_5-4B`, `OpenGVLab/Mono-InternVL-2B`, `OpenGVLab/InternVL2-4B`, etc.
   *
   * ✅︎
@@ -1239,6 +1239,10 @@ V1 currently uses a simplified attention pattern:
 - Will be updated in the future to support the correct behavior
 
 This limitation exists because the model's mixed attention pattern (bidirectional for images, causal otherwise) is not yet supported by vLLM's attention backends.
+:::
+
+:::{note}
+Only `InternVLChatModel` with Qwen2.5 text backbone (`OpenGVLab/InternVL3-2B`, `OpenGVLab/InternVL2.5-1B` etc) has video inputs support currently.
 :::
 
 :::{note}

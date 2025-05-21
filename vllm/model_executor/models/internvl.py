@@ -261,7 +261,7 @@ def video_to_pixel_values_internvl(
     frames_list = list[Image.Image]()
     for frame in video:
         pil_frame = dynamic_preprocess_internvl(
-            Image.fromarray(frame).convert('RGB'),
+            Image.fromarray(frame, mode="RGB"),
             target_ratios=target_ratios,
             image_size=input_size,
             use_thumbnail=use_thumbnail,
@@ -543,7 +543,7 @@ class InternVLProcessor(BaseInternVLProcessor):
     def video_token_id(self) -> Optional[int]:
         if self.video_token is None:
             return None
-        return self.tokenizer.get_vocab()[self.video_token]
+        return self.tokenizer.get_vocab().get(self.video_token, None)
 
     def get_image_repl(
         self,
