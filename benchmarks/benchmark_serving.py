@@ -834,6 +834,8 @@ def main(args: argparse.Namespace):
             ]:
                 if field in result_json:
                     del result_json[field]
+                if field in benchmark_result:
+                    del benchmark_result[field]
 
         # Save to file
         base_model_id = model_id.split("/")[-1]
