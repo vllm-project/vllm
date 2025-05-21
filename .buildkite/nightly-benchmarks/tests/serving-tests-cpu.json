@@ -3,7 +3,6 @@
         "test_name": "serving_llama8B_tp1_sharegpt",
         "qps_list": [1, 4, 16, "inf"],
         "server_environment_variables": {
-            "VLLM_USE_V1": 1,
             "VLLM_RPC_TIMEOUT": 1000000,
 	    "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
 	    "VLLM_ENGINE_ITERATION_TIMEOUT_S": 600,
@@ -33,7 +32,6 @@
         "test_name": "serving_llama8B_tp4_random_128_128",
         "qps_list": ["inf"],
         "server_environment_variables": {
-            "VLLM_USE_V1": 1,
             "VLLM_RPC_TIMEOUT": 1000000,
 	    "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
 	    "VLLM_ENGINE_ITERATION_TIMEOUT_S": 600,
@@ -66,7 +64,6 @@
         "test_name": "serving_llama8B_tp4_random_1024_128",
         "qps_list": ["inf"],
         "server_environment_variables": {
-            "VLLM_USE_V1": 1,
             "VLLM_RPC_TIMEOUT": 1000000,
 	    "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
 	    "VLLM_ENGINE_ITERATION_TIMEOUT_S": 600,
@@ -99,7 +96,6 @@
         "test_name": "serving_llama8B_tp4_random_2048_2048",
         "qps_list": ["inf"],
         "server_environment_variables": {
-            "VLLM_USE_V1": 1,
             "VLLM_RPC_TIMEOUT": 1000000,
 	    "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
 	    "VLLM_ENGINE_ITERATION_TIMEOUT_S": 600,
