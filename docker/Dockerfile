@@ -6,6 +6,7 @@
 # docs/assets/contributing/dockerfile-stages-dependency.png
 
 ARG CUDA_VERSION=12.8.1
+ARG PYTHON_VERSION=3.12
 
 # By parameterizing the base images, we allow third-party to use their own
 # base images. One use case is hermetic builds with base images stored in
@@ -15,14 +16,6 @@ ARG CUDA_VERSION=12.8.1
 # docker build --build-arg BUILD_BASE_IMAGE=registry.acme.org/mirror/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
 ARG BUILD_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
 ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
-
-#################### BASE BUILD IMAGE ####################
-# prepare basic build environment
-FROM ${BUILD_BASE_IMAGE} AS base
-ARG CUDA_VERSION=12.8.1
-ARG PYTHON_VERSION=3.12
-ARG TARGETPLATFORM
-ENV DEBIAN_FRONTEND=noninteractive
 
 # By parameterizing the Deadsnakes repository URL, we allow third-party to use
 # their own mirror. When doing so, we don't benefit from the transparent
@@ -41,6 +34,41 @@ ARG DEADSNAKES_GPGKEY_URL
 #
 # Reference: https://pip.pypa.io/en/stable/installation/#get-pip-py
 ARG GET_PIP_URL="https://bootstrap.pypa.io/get-pip.py"
+
+# PIP supports fetching the packages from custom indexes, allowing third-party
+# to host the packages in private mirrors. The PIP_INDEX_URL and
+# PIP_EXTRA_INDEX_URL are standard PIP environment variables to override the
+# default indexes. By letting them empty by default, PIP will use its default
+# indexes if the build process doesn't override the indexes.
+#
+# The PPIP_PYTORCH_* variable follow the same naming convention, but are not
+# standard, so they have to be passed via --extra-index-url on the pip command
+# line.
+ARG PIP_INDEX_URL
+ARG PIP_EXTRA_INDEX_URL
+ARG PIP_PYTORCH_CUDA_INDEX_BASE_URL=https://download.pytorch.org/whl
+ARG PIP_PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL=https://download.pytorch.org/whl/nightly
+
+# PIP supports multiple authentication schemes, including keyring
+# By parameterizing the PIP_KEYRING_PROVIDER variable and setting it to
+# disabled by default, we allow third-party to use keyring authentication for
+# their private Python indexes, while not changing the default behavior which
+# is no authentication.
+#
+# Reference: https://pip.pypa.io/en/stable/topics/authentication/#keyring-support
+ARG PIP_KEYRING_PROVIDER=disabled
+
+#################### BASE BUILD IMAGE ####################
+# prepare basic build environment
+FROM ${BUILD_BASE_IMAGE} AS base
+ARG CUDA_VERSION
+ARG PYTHON_VERSION
+ARG TARGETPLATFORM
+ENV DEBIAN_FRONTEND=noninteractive
+
+ARG DEADSNAKES_MIRROR_URL
+ARG DEADSNAKES_GPGKEY_URL
+ARG GET_PIP_URL
 
 # Install Python and other dependencies
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
@@ -68,28 +96,11 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && curl -sS ${GET_PIP_URL} | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
 
-# PIP supports fetching the packages from custom indexes, allowing third-party
-# to host the packages in private mirrors. The PIP_INDEX_URL and
-# PIP_EXTRA_INDEX_URL are standard PIP environment variables to override the
-# default indexes. By letting them empty by default, PIP will use its default
-# indexes if the build process doesn't override the indexes.
-#
-# The PPIP_PYTORCH_* variable follow the same naming convention, but are not
-# standard, so they have to be passed via --extra-index-url on the pip command
-# line.
 ARG PIP_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL
-ARG PIP_PYTORCH_CUDA_INDEX_BASE_URL=https://download.pytorch.org/whl
-ARG PIP_PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL=https://download.pytorch.org/whl/nightly
-
-# PIP supports multiple authentication schemes, including keyring
-# By parameterizing the PIP_KEYRING_PROVIDER variable and setting it to
-# disabled by default, we allow third-party to use keyring authentication for
-# their private Python indexes, while not changing the default behavior which
-# is no authentication.
-#
-# Reference: https://pip.pypa.io/en/stable/topics/authentication/#keyring-support
-ARG PIP_KEYRING_PROVIDER=disabled
+ARG PIP_PYTORCH_CUDA_INDEX_BASE_URL
+ARG PIP_PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL
+ARG PIP_KEYRING_PROVIDER
 
 # Install uv for faster pip installs
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -153,18 +164,9 @@ ENV VLLM_FA_CMAKE_GPU_ARCHES=${vllm_fa_cmake_gpu_arches}
 FROM base AS build
 ARG TARGETPLATFORM
 
-# PIP supports fetching the packages from custom indexes, allowing third-party
-# to host the packages in private mirrors. The PIP_INDEX_URL and
-# PIP_EXTRA_INDEX_URL are standard PIP environment variables to override the
-# default indexes. By letting them empty by default, PIP will use its default
-# indexes if the build process doesn't override the indexes.
-#
-# The PPIP_PYTORCH_* variable follow the same naming convention, but are not
-# standard, so they have to be passed via --extra-index-url on the pip command
-# line.
 ARG PIP_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL
-ARG PIP_PYTORCH_CUDA_INDEX_BASE_URL=https://download.pytorch.org/whl
+ARG PIP_PYTORCH_CUDA_INDEX_BASE_URL
 
 # install build dependencies
 COPY requirements/build.txt requirements/build.txt
@@ -243,18 +245,9 @@ RUN if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
 #################### DEV IMAGE ####################
 FROM base as dev
 
-# PIP supports fetching the packages from custom indexes, allowing third-party
-# to host the packages in private mirrors. The PIP_INDEX_URL and
-# PIP_EXTRA_INDEX_URL are standard PIP environment variables to override the
-# default indexes. By letting them empty by default, PIP will use its default
-# indexes if the build process doesn't override the indexes.
-#
-# The PPIP_PYTORCH_* variable follow the same naming convention, but are not
-# standard, so they have to be passed via --extra-index-url on the pip command
-# line.
 ARG PIP_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL
-ARG PIP_PYTORCH_CUDA_INDEX_BASE_URL=https://download.pytorch.org/whl
+ARG PIP_PYTORCH_CUDA_INDEX_BASE_URL
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
@@ -277,31 +270,17 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # image with vLLM installed
 # TODO: Restore to base image after FlashInfer AOT wheel fixed
 FROM ${FINAL_BASE_IMAGE} AS vllm-base
-ARG CUDA_VERSION=12.8.1
-ARG PYTHON_VERSION=3.12
+ARG CUDA_VERSION
+ARG PYTHON_VERSION
 WORKDIR /vllm-workspace
 ENV DEBIAN_FRONTEND=noninteractive
 ARG TARGETPLATFORM
 
 SHELL ["/bin/bash", "-c"]
 
-# By parameterizing the Deadsnakes repository URL, we allow third-party to use
-# their own mirror. When doing so, we don't benefit from the transparent
-# installation of the GPG key of the PPA, as done by add-apt-repository, so we
-# also need a URL for the GPG key.
 ARG DEADSNAKES_MIRROR_URL
 ARG DEADSNAKES_GPGKEY_URL
-
-# The PyPA get-pip.py script is a self contained script+zip file, that provides
-# both the installer script and the pip base85-encoded zip archive. This allows
-# bootstrapping pip in environment where a dsitribution package does not exist.
-#
-# By parameterizing the URL for get-pip.py installation script, we allow
-# third-party to use their own copy of the script stored in a private mirror.
-# We set the default value to the PyPA owned get-pip.py script.
-#
-# Reference: https://pip.pypa.io/en/stable/installation/#get-pip-py
-ARG GET_PIP_URL="https://bootstrap.pypa.io/get-pip.py"
+ARG GET_PIP_URL
 
 RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
     echo "export PYTHON_VERSION_STR=${PYTHON_VERSION_STR}" >> /etc/environment
@@ -333,28 +312,11 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && curl -sS ${GET_PIP_URL} | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
 
-# PIP supports fetching the packages from custom indexes, allowing third-party
-# to host the packages in private mirrors. The PIP_INDEX_URL and
-# PIP_EXTRA_INDEX_URL are standard PIP environment variables to override the
-# default indexes. By letting them empty by default, PIP will use its default
-# indexes if the build process doesn't override the indexes.
-#
-# The PPIP_PYTORCH_* variable follow the same naming convention, but are not
-# standard, so they have to be passed via --extra-index-url on the pip command
-# line.
 ARG PIP_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL
-ARG PIP_PYTORCH_CUDA_INDEX_BASE_URL=https://download.pytorch.org/whl
-ARG PIP_PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL=https://download.pytorch.org/whl/nightly
-
-# PIP supports multiple authentication schemes, including keyring
-# By parameterizing the PIP_KEYRING_PROVIDER variable and setting it to
-# disabled by default, we allow third-party to use keyring authentication for
-# their private Python indexes, while not changing the default behavior which
-# is no authentication.
-#
-# Reference: https://pip.pypa.io/en/stable/topics/authentication/#keyring-support
-ARG PIP_KEYRING_PROVIDER=disabled
+ARG PIP_PYTORCH_CUDA_INDEX_BASE_URL
+ARG PIP_PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL
+ARG PIP_KEYRING_PROVIDER
 
 # Install uv for faster pip installs
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -451,11 +413,6 @@ FROM vllm-base AS test
 
 ADD . /vllm-workspace/
 
-# PIP supports fetching the packages from custom indexes, allowing third-party
-# to host the packages in private mirrors. The PIP_INDEX_URL and
-# PIP_EXTRA_INDEX_URL are standard PIP environment variables to override the
-# default indexes. By letting them empty by default, PIP will use its default
-# indexes if the build process doesn't override the indexes.
 ARG PIP_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL
 
@@ -502,11 +459,6 @@ RUN mv mkdocs.yaml test_docs/
 FROM vllm-base AS vllm-openai-base
 ARG TARGETPLATFORM
 
-# PIP supports fetching the packages from custom indexes, allowing third-party
-# to host the packages in private mirrors. The PIP_INDEX_URL and
-# PIP_EXTRA_INDEX_URL are standard PIP environment variables to override the
-# default indexes. By letting them empty by default, PIP will use its default
-# indexes if the build process doesn't override the indexes.
 ARG PIP_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL
 
