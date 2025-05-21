@@ -199,9 +199,11 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
         #B_scale = torch.ones((N, K), dtype=torch.float32, device=tensors.A.device)
         A_scale = torch.ones(1, dtype=torch.float32, device=tensors.A.device)
         B_scale = torch.ones(1, dtype=torch.float32, device=tensors.B.device)
+        quant_block_shape = [1, 1]
     else:
         A_scale = None
         B_scale = None
+        quant_block_shape = None
 
     invoke_moe_batched_triton_kernel(
         tensors.A,
@@ -221,7 +223,9 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
             "BLOCK_SIZE_M": block_shape[0],
             "BLOCK_SIZE_N": block_shape[1],
             "BLOCK_SIZE_K": block_shape[2],
-        })
+        },
+        block_shape=quant_block_shape,
+    )
 
     ref_output = ref_output.to(dtype=out_dtype)
     ref_output = ref_impl(tensors.A.to(dtype=out_dtype),
@@ -247,5 +251,4 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
     }[test_output.dtype]
 
     torch.testing.assert_close(ref_output, ref_output2, atol=atol, rtol=rtol)
-    if not use_fp8_w8a8:
-        torch.testing.assert_close(test_output, ref_output2, atol=atol, rtol=rtol)
+    torch.testing.assert_close(test_output, ref_output2, atol=atol, rtol=rtol)
