@@ -138,6 +138,7 @@ steps:
   - vllm/core/
   - tests/distributed/test_utils
   - tests/distributed/test_pynccl
+  - tests/distributed/test_events
   - tests/spec_decode/e2e/test_integration_dist_tp4
   - tests/compile/test_basic_correctness
   - examples/offline_inference/rlhf.py
@@ -156,6 +157,7 @@ steps:
   - pytest -v -s distributed/test_utils.py
   - pytest -v -s compile/test_basic_correctness.py
   - pytest -v -s distributed/test_pynccl.py
+  - pytest -v -s distributed/test_events.py
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp4.py
   # TODO: create a dedicated test section for multi-GPU example tests
   # when we have multiple distributed example tests
