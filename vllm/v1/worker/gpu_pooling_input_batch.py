@@ -90,7 +90,7 @@ class InputBatch(BaseInputBatch):
     def remove_request(self, req_id: str) -> Optional[int]:
         """This method must always be followed by a call to condense()."""
 
-        req_index = self.req_id_to_index.pop(req_id, None)
+        req_index = self.req_id_to_index.get(req_id, None)
         if req_index is not None:
             self.pooling_params.pop(req_id, None)
 

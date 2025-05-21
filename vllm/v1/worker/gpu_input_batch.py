@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Datastructures defining an input batch
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, cast
 
 import torch
@@ -22,7 +22,7 @@ class SamplingRequestState(BaseRequestState):
 
     sampling_params: SamplingParams = SamplingParams()
     generator: Optional[torch.Generator] = None
-    output_token_ids: list[int] = []
+    output_token_ids: list[int] = field(default_factory=list)
 
     @property
     def num_tokens(self) -> int:
@@ -268,7 +268,7 @@ class InputBatch(BaseInputBatch):
     def remove_request(self, req_id: str) -> Optional[int]:
         """This method must always be followed by a call to condense()."""
 
-        req_index = self.req_id_to_index.pop(req_id, None)
+        req_index = self.req_id_to_index.get(req_id, None)
         if req_index is not None:
             self.greedy_reqs.discard(req_id)
             self.random_reqs.discard(req_id)
