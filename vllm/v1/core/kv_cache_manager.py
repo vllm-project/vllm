@@ -65,7 +65,7 @@ class KVCacheManager:
             "KVCacheManager does not support hybrid models with more than 1 "
             "kv cache group")
         kv_cache_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
-        forested_prefix_spec = kv_cache_config.forested_prefix_config
+        forested_prefix_spec = kv_cache_config.forested_cascade_config
         self.block_size = kv_cache_spec.block_size
         self.num_gpu_blocks = kv_cache_config.num_blocks
         self.max_model_len = max_model_len

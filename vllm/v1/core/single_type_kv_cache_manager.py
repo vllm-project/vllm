@@ -404,6 +404,8 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
 
         old_req_depth = -1
         if removed_blocks:
+            #TODO: Verify block_depth is not fixed at 0.
+            # These blocks should have been fully cached.
             old_req_depth = removed_blocks[-1].block_depth
             new_req_depth = removed_blocks[0].block_depth + 1
             self.req_to_depth[request_id] = new_req_depth

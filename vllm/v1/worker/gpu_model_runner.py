@@ -141,8 +141,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.kv_caches: list[torch.Tensor] = []
         self.attn_metadata_builders: list[AttentionMetadataBuilder] = []
         self.attn_backends: list[type[AttentionBackend]] = []
-        # self.kv_cache_config: KVCacheConfig
-        # self.input_batch: InputBatch # Persistent batch.
 
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: dict[str, dict[int, torch.Tensor]] = {}

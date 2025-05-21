@@ -13,7 +13,7 @@ from vllm.logger import init_logger
 from vllm.utils import GiB_bytes, sha256
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheSpec,
-                                        KVCacheTensor, SlidingWindowSpec)
+                                        KVCacheTensor, SlidingWindowSpec, ForestedPrefixSpec)
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 from vllm.v1.utils import ConstantList
@@ -914,7 +914,6 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
     Returns:
         The generated KVCacheConfig
     """
-
     page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
     assert len(page_sizes) == 1
     page_size = page_sizes.pop()
@@ -951,6 +950,7 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
         },
         kv_cache_groups=create_kv_cache_group_specs(kv_cache_spec,
                                                     grouped_layer_names),
+        forested_cascade_config=vllm_config.model_config.forested_cascade_config
     )
     return kv_cache_config
 

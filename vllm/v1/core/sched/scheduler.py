@@ -533,6 +533,7 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
             num_common_prefix_blocks=num_common_prefix_blocks,
+            common_prefix_list=common_prefix_list,
             # finished_req_ids is an existing state in the scheduler,
             # instead of being newly scheduled in this step.
             # It contains the request IDs that are finished in between
@@ -540,8 +541,7 @@ class Scheduler(SchedulerInterface):
             finished_req_ids=self.finished_req_ids,
             free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
             structured_output_request_ids=structured_output_request_ids,
-            grammar_bitmask=grammar_bitmask,
-            common_prefix_list=common_prefix_list
+            grammar_bitmask=grammar_bitmask
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
