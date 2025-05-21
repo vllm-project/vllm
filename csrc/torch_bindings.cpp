@@ -602,6 +602,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "CUBLAS_M_THRESHOLD, bool has_zp, bool n32k16_reorder) -> Tensor");
   //  conditionally compiled so impl in source file
 #endif
+
+  // Store Tensor to pinned memory
+  ops.def("store_tensor(Tensor device_tensor, Tensor host_tensor) -> ()");
+  ops.impl("store_tensor", torch::kCUDA, &store_tensor);
+  // Load Tensor from pinned memory
+  ops.def("load_tensor(Tensor host_tensor, Tensor device_tensor) -> ()");
+  ops.impl("load_tensor", torch::kCUDA, &load_tensor);
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
@@ -701,13 +708,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
   custom_ar.impl("open_mem_handle", torch::kCPU, &open_mem_handle);
 
   custom_ar.def("free_shared_buffer", &free_shared_buffer);
-}
-
-TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _mem_pool), mem_pool) {
-  mem_pool.def("store_tensor(Tensor device_tensor, Tensor host_tensor) -> ()");
-  mem_pool.impl("store_tensor", torch::kCUDA, &store_tensor);
-  mem_pool.def("load_tensor(Tensor host_tensor, Tensor device_tensor) -> ()");
-  mem_pool.impl("load_tensor", torch::kCUDA, &load_tensor);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

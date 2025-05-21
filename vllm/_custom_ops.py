@@ -1663,14 +1663,6 @@ def free_shared_buffer(ptr: int) -> None:
     torch.ops._C_custom_ar.free_shared_buffer(ptr)
 
 
-def store_tensor(device_tensor: torch.Tensor, host_tensor: torch.Tensor):
-    torch.ops._C_mem_pool.store_tensor(device_tensor, host_tensor)
-
-
-def load_tensor(host_tensor: torch.Tensor, device_tensor: torch.Tensor):
-    torch.ops._C_mem_pool.load_tensor(host_tensor, device_tensor)
-
-
 def get_flash_mla_metadata(
     cache_seqlens: torch.Tensor,
     num_heads_per_head_k: int,
@@ -1742,3 +1734,11 @@ def cutlass_mla_decode(out: torch.Tensor, q_nope: torch.Tensor,
     torch.ops._C.cutlass_mla_decode(out, q_nope, q_pe, kv_c_and_k_pe_cache,
                                     seq_lens, page_table, scale)
     return out
+
+
+def store_tensor(device_tensor: torch.Tensor, host_tensor: torch.Tensor):
+    torch.ops._C.store_tensor(device_tensor, host_tensor)
+
+
+def load_tensor(host_tensor: torch.Tensor, device_tensor: torch.Tensor):
+    torch.ops._C.load_tensor(host_tensor, device_tensor)
