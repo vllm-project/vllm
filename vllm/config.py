@@ -222,7 +222,7 @@ def is_init_field(cls: ConfigType, name: str) -> bool:
 
 
 TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
-ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
+ModelDType = Literal["auto", "hybrid", "half", "float16", "bfloat16", "float", "float32"]
 
 
 @config
@@ -255,6 +255,8 @@ class ModelConfig:
     """Data type for model weights and activations:\n
     - "auto" will use FP16 precision for FP32 and FP16 models, and BF16
     precision for BF16 models.\n
+    - "hybrid" will use FP32 for weights and activation 
+    and float16 for attention.\n
     - "half" for FP16. Recommended for AWQ quantization.\n
     - "float16" is the same as "half".\n
     - "bfloat16" for a balance between precision and range.\n
@@ -540,10 +542,8 @@ class ModelConfig:
         self.encoder_config = self._get_encoder_config()
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, hf_token=self.hf_token, revision=self.revision)
-        self.dtype = _get_and_verify_dtype(self.hf_config, self.dtype)
-        self.attn_dtype = (self.dtype if self.attn_dtype
-                           is None else _get_and_verify_dtype(
-                               self.hf_config, self.attn_dtype))
+
+        self._init_dtype()
 
         interleaved_attn_models = ["gemma2", "gemma3_text", "cohere2"]
         sliding_window = getattr(self.hf_text_config, "sliding_window", None)
@@ -649,6 +649,17 @@ class ModelConfig:
             s3_tokenizer.pull_files(
                 model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
             self.tokenizer = s3_tokenizer.dir
+
+    def _init_dtype(self):
+        if self.dtype == "hybrid":
+            self.dtype = torch.float32
+            self.attn_dtype = torch.float16
+            return
+
+        self.dtype = _get_and_verify_dtype(self.hf_config, self.dtype)
+        self.attn_dtype = (self.dtype if self.attn_dtype
+                           is None else _get_and_verify_dtype(
+                               self.hf_config, self.attn_dtype))
 
     def _init_multimodal_config(self) -> Optional["MultiModalConfig"]:
         if self.registry.is_multimodal_model(self.architectures):
@@ -2210,11 +2221,7 @@ class DeviceConfig:
     """Configuration for the device to use for vLLM execution."""
 
     device: Union[Device, torch.device] = "auto"
-    """Device type for vLLM execution.
-    This parameter is deprecated and will be 
-    removed in a future release. 
-    It will now be set automatically based 
-    on the current platform."""
+    """Device type for vLLM execution."""
     device_type: str = field(init=False)
     """Device type from the current platform. This is set in
     `__post_init__`."""
