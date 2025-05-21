@@ -13,7 +13,7 @@ from vllm.logger import init_logger
 from vllm.utils import GiB_bytes, sha256
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheSpec,
-                                        KVCacheTensor, SlidingWindowSpec, ForestedPrefixSpec)
+                                        KVCacheTensor, SlidingWindowSpec)
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 from vllm.v1.utils import ConstantList
