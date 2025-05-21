@@ -36,7 +36,7 @@ class P2pNcclEngine:
 
         if not hostname:
             hostname = get_ip()
-        port = self.config.kv_port + port_offset
+        port = int(self.config.kv_port) + port_offset
         if port == 0:
             raise ValueError("Port cannot be 0")
         self._hostname = hostname

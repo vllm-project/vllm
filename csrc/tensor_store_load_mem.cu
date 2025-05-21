@@ -61,9 +61,9 @@ void store_tensor(torch::Tensor& device_tensor, torch::Tensor& host_tensor) {
   TORCH_CHECK(device_tensor.is_cuda(), "Input tensor must be a CUDA tensor");
   TORCH_CHECK(host_tensor.is_pinned(), "Output tensor must be pinned memory");
   TORCH_CHECK(device_tensor.numel() == host_tensor.numel(),
-             "Tensors must have same number of elements");
+              "Tensors must have same number of elements");
   TORCH_CHECK(device_tensor.dtype() == host_tensor.dtype(),
-             "Tensors must have same dtype");
+              "Tensors must have same dtype");
 
   // Type-based dispatch to different implementations
   switch (device_tensor.scalar_type()) {
@@ -86,9 +86,9 @@ void load_tensor(torch::Tensor& host_tensor, torch::Tensor& device_tensor) {
   TORCH_CHECK(device_tensor.is_cuda(), "Output tensor must be a CUDA tensor");
   TORCH_CHECK(host_tensor.is_pinned(), "Input tensor must be pinned memory");
   TORCH_CHECK(device_tensor.numel() == host_tensor.numel(),
-             "Tensors must have same number of elements");
+              "Tensors must have same number of elements");
   TORCH_CHECK(device_tensor.dtype() == host_tensor.dtype(),
-             "Tensors must have same dtype");
+              "Tensors must have same dtype");
 
   // Type-based dispatch to different implementations
   switch (host_tensor.scalar_type()) {
