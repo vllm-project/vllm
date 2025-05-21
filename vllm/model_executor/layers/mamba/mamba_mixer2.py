@@ -119,11 +119,9 @@ class Mixer2RMSNormGated(CustomOp):
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         input_dtype = x.dtype
         if not self.use_rms_norm:
+            # Keep gate in float32 for numerical stability during silu
             return x * nn.functional.silu(gate.to(
                 torch.float32)).to(input_dtype)
-
-        if not self.use_rms_norm:
-            return x * nn.functional.silu(gate.to(torch.float32))
 
         if self.tp_size > 1 or self.n_groups != 1:
             return self.forward_native(x, gate)
