@@ -330,7 +330,7 @@ def run_smolvlm(questions: list[str], modality: str) -> ModelRequestData:
 # InternVL
 def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
 
-    model_name = "OpenGVLab/InternVL3-1B"
+    model_name = "OpenGVLab/InternVL3-2B"
 
     engine_args = EngineArgs(
         model=model_name,
@@ -360,7 +360,9 @@ def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
     # https://huggingface.co/OpenGVLab/InternVL2-2B/blob/main/conversation.py
     stop_tokens = ["<|endoftext|>", "<|im_start|>", "<|im_end|>", "<|end|>"]
     stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
-    stop_token_ids = [token_id for token_id in stop_token_ids if token_id is not None]
+    stop_token_ids = [
+        token_id for token_id in stop_token_ids if token_id is not None
+    ]
 
     return ModelRequestData(
         engine_args=engine_args,

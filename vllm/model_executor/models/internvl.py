@@ -89,6 +89,21 @@ class InternVLVideoPixelInputs(TypedDict):
     """Shape: `(batch_size * num_images)`"""
 
 
+class InternVLVideoEmbeddingInputs(TypedDict):
+    type: Literal["video_embeds"]
+    data: Union[torch.Tensor, list[torch.Tensor]]
+    """ 
+    A tensor of shape `(num_videos, total_video_feature_size, hidden_size)`
+    or a list of tensors of shape `(total_video_feature_size, hidden_size)`
+
+    `hidden_size` must match the hidden size of language model backbone.
+    """
+
+
+InternVLVideoInputs = Union[InternVLVideoPixelInputs,
+                            InternVLVideoEmbeddingInputs]
+
+
 # adapted from https://huggingface.co/OpenGVLab/InternVL2-1B
 def build_transform(input_size: int):
     MEAN, STD = IMAGENET_MEAN, IMAGENET_STD
@@ -806,6 +821,8 @@ class InternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
         def get_video_replacement_internvl(item_idx: int):
             feature_size = hf_processor.num_image_token
             num_patches = video_num_patches[item_idx]
+            if num_patches is not None:
+                assert isinstance(num_patches, int)
 
             return hf_processor.get_video_repl(
                 feature_size,
@@ -1063,9 +1080,20 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
             self, **kwargs: object) -> Optional[InternVLVideoPixelInputs]:
         pixel_values_flat_video = kwargs.pop("pixel_values_flat_video", None)
         video_num_patches = kwargs.pop("video_num_patches", None)
+        video_embeds = kwargs.pop("image_embeds", None)
 
-        if pixel_values_flat_video is None:
+        if pixel_values_flat_video is None and video_embeds is None:
             return None
+
+        if video_embeds is not None:
+            if not isinstance(video_embeds, (torch.Tensor, list)):
+                raise ValueError("Incorrect type of video embeddings. "
+                                 f"Got type: {type(video_embeds)}")
+
+            return InternVLImageEmbeddingInputs(
+                type="video_embeds",
+                data=flatten_bn(video_embeds),
+            )
 
         video_token_id = kwargs["video_token_id"]
         assert isinstance(video_token_id, torch.Tensor)
