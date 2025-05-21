@@ -242,11 +242,13 @@ def calculate_metrics(
             "on the benchmark arguments.",
             stacklevel=2,
         )
-    # for concurrency 1, dur_s = last_request_recv_time - first_request_send_time
-    # for concurrency > 1, dur_s = sum(e2els)/concurrency, 
+    # if concurrency = 1, dur_s = last_request_recv_time - first_request_send_time
+    # if concurrency > 1, dur_s = sum(e2els)/concurrency, 
     # and in each request, e2el = last_request_recv_time - first_request_send_time.    
     if warmup:
         dur_s = sum(e2els)/max_concurrency
+    else:
+        dur_s = last_request_recv_time - first_request_send_time
 
     metrics = BenchmarkMetrics(
         completed=completed,
