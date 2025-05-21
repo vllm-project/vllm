@@ -45,8 +45,8 @@ from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.block_table import BlockTable
-from vllm.v1.worker.gpu_pooling_input_batch import (CachedRequestState,
-                                                    InputBatch)
+from vllm.v1.worker.gpu_pooling_input_batch import (InputBatch,
+                                                    PoolingRequestState)
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from .utils import (gather_mm_placeholders, sanity_check_mm_encoder_outputs,
@@ -137,7 +137,7 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
         assert vllm_config.speculative_config is None
 
         # Request states.
-        self.requests: dict[str, CachedRequestState] = {}
+        self.requests: dict[str, PoolingRequestState] = {}
 
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE
@@ -324,7 +324,7 @@ class GPUPoolingModelRunner(LoRAModelRunnerMixin):
             pooling_params = new_req_data.pooling_params
             assert pooling_params is not None
 
-            self.requests[req_id] = CachedRequestState(
+            self.requests[req_id] = PoolingRequestState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
                 token_type_ids=new_req_data.token_type_ids,
