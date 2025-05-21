@@ -770,8 +770,10 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                             make_attn_mask=causal_mask)  # type: ignore
 
                     vllm_config_use_fp8_scales = (
-                        True if self.vllm_config is None or self.vllm_config.model_config
-                        is None else self.vllm_config.model_config.override_attention_dtype == "fp8")
+                        True if self.vllm_config is None
+                        or self.vllm_config.model_config is None else
+                        self.vllm_config.model_config.override_attention_dtype
+                        == "fp8")
                     use_fp8_scales = (layer._q_scale and layer._k_scale
                                       and layer._v_scale and layer._prob_scale
                                       and vllm_config_use_fp8_scales)
