@@ -581,6 +581,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 logger.debug("Using naive (SDPA) attention in ROCmBackend")
 
         self.aiter_kv_scales_initialized = False
+        self.vllm_config = get_current_vllm_config()
 
     def repeat_kv(self, x: torch.Tensor, n_rep: int) -> torch.Tensor:
         """torch.repeat_interleave(x, dim=1, repeats=n_rep)"""
@@ -768,10 +769,9 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                             seq_lens,
                             make_attn_mask=causal_mask)  # type: ignore
 
-                    vllm_config = get_current_vllm_config()
                     vllm_config_use_fp8_scales = (
-                        True if vllm_config is None or vllm_config.model_config
-                        is None else vllm_config.model_config.use_fp8_scales)
+                        True if self.vllm_config is None or self.vllm_config.model_config
+                        is None else self.vllm_config.model_config.override_attention_dtype == "fp8")
                     use_fp8_scales = (layer._q_scale and layer._k_scale
                                       and layer._v_scale and layer._prob_scale
                                       and vllm_config_use_fp8_scales)

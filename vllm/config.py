@@ -407,8 +407,8 @@ class ModelConfig:
     available.\n
     - "vllm" will use the vLLM model implementation.\n
     - "transformers" will use the Transformers model implementation."""
-    use_fp8_scales: bool = True
-    """If true, pass the fp8 scales to the ROCm Triton attention backend"""
+    override_attention_dtype: str = "fp8"
+    """Override dtype for attention"""
 
     def compute_hash(self) -> str:
         """
