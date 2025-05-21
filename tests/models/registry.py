@@ -61,6 +61,12 @@ class _HfExamplesInfo:
     hf_overrides: dict[str, Any] = field(default_factory=dict)
     """The ``hf_overrides`` required to load the model."""
 
+    max_model_len: int = None
+    """
+    The maximum model length to use for this model. Some models default to a
+    length that is too large to fit into memory in CI.
+    """
+
     def check_transformers_version(
         self,
         *,
@@ -336,7 +342,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                       extras={"thinking": "moonshotai/Kimi-VL-A3B-Thinking"},  # noqa: E501
                                                       trust_remote_code=True),
     "Llama4ForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-4-Scout-17B-16E-Instruct",   # noqa: E501
-                                                      min_transformers_version="4.51"),
+                                                      min_transformers_version="4.51",
+                                                      max_model_len=10240),
     "LlavaForConditionalGeneration": _HfExamplesInfo("llava-hf/llava-1.5-7b-hf",
                                                      extras={"mistral": "mistral-community/pixtral-12b", # noqa: E501
                                                              "mistral-fp8": "nm-testing/pixtral-12b-FP8-dynamic"}),  # noqa: E501

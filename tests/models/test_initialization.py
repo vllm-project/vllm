@@ -52,7 +52,7 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
         scheduler_kv_cache_config = get_kv_cache_config(
             vllm_config,
             kv_cache_specs[0],
-            20 * GiB_bytes,
+            10 * GiB_bytes,
         )
 
         # gpu_blocks (> 0), cpu_blocks, scheduler_kv_cache_config
@@ -73,6 +73,7 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
                 "num_speculative_tokens": 1,
             } if model_info.speculative_model else None,
             trust_remote_code=model_info.trust_remote_code,
+            max_model_len=model_info.max_model_len,
             load_format="dummy",
             hf_overrides=hf_overrides,
         )
