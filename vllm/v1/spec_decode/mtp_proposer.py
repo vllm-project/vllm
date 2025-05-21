@@ -14,7 +14,7 @@ from vllm.model_executor.model_loader.utils import (
 from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.vllm.v1.spec_decode.utils import prepare_input_kernel
+from vllm.v1.spec_decode.utils import prepare_input_kernel
 
 
 # FIXME(woosuk): The logic here is duplicated with the main sampling code.

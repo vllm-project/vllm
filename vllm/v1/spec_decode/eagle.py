@@ -14,7 +14,7 @@ from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.vllm.v1.spec_decode.utils import prepare_input_kernel
+from vllm.v1.spec_decode.utils import prepare_input_kernel
 
 logger = init_logger(__name__)
 
