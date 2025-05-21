@@ -77,7 +77,7 @@ def test_quark_fp8_parity(vllm_runner):
           quark_handle, vllm_runner(fp8_model_id, **llm_kwargs) as fp8_handle):
 
         def get_state_dict(model):
-            return model.state_dict()
+            return {k: v.cpu() for k, v in model.state_dict().items()}
 
         quark_state_dict, = quark_handle.apply_model(get_state_dict)
         fp8_state_dict, = fp8_handle.apply_model(get_state_dict)

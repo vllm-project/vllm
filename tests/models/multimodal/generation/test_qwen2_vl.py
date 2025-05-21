@@ -123,7 +123,7 @@ def batch_make_image_embeddings(
             image_grid_thw_on_device = image_grid_thw.to(visual.device,
                                                          dtype=torch.int64)
             return visual(pixel_values_on_device,
-                          grid_thw=image_grid_thw_on_device)
+                          grid_thw=image_grid_thw_on_device).cpu()
 
     image_embeds = torch.concat(llm.apply_model(get_image_embeds))
 
@@ -206,7 +206,7 @@ def batch_make_video_embeddings(
             video_grid_thw_on_device = video_grid_thw.to(visual.device,
                                                          dtype=torch.int64)
             return visual(pixel_values_on_device,
-                          grid_thw=video_grid_thw_on_device)
+                          grid_thw=video_grid_thw_on_device).cpu()
 
     # V1 Test: this calls a V0 internal.
     video_embeds = torch.concat(llm.apply_model(get_image_embeds))
