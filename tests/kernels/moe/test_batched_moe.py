@@ -7,6 +7,7 @@ from typing import Optional
 import pytest
 import torch
 import triton.language as tl
+from typing import Optional
 
 from tests.kernels.moe.utils import (batched_moe,
                                      make_quantized_test_activations,
