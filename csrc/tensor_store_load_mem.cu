@@ -1,5 +1,6 @@
 #include <torch/all.h>
 #include <cuda_runtime.h>
+#include <c10/cuda/CUDAStream.h>
 #include <c10/util/Exception.h>
 
 // Template-based CUDA kernel: Copy from device memory to pinned host memory
