@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Test the functionality of the Transformers backend."""
-from typing import Any, Union
+from typing import Any, Optional, Union
 
 import pytest
 
@@ -17,8 +17,8 @@ def check_implementation(
     runner_test: type[VllmRunner],
     example_prompts: list[str],
     model: str,
-    kwargs_ref: dict[str, Any] = None,
-    kwargs_test: dict[str, Any] = None,
+    kwargs_ref: Optional[dict[str, Any]] = None,
+    kwargs_test: Optional[dict[str, Any]] = None,
     **kwargs,
 ):
     if kwargs_ref is None:
@@ -90,8 +90,11 @@ def test_distributed(
     example_prompts,
 ):
     kwargs = {"model_impl": "transformers", "tensor_parallel_size": 2}
-    check_implementation(hf_runner, vllm_runner, example_prompts,
-                         "meta-llama/Llama-3.2-1B-Instruct", **kwargs)
+    check_implementation(hf_runner,
+                         vllm_runner,
+                         example_prompts,
+                         "meta-llama/Llama-3.2-1B-Instruct",
+                         kwargs_test=kwargs)
 
 
 @pytest.mark.skipif(
