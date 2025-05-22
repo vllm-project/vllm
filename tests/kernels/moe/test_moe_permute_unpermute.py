@@ -13,7 +13,7 @@ import torch
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_map
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
-    moe_permute, moe_unpermute)
+    moe_permute, moe_permute_unpermute_supported, moe_unpermute)
 from vllm.platforms import current_platform
 
 NUM_EXPERTS = [16, 64]
@@ -167,6 +167,8 @@ def torch_unpermute(permuted_hidden_states: torch.Tensor,
 def test_moe_permute_unpermute(n_token: int, n_hidden: int, topk: int,
                                n_expert: int, ep_size: int, dtype: torch.dtype,
                                align_block_size: Optional[int]):
+    if not moe_permute_unpermute_supported():
+        pytest.skip("moe_permute_unpermute is not supported on this platform.")
     fill_invalid_expert = 0
     ep_rank = np.random.randint(0, ep_size)
     expert_map = None
