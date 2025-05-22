@@ -130,8 +130,8 @@ class RequestOutput:
         **kwargs: Any,
     ) -> None:
         if kwargs:
-            logger.warning("RequestOutput: Ignoring extra arguments: %s",
-                           str(kwargs))
+            logger.warning_once("RequestOutput: Ignoring extra arguments: %s",
+                                str(kwargs))
         self.request_id = request_id
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
