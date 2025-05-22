@@ -249,7 +249,7 @@ class Qwen2_5_VisionAttention(nn.Module):
         # Detect attention implementation.
         self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
         if self.attn_backend not in {
-                _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS
+                _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS, _Backend.FLASH_ATTN_VLLM_V1,
         }:
             raise RuntimeError(
                 f"Qwen2.5-VL does not support {self.attn_backend} backend now."
