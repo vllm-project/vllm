@@ -294,10 +294,6 @@ def unified_attention(
     #   <= floor(\sum_i(query_len[i]) / BLOCK_Q) + num_seqs
     #    = floor(q.shape[0] / BLOCK_Q) + num_seqs
     total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
-    
-    print(f"grid size dimention 0: total_num_q_blocks: {total_num_q_blocks}")
-    print(f"grid_size_dimention 1: num_kv_heads: {num_kv_heads}")
-
 
     kernel_unified_attention_2d[(
         total_num_q_blocks,
