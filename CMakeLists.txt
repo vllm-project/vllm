@@ -30,7 +30,11 @@ set(ignoreMe "${VLLM_PYTHON_PATH}")
 set(PYTHON_SUPPORTED_VERSIONS "3.9" "3.10" "3.11" "3.12")
 
 # Supported NVIDIA architectures.
-set(CUDA_SUPPORTED_ARCHS "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0;10.0;10.1;12.0")
+if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL)
+  set(CUDA_SUPPORTED_ARCHS "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0;10.0;10.1;12.0")
+else()
+  set(CUDA_SUPPORTED_ARCHS "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0")
+endif()
 
 # Supported AMD GPU architectures.
 set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1200;gfx1201")
