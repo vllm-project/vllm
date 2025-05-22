@@ -65,11 +65,9 @@ class QuickAllreduce:
         """
         self._IS_CAPTURING = False
         self.disabled = True
-        assert \
-        envs.VLLM_QUICK_ALLREDUCE in QuickAllreduce._SUPPORTED_LEVEL, (
+        assert envs.VLLM_QUICK_ALLREDUCE in QuickAllreduce._SUPPORTED_LEVEL, (
             "quick allreduce level must be in [0, 1, 2, 3, 4, 5], "
-            f"but got {envs.VLLM_QUICK_ALLREDUCE}"
-        )
+            f"but got {envs.VLLM_QUICK_ALLREDUCE}")
 
         if not quick_ar:
             # disable because of missing quick allreduce library
