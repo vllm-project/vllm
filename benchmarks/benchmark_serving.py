@@ -84,6 +84,9 @@ class BenchmarkMetrics:
     request_goodput: float
     output_throughput: float
     total_token_throughput: float
+    server_processing_request_throughput: float
+    server_processing_output_throughput: float
+    server_processing_total_token_throughput: float
     mean_ttft_ms: float
     median_ttft_ms: float
     std_ttft_ms: float
@@ -152,7 +155,6 @@ async def get_request(
 
 def calculate_metrics(
     max_concurrency: int,
-    warmup: bool,
     input_requests: list[SampleRequest],
     outputs: list[RequestFuncOutput],
     dur_s: float,
@@ -170,8 +172,6 @@ def calculate_metrics(
     all_tpots: list[float] = []
     ttfts: list[float] = []
     e2els: list[float] = []
-    first_request_send_time = -1
-    last_request_recv_time = -1
 
     for i in range(len(outputs)):
         if getattr(input_requests[i], "is_warmup", False):
@@ -203,13 +203,6 @@ def calculate_metrics(
             ttfts.append(outputs[i].ttft)
             e2els.append(outputs[i].latency)
             completed += 1
-            if hasattr(outputs[i], "start_time") and hasattr(outputs[i], "end_time"):
-                if first_request_send_time == -1 or (
-                    outputs[i].start_time < first_request_send_time
-                ):
-                    first_request_send_time = outputs[i].start_time
-                if outputs[i].end_time > last_request_recv_time:
-                    last_request_recv_time = outputs[i].end_time
         else:
             actual_output_lens.append(0)
 
@@ -244,13 +237,12 @@ def calculate_metrics(
             "on the benchmark arguments.",
             stacklevel=2,
         )
-    # if concurrency = 1, dur_s = last_request_recv_time - first_request_send_time
-    # if concurrency > 1, dur_s = sum(e2els)/concurrency,
-    # and in each request, e2el = last_request_recv_time - first_request_send_time.
-    if warmup:
-        dur_s = sum(e2els) / max_concurrency
-    else:
-        dur_s = last_request_recv_time - first_request_send_time
+
+    # average server processing time per concurrency:
+    # In a high-concurrency scenario, to exclude the impact of the client side, 
+    # only the server-side processing time of each concurrency is counted.
+    # with this metric, we can evaluate the performance with an extra perspective.
+    e2el_per_concurrency = sum(e2els) / max_concurrency,
 
     metrics = BenchmarkMetrics(
         completed=completed,
@@ -260,6 +252,9 @@ def calculate_metrics(
         request_goodput=good_completed / dur_s,
         output_throughput=sum(actual_output_lens) / dur_s,
         total_token_throughput=(total_input + sum(actual_output_lens)) / dur_s,
+        server_processing_request_throughput=completed / e2el_per_concurrency,
+        server_processing_output_throughput=sum(actual_output_lens) / e2el_per_concurrency,
+        server_processing_total_token_throughput=(total_input + sum(actual_output_lens)) / e2el_per_concurrency,
         mean_ttft_ms=np.mean(ttfts or 0)
         * 1000,  # ttfts is empty if streaming is not supported by backend
         std_ttft_ms=np.std(ttfts or 0) * 1000,
@@ -308,7 +303,6 @@ async def benchmark(
     ignore_eos: bool,
     goodput_config_dict: dict[str, float],
     max_concurrency: Optional[int],
-    warmup: bool,
     lora_modules: Optional[Iterable[str]],
     extra_body: Optional[dict],
 ):
@@ -446,7 +440,6 @@ async def benchmark(
 
     metrics, actual_output_lens = calculate_metrics(
         max_concurrency=max_concurrency,
-        warmup=warmup,
         input_requests=input_requests,
         outputs=outputs,
         dur_s=benchmark_duration,
@@ -480,6 +473,16 @@ async def benchmark(
     print(
         "{:<40} {:<10.2f}".format(
             "Total Token throughput (tok/s):", metrics.total_token_throughput
+        )
+    )
+    print(
+        "{:<40} {:<10.2f}".format(
+            "Server Processing Output token throughput (tok/s):", metrics.server_processing_output_throughput
+        )
+    )
+    print(
+        "{:<40} {:<10.2f}".format(
+            "Server Processing Total Token throughput (tok/s):", metrics.server_processing_total_token_throughput
         )
     )
 
