@@ -84,9 +84,9 @@ class BenchmarkMetrics:
     request_goodput: float
     output_throughput: float
     total_token_throughput: float
-    server_processing_request_throughput: float
-    server_processing_output_throughput: float
-    server_processing_total_token_throughput: float
+    norm_request_throughput: float
+    norm_output_throughput: float
+    norm_total_token_throughput: float
     mean_ttft_ms: float
     median_ttft_ms: float
     std_ttft_ms: float
@@ -237,11 +237,9 @@ def calculate_metrics(
             "on the benchmark arguments.",
             stacklevel=2,
         )
-
-    # average server processing time per concurrency:
-    # In a high-concurrency scenario, to exclude the impact of the client side, 
-    # only the server-side processing time of each concurrency is counted.
-    # with this metric, we can evaluate the performance with an extra perspective.
+    # In a high-concurrency scenario, with evenly distributed requests,
+    # this calculates the mean E2E latency per concurrency,
+    # providing a normalized view of performance under load.
     e2el_per_concurrency = sum(e2els) / max_concurrency
 
     metrics = BenchmarkMetrics(
@@ -252,9 +250,9 @@ def calculate_metrics(
         request_goodput=good_completed / dur_s,
         output_throughput=sum(actual_output_lens) / dur_s,
         total_token_throughput=(total_input + sum(actual_output_lens)) / dur_s,
-        server_processing_request_throughput=completed / e2el_per_concurrency,
-        server_processing_output_throughput=sum(actual_output_lens) / e2el_per_concurrency,
-        server_processing_total_token_throughput=(total_input + sum(actual_output_lens)) / e2el_per_concurrency,
+        norm_request_throughput=completed / e2el_per_concurrency,
+        norm_output_throughput=sum(actual_output_lens) / e2el_per_concurrency,
+        norm_total_token_throughput=(total_input + sum(actual_output_lens)) / e2el_per_concurrency,
         mean_ttft_ms=np.mean(ttfts or 0)
         * 1000,  # ttfts is empty if streaming is not supported by backend
         std_ttft_ms=np.std(ttfts or 0) * 1000,
@@ -477,12 +475,12 @@ async def benchmark(
     )
     print(
         "{:<40} {:<10.2f}".format(
-            "Srv Output token throughput (tok/s):", metrics.server_processing_output_throughput
+            "Normalized Output token throughput (tok/s):",metrics.norm_output_throughput
         )
     )
     print(
         "{:<40} {:<10.2f}".format(
-            "Srv Total Token throughput (tok/s):", metrics.server_processing_total_token_throughput
+            "Normalized Total Token throughput (tok/s):", metrics.norm_total_token_throughput
         )
     )
 
