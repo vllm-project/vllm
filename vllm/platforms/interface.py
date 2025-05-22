@@ -478,6 +478,13 @@ class Platform:
         """
         raise NotImplementedError
 
+    @classmethod
+    def get_piecewise_backend_cls(cls) -> str:
+        """
+        Get piecewise backend class for piecewise graph.
+        """
+        return "vllm.compilation.base_piecewise_backend.AbstractPiecewiseBackend"  # noqa
+
 
 class UnspecifiedPlatform(Platform):
     _enum = PlatformEnum.UNSPECIFIED
