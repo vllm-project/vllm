@@ -2,27 +2,34 @@
 
 import json
 import os
-import torch
-import tempfile
 import shutil
-from safetensors import safe_open
+import tempfile
+
+import torch
 from huggingface_hub import snapshot_download
+from safetensors import safe_open
+
 from vllm import LLM, SamplingParams
 
 
-def patch_eagle_draft_with_lm_head(target_model_id: str, draft_model_id: str) -> str:
-    # In NxDI, draft model checkpoint must include lm_head weights from target model.
-    # For more details see https://awsdocs-neuron.readthedocs-hosted.com/en/latest/libraries/nxd-inference/developer_guides/
-    # feature-guide.html#eagle-checkpoint-compatibility
-    final_draft_dir = "/tmp/patched_eagle_draft" 
+def patch_eagle_draft_with_lm_head(target_model_id: str,
+                                   draft_model_id: str) -> str:
+    # In NxDI, draft model checkpoint must include lm_head weights from target
+    # model. For more details see https://awsdocs-neuron.readthedocs-hosted.com
+    # /en/latest/libraries/nxd-inference/developer_guides/feature-guide.html
+    # #eagle-checkpoint-compatibility
+    final_draft_dir = "/tmp/patched_eagle_draft"
 
     with tempfile.TemporaryDirectory() as tmp_dir:
-        target_dir = snapshot_download(repo_id=target_model_id, local_dir=os.path.join(tmp_dir, "target"))
-        draft_dir = snapshot_download(repo_id=draft_model_id, local_dir=os.path.join(tmp_dir, "draft"))
+        target_dir = snapshot_download(repo_id=target_model_id,
+                                       local_dir=os.path.join(
+                                           tmp_dir, "target"))
+        draft_dir = snapshot_download(repo_id=draft_model_id,
+                                      local_dir=os.path.join(tmp_dir, "draft"))
 
         lm_head_key = "lm_head.weight"
         index_path = os.path.join(target_dir, "model.safetensors.index.json")
-        with open(index_path, "r") as f:
+        with open(index_path) as f:
             index = json.load(f)
         shard_name = index["weight_map"][lm_head_key]
         target_safetensor_path = os.path.join(target_dir, shard_name)
@@ -43,8 +50,7 @@ def patch_eagle_draft_with_lm_head(target_model_id: str, draft_model_id: str) ->
 def test_eagle():
     patched_draft_path = patch_eagle_draft_with_lm_head(
         target_model_id="meta-llama/Llama-2-7b-hf",
-        draft_model_id="yuhuili/EAGLE-llama2-chat-7B"
-    )
+        draft_model_id="yuhuili/EAGLE-llama2-chat-7B")
     llm = LLM(
         model="meta-llama/Llama-2-7b-hf",
         speculative_config={
@@ -65,8 +71,9 @@ def test_eagle():
         "The president of the United States is",
     ]
     outputs = llm.generate(prompts, SamplingParams(top_k=1))
-    expected_output = " the head of state and head of government of the United States. The president direct"
+    expected_output = " the head of state and head of government of " \
+    "the United States. The president direct"
+
     for output in outputs:
-        prompt = output.prompt
         generated_text = output.outputs[0].text
         assert (expected_output == generated_text)

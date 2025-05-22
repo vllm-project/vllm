@@ -2532,7 +2532,7 @@ class SpeculativeConfig:
                     from vllm.transformers_utils.configs.eagle import (
                         EAGLEConfig)
                     if isinstance(self.draft_model_config.hf_config,
-                                  EAGLEConfig): 
+                                  EAGLEConfig):
                         pass
                     else:
                         eagle_config = EAGLEConfig(
