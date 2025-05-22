@@ -321,7 +321,7 @@ void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
             auto kernel = &selective_scan_fwd_kernel<Ktraits>;
             if (kSmemSize >= 48 * 1024) {
                 C10_CUDA_CHECK(cudaFuncSetAttribute(
-                    kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
+                    (void *) kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
             }
             kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
             C10_CUDA_KERNEL_LAUNCH_CHECK();
