@@ -512,7 +512,8 @@ class ModelConfig:
         if (self.override_attention_dtype is not None
                 and not current_platform.is_rocm()):
             warnings.warn(
-                "override-attention-dtype is set but not using ROCm platform")
+                "override-attention-dtype is set but not using ROCm platform",
+                stacklevel=2)
 
         if (self.enable_sleep_mode
                 and not current_platform.is_sleep_mode_available()):
