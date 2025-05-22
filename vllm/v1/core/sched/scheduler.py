@@ -315,10 +315,17 @@ class Scheduler(SchedulerInterface):
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                     is_ready = self._update_waiting_for_remote_kv(request)
                     if is_ready:
+                        logger.debug(
+                            "Request %s is ready for "
+                            "scheduling after waiting for remote kvs.",
+                            request)
                         request.status = RequestStatus.WAITING
                         num_prealloc_computed_tokens = (
                             request.num_computed_tokens)
                     else:
+                        logger.debug(
+                            "Request %s is still waiting "
+                            "for remote kvs", request)
                         self.waiting.popleft()
                         skipped_waiting_requests.appendleft(request)
                         continue
