@@ -25,13 +25,16 @@ class Mamba2Metadata:
 def get_platform_metadata_classes() -> tuple[type[AttentionMetadata], ...]:
     """Returns the appropriate metadata classes for the current platform."""
     if current_platform.is_rocm():
-        from vllm.attention.backends.rocm_flash_attn import ROCmFlashAttentionMetadata
+        from vllm.attention.backends.rocm_flash_attn import (
+            ROCmFlashAttentionMetadata)
         return (ROCmFlashAttentionMetadata, PlaceholderAttentionMetadata)
     elif current_platform.is_cuda():
         from vllm.attention.backends.flash_attn import FlashAttentionMetadata
         from vllm.attention.backends.xformers import XFormersMetadata
-        return (FlashAttentionMetadata, XFormersMetadata, PlaceholderAttentionMetadata)
-    raise ValueError(f"Unsupported platform for Mamba2: {current_platform.device_type}")
+        return (FlashAttentionMetadata, XFormersMetadata,
+                PlaceholderAttentionMetadata)
+    raise ValueError(
+        f"Unsupported platform for Mamba2: {current_platform.device_type}")
 
 
 def _query_start_loc_to_chunk_indices_offsets(query_start_loc: torch.Tensor,
