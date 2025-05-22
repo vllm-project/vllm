@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-import re
 from collections.abc import Sequence
 from typing import Any, Optional
 
+import regex as re
 from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.chat_utils import random_tool_call_id

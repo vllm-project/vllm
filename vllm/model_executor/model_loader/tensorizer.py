@@ -4,13 +4,13 @@ import argparse
 import dataclasses
 import io
 import os
-import re
 import time
 from collections.abc import Generator
 from dataclasses import dataclass
 from functools import partial
 from typing import BinaryIO, Optional, Union
 
+import regex as re
 import torch
 from torch import nn
 from transformers import PretrainedConfig

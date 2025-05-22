@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import re
+import regex as re
 
 
 def grammar_is_likely_lark(grammar_str: str) -> bool:

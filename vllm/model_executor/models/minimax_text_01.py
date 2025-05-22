@@ -2,10 +2,10 @@
 """Inference-only MiniMaxText01 model."""
 import copy
 import math
-import re
 from collections.abc import Iterable
 from typing import Optional, Union
 
+import regex as re
 import torch
 import torch.distributed
 import torch.nn.functional as F

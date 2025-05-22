@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 import json
-import re
 import sys
 from abc import ABC, abstractmethod
 from collections import defaultdict
@@ -12,6 +11,7 @@ from functools import lru_cache
 from typing import (TYPE_CHECKING, Generic, NamedTuple, Optional, Protocol,
                     TypeVar, Union, cast)
 
+import regex as re
 import torch
 from typing_extensions import assert_never
 

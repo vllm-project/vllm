@@ -3,11 +3,11 @@
 import copy
 import math
 import os
-import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Union
 
+import regex as re
 import safetensors.torch
 import torch
 from torch import nn

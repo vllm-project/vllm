@@ -8,6 +8,7 @@ myst-parser==3.0.1  # `myst-parser==4.0.1` breaks inline code in titles
 msgspec
 snowballstemmer<3  # https://github.com/snowballstem/snowball/issues/229
 commonmark # Required by sphinx-argparse when using :markdownhelp:
+regex # Replace re for higher-performance regex matching
 
 # Custom autodoc2 is necessary for faster docstring processing
 # see: https://github.com/sphinx-extensions2/sphinx-autodoc2/issues/33#issuecomment-2856386035

@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
 import huggingface_hub
+import regex as re
 from huggingface_hub import HfApi, hf_hub_download
 
 from vllm.logger import init_logger

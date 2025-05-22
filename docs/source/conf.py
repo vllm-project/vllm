@@ -15,10 +15,10 @@
 import datetime
 import logging
 import os
-import re
 import sys
 from pathlib import Path
 
+import regex as re
 import requests
 
 logger = logging.getLogger(__name__)
