@@ -13,6 +13,7 @@ schemathesis.experimental.OPEN_API_3_1.enable()
 MODEL_NAME = "HuggingFaceTB/SmolVLM-256M-Instruct"
 MAXIMUM_IMAGES = 2
 DEFAULT_TIMEOUT_SECONDS: Final[int] = 10
+LONG_TIMEOUT_SECONDS: Final[int] = 60
 
 
 @pytest.fixture(scope="module")
@@ -67,18 +68,12 @@ def before_generate_case(context: schemathesis.hooks.HookContext, strategy):
             -d '{"messages": [{"content": [{"file": {}, "type": "file"}], "role": "user"}]}' \
             http://localhost:8000/tokenize
         """  # noqa: E501
-        if op.method.lower() != "post" or op.path != "/tokenize":
-            return True
-
-        if case.body and isinstance(case.body, dict):
-            if "messages" not in case.body:
-                return True
-
-            messages = case.body.get("messages", [])
-            if not isinstance(messages, list) or len(messages) == 0:
-                return True
-
-            for message in messages:
+        if (op.method.lower() == "post" and op.path == "/tokenize"
+                and hasattr(case, "body") and isinstance(case.body, dict)
+                and "messages" in case.body
+                and isinstance(case.body["messages"], list)
+                and len(case.body["messages"]) > 0):
+            for message in case.body["messages"]:
                 if not isinstance(message, dict):
                     continue
                 content = message.get("content", [])
@@ -93,14 +88,16 @@ def before_generate_case(context: schemathesis.hooks.HookContext, strategy):
 
 @schema.parametrize()
 @schema.override(headers={"Content-Type": "application/json"})
-@settings(deadline=60000)
+@settings(deadline=LONG_TIMEOUT_SECONDS * 1000)
 def test_openapi_stateless(case: schemathesis.Case):
     key = (
         case.operation.method.upper(),
         case.operation.path,
     )
     timeout = {
-        ("POST", "/v1/chat/completions"): 60,
+        # requires a longer timeout
+        ("POST", "/v1/chat/completions"):
+        LONG_TIMEOUT_SECONDS,
     }.get(key, DEFAULT_TIMEOUT_SECONDS)
 
     #No need to verify SSL certificate for localhost
