@@ -729,7 +729,10 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         mm_kwargs, placeholder_maps = MultiModalPlaceholderMap.from_seq_group(
             seq_group_metadata,
             range(positions[0], positions[0] + len(positions)))
-        if not mm_kwargs:
+
+        # M-RoPE requires mrope_positions even for plain text; return early
+        # when mm_kwargs is empty only if inter_data.is_prompt is False.
+        if not mm_kwargs and not inter_data.is_prompt:
             return
 
         inter_data.multi_modal_kwargs = mm_kwargs
@@ -741,12 +744,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             video_grid_thw = mm_kwargs.get("video_grid_thw", None)
             audio_feature_lengths = mm_kwargs.get("audio_feature_lengths",
                                                   None)
-            assert (
-                image_grid_thw is not None or video_grid_thw is not None
-                or audio_feature_lengths is not None), (
-                    "mrope embedding type requires multi-modal input mapper "
-                    "returns 'image_grid_thw' or 'video_grid_thw' or "
-                    "'audio_feature_lengths'.")
 
             second_per_grid_ts = mm_kwargs.get("second_per_grid_ts", None)
             use_audio_in_video = mm_kwargs.get("use_audio_in_video", False)
