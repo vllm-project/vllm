@@ -264,7 +264,7 @@ if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
         export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0+PTX'; \
         export FLASHINFER_ENABLE_AOT=1; \
         uv pip install --system --no-build-isolation "git+https://github.com/flashinfer-ai/flashinfer@21ea1d2545f74782b91eb8c08fd503ac4c0743fc" ; \
-    fi
+    fi \
 fi
 COPY examples examples
 COPY benchmarks benchmarks
