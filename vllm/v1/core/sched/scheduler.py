@@ -402,11 +402,22 @@ class Scheduler(SchedulerInterface):
                     # `request.num_prompt_tokens` to consider the resumed
                     # requests, which have output tokens.
                     num_new_tokens = request.num_tokens - num_computed_tokens
+                    if num_new_tokens <= 0:
+                        logger.debug(
+                            "KV: Request %s has no new tokens to schedule. "
+                            "num_tokens=%d, num_computed_tokens=%d",
+                            request.request_id, request.num_tokens,
+                            num_computed_tokens)
                     if (0 < self.scheduler_config.long_prefill_token_threshold
                             < num_new_tokens):
                         num_new_tokens = (
                             self.scheduler_config.long_prefill_token_threshold)
                     num_new_tokens = min(num_new_tokens, token_budget)
+                    if num_new_tokens <= 0:
+                        logger.debug(
+                            "KV: Request %s failing assert. num_new_tokens=%d" \
+                            "after min with token_budget=%d",
+                            request.request_id, num_new_tokens, token_budget)
                     assert num_new_tokens > 0
 
                     # Schedule encoder inputs.
