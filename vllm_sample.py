@@ -25,7 +25,7 @@ def main():
     args = parse_args()
     
     # Load prompts from file if specified
-    prompts = args.prompts if args.prompts else []
+    prompts = args.prompts or []
     if args.prompts_file:
         with open(args.prompts_file, "r", encoding="utf-8") as f:
             prompts.extend([line.strip() for line in f if line.strip()])
