@@ -259,7 +259,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
     # FlashInfer alreary has a wheel for PyTorch 2.7.0 and CUDA 12.8. This is enough for CI use
     if [[ "$CUDA_VERSION" == 12.8* ]]; then \
-        uv pip install --system https://pytorch.s3.us-east-1.amazonaws.com/whl/cu128/flashinfer/flashinfer_python-0.2.5%2Bcu128torch2.7-cp38-abi3-linux_x86_64.whl; \
+        uv pip install --system https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.5%2Bcu128torch2.7-cp38-abi3-linux_x86_64.whl; \
     else \
         export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0+PTX'; \
         export FLASHINFER_ENABLE_AOT=1; \
