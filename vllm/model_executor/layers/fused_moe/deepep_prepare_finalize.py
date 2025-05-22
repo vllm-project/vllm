@@ -36,6 +36,9 @@ class DeepEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # combine function.
         self.handle = None
 
+    def max_num_tokens_per_dp_rank(self) -> Optional[int]:
+        return None
+
     def _do_quant(self, tokens: torch.Tensor,
                   token_scales: Optional[torch.Tensor], per_act_token: bool):
 

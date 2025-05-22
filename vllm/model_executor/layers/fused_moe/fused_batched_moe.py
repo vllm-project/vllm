@@ -396,6 +396,9 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.rank = rank
         self.max_num_tokens = max_num_tokens
 
+    def max_num_tokens_per_dp_rank(self) -> Optional[int]:
+        return self.max_num_tokens
+
     def prepare(
         self,
         a1: torch.Tensor,

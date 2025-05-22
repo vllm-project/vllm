@@ -83,6 +83,16 @@ class FusedMoEPrepareAndFinalize(ABC):
     """
 
     @abstractmethod
+    def max_num_tokens_per_dp_rank(self) -> Optional[int]:
+        """
+      Some implementations, process the tokens in batches.
+      If the current implementation is batched, return the maximum number
+      of tokens some dp rank can submit on a single iteration.
+      If the current implementation does not require batching, return None.
+      """
+        pass
+
+    @abstractmethod
     def prepare(
         self,
         a1: torch.Tensor,

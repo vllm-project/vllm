@@ -23,6 +23,9 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
         self.block_shape = block_shape
         self.quant_dtype = quant_dtype
 
+    def max_num_tokens_per_dp_rank(self) -> Optional[int]:
+        return None
+
     def prepare(
         self,
         a1: torch.Tensor,

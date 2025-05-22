@@ -5,10 +5,13 @@ import deep_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm import _custom_ops as ops
 
 
 class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
+
+    # DeepEP low-latency kernels are compiled only for certain
+    # specific hidden sizes.
+    SUPPORTED_HIDDEN_SIZES = [2560, 4096, 5120, 7168]
 
     # TODO (varun) : Expose internode / low-latency mode kernels
     def __init__(
@@ -36,6 +39,9 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # combine function.
         self.handle = None
 
+    def max_num_tokens_per_dp_rank(self) -> Optional[int]:
+        return self.max_tokens_per_rank
+
     def prepare(
         self,
         a1: torch.Tensor,
@@ -47,6 +53,11 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: Optional[torch.Tensor],  # TODO (varun) : Unused - remove
         apply_router_weight_on_input: bool,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+
+        hidden_size = a1.size(1)
+        assert hidden_size in self.SUPPORTED_HIDDEN_SIZES, \
+            (f"Hidden Size {hidden_size} not in supported list of hidden sizes"
+            "{self.SUPPORTED_HIDDEN_SIZES}")
 
         if apply_router_weight_on_input:
             topk = rank_topk_ids.size(1)
@@ -78,18 +89,18 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         # The DeepEP kernels don't seem to do the topk weight multiplication.
         # We multiply the weights locally.
-        if not apply_router_weight_on_input:
-            # TODO (varun) : fix inefficiencies
-            fused_expert_output.mul_(
-                topk_weights.view(fused_expert_output.size(0), -1, 1))
-            num_tokens = topk_ids.size(0)
-            hidden_dim = fused_expert_output.size(-1)
-            local_out_shape = (num_tokens, hidden_dim)
-            local_out = torch.zeros(local_out_shape,
-                                    device="cuda",
-                                    dtype=torch.float32)
-            ops.moe_sum(fused_expert_output, local_out)
-            fused_expert_output = local_out
+        #if not apply_router_weight_on_input:
+        #    # TODO (varun) : fix inefficiencies
+        #    fused_expert_output.mul_(
+        #        topk_weights.view(fused_expert_output.size(0), -1, 1))
+        #    num_tokens = topk_ids.size(0)
+        #    hidden_dim = fused_expert_output.size(-1)
+        #    local_out_shape = (num_tokens, hidden_dim)
+        #    local_out = torch.zeros(local_out_shape,
+        #                            device="cuda",
+        #                            dtype=torch.float32)
+        #    ops.moe_sum(fused_expert_output, local_out)
+        #    fused_expert_output = local_out
 
         _, event, hook = self.buffer.low_latency_combine(
             fused_expert_output,
