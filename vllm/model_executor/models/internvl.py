@@ -336,14 +336,6 @@ class BaseInternVLProcessor(ABC):
     def image_token_id(self) -> int:
         raise NotImplementedError
 
-    @property
-    def video_token_id(self) -> Optional[int]:
-        return None
-
-    @property
-    def supports_video(self) -> bool:
-        return self.video_token_id is not None
-
     @abstractmethod
     def get_image_repl(
         self,
@@ -542,6 +534,10 @@ class InternVLProcessor(BaseInternVLProcessor):
             return None
         return self.tokenizer.get_vocab().get(self.video_token, None)
 
+    @property
+    def supports_video(self) -> bool:
+        return self.video_token_id is not None
+
     def _videos_to_pixel_values_lst(
         self,
         videos: list[npt.NDArray],
@@ -669,7 +665,7 @@ class BaseInternVLProcessingInfo(BaseProcessingInfo):
 
     @property
     def supports_video(self):
-        return self.get_hf_processor().supports_video
+        return getattr(self.get_hf_processor(), "supports_video", False)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
@@ -797,13 +793,13 @@ class InternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
         hf_processor = self.info.get_hf_processor(**mm_kwargs)
         image_token_id = hf_processor.image_token_id
-        video_token_id = hf_processor.video_token_id
 
         # Since there may be extra tokens in the feature placeholders,
         # we need to pass the image token ID to the model to select the
         # tokens to merge from the vision encoder outputs
         processed_outputs["image_token_id"] = torch.tensor(image_token_id)
-        if video_token_id is not None:
+        if self.info.supports_video and (video_token_id := getattr(
+                hf_processor, "video_token_id", None)) is not None:
             processed_outputs["video_token_id"] = torch.tensor(video_token_id)
 
         return processed_outputs
@@ -823,8 +819,7 @@ class InternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
             image_token_id=MultiModalFieldConfig.shared("image", num_images),
         )
 
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        if hf_processor.supports_video:
+        if self.info.supports_video:
             video_num_patches = hf_inputs.get("video_num_patches",
                                               torch.empty(0))
             num_videos = len(video_num_patches)
@@ -904,7 +899,7 @@ class InternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
                 replacement=get_image_replacement_internvl,
             )
         ]
-        if hf_processor.supports_video:
+        if self.info.supports_video:
             prompt_repl.append(
                 PromptReplacement(
                     modality="video",
