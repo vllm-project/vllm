@@ -18,7 +18,6 @@ from PIL import Image
 from transformers import BatchEncoding, PretrainedConfig, TensorType
 
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.models.intern_vit import (InternVisionModel,
@@ -46,8 +45,6 @@ IMG_CONTEXT = '<IMG_CONTEXT>'
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
-
-logger = init_logger(__name__)
 
 
 class InternVLImagePixelInputs(TypedDict):
@@ -346,7 +343,7 @@ class BaseInternVLProcessor(ABC):
         return None
 
     @property
-    def is_video_support(self) -> bool:
+    def supports_video(self) -> bool:
         return self.video_token_id is not None
 
     @abstractmethod
@@ -518,7 +515,7 @@ class BaseInternVLProcessor(ABC):
                 image_repl = self.get_image_repl(feature_size, num_patches)
                 text = [t.replace('<image>', image_repl.full, 1) for t in text]
 
-        if len(videos) == 0 or not self.is_video_support:
+        if len(videos) == 0 or not self.supports_video:
             video_inputs = {}
         else:
             pixel_values_lst_video = self._videos_to_pixel_values_lst(
@@ -600,8 +597,8 @@ class BaseInternVLProcessingInfo(BaseProcessingInfo):
         raise NotImplementedError
 
     @property
-    def is_video_support(self):
-        return self.get_hf_processor().is_video_support
+    def supports_video(self):
+        return self.get_hf_processor().supports_video
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
@@ -756,7 +753,7 @@ class InternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
         )
 
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        if hf_processor.is_video_support:
+        if hf_processor.supports_video:
             video_num_patches = hf_inputs.get("video_num_patches",
                                               torch.empty(0))
             num_videos = len(video_num_patches)
@@ -836,7 +833,7 @@ class InternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
                 replacement=get_image_replacement_internvl,
             )
         ]
-        if hf_processor.is_video_support:
+        if hf_processor.supports_video:
             prompt_repl.append(
                 PromptReplacement(
                     modality="video",
@@ -849,12 +846,8 @@ class InternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
 class InternVLProcessingInfo(BaseInternVLProcessingInfo):
 
     def get_supported_mm_limits(self):
-        if self.is_video_support:
-            return {
-                "image": None,
-                "video": None,
-            }
-        return {"image": None}
+        video_limit = {"video": None} if self.supports_video else {}
+        return {**super().get_supported_mm_limits(), **video_limit}
 
     def get_video_token(self) -> Optional[str]:
         text_model_type = self.get_hf_config().get_text_config().model_type
@@ -1124,7 +1117,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
     def _process_image_input(
         self,
         image_input: Union[InternVLImageInputs, InternVLVideoPixelInputs],
-    ) -> Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor, ...]]:
+    ) -> tuple[torch.Tensor, ...]:
         if image_input["type"] == "image_embeds":
             return image_input["data"]
 
