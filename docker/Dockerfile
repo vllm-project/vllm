@@ -263,8 +263,11 @@ if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
         export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0 10.0+PTX'; \
     else \
         export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0+PTX'; \
-    fi && \
-    export FLASHINFER_ENABLE_AOT=1; \
+    fi; \
+    CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
+    if [ "$CUDA_MAJOR" -lt 12 ]; then \
+        export FLASHINFER_ENABLE_SM90=0; \
+    fi; \
     uv pip install --system --no-build-isolation "git+https://github.com/flashinfer-ai/flashinfer@21ea1d2545f74782b91eb8c08fd503ac4c0743fc" ; \
 fi
 COPY examples examples
@@ -275,7 +278,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 . /etc/environment && \
 uv pip list
 
-# Although we build Flashinfer with AOT mode, there's still
+# Even when we build Flashinfer with AOT mode, there's still
 # some issues w.r.t. JIT compilation. Therefore we need to
 # install build dependencies for JIT compilation.
 # TODO: Remove this once FlashInfer AOT wheel is fixed
@@ -303,8 +306,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system --no-build-isolation "git+https://github.com/state-spaces/mamba@v2.2.4"
 
 # install development dependencies (for testing)
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/dev.txt
+RUN --mount=type=cache,target=/root/.cache/uv \   
+    CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
+    if [ "$CUDA_MAJOR" -ge 12 ]; then \
+        uv pip install --system -r requirements/dev.txt; \
+    fi
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
