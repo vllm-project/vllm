@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import platform
 import unittest
+from typing import ClassVar
 
 import torch
 
@@ -8,20 +9,31 @@ from vllm.platforms.cpu import CpuPlatform
 
 
 class TestAppleSiliconBF16(unittest.TestCase):
+    is_mac: ClassVar[bool]
+    is_arm: ClassVar[bool]
+    is_apple_silicon: ClassVar[bool]
 
     @classmethod
-    def setUpClass(cls):
+    def setUpClass(cls) -> None:
         cls.is_mac = platform.system() == "Darwin"
-        cls.is_arm = platform.processor().startswith("arm")
+        cls.is_arm = platform.machine() == "arm64"
         cls.is_apple_silicon = cls.is_mac and cls.is_arm
+
+        if not cls.is_apple_silicon:
+            print("Skipping tests: Not running on Apple Silicon")
+            return
+
+        if not torch.backends.mps.is_available():
+            print("Skipping tests: MPS backend not available")
+            return
 
     def test_platform_detection(self):
         """Test if we correctly detect Apple Silicon platform"""
         self.assertEqual(self.is_mac, platform.system() == "Darwin")
-        self.assertEqual(self.is_arm, platform.processor().startswith("arm"))
+        self.assertEqual(self.is_arm, platform.machine() == "arm64")
         self.assertEqual(self.is_apple_silicon, self.is_mac and self.is_arm)
 
-    def test_bf16_support_detection(self):
+    def test_bf16_support_detection(self) -> None:
         """Test if bf16 support is correctly detected"""
         if not self.is_apple_silicon:
             self.skipTest("Test only runs on Apple Silicon")
@@ -36,13 +48,14 @@ class TestAppleSiliconBF16(unittest.TestCase):
         # Test bf16 tensor creation if support is detected
         if has_support:
             try:
-                x = torch.zeros(1, dtype=torch.bfloat16, device="mps")
-                self.assertEqual(x.dtype, torch.bfloat16)
+                tensor = torch.zeros(1, dtype=torch.bfloat16, device="mps")
+                self.assertEqual(tensor.dtype, torch.bfloat16)
+                self.assertEqual(tensor.device.type, "mps")
                 print("Successfully created bf16 tensor on MPS device")
             except Exception as e:
                 self.fail(f"Failed to create bf16 tensor: {str(e)}")
 
-    def test_supported_dtypes(self):
+    def test_supported_dtypes(self) -> None:
         """Test if supported dtypes are correctly reported"""
         if not self.is_apple_silicon:
             self.skipTest("Test only runs on Apple Silicon")
