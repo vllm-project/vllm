@@ -4502,7 +4502,6 @@ def set_current_vllm_config(vllm_config: VllmConfig, check_compile=False):
     old_vllm_config = _current_vllm_config
     from vllm.compilation.counter import compilation_counter
     num_models_seen = compilation_counter.num_models_seen
-    was_raised = False
     try:
         _current_vllm_config = vllm_config
         yield
