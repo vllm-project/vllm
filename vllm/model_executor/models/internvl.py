@@ -8,7 +8,7 @@
 # --------------------------------------------------------
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Literal, Optional, TypedDict, TypeVar, Union
+from typing import Any, Literal, Optional, TypedDict, TypeVar, Union
 
 import numpy.typing as npt
 import torch
@@ -354,14 +354,6 @@ class BaseInternVLProcessor(ABC):
     ) -> PromptUpdateDetails[str]:
         raise NotImplementedError
 
-    def get_video_repl(
-        self,
-        feature_size: int,
-        num_patches: Optional[int] = None,
-        video_context_token: str = IMG_CONTEXT,
-    ) -> PromptUpdateDetails[str]:
-        raise NotImplementedError
-
     def resolve_min_max_num(
         self,
         *,
@@ -447,51 +439,14 @@ class BaseInternVLProcessor(ABC):
             ) for image in images
         ]
 
-    def _videos_to_pixel_values_lst(
+    def _preprocess_image(
         self,
-        videos: list[npt.NDArray],
-        dynamic_image_size: Optional[bool] = None,
-    ) -> list[torch.Tensor]:
-        min_num, max_num = self.resolve_min_max_num(
-            min_dynamic_patch=1,
-            max_dynamic_patch=1,
-            dynamic_image_size=dynamic_image_size,
-            use_thumbnail=False,  # Applied in image_to_pixel_values
-        )
-
-        return [
-            video_to_pixel_values_internvl(
-                video,
-                input_size=self.image_size,
-                min_num=min_num,
-                max_num=max_num,
-                use_thumbnail=False,
-            ) for video in videos
-        ]
-
-    def __call__(
-        self,
-        text: Optional[Union[str, list[str]]] = None,
-        images: Optional[Union[Image.Image, list[Image.Image]]] = None,
-        videos: Optional[Union[npt.NDArray, list[npt.NDArray]]] = None,
+        text: list[str],
+        images: list[Image.Image],
         min_dynamic_patch: Optional[int] = None,
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
-        return_tensors: Optional[Union[str, TensorType]] = None,
-    ) -> Mapping[str, NestedTensors]:
-        if text is None:
-            text = []
-        if not isinstance(text, list):
-            text = [text]
-        if images is None:
-            images = []
-        if not isinstance(images, list):
-            images = [images]
-        if videos is None:
-            videos = []
-        if not isinstance(videos, list):
-            videos = [videos]
-
+    ) -> tuple[list[str], dict[str, torch.Tensor]]:
         if len(images) == 0:
             image_inputs = {}
         else:
@@ -514,7 +469,84 @@ class BaseInternVLProcessor(ABC):
 
                 image_repl = self.get_image_repl(feature_size, num_patches)
                 text = [t.replace('<image>', image_repl.full, 1) for t in text]
+        return text, image_inputs
 
+    def _make_batch_input(self,
+                          input_item: Optional[Union[Any, list[Any]]] = None):
+        if input_item is None:
+            input_item = []
+        if not isinstance(input_item, list):
+            input_item = [input_item]
+        return input_item
+
+    def __call__(
+        self,
+        text: Optional[Union[str, list[str]]] = None,
+        images: Optional[Union[Image.Image, list[Image.Image]]] = None,
+        videos: Optional[Union[npt.NDArray, list[npt.NDArray]]] = None,
+        min_dynamic_patch: Optional[int] = None,
+        max_dynamic_patch: Optional[int] = None,
+        dynamic_image_size: Optional[bool] = None,
+        return_tensors: Optional[Union[str, TensorType]] = None,
+    ) -> Mapping[str, NestedTensors]:
+        text, images = [self._make_batch_input(x) for x in (text, images)]
+
+        text, image_inputs = self._preprocess_image(
+            text=text,
+            images=images,
+            min_dynamic_patch=min_dynamic_patch,
+            max_dynamic_patch=max_dynamic_patch,
+            dynamic_image_size=dynamic_image_size,
+        )
+
+        text_inputs = self.tokenizer(text)
+
+        return {
+            **BatchEncoding(text_inputs, tensor_type=return_tensors),
+            **image_inputs,
+        }
+
+
+class InternVLProcessor(BaseInternVLProcessor):
+
+    @property
+    def image_token_id(self) -> int:
+        return self.tokenizer.get_vocab()[IMG_CONTEXT]
+
+    @property
+    def video_token_id(self) -> Optional[int]:
+        if self.video_token is None:
+            return None
+        return self.tokenizer.get_vocab().get(self.video_token, None)
+
+    def _videos_to_pixel_values_lst(
+        self,
+        videos: list[npt.NDArray],
+        dynamic_image_size: Optional[bool] = None,
+    ) -> list[torch.Tensor]:
+        min_num, max_num = self.resolve_min_max_num(
+            min_dynamic_patch=1,
+            max_dynamic_patch=1,
+            dynamic_image_size=dynamic_image_size,
+            use_thumbnail=False,  # Applied in image_to_pixel_values
+        )
+
+        return [
+            video_to_pixel_values_internvl(
+                video,
+                input_size=self.image_size,
+                min_num=min_num,
+                max_num=max_num,
+                use_thumbnail=False,
+            ) for video in videos
+        ]
+
+    def _preprocess_video(
+        self,
+        text: list[str],
+        videos: list[npt.NDArray],
+        dynamic_image_size: Optional[bool] = None,
+    ):
         if len(videos) == 0 or not self.supports_video:
             video_inputs = {}
         else:
@@ -535,6 +567,35 @@ class BaseInternVLProcessor(ABC):
                 video_repl = self.get_video_repl(self.num_image_token,
                                                  num_patches, self.video_token)
                 text = [t.replace('<video>', video_repl.full, 1) for t in text]
+        return text, video_inputs
+
+    def __call__(
+        self,
+        text: Optional[Union[str, list[str]]] = None,
+        images: Optional[Union[Image.Image, list[Image.Image]]] = None,
+        videos: Optional[Union[npt.NDArray, list[npt.NDArray]]] = None,
+        min_dynamic_patch: Optional[int] = None,
+        max_dynamic_patch: Optional[int] = None,
+        dynamic_image_size: Optional[bool] = None,
+        return_tensors: Optional[Union[str, TensorType]] = None,
+    ) -> Mapping[str, NestedTensors]:
+        text, images, videos = [
+            self._make_batch_input(x) for x in (text, images, videos)
+        ]
+
+        text, image_inputs = self._preprocess_image(
+            text=text,
+            images=images,
+            min_dynamic_patch=min_dynamic_patch,
+            max_dynamic_patch=max_dynamic_patch,
+            dynamic_image_size=dynamic_image_size,
+        )
+
+        text, video_inputs = self._preprocess_video(
+            text=text,
+            videos=videos,
+            dynamic_image_size=dynamic_image_size,
+        )
 
         text_inputs = self.tokenizer(text)
 
@@ -543,19 +604,6 @@ class BaseInternVLProcessor(ABC):
             **image_inputs,
             **video_inputs,
         }
-
-
-class InternVLProcessor(BaseInternVLProcessor):
-
-    @property
-    def image_token_id(self) -> int:
-        return self.tokenizer.get_vocab()[IMG_CONTEXT]
-
-    @property
-    def video_token_id(self) -> Optional[int]:
-        if self.video_token is None:
-            return None
-        return self.tokenizer.get_vocab().get(self.video_token, None)
 
     def get_image_repl(
         self,
