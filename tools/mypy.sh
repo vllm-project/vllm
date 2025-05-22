@@ -13,14 +13,14 @@ fi
 
 run_mypy() {
     echo "Running mypy on $1"
-    if [ "$CI" -eq 1 ] && [ -z "$1" ]; then
+    if [ -z "$1" ]; then
         mypy --python-version "${PYTHON_VERSION}" "$@"
         return
     fi
     mypy --follow-imports skip --python-version "${PYTHON_VERSION}" "$@"
 }
 
-run_mypy # Note that this is less strict than CI
+run_mypy
 run_mypy tests
 run_mypy vllm/attention
 run_mypy vllm/compilation
