@@ -252,7 +252,8 @@ def calculate_metrics(
         total_token_throughput=(total_input + sum(actual_output_lens)) / dur_s,
         norm_request_throughput=completed / e2el_per_concurrency,
         norm_output_throughput=sum(actual_output_lens) / e2el_per_concurrency,
-        norm_total_token_throughput=(total_input + sum(actual_output_lens)) / e2el_per_concurrency,
+        norm_total_token_throughput=(total_input + sum(actual_output_lens))
+        / e2el_per_concurrency,
         mean_ttft_ms=np.mean(ttfts or 0)
         * 1000,  # ttfts is empty if streaming is not supported by backend
         std_ttft_ms=np.std(ttfts or 0) * 1000,
@@ -475,12 +476,12 @@ async def benchmark(
     )
     print(
         "{:<40} {:<10.2f}".format(
-            "Normalized Output token throughput (tok/s):",metrics.norm_output_throughput
+            "Norm Output token throughput (tok/s):",metrics.norm_output_throughput
         )
     )
     print(
         "{:<40} {:<10.2f}".format(
-            "Normalized Total Token throughput (tok/s):", metrics.norm_total_token_throughput
+            "Norm Total Token throughput (tok/s):", metrics.norm_total_token_throughput
         )
     )
 
