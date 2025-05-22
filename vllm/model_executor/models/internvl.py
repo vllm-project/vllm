@@ -302,13 +302,11 @@ class BaseInternVLProcessor(ABC):
         min_dynamic_patch: Optional[int] = None,
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
-        video_token: Optional[str] = None,
     ) -> None:
         super().__init__()
 
         self.config = config
         self.tokenizer = tokenizer
-        self.video_token = video_token
 
         image_size: int = config.vision_config.image_size
         patch_size: int = config.vision_config.patch_size
@@ -483,7 +481,6 @@ class BaseInternVLProcessor(ABC):
         self,
         text: Optional[Union[str, list[str]]] = None,
         images: Optional[Union[Image.Image, list[Image.Image]]] = None,
-        videos: Optional[Union[npt.NDArray, list[npt.NDArray]]] = None,
         min_dynamic_patch: Optional[int] = None,
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
@@ -508,6 +505,32 @@ class BaseInternVLProcessor(ABC):
 
 
 class InternVLProcessor(BaseInternVLProcessor):
+    """
+    HF Processor for InternVLChatModel with extended video processing logic.
+
+    Code for video processing is adapted from video example:
+    https://huggingface.co/OpenGVLab/InternVL3-1B#inference-with-transformers
+    """
+
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        tokenizer: AnyTokenizer,
+        *,
+        min_dynamic_patch: Optional[int] = None,
+        max_dynamic_patch: Optional[int] = None,
+        dynamic_image_size: Optional[bool] = None,
+        video_token: Optional[str] = None,
+    ) -> None:
+        super().__init__(
+            config=config,
+            tokenizer=tokenizer,
+            min_dynamic_patch=min_dynamic_patch,
+            max_dynamic_patch=max_dynamic_patch,
+            dynamic_image_size=dynamic_image_size,
+        )
+        # add extra video token for video processing
+        self.video_token = video_token
 
     @property
     def image_token_id(self) -> int:
