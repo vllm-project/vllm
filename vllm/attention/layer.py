@@ -185,10 +185,13 @@ class Attention(nn.Module):
         `vllm.forward_context.get_forward_context().attn_metadata`.
         """
 
-        if self.attn_dtype != self.dtype:
-            query = query.to(self.attn_dtype)
-            key = key.to(self.attn_dtype)
-            value = value.to(self.attn_dtype)
+        # torch.Tensor.to:
+        # If the self Tensor already has the correct torch.dtype,
+        # then self is returned.
+        # So to attn_dtype anyway，there will be no additional overhead
+        query = query.to(self.attn_dtype)
+        key = key.to(self.attn_dtype)
+        value = value.to(self.attn_dtype)
 
         if self.calculate_kv_scales:
             attn_metadata = get_forward_context().attn_metadata
@@ -287,9 +290,13 @@ class MultiHeadAttention(nn.Module):
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-        dtype = torch.get_default_dtype()
+        vllm_config = get_current_vllm_config()
+        self.dtype = cast(torch.dtype, vllm_config.model_config.dtype)
+        self.attn_dtype = cast(torch.dtype,
+                               vllm_config.model_config.attn_dtype)
+
         attn_backend = get_attn_backend(head_size,
-                                        dtype,
+                                        attn_dtype=self.attn_dtype,
                                         kv_cache_dtype=None,
                                         block_size=16,
                                         is_attention_free=False)
@@ -311,6 +318,14 @@ class MultiHeadAttention(nn.Module):
         # TODO(Isotr0py): Use existing backend implementations and support FA3
         bsz, q_len, _ = query.size()
         kv_len = key.size(1)
+
+        # torch.Tensor.to:
+        # If the self Tensor already has the correct torch.dtype,
+        # then self is returned.
+        # So to attn_dtype anyway，there will be no additional overhead
+        query = query.to(self.attn_dtype)
+        key = key.to(self.attn_dtype)
+        value = value.to(self.attn_dtype)
 
         query = query.view(bsz, q_len, self.num_heads, self.head_size)
         key = key.view(bsz, kv_len, self.num_kv_heads, self.head_size)
@@ -343,7 +358,7 @@ class MultiHeadAttention(nn.Module):
             out = flash_attention(query, key, value, sm_scale=self.scale)
             out = out.transpose(1, 2)
 
-        return out.reshape(bsz, q_len, -1)
+        return out.reshape(bsz, q_len, -1).to(self.dtype)
 
 
 def wait_for_kv_layer_from_connector(layer_name: str):

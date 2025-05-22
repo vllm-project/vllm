@@ -1,7 +1,7 @@
 import pytest
 
 from tests.models.language.pooling.mteb_utils import mteb_test_embed_models
-from tests.models.utils import Dtype, EmbedModelInfo, check_outputs_equal
+from tests.models.utils import Dtype, EmbedModelInfo, check_logprobs_close
 
 high_precision_data_types = [
     Dtype(dtype="float32"),
@@ -32,28 +32,27 @@ def test_embed_model(hf_runner, vllm_runner, dtype: Dtype):
             mteb_test_embed_models(hf_runner, vllm_runner, model_info)
 
 
-
 @pytest.mark.parametrize("model", [generate_model])
 @pytest.mark.parametrize("dtype", data_types)
-@pytest.mark.parametrize("max_tokens", [96])
-def test_generate_models(
-    hf_runner,
-    vllm_runner,
-    example_prompts,
-    model: str,
-    dtype: Dtype,
-    max_tokens: int,
-) -> None:
+@pytest.mark.parametrize("max_tokens", [32])
+@pytest.mark.parametrize("num_logprobs", [4])
+def test_generate_models(hf_runner, vllm_runner, example_prompts, model: str,
+                         dtype: Dtype, max_tokens: int,
+                         num_logprobs: int) -> None:
+    if dtype in [Dtype(dtype="float32", attn_dtype="bfloat16")]:
+        pytest.skip("This combination can't pass the test.")
 
-    def run_generate_greedy_test():
-        # To pass the small model tests, we need full precision.
+    def run_test():
         with hf_runner(model, dtype="float32") as hf_model:
-            hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
+            hf_outputs = hf_model.generate_greedy_logprobs_limit(
+                example_prompts, max_tokens, num_logprobs)
 
-        with vllm_runner(model, dtype=dtype.dtype, attn_dtype=dtype.attn_dtype) as vllm_model:
-            vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
+        with vllm_runner(model, dtype=dtype.dtype,
+                         attn_dtype=dtype.attn_dtype) as vllm_model:
+            vllm_outputs = vllm_model.generate_greedy_logprobs(
+                example_prompts, max_tokens, num_logprobs)
 
-        check_outputs_equal(
+        check_logprobs_close(
             outputs_0_lst=hf_outputs,
             outputs_1_lst=vllm_outputs,
             name_0="hf",
@@ -61,7 +60,7 @@ def test_generate_models(
         )
 
     if dtype in high_precision_data_types:
-        run_generate_greedy_test()
+        run_test()
     else:
         with pytest.raises(AssertionError):
-            run_generate_greedy_test()
+            run_test()

@@ -882,6 +882,7 @@ class EngineArgs:
             trust_remote_code=self.trust_remote_code,
             allowed_local_media_path=self.allowed_local_media_path,
             dtype=self.dtype,
+            attn_dtype=self.attn_dtype,
             seed=self.seed,
             revision=self.revision,
             code_revision=self.code_revision,
@@ -1288,8 +1289,8 @@ class EngineArgs:
 
         # Only Fp16 and Bf16 dtypes since we only support FA.
         V1_SUPPORTED_DTYPES = [torch.bfloat16, torch.float16]
-        if model_config.dtype not in V1_SUPPORTED_DTYPES:
-            _raise_or_fallback(feature_name=f"--dtype {model_config.dtype}",
+        if model_config.attn_dtype not in V1_SUPPORTED_DTYPES:
+            _raise_or_fallback(feature_name=f"--attn-dtype {model_config.attn_dtype}",
                                recommend_to_remove=False)
             return False
 

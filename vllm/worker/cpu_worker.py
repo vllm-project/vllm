@@ -53,7 +53,7 @@ class CPUCacheEngine:
         self.num_cpu_blocks = cache_config.num_gpu_blocks
 
         if cache_config.cache_dtype == "auto":
-            self.dtype = model_config.dtype
+            self.dtype = model_config.attn_dtype
         elif cache_config.cache_dtype in ["fp8", "fp8_e5m2"]:
             self.dtype = torch.float8_e5m2
         else:
@@ -63,7 +63,7 @@ class CPUCacheEngine:
         # Get attention backend.
         self.attn_backend = get_attn_backend(
             self.model_config.get_head_size(),
-            self.model_config.dtype,
+            self.model_config.attn_dtype,
             cache_config.cache_dtype,
             self.block_size,
             self.model_config.is_attention_free,
