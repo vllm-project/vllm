@@ -689,7 +689,7 @@ def evaluate(ret, args):
     def _eval_correctness_regex(expected, actual):
         import regex as re
 
-        return re.match(args.re, actual) is not None
+        return re.match(args.regex, actual) is not None
 
     def _eval_correctness(expected, actual):
         if args.structure_type == "guided_json":
