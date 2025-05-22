@@ -136,7 +136,7 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
         # prepare recompute kv token
         # update seq_group_metadata_list
         mask_token_id = self.pard_token
-        request_by_id = {}
+        request_by_id: Dict[str, List[SequenceGroupMetadata]] = {}
         for tmp in expanded_request.seq_group_metadata_list:
             name = tmp.request_id
             request_by_id[name] = request_by_id.get(name, [])
