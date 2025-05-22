@@ -8,7 +8,6 @@ import inspect
 import json
 import re
 import textwrap
-import uuid
 import warnings
 from collections import Counter
 from contextlib import contextmanager
@@ -3495,7 +3494,7 @@ class KVTransferConfig:
     """The KV connector for vLLM to transmit KV caches between vLLM instances.
     """
 
-    engine_id: str = str(uuid.uuid4())
+    engine_id: Optional[str] = None
     """The engine id for KV transfers."""
 
     kv_buffer_device: Optional[str] = "cuda"
