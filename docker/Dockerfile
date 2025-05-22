@@ -306,8 +306,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system --no-build-isolation "git+https://github.com/state-spaces/mamba@v2.2.4"
 
 # install development dependencies (for testing)
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/dev.txt
+RUN --mount=type=cache,target=/root/.cache/uv \   
+    CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
+    if [ "$CUDA_MAJOR" -ge 12 ]; then \
+        uv pip install --system -r requirements/dev.txt; \
+    fi
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
