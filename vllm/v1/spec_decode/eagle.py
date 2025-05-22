@@ -9,7 +9,8 @@ from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
-from vllm.model_executor.model_loader.utils import set_default_torch_dtype
+from vllm.model_executor.model_loader.utils import (
+    process_weights_after_loading, set_default_torch_dtype)
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.triton_utils import tl, triton
@@ -307,6 +308,9 @@ class EagleProposer:
         self.attn_layer_name = next(iter(draft_attn_layer_names))
         loaded_weights = self.model.load_weights(
             loader.get_all_weights(draft_model_config, self.model))
+
+        process_weights_after_loading(self.model, draft_model_config,
+                                      target_device)
 
         # share embed_tokens with the target model if needed
         if get_pp_group().world_size == 1:
