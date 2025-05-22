@@ -906,7 +906,7 @@ class GPUBaseModelRunner(ABC, LoRAModelRunnerMixin, Generic[InputBatchT,
         if self.use_aux_hidden_state_outputs:
             hidden_states, aux_hidden_states = model_output
         else:
-            hidden_states = model_output
+            hidden_states, aux_hidden_states = model_output, None
 
         return self._build_output(
             scheduler_output,
