@@ -93,8 +93,7 @@ def prepare_mamba2_metadata(
     # Compute seq_idx, chunk_indices and chunk_offsets for prefill only
     if num_prefills > 0:
         attn_metadata_instances = get_platform_metadata_classes()
-        if (isinstance(attn_metadata,
-                       attn_metadata_instances)
+        if (isinstance(attn_metadata, attn_metadata_instances)
                 and attn_metadata.context_lens_tensor is not None):
             has_initial_states = \
                 attn_metadata.context_lens_tensor[:num_prefills] > 0  #[batch,]
