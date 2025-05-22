@@ -693,6 +693,14 @@ class DPEngineCoreProc(EngineCoreProc):
         assert dp_size > 1
         assert 0 <= local_dp_rank <= dp_rank < dp_size
 
+        # generate a new engine_id post-fork to ensure each process gets own ID
+        if vllm_config.kv_transfer_config is not None:
+            import uuid
+            vllm_config.kv_transfer_config.engine_id = str(uuid.uuid4())
+            logger.debug(
+                "Regenerated engine_id to %s post-fork for DP rank %d",
+                vllm_config.kv_transfer_config.engine_id, dp_rank)
+
         from vllm.platforms import current_platform
         device_control_env_var = current_platform.device_control_env_var
         world_size = vllm_config.parallel_config.world_size
