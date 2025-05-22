@@ -7,7 +7,7 @@ to launch the vLLM OpenAI API server:
 
 On the client side, run:
     vllm bench serve \
-        --endpoint-type <endpoint_type. Default 'openi-comp'> \
+        --endpoint-type <endpoint_type. Default 'openai'> \
         --label <benchmark result label. Default using endpoint_type> \
         --model <your_model> \
         --dataset-name <dataset_name. Default 'random'> \
@@ -545,7 +545,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--endpoint-type",
         type=str,
-        default="openai-comp",
+        default="openai",
         choices=list(ASYNC_REQUEST_FUNCS.keys()),
     )
     parser.add_argument(
@@ -945,6 +945,7 @@ def main(args: argparse.Namespace):
             args.hf_split = "train"
         elif args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS:
             dataset_class = ConversationDataset
+            args.hf_split = "train"
         elif args.dataset_path in AIMODataset.SUPPORTED_DATASET_PATHS:
             dataset_class = AIMODataset
             args.hf_split = "train"
