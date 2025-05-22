@@ -9,11 +9,14 @@ from typing import Any, Generic, Optional, Union
 import torch
 from typing_extensions import TypeVar, deprecated
 
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalPlaceholderDict
 from vllm.sampling_params import RequestOutputKind
 from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
                            SequenceGroup, SequenceGroupBase, SequenceStatus)
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -126,6 +129,9 @@ class RequestOutput:
         # still run with older versions of vLLM without breaking.
         **kwargs: Any,
     ) -> None:
+        if kwargs:
+            logger.warning("RequestOutput: Ignoring extra arguments: %s",
+                           str(kwargs))
         self.request_id = request_id
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
