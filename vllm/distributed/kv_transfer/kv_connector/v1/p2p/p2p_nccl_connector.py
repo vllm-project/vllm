@@ -336,8 +336,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
 
-        logger.debug(
-            "🐞build_connector_meta, scheduler_output:%s", scheduler_output)
+        logger.debug("🐞build_connector_meta, scheduler_output:%s",
+                     scheduler_output)
 
         meta = P2pNcclConnectorMetadata()
 
