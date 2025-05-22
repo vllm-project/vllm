@@ -242,7 +242,7 @@ def calculate_metrics(
     # In a high-concurrency scenario, to exclude the impact of the client side, 
     # only the server-side processing time of each concurrency is counted.
     # with this metric, we can evaluate the performance with an extra perspective.
-    e2el_per_concurrency = sum(e2els) / max_concurrency,
+    e2el_per_concurrency = sum(e2els) / max_concurrency
 
     metrics = BenchmarkMetrics(
         completed=completed,
@@ -477,12 +477,12 @@ async def benchmark(
     )
     print(
         "{:<40} {:<10.2f}".format(
-            "Server Processing Output token throughput (tok/s):", metrics.server_processing_output_throughput
+            "Srv Output token throughput (tok/s):", metrics.server_processing_output_throughput
         )
     )
     print(
         "{:<40} {:<10.2f}".format(
-            "Server Processing Total Token throughput (tok/s):", metrics.server_processing_total_token_throughput
+            "Srv Total Token throughput (tok/s):", metrics.server_processing_total_token_throughput
         )
     )
 
@@ -821,7 +821,6 @@ def main(args: argparse.Namespace):
             ignore_eos=args.ignore_eos,
             goodput_config_dict=goodput_config_dict,
             max_concurrency=args.max_concurrency,
-            warmup=args.warmup,
             lora_modules=args.lora_modules,
             extra_body=sampling_params,
         )
