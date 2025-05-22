@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import numpy as np
+import torch
 
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.backends.torch_sdpa import (TorchSDPABackendImpl,
@@ -66,6 +67,13 @@ class TorchSDPAMetadataBuilderV1:
                                                       dtype=np.int64)
         self.num_prompt_req: int = 0
 
+        self.seq_start_loc_cpu = torch.zeros(
+            runner.max_num_reqs + 1,
+            dtype=torch.int32,
+            device="cpu",
+        )
+        self.seq_start_loc_np = self.seq_start_loc_cpu.numpy()
+
     def reorder_batch(self, input_batch: InputBatch,
                       scheduler_output: SchedulerOutput) -> bool:
         prompt_list_idx = 0
@@ -121,8 +129,8 @@ class TorchSDPAMetadataBuilderV1:
         ) if num_prompt_req > 0 else 0
         max_decode_seq_len = seq_lens_np[num_prompt_req:num_reqs].max().item(
         ) if num_prompt_req < num_reqs else 0
-        runner.seq_start_loc_np[0] = 0
-        np.cumsum(seq_lens_np, out=runner.seq_start_loc_np[1:num_reqs + 1])
+        self.seq_start_loc_np[0] = 0
+        np.cumsum(seq_lens_np, out=self.seq_start_loc_np[1:num_reqs + 1])
         num_prefill_tokens = runner.query_start_loc_np[num_prompt_req].item()
         num_decode_tokens = runner.query_start_loc_np[num_reqs].item(
         ) - num_prefill_tokens
@@ -142,8 +150,8 @@ class TorchSDPAMetadataBuilderV1:
             max_kv_len=max_prefill_seq_len,
             prefill_query_start_loc=runner.
             query_start_loc_cpu[:num_prompt_req + 1],  # prefill
-            kv_start_loc=runner.seq_start_loc_cpu[:num_prompt_req +
-                                                  1],  # prefill
+            kv_start_loc=self.seq_start_loc_cpu[:num_prompt_req +
+                                                1],  # prefill
             prefill_block_tables=block_table_tensor[:
                                                     num_prompt_req],  # prefill
             query_start_loc=runner.query_start_loc_cpu[:num_reqs +

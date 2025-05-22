@@ -304,6 +304,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.device_properties = torch.cuda.get_device_properties(self.device)
         self.num_sms = self.device_properties.multi_processor_count
 
+    def _sync_device(self) -> None:
+        torch.cuda.synchronize()
+
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
         output.
@@ -1698,7 +1701,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Must synchronize the non-blocking GPU->CPU transfers.
         if prompt_logprobs_dict:
-            torch.cuda.synchronize()
+            self._sync_device()
 
         return prompt_logprobs_dict
 
@@ -1952,7 +1955,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sampler_output = self._dummy_sampler_run(hidden_states)
         else:
             sampler_output = None
-        torch.cuda.synchronize()
+        self._sync_device()
         del hidden_states, sampler_output
         self.encoder_cache.clear()
         gc.collect()
