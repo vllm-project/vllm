@@ -15,6 +15,7 @@ import importlib.metadata
 import importlib.util
 import inspect
 import ipaddress
+import json
 import multiprocessing
 import os
 import pickle
@@ -75,6 +76,12 @@ if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
 
 logger = init_logger(__name__)
+
+# This value is chosen to have a balance between ITL and TTFT. Note it is
+# not optimized for throughput.
+DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
+POOLING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
+MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
 
 # Exception strings for non-implemented encoder/decoder scenarios
 
@@ -1418,6 +1425,51 @@ class FlexibleArgumentParser(ArgumentParser):
                 processed_args.append(arg[2:])
             else:
                 processed_args.append(arg)
+
+        def create_nested_dict(keys: list[str], value: str):
+            """Creates a nested dictionary from a list of keys and a value.
+
+            For example, `keys = ["a", "b", "c"]` and `value = 1` will create:
+            `{"a": {"b": {"c": 1}}}`
+            """
+            nested_dict: Any = value
+            for key in reversed(keys):
+                nested_dict = {key: nested_dict}
+            return nested_dict
+
+        def recursive_dict_update(original: dict, update: dict):
+            """Recursively updates a dictionary with another dictionary."""
+            for k, v in update.items():
+                if isinstance(v, dict) and isinstance(original.get(k), dict):
+                    recursive_dict_update(original[k], v)
+                else:
+                    original[k] = v
+
+        delete = set()
+        dict_args: dict[str, dict] = defaultdict(dict)
+        for i, processed_arg in enumerate(processed_args):
+            if processed_arg.startswith("--") and "." in processed_arg:
+                if "=" in processed_arg:
+                    processed_arg, value = processed_arg.split("=", 1)
+                    if "." not in processed_arg:
+                        # False positive, . was only in the value
+                        continue
+                else:
+                    value = processed_args[i + 1]
+                    delete.add(i + 1)
+                key, *keys = processed_arg.split(".")
+                # Merge all values with the same key into a single dict
+                arg_dict = create_nested_dict(keys, value)
+                recursive_dict_update(dict_args[key], arg_dict)
+                delete.add(i)
+        # Filter out the dict args we set to None
+        processed_args = [
+            a for i, a in enumerate(processed_args) if i not in delete
+        ]
+        # Add the dict args back as if they were originally passed as JSON
+        for dict_arg, dict_value in dict_args.items():
+            processed_args.append(dict_arg)
+            processed_args.append(json.dumps(dict_value))
 
         return super().parse_args(processed_args, namespace)
 
