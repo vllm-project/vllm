@@ -8,4 +8,4 @@ def use_v0_only(monkeypatch):
     Since this module is V0 only, set VLLM_USE_V1=0 for
     all tests in the module.
     """
-    monkeypatch.setenv('VLLM_USE_V1', '1')
+    monkeypatch.setenv('VLLM_USE_V1', '0')
