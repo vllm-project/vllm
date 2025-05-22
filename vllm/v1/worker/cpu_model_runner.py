@@ -27,13 +27,6 @@ class CPUModelRunner(GPUModelRunner):
 
         self._postprocess_tenosrs()
 
-        self.seq_start_loc_cpu = torch.zeros(
-            self.max_num_reqs + 1,
-            dtype=torch.int32,
-            device="cpu",
-        )
-        self.seq_start_loc_np = self.seq_start_loc_cpu.numpy()
-
     def _postprocess_tenosrs(self) -> None:
         # Note: replace device tensors with cpu tensors
         def replace_tensor(obj: Any, cpu_attr_name: str,
@@ -69,6 +62,9 @@ class CPUModelRunner(GPUModelRunner):
         logger.info("Warming up done.")
 
     def _init_device_properties(self) -> None:
+        pass
+
+    def _sync_device(self) -> None:
         pass
 
 
