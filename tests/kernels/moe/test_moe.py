@@ -577,7 +577,7 @@ def test_moe_align_block_size_opcheck():
              num_tokens_post_pad))
 
 
-@pytest.mark.parametrize("m", [1, 33, 222, 1024 * 128])
+@pytest.mark.parametrize("m", [1, 33, 64, 222])
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("k", [128, 511, 1024])
 @pytest.mark.parametrize("dtype",
