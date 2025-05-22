@@ -330,11 +330,9 @@ class SamplingParams(
         # and set `_real_n`` to the original `n`.
         # when we return the result, we will check
         # if we need to return `n` or `_real_n` results
-        if self.best_of:
-            if self.best_of < self.n:
-                raise ValueError(
-                    f"best_of must be greater than or equal to n, "
-                    f"got n={self.n} and best_of={self.best_of}.")
+        if self.best_of is None:
+            self.best_of = self.n
+        else:
             if not self._real_n:
                 self._real_n = self.n
                 self.n = self.best_of
@@ -389,6 +387,14 @@ class SamplingParams(
                              f"type {type(self.n)}")
         if self.n < 1:
             raise ValueError(f"n must be at least 1, got {self.n}.")
+        if not isinstance(self.best_of, int):
+            raise ValueError(
+                f"best_of must be an integer, got {type(self.best_of)}")
+        if self.best_of < 1:
+            raise ValueError(f"best_of must be at least 1, got {self.best_of}")
+        if self.best_of < self.n:
+            raise ValueError(f"best_of must be greater than or equal to n, "
+                             f"got n={self.n} and best_of={self.best_of}.")
         if not -2.0 <= self.presence_penalty <= 2.0:
             raise ValueError("presence_penalty must be in [-2, 2], got "
                              f"{self.presence_penalty}.")
@@ -512,7 +518,6 @@ class SamplingParams(
             raise ValueError(
                 f"The model vocabulary size is {tokenizer.max_token_id+1},"
                 f" but the following tokens"
-                f" were specified as bad: {invalid_token_ids}."
                 f" All token id values should be integers satisfying:"
                 f" 0 <= token_id <= {tokenizer.max_token_id}.")
 
