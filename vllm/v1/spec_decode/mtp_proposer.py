@@ -5,8 +5,8 @@ import torch
 import torch.nn as nn
 
 from vllm.attention.layer import Attention
-from vllm.config import (VllmConfig, get_layers_from_vllm_config,
-                         set_current_vllm_config)
+from vllm.config import (CompilationLevel, VllmConfig,
+                         get_layers_from_vllm_config, set_current_vllm_config)
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import (
@@ -66,6 +66,30 @@ class MtpProposer:
             vllm_config.speculative_config.num_speculative_tokens)
         self.block_size = vllm_config.cache_config.block_size
         self.runner = runner
+        
+        self.max_num_tokens = self.runner.max_num_tokens
+        self.device = self.runner.device
+        self.dtype = self.runner.dtype
+        self.hidden_size = self.runner.hidden_size
+        
+        self.use_cuda_graph = (self.vllm_config.compilation_config.level
+                               == CompilationLevel.PIECEWISE and
+                               not self.vllm_config.model_config.enforce_eager)
+        self.cudagraph_batch_sizes = list(
+            reversed(
+                self.vllm_config.compilation_config.cudagraph_capture_sizes))
+        
+        # persistent buffers for cuda graph
+        self.input_ids = torch.zeros(self.max_num_tokens,
+                                     dtype=torch.int32,
+                                     device=self.device)
+        self.positions = torch.zeros(self.max_num_tokens,
+                                     dtype=torch.int64,
+                                     device=self.device)
+        self.hidden_states = torch.zeros(
+            (self.max_num_tokens, self.hidden_size),
+            dtype=self.dtype,
+            device=self.device)
 
     @staticmethod
     def prepare_inputs(
@@ -167,17 +191,29 @@ class MtpProposer:
             common_prefix_len=0,
             common_attn_metadata=common_attn_metadata,
         )
+        
+        if self.use_cuda_graph and \
+            num_tokens <= self.cudagraph_batch_sizes[-1]:
+            num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
+        else:
+            num_input_tokens = num_tokens
+        # copy inputs to buffer for cudagraph
+        self.positions[:num_tokens] = target_positions
+        self.hidden_states[:num_tokens] = target_hidden_states
 
         with set_forward_context(attn_metadata, self.vllm_config):
             hidden_states = self.model(
-                input_ids=input_ids,
-                positions=target_positions,
-                previous_hidden_states=target_hidden_states,
+                input_ids=self.input_ids[:num_input_tokens],
+                positions=self.positions[:num_input_tokens],
+                previous_hidden_states=self.hidden_states[:num_input_tokens],
             )
         sample_hidden_states = hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
         draft_token_ids = logits.argmax(dim=-1)
 
+        # TODO: Currently, MTP module released by deepseek only has
+        # one layer. Adapt this code to support multiple layers once
+        # there's a multi-layer MTP module.
         assert self.num_speculative_tokens == 1
         # [batch_size, 1]
         return draft_token_ids.view(-1, 1)
@@ -213,3 +249,16 @@ class MtpProposer:
                 self.model,
                 self.vllm_config.speculative_config.draft_model_config,
                 target_device)
+
+    @torch.inference_mode()
+    def dummy_run(
+        self,
+        num_tokens: int,
+    ) -> None:
+        with set_forward_context(None, self.vllm_config,
+                                 num_tokens=num_tokens):
+            self.model(
+                input_ids=self.input_ids[:num_tokens],
+                positions=self.positions[:num_tokens],
+                previous_hidden_states=self.hidden_states[:num_tokens],
+            )

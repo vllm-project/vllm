@@ -1720,8 +1720,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 hidden_states = outputs
 
             if self.use_spec_decode and \
-                self.speculative_config.method in ('eagle', 'eagle3'):
-                assert isinstance(self.drafter, EagleProposer)
+                self.speculative_config.method in (
+                    'eagle', 'eagle3', "deepseek_mtp"):
+                assert isinstance(self.drafter, (EagleProposer, MtpProposer))
                 self.drafter.dummy_run(num_tokens)
 
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
