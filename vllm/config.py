@@ -2201,7 +2201,11 @@ class DeviceConfig:
     """Configuration for the device to use for vLLM execution."""
 
     device: Union[Device, torch.device] = "auto"
-    """Device type for vLLM execution."""
+    """Device type for vLLM execution.
+    This parameter is deprecated and will be 
+    removed in a future release. 
+    It will now be set automatically based 
+    on the current platform."""
     device_type: str = field(init=False)
     """Device type from the current platform. This is set in
     `__post_init__`."""
