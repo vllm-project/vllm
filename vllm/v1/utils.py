@@ -6,6 +6,7 @@ import time
 import weakref
 from collections import defaultdict
 from collections.abc import Sequence
+from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing import Process, connection
 from multiprocessing.process import BaseProcess
@@ -261,9 +262,23 @@ class CoreEngine:
         self.state = CoreEngineState.NEW
 
 
+@dataclass
+class EngineZmqAddresses:
+    inputs: list[str]
+    outputs: list[str]
+    coordinator_input: Optional[str] = None
+    coordinator_output: Optional[str] = None
+
+
+@dataclass
+class EngineHandshakeMetadata:
+    addresses: EngineZmqAddresses
+    parallel_config: dict[str, Union[int, str]]
+
+
 def wait_for_engine_startup(
     handshake_socket: zmq.Socket,
-    addresses: dict[str, Any],
+    addresses: EngineZmqAddresses,
     core_engines: list[CoreEngine],
     parallel_config: ParallelConfig,
     cache_config: CacheConfig,
@@ -324,16 +339,17 @@ def wait_for_engine_startup(
         if status == "HELLO" and engine.state == CoreEngineState.NEW:
 
             # Send init message with DP config info.
-            init_message = msgspec.msgpack.encode({
-                "addresses": addresses,
-                "parallel_config": {
-                    "data_parallel_master_ip":
-                    parallel_config.data_parallel_master_ip,
-                    "data_parallel_master_port":
-                    parallel_config.data_parallel_master_port,
-                    "data_parallel_size": parallel_config.data_parallel_size,
-                },
-            })
+            init_message = msgspec.msgpack.encode(
+                EngineHandshakeMetadata(
+                    addresses=addresses,
+                    parallel_config={
+                        "data_parallel_master_ip":
+                        parallel_config.data_parallel_master_ip,
+                        "data_parallel_master_port":
+                        parallel_config.data_parallel_master_port,
+                        "data_parallel_size":
+                        parallel_config.data_parallel_size,
+                    }))
             handshake_socket.send_multipart((eng_identity, init_message),
                                             copy=False)
             conn_pending[0 if local else 1] -= 1
@@ -343,7 +359,7 @@ def wait_for_engine_startup(
             # Setup KV cache config with initialization state from
             # engine core process. Sum values from all engines in DP case.
             num_gpu_blocks = cache_config.num_gpu_blocks or 0
-            num_gpu_blocks += msg['num_gpu_blocks']
+            num_gpu_blocks += msg["num_gpu_blocks"]
             cache_config.num_gpu_blocks = num_gpu_blocks
 
             start_pending[0 if local else 1] -= 1

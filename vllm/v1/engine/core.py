@@ -39,6 +39,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
+from vllm.v1.utils import EngineHandshakeMetadata, EngineZmqAddresses
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -368,17 +369,13 @@ class EngineCoreProc(EngineCore):
             # Register engine with front-end.
             addresses = self.startup_handshake(handshake_socket, on_head_node,
                                                vllm_config.parallel_config)
-            input_addresses: list[str] = addresses["input_addresses"]
-            output_addresses: list[str] = addresses["output_addresses"]
-            coord_in_addr: Optional[str] = addresses.get("coord_in_address")
-            coord_out_addr: Optional[str] = addresses.get("coord_out_address")
-            self.client_count = len(output_addresses)
+            self.client_count = len(addresses.outputs)
 
             # Update config which may have changed from the handshake.
             vllm_config.__post_init__()
 
             # Set up data parallel environment.
-            has_coordinator = coord_out_addr is not None
+            has_coordinator = addresses.coordinator_output is not None
             self._init_data_parallel(vllm_config, has_coordinator)
 
             # Initialize engine core and model.
@@ -409,17 +406,20 @@ class EngineCoreProc(EngineCore):
         self.output_queue = queue.Queue[Union[tuple[int, EngineCoreOutputs],
                                               bytes]]()
         threading.Thread(target=self.process_input_sockets,
-                         args=(input_addresses, coord_in_addr, identity),
+                         args=(addresses.inputs, addresses.coordinator_input,
+                               identity),
                          daemon=True).start()
         self.output_thread = threading.Thread(
             target=self.process_output_sockets,
-            args=(output_addresses, coord_out_addr, engine_index),
+            args=(addresses.outputs, addresses.coordinator_output,
+                  engine_index),
             daemon=True)
         self.output_thread.start()
 
     @staticmethod
-    def startup_handshake(handshake_socket: zmq.Socket, on_head_node: bool,
-                          parallel_config: ParallelConfig) -> dict[str, Any]:
+    def startup_handshake(
+            handshake_socket: zmq.Socket, on_head_node: bool,
+            parallel_config: ParallelConfig) -> EngineZmqAddresses:
 
         # Send registration message.
         handshake_socket.send(
@@ -435,14 +435,15 @@ class EngineCoreProc(EngineCore):
                                f"process within {HANDSHAKE_TIMEOUT_MINS} "
                                f"minutes")
         init_bytes = handshake_socket.recv()
-        init_message = msgspec.msgpack.decode(init_bytes)
+        init_message: EngineHandshakeMetadata = msgspec.msgpack.decode(
+            init_bytes)
         logger.debug("Received init message: %s", init_message)
 
-        received_parallel_config = init_message.pop("parallel_config")
+        received_parallel_config = init_message.parallel_config
         for key, value in received_parallel_config.items():
             setattr(parallel_config, key, value)
 
-        return init_message["addresses"]
+        return init_message.addresses
 
     @staticmethod
     def run_engine_core(*args,
@@ -515,7 +516,7 @@ class EngineCoreProc(EngineCore):
         """Exits when an engine step needs to be performed."""
 
         waited = False
-        while not self.engines_running and not (self.scheduler.has_requests()):
+        while not self.engines_running and not self.scheduler.has_requests():
             if logger.isEnabledFor(DEBUG) and self.input_queue.empty():
                 logger.debug("EngineCore waiting for work.")
                 waited = True

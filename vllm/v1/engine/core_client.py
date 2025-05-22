@@ -30,7 +30,8 @@ from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 from vllm.v1.utils import (CoreEngine, CoreEngineProcManager,
-                           get_engine_client_zmq_addr, wait_for_engine_startup)
+                           EngineZmqAddresses, get_engine_client_zmq_addr,
+                           wait_for_engine_startup)
 
 logger = init_logger(__name__)
 
@@ -471,14 +472,15 @@ class MPClient(EngineCoreClient):
 
     def _wait_for_engine_startup(self, handshake_socket: zmq.Socket,
                                  input_address: str, output_address: str):
-        addresses: dict[str, Any] = {
-            "input_addresses": [input_address],
-            "output_addresses": [output_address],
-        }
+        addresses = EngineZmqAddresses(
+            inputs=[input_address],
+            outputs=[output_address],
+        )
 
         coordinator = self.resources.coordinator
         if coordinator is not None:
-            addresses.update(coordinator.get_engine_socket_addresses())
+            addresses.coordinator_input, addresses.coordinator_output = (
+                coordinator.get_engine_socket_addresses())
 
         wait_for_engine_startup(
             handshake_socket,

@@ -6,7 +6,7 @@ import signal
 import socket
 import sys
 from multiprocessing import connection
-from typing import Any, Union
+from typing import Union
 
 import uvloop
 import zmq
@@ -28,7 +28,7 @@ from vllm.v1.engine.core_client import CoreEngineProcManager
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 from vllm.v1.utils import (APIServerProcessManager, CoreEngine,
-                           get_engine_client_zmq_addr,
+                           EngineZmqAddresses, get_engine_client_zmq_addr,
                            wait_for_completion_or_failure,
                            wait_for_engine_startup)
 
@@ -214,10 +214,10 @@ def run_multi_api_server(args: argparse.Namespace):
         for _ in range(num_api_servers)
     ]
 
-    addresses: dict[str, Any] = {
-        "input_addresses": input_addresses,
-        "output_addresses": output_addresses,
-    }
+    addresses = EngineZmqAddresses(
+        inputs=input_addresses,
+        outputs=output_addresses,
+    )
 
     # Set up coordinator for dp > 1.
     coordinator = None
@@ -225,7 +225,8 @@ def run_multi_api_server(args: argparse.Namespace):
     if dp_size > 1:
         # TODO "ready" event for coordinator
         coordinator = DPCoordinator(parallel_config)
-        addresses.update(coordinator.get_engine_socket_addresses())
+        addresses.coordinator_input, addresses.coordinator_output = (
+            coordinator.get_engine_socket_addresses())
         stats_update_address = coordinator.get_stats_publish_address()
         logger.info("Started DP Coordinator process (PID: %d)",
                     coordinator.proc.pid)

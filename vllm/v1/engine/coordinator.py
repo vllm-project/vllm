@@ -54,11 +54,9 @@ class DPCoordinator:
     def get_stats_publish_address(self) -> str:
         return self.stats_publish_address
 
-    def get_engine_socket_addresses(self) -> dict[str, str]:
-        return {
-            "coord_in_address": self.coord_in_address,
-            "coord_out_address": self.coord_out_address,
-        }
+    def get_engine_socket_addresses(self) -> tuple[str, str]:
+        """Returns tuple of ZMQ input address, output address."""
+        return self.coord_in_address, self.coord_out_address
 
     def close(self):
         self._finalizer()
