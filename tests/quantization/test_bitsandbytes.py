@@ -8,15 +8,21 @@ import gc
 
 import pytest
 import torch
+from transformers import BitsAndBytesConfig
 
 from tests.quantization.utils import is_quant_method_supported
 
+from ..models.utils import check_embeddings_close
 from ..utils import compare_two_settings, create_new_process_for_each_test
 
 models_4bit_to_test = [
     ("facebook/opt-125m", "quantize opt model inflight"),
     ("mistralai/Mistral-7B-Instruct-v0.3",
      "quantize inflight model with both HF and Mistral format weights")
+]
+
+models_4bit_to_embedding_test = [
+    ("intfloat/e5-mistral-7b-instruct", "quantize embedding model inflight"),
 ]
 
 models_pre_qaunt_4bit_to_test = [
@@ -39,7 +45,8 @@ models_pre_quant_8bit_to_test = [
 def test_load_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                              model_name, description) -> None:
 
-    hf_model_kwargs = {"load_in_4bit": True}
+    hf_model_kwargs = dict(quantization_config=BitsAndBytesConfig(
+        load_in_4bit=True))
     validate_generated_texts(hf_runner, vllm_runner, example_prompts[:1],
                              model_name, False, hf_model_kwargs)
 
@@ -77,7 +84,8 @@ def test_load_8bit_bnb_model(hf_runner, vllm_runner, example_prompts,
 def test_load_tp_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                                 model_name, description) -> None:
 
-    hf_model_kwargs = {"load_in_4bit": True}
+    hf_model_kwargs = dict(quantization_config=BitsAndBytesConfig(
+        load_in_4bit=True))
     validate_generated_texts(hf_runner,
                              vllm_runner,
                              example_prompts[:1],
@@ -111,6 +119,54 @@ def test_load_pp_4bit_bnb_model(model_name, description) -> None:
         "2",
     ]
     compare_two_settings(model_name, common_args, pp_args)
+
+
+@pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
+                    reason='bitsandbytes is not supported on this GPU type.')
+@pytest.mark.parametrize("model_name, description",
+                         models_4bit_to_embedding_test)
+@pytest.mark.parametrize("dtype", ["half"])
+@create_new_process_for_each_test()
+def test_4bit_bnb_embedding_model(
+    model_name,
+    description,
+    hf_runner,
+    vllm_runner,
+    example_prompts,
+    dtype: str,
+) -> None:
+
+    # The example_prompts has ending "\n", for example:
+    # "Write a short story about a robot that dreams for the first time.\n"
+    # sentence_transformers will strip the input texts, see:
+    # https://github.com/UKPLab/sentence-transformers/blob/v3.1.1/sentence_transformers/models/Transformer.py#L159
+    # This makes the input_ids different between hf_model and vllm_model.
+    # So we need to strip the input texts to avoid test failing.
+    example_prompts = [str(s).strip() for s in example_prompts]
+
+    # Inflight 4bit quantization
+    hf_model_kwargs = dict(quantization_config=BitsAndBytesConfig(
+        load_in_4bit=True))
+    with hf_runner(
+            model_name,
+            dtype=dtype,
+            model_kwargs=hf_model_kwargs,
+            is_sentence_transformer=True,
+    ) as hf_model:
+        hf_outputs = hf_model.encode(example_prompts)
+
+    with vllm_runner(model_name,
+                     task="embed",
+                     dtype=dtype,
+                     quantization="bitsandbytes") as vllm_model:
+        vllm_outputs = vllm_model.encode(example_prompts)
+    check_embeddings_close(
+        embeddings_0_lst=hf_outputs,
+        embeddings_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
+        tol=5e-2,
+    )
 
 
 def log_generated_texts(prompts, outputs, runner_name):
