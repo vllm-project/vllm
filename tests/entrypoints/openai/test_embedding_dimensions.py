@@ -11,7 +11,8 @@ import pytest
 from vllm.entrypoints.openai.protocol import EmbeddingResponse
 
 from ...conftest import HfRunner
-from ...models.utils import EmbedModelInfo, run_embedding_correctness_test
+from ...models.language.pooling.embed_utils import EmbedModelInfo, run_embedding_correctness_test
+
 from ...utils import RemoteOpenAIServer
 
 MODELS = [
