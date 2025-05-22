@@ -702,7 +702,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
 
   custom_ar.def("free_shared_buffer", &free_shared_buffer);
 }
-
+#ifdef USE_ROCM
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _quick_ar), quick_ar) {
   // quick all reduce kernels
   quick_ar.def("init_quick_ar(int world_size, int rank) -> int");
@@ -719,4 +719,5 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _quick_ar), quick_ar) {
   quick_ar.impl("qr_destroy", &qr_destroy);
   quick_ar.impl("is_quickreduce_available", &is_quickreduce_available);
 }
+#endif
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
