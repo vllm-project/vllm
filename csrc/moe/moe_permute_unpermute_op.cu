@@ -5,6 +5,9 @@
 #include "permute_unpermute_kernels/dispatch.h"
 #include "core/registration.h"
 
+// moe_permute kernels require at least CUDA 12.0
+#if defined(CUDA_VERSION) && (CUDA_VERSION >= 12000)
+
 void moe_permute(
     const torch::Tensor& input,                      // [n_token, hidden]
     const torch::Tensor& topk_weights,               //[n_token, topk]
@@ -125,6 +128,44 @@ void moe_unpermute(
         get_ptr<int>(src_row_id2dst_row_id_map), get_ptr<int>(topk_ids),
         n_token, n_hidden, topk, valid_ptr, stream);
   });
+}
+
+#else
+
+void moe_permute(const torch::Tensor& input, const torch::Tensor& topk_weights,
+                 torch::Tensor& topk_ids,
+                 const torch::Tensor& token_expert_indicies,
+                 const std::optional<torch::Tensor>& expert_map,
+                 int64_t n_expert, int64_t n_local_expert, int64_t topk,
+                 const std::optional<int64_t>& align_block_size,
+                 torch::Tensor& permuted_input,
+                 torch::Tensor& expert_first_token_offset,
+                 torch::Tensor& src_row_id2dst_row_id_map,
+                 torch::Tensor& m_indices) {
+  TORCH_CHECK(false, "moe_unpermute is not supported on CUDA < 12.0");
+}
+
+void moe_unpermute(const torch::Tensor& input,
+                   const torch::Tensor& topk_weights, torch::Tensor& topk_ids,
+                   const torch::Tensor& token_expert_indicies,
+                   const std::optional<torch::Tensor>& expert_map,
+                   int64_t n_expert, int64_t n_local_expert, int64_t topk,
+                   const std::optional<int64_t>& align_block_size,
+                   torch::Tensor& permuted_input,
+                   torch::Tensor& expert_first_token_offset,
+                   torch::Tensor& src_row_id2dst_row_id_map,
+                   torch::Tensor& m_indices) {
+  TORCH_CHECK(false, "moe_unpermute is not supported on CUDA < 12.0");
+}
+
+#endif
+
+bool moe_permute_unpermute_supported() {
+#if defined(CUDA_VERSION) && (CUDA_VERSION >= 12000)
+  return true;
+#else
+  return false;
+#endif
 }
 
 TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
