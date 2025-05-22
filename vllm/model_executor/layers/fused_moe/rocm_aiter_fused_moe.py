@@ -322,11 +322,6 @@ def rocm_aiter_fused_experts(
                 topk == 1
             ), "Only support topk=1 when `apply_router_weight_on_input` is True"
 
-            hidden_states = hidden_states * topk_weights.to(
-                hidden_states.dtype)
-            topk_ids = topk_ids.to(torch.int32)
-            topk_weights = torch.ones_like(topk_weights, dtype=torch.float32)
-
         return torch.ops.vllm.rocm_aiter_fused_moe(
             hidden_states,
             w1,
@@ -338,7 +333,8 @@ def rocm_aiter_fused_experts(
             w1_scale=w1_scale,
             w2_scale=w2_scale,
             a1_scale=a1_scale,
-            a2_scale=a2_scale)
+            a2_scale=a2_scale,
+            doweight_stage1=apply_router_weight_on_input)
 
 
 def rocm_aiter_topk_softmax(topk_weights: torch.Tensor,
