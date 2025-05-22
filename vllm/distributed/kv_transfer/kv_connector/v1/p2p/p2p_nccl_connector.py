@@ -188,7 +188,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
                     forward_context.virtual_engine]
 
                 kv_cache = self.p2p_nccl_engine.recv_tensor(
-                    request.request_id + "-" + layer_name)
+                    request.request_id + "#" + layer_name)
 
                 if kv_cache is None:
                     logger.warning("🚧src_kv_cache is None, %s",
@@ -252,7 +252,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 remote_address = ip + ":" + str(port + self._rank)
                 kv_cache = extract_kv_from_layer(kv_layer,
                                                  request.slot_mapping)
-                self.p2p_nccl_engine.send_tensor(request_id + "-" + layer_name,
+                self.p2p_nccl_engine.send_tensor(request_id + "#" + layer_name,
                                                  kv_cache, remote_address)
 
     def wait_for_save(self):
@@ -351,6 +351,10 @@ class P2pNcclConnector(KVConnectorBase_V1):
                                  block_ids=block_ids,
                                  block_size=self._block_size)
                 total_need_load += 1
+
+        for finished_req in scheduler_output.finished_req_ids:
+            # TODO: Abatom
+            break
 
         assert total_need_load == len(self._requests_need_load)
         self._requests_need_load.clear()
