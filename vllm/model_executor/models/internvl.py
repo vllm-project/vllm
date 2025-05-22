@@ -651,6 +651,7 @@ class InternVLProcessor(BaseInternVLProcessor):
 
 
 class BaseInternVLProcessingInfo(BaseProcessingInfo):
+    """Basic image-only ProcessingInfo for InternVL-style models."""
 
     @abstractmethod
     def get_hf_processor(
@@ -662,10 +663,6 @@ class BaseInternVLProcessingInfo(BaseProcessingInfo):
         **kwargs: object,
     ) -> BaseInternVLProcessor:
         raise NotImplementedError
-
-    @property
-    def supports_video(self):
-        return getattr(self.get_hf_processor(), "supports_video", False)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
@@ -720,64 +717,37 @@ class BaseInternVLProcessingInfo(BaseProcessingInfo):
             processor=processor,
         )
 
-    def get_num_frames_with_most_features(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> int:
-        max_images = mm_counts.get("image", 0)
-        max_videos = mm_counts.get("video", 0)
-
-        processor = self.get_hf_processor()
-
-        max_image_tokens = self.get_max_image_tokens() * max_images
-        max_total_frames = (seq_len -
-                            max_image_tokens) // processor.num_image_token
-        max_frames_per_video = max_total_frames // max(max_videos, 1)
-
-        return max(max_frames_per_video, 1)
-
 
 _I = TypeVar("_I", bound=BaseInternVLProcessingInfo)
 
 
-class InternVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
+class BaseInternVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
+    """Basic image-only DummyInputsBuilder for InternVL-style models."""
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
-        num_videos = mm_counts.get("video", 0)
 
-        return "<image>" * num_images + "<video>" * num_videos
+        return "<image>" * num_images
 
     def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-        num_videos = mm_counts.get("video", 0)
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
-
-        config = self.info.get_hf_config()
-        image_size: int = config.vision_config.image_size
-        target_num_frames = \
-            self.info.get_num_frames_with_most_features(seq_len, mm_counts)
+        num_images = mm_counts.get("image", 0)
 
         return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
-                                   num_images=num_images),
-            "video":
-            self._get_dummy_videos(width=image_size,
-                                   height=image_size,
-                                   num_frames=target_num_frames,
-                                   num_videos=num_videos)
+                                   num_images=num_images)
         }
 
 
-class InternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
+class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
+    """ Basic image-only MultiModalProcessor for InternVL-style models."""
 
     def _call_hf_processor(
         self,
@@ -798,9 +768,6 @@ class InternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
         # we need to pass the image token ID to the model to select the
         # tokens to merge from the vision encoder outputs
         processed_outputs["image_token_id"] = torch.tensor(image_token_id)
-        if self.info.supports_video and (video_token_id := getattr(
-                hf_processor, "video_token_id", None)) is not None:
-            processed_outputs["video_token_id"] = torch.tensor(video_token_id)
 
         return processed_outputs
 
@@ -811,29 +778,14 @@ class InternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
     ) -> Mapping[str, MultiModalFieldConfig]:
         image_num_patches = hf_inputs.get("image_num_patches", torch.empty(0))
         num_images = len(image_num_patches)
-        image_field = dict(
+
+        return dict(
             pixel_values_flat=MultiModalFieldConfig.flat_from_sizes(
                 "image", image_num_patches),
             image_num_patches=MultiModalFieldConfig.batched("image"),
             image_embeds=MultiModalFieldConfig.batched("image"),
             image_token_id=MultiModalFieldConfig.shared("image", num_images),
         )
-
-        if self.info.supports_video:
-            video_num_patches = hf_inputs.get("video_num_patches",
-                                              torch.empty(0))
-            num_videos = len(video_num_patches)
-            video_field = dict(
-                pixel_values_flat_video=MultiModalFieldConfig.flat_from_sizes(
-                    "video", video_num_patches),
-                video_num_patches=MultiModalFieldConfig.batched("video"),
-                video_token_id=MultiModalFieldConfig.shared(
-                    "video", num_videos),
-            )
-        else:
-            video_field = {}
-
-        return image_field | video_field
 
     def _get_prompt_updates(
         self,
@@ -854,14 +806,7 @@ class InternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
         else:
             image_num_patches = []
 
-        if "video_num_patches" in out_mm_kwargs:
-            video_num_patches = out_mm_kwargs["video_num_patches"]
-            assert isinstance(video_num_patches, torch.Tensor)
-            video_num_patches = video_num_patches.tolist()
-        else:
-            video_num_patches = []
-
-        def get_image_replacement_internvl(item_idx: int):
+        def get_replacement_internvl(item_idx: int):
             images = mm_items.get_items(
                 "image", (ImageEmbeddingItems, ImageProcessorItems))
 
@@ -881,35 +826,21 @@ class InternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
             return hf_processor.get_image_repl(feature_size, num_patches)
 
-        def get_video_replacement_internvl(item_idx: int):
-            feature_size = hf_processor.num_image_token
-            num_patches = video_num_patches[item_idx]
-            if num_patches is not None:
-                assert isinstance(num_patches, int)
-
-            return hf_processor.get_video_repl(
-                feature_size,
-                num_patches,
-                video_context_token=hf_processor.video_token)
-
-        prompt_repl = [
+        return [
             PromptReplacement(
                 modality="image",
                 target="<image>",
-                replacement=get_image_replacement_internvl,
+                replacement=get_replacement_internvl,
             )
         ]
-        if self.info.supports_video:
-            prompt_repl.append(
-                PromptReplacement(
-                    modality="video",
-                    target="<video>",
-                    replacement=get_video_replacement_internvl,
-                ))
-        return prompt_repl
 
 
 class InternVLProcessingInfo(BaseInternVLProcessingInfo):
+    """InternVL ProcessingInfo extended for video processing"""
+
+    @property
+    def supports_video(self):
+        return getattr(self.get_hf_processor(), "supports_video", False)
 
     def get_supported_mm_limits(self):
         video_limit = {"video": None} if self.supports_video else {}
@@ -920,6 +851,23 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
         if text_model_type == "qwen2":
             return "<|video_pad|>"
         return None
+
+    def get_num_frames_with_most_features(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> int:
+        max_images = mm_counts.get("image", 0)
+        max_videos = mm_counts.get("video", 0)
+
+        processor = self.get_hf_processor()
+
+        max_image_tokens = self.get_max_image_tokens() * max_images
+        max_total_frames = (seq_len -
+                            max_image_tokens) // processor.num_image_token
+        max_frames_per_video = max_total_frames // max(max_videos, 1)
+
+        return max(max_frames_per_video, 1)
 
     def get_hf_processor(
         self,
@@ -944,6 +892,121 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
             tokenizer=self.get_tokenizer(),
             **kwargs,
         )
+
+
+class InternVLDummyInputsBuilder(
+        BaseInternVLDummyInputsBuilder[InternVLProcessingInfo]):
+    """InternVL DummyInputsBuilder extended for video support"""
+
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        num_videos = mm_counts.get("video", 0)
+
+        return super().get_dummy_text(mm_counts) + "<video>" * num_videos
+
+    def get_dummy_mm_data(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> MultiModalDataDict:
+        dummy_image = super().get_dummy_mm_data(seq_len=seq_len,
+                                                mm_counts=mm_counts)
+        if self.info.supports_video:
+            config = self.info.get_hf_config()
+            image_size: int = config.vision_config.image_size
+            target_num_frames = \
+                self.info.get_num_frames_with_most_features(seq_len, mm_counts)
+            num_videos = mm_counts.get("video", 0)
+            dummy_video = {
+                "video":
+                self._get_dummy_videos(width=image_size,
+                                       height=image_size,
+                                       num_frames=target_num_frames,
+                                       num_videos=num_videos)
+            }
+        else:
+            dummy_video = {}
+        return {**dummy_image, **dummy_video}
+
+
+class InternVLMultiModalProcessor(
+        BaseInternVLMultiModalProcessor[InternVLProcessingInfo]):
+    """InternVL MultiModalProcessor extended for video support"""
+
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, NestedTensors]:
+        processed_outputs = super()._call_hf_processor(prompt, mm_data,
+                                                       mm_kwargs)
+
+        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        if self.info.supports_video and (
+                video_token_id := hf_processor.video_token_id) is not None:
+            processed_outputs["video_token_id"] = torch.tensor(video_token_id)
+        return processed_outputs
+
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: Mapping[str, NestedTensors],
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        image_field = super()._get_mm_fields_config(hf_inputs,
+                                                    hf_processor_mm_kwargs)
+        if self.info.supports_video:
+            video_num_patches = hf_inputs.get("video_num_patches",
+                                              torch.empty(0))
+            num_videos = len(video_num_patches)
+            video_field = dict(
+                pixel_values_flat_video=MultiModalFieldConfig.flat_from_sizes(
+                    "video", video_num_patches),
+                video_num_patches=MultiModalFieldConfig.batched("video"),
+                video_token_id=MultiModalFieldConfig.shared(
+                    "video", num_videos),
+            )
+        else:
+            video_field = {}
+
+        return image_field | video_field
+
+    def _get_prompt_updates(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargs,
+    ) -> Sequence[PromptUpdate]:
+        prompt_repl: list[PromptUpdate] = super()._get_prompt_updates(
+            mm_items, hf_processor_mm_kwargs, out_mm_kwargs)
+
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+
+        if "video_num_patches" in out_mm_kwargs:
+            video_num_patches = out_mm_kwargs["video_num_patches"]
+            assert isinstance(video_num_patches, torch.Tensor)
+            video_num_patches = video_num_patches.tolist()
+        else:
+            video_num_patches = []
+
+        def get_video_replacement_internvl(item_idx: int):
+            feature_size = hf_processor.num_image_token
+            num_patches = video_num_patches[item_idx]
+            if num_patches is not None:
+                assert isinstance(num_patches, int)
+
+            return hf_processor.get_video_repl(
+                feature_size,
+                num_patches,
+                video_context_token=hf_processor.video_token)
+
+        if self.info.supports_video:
+            prompt_repl.append(
+                PromptReplacement(
+                    modality="video",
+                    target="<video>",
+                    replacement=get_video_replacement_internvl,
+                ))
+        return prompt_repl
 
 
 @MULTIMODAL_REGISTRY.register_processor(

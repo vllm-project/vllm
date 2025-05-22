@@ -22,9 +22,10 @@ from vllm.multimodal.processing import (PromptReplacement, PromptUpdate,
                                         PromptUpdateDetails)
 
 from .intern_vit import InternVisionModel
-from .internvl import (BaseInternVLProcessingInfo, BaseInternVLProcessor,
-                       InternVLChatModel, InternVLDummyInputsBuilder,
-                       InternVLMultiModalProcessor)
+from .internvl import (BaseInternVLDummyInputsBuilder,
+                       BaseInternVLMultiModalProcessor,
+                       BaseInternVLProcessingInfo, BaseInternVLProcessor,
+                       InternVLChatModel)
 
 IMG_PAD = "<|vision_pad|>"
 
@@ -84,7 +85,8 @@ class NVLMProcessingInfo(BaseInternVLProcessingInfo):
         )
 
 
-class NVLMDummyInputsBuilder(InternVLDummyInputsBuilder[NVLMProcessingInfo]):
+class NVLMDummyInputsBuilder(BaseInternVLDummyInputsBuilder[NVLMProcessingInfo]
+                             ):
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
@@ -110,7 +112,8 @@ class NVLMDummyInputsBuilder(InternVLDummyInputsBuilder[NVLMProcessingInfo]):
         }
 
 
-class NVLMMultiModalProcessor(InternVLMultiModalProcessor[NVLMProcessingInfo]):
+class NVLMMultiModalProcessor(
+        BaseInternVLMultiModalProcessor[NVLMProcessingInfo]):
 
     def _get_prompt_updates(
         self,
