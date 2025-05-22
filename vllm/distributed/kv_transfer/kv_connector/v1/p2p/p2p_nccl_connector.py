@@ -2,7 +2,7 @@
 
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 
@@ -93,6 +93,10 @@ class P2pNcclConnector(KVConnectorBase_V1):
             port_offset=rank,
         ) if role == KVConnectorRole.WORKER else None
 
+    # ==============================
+    # Worker-side methods
+    # ==============================
+
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs) -> None:
         """Start loading the KV cache from the connector buffer to vLLM's
@@ -109,6 +113,10 @@ class P2pNcclConnector(KVConnectorBase_V1):
         assert self.p2p_nccl_engine is not None
 
         attn_metadata = forward_context.attn_metadata
+        if attn_metadata is None:
+            logger.warning(
+                "In connector.start_load_kv, but the attn_metadata is None")
+            return
 
         def inject_kv_into_layer(
             dst_kv_cache_layer: torch.Tensor,
@@ -170,12 +178,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
             logger.warning(
                 "In connector.start_load_kv, but the connector metadata is None"
             )
-            return
-
-        attn_metadata = forward_context.attn_metadata
-        if attn_metadata is None:
-            logger.warning(
-                "In connector.start_load_kv, but the attn_metadata is None")
             return
 
         # Load the KV for each request each layer
@@ -260,6 +262,28 @@ class P2pNcclConnector(KVConnectorBase_V1):
             assert self.p2p_nccl_engine is not None
             self.p2p_nccl_engine.wait_for_sent()
 
+    def get_finished(
+        self, finished_req_ids: set[str]
+    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+        """
+        Notifies worker-side connector ids of requests that have
+        finished generating tokens.
+
+        Returns:
+            ids of requests that have finished asynchronous transfer,
+            tuple of (sending/saving ids, recving/loading ids).
+            The finished saves/sends req ids must belong to a set provided in a
+            call to this method (this call or a prior one).
+        """
+
+        logger.debug("🐞get_finished, finished_req_ids:%s", finished_req_ids)
+
+        return None, None
+
+    # ==============================
+    # Scheduler-side methods
+    # ==============================
+
     def get_num_new_matched_tokens(
         self,
         request: "Request",
@@ -311,6 +335,10 @@ class P2pNcclConnector(KVConnectorBase_V1):
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
+
+        logger.debug(
+            "🐞build_connector_meta, scheduler_output:%s", scheduler_output)
+
         meta = P2pNcclConnectorMetadata()
 
         total_need_load = 0
@@ -359,6 +387,31 @@ class P2pNcclConnector(KVConnectorBase_V1):
         assert total_need_load == len(self._requests_need_load)
         self._requests_need_load.clear()
         return meta
+
+    def request_finished(
+        self,
+        request: "Request",
+        block_ids: list[int],
+    ) -> tuple[bool, Optional[dict[str, Any]]]:
+        """
+        Called when a request has finished, before its blocks are freed.
+
+        Returns:
+            True if the request is being saved/sent asynchronously and blocks
+            should not be freed until the request_id is returned from
+            get_finished().
+            Optional KVTransferParams to be included in the request outputs
+            returned by the engine.
+        """
+
+        logger.debug("🐞request_finished, request_id:%s, block_ids:%s",
+                     request.request_id, block_ids)
+
+        return False, None
+
+    # ==============================
+    # Static methods
+    # ==============================
 
     @staticmethod
     def parse_request_id(request_id: str, is_prefill=True) -> tuple[str, int]:
