@@ -407,7 +407,7 @@ class ModelConfig:
     available.\n
     - "vllm" will use the vLLM model implementation.\n
     - "transformers" will use the Transformers model implementation."""
-    override_attention_dtype: str = "fp8"
+    override_attention_dtype: Optional[str] = None
     """Override dtype for attention"""
 
     def compute_hash(self) -> str:
@@ -508,6 +508,11 @@ class ModelConfig:
                 "for instructions on how to install it.")
 
         from vllm.platforms import current_platform
+
+        if (self.override_attention_dtype is not None
+                and not current_platform.is_rocm()):
+            warnings.warn(
+                "override-attention-dtype is set but not using ROCm platform")
 
         if (self.enable_sleep_mode
                 and not current_platform.is_sleep_mode_available()):
