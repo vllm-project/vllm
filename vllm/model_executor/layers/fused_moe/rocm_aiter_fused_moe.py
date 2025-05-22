@@ -374,4 +374,3 @@ def shuffle_weights(
     from aiter.ops.shuffle import shuffle_weight
 
     return tuple(shuffle_weight(tensor, layout=layout) for tensor in tensors)
-
