@@ -582,7 +582,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
 
         self.aiter_kv_scales_initialized = False
         self.force_fp8_attention = (
-            get_current_vllm_config is not None
+            get_current_vllm_config() is not None
             and get_current_vllm_config().model_config.override_attention_dtype
             == "fp8")
 
