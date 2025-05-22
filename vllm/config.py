@@ -4507,7 +4507,6 @@ def set_current_vllm_config(vllm_config: VllmConfig, check_compile=False):
         _current_vllm_config = vllm_config
         yield
     except Exception:
-        was_raised = True
         raise
     else:
         logger.debug("enabled custom ops: %s",
@@ -4528,8 +4527,7 @@ def set_current_vllm_config(vllm_config: VllmConfig, check_compile=False):
                 " if you want it to be supported.",
                 vllm_config.model_config.model)
     finally:
-        if was_raised:
-            _current_vllm_config = old_vllm_config
+        _current_vllm_config = old_vllm_config
 
 
 def get_current_vllm_config() -> VllmConfig:
