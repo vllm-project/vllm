@@ -31,6 +31,7 @@ trt-llm-setup:
  
 vllm-setup:
 	VLLM_USE_PRECOMPILED=1 pip install --editable .
+	pip install "bok @ git+ssh://git@gitlab-master.nvidia.com:12051/jdebache/bok.git"
 
 run-vllm:
 	docker run -it --gpus all \
@@ -47,8 +48,8 @@ run-vllm:
 		myimage-dblanaru 
 
 
-vllm-bench:
-	PYTHONPATH=. python3 benchmarks/benchmark_latency.py --model meta-llama/Llama-3.1-8B --enforce_eager --batch_size 1 --output_len 2 --num_iters 1 --num_iters_warmup 0
+vllm-sample:
+	PYTHONPATH=. python vllm_sample.py --model meta-llama/Llama-3.1-8B --enforce-eager --batch-size 3 --output-len 2 --num-iters 1 --num-iters-warmup 0 --prompts-file sample_prompts.txt
  
 
 build-model8b-edgar4:
