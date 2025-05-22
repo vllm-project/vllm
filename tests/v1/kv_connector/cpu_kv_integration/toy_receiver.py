@@ -53,11 +53,20 @@ def main():
                         
                         # Verify received data
                         num_elements = source_spec.get_size()
-                        received_data = allocator._buffer[paddr : paddr + num_elements]
-                        print(f"Received {num_elements} elements")
-                        print(f"First few values: {received_data[:10]}")
+                        received_data = allocator._buffer[paddr : paddr + num_elements]\
+                                .view(source_spec.dtype)\
+                                .reshape(source_spec.tensor_shape)
+                        print(f"Received layer {source_spec.layer_id} tokens "
+                              f"{source_spec.start} - {source_spec.stop} of request "
+                              f"{source_spec.request_id}")
+                        print(f"The shape is {received_data.shape}")
+                        print(f"The digest is {received_data.mean()}")
+                        allocator.free(vaddr)
                 
-                time.sleep(0.001)  # Small sleep to prevent busy waiting
+
+                print("Allocator high/low watermark:", allocator.high_watermark,
+                        allocator.low_watermark)
+                time.sleep(1)  # Small sleep to prevent busy waiting
                 
         except KeyboardInterrupt:
             print("\nShutting down receiver...")

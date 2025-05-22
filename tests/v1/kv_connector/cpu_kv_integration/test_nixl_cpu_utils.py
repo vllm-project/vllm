@@ -184,7 +184,8 @@ def run_sender_with_protocol(buffer_config, host, base_port, rank, receiver_read
             start=0,
             stop=16,  # Assuming we want to send 16 tokens
             shape=(2, 1, 16, 8, 128),  # Example shape 
-            dtype_str="bfloat16"  # Example dtype
+            dtype_str="bfloat16",  # Example dtype
+            num_all_tokens=16,
         )
         
         # Prepare send and wait for completion

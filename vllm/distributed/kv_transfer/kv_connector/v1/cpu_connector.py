@@ -21,7 +21,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.cpu_connector_utils import (
     SourceSpec, DestinationSpec)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_cpu_utils import (
-    NixlSendTask, NixlKVSender)
+    NixlSendTask, NixlPrefillManager, NixlDecodeManager)
 
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
@@ -107,7 +107,10 @@ class PrefillRequestTracker:
     # Request id
     req_id: str
 
-    # Total number of tokens that are in this request
+    # Total number of tokens in the "full request"
+    num_all_tokens: int = 0
+
+    # Total number of tokens that are already seen until this step 
     num_total_tokens: int = 0
 
     # Number of tokens that are already saved
@@ -135,6 +138,7 @@ class PrefillRequestTracker:
 
         return PrefillRequestTracker(
             req_id=new_request.req_id,
+            num_all_tokens=len(new_request.prompt_token_ids),
             num_total_tokens = num_tokens_to_compute,
             num_saved_tokens=0,
             allocated_block_ids=unfolded_block_ids,
@@ -172,6 +176,8 @@ class PrefillReqMeta:
     skip_leading_tokens: int
     # Skip last N tokens
     skip_trailing_tokens: int
+    # The number of tokens in the "full request"
+    num_all_tokens: int
 
     @staticmethod
     def from_request_tracker(
@@ -222,12 +228,18 @@ class PrefillReqMeta:
             token_range=token_range,
             skip_leading_tokens=skip_leading_tokens,
             skip_trailing_tokens=skip_trailing_tokens,
+            num_all_tokens=request_tracker.num_all_tokens,
         )
 
 
 @dataclass
 class DecodeReqMeta:
-    pass
+    # Request id
+    req_id: str
+    # Allocated block ids
+    block_ids: list[int]
+    # Skip the first N tokens 
+    skip_leading_tokens: int
 
 @dataclass
 class CPUConnectorMetadata(KVConnectorMetadata):
@@ -271,10 +283,14 @@ class CPUConnector(KVConnectorBase_V1):
         self._block_size = vllm_config.cache_config.block_size
 
         if role == KVConnectorRole.SCHEDULER:
-            pass
+            self._kv_receiver = NixlDecodeManager(
+                    1024 * 1024 * 1024, # 1GB for debug
+                    "localhost",
+                    54321, # Changed from string to int to match the class definition
+                )
         elif role == KVConnectorRole.WORKER:
             # Prefiller side sender
-            self._kv_sender = NixlKVSender(1024 * 1024 * 1024) # 1GB for debug
+            self._kv_sender = NixlPrefillManager(1024 * 1024 * 1024) # 1GB for debug
 
         # request_id -> prefill request trackers
         self._prefill_reqs: dict[str, PrefillRequestTracker] = {}
@@ -290,6 +306,10 @@ class CPUConnector(KVConnectorBase_V1):
 
         # prefill offload tasks
         self._inflight_copy_tasks: list[NixlSendTask] = []
+
+        # Decode request id to prefill request id mapping
+        self._decode_req_id_to_prefill_req_id: dict[str, str] = {}
+
 
     
     ############################################################
@@ -346,7 +366,21 @@ class CPUConnector(KVConnectorBase_V1):
     def get_num_new_matched_tokens(
             self, request: "Request",
             num_computed_tokens: int) -> tuple[int, bool]:
-        return 0, False
+        kv_transfer_params = request.kv_transfer_params
+        num_tokens = len(request.prompt_token_ids)
+        request_id = request.request_id
+        if "prefill_request_id" not in kv_transfer_params:
+            logger.warning("Request %s does not have prefill_request_id", request.req_id)
+            #return 0, False
+
+            logger.warning("NOW DEBUGGING SET THE REQUEST TO HAVE A PREFILL ID")
+            # Set the prefill_request_id to the request id
+            # This is a temporary fix to make the code work
+            self._decode_req_id_to_prefill_req_id[request_id] = request.request_id
+            return num_tokens, True
+        prefill_request_id = kv_transfer_params["prefill_request_id"]
+        self._decode_req_id_to_prefill_req_id[request_id] = prefill_request_id
+        return num_tokens, True
 
     def update_state_after_alloc(
             self,
@@ -354,6 +388,7 @@ class CPUConnector(KVConnectorBase_V1):
             blocks: "KVCacheBlocks",
             num_external_tokens: int) -> None:
         print("In update_state_after_alloc")
+        breakpoint()
         pass
 
     def build_connector_meta(
@@ -454,7 +489,6 @@ class CPUConnector(KVConnectorBase_V1):
         meta = self._get_connector_metadata()
         assert isinstance(meta, CPUConnectorMetadata), \
                 "Connector metadata is not of type CPUConnectorMetadata"
-
         assert self._kv_sender is not None
 
         for prefill_req in meta.prefill_meta:
@@ -465,7 +499,8 @@ class CPUConnector(KVConnectorBase_V1):
                 start=prefill_req.token_range.start,
                 stop=prefill_req.token_range.stop,
                 shape=tuple(self._get_kv_shape(len(prefill_req.blocks_to_save))),
-                dtype_str=str(kv_layer.dtype).split('.')[-1]  # Convert torch.float32 -> "float32"
+                dtype_str=str(kv_layer.dtype).split('.')[-1],  # Convert torch.float32 -> "float32"
+                num_all_tokens=prefill_req.num_all_tokens,
             )
 
             # Create a destination spec
@@ -501,8 +536,10 @@ class CPUConnector(KVConnectorBase_V1):
 
             self._inflight_copy_tasks.append(task)
 
-        # Check the task states and send the tasks
-        self._kv_sender.progress()
+        # TODO(ApostaC): Potential optimizations
+        # 1. coalesce the d2h page copy to a single call
+        # 2. use a single cuda event instead of a list of cuda events
+
 
 
     @_lmcache_nvtx_annotate
@@ -514,12 +551,12 @@ class CPUConnector(KVConnectorBase_V1):
 
         This prevents overwrites of paged KV buffer before saving done.
         """
+        # Check the task states and send the tasks
         for task in self._inflight_copy_tasks:
             if task.cuda_event is not None:
                 task.cuda_event.synchronize()
+        self._kv_sender.progress()
         self._inflight_copy_tasks.clear()
-
-        self._kv_sender.wait_for_all_tasks()
 
     def get_finished(
         self, finished_req_ids: set[str]
@@ -535,3 +572,14 @@ class CPUConnector(KVConnectorBase_V1):
             call to this method (this call or a prior one).
         """
         return None, None
+
+    def close(self):
+        """
+        Block until all the transfers are done. This is called
+        as the forward context exits to ensure that the async saving
+        from save_kv_layer is complete before finishing the forward.
+
+        This prevents overwrites of paged KV buffer before saving done.
+        """
+        if hasattr(self, "_kv_sender") and self._kv_sender is not None:
+            self._kv_sender.close()

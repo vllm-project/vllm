@@ -80,6 +80,9 @@ class SourceSpec(msgspec.Struct):
     # The dtype of the offloaded KV cache tensor as a string
     dtype_str: str
 
+    # The total number of tokens in the "full request"
+    num_all_tokens: int
+
     @property
     def token_range(self) -> slice:
         """Get the token range as a slice object."""
@@ -104,6 +107,14 @@ class SourceSpec(msgspec.Struct):
                 f"layer_id={self.layer_id}, "
                 f"token_range={self.token_range}, shape={self.tensor_shape})")
 
+@dataclass
+class DecoderKVSpec:
+    # Start index of the KV cache (inclusive)
+    start: int
+    # Stop index of the KV cache (exclusive)
+    stop: int
+    # The shape of the KV cache
+    buffer: torch.Tensor
 
 
 @dataclass
@@ -233,15 +244,20 @@ class KVSenderInterface(ABC):
 
         new_task_list = []
 
+        num_sent = 0
+        num_freed = 0
         for task in self._send_tasks:
             should_add = True
 
             if task.is_ready() and not task.is_sending():
                 self.send_task(task)
+                task.mark_sending()
+                num_sent += 1
 
             if task.is_done():
                 self.free_task(task)
                 should_add = False
+                num_freed += 1
 
             if should_add:
                 new_task_list.append(task)
@@ -250,6 +266,8 @@ class KVSenderInterface(ABC):
 
         # Update after going through all send tasks
         self.post_progress_hook()
+
+        logger.info("KVSender progress: sent %d, freed %d", num_sent, num_freed)
 
     ######################################################
     # Abstract methods (to be implemented by subclasses) #

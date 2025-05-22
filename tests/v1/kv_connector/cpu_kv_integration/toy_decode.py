@@ -19,7 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl_cpu_utils import (
 if __name__ == "__main__":
 
     context = "Hi " * 1000
-    context2 = "Hey " * 1000
+    context2 = "Hi" * 1000
     context3 = "Hello " * 1000 
     context4 = "How " * 1000
     prompts = [
@@ -36,7 +36,7 @@ if __name__ == "__main__":
               gpu_memory_utilization=0.8,
               kv_transfer_config=KVTransferConfig(
                     kv_connector = "CPUConnector",
-                    kv_role = "kv_producer",
+                    kv_role = "kv_consumer",
                     kv_connector_extra_config = {},
                   ),
               load_format="dummy",

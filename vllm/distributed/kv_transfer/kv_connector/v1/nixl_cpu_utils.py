@@ -20,7 +20,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.kv_transfer.kv_connector.v1.cpu_connector_utils import (
-        SendTask, KVSenderInterface, SourceSpec, DestinationSpec, 
+        SendTask, KVSenderInterface, SourceSpec, DestinationSpec, DecoderKVSpec,
         SendTaskState)
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
@@ -50,6 +50,8 @@ except ImportError:
 ###################################################################
 # Helper classes and functions
 ###################################################################
+
+DEFAULT_NIXL_PAGE_SIZE = 4096
 
 def init_nixl_agent(
     buffer_size: int,
@@ -179,6 +181,29 @@ class RingBufferAllocator:
                 # No space available
                 return -1, None
 
+    def view_as_tensor(self, vaddr: int, 
+                       dtype: torch.dtype, shape: torch.Size) -> torch.Tensor:
+        """View the buffer as a tensor.
+        Args:
+            vaddr (int): The virtual address of the buffer.
+            dtype (torch.dtype): The data type of the tensor.
+            shape (torch.Size): The shape of the tensor.
+        Returns:
+            torch.Tensor: The tensor view of the buffer.
+        """
+        assert vaddr % self._align_to == 0, \
+            "Virtual address is not aligned to the alignment size"
+
+        paddr = self.virtual_to_physical(vaddr)
+        size = shape.numel() * dtype.itemsize
+        assert paddr + size <= self._size, \
+            "Physical address is out of bounds"
+
+        # Get the tensor
+        return self._buffer[paddr:paddr + size].view(dtype).view(shape)
+
+
+
     def free(self, address: int) -> None:
         """Free the buffer at the given address.
 
@@ -187,7 +212,7 @@ class RingBufferAllocator:
                 which is returned by the allocate() method.
         """
         assert address in self._allocated, \
-                "Address not found in allocated buffers"
+                f"Address {address} not found in allocated buffers"
 
         # Pop the address from the allocated dict, and update the 
         # low watermark
@@ -423,7 +448,6 @@ class NixlCPUSender:
         )
 
         self._nixl_wrapper.transfer(handle)
-        logger.info("Start trasnfer of the request %s", req_uuid)
 
         return handle
 
@@ -556,6 +580,16 @@ class NixlCPUSender:
             logger.debug("Successfully completed handshake with %s", 
                          destination_spec)
 
+    def close(self) -> None:
+        if self._reg_dlist is not None:
+            self._nixl_wrapper.deregister_memory(self._reg_dlist)
+        for agent in self._remote_agents.values():
+            self._nixl_wrapper.remove_remote_agent(agent)
+        if self._local_xfer_handlers is not None:
+            self._nixl_wrapper.release_dlist_handle(self._local_xfer_handlers)
+        for remote_xfer_handler in self._remote_xfer_handlers.values():
+            self._nixl_wrapper.release_dlist_handle(remote_xfer_handler)
+        del self._nixl_wrapper
 
 class NixlCPUReceiver:
     def __init__(
@@ -607,8 +641,6 @@ class NixlCPUReceiver:
             for msg in notifs[remote_agent_name]:
                 # Decode the messag
                 obj = self._msg_decoder.decode(msg)
-                logger.info("Received message from %s: %s %s", 
-                            remote_agent_name, obj.msg_type, obj.req_uuid)
                 if obj.msg_type == "REQMSG":
                     # Add the request to the pending allocation
                     self._pending_allocation[obj.req_uuid] = (obj.source_spec,
@@ -641,7 +673,7 @@ class NixlCPUReceiver:
 
             vaddr, buffer = self._allocator.allocate(requested_size)
             if vaddr == -1:
-                logger.info("No space available for request %s", req_uuid)
+                #logger.debug("No space available for request %s", req_uuid)
                 # No space available, skip all the requests
 
                 # NOTE: an alternative is to try allocation for other requests
@@ -652,7 +684,6 @@ class NixlCPUReceiver:
             # Add the request to the inflight requests
             self._inflight_requests[req_uuid] = source_spec
             self._inflight_request_vaddr[req_uuid] = vaddr
-            logger.info("Adding %s to inflight requests", req_uuid)
 
             # Send back the ready message
             paddr = self._allocator.virtual_to_physical(vaddr)
@@ -765,6 +796,11 @@ class NixlCPUReceiver:
             self._handshake_listener_t.join()
             self._handshake_listener_t = None
 
+    def close(self):
+        self.stop_handshake_listener()
+        self._nixl_wrapper.deregister_memory(self._reg_dlist)
+        del self._nixl_wrapper
+
 
 @contextlib.contextmanager
 def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
@@ -834,7 +870,7 @@ class NixlSendTask(SendTask):
                 self.state.send_done = True
 
 
-class NixlKVSender(KVSenderInterface):
+class NixlPrefillManager(KVSenderInterface):
     """NixlSendTask is an implementation of KVSenderInterface that provides a
     ring buffer allocator for managing pin memory allocation and deallocation,
     with NIXL for sending data.
@@ -842,7 +878,7 @@ class NixlKVSender(KVSenderInterface):
 
     def __init__(self, buffer_size: int) -> None: 
         super().__init__()
-        nixl_page_size = 4096
+        nixl_page_size = DEFAULT_NIXL_PAGE_SIZE
         self._buffer_size = buffer_size
         self._allocator = RingBufferAllocator(self._buffer_size,
                                               nixl_page_size)
@@ -928,7 +964,8 @@ class NixlKVSender(KVSenderInterface):
         pass
 
     def wait_for_all_tasks(self) -> None:
-        """Wait for all tasks to finish.
+        """Wait for all tasks to finish. Mainly for debug, test,
+        and offline inferences.
         """
         # Wait for all tasks to finish
         tasks = self.get_send_tasks()
@@ -937,3 +974,194 @@ class NixlKVSender(KVSenderInterface):
             time.sleep(1)
             tasks = self.get_send_tasks()
             logger.info("Still waiting for %d tasks to finish", len(tasks))
+
+    def close(self):
+        self.wait_for_all_tasks()
+        self._nixl_sender.close()
+
+class NixlDecodeManager:
+    def __init__(self, 
+                 buffer_size: int,
+                 host: str,
+                 port: int) -> None:
+        self.nixl_page_size = DEFAULT_NIXL_PAGE_SIZE
+        self._buffer_size = buffer_size
+        self._allocator = RingBufferAllocator(self._buffer_size,
+                                              self.nixl_page_size)
+        self._nixl_receiver = NixlCPUReceiver(self._allocator, 
+                                              self.nixl_page_size)
+        self._nixl_receiver.start_handshake_listener(host, port)
+
+
+        # How many tokens are received for each request, each layer
+        # (p_request_id, layer_id) -> num_tokens
+        self._received_tokens: dict[str, dict[int, int]] = {}
+
+        # How many tokens are expected for each request
+        # p_request_id -> num_tokens
+        self._expected_tokens: dict[str, int] = {}
+
+        # The detailed specs of the requests
+        # (p_request_id, layer_id) -> (SourceSpec, vaddr)
+        self._request_specs: dict[tuple(str, int), 
+                                  list[tuple(SourceSpec, int)]] = {}
+
+        # Metadata
+        self.rank = get_tensor_model_parallel_rank()
+        self.world_size = get_tensor_model_parallel_world_size()
+        self.tp_group = get_tp_group()
+
+        # Multi process receiving check
+        # p_request_id -> number of ready workers
+        self._done_receiving_count: defaultdict[str, int] = defaultdict(lambda: 0)
+
+    def _check_receive_and_update(self):
+        """Checks the KV cache receiving status and update the internal
+        states
+        """
+        finished_list = self._nixl_receiver.get_finished(clear = True)
+        for source_spec, vaddr in finished_list:
+            # Get the request id and layer id
+            p_request_id = source_spec.request_id
+            layer_id = source_spec.layer_id
+            num_received_tokens = source_spec.stop - source_spec.start
+
+            if p_request_id not in self._expected_tokens:
+                self._expected_tokens[p_request_id] = source_spec.num_all_tokens
+
+            # Update the received tokens
+            if p_request_id not in self._received_tokens:
+                self._received_tokens[p_request_id] = {}
+            if layer_id not in self._received_tokens[p_request_id]:
+                self._received_tokens[p_request_id][layer_id] = 0
+            self._received_tokens[p_request_id][layer_id] += num_received_tokens
+
+            # Update received specs
+            if (p_request_id, layer_id) not in self._request_specs:
+                self._request_specs[(p_request_id, layer_id)] = []
+            self._request_specs[(p_request_id, layer_id)].append(
+                (source_spec, vaddr)
+            )
+
+    def progress(self) -> None:
+        """Process the received requests and the data. Updates the internal
+        status and respond to the allocation requests.
+        """
+        self._nixl_receiver.progress()
+
+    def get_finished(self, num_expected_layers: int) -> list[str]:
+        """Get the prefill node request_ids of the requests that finishes 
+        receiving (which means the KV caches of all tokens and all layers 
+        are in CPU memory)
+
+        Returns:
+            list[str]: A list of prefill-side request ids.
+        """
+        ready_requests = []
+        self._check_receive_and_update()
+        for p_request_id in self._expected_tokens:
+            expected_tokens = self._expected_tokens[p_request_id]
+            assert p_request_id in self._received_tokens
+            # check if all the layers are there
+            if len(self._received_tokens[p_request_id]) != num_expected_layers:
+                continue
+            # check if all the tokens are there
+            ready = True
+            for layer_id in self._received_tokens[p_request_id]:
+                received_tokens = self._received_tokens[p_request_id][layer_id]
+                if received_tokens != expected_tokens:
+                    ready = False
+                    break
+            if ready:
+                ready_requests.append(p_request_id)
+
+        if self.world_size == 1:
+            return ready_requests
+
+        # For multi-process 
+        if self.rank == 0:
+            for p_request_id in ready_requests:
+                self._done_receiving_count[p_request_id] += 1
+
+            other_ranks_finished_ids: list[str] = []
+            for i in range(1, self.world_size):
+                other_ranks_finished_ids.extend(
+                        self.tp_group.recv_object(src=i))
+            for p_request_id in other_ranks_finished_ids:
+                self._done_receiving_count[p_request_id] += 1
+
+            all_done_recving: list[str]
+            for p_request_id in self._done_receiving_count:
+                if self._done_receiving_count[p_request_id] == \
+                        self.world_size:
+                    all_done_recving.append(p_request_id)
+                    self._done_receiving_count.pop(p_request_id)
+            return all_done_recving
+        else:
+            self.tp_group.send_object(ready_requests, dst=0)
+            return ready_requests
+
+    def _create_decoder_kv_spec(self, 
+                                source_spec: SourceSpec,
+                                vaddr: int) -> DecoderKVSpec:
+        """Create a DecoderKVSpec from the source spec and the virtual address.
+        """
+        # Get the correct buffer
+        return DecoderKVSpec(
+            start = source_spec.start,
+            stop = source_spec.stop,
+            buffer = self._allocator.view_as_tensor(
+                vaddr, source_spec.dtype, source_spec.tensor_shape)
+        )
+
+
+    def get_kv_specs(self, 
+                     p_request_id: str,
+                     layer_id: int) -> list[DecoderKVSpec]:
+        """Get the KV specs for the given request id and layer id, which 
+        will be used for connector to load the KV back to CPU
+
+        Args:
+            p_request_id (str): The original request id from prefiller.
+            layer_id (int): The layer id of the request.
+        """
+        ret = []
+        if (p_request_id, layer_id) not in self._request_specs:
+            logger.warning("Request %s not found in request specs", 
+                           (p_request_id, layer_id))
+            return ret
+
+        for source_spec, vaddr in self._request_specs[(p_request_id, layer_id)]:
+            # Create the decoder kv spec
+            decoder_kv_spec = self._create_decoder_kv_spec(source_spec, vaddr)
+            ret.append(decoder_kv_spec)
+
+        return ret
+
+    def free_request(self, p_request_id):
+        """Free the request's memory with the given request id.
+
+        Args:
+            p_request_id (str): The original request id from prefiller.
+        """
+        # Free the memory and clear the internal states
+        self._expected_tokens.pop(p_request_id, None)
+        rcv_tokens = self._received_tokens.pop(p_request_id, None)
+        if rcv_tokens is not None:
+            for layer_id in rcv_tokens:
+                assert (p_request_id, layer_id) in self._request_specs, \
+                    "Found received tokens but no request specs"
+
+                # Free the memory
+                for src_spec, vaddr in self._request_specs[(p_request_id, layer_id)]:
+                    self._allocator.free(vaddr)
+
+                # Clear the request specs
+                self._request_specs.pop((p_request_id, layer_id), None)
+
+        else:
+            logger.warning("Request %s not found in received tokens", 
+                           p_request_id)
+
+    def close(self):
+        self._nixl_receiver.close()
