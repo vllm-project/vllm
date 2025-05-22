@@ -59,6 +59,7 @@ steps:
   - pytest -v -s async_engine # AsyncLLMEngine
   - NUM_SCHEDULER_STEPS=4 pytest -v -s async_engine/test_async_llm_engine.py
   - pytest -v -s test_inputs.py
+  - pytest -v -s test_outputs.py
   - pytest -v -s multimodal
   - pytest -v -s test_utils.py # Utils
   - pytest -v -s worker # Worker
