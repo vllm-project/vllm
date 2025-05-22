@@ -517,8 +517,7 @@ class NixlConnectorWorker:
             for cache in cache_list:
                 base_addr = cache.data_ptr()
                 region_len = self.num_blocks * self.block_len
-                caches_data.append(
-                    (base_addr, region_len, self.unique_rank, ""))
+                caches_data.append((base_addr, region_len, self.rank, ""))
                 kv_caches_base_addr.append(base_addr)
         self.kv_caches_base_addr[self.engine_id] = kv_caches_base_addr
         self.num_regions = len(caches_data)
@@ -592,10 +591,12 @@ class NixlConnectorWorker:
             for block_id in range(self.num_blocks):
                 block_offset = block_id * self.block_len
                 # (addr, len, device id)
-                blocks_data.append((base_addr + block_offset, self.block_len,
-                                    self.unique_rank))
-        logger.debug("Created %s blocks for src engine %s and TP rank %s",
-                     len(blocks_data), self.engine_id, self.unique_rank)
+                blocks_data.append(
+                    (base_addr + block_offset, self.block_len, self.rank))
+        logger.debug(
+            "Created %s blocks for src engine %s rank %s \
+                      and TP rank %s", len(blocks_data), self.engine_id,
+            self.rank, self.unique_rank)
 
         # Register with NIXL.
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, "VRAM")
@@ -609,8 +610,8 @@ class NixlConnectorWorker:
             for block_id in range(nixl_agent_meta.num_blocks):
                 block_offset = block_id * self.block_len
                 # (addr, len, device id)
-                blocks_data.append((base_addr + block_offset, self.block_len,
-                                    self.unique_rank))
+                blocks_data.append(
+                    (base_addr + block_offset, self.block_len, self.rank))
         logger.debug("Created %s blocks for dst engine %s and TP rank %s",
                      len(blocks_data), engine_id, self.unique_rank)
 
