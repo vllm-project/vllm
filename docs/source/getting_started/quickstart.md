@@ -32,6 +32,15 @@ Another delightful way is to use `uv run` with `--with [dependency]` option, whi
 uv run --with vllm vllm --help
 ```
 
+You can also use [conda](https://docs.conda.io/projects/conda/en/latest/user-guide/getting-started.html) to create and manage Python environments. You can install `uv` to the conda environment through `pip` if you want to manage it within the environment.
+
+```console
+conda create -n myenv python=3.12 -y
+conda activate myenv
+pip install --upgrade uv
+uv pip install vllm --torch-backend=auto
+```
+
 :::{note}
 For more detail and non-CUDA platforms, please refer [here](#installation-index) for specific instructions on how to install vLLM.
 :::
