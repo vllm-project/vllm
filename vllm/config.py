@@ -222,8 +222,9 @@ def is_init_field(cls: ConfigType, name: str) -> bool:
 
 
 TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
-ModelDType = Literal["auto", "hybrid", "half", "float16", "bfloat16", "float", "float32"]
-
+ModelDType = Literal["auto", "hybrid", "half", "float16", "bfloat16", "float",
+                     "float32"]
+AttnDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 
 @config
 @dataclass
@@ -262,10 +263,12 @@ class ModelConfig:
     - "bfloat16" for a balance between precision and range.\n
     - "float" is shorthand for FP32 precision.\n
     - "float32" for FP32 precision."""
-    attn_dtype: Optional[Union[ModelDType, torch.dtype]] = None
+    attn_dtype: Union[AttnDType, torch.dtype] = "auto"
     """
     Data type for attention:
-    Default is the same as dtype, other data types can be manually specified.
+    - "auto" attn_dtype is the same as model dtype. \n
+    - Manually set attn_dtype, supporting 
+    "half", "float16", "bfloat16", "float", "float32". \n
     """
     seed: Optional[int] = None
     """Random seed for reproducibility. Initialized to None in V0, but
