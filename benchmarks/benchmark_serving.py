@@ -476,7 +476,7 @@ async def benchmark(
     )
     print(
         "{:<40} {:<10.2f}".format(
-            "Norm Output token throughput (tok/s):",metrics.norm_output_throughput
+            "Norm Output token throughput (tok/s):", metrics.norm_output_throughput
         )
     )
     print(
