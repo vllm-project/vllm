@@ -9,8 +9,11 @@ import triton.language as tl
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     get_config_dtype_str, try_get_optimal_moe_config)
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8)
 from vllm.model_executor.layers.fused_moe.utils import (_fp8_quantize,
-                                                        _resize_cache)
+                                                        _resize_cache,
+                                                        cdiv)
 
 
 @triton.jit
@@ -390,12 +393,15 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     """
 
     def __init__(self, max_num_tokens: Optional[int], world_size: int,
-                 dp_size: int, rank: int):
+                 dp_size: int, rank: int, use_fp8_w8a8: bool = False,
+                 block_shape: Optional[list[int]] = None):
         super().__init__()
         self.world_size = world_size
         self.dp_size = dp_size
         self.rank = rank
         self.max_num_tokens = max_num_tokens
+        self.use_fp8_w8a8 = use_fp8_w8a8
+        self.block_shape = block_shape
 
     def prepare(
         self,
@@ -419,6 +425,8 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 "apply_router_weight_on_input is only implemented for topk=1"
             a1.mul_(topk_weights.to(a1.dtype))
 
+        _, block_k = self.block_shape
+
         num_tokens, hidden_dim = a1.size()
         topk = topk_ids.size(1)
 
@@ -437,8 +445,17 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         b_a1 = torch.zeros(
             (num_local_experts, self.max_num_tokens, hidden_dim),
-            dtype=a1.dtype,
+            dtype=torch.float8_e4m3fn if self.use_fp8_w8a8 else a1.dtype,
             device=a1.device)
+
+        if self.use_fp8_w8a8:
+            k_tiles = (hidden_dim + block_k - 1) // block_k
+            b_a1_scale = torch.zeros(
+                (num_local_experts, self.max_num_tokens, k_tiles),
+                dtype=torch.float32,
+                device=a1.device)
+        else:
+            b_a1_scale = None
 
         first_expert = num_local_experts * self.rank
         last_expert = first_expert + num_local_experts
@@ -446,11 +463,19 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         for expert_id in range(first_expert, last_expert):
             topks = torch.any(topk_ids == expert_id, dim=1).flatten()
             rows = torch.count_nonzero(topks.flatten())
-            b_a1[expert_id -
-                 first_expert, :rows, :] = a1[:topks.numel()][topks]
-            tokens_per_expert[expert_id - first_expert] = rows
 
-        return b_a1, a1_scale, tokens_per_expert
+            rhs = a1[:topks.numel()][topks]
+            idx = expert_id - first_expert
+            if self.use_fp8_w8a8:
+                # TODO: use _fp8_quantize
+                b_a1[idx, :rows, :], tmp_scale = per_token_group_quant_fp8(rhs, block_k)
+                b_a1_scale[idx, :rows] = tmp_scale # inline?
+            else:
+                b_a1[idx, :rows, :] = rhs
+
+            tokens_per_expert[idx] = rows
+
+        return b_a1, b_a1_scale, tokens_per_expert
 
     def finalize(
         self,
@@ -529,66 +554,6 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace2 = max_num_tokens * num_dp * N
         return (workspace13, workspace2, a.dtype)
 
-    def native_w8a8_block_matmul(A: torch.Tensor,
-                                 B: torch.Tensor,
-                                 As: torch.Tensor,
-                                 Bs: torch.Tensor):
-        """This function performs matrix multiplication with block-wise
-        quantization using native torch.
-        It is agnostic to the input data type and can be used for both int8 and
-        fp8 data types.
-
-        It takes two input tensors `A` and `B` (int8) with scales `As` and
-        `Bs` (float32).
-        The output is returned in the specified `output_dtype`.
-        """
-        A = A.to(torch.float32)
-        B = B.to(torch.float32)
-        assert A.shape[-1] == B.shape[-1]
-        assert B.ndim == 2 and B.is_contiguous() and Bs.ndim == 2
-        assert self.block_shape is not None and len(self.block_shape) == 2
-        block_n, block_k = self.block_shape[0], self.block_shape[1]
-        assert (A.shape[-1] + block_k - 1) // block_k == As.shape[-1]
-        assert A.shape[:-1] == As.shape[:-1]
-
-        M = A.numel() // A.shape[-1]
-        N, K = B.shape
-        origin_C_shape = A.shape[:-1] + (N, )
-        A = A.reshape(M, A.shape[-1])
-        As = As.reshape(M, As.shape[-1])
-        n_tiles = (N + block_n - 1) // block_n
-        k_tiles = (K + block_k - 1) // block_k
-        assert n_tiles == Bs.shape[0]
-        assert k_tiles == Bs.shape[1]
-
-        C_shape = (M, N)
-        C = torch.zeros(C_shape, dtype=torch.float32, device=A.device)
-
-        A_tiles = [
-            A[:, i * block_k:min((i + 1) * block_k, K)] for i in range(k_tiles)
-        ]
-        B_tiles = [[
-            B[
-                j * block_n:min((j + 1) * block_n, N),
-                i * block_k:min((i + 1) * block_k, K),
-            ] for i in range(k_tiles)
-        ] for j in range(n_tiles)]
-        C_tiles = [
-            C[:, j * block_n:min((j + 1) * block_n, N)] for j in range(n_tiles)
-        ]
-        As_tiles = [As[:, i:i + 1] for i in range(k_tiles)]
-
-        for i in range(k_tiles):
-            for j in range(n_tiles):
-                a = A_tiles[i]
-                b = B_tiles[j][i]
-                c = C_tiles[j]
-                s = As_tiles[i] * Bs[j][i]
-                c[:, :] += torch.matmul(a, b.t()) * s
-
-        C = C.reshape(origin_C_shape).to(output_dtype)
-        return C
-
     def apply(
         self,
         hidden_states: torch.Tensor,
@@ -643,9 +608,6 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
             tmp = _resize_cache(workspace2, (num, N))
             if self.use_fp8_w8a8:
                 assert False # TBD
-                input = hidden_states[expert, :num, :] @ w1[expert].transpose(0, 1)
-                self.activation(activation, tmp, input)
-                out[expert, :num, :] = tmp @ w2[expert].transpose(0, 1)
             else:
                 input = hidden_states[expert, :num, :] @ w1[expert].transpose(0, 1)
                 self.activation(activation, tmp, input)
@@ -778,6 +740,8 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                             (E, num_tokens, N // 2))
         intermediate_cache3 = _resize_cache(workspace13, (E, num_tokens, K))
 
+        assert not self.use_fp8_w8a8 or a1q_scale is not None
+
         # MM1
         invoke_moe_batched_triton_kernel(A=hidden_states,
                                          B=w1,
@@ -804,20 +768,26 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         #assert not self.use_fp8_w8a8
         if self.use_fp8_w8a8:
             per_act_token = False
-            qintermediate_cache2 = torch.empty_like(intermediate_cache2,
+            qintermediate_cache2 = torch.zeros_like(intermediate_cache2,
                                                     dtype=torch.float8_e4m3fn)
-            if per_act_token:
-                scale_shape = (E, num_tokens, 1)
-            else:
-                scale_shape = (E, 1)
-            a2q_scale = torch.empty(scale_shape,
+            block_n = self.block_shape[0]
+            n_tiles = ((N // 2) + block_n - 1) // block_n
+            scale_shape = (E, num_tokens, n_tiles)
+            a2q_scale = torch.zeros(scale_shape,
                                     dtype=torch.float32,
                                     device=hidden_states.device)
             for e in range(E):
-                qintermediate_cache2[e], a2q_scale[e] = _fp8_quantize(
-                    intermediate_cache2[e, :expert_num_tokens[e]],
-                    a2_scale[e] if a2_scale is not None else None,
-                    per_act_token, self.block_shape)
+                num_tokens = expert_num_tokens[e]
+                if num_tokens > 0:
+                    #qintermediate_cache2[e], tmp_scale = _fp8_quantize(
+                    #    intermediate_cache2[e],
+                    #    a2_scale[e] if a2_scale is not None else None,
+                    #    per_act_token, self.block_shape)
+                    qintermediate_cache2[e, :num_tokens, :], tmp_scale = per_token_group_quant_fp8(
+                         intermediate_cache2[e, :num_tokens], block_n)
+                    #print(a2q_scale[e, :tmp_scale.shape[0]].shape)
+                    #print(tmp_scale.shape)
+                    a2q_scale[e, :tmp_scale.shape[0]] = tmp_scale
         else:
             qintermediate_cache2 = intermediate_cache2
             a2q_scale = a2_scale
