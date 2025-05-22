@@ -38,8 +38,8 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
 from vllm.v1.sample.tpu.metadata import TPUSupportedSamplingMetadata
 from vllm.v1.sample.tpu.sampler import Sampler as TPUSampler
 from vllm.v1.utils import bind_kv_cache
+from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
-from vllm.v1.worker.tpu_input_batch import CachedRequestState, InputBatch
 
 from .utils import sanity_check_mm_encoder_outputs
 
@@ -1455,9 +1455,9 @@ def _get_padded_num_reqs_with_upper_limit(x: int, upper_limit: int) -> int:
 
 def _get_token_paddings(min_token_size: int, max_token_size: int,
                         padding_gap: int) -> list[int]:
-    """Generate a list of padding size, starting from min_token_size,
+    """Generate a list of padding size, starting from min_token_size, 
     ending with a number that can cover max_token_size
-
+    
     If padding_gap == 0 then:
         increase 2X each time (exponential)
     else:
