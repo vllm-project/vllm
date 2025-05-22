@@ -73,14 +73,17 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             if VLLM_INVALID_TOKEN_ID not in proposals
         ]
 
-        (spec_indices, non_spec_indices, target_seq_group_metadata_list, num_scoring_tokens) = self._expand_batch(
+        (spec_indices, non_spec_indices, target_seq_group_metadata_list,
+         num_scoring_tokens) = self._expand_batch(
              seq_group_metadata_list=execute_model_req.seq_group_metadata_list,
              proposal_token_ids_list=proposal_token_ids_list_without_skips,
              proposal_lens_list=proposal_lens_list,
          )
 
         if keep_index is not None:
-            target_seq_group_metadata_list = [target_seq_group_metadata_list[i] for i in keep_index]
+            target_seq_group_metadata_list = [
+                target_seq_group_metadata_list[i] for i in keep_index
+            ]
         target_sampler_output = self._scorer_worker.execute_model(
             execute_model_req=execute_model_req.clone(
                 seq_group_metadata_list=target_seq_group_metadata_list))
