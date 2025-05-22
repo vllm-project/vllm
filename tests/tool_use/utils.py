@@ -88,7 +88,7 @@ CONFIGS: dict[str, ServerConfig] = {
         "meta-llama/Llama-4-Scout-17B-16E-Instruct",
         "arguments": [
             "--enforce-eager", "--no-enable-prefix-caching",
-            "--tool-call-parser", "pythonic", "--chat-template",
+            "--tool-call-parser", "llama4_pythonic", "--chat-template",
             str(VLLM_PATH /
                 "examples/tool_chat_template_llama4_pythonic.jinja"), "-tp",
             "4"
