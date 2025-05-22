@@ -14,8 +14,8 @@ class QuantMethod(IntEnum):
     # This allows interfacing with AITER QuantType Enum
     # without importing the QuantType from AITER globally.
 
-    # Note that these quantization methods are 
-    # supported in AITER package. However, 
+    # Note that these quantization methods are
+    # supported in AITER package. However,
     # not all are used in this module.
 
     NO = 0  # a16w16
