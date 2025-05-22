@@ -112,12 +112,12 @@ class RequestMetrics:
                             will include model forward, block/sync across
                             workers, cpu-gpu sync time and sampling time.
         spec_token_acceptance_counts: number of accepted speculative tokens at
-                                      each position; the first token is from 
+                                      each position; the first token is from
                                       the target model and is always accepted;
-                                      e.g., when it's [10, 8, 4, 2] for a req, 
+                                      e.g., when it's [10, 8, 4, 2] for a req,
                                       it means there were 10 forward passes in
-                                      total, and there were 8, 4, 2 accepted 
-                                      tokens at 1st, 2nd, 3rd speculation step. 
+                                      total, and there were 8, 4, 2 accepted
+                                      tokens at 1st, 2nd, 3rd speculation step.
     """
     arrival_time: float
     last_token_time: float
@@ -714,9 +714,9 @@ class SequenceGroup:
         trace_headers: OpenTelemetry trace headers.
         prompt_adapter_request: Prompt Adapter request.
         priority: User-defined priority of the request.
-        draft_size: The number of speculative tokens plus one from the target 
+        draft_size: The number of speculative tokens plus one from the target
                     model; equal to max number of tokens a step can generate
-                    for single-draft speculative decoding but larger than 
+                    for single-draft speculative decoding but larger than
                     that for multi-draft SD (currently not supported).
     """
 
@@ -1123,7 +1123,7 @@ class SequenceOutput(
             self.output_embed.shape if self.output_embed is not None else None
         return (f"SequenceOutput(parent_seq_id={self.parent_seq_id}, "
                 f"output_token={self.output_token}, "
-                f"output_embed.shape={output_embed_shape}"
+                f"output_embed.shape={output_embed_shape}, "
                 f"logprobs={self.logprobs})")
 
     def __eq__(self, other: object) -> bool:

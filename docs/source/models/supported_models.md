@@ -54,7 +54,7 @@ For a model to be compatible with the Transformers backend for vLLM it must:
 
 If the compatible model is:
 
-- on the Hugging Face Model Hub, simply set `trust_remote_code=True` for <project:#offline-inference> or `--trust-remode-code` for the <project:#openai-compatible-server>.
+- on the Hugging Face Model Hub, simply set `trust_remote_code=True` for <project:#offline-inference> or `--trust-remote-code` for the <project:#openai-compatible-server>.
 - in a local directory, simply pass directory path to `model=<MODEL_DIR>` for <project:#offline-inference> or `vllm serve <MODEL_DIR>` for the <project:#openai-compatible-server>.
 
 This means that, with the Transformers backend for vLLM, new models can be used before they are officially supported in Transformers or vLLM!
@@ -390,6 +390,11 @@ Specified using `--task generate`.
 - * `FalconMambaForCausalLM`
   * FalconMamba
   * `tiiuae/falcon-mamba-7b`, `tiiuae/falcon-mamba-7b-instruct`, etc.
+  * ✅︎
+  * ✅︎
+- * `FalconH1ForCausalLM`
+  * Falcon-H1
+  * `tiiuae/Falcon-H1-34B-Base`, `tiiuae/Falcon-H1-34B-Instruct`, etc.
   * ✅︎
   * ✅︎
 - * `GemmaForCausalLM`

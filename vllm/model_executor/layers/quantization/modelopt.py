@@ -192,7 +192,7 @@ class ModelOptNvFp4Config(QuantizationConfig):
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
-        return "nvfp4"
+        return "modelopt_fp4"
 
     @classmethod
     def get_supported_act_dtypes(cls) -> list[torch.dtype]:

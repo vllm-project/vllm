@@ -430,6 +430,15 @@ class HfRunner:
 
         return all_inputs
 
+    def get_prompt_embeddings(self, prompts: list[str]) -> list[torch.Tensor]:
+        all_inputs = self.get_inputs(prompts)
+        embeddings = []
+        for inputs in all_inputs:
+            input_ids = self.wrap_device(inputs)["input_ids"]
+            embedding = self.model.get_input_embeddings()(input_ids).squeeze(0)
+            embeddings.append(embedding)
+        return embeddings
+
     def classify(self, prompts: list[str]) -> list[str]:
         # output is final logits
         all_inputs = self.get_inputs(prompts)

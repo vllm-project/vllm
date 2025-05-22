@@ -338,13 +338,5 @@ class StablelmForCausalLM(nn.Module, SupportsPP):
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            # Models trained using ColossalAI may include these tensors in
-            # the checkpoint. Skip them.
-            skip_prefixes=[
-                "rotary_emb.inv_freq", "rotary_emb.cos_cached",
-                "rotary_emb.sin_cached"
-            ],
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
