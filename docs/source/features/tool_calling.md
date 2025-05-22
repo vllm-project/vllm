@@ -158,13 +158,13 @@ All Llama 3.1, 3.2 and 4 models should be supported.
 * `meta-llama/Llama-3.2-*`
 * `meta-llama/Llama-4-*`
 
-The tool calling that is supported is the [JSON based tool calling](https://llama.meta.com/docs/model-cards-and-prompt-formats/llama3_1/#json-based-tool-calling). For [pythonic tool calling](https://github.com/meta-llama/llama-models/blob/main/models/llama3_2/text_prompt_format.md#zero-shot-function-calling) introduced by the Llama-3.2 models, see the `pythonic` tool parser below.
+The tool calling that is supported is the [JSON based tool calling](https://llama.meta.com/docs/model-cards-and-prompt-formats/llama3_1/#json-based-tool-calling). For [pythonic tool calling](https://github.com/meta-llama/llama-models/blob/main/models/llama3_2/text_prompt_format.md#zero-shot-function-calling) introduced by the Llama-3.2 models, see the `pythonic` tool parser below. As for llama 4 models, it is recommended to use the `llama4_pythonic` tool parser.
 
 Other tool calling formats like the built in python tool calling or custom tool calling are not supported.
 
 Known issues:
 
-1. Parallel tool calls are not supported.
+1. Parallel tool calls are not supported for llama 3, but it is supported in llama 4 models.
 2. The model can generate parameters with a wrong format, such as generating
    an array serialized as string instead of an array.
 
@@ -177,11 +177,10 @@ images.
 
 Recommended flags: `--tool-call-parser llama3_json --chat-template {see_above}`
 
-VLLM also provides a JSON based chat template for Llama 4:
-* <gh-file:examples/tool_chat_template_llama4_json.jinja> - this is based on the "official" chat template for the Llama 4
-models, but tweaked so that it works better with vLLM.
+VLLM also provides a pythonic and JSON based chat template for Llama 4, but pythonic tool calling is recommended:
+* <gh-file:examples/tool_chat_template_llama4_pythonic.jinja> - this is based on the [official chat template](https://www.llama.com/docs/model-cards-and-prompt-formats/llama4/) for the Llama 4 models.
 
-For Llama 4 use `--tool-call-parser llama4_json examples/tool_chat_template_llama4_json.jinja`.
+For Llama 4 model, use `--tool-call-parser llama4_pythonic --chat-template examples/tool_chat_template_llama4_pythonic.jinja`.
 
 #### IBM Granite
 
