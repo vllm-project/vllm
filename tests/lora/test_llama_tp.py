@@ -11,7 +11,7 @@ from vllm import LLM
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 
-from ..utils import create_new_process_for_each_test, multi_gpu_test
+from ..utils import VLLM_PATH, create_new_process_for_each_test, multi_gpu_test
 
 MODEL_PATH = "meta-llama/Llama-2-7b-hf"
 
@@ -202,8 +202,9 @@ def test_serialize_and_deserialize_lora(tmp_path, sql_lora_files,
     suffix = "test"
     try:
         result = subprocess.run([
-            sys.executable, "examples/other/tensorize_vllm_model.py",
-            "--model", MODEL_PATH, "--lora-path", lora_path, "serialize",
+            sys.executable,
+            f"{VLLM_PATH}/examples/other/tensorize_vllm_model.py", "--model",
+            MODEL_PATH, "--lora-path", lora_path, "serialize",
             "--serialized-directory",
             str(tmp_path), "--suffix", suffix
         ],
