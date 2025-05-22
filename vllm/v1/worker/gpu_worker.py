@@ -183,7 +183,6 @@ class Worker(WorkerBase):
         _, total_gpu_memory = torch.cuda.mem_get_info()
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
-        # self.model_runner.profile_run()
         with memory_profiling(
                 self.baseline_snapshot,
                 weights_memory=self.model_runner.model_memory_usage) as result:
@@ -211,9 +210,9 @@ class Worker(WorkerBase):
         )[1] - torch.cuda.mem_get_info()[0]
         non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
         if non_torch_allocations > 0:
-            # note that result.non_torch_increase is not the same as
-            # non_torch_allocations result.non_torch_increase doesn't
-            # include the usage before baseline_snapshot or that of
+            # Note that `result.non_torch_increase` is not the same as
+            # `non_torch_allocations`. `result.non_torch_increase` doesn't
+            # include the usage before `baseline_snapshot` or that of
             # torch initialisation
             peak_memory += non_torch_allocations
 
