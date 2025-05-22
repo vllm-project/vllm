@@ -115,6 +115,26 @@ stages:
           cd .jenkins/lm-eval-harness && 
           PT_HPU_LAZY_MODE=1 
           bash run-tests.sh -c configs/models-fp8.txt -t 2
+  - name: test_gsm8k_fp8_bypass_inc
+    steps:
+      - name: gsm8k_fp8_llama4_scout_g3_tp2_compressed_tensor
+        flavor: g3.s
+        command: >-
+          cd .jenkins/lm-eval-harness && 
+          PT_HPU_LAZY_MODE=1 
+          bash run-tests.sh -c configs/models-fp8-compressedtensor.txt -t 2
+      - name: gsm8k_fp8_qwen3_30B_g3_tp1_block_scale_dynamic
+        flavor: g3
+        command: >-
+          cd .jenkins/lm-eval-harness && 
+          PT_HPU_LAZY_MODE=1 
+          bash run-tests.sh -c configs/models-fp8-blockfp8.txt -t 1
+      - name: gsm8k_fp8_qwen3_30B_g3_tp1_block_scale_dequant
+        flavor: g3
+        command: >-
+          cd .jenkins/lm-eval-harness && 
+          PT_HPU_LAZY_MODE=1 VLLM_HPU_FORCE_CHANNEL_FP8=0 
+          bash run-tests.sh -c configs/models-fp8-blockfp8.txt -t 1
   - name: test_gsm8k_mss
     steps:
       - name: gsm8k_small_g3_tp1_mss

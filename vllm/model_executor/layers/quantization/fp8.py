@@ -332,7 +332,8 @@ class Fp8LinearMethod(LinearMethodBase):
             assert self.quant_config.activation_scheme == "dynamic"
             size_k_first = False
             if current_platform.is_hpu():
-                layer = hpu_ops.fp8_block_linear_postprocess_weights(layer)
+                layer = hpu_ops.fp8_block_linear_postprocess_weights(
+                    layer, envs.VLLM_HPU_FORCE_CHANNEL_FP8)
                 return
             if current_platform.is_fp8_fnuz():
                 weight, weight_scale_inv, _ = \
@@ -423,16 +424,13 @@ class Fp8LinearMethod(LinearMethodBase):
         if self.block_quant:
             assert self.quant_config.weight_block_size is not None
             if current_platform.is_hpu():
-                return hpu_ops.apply_block_fp8_linear_hpu_dequant(
+                return hpu_ops.apply_block_fp8_linear_hpu(
                     input=x,
-                    weight=layer.weight,
+                    layer=layer,
                     block_size=self.quant_config.weight_block_size,
-                    weight_scale=layer.weight_scale_inv,
-                    input_scale=layer.input_scale,
                     bias=bias,
-                    original_M=layer.orig_M,
-                    original_N=layer.orig_N,
                     do_unpad=True,
+                    force_channel_fp8=envs.VLLM_HPU_FORCE_CHANNEL_FP8,
                 )
             return torch.ops.vllm.apply_w8a8_block_fp8_linear(
                 input=x,
@@ -444,6 +442,14 @@ class Fp8LinearMethod(LinearMethodBase):
                 cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
             )
 
+        if current_platform.is_hpu():
+            weight_scale = layer.weight_scale.transpose(0, 1)
+            return hpu_ops.apply_fp8_linear_hpu(input=x,
+                                                weight=layer.weight,
+                                                weight_scale=weight_scale,
+                                                input_scale=layer.input_scale,
+                                                bias=bias,
+                                                trans_B=False)
         return self.fp8_linear.apply(input=x,
                                      weight=layer.weight,
                                      weight_scale=layer.weight_scale,
@@ -628,7 +634,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         if self.block_quant:
             assert self.quant_config.activation_scheme == "dynamic"
             if current_platform.is_hpu():
-                layer = hpu_ops.fp8_block_moe_prepare_weights(layer)
+                import vllm_hpu_extension.ops as hpu_ops
+                layer = hpu_ops.fp8_block_moe_prepare_weights(
+                    layer, envs.VLLM_HPU_FORCE_CHANNEL_FP8)
                 return
             if current_platform.is_fp8_fnuz():
                 w13_weight, w13_weight_scale_inv, w13_input_scale = \
@@ -741,6 +749,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     layer.w13_input_scale.max(), requires_grad=False)
                 layer.w2_input_scale = torch.nn.Parameter(
                     layer.w2_input_scale.max(), requires_grad=False)
+            if current_platform.is_hpu():
+                import vllm_hpu_extension.ops as hpu_ops
+                layer = hpu_ops.fp8_channel_moe_prepare_weights(layer)
+                return
             if current_platform.is_fp8_fnuz():
                 # Normalize the weights and scales
                 w13_weight, w13_weight_scale, w13_input_scale = \
@@ -831,6 +843,23 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
     ) -> torch.Tensor:
+        if current_platform.is_hpu():
+            return self.forward_hpu(
+                layer,
+                x,
+                use_grouped_topk,
+                top_k,
+                router_logits,
+                renormalize,
+                topk_group=topk_group,
+                num_expert_group=num_expert_group,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+                custom_routing_function=custom_routing_function,
+                scoring_func=scoring_func,
+                e_score_correction_bias=e_score_correction_bias,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                activation=activation)
         from vllm.model_executor.layers.fused_moe import fused_experts
 
         topk_weights, topk_ids = FusedMoE.select_experts(
@@ -846,11 +875,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             e_score_correction_bias=e_score_correction_bias,
         )
 
-        if current_platform.is_hpu():
-            topk_ids = topk_ids.view(*x.shape[:-1], -1)
-            topk_weights = topk_weights.view(*x.shape[:-1], -1)
-            return layer.moe_op(x, topk_ids.to(torch.int64),
-                                topk_weights.to(x.dtype))
         if self.use_marlin:
             return torch.ops.vllm.fused_marlin_moe(
                 x,
@@ -885,6 +909,56 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             block_shape=self.quant_config.weight_block_size,
             allow_deep_gemm=self.allow_deep_gemm,
         )
+
+    def forward_hpu(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        use_grouped_topk: bool,
+        top_k: int,
+        router_logits: torch.Tensor,
+        renormalize: bool,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
+        activation: str = "silu",
+        **kwargs,
+    ):
+        input_shape = x.shape
+        x = x.view(-1, x.shape[-1])
+        if use_grouped_topk or custom_routing_function is not None:
+            topk_weights, topk_ids = FusedMoE.select_experts(
+                hidden_states=x,
+                router_logits=router_logits,
+                use_grouped_topk=use_grouped_topk,
+                top_k=top_k,
+                renormalize=renormalize,
+                topk_group=topk_group,
+                num_expert_group=num_expert_group,
+                custom_routing_function=custom_routing_function,
+                scoring_func=scoring_func,
+                e_score_correction_bias=e_score_correction_bias)
+        else:
+            import torch.nn.functional as F
+            topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
+            topk_weights, topk_ids = torch.topk(topk_weights, top_k, dim=-1)
+            topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
+            topk_weights = topk_weights.to(x.dtype)
+        topk_ids = topk_ids.view(*x.shape[:-1], -1)
+        topk_weights = topk_weights.view(*x.shape[:-1], -1)
+        output = layer.moe_op(
+            x,
+            topk_ids.to(torch.int64),
+            topk_weights.to(x.dtype),
+            permuted_weights=True,
+            activation=activation,
+        )
+        return output.view(*input_shape)
 
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):

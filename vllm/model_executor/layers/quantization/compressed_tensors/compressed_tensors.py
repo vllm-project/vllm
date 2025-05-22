@@ -32,6 +32,9 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.platforms import current_platform
 
+if current_platform.is_hpu():
+    import vllm_hpu_extension.ops as hpu_ops
+
 logger = init_logger(__name__)
 
 __all__ = ["CompressedTensorsLinearMethod"]
@@ -577,7 +580,14 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
         layer input.  See LinearMethodBase for param details
 
         """
-
+        if current_platform.is_hpu():
+            weight_scale = layer.weight_scale.transpose(0, 1)
+            return hpu_ops.apply_fp8_linear_hpu(input=x,
+                                                weight=layer.weight,
+                                                weight_scale=weight_scale,
+                                                input_scale=layer.input_scale,
+                                                bias=bias,
+                                                trans_B=False)
         scheme = layer.scheme
         if scheme is None:
             raise ValueError("A scheme must be defined for each layer")

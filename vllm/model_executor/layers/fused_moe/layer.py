@@ -538,26 +538,32 @@ class FusedMoE(torch.nn.Module):
         if is_hpu:
             num_experts = self.local_num_experts
             ep_shift = self.ep_rank * num_experts
-            from vllm_hpu_extension.ops import (VllmMixtureOfExpertsOp,
-                                                VllmMixtureOfExpertsOpFP8)
-
-            from vllm.model_executor.layers.quantization.fp8 import (
-                Fp8MoEMethod)
+            from vllm_hpu_extension.ops import (
+                VllmMixtureOfExpertsOp, VllmMixtureOfExpertsOpFP8,
+                VllmMixtureOfExpertsOpFP8PerChannel)
 
             experts_min, experts_max = ep_shift, num_experts + ep_shift - 1
-            if quant_config is not None and isinstance(self.quant_method,
-                                                       Fp8MoEMethod):
-                moe_op = VllmMixtureOfExpertsOpFP8(
-                    num_experts,
-                    experts_min,
-                    experts_max,
-                )
-            else:
+            if quant_config is None or isinstance(self.quant_method,
+                                                  UnquantizedFusedMoEMethod):
                 moe_op = VllmMixtureOfExpertsOp(
                     num_experts,
                     experts_min,
                     experts_max,
                 )
+            elif quant_config is not None:
+                if hasattr(quant_config, "weight_block_size"
+                           ) and not envs.VLLM_HPU_FORCE_CHANNEL_FP8:
+                    moe_op = VllmMixtureOfExpertsOpFP8(
+                        num_experts,
+                        experts_min,
+                        experts_max,
+                    )
+                else:
+                    moe_op = VllmMixtureOfExpertsOpFP8PerChannel(
+                        num_experts,
+                        experts_min,
+                        experts_max,
+                    )
             self.moe_op = moe_op
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
