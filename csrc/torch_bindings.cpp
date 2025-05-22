@@ -482,7 +482,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                   Tensor page_table, float scale) -> ()");
   ops.impl("cutlass_mla_decode", torch::kCUDA, &cutlass_mla_decode);
 
-
   // Compute NVFP4 block quantized tensor.
   ops.def(
       "scaled_fp4_quant(Tensor! output, Tensor input,"
