@@ -382,3 +382,7 @@ class RocmPlatform(Platform):
     @classmethod
     def is_navi(cls) -> bool:
         return 'gfx1' in torch.cuda.get_device_properties(0).gcnArchName
+
+    @classmethod
+    def get_piecewise_backend_cls(cls) -> str:
+        return "vllm.compilation.cuda_piecewise_backend.CUDAPiecewiseBackend"  # noqa
