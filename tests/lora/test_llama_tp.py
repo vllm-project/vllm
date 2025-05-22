@@ -191,11 +191,14 @@ def test_llama_lora_tp4_fully_sharded_loras(sql_lora_files):
 
 
 @create_new_process_for_each_test()
-def test_serialize_and_deserialize_lora(tmp_path, sql_lora_files,
-                                        sql_lora_huggingface_id):
+def test_tp2_serialize_and_deserialize_lora(tmp_path, sql_lora_files,
+                                            sql_lora_huggingface_id):
 
     # Run the tensorizing of the LoRA adapter and the model in a subprocess
     # to guarantee cleanup
+
+    tp_size = 2
+    model_name = "model-rank-%03d.tensors"
 
     model_ref = MODEL_PATH
     lora_path = sql_lora_huggingface_id
@@ -204,8 +207,8 @@ def test_serialize_and_deserialize_lora(tmp_path, sql_lora_files,
         result = subprocess.run([
             sys.executable,
             f"{VLLM_PATH}/examples/other/tensorize_vllm_model.py", "--model",
-            MODEL_PATH, "--lora-path", lora_path, "serialize",
-            "--serialized-directory",
+            MODEL_PATH, "--lora-path", lora_path, "--tensor-parallel-size",
+            str(tp_size), "serialize", "--serialized-directory",
             str(tmp_path), "--suffix", suffix
         ],
                                 check=True,
@@ -219,7 +222,7 @@ def test_serialize_and_deserialize_lora(tmp_path, sql_lora_files,
 
     print("STDOUT:\n", result.stdout)
 
-    model_uri = tmp_path / "vllm" / model_ref / suffix / "model.tensors"
+    model_uri = tmp_path / "vllm" / model_ref / suffix / model_name
     tensorizer_config = TensorizerConfig(tensorizer_uri=str(model_uri))
     tensorizer_config.lora_dir = tensorizer_config.tensorizer_dir
 
@@ -229,8 +232,8 @@ def test_serialize_and_deserialize_lora(tmp_path, sql_lora_files,
                             enforce_eager=True,
                             model_loader_extra_config=tensorizer_config,
                             max_num_seqs=13,
-                            max_loras=2,
-                            gpu_memory_utilization=0.3)
+                            tensor_parallel_size=2,
+                            max_loras=2)
 
     tensorizer_config_dict = tensorizer_config.to_dict()
 
