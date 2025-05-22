@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import math
 from dataclasses import dataclass
-from typing import Type
 
 import torch
 
@@ -23,7 +22,7 @@ class Mamba2Metadata:
     chunk_offsets: torch.Tensor
 
 
-def get_platform_metadata_classes() -> tuple[Type[AttentionMetadata], ...]:
+def get_platform_metadata_classes() -> tuple[type[AttentionMetadata], ...]:
     """Returns the appropriate metadata classes for the current platform."""
     if current_platform.is_rocm():
         from vllm.attention.backends.rocm_flash_attn import ROCmFlashAttentionMetadata
