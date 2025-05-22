@@ -89,6 +89,8 @@ class NixlConnector(KVConnectorBase_V1):
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
         assert vllm_config.kv_transfer_config is not None
         self.engine_id = str(uuid.uuid4())
+        logger.debug("Initializing NixlConnector with engine_id: %s, role: %s",
+                     self.engine_id, role)
 
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler : Optional[NixlConnectorScheduler] = \
@@ -435,24 +437,32 @@ class NixlConnectorWorker:
         # a hack to keep us moving. We will switch when moving to etcd
         # or where we have a single ZMQ socket in the scheduler.
         path = make_zmq_path("tcp", host, port + self.unique_rank)
-        logger.debug("Querying metadata on path: %s (unique rank: %s)", path,
-                     self.unique_rank)
-        with zmq_ctx(zmq.REQ, path) as sock:
-            # Send query for the request.
-            sock.send(GET_META_MSG)
-            metadata_bytes = sock.recv()
-            decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
-            metadata = decoder.decode(metadata_bytes)
-            got_metadata_time = time.perf_counter()
+        logger.debug(
+            "Attempting NIXL handshake with remote at %s (unique rank: %s)",
+            path, self.unique_rank)
+        try:
+            with zmq_ctx(zmq.REQ, path) as sock:
+                # Send query for the request.
+                logger.debug("Sending metadata request to remote")
+                sock.send(GET_META_MSG)
+                metadata_bytes = sock.recv()
+                decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
+                metadata = decoder.decode(metadata_bytes)
+                got_metadata_time = time.perf_counter()
+                logger.debug("Received remote metadata with engine_id: %s",
+                             metadata.engine_id)
 
-            # Register Remote agent.
-            self.add_remote_agent(metadata)
-            setup_agent_time = time.perf_counter()
+                # Register Remote agent.
+                self.add_remote_agent(metadata)
+                setup_agent_time = time.perf_counter()
 
-            logger.debug("NIXL handshake: get metadata took: %s",
-                         got_metadata_time - start_time)
-            logger.debug("NIXL handshake: add agent took: %s",
-                         setup_agent_time - got_metadata_time)
+                logger.debug("NIXL handshake: get metadata took: %s",
+                             got_metadata_time - start_time)
+                logger.debug("NIXL handshake: add agent took: %s",
+                             setup_agent_time - got_metadata_time)
+        except Exception as e:
+            logger.error("Failed during NIXL handshake: %s", str(e))
+            raise
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
@@ -556,9 +566,18 @@ class NixlConnectorWorker:
 
     def add_remote_agent(self, nixl_agent_meta: NixlAgentMetadata):
         engine_id = nixl_agent_meta.engine_id
+        logger.debug(
+            "Adding remote agent with engine_id: %s (current engine_id: %s)",
+            engine_id, self.engine_id)
+
         if engine_id in self._remote_agents:
+            logger.debug(
+                "Remote agent with engine_id %s already exists, skipping",
+                engine_id)
             return
 
+        logger.debug("Registering new remote agent with engine_id: %s",
+                     engine_id)
         self._remote_agents[engine_id] = self.nixl_wrapper.add_remote_agent(
             nixl_agent_meta.agent_metadata)
         self.kv_caches_base_addr[
@@ -761,7 +780,21 @@ class NixlConnectorWorker:
 
         # Get side handles.
         local_xfer_side_handle = self.src_xfer_side_handle
-        remote_xfer_side_handle = self.dst_xfer_side_handles[dst_engine_id]
+        logger.debug(
+            "Looking up dst_engine_id %s in dst_xfer_side_handles. " \
+            "Available keys: %s",
+            dst_engine_id, list(self.dst_xfer_side_handles.keys()))
+        try:
+            remote_xfer_side_handle = self.dst_xfer_side_handles[dst_engine_id]
+        except KeyError:
+            logger.error(
+                "Failed to find dst_engine_id %s in dst_xfer_side_handles. " \
+                "Available keys: %s",
+                dst_engine_id, list(self.dst_xfer_side_handles.keys()))
+            logger.error("Current engine_id: %s", self.engine_id)
+            logger.error("Remote agents registered: %s",
+                         list(self._remote_agents.keys()))
+            raise
 
         # Get descs ids.
         local_block_descs_ids: list[int] = []
