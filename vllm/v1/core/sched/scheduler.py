@@ -367,6 +367,14 @@ class Scheduler(SchedulerInterface):
                             self.connector.get_num_new_matched_tokens(
                                 request, num_native_computed_tokens))
 
+                        if request.request_id in self.finished_recving_kv_req_ids:  # noqa: E501
+                            logger.debug(
+                                "Request %s is in finished_recving_kv_req_ids" \
+                                "but still getting external tokens. "
+                                "num_external_tokens=%d, "
+                                "load_kv_async=%s", request.request_id,
+                                num_external_computed_tokens, load_kv_async)
+
                     # Total computed tokens (local + external).
                     num_computed_tokens = (num_native_computed_tokens +
                                            num_external_computed_tokens)
@@ -377,6 +385,9 @@ class Scheduler(SchedulerInterface):
 
                     # Total computed tokens (allocated in prior step).
                     num_computed_tokens = num_prealloc_computed_tokens
+                    logger.debug(
+                        "Using prealloc_computed_tokens request %s: %d tokens",
+                        request.request_id, num_prealloc_computed_tokens)
 
                 encoder_inputs_to_schedule = None
                 new_encoder_budget = encoder_budget
@@ -973,9 +984,13 @@ class Scheduler(SchedulerInterface):
 
         # Now that the blocks are ready, actually cache them.
         block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
+        logger.debug("Request %s KV transfer complete. Got %d block_ids",
+                     request.request_id, len(block_ids))
+
         num_computed_tokens = len(block_ids) * self.block_size
         if num_computed_tokens == request.num_tokens:
             num_computed_tokens -= 1
+
         self.kv_cache_manager.single_type_manager.cache_blocks(
             request,
             self.kv_cache_manager.req_to_block_hashes[request.request_id],
@@ -984,6 +999,9 @@ class Scheduler(SchedulerInterface):
 
         # Update the request state for scheduling.
         request.num_computed_tokens = num_computed_tokens
+        logger.debug(
+            "Request %s: cached %d tokens successfully, request.num_tokens=%d",
+            request.request_id, num_computed_tokens, request.num_tokens)
 
         # Return that we are ready.
         self.finished_recving_kv_req_ids.remove(request.request_id)
