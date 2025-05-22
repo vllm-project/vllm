@@ -732,7 +732,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         # M-RoPE requires mrope_positions even for plain text; return early
         # when mm_kwargs is empty only if inter_data.is_prompt is False.
-        if not mm_kwargs and (not inter_data.is_prompt):
+        if not mm_kwargs and not inter_data.is_prompt:
             return
 
         inter_data.multi_modal_kwargs = mm_kwargs
