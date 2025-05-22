@@ -43,7 +43,7 @@ class MultiModalHasher:
                 "ndarray", {
                     "dtype": obj.dtype.str,
                     "shape": obj.shape,
-                    "data": obj.data.tobytes(),
+                    "data": obj.tobytes(),
                 })
 
         logger.warning(
