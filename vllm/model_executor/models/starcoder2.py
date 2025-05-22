@@ -349,8 +349,7 @@ class Starcoder2ForCausalLM(nn.Module, SupportsPP):
             self,
             # Models trained using ColossalAI may include these tensors in
             # the checkpoint. Skip them.
-            skip_prefixes=([
-                "rotary_emb.inv_freq", "lm_head.weight"
-            ] if self.config.tie_word_embeddings else ["rotary_emb.inv_freq"]),
+            skip_prefixes=(["lm_head.weight"]
+                           if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)
