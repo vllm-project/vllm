@@ -9,6 +9,7 @@ import torch
 
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
+from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
@@ -19,6 +20,8 @@ from vllm.v1.sample.logits_processor import (LogitBiasLogitsProcessor,
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import BlockTable
+
+is_tpu = current_platform.is_tpu()
 
 _SAMPLING_EPS = 1e-5
 
