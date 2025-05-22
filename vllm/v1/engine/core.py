@@ -755,7 +755,7 @@ class DPEngineCoreProc(EngineCoreProc):
             local_unfinished_reqs = self.scheduler.has_unfinished_requests()
             if not executed:
                 if not local_unfinished_reqs and not self.engines_running:
-                    # All engines are idle. Note we may have waiting requests
+                    # All engines are idle.
                     continue
 
                 # We are in a running state and so must execute a dummy pass
