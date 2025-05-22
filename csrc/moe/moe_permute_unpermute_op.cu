@@ -171,5 +171,4 @@ bool moe_permute_unpermute_supported() {
 TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
   m.impl("moe_permute", &moe_permute);
   m.impl("moe_unpermute", &moe_unpermute);
-  m.impl("moe_permute_unpermute_supported", &moe_permute_unpermute_supported);
 }
