@@ -25,9 +25,9 @@ messages = [
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Client for vLLM API server")
-    parser.add_argument("--stream",
-                        action="store_true",
-                        help="Enable streaming response")
+    parser.add_argument(
+        "--stream", action="store_true", help="Enable streaming response"
+    )
     return parser.parse_args()
 
 
