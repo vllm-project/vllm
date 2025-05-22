@@ -52,13 +52,15 @@ class QuickAllreduce:
                  group: ProcessGroup,
                  device: Union[int, str, torch.device],
                  max_size=512 * 1024 * 1024,
-                 min_size=32 * 1024) -> None:
+                 min_size=128 * 1024) -> None:
         """
         Args:
             group: the process group to work on. If None, it will use the
                 default process group.
             device: the device to bind the QuickAllreduce to. If None,
                 it will be bind to f"cuda:{local_rank}".
+            max_size: max supported size.
+            min_size: Less than this size, custom_allreduce is better.
         It is the caller's responsibility to make sure each communicator
         is bind to a unique device, and all communicators in this group
         are in the same node.
@@ -168,24 +170,11 @@ class QuickAllreduce:
             return inp_size < self.max_size  # and inp_size > self.min_size
         return False
 
-    def all_reduce(self,
-                   inp: torch.Tensor,
-                   *,
-                   out: torch.Tensor = None,
-                   registered: bool = False):
-        """Performs an out-of-place all reduce.
-        
-        If registered is True, this assumes inp's pointer is already
-        IPC-registered. Otherwise, inp is first copied into a pre-registered
-        buffer.
-        """
+    def all_reduce(self, inp: torch.Tensor, *, out: torch.Tensor = None):
+        """Performs an out-of-place all reduce."""
         if out is None:
             out = torch.empty_like(inp)
-        if registered:
-            ops.all_reduce(self._ptr, inp, out, 0, 0)
-        else:
-            # print("qr")
-            ops.qr_all_reduce(self._ptr, envs.VLLM_QUICK_ALLREDUCE, inp, out)
+        ops.qr_all_reduce(self._ptr, envs.VLLM_QUICK_ALLREDUCE, inp, out)
         return out
 
     def quick_all_reduce(self, input: torch.Tensor) -> Optional[torch.Tensor]:
@@ -193,15 +182,8 @@ class QuickAllreduce:
         # When quick allreduce is disabled, this will be None.
         if self.disabled or not self.should_quick_ar(input):
             return None
-        if self._IS_CAPTURING:
-            if torch.cuda.is_current_stream_capturing():
-                return self.all_reduce(input, registered=True)
-            else:
-                # If warm up, mimic the allocation pattern since quick
-                # allreduce is out-of-place.
-                return torch.empty_like(input)
-        else:
-            return self.all_reduce(input, registered=False)
+
+        return self.all_reduce(input)
 
     def close(self):
         '''del self._ptr and del buffer'''

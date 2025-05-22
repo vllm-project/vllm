@@ -159,8 +159,6 @@ void DeviceComms::allreduce(int profile, hipStream_t stream, T const* A, T* B,
       break;
   }
 
-#endif
-
   // -------------------------------------------------
   // Rotate the flag color.
   flag_color++;
