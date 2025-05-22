@@ -4,11 +4,13 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.layers.quantization.awq import is_layer_skipped_awq
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 
 
 class AutoQuantConfig(QuantizationConfig):
@@ -24,12 +26,16 @@ class AutoQuantConfig(QuantizationConfig):
         zero_point: bool,
         from_float: bool,
         quant_mode: str,  # weight_only
+        lm_head_quantized: bool = False,
+        modules_to_not_convert: Optional[List[str]] = None
     ) -> None:
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.zero_point = zero_point
         self.from_float = from_float
         self.quant_mode = quant_mode
+        self.lm_head_quantized = lm_head_quantized
+        self.modules_to_not_convert = modules_to_not_convert or []
 
         if self.weight_bits != 4:
             raise ValueError(
@@ -42,7 +48,9 @@ class AutoQuantConfig(QuantizationConfig):
                 f"group_size={self.group_size}, "
                 f"zero_point={self.zero_point}, "
                 f"from_float={self.from_float}, "
-                f"quant_mode={self.quant_mode})")
+                f"quant_mode={self.quant_mode}, "
+                f"lm_head_quantized={self.lm_head_quantized}, "
+                f"modules_to_not_convert={self.modules_to_not_convert})")
 
     def get_name(self) -> str:
         return "auto_quant"
@@ -68,20 +76,22 @@ class AutoQuantConfig(QuantizationConfig):
         weight_bits = cls.get_from_keys(config, ["w_bit", "bits"])
         group_size = cls.get_from_keys(config, ["q_group_size", "group_size"])
         zero_point = cls.get_from_keys(config, ["zero_point"])
-        try:
-            from_float = cls.get_from_keys(config, ["from_float"])
-        except Exception:
-            from_float = False
-        try:
-            quant_mode = cls.get_from_keys(config, ["quant_mode"])
-        except Exception:
-            quant_mode = "weight_only"
-        return cls(weight_bits, group_size, zero_point, from_float, quant_mode)
+
+        from_float = cls.get_from_keys_or(config, ["from_float"], default=False)
+        quant_mode = cls.get_from_keys_or(config, ["quant_mode"], default="weight_only")
+        lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"], default=False)
+        modules_to_not_convert = cls.get_from_keys_or(
+            config, ["modules_to_not_convert"], None)
+        return cls(weight_bits, group_size, zero_point,
+                   from_float, quant_mode,
+                   lm_head_quantized, modules_to_not_convert)
 
     def get_quant_method(
             self, layer: torch.nn.Module, prefix: str) -> Optional["AutoQuantLinearMethod"]:
         from vllm.attention.layer import Attention
-        if isinstance(layer, LinearBase):
+        if (isinstance(layer, LinearBase) or (isinstance(layer, ParallelLMHead) and self.lm_head_quantized)):
+            if is_layer_skipped_awq(prefix, self.modules_to_not_convert):
+                return UnquantizedLinearMethod()
             return AutoQuantLinearMethod(self)
         elif isinstance(layer, Attention):
             return AutoQuantKVCacheMethod(self)
