@@ -82,6 +82,11 @@ llm = LLM(model="facebook/opt-125m")
 
 :::{note}
 By default, vLLM downloads models from [Hugging Face](https://huggingface.co/). If you would like to use models from [ModelScope](https://www.modelscope.cn), set the environment variable `VLLM_USE_MODELSCOPE` before initializing the engine.
+
+```shell
+export VLLM_USE_MODELSCOPE=True
+```
+
 :::
 
 Now, the fun part! The outputs are generated using `llm.generate`. It adds the input prompts to the vLLM engine's waiting queue and executes the vLLM engine to generate the outputs with high throughput. The outputs are returned as a list of `RequestOutput` objects, which include all of the output tokens.

@@ -59,6 +59,7 @@ steps:
   - pytest -v -s async_engine # AsyncLLMEngine
   - NUM_SCHEDULER_STEPS=4 pytest -v -s async_engine/test_async_llm_engine.py
   - pytest -v -s test_inputs.py
+  - pytest -v -s test_outputs.py
   - pytest -v -s multimodal
   - pytest -v -s test_utils.py # Utils
   - pytest -v -s worker # Worker
@@ -125,7 +126,7 @@ steps:
   - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
   - pytest -v -s entrypoints/llm/test_generate_multiple_loras.py # it needs a clean process
   - VLLM_USE_V1=0 pytest -v -s entrypoints/llm/test_guided_generate.py # it needs a clean process
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_oot_registration.py  --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/test_openai_schema.py
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_oot_registration.py  --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/correctness/
   - pytest -v -s entrypoints/test_chat_utils.py
   - VLLM_USE_V1=0 pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
 
@@ -138,6 +139,7 @@ steps:
   - vllm/core/
   - tests/distributed/test_utils
   - tests/distributed/test_pynccl
+  - tests/distributed/test_events
   - tests/spec_decode/e2e/test_integration_dist_tp4
   - tests/compile/test_basic_correctness
   - examples/offline_inference/rlhf.py
@@ -156,6 +158,7 @@ steps:
   - pytest -v -s distributed/test_utils.py
   - pytest -v -s compile/test_basic_correctness.py
   - pytest -v -s distributed/test_pynccl.py
+  - pytest -v -s distributed/test_events.py
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp4.py
   # TODO: create a dedicated test section for multi-GPU example tests
   # when we have multiple distributed example tests
