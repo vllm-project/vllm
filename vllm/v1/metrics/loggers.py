@@ -184,16 +184,34 @@ class PrometheusStatLogger(StatLoggerBase):
             documentation="GPU KV-cache usage. 1 means 100 percent usage.",
             labelnames=labelnames).labels(*labelvalues)
 
+        # Deprecated in 0.9 - Renamed as vllm:prefix_cache_queries
+        # TODO: in 0.10, only enable if show_hidden_metrics=True
         self.counter_gpu_prefix_cache_queries = self._counter_cls(
             name="vllm:gpu_prefix_cache_queries",
-            documentation=
-            "GPU prefix cache queries, in terms of number of queried tokens.",
+            documentation=(
+            "GPU prefix cache queries, in terms of number of queried tokens."
+            "DEPRECATED: Use vllm:prefix_cache_queries instead."),
             labelnames=labelnames).labels(*labelvalues)
 
+        # Deprecated in 0.9 - Renamed as vllm:prefix_cache_hits
+        # TODO: in 0.10, only enable if show_hidden_metrics=True
         self.counter_gpu_prefix_cache_hits = self._counter_cls(
             name="vllm:gpu_prefix_cache_hits",
-            documentation=
-            "GPU prefix cache hits, in terms of number of cached tokens.",
+            documentation=(
+            "GPU prefix cache hits, in terms of number of cached tokens."
+            "DEPRECATED: Use vllm:prefix_cache_hits instead."),
+            labelnames=labelnames).labels(*labelvalues)
+
+        self.counter_prefix_cache_queries = self._counter_cls(
+            name="vllm:prefix_cache_queries",
+            documentation=(
+            "Prefix cache queries, in terms of number of queried tokens."),
+            labelnames=labelnames).labels(*labelvalues)
+
+        self.counter_prefix_cache_hits = self._counter_cls(
+            name="vllm:prefix_cache_hits",
+            documentation=(
+            "Prefix cache hits, in terms of number of cached tokens."),
             labelnames=labelnames).labels(*labelvalues)
 
         #
@@ -385,7 +403,14 @@ class PrometheusStatLogger(StatLoggerBase):
 
         self.counter_gpu_prefix_cache_queries.inc(
             scheduler_stats.prefix_cache_stats.queries)
+
         self.counter_gpu_prefix_cache_hits.inc(
+            scheduler_stats.prefix_cache_stats.hits)
+
+        self.counter_prefix_cache_queries.inc(
+            scheduler_stats.prefix_cache_stats.queries)
+
+        self.counter_prefix_cache_hits.inc(
             scheduler_stats.prefix_cache_stats.hits)
 
         if scheduler_stats.spec_decoding_stats is not None:
