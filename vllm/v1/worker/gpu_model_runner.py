@@ -1721,6 +1721,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        # The dummy hidden states may contain special values,
+        # like `inf` or `nan`.
+        # To avoid breaking the sampler, we use a random tensor here instead.
+        hidden_states = torch.rand_like(hidden_states)
 
         logits = self.model.compute_logits(hidden_states, None)
         num_reqs = logits.size(0)
