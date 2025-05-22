@@ -22,8 +22,10 @@ class CpuCommunicator(DeviceCommunicatorBase):
         super().__init__(cpu_group, device, device_group, unique_name)
         self.dist_module = torch.distributed
 
-        if (current_platform.get_cpu_architecture() == CpuArchEnum.X86) \
-            and hasattr(torch.ops._C, "init_shm_manager"):
+        if (current_platform.get_cpu_architecture()
+                == CpuArchEnum.X86) and hasattr(
+                    torch.ops._C,
+                    "init_shm_manager") and unique_name.startswith("tp"):
             self.dist_module = _CPUSHMDistributed(self)
 
     def all_reduce(self, input_):
@@ -96,6 +98,8 @@ class _CPUSHMDistributed:
 
     def __init__(self, communicator: CpuCommunicator):
         instance_identifier = os.environ["VLLM_DIST_IDENT"]
+        unique_name = communicator.unique_name
+        instance_identifier = f"{instance_identifier}-{unique_name}"
         self.communicator = communicator
 
         group_ranks = [str(rank) for rank in self.communicator.ranks]
