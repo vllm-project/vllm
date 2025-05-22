@@ -35,8 +35,8 @@ dynamic = [ "version", "dependencies", "optional-dependencies"]
 
 [project.urls]
 Homepage="https://github.com/vllm-project/vllm"
-Documentation="https://vllm.readthedocs.io/en/latest/"
-Slack="http://slack.vllm.ai/"
+Documentation="https://docs.vllm.ai/en/latest/"
+Slack="https://slack.vllm.ai/"
 
 [project.scripts]
 vllm = "vllm.entrypoints.cli.main:main"
