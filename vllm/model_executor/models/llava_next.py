@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from abc import abstractmethod
-from typing import (Final, Iterable, List, Literal, Mapping, Optional,
-                    Protocol, Set, Tuple, TypedDict, TypeVar, Union)
+from collections.abc import Iterable, Mapping
+from typing import (Final, Literal, Optional, Protocol, TypedDict, TypeVar,
+                    Union)
 
 import torch
 import torch.nn as nn
@@ -134,11 +135,13 @@ class LlavaNextProcessingInfo(BaseLlavaProcessingInfo):
         current_aspect_ratio = current_width / current_height
 
         if aspect_ratio > current_aspect_ratio:
-            new_height = (original_height * current_width) // original_width
+            new_height = int(
+                round(original_height * (current_width / original_width), 7))
             padding = (current_height - new_height) // 2
             current_height = current_height - (2 * padding)
         else:
-            new_width = (original_width * current_height) // original_height
+            new_width = int(
+                round(original_width * (current_height / original_height), 7))
             padding = (current_width - new_width) // 2
             current_width = current_width - (2 * padding)
 
@@ -266,8 +269,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
         return data
 
     def _validate_pixel_values(
-        self, data: Union[torch.Tensor, List[torch.Tensor]]
-    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+        self, data: Union[torch.Tensor, list[torch.Tensor]]
+    ) -> Union[torch.Tensor, list[torch.Tensor]]:
 
         h = w = self.config.vision_config.image_size
         expected_dims = (3, h, w)
@@ -450,7 +453,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
     def _process_image_input(
         self,
         image_input: LlavaNextImageInputs,
-    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+    ) -> Union[torch.Tensor, list[torch.Tensor]]:
         if image_input["type"] == "image_embeds":
             return [image_input["data"]]
 
@@ -577,7 +580,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

@@ -12,8 +12,7 @@ from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
-                                                          KVConnectorRole,
-                                                          KVTransferParams)
+                                                          KVConnectorRole)
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
@@ -346,32 +345,38 @@ class Scheduler(SchedulerInterface):
                     skipped_waiting_requests.appendleft(request)
                     continue
 
+                num_external_computed_tokens = 0
+                load_kv_async = False
+
                 # Get already-cached tokens.
                 if num_prealloc_computed_tokens == 0:
                     new_computed_blocks, num_native_computed_tokens = \
                         self.kv_cache_manager.get_computed_blocks(
                             request)
+
+                    # Get externally-cached tokens if using a KVConnector.
+                    if self.connector is not None:
+                        num_external_computed_tokens, load_kv_async = (
+                            self.connector.get_num_new_matched_tokens(
+                                request, num_native_computed_tokens))
+
+                    # Total computed tokens (local + external).
+                    num_computed_tokens = (num_native_computed_tokens +
+                                           num_external_computed_tokens)
                 else:
                     # P/D: skip checking prefix cache if loaded from remote kvs.
                     new_computed_blocks = KVCacheBlocks.create_empty()
                     num_native_computed_tokens = 0
 
-                # Get externally-cached tokens if using a KVConnector.
-                num_external_computed_tokens, load_kv_async = (
-                    (0, False) if self.connector is None else
-                    self.connector.get_num_new_matched_tokens(
-                        request, num_native_computed_tokens))
-
-                # Total computed tokens (local + external).
-                num_computed_tokens = (num_native_computed_tokens +
-                                       num_external_computed_tokens +
-                                       num_prealloc_computed_tokens)
+                    # Total computed tokens (allocated in prior step).
+                    num_computed_tokens = num_prealloc_computed_tokens
 
                 encoder_inputs_to_schedule = None
                 new_encoder_budget = encoder_budget
 
                 # P/D: loading remote KV, do not allocate for new work.
                 if load_kv_async:
+                    assert num_external_computed_tokens > 0
                     num_new_tokens = 0
                 # Number of tokens to be scheduled.
                 else:
@@ -412,7 +417,8 @@ class Scheduler(SchedulerInterface):
                 # KVConnector: update internal state after allocation.
                 # This information is used to determine if a load is
                 # needed for this request.
-                if self.connector is not None:
+                if num_external_computed_tokens:
+                    assert self.connector is not None
                     self.connector.update_state_after_alloc(
                         request,
                         new_computed_blocks + new_blocks,
@@ -759,7 +765,8 @@ class Scheduler(SchedulerInterface):
                 # the outer lists can be of length > 1.
                 new_logprobs = logprobs.slice(req_index, req_index + 1)
 
-            if new_token_ids and request.use_structured_output:
+            if new_token_ids and self.structured_output_manager.should_advance(
+                    request):
                 # NOTE: structured_output_request
                 # should not be None if use_structured_output, we have
                 # check above, so safe to ignore type warning
@@ -768,11 +775,10 @@ class Scheduler(SchedulerInterface):
 
             # Add newly generated spec token ids to the request.
             if spec_token_ids is not None:
-                if request.use_structured_output:
+                if self.structured_output_manager.should_advance(request):
                     metadata = request.structured_output_request
-                    assert metadata is not None and metadata.grammar is not None
                     # Needs to happen after new_token_ids are accepted.
-                    request.spec_token_ids = metadata.grammar.validate_tokens(
+                    request.spec_token_ids = metadata.grammar.validate_tokens(  # type: ignore[union-attr]
                         spec_token_ids[req_index])
                 else:
                     request.spec_token_ids = spec_token_ids[req_index]
@@ -931,8 +937,13 @@ class Scheduler(SchedulerInterface):
         return self.connector
 
     def _connector_finished(
-            self, request: Request) -> tuple[bool, Optional[KVTransferParams]]:
-        """Invoke the KV connector request_finished() method if applicable."""
+            self, request: Request) -> tuple[bool, Optional[dict[str, Any]]]:
+        """
+        Invoke the KV connector request_finished() method if applicable.
+
+        Returns optional kv transfer parameters to be included with the
+        request outputs.
+        """
         if self.connector is None:
             return False, None
         block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
