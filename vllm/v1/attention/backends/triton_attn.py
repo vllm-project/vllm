@@ -127,7 +127,8 @@ class TritonAttentionImpl(AttentionImpl):
                                       "TritonAttentionImpl")
 
         self.fp8_dtype = current_platform.fp8_dtype()
-        self.use_prefill_decode_attn = envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION
+        self.force_prefill_decode_attn = \
+            envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION
 
     def forward(
         self,
@@ -168,9 +169,9 @@ class TritonAttentionImpl(AttentionImpl):
         # performance to make sure it does not introduce any overhead.
 
         num_queries_per_kv = query.shape[1] // key.shape[1]
-        use_prefill_decode_attn = self.use_prefill_decode_attn or (
-            (num_queries_per_kv & (num_queries_per_kv - 1)) != 0)
-
+        num_q_is_pow2 = (num_queries_per_kv & (num_queries_per_kv - 1)) == 0
+        use_prefill_decode_attn = (self.force_prefill_decode_attn
+                                   or not num_q_is_pow2)
         num_actual_tokens = attn_metadata.num_actual_tokens
 
         if use_prefill_decode_attn:
