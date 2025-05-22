@@ -105,15 +105,20 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # There's not much point setting this unless it is != indices.size(0)
         bound_m: Optional[torch.Tensor] = None
 
-        self.a2a.dispatch(
-            out_expert_num_tokens=expert_num_tokens,
-            out_expert_x=expert_x,
-            out_expert_x_scale=expert_x_scale,
-            dp_x=a1q,
-            dp_x_scale=a1q_scale,
-            indices=rank_topk_ids,
-            bound_m=bound_m,
-        )
+        def dispatch(send: bool):
+            self.a2a.dispatch(
+                out_expert_num_tokens=expert_num_tokens,
+                out_expert_x=expert_x,
+                out_expert_x_scale=expert_x_scale,
+                dp_x=a1q,
+                dp_x_scale=a1q_scale,
+                indices=rank_topk_ids,
+                bound_m=bound_m,
+                do_send=send,
+                do_recv=not send,
+            )
+        dispatch(True) # Send
+        dispatch(False) # Recv
 
         return expert_x, expert_x_scale, expert_num_tokens
 
@@ -140,8 +145,15 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         if apply_router_weight_on_input:
             topk_weights = torch.ones_like(topk_weights)
 
-        self.a2a.combine(out_tokens=output,
-                         indices=topk_ids,
-                         weights=topk_weights,
-                         expert_y=fused_expert_output,
-                         bound_m=bound_m)
+        def combine(send: bool):
+            self.a2a.combine(
+                out_tokens=output,
+                indices=topk_ids,
+                weights=topk_weights,
+                expert_y=fused_expert_output,
+                bound_m=bound_m,
+                do_send=send,
+                do_recv=not send,
+            )
+        combine(True)
+        combine(False)

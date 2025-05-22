@@ -102,7 +102,6 @@ def override_forward_context(forward_context: Optional[ForwardContext]):
     """
     global _forward_context
     prev_context = _forward_context
-    print("overriding forward context with", forward_context)
     _forward_context = forward_context
     try:
         yield

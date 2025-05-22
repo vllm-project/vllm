@@ -74,7 +74,7 @@ class FusedMoEParallelConfig:
 
     @property
     def use_pplx_kernels(self):
-        return self.dp_size > 1 and self.use_ep and has_pplx and False
+        return self.dp_size > 1 and self.use_ep and has_pplx
 
     @staticmethod
     def make(tp_size_: int, dp_size_: int,

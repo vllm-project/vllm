@@ -1300,16 +1300,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_ids, positions, inputs_embeds, intermediate_tensors = \
                 model_inputs(token_slice, use_dummy_input)
             with context:
-                if isinstance(context, UBatchContext):
-                    print("running ubatch ctx", context.id)
                 model_output = self.model(
                     input_ids=input_ids,
                     positions=positions,
                     intermediate_tensors=intermediate_tensors,
                     inputs_embeds=inputs_embeds,
                 )
-                if isinstance(context, UBatchContext):
-                    print("done ubatch ctx", context.id)
                 if isinstance(context, UBatchContext):
                     # Clone before we leave the ubatch context
                     model_output = model_output.clone()
@@ -1335,7 +1331,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.ubatch_streams = [torch.cuda.Stream(self.device)  for _ in range(len(ubatch_slices))]
                             
             ubatch_fwd_ctxs = [create_forward_context(
-                    attn_metadata[i], self.vllm_config, num_tokens=(tokens_slice.stop - tokens_slice.start)
+                    attn_metadata[i] if attn_metadata is not None else None,
+                    self.vllm_config, num_tokens=(tokens_slice.stop - tokens_slice.start)
                 ) for i, (_, tokens_slice) in enumerate(ubatch_slices)]
             ubatch_ctxs, start_hook = make_ubatch_context_chain(
                 len(ubatch_slices),
@@ -1368,7 +1365,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     
                 # Single the first ubatch to start
                 start_hook(root_stream)
-                print("started first ubatch")
                     
                 for thread in ubatch_threads:
                     thread.join()
@@ -1376,7 +1372,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             for ubatch_ctx in ubatch_ctxs:
                 root_stream.wait_stream(ubatch_ctx.stream)
 
-            print("torch cat")
             torch.cuda.set_stream(root_stream)
             return torch.cat(results, dim=0)
 
