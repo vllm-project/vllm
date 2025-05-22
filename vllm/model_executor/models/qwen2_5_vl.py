@@ -321,7 +321,7 @@ class Qwen2_5_VisionAttention(nn.Module):
                                       "(b s) ... -> b s ...",
                                       b=batch_size)
         elif self.attn_backend == _Backend.FLASH_ATTN_VLLM_V1:
-            from vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
+            from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
 
             q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
 
