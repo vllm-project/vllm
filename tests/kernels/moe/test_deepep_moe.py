@@ -170,7 +170,7 @@ class TestTensors:
     config: TestConfig
 
     @staticmethod
-    def make(config: TestConfig) -> "TestTensors":
+    def make(config: TestConfig, low_latency_mode: bool) -> "TestTensors":
         # TODO (varun) - check that float16 works ?
         assert config.dtype in [torch.bfloat16, torch.float8_e4m3fn]
         token_dtype = (torch.bfloat16 if config.dtype == torch.float8_e4m3fn
@@ -179,8 +179,9 @@ class TestTensors:
             (config.m, config.k), device="cuda", dtype=token_dtype) / 10
         rank_token_scales = None
         if config.dtype == torch.float8_e4m3fn:
+            # low_latency_mode kernels dont support per-token quant.
             _, rank_token_scales = ops.scaled_fp8_quant(
-                rank_tokens, use_per_token_if_dynamic=True)
+                rank_tokens, use_per_token_if_dynamic=not low_latency_mode)
 
         topk = torch.randint(low=0,
                              high=config.num_experts,
@@ -415,7 +416,7 @@ def _deep_ep_moe(
         w2_scale = w2_scale.to(device=torch.cuda.current_device())
 
     pg = torch.distributed.new_group(list(range(pgi.world_size)))
-    test_tensors = TestTensors.make(config)
+    test_tensors = TestTensors.make(config, low_latency_mode)
 
     with set_current_vllm_config(VllmConfig()):
         # Reference
@@ -462,15 +463,10 @@ DTYPES = [torch.bfloat16, torch.float8_e4m3fn]
 @pytest.mark.parametrize("num_experts", [32])
 @pytest.mark.parametrize("topk", [6])
 @pytest.mark.parametrize("world_dp_size", [(2, 1)])
-@pytest.mark.parametrize("low_latency_mode", )
 @requires_deep_ep
-def test_deep_ep_moe(
-    dtype: torch.dtype,
-    mnk: tuple[int, int, int],
-    num_experts: int,
-    topk: int,
-    world_dp_size: tuple[int, int],
-):
+def test_deep_ep_moe(dtype: torch.dtype, mnk: tuple[int, int, int],
+                     num_experts: int, topk: int, world_dp_size: tuple[int,
+                                                                       int]):
     low_latency_mode = False
     m, n, k = mnk
 
@@ -489,6 +485,7 @@ def test_deep_ep_moe(
                     config, w1, w2, w1_scale, w2_scale)
 
 
+# DeepEP supports only a handful of hidden sizes.
 MNKs = [
     (1, 128, 2560),
     (2, 128, 2560),
@@ -499,7 +496,7 @@ MNKs = [
     (222, 1024, 2560),
 ]
 
-DTYPES = [torch.bfloat16]
+DTYPES = [torch.bfloat16, torch.float8_e4m3fn]
 
 
 @pytest.mark.parametrize("dtype", DTYPES)
@@ -508,13 +505,10 @@ DTYPES = [torch.bfloat16]
 @pytest.mark.parametrize("topk", [6])
 @pytest.mark.parametrize("world_dp_size", [(2, 1)])
 @requires_deep_ep
-def test_low_latency_deep_ep_moe(
-    dtype: torch.dtype,
-    mnk: tuple[int, int, int],
-    num_experts: int,
-    topk: int,
-    world_dp_size: tuple[int, int],
-):
+def test_low_latency_deep_ep_moe(dtype: torch.dtype, mnk: tuple[int, int, int],
+                                 num_experts: int, topk: int,
+                                 world_dp_size: tuple[int, int]):
+
     low_latency_mode = True
     m, n, k = mnk
 

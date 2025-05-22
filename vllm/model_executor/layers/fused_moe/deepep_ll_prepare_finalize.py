@@ -5,6 +5,8 @@ import deep_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.utils import (
+    moe_kernel_quantize_input)
 
 
 class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
@@ -59,6 +61,12 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             (f"Hidden Size {hidden_size} not in supported list of hidden sizes"
             "{self.SUPPORTED_HIDDEN_SIZES}")
 
+        # Quantize
+        per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
+            a2_scale.numel() != 1 if a2_scale is not None else False)
+        assert not per_act_token, (
+            "low_latency kernels don't support per-act-token quant")
+
         if apply_router_weight_on_input:
             topk = rank_topk_ids.size(1)
             # TODO: this only works for topK=1, will need to update for topK>1
@@ -66,9 +74,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 "apply_router_weight_on_input is only implemented for topk=1")
             a1 = a1 * rank_topk_weights.to(a1.dtype)
 
-        #per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
-        #    a2_scale.numel() != 1 if a2_scale is not None else False)
-
+        # Dispatch
         expert_x, expert_num_tokens, self.handle, event, hook = \
                 self.buffer.low_latency_dispatch(a1,
                                                 rank_topk_ids,
@@ -78,7 +84,15 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                                                 async_finish=False,
                                                 return_recv_hook=False)
 
-        expert_x_scale = None
+        num_experts = expert_x.size(0)
+        hidden_dim = expert_x.size(-1)
+
+        expert_x = expert_x.view((-1, expert_x.size(-1)))
+        expert_x, expert_x_scale = moe_kernel_quantize_input(
+            expert_x, a1_scale, self.quant_dtype, per_act_token,
+            self.block_shape)
+        expert_x = expert_x.view((num_experts, -1, hidden_dim))
+
         return (expert_x, expert_x_scale, expert_num_tokens, None, None)
 
     def finalize(self, output: torch.Tensor, fused_expert_output: torch.Tensor,
@@ -86,21 +100,6 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                  apply_router_weight_on_input: bool) -> torch.Tensor:
 
         assert self.handle is not None
-
-        # The DeepEP kernels don't seem to do the topk weight multiplication.
-        # We multiply the weights locally.
-        #if not apply_router_weight_on_input:
-        #    # TODO (varun) : fix inefficiencies
-        #    fused_expert_output.mul_(
-        #        topk_weights.view(fused_expert_output.size(0), -1, 1))
-        #    num_tokens = topk_ids.size(0)
-        #    hidden_dim = fused_expert_output.size(-1)
-        #    local_out_shape = (num_tokens, hidden_dim)
-        #    local_out = torch.zeros(local_out_shape,
-        #                            device="cuda",
-        #                            dtype=torch.float32)
-        #    ops.moe_sum(fused_expert_output, local_out)
-        #    fused_expert_output = local_out
 
         _, event, hook = self.buffer.low_latency_combine(
             fused_expert_output,

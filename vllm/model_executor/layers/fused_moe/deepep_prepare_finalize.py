@@ -80,7 +80,7 @@ class DeepEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             topk_weights=rank_topk_weights,
             expert_alignment=
             1,  # TODO (varun) : set this properly and avoid moe_align kernel ?
-            config=None,
+            config=None,  # TODO (varun) : get config from deepep
             previous_event=None,
             async_finish=False,
             allocate_on_comm_stream=False)
