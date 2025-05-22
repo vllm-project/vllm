@@ -1,11 +1,13 @@
 {{- bos_token }}
 {%- if custom_tools is defined and custom_tools%}
     {%- set tools = custom_tools %}
-    {%- set tool_definition = tool_definition ~ (tools | tojson(indent=4)) %}
 {%- endif %}
-{%- if not tools is defined %}
+{%- if tools is defined and tools %}
+    {%- set tool_definition = tool_definition ~ (tools | tojson(indent=4)) %}
+{%- else %}
     {%- set tools = none %}
 {%- endif %}
+
 
 {#- This block extracts the system message, so we can slot it into the right place. #}
 {%- if messages[0]['role'] == 'system' %}
