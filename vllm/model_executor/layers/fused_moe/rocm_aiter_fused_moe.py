@@ -12,7 +12,12 @@ from vllm.utils import direct_register_custom_op
 
 class QuantMethod(IntEnum):
     # This allows interfacing with AITER QuantType Enum
-    # without importing the QuantType from AITER globally
+    # without importing the QuantType from AITER globally.
+
+    # Note that these quantization methods are 
+    # supported in AITER package. However, 
+    # not all are used in this module.
+
     NO = 0  # a16w16
     PER_TENSOR = 1  # w8a8 (pre_Tensor)
     PER_TOKEN = 2  # w8a8/w8a4 (per_Token)
@@ -22,7 +27,7 @@ class QuantMethod(IntEnum):
 
 class ActivationMethod(IntEnum):
     # This allows interfacing with AITER ActivationType enum
-    # without importing the ActivationType enum from AITER globally
+    # without importing the ActivationType enum from AITER globally.
     SILU = 0
     GELU = 1
 
@@ -306,9 +311,8 @@ def rocm_aiter_fused_experts(
             assert w2_scale is not None
             quant_method = QuantMethod.BLOCK_128x128.value
         elif use_fp8_w8a8:
-            quant_method = QuantMethod.PER_TOKEN.value
-            if a1_scale is not None and a2_scale is not None:
-                quant_method = QuantMethod.PER_TENSOR.value
+            # Currently only per tensor quantization method is enabled.
+            quant_method = QuantMethod.PER_TENSOR.value
 
         if apply_router_weight_on_input:
             assert (topk_weights.dim() == 2
@@ -371,24 +375,3 @@ def shuffle_weights(
 
     return tuple(shuffle_weight(tensor, layout=layout) for tensor in tensors)
 
-
-def expand_weights(*tensors: torch.Tensor,
-                   expansion_dims: list[int]) -> tuple[torch.Tensor, ...]:
-    """
-    Expands the dimensions of input tensors.
-
-    Args:
-        *tensors: A variable number of torch.Tensor objects.
-        expansion_dims: A list of expansion dimensions 
-        corresponding to each tensor.
-
-    Returns:
-        A Tuple of tensors with expanded dimensions.
-    """
-
-    assert len(tensors) == len(expansion_dims), \
-    "Number of tensors must match the number of expansion dimensions."
-
-    return tuple(
-        tensor.unsqueeze(-1).unsqueeze(-1).expand((-1, dim, -1))
-        for tensor, dim in zip(tensors, expansion_dims))

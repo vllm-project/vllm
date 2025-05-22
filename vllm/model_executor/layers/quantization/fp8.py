@@ -597,7 +597,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def process_weights_after_loading(self, layer: Module) -> None:
         # Lazy import to avoid importing triton too early.
         from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-            expand_weights, is_rocm_aiter_moe_enabled, shuffle_weights)
+            is_rocm_aiter_moe_enabled, shuffle_weights)
 
         self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
 
@@ -675,17 +675,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                                                  requires_grad=False)
             if self.rocm_aiter_moe_enabled:
                 # reshaping weights is required for aiter moe kernel.
-                w13_scales, w2_scales = expand_weights(
-                    layer.w13_weight_scale.data,
-                    layer.w2_weight_scale.data,
-                    expansion_dims=[
-                        layer.w13_weight.shape[1], layer.w2_weight.shape[1]
-                    ])
-                layer.w13_weight_scale = torch.nn.Parameter(
-                    w13_scales.contiguous(), requires_grad=False)
-                layer.w2_weight_scale = torch.nn.Parameter(
-                    w2_scales.contiguous(), requires_grad=False)
-
                 shuffled_w13, shuffled_w2 = shuffle_weights(
                     layer.w13_weight, layer.w2_weight)
 
