@@ -35,10 +35,10 @@ class CpuPlatform(Platform):
         """
         if not sys.platform.startswith("darwin"):
             return False
-            
+
         if cls.get_cpu_architecture() != CpuArchEnum.ARM:
             return False
-            
+
         # Check if we're on Apple Silicon
         try:
             import platform
@@ -46,15 +46,15 @@ class CpuPlatform(Platform):
                 return False
         except Exception:
             return False
-            
+
         # Check PyTorch MPS backend support
         if not torch.backends.mps.is_available():
             return False
-            
+
         # Check if bf16 is supported by PyTorch on this device
         try:
-            # Try to create a bf16 tensor on MPS
-            x = torch.zeros(1, dtype=torch.bfloat16, device="mps")
+            # Try to create a bf16 tensor on MP
+            torch.zeros(1, dtype=torch.bfloat16, device="mps")
             return True
         except Exception:
             return False
@@ -63,7 +63,8 @@ class CpuPlatform(Platform):
     def supported_dtypes(self) -> list:
         if self.get_cpu_architecture() == CpuArchEnum.POWERPC:
             return [torch.bfloat16, torch.float32]
-        elif sys.platform.startswith("darwin") and self.get_cpu_architecture() == CpuArchEnum.ARM:
+        elif sys.platform.startswith(
+                "darwin") and self.get_cpu_architecture() == CpuArchEnum.ARM:
             # Check for bf16 support on Apple Silicon
             if self.bf16_support_mac():
                 return [torch.bfloat16, torch.float16, torch.float32]

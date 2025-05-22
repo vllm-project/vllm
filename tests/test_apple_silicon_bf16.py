@@ -1,9 +1,14 @@
-import unittest
+# SPDX-License-Identifier: Apache-2.0
 import platform
+import unittest
+
 import torch
+
 from vllm.platforms.cpu import CpuPlatform
 
+
 class TestAppleSiliconBF16(unittest.TestCase):
+
     @classmethod
     def setUpClass(cls):
         cls.is_mac = platform.system() == "Darwin"
@@ -20,14 +25,14 @@ class TestAppleSiliconBF16(unittest.TestCase):
         """Test if bf16 support is correctly detected"""
         if not self.is_apple_silicon:
             self.skipTest("Test only runs on Apple Silicon")
-            
+
         has_support = CpuPlatform.bf16_support_mac()
         print(f"BF16 support detected: {has_support}")
-        
+
         # Test PyTorch MPS backend
-        self.assertTrue(torch.backends.mps.is_available(), 
-                       "MPS backend should be available on Apple Silicon")
-        
+        self.assertTrue(torch.backends.mps.is_available(),
+                        "MPS backend should be available on Apple Silicon")
+
         # Test bf16 tensor creation if support is detected
         if has_support:
             try:
@@ -36,18 +41,19 @@ class TestAppleSiliconBF16(unittest.TestCase):
                 print("Successfully created bf16 tensor on MPS device")
             except Exception as e:
                 self.fail(f"Failed to create bf16 tensor: {str(e)}")
+
     def test_supported_dtypes(self):
         """Test if supported dtypes are correctly reported"""
         if not self.is_apple_silicon:
             self.skipTest("Test only runs on Apple Silicon")
-            
+
         platform = CpuPlatform()
         dtypes = platform.supported_dtypes
-        
+
         # Should always support float16 and float32
         self.assertIn(torch.float16, dtypes)
         self.assertIn(torch.float32, dtypes)
-        
+
         # Check bf16 support
         has_bf16 = CpuPlatform.bf16_support_mac()
         if has_bf16:
@@ -55,5 +61,6 @@ class TestAppleSiliconBF16(unittest.TestCase):
         else:
             self.assertNotIn(torch.bfloat16, dtypes)
 
+
 if __name__ == "__main__":
-    unittest.main() 
+    unittest.main()
