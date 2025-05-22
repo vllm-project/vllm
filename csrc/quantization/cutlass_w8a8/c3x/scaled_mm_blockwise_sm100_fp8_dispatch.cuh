@@ -204,10 +204,7 @@ void cutlass_gemm_blockwise_sm100_fp8_dispatch(torch::Tensor& out,
                                                torch::Tensor const& b,
                                                torch::Tensor const& a_scales,
                                                torch::Tensor const& b_scales) {
-  auto m = a.size(0);
-  auto k = a.size(1);
-  auto n = b.size(1);
-  int sms;
+  int32_t m = a.size(0), n = b.size(1), k = a.size(1), sms;
   cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, a.get_device());
 
   constexpr int TILE_K = 128;
