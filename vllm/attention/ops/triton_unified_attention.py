@@ -29,42 +29,42 @@ def apply_softcap(S, x):
 
 @triton.jit
 def kernel_unified_attention_2d(
-    output_ptr,  # [num_tokens, num_query_heads, head_size]
-    query_ptr,  # [num_tokens, num_query_heads, head_size]
-    key_cache_ptr,  # [num_blks, blk_size, num_kv_heads, head_size]
-    value_cache_ptr,  # [num_blks, blk_size, num_kv_heads, head_size]
-    block_tables_ptr,  # [num_seqs, max_num_blocks_per_seq]
-    seq_lens_ptr,  # [num_seqs]
-    alibi_slopes_ptr,  # [num_query_heads]
-    scale,  # float32
-    k_scale,  # float32
-    v_scale,  # float32
-    softcap,  # float32
-    num_query_heads: tl.constexpr,  # int
-    num_queries_per_kv: tl.constexpr,  # int
-    block_table_stride: tl.int64,  # int
-    query_stride_0: tl.int64,  # int
-    query_stride_1: tl.int64,  # int, should be equal to head_size
-    output_stride_0: tl.int64,  # int
-    output_stride_1: tl.int64,  # int, should be equal to head_size
-    BLOCK_SIZE: tl.constexpr,  # int
-    HEAD_SIZE: tl.constexpr,  # int
-    HEAD_SIZE_PADDED: tl.constexpr,  # int, must be power of 2
-    USE_ALIBI_SLOPES: tl.constexpr,  # bool
-    USE_SOFTCAP: tl.constexpr,  # bool
-    SLIDING_WINDOW: tl.constexpr,  # int
-    stride_k_cache_0: tl.int64,  # int
-    stride_k_cache_1: tl.int64,  # int
-    stride_k_cache_2: tl.int64,  # int
-    stride_k_cache_3: tl.constexpr,  # int
-    stride_v_cache_0: tl.int64,  # int
-    stride_v_cache_1: tl.int64,  # int
-    stride_v_cache_2: tl.int64,  # int
-    stride_v_cache_3: tl.constexpr,  # int
-    query_start_len_ptr,  # [num_seqs+1]
-    BLOCK_Q: tl.constexpr,  # int
-    num_seqs: tl.int32,
-    BLOCK_M: tl.constexpr,  # int
+        output_ptr,  # [num_tokens, num_query_heads, head_size]
+        query_ptr,  # [num_tokens, num_query_heads, head_size]
+        key_cache_ptr,  # [num_blks, blk_size, num_kv_heads, head_size]
+        value_cache_ptr,  # [num_blks, blk_size, num_kv_heads, head_size]
+        block_tables_ptr,  # [num_seqs, max_num_blocks_per_seq]
+        seq_lens_ptr,  # [num_seqs]
+        alibi_slopes_ptr,  # [num_query_heads]
+        scale,  # float32
+        k_scale,  # float32
+        v_scale,  # float32
+        softcap,  # float32
+        num_query_heads: tl.constexpr,  # int
+        num_queries_per_kv: tl.constexpr,  # int
+        block_table_stride: tl.int64,  # int
+        query_stride_0: tl.int64,  # int
+        query_stride_1: tl.int64,  # int, should be equal to head_size
+        output_stride_0: tl.int64,  # int
+        output_stride_1: tl.int64,  # int, should be equal to head_size
+        BLOCK_SIZE: tl.constexpr,  # int
+        HEAD_SIZE: tl.constexpr,  # int
+        HEAD_SIZE_PADDED: tl.constexpr,  # int, must be power of 2
+        USE_ALIBI_SLOPES: tl.constexpr,  # bool
+        USE_SOFTCAP: tl.constexpr,  # bool
+        SLIDING_WINDOW: tl.constexpr,  # int
+        stride_k_cache_0: tl.int64,  # int
+        stride_k_cache_1: tl.int64,  # int
+        stride_k_cache_2: tl.int64,  # int
+        stride_k_cache_3: tl.constexpr,  # int
+        stride_v_cache_0: tl.int64,  # int
+        stride_v_cache_1: tl.int64,  # int
+        stride_v_cache_2: tl.int64,  # int
+        stride_v_cache_3: tl.constexpr,  # int
+        query_start_len_ptr,  # [num_seqs+1]
+        BLOCK_Q: tl.constexpr,  # int
+        num_seqs: tl.int32,
+        BLOCK_M: tl.constexpr,  # int
 ):
 
     q_block_global_idx = tl.program_id(0)
@@ -118,12 +118,9 @@ def kernel_unified_attention_2d(
 
     block_table_offset = seq_idx * block_table_stride
 
-    M = tl.full([BLOCK_M],
-                float("-inf"),
-                dtype=tl.float32)
+    M = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
     L = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
-    acc = tl.zeros([BLOCK_M, HEAD_SIZE_PADDED],
-                   dtype=tl.float32)
+    acc = tl.zeros([BLOCK_M, HEAD_SIZE_PADDED], dtype=tl.float32)
 
     # sequence len for this particular sequence
     seq_len = tl.load(seq_lens_ptr + seq_idx)
@@ -184,12 +181,10 @@ def kernel_unified_attention_2d(
 
         seq_offset = j * BLOCK_SIZE + offs_n
 
-        seq_mask = seq_offset[
-            None, :] < context_len + query_pos[:, None] + 1
+        seq_mask = seq_offset[None, :] < context_len + query_pos[:, None] + 1
 
         # S : (BLOCK_M, BLOCK_SIZE)
-        S = tl.zeros(shape=(BLOCK_M, BLOCK_SIZE),
-                     dtype=tl.float32)
+        S = tl.zeros(shape=(BLOCK_M, BLOCK_SIZE), dtype=tl.float32)
 
         S += scale * tl.dot(Q, K)
 
@@ -298,39 +293,41 @@ def unified_attention(
     kernel_unified_attention_2d[(
         total_num_q_blocks,
         num_kv_heads,
-    )](output_ptr=out,
-       query_ptr=q,
-       key_cache_ptr=k,
-       value_cache_ptr=v,
-       block_tables_ptr=block_table,
-       seq_lens_ptr=seqused_k,
-       alibi_slopes_ptr=alibi_slopes,
-       scale=softmax_scale,
-       k_scale=k_descale,
-       v_scale=v_descale,
-       softcap=softcap,
-       num_query_heads=num_query_heads,
-       num_queries_per_kv=num_queries_per_kv,
-       block_table_stride=block_table.stride(0),
-       query_stride_0=q.stride(0),
-       query_stride_1=q.stride(1),
-       output_stride_0=out.stride(0),
-       output_stride_1=out.stride(1),
-       BLOCK_SIZE=block_size,
-       HEAD_SIZE=head_size,
-       HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
-       USE_ALIBI_SLOPES=use_alibi_slopes,
-       USE_SOFTCAP=(softcap > 0),
-       SLIDING_WINDOW=(1 + window_size[0]),
-       stride_k_cache_0=k.stride(0),
-       stride_k_cache_1=k.stride(1),
-       stride_k_cache_2=k.stride(2),
-       stride_k_cache_3=k.stride(3),
-       stride_v_cache_0=v.stride(0),
-       stride_v_cache_1=v.stride(1),
-       stride_v_cache_2=v.stride(2),
-       stride_v_cache_3=v.stride(3),
-       query_start_len_ptr=cu_seqlens_q,
-       BLOCK_Q=BLOCK_Q,
-       num_seqs=num_seqs,
-       BLOCK_M=BLOCK_M,)
+    )](
+        output_ptr=out,
+        query_ptr=q,
+        key_cache_ptr=k,
+        value_cache_ptr=v,
+        block_tables_ptr=block_table,
+        seq_lens_ptr=seqused_k,
+        alibi_slopes_ptr=alibi_slopes,
+        scale=softmax_scale,
+        k_scale=k_descale,
+        v_scale=v_descale,
+        softcap=softcap,
+        num_query_heads=num_query_heads,
+        num_queries_per_kv=num_queries_per_kv,
+        block_table_stride=block_table.stride(0),
+        query_stride_0=q.stride(0),
+        query_stride_1=q.stride(1),
+        output_stride_0=out.stride(0),
+        output_stride_1=out.stride(1),
+        BLOCK_SIZE=block_size,
+        HEAD_SIZE=head_size,
+        HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
+        USE_ALIBI_SLOPES=use_alibi_slopes,
+        USE_SOFTCAP=(softcap > 0),
+        SLIDING_WINDOW=(1 + window_size[0]),
+        stride_k_cache_0=k.stride(0),
+        stride_k_cache_1=k.stride(1),
+        stride_k_cache_2=k.stride(2),
+        stride_k_cache_3=k.stride(3),
+        stride_v_cache_0=v.stride(0),
+        stride_v_cache_1=v.stride(1),
+        stride_v_cache_2=v.stride(2),
+        stride_v_cache_3=v.stride(3),
+        query_start_len_ptr=cu_seqlens_q,
+        BLOCK_Q=BLOCK_Q,
+        num_seqs=num_seqs,
+        BLOCK_M=BLOCK_M,
+    )
