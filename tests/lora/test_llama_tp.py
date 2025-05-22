@@ -190,6 +190,7 @@ def test_llama_lora_tp4_fully_sharded_loras(sql_lora_files):
     generate_and_test(llm, sql_lora_files)
 
 
+@multi_gpu_test(num_gpus=2)
 @create_new_process_for_each_test()
 def test_tp2_serialize_and_deserialize_lora(tmp_path, sql_lora_files,
                                             sql_lora_huggingface_id):
