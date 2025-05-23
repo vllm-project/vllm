@@ -120,7 +120,7 @@ def reduce_scatter(tensor: torch.Tensor, dim: int, world_size: int,
     group = _groups[group_name]()
     if group is None:
         raise ValueError(f"Group {group_name} is destroyed.")
-    return group.reduce_scatter(tensor, dim)
+    return group._reduce_scatter_out_place(tensor, dim)
 
 
 def reduce_scatter_fake(tensor: torch.Tensor, dim: int, world_size: int,
@@ -136,7 +136,7 @@ def all_gather(tensor: torch.Tensor, dim: int, world_size: int,
     group = _groups[group_name]()
     if group is None:
         raise ValueError(f"Group {group_name} is destroyed.")
-    return group.all_gather(tensor, dim)
+    return group._all_gather_out_place(tensor, dim)
 
 
 def all_gather_fake(tensor: torch.Tensor, dim: int, world_size: int,
@@ -161,6 +161,7 @@ if supports_custom_op():
         op_func=reduce_scatter,
         mutates_args=[],
         fake_impl=reduce_scatter_fake,
+        dispatch_key=current_platform.dispatch_key,
     )
 
     direct_register_custom_op(
@@ -168,6 +169,7 @@ if supports_custom_op():
         op_func=all_gather,
         mutates_args=[],
         fake_impl=all_gather_fake,
+        dispatch_key=current_platform.dispatch_key,
     )
 
 
@@ -367,6 +369,16 @@ class GroupCoordinator:
         assert -input_.dim() <= dim < input_.dim(), (
             f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
 
+        if self.use_custom_op_call:
+            return torch.ops.vllm.all_gather(input_,
+                                             dim,
+                                             world_size,
+                                             group_name=self.unique_name)
+        else:
+            return self._all_gather_out_place(input_, dim)
+
+    def _all_gather_out_place(self, input_: torch.Tensor,
+                              dim: int) -> torch.Tensor:
         return self.device_communicator.all_gather(input_, dim)
 
     def reduce_scatter(self,
@@ -379,6 +391,16 @@ class GroupCoordinator:
         assert -input_.dim() <= dim < input_.dim(), (
             f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
 
+        if self.use_custom_op_call:
+            return torch.ops.vllm.reduce_scatter(input_,
+                                                 dim,
+                                                 world_size,
+                                                 group_name=self.unique_name)
+        else:
+            return self._reduce_scatter_out_place(input_, dim)
+
+    def _reduce_scatter_out_place(self, input_: torch.Tensor,
+                                  dim: int) -> torch.Tensor:
         return self.device_communicator.reduce_scatter(input_, dim)
 
     def gather(self,
