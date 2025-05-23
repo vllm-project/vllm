@@ -38,7 +38,7 @@ nav:
     - contributing/overview.md
     - glob: contributing/*
       flatten_single_child_sections: true
-    - contributing/model
+    - Model Implementation: contributing/model
     - Design Documents:
       - V0: design
       - V1: design/v1
