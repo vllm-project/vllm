@@ -45,7 +45,7 @@ class ReqMeta:
                 block_ids_tensor.reshape((num_blocks, 1)) * block_size
         slot_mapping = slot_mapping.flatten()[:valid_num_tokens]
 
-        logger.info(
+        logger.debug(
             "🐞P2pNcclConnector make_meta, request_id:%s, token_ids:%s, "
             "valid_num_tokens:%d, block_ids:%s, num_blocks:%d, block_size:%d, "
             "slot_mapping:%s", request_id, token_ids, valid_num_tokens,
@@ -294,7 +294,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
             call to this method (this call or a prior one).
         """
 
-        logger.info("🐞get_finished, finished_req_ids:%s", finished_req_ids)
+        logger.debug("🐞get_finished, finished_req_ids:%s", finished_req_ids)
 
         return None, None
 
@@ -354,8 +354,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
 
-        logger.info("🐞build_connector_meta, scheduler_output:%s",
-                    scheduler_output)
+        logger.debug("🐞build_connector_meta, scheduler_output:%s",
+                     scheduler_output)
 
         meta = P2pNcclConnectorMetadata()
 
@@ -370,7 +370,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
                     # 'CachedRequestData' has no attribute 'prompt_token_ids'
                     self.chunked_prefill[new_req.req_id] = (
                         new_req.block_ids, new_req.prompt_token_ids)
-                    logger.info(
+                    logger.debug(
                         "🐞build_connector_meta, chunked prefill, "
                         "request_id:%s, num_scheduled_tokens:%d, "
                         "num_prompt_tokens:%d, num_computed_tokens:%d, "
@@ -395,12 +395,13 @@ class P2pNcclConnector(KVConnectorBase_V1):
             if self.is_producer:
                 num_scheduled_tokens = (
                     scheduler_output.num_scheduled_tokens)[cached_req.req_id]
-                num_tokens = num_scheduled_tokens + cached_req.num_computed_tokens
+                num_tokens = (num_scheduled_tokens +
+                              cached_req.num_computed_tokens)
                 assert cached_req.req_id in self.chunked_prefill
                 block_ids = (self.chunked_prefill[cached_req.req_id][0] +
                              cached_req.new_block_ids)
                 prompt_token_ids = self.chunked_prefill[cached_req.req_id][1]
-                logger.info(
+                logger.debug(
                     "🐞build_connector_meta, cached_req, request_id:%s, "
                     "num_scheduled_tokens:%d, num_prompt_tokens:%d",
                     cached_req.req_id, num_scheduled_tokens,
@@ -461,8 +462,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
             returned by the engine.
         """
 
-        logger.info("🐞request_finished, request_id:%s, block_ids:%s",
-                    request.request_id, block_ids)
+        logger.debug("🐞request_finished, request_id:%s, block_ids:%s",
+                     request.request_id, block_ids)
 
         return False, None
 
