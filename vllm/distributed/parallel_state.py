@@ -1221,8 +1221,9 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
         ray.shutdown()
     gc.collect()
     from vllm.platforms import current_platform
-    if not current_platform.is_cpu():
-        torch.cuda.empty_cache()
+    empty_cache = current_platform.empty_cache
+    if empty_cache is not None:
+        empty_cache()
     try:
         torch._C._host_emptyCache()
     except AttributeError:
