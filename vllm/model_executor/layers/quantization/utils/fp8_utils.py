@@ -115,8 +115,19 @@ def apply_w8a8_block_fp8_linear(
     output_shape = [*input.shape[:-1], weight.shape[0]]
 
     if current_platform.is_cuda():
-        use_cutlass = cutlass_block_fp8_supported and (
-            weight.shape[0] % 128 == 0 and weight.shape[1] % 128 == 0)
+        if current_platform.has_device_capability(100):
+
+            def ceil_div(x: int, y: int) -> int:
+                return (x + y - 1) // y
+
+            use_cutlass = cutlass_block_fp8_supported and (
+                ceil_div(weight.shape[0], 128) == weight_scale.shape[0]
+                and ceil_div(weight.shape[1], 128) == weight_scale.shape[1])
+        else:
+            # TODO: update this after switching to public sm90 block scale gemm
+            # as it also supports weight.shape % 128 != 0
+            use_cutlass = cutlass_block_fp8_supported and (
+                weight.shape[0] % 128 == 0 and weight.shape[1] % 128 == 0)
     else:
         use_cutlass = False
 

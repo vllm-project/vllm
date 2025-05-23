@@ -115,8 +115,16 @@ def bench_fp8(
     a_cont = a.contiguous()
     scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
     scale_b = torch.tensor(1.0, device="cuda", dtype=torch.float32)
-    block_scale_a = torch.rand((m, k // 128), device="cuda", dtype=torch.float32)
-    block_scale_b = torch.rand((k // 128, n // 128), device="cuda", dtype=torch.float32)
+
+    def ceil_div(x: int, y: int) -> int:
+        return (x + y - 1) // y
+
+    block_scale_a = torch.rand(
+        (m, ceil_div(k, 128)), device="cuda", dtype=torch.float32
+    )
+    block_scale_b = torch.rand(
+        ceil_div(k, 128), ceil_div(n, 128), device="cuda", dtype=torch.float32
+    )
     block_scale_a_M_major = block_scale_a.t().contiguous().t()
     block_scale_b_K_major = block_scale_b.t().contiguous().t()
     bias = torch.zeros((n,), device="cuda", dtype=torch.bfloat16)

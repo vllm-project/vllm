@@ -9,6 +9,7 @@ import vllm.envs as envs
 from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams, SamplingType
+from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
 from .interface import Platform, PlatformEnum, _Backend
 
@@ -161,6 +162,16 @@ class TpuPlatform(Platform):
             "Forcing --disable_chunked_mm_input.")
             scheduler_config.disable_chunked_mm_input = True
 
+        if vllm_config.model_config and vllm_config.model_config.use_mla:
+            logger.info(
+                "MLA is enabled on a non-GPU platform; forcing chunked "
+                "prefill and prefix caching to be disabled.")
+            vllm_config.scheduler_config.enable_chunked_prefill = False
+            vllm_config.scheduler_config.chunked_prefill_enabled = False
+            vllm_config.scheduler_config.max_num_batched_tokens = max(
+                vllm_config.scheduler_config.max_model_len,
+                DEFAULT_MAX_NUM_BATCHED_TOKENS)
+
     @classmethod
     def is_pin_memory_available(cls):
         logger.warning("Pin memory is not supported on TPU.")
@@ -194,3 +205,11 @@ class TpuPlatform(Platform):
             if params.sampling_type == SamplingType.RANDOM_SEED:
                 raise ValueError(
                     "Torch XLA does not support per-request seed.")
+
+
+try:
+    from tpu_commons.platforms import TpuPlatform as TpuCommonsPlatform
+    TpuPlatform = TpuCommonsPlatform  # type: ignore
+except ImportError:
+    logger.info("tpu_commons not found, using vLLM's TpuPlatform")
+    pass

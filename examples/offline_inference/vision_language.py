@@ -19,6 +19,7 @@ from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.lora.request import LoRARequest
+from vllm.multimodal.image import convert_image_mode
 from vllm.utils import FlexibleArgumentParser
 
 
@@ -1096,8 +1097,8 @@ def get_multi_modal_input(args):
     """
     if args.modality == "image":
         # Input image and question
-        image = ImageAsset("cherry_blossom") \
-            .pil_image.convert("RGB")
+        image = convert_image_mode(
+            ImageAsset("cherry_blossom").pil_image, "RGB")
         img_questions = [
             "What is the content of this image?",
             "Describe the content of this image in detail.",

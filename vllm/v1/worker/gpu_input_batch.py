@@ -11,11 +11,10 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
-from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
-from vllm.v1.worker.block_table import MultiGroupBlockTable
+from vllm.v1.worker.block_table import BlockTable
 
 _SAMPLING_EPS = 1e-5
 
@@ -30,7 +29,7 @@ class CachedRequestState:
     sampling_params: SamplingParams
     generator: Optional[torch.Generator]
 
-    block_ids: list[list[int]]
+    block_ids: list[int]
     num_computed_tokens: int
     output_token_ids: list[int]
 
@@ -59,14 +58,15 @@ class InputBatch:
         self,
         max_num_reqs: int,
         max_model_len: int,
+        max_num_blocks_per_req: int,
         max_num_batched_tokens: int,
         device: torch.device,
         pin_memory: bool,
         vocab_size: int,
-        kv_cache_config: KVCacheConfig,
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
+        self.max_num_blocks_per_req = max_num_blocks_per_req
         self.max_num_batched_tokens = max_num_batched_tokens
         self.device = device
         self.pin_memory = pin_memory
@@ -99,13 +99,12 @@ class InputBatch:
             self.num_computed_tokens_cpu_tensor.numpy()
 
         # Block table.
-        self.block_table = MultiGroupBlockTable(
+        self.block_table = BlockTable(
             max_num_reqs=max_num_reqs,
-            max_model_len=max_model_len,
+            max_num_blocks_per_req=max_num_blocks_per_req,
             max_num_batched_tokens=max_num_batched_tokens,
             pin_memory=pin_memory,
             device=device,
-            kv_cache_config=kv_cache_config,
         )
 
         # Sampling-related.

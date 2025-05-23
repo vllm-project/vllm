@@ -530,8 +530,5 @@ class Qwen3MoeForCausalLM(nn.Module, SupportsPP):
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["rotary_emb.inv_freq"]),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

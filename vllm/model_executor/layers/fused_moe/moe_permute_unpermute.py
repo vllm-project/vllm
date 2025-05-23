@@ -182,3 +182,7 @@ def moe_unpermute(
                                    expert_first_token_offset, n_expert,
                                    n_local_expert, topk, hidden_states)
     return hidden_states
+
+
+def moe_permute_unpermute_supported():
+    return torch.ops._moe_C.moe_permute_unpermute_supported()

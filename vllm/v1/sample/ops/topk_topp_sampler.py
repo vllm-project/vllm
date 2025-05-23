@@ -31,21 +31,10 @@ class TopKTopPSampler(nn.Module):
         if current_platform.is_cuda():
             if is_flashinfer_available:
                 flashinfer_version = flashinfer.__version__
-                if flashinfer_version >= "0.2.3":
-                    # FIXME(DefTruth): Currently, we have errors when using
-                    # FlashInfer>=v0.2.3 for top-p & top-k sampling. As a
-                    # workaround, we disable FlashInfer for top-p & top-k
-                    # sampling by default while FlashInfer>=v0.2.3.
-                    # The sampling API removes the success return value
-                    # of all sampling API, which is not compatible with
-                    # earlier design.
-                    # https://github.com/flashinfer-ai/flashinfer/releases/
-                    # tag/v0.2.3
-                    logger.info(
-                        "Currently, FlashInfer top-p & top-k sampling sampler "
-                        "is disabled because FlashInfer>=v0.2.3 is not "
-                        "backward compatible. Falling back to the PyTorch-"
-                        "native implementation of top-p & top-k sampling.")
+                if flashinfer_version < "0.2.3":
+                    logger.warning(
+                        "FlashInfer version >= 0.2.3 required. "
+                        "Falling back to default sampling implementation.")
                     self.forward = self.forward_native
                 elif envs.VLLM_USE_FLASHINFER_SAMPLER is not False:
                     # NOTE(woosuk): The V0 sampler doesn't use FlashInfer for
@@ -106,6 +95,11 @@ class TopKTopPSampler(nn.Module):
             # not needed. This is because `random_sample` does not require
             # CPU-GPU synchronization while `flashinfer_sample` does.
             return random_sample(probs, generators)
+        if generators:
+            logger.warning("FlashInfer 0.2.3+ does not support "
+                           "per-request generators. Falling back to "
+                           "PyTorch-native implementation.")
+            return self.forward_native(logits, generators, k, p)
         return flashinfer_sample(probs, k, p, generators)
 
     def forward_tpu(
@@ -280,36 +274,18 @@ def flashinfer_sample(
     the synchronization overhead.
     """
     assert not (k is None and p is None)
-    max_top_k_round = 32
-    batch_size = probs.shape[0]
-    uniform_samples = torch.empty((max_top_k_round, batch_size),
-                                  device=probs.device)
-    if len(generators) != batch_size:
-        uniform_samples.uniform_()
-    if generators:
-        for i, generator in generators.items():
-            uniform_samples[:, i].uniform_(generator=generator)
 
     if k is None:
         # Top-p only.
-        next_token_ids, success = flashinfer.sampling.top_p_sampling_from_probs(
-            probs, uniform_samples, p, deterministic=True)
+        next_token_ids = flashinfer.sampling.top_p_sampling_from_probs(
+            probs, p, deterministic=True)
     elif p is None:
         # Top-k only.
-        next_token_ids, success = flashinfer.sampling.top_k_sampling_from_probs(
-            probs, uniform_samples, k, deterministic=True)
+        next_token_ids = flashinfer.sampling.top_k_sampling_from_probs(
+            probs, k, deterministic=True)
     else:
         # Both top-k and top-p.
-        next_token_ids, success = (
-            flashinfer.sampling.top_k_top_p_sampling_from_probs(
-                probs, uniform_samples, k, p, deterministic=True))
+        next_token_ids = (flashinfer.sampling.top_k_top_p_sampling_from_probs(
+            probs, k, p, deterministic=True))
 
-    # NOTE: CPU-GPU synchronization happens here.
-    if not success.all():
-        if k is not None:
-            probs = flashinfer.sampling.top_k_renorm_prob(probs, k)
-        if p is not None:
-            probs = flashinfer.sampling.top_p_renorm_prob(probs, p)
-        next_token_ids = flashinfer.sampling.sampling_from_probs(
-            probs, uniform_samples[0], deterministic=True)
     return next_token_ids.view(-1)

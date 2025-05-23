@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import copy
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
@@ -21,9 +22,10 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class MultiKVConnectorMetadata(tuple[KVConnectorMetadata, ...],
-                               KVConnectorMetadata):
-    pass
+@dataclass
+class MultiKVConnectorMetadata(KVConnectorMetadata):
+    metadata: tuple[KVConnectorMetadata, ...]
+    extra_async_saves: Optional[dict[str, int]] = None
 
 
 class MultiConnector(KVConnectorBase_V1):
@@ -38,7 +40,7 @@ class MultiConnector(KVConnectorBase_V1):
 
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
         super().__init__(vllm_config=vllm_config, role=role)
-        self._connectors = []
+        self._connectors: list[KVConnectorBase_V1] = []
         ktcs = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "connectors")
         assert ktcs is not None
@@ -54,6 +56,7 @@ class MultiConnector(KVConnectorBase_V1):
         # Keeps track of *additional* remaining async saves (beyond 1) to be
         # finished per request. Not needed for async loads since we only allow
         # a single connector to load.
+        # Propagated from scheduler to worker side via the connector metadata.
         self._extra_async_saves: dict[str, int] = {}
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
@@ -66,7 +69,10 @@ class MultiConnector(KVConnectorBase_V1):
     def bind_connector_metadata(
             self, connector_metadata: KVConnectorMetadata) -> None:
         assert isinstance(connector_metadata, MultiKVConnectorMetadata)
-        for c, cm in zip(self._connectors, connector_metadata):
+        if connector_metadata.extra_async_saves:
+            self._extra_async_saves.update(
+                connector_metadata.extra_async_saves)
+        for c, cm in zip(self._connectors, connector_metadata.metadata):
             c.bind_connector_metadata(cm)
 
     def clear_connector_metadata(self) -> None:
@@ -97,10 +103,10 @@ class MultiConnector(KVConnectorBase_V1):
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
-        finished_recving: set[str] = set()
         finished_sending: set[str] = set()
+        finished_recving: set[str] = set()
         for c in self._connectors:
-            recving, sending = c.get_finished(finished_req_ids)
+            sending, recving = c.get_finished(finished_req_ids)
             if not recving and not sending:
                 continue
             # Aggregate finished recving request ids.
@@ -119,7 +125,7 @@ class MultiConnector(KVConnectorBase_V1):
                 else:
                     self._extra_async_saves[req_id] = extra_pending - 1
 
-        return finished_recving or None, finished_sending or None
+        return finished_sending or None, finished_recving or None
 
     # ==============================
     # Scheduler-side methods
@@ -152,8 +158,13 @@ class MultiConnector(KVConnectorBase_V1):
     def build_connector_meta(
             self,
             scheduler_output: SchedulerOutput) -> MultiKVConnectorMetadata:
-        return MultiKVConnectorMetadata(
-            c.build_connector_meta(scheduler_output) for c in self._connectors)
+        metadata = MultiKVConnectorMetadata(metadata=tuple(
+            c.build_connector_meta(scheduler_output)
+            for c in self._connectors))
+        if self._extra_async_saves:
+            metadata.extra_async_saves = self._extra_async_saves
+            self._extra_async_saves = {}
+        return metadata
 
     def request_finished(
         self,

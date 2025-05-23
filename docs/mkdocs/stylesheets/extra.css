@@ -1,0 +1,4 @@
+.md-banner {
+    background-color: var(--md-warning-bg-color);
+    color: var(--md-warning-fg-color);
+}

@@ -14,7 +14,7 @@ steps:
     agents:
       queue: cpu_queue_postmerge
     commands:
-      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.6.3 --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.6.3 --build-arg torch_cuda_arch_list='7.0 7.5 8.0 8.9 9.0+PTX' --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
       - "mkdir artifacts"
       - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
       - "bash .buildkite/scripts/upload-wheels.sh"
@@ -31,7 +31,7 @@ steps:
     agents:
       queue: cpu_queue_postmerge
     commands:
-      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=11.8.0 --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=11.8.0 --build-arg torch_cuda_arch_list='7.0 7.5 8.0 8.9 9.0+PTX' --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
       - "mkdir artifacts"
       - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
       - "bash .buildkite/scripts/upload-wheels.sh"
@@ -64,7 +64,7 @@ steps:
       - "docker push vllm/vllm-tpu:$BUILDKITE_COMMIT"
     plugins:
       - docker-login#v3.0.0:
-          username: vllm
+          username: vllmbot
           password-env: DOCKERHUB_TOKEN
     env:
       DOCKER_BUILDKIT: "1"

@@ -101,8 +101,17 @@ class ChatCommand(CLISubcommand):
         model_name, client = _interactive_cli(args)
         system_prompt = args.system_prompt
         conversation: list[ChatCompletionMessageParam] = []
+
         if system_prompt is not None:
             conversation.append({"role": "system", "content": system_prompt})
+
+        if args.quick:
+            conversation.append({"role": "user", "content": args.quick})
+
+            chat_completion = client.chat.completions.create(
+                model=model_name, messages=conversation)
+            print(chat_completion.choices[0].message.content)
+            return
 
         print("Please enter a message for the chat model:")
         while True:
@@ -136,6 +145,12 @@ class ChatCommand(CLISubcommand):
             default=None,
             help=("The system prompt to be added to the chat template, "
                   "used for models that support system prompts."))
+        chat_parser.add_argument("-q",
+                                 "--quick",
+                                 type=str,
+                                 metavar="MESSAGE",
+                                 help=("Send a single prompt as MESSAGE "
+                                       "and print the response, then exit."))
         return chat_parser
 
 
@@ -149,6 +164,13 @@ class CompleteCommand(CLISubcommand):
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
         model_name, client = _interactive_cli(args)
+
+        if args.quick:
+            completion = client.completions.create(model=model_name,
+                                                   prompt=args.quick)
+            print(completion.choices[0].text)
+            return
+
         print("Please enter prompt to complete:")
         while True:
             input_prompt = input("> ")
@@ -168,6 +190,13 @@ class CompleteCommand(CLISubcommand):
                          "via the running API server."),
             usage="vllm complete [options]")
         _add_query_options(complete_parser)
+        complete_parser.add_argument(
+            "-q",
+            "--quick",
+            type=str,
+            metavar="PROMPT",
+            help=
+            "Send a single prompt and print the completion output, then exit.")
         return complete_parser
 
 

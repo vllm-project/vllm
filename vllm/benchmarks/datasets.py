@@ -13,7 +13,6 @@ generation. Supported dataset types include:
 TODO: Implement CustomDataset to parse a JSON file and convert its contents into
 SampleRequest instances, similar to the approach used in ShareGPT.
 """
-
 import base64
 import io
 import json
@@ -33,6 +32,7 @@ from transformers import PreTrainedTokenizerBase
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal import MultiModalDataDict
+from vllm.multimodal.image import convert_image_mode
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_lora_tokenizer
 
 logger = logging.getLogger(__name__)
@@ -259,7 +259,7 @@ def process_image(image: Any) -> Mapping[str, Any]:
     if isinstance(image, dict) and 'bytes' in image:
         image = Image.open(BytesIO(image['bytes']))
     if isinstance(image, Image.Image):
-        image = image.convert("RGB")
+        image = convert_image_mode(image, "RGB")
         with io.BytesIO() as image_data:
             image.save(image_data, format="JPEG")
             image_base64 = base64.b64encode(

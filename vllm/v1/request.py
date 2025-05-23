@@ -77,6 +77,10 @@ class Request:
         self.output_token_ids = ConstantList(self._output_token_ids)
         self.all_token_ids = ConstantList(self._all_token_ids)
 
+        # State
+        # The number of tokens with prefix cache hits.
+        self.num_cached_tokens = -1
+
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
         if request.mm_inputs is not None:

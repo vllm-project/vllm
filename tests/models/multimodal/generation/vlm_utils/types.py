@@ -6,7 +6,6 @@ from pathlib import PosixPath
 from typing import Any, Callable, NamedTuple, Optional, Union
 
 import torch
-from PIL.Image import Image
 from pytest import MarkDecorator
 from transformers import AutoModelForCausalLM
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
@@ -15,17 +14,24 @@ from vllm.config import TaskOption
 from vllm.sequence import SampleLogprobs
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
-from .....conftest import IMAGE_ASSETS, HfRunner, ImageAsset, ImageTestAssets
+from .....conftest import (AUDIO_ASSETS, IMAGE_ASSETS, HfRunner, ImageAsset,
+                           ImageTestAssets, PromptAudioInput, PromptImageInput,
+                           PromptVideoInput)
 from ....utils import check_logprobs_close
 
 # meta image tag; will be replaced by the appropriate tag for the model
 TEST_IMG_PLACEHOLDER = "<vlm_image>"
 TEST_VIDEO_PLACEHOLDER = "<vlm_video>"
+TEST_AUDIO_PLACEHOLDER = "<lmm_audio>"
 
 # yapf: disable
 SINGLE_IMAGE_BASE_PROMPTS = IMAGE_ASSETS.prompts({
     "stop_sign": f"{TEST_IMG_PLACEHOLDER}What's the content of the image?",
     "cherry_blossom": f"{TEST_IMG_PLACEHOLDER}What is the season?",
+})
+SINGLE_AUDIO_BASE_PROMPT = AUDIO_ASSETS.prompts({
+    "mary_had_lamb": f"{TEST_AUDIO_PLACEHOLDER}Transcribe this audio into English.",    # noqa: E501
+    "winning_call": f"{TEST_AUDIO_PLACEHOLDER}What is happening in this audio clip?",     # noqa: E501
 })
 
 MULTI_IMAGE_BASE_PROMPT = f"Image-1: {TEST_IMG_PLACEHOLDER}Image-2: {TEST_IMG_PLACEHOLDER}Describe the two images in detail.\n"  # noqa: E501
@@ -38,12 +44,21 @@ RunnerOutput = tuple[list[int], str, Optional[SampleLogprobs]]
 # yapf: enable
 
 
+class PromptWithMultiModalInput(NamedTuple):
+    """Holds the multimodal input for a single test case."""
+    prompts: list[str]
+    image_data: Optional[PromptImageInput] = None
+    video_data: Optional[PromptVideoInput] = None
+    audio_data: Optional[PromptAudioInput] = None
+
+
 class VLMTestType(Enum):
     IMAGE = 1
     MULTI_IMAGE = 2
     EMBEDDING = 3
     VIDEO = 4
-    CUSTOM_INPUTS = 5
+    AUDIO = 5
+    CUSTOM_INPUTS = 6
 
 
 class SizeType(Enum):
@@ -52,10 +67,8 @@ class SizeType(Enum):
 
 
 class CustomTestOptions(NamedTuple):
-    inputs: list[tuple[list[str], list[Union[list[Image], Image]]]]
+    inputs: list[PromptWithMultiModalInput]
     limit_mm_per_prompt: dict[str, int]
-    # kwarg to pass multimodal data in as to vllm/hf runner instances.
-    runner_mm_key: str = "images"
 
 
 class ImageSizeWrapper(NamedTuple):
@@ -75,6 +88,7 @@ class VLMTestInfo(NamedTuple):
     prompt_formatter: Optional[Callable[[str], str]] = None
     img_idx_to_prompt: Callable[[int], str] = lambda idx: "<image>\n"
     video_idx_to_prompt: Callable[[int], str] = lambda idx: "<video>\n"
+    audio_idx_to_prompt: Callable[[int], str] = lambda idx: "<audio>\n"
 
     # Most models work on the single / multi-image prompts above, but in some
     # cases the log prob check fails, e.g., for paligemma. We allow passing
