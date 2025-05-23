@@ -23,6 +23,7 @@ from vllm.model_executor.models.intern_vit import (InternVisionModel,
                                                    InternVisionPatchModel)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargs, NestedTensors)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
@@ -77,7 +78,7 @@ InternVLImageInputs = Union[InternVLImagePixelInputs,
 def build_transform(input_size: int):
     MEAN, STD = IMAGENET_MEAN, IMAGENET_STD
     return T.Compose([
-        T.Lambda(lambda img: img.convert('RGB') if img.mode != 'RGB' else img),
+        T.Lambda(lambda img: convert_image_mode(img, 'RGB')),
         T.Resize((input_size, input_size),
                  interpolation=T.InterpolationMode.BICUBIC),
         T.ToTensor(),
