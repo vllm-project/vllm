@@ -31,6 +31,7 @@ from vllm.v1.worker.worker_base import WorkerBase
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
+    from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.core.sched.output import SchedulerOutput
 
 
@@ -325,6 +326,13 @@ class Worker(WorkerBase):
             pattern=pattern,
             max_size=max_size,
         )
+
+    def save_tensorized_model(
+        self,
+        tensorizer_config: "TensorizerConfig",
+    ) -> None:
+        self.model_runner.save_tensorized_model(
+            tensorizer_config=tensorizer_config, )
 
 
 def init_worker_distributed_environment(
