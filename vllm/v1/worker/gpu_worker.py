@@ -348,8 +348,7 @@ def init_worker_distributed_environment(
                                  distributed_init_method, local_rank)
 
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
-                                      parallel_config.pipeline_parallel_size,
-                                      parallel_config.enable_expert_parallel)
+                                      parallel_config.pipeline_parallel_size)
 
     ensure_kv_transfer_initialized(vllm_config)
 
