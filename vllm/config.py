@@ -2522,6 +2522,12 @@ class SpeculativeConfig:
                 elif (self.draft_model_config.hf_config.model_type ==
                       "deepseek_mtp"):
                     self.method = "deepseek_mtp"
+                    if self.num_speculative_tokens > 1:
+                        logger.warning(
+                                "All Deepseek MTP models only have " \
+                                "one layer. Might need some code changes " \
+                                "to support multiple layers."
+                            )
                 else:
                     self.method = "draft_model"
 

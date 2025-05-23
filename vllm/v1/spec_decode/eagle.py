@@ -181,11 +181,6 @@ class EagleProposer:
         # TODO: Currently, MTP module released by deepseek only has
         # one layer. Adapt this code to support multiple layers once
         # there's a multi-layer MTP module.
-        if self.method == "deepseek_mtp":
-            logger.warning(
-                    "All Deepseek MTP models only have one layer. " \
-                    "Might need to change code to support multiple layers."
-                )
 
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
