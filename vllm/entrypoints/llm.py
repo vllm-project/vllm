@@ -131,10 +131,9 @@ class LLM:
         **kwargs: Arguments for {class}`~vllm.EngineArgs`. (See
             {ref}`engine-args`)
 
-    :::{note}
-    This class is intended to be used for offline inference. For online
-    serving, use the {class}`~vllm.AsyncLLMEngine` class instead.
-    :::
+    Note:
+        This class is intended to be used for offline inference. For online
+        serving, use the {class}`~vllm.AsyncLLMEngine` class instead.
     """
 
     DEPRECATE_LEGACY: ClassVar[bool] = True
@@ -422,11 +421,10 @@ class LLM:
             A list of `RequestOutput` objects containing the
             generated completions in the same order as the input prompts.
 
-        :::{note}
-        Using `prompts` and `prompt_token_ids` as keyword parameters is
-        considered legacy and may be deprecated in the future. You should
-        instead pass them via the `inputs` parameter.
-        :::
+        Note:
+            Using `prompts` and `prompt_token_ids` as keyword parameters is
+            considered legacy and may be deprecated in the future. You should
+            instead pass them via the `inputs` parameter.
         """
         runner_type = self.llm_engine.model_config.runner_type
         if runner_type not in ["generate", "transcription"]:
@@ -502,10 +500,9 @@ class LLM:
         Returns:
             A list containing the results from each worker.
 
-        :::{note}
-        It is recommended to use this API to only pass control messages,
-        and set up data-plane communication to pass data.
-        :::
+        Note:
+            It is recommended to use this API to only pass control messages,
+            and set up data-plane communication to pass data.
         """
 
         return self.llm_engine.collective_rpc(method, timeout, args, kwargs)
@@ -924,11 +921,10 @@ class LLM:
             A list of `PoolingRequestOutput` objects containing the
             pooled hidden states in the same order as the input prompts.
 
-        :::{note}
-        Using `prompts` and `prompt_token_ids` as keyword parameters is
-        considered legacy and may be deprecated in the future. You should
-        instead pass them via the `inputs` parameter.
-        :::
+        Note:
+            Using `prompts` and `prompt_token_ids` as keyword parameters is
+            considered legacy and may be deprecated in the future. You should
+            instead pass them via the `inputs` parameter.
         """
         runner_type = self.llm_engine.model_config.runner_type
         if runner_type != "pooling":
@@ -1306,27 +1302,25 @@ class LLM:
     ):
         # skip_tokenizer_init is now checked in engine
 
+        if prompts is None and prompt_token_ids is None:
+            raise ValueError(
+                "Either prompts or prompt_token_ids must be provided.")
+        if prompts is not None and prompt_token_ids is not None \
+                and len(prompts) != len(prompt_token_ids):
+            raise ValueError(
+                "The lengths of prompts and prompt_token_ids must be the same."
+            )
+
         if prompts is not None:
             prompts = [p["content"] for p in parse_and_batch_prompt(prompts)]
         if prompt_token_ids is not None:
             prompt_token_ids = [
                 p["content"] for p in parse_and_batch_prompt(prompt_token_ids)
             ]
-
-        num_requests = None
         if prompts is not None:
             num_requests = len(prompts)
-        if prompt_token_ids is not None:
-            if (num_requests is not None
-                    and num_requests != len(prompt_token_ids)):
-                raise ValueError("The lengths of prompts and prompt_token_ids "
-                                 "must be the same.")
-
+        elif prompt_token_ids is not None:
             num_requests = len(prompt_token_ids)
-        if num_requests is None:
-            raise ValueError("Either prompts or prompt_token_ids must be "
-                             "provided.")
-
         parsed_prompts: list[PromptType] = []
         for i in range(num_requests):
             item: PromptType

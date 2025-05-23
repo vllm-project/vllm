@@ -264,13 +264,14 @@ class DefaultModelLoader(BaseModelLoader):
                               fall_back_to_pt=True,
                               allow_patterns_overrides=None)
 
-    def load_model(self, vllm_config: VllmConfig) -> nn.Module:
+    def load_model(self, vllm_config: VllmConfig,
+                   model_config: ModelConfig) -> nn.Module:
         device_config = vllm_config.device_config
-        model_config = vllm_config.model_config
         target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
-                model = initialize_model(vllm_config=vllm_config)
+                model = initialize_model(vllm_config=vllm_config,
+                                         model_config=model_config)
 
             weights_to_load = {name for name, _ in model.named_parameters()}
             loaded_weights = model.load_weights(
