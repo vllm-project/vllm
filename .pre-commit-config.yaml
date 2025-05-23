@@ -39,6 +39,7 @@ repos:
   rev: v0.9.29
   hooks:
   - id: pymarkdown
+    exclude: '.*\.inc\.md'
     args: [fix]
 - repo: https://github.com/rhysd/actionlint
   rev: v1.7.7

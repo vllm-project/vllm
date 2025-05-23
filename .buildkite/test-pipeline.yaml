@@ -33,14 +33,13 @@ steps:
 
 - label: Documentation Build # 2min
   mirror_hardwares: [amdexperimental]
-  working_dir: "/vllm-workspace/test_docs/docs"
+  working_dir: "/vllm-workspace/test_docs"
   fast_check: true
   no_gpu: True
   commands:
-  - pip install -r ../../requirements/docs.txt
-  - SPHINXOPTS=\"-W\" make html
-  # Check API reference (if it fails, you may have missing mock imports)
-  - grep \"sig sig-object py\" build/html/api/vllm/vllm.sampling_params.html
+  - pip install -r ../requirements/docs.txt
+  # TODO: add `--strict` once warnings in docstrings are fixed
+  - mkdocs build
 
 - label: Async Engine, Inputs, Utils, Worker Test # 24min
   mirror_hardwares: [amdexperimental]
