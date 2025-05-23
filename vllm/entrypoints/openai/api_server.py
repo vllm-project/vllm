@@ -1299,6 +1299,9 @@ def validate_api_server_args(args):
 
 
 def setup_server(args):
+    """Validate API server args, set up signal handler, create socket
+    ready to serve."""
+
     logger.info("vLLM API server version %s", VLLM_VERSION)
     log_non_default_args(args)
 
@@ -1333,6 +1336,7 @@ def setup_server(args):
 
 
 async def run_server(args, **uvicorn_kwargs) -> None:
+    """Run a single-worker API server."""
     listen_address, sock = setup_server(args)
     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
 
@@ -1342,6 +1346,7 @@ async def run_server_worker(listen_address,
                             args,
                             client_config=None,
                             **uvicorn_kwargs) -> None:
+    """Run a single API server worker."""
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)

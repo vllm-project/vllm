@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 import multiprocessing
-import sys
 import time
 import weakref
 from typing import Optional
@@ -19,6 +18,36 @@ logger = init_logger(__name__)
 
 
 class DPCoordinator:
+    """Coordinator process used for data-parallel deployments (DP>1).
+
+    Intermediates between multiple DP engine rank processes and one or more
+    front-end API server processes.
+
+    * Collects stats from each DP engine (currently just waiting and running
+      queue lengths), and publishes these to all front-ends for use in
+      load-balancing decisions.
+
+    * Keeps track of the current DP "request wave" number and running state
+      of the engines. This is received from the DP rank 0 engine and published
+      to the front-end processes along with the current load stats.
+
+      The engines alternate between a global running/paused state. The global
+      "request wave" number is a count of the number of times that the workers
+      collectively move from running paused state. This transition is
+      synchronized via the all-reduce operation performed in the
+      DPEngineCoreProc._has_global_unfinished_reqs method.
+
+    * Broadcasts the START_DP_WAVE message to engines to move them from paused
+      to running state when one engine receives a new request. This can happen
+      in two cases:
+      1) A front-end sending a new request while the engines are paused will
+         concurrently notify the coordinator.
+      2) An engine receiving a request for a stale request wave while in paused
+         state will notify the coordinator.
+
+    Engines will move into running state when receiving a new request or
+    START_DP_WAVE message.
+    """
 
     def __init__(self, parallel_config: ParallelConfig):
 
@@ -169,8 +198,6 @@ class CoordinatorProc:
                         stats[1] = outputs.scheduler_stats.num_running_reqs
                         self.stats_changed = True
 
-                        #TODO record prometheus metrics here?
-
                     if outputs.wave_complete is not None:
                         if self.current_wave <= wave:
                             self.current_wave = wave + 1
@@ -198,13 +225,13 @@ class CoordinatorProc:
     def _get_engine_counts(self) -> list[list[int]]:
         return [e.request_counts for e in self.engines]
 
-    def _get_engine_list(self) -> Optional[list[int]]:
-        shortlist: list[int] = []
-        min_counts = [sys.maxsize, sys.maxsize]
-        for i, e in enumerate(self.engines):
-            if e.request_counts <= min_counts:
-                if e.request_counts < min_counts:
-                    min_counts = e.request_counts
-                    shortlist.clear()
-                shortlist.append(i)
-        return None if len(shortlist) == len(self.engines) else shortlist
+    # def _get_engine_list(self) -> Optional[list[int]]:
+    #     shortlist: list[int] = []
+    #     min_counts = [sys.maxsize, sys.maxsize]
+    #     for i, e in enumerate(self.engines):
+    #         if e.request_counts <= min_counts:
+    #             if e.request_counts < min_counts:
+    #                 min_counts = e.request_counts
+    #                 shortlist.clear()
+    #             shortlist.append(i)
+    #     return None if len(shortlist) == len(self.engines) else shortlist

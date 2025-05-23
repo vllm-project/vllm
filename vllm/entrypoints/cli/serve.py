@@ -254,7 +254,7 @@ def run_multi_api_server(args: argparse.Namespace):
 
         # Start API servers using the manager
         api_server_manager = APIServerProcessManager(
-            target_server_fn=run_api_server_worker,
+            target_server_fn=run_api_server_worker_proc,
             listen_address=listen_address,
             sock=sock,
             args=args,
@@ -285,11 +285,12 @@ def run_multi_api_server(args: argparse.Namespace):
             coordinator=coordinator)
 
 
-def run_api_server_worker(listen_address,
-                          sock,
-                          args,
-                          client_config=None,
-                          **uvicorn_kwargs) -> None:
+def run_api_server_worker_proc(listen_address,
+                               sock,
+                               args,
+                               client_config=None,
+                               **uvicorn_kwargs) -> None:
+    """Entrypoint for individual API server worker processes."""
 
     # Add process-specific prefix to stdout and stderr.
     from multiprocessing import current_process
