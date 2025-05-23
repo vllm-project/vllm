@@ -259,7 +259,7 @@ def flashinfer_sample(
     p: Optional[torch.Tensor],
     generators: dict[int, torch.Generator],
 ) -> torch.Tensor:
-    """Sample from the probabilities using FlashInfer.
+    """Sample from the logits using FlashInfer.
 
     Statistically, this function is equivalent to the `random_sample` function.
     However, this function is faster because it avoids sorting the logits tensor
