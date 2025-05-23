@@ -3,10 +3,7 @@
 import argparse
 import os
 import signal
-import socket
 import sys
-from multiprocessing import connection
-from typing import Union
 
 import uvloop
 import zmq
@@ -33,9 +30,6 @@ from vllm.v1.utils import (APIServerProcessManager, CoreEngine,
                            wait_for_engine_startup)
 
 logger = init_logger(__name__)
-
-# Type for process sentinel objects
-SentinelType = Union[connection.Connection, socket.socket, int]
 
 
 class ServeSubcommand(CLISubcommand):
@@ -168,7 +162,7 @@ def run_multi_api_server(args: argparse.Namespace):
 
     assert not args.headless
     num_api_servers = args.api_server_count
-    #assert num_api_servers > 1
+    assert num_api_servers > 0
 
     if num_api_servers > 1:
         setup_multiprocess_prometheus()
@@ -223,7 +217,6 @@ def run_multi_api_server(args: argparse.Namespace):
     coordinator = None
     stats_update_address = None
     if dp_size > 1:
-        # TODO "ready" event for coordinator
         coordinator = DPCoordinator(parallel_config)
         addresses.coordinator_input, addresses.coordinator_output = (
             coordinator.get_engine_socket_addresses())

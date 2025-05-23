@@ -55,6 +55,8 @@ class EngineCoreRequest(
     lora_request: Optional[LoRARequest]
     cache_salt: Optional[str]
 
+    # Index of the client, used to ensure outputs are sent back to the same
+    # client for this request when scaling out the front-end.
     client_index: int = 0
 
     # Used in DP case to indicate which wave of requests this is expected to
