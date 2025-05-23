@@ -119,10 +119,10 @@ class PyNcclPipe(KVPipeBase):
         Create the metadata as a dictionary based on the input tensor.
 
         Args:
-            - tensor: The input tensor or None if no tensor is provided.
+            tensor: The input tensor or None if no tensor is provided.
 
         Returns:
-            - metadata: A dictionary with the following keys:
+            metadata: A dictionary with the following keys:
                 - "dtype": The data type of the tensor or None.
                 - "shape": The shape of the tensor or None.
         """
@@ -152,7 +152,7 @@ class PyNcclPipe(KVPipeBase):
         Send the metadata dictionary to the target rank.
 
         Args:
-            - metadata: A dictionary with keys "dtype" and "shape".
+            metadata: A dictionary with keys "dtype" and "shape".
         """
         self.group.send_obj(metadata, self.target_rank_for_send)
 
@@ -161,7 +161,7 @@ class PyNcclPipe(KVPipeBase):
         Receive the metadata dictionary from the target rank.
 
         Returns:
-            - metadata: A dictionary with keys "dtype" and "shape"
+            metadata: A dictionary with keys "dtype" and "shape"
                 describing the tensor.
         """
         return self.group.recv_obj(self.target_rank_for_recv)
@@ -172,8 +172,8 @@ class PyNcclPipe(KVPipeBase):
         target rank.
 
         Args:
-            - tensor: The input tensor to be sent,
-                or `None` if no tensor is being sent.
+            tensor: The input tensor to be sent, or `None` if no tensor is
+                being sent.
         """
         metadata = self._make_metadata(tensor)
         self._send_metadata(metadata)
@@ -187,7 +187,7 @@ class PyNcclPipe(KVPipeBase):
         the target rank.
 
         Returns:
-            - buffer: The received tensor, or `None` if no tensor is received.
+            buffer: The received tensor, or `None` if no tensor is received.
         """
         metadata = self._recv_metadata()
         if metadata["dtype"] is None:
@@ -228,7 +228,7 @@ class PyNcclPipe(KVPipeBase):
         non-blocking way.
 
         Args:
-            - tensor: The tensor to send, or `None` if no tensor is being sent.
+            tensor: The tensor to send, or `None` if no tensor is being sent.
         """
         if self.transport_thread is None:
             self.transport_thread = ThreadPoolExecutor(max_workers=1)
@@ -251,8 +251,7 @@ class PyNcclPipe(KVPipeBase):
         Receives a tensor and its metadata from the source rank. Blocking call.
 
         Args:
-            - tensor: The received tensor,
-                or `None` if no tensor is received.
+            tensor: The received tensor, or `None` if no tensor is received.
         """
         if self.transport_thread is None:
             self.transport_thread = ThreadPoolExecutor(max_workers=1)
