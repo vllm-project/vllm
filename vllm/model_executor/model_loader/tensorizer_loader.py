@@ -2,6 +2,7 @@
 # ruff: noqa: SIM117
 import copy
 from collections.abc import Generator
+from typing import Union
 
 import torch
 from torch import nn
@@ -111,8 +112,10 @@ class TensorizerLoader(BaseModelLoader):
     @staticmethod
     def save_model(
         model: torch.nn.Module,
-        tensorizer_config: TensorizerConfig,
+        tensorizer_config: Union[TensorizerConfig, dict],
     ) -> None:
+        if isinstance(tensorizer_config, dict):
+            tensorizer_config = TensorizerConfig(**tensorizer_config)
         serialize_vllm_model(
             model=model,
             tensorizer_config=tensorizer_config,

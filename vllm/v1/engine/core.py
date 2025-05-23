@@ -340,6 +340,13 @@ class EngineCore:
         return self.model_executor.collective_rpc(method, timeout, args,
                                                   kwargs)
 
+    def save_tensorized_model(
+        self,
+        tensorizer_config,
+    ) -> None:
+        self.model_executor.save_tensorized_model(
+            tensorizer_config=tensorizer_config, )
+
 
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
