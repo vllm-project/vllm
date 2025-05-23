@@ -813,6 +813,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "naive": naive all2all implementation using all-reduce
     # - "pplx": use pplx kernels
     # - "deepep", use deepep kernels
+    # - "deepep_ll", use deepep low-latency kernels
     "VLLM_ALL2ALL_BACKEND":
     lambda: os.getenv("VLLM_ALL2ALL_BACKEND", "naive"),
 }
