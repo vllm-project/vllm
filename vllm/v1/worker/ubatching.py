@@ -3,6 +3,7 @@ import threading
 import torch
 import torch._dynamo
 import torch.profiler as profiler
+import os
 from typing import Optional
 from torch.library import Library
 from torch.library import custom_op, register_kernel
@@ -135,8 +136,11 @@ def dump_ubatching_state():
     """
     Dump the current UBatchContext state for debugging.
     """
+    
+    dp_rank = os.getenv("VLLM_DP_RANK", None)
+    
     for ctx in _CURRENT_CONTEXT.values():
-        print(f"UBatchContext: {ctx.id}\n"
+        print(f"UBatchContext: {ctx.id} (dp_rank {dp_rank})\n"
               f" Stream: {ctx.stream}, ({ctx.stream.query()})\n"
               f" Original Stream: {ctx.original_stream}, ({ctx.original_stream.query()})\n"
               f" CPU Wait Event: {ctx.cpu_wait_event}\n"
