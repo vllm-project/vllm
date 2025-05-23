@@ -26,7 +26,7 @@ class EagleProposer:
         self,
         vllm_config: VllmConfig,
         device: torch.device,
-        runner,
+        runner = None,
     ):
         self.vllm_config = vllm_config
         self.speculative_config = vllm_config.speculative_config
@@ -137,6 +137,8 @@ class EagleProposer:
             common_attn_metadata = CommonAttentionMetadata(
                 query_start_loc=cu_num_tokens, seq_lens=seq_lens)
 
+            assert self.runner is not None
+    
             # FIXME: need to consider multiple kv_cache_groups
             attn_metadata = self.runner.attn_metadata_builder.build(
                 num_reqs=batch_size,
