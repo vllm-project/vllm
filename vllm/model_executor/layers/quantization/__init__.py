@@ -34,6 +34,7 @@ QuantizationMethods = Literal[
     "moe_wna16",
     "torchao",
     "auto-round",
+    "rtn",
 ]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
@@ -109,6 +110,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .neuron_quant import NeuronQuantConfig
     from .ptpc_fp8 import PTPCFp8Config
     from .qqq import QQQConfig
+    from .rtn import RTNConfig
     from .torchao import TorchAOConfig
     from .tpu_int8 import Int8TpuConfig
 
@@ -141,6 +143,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "moe_wna16": MoeWNA16Config,
         "torchao": TorchAOConfig,
         "auto-round": AutoRoundConfig,
+        "rtn": RTNConfig
     }
     # Update the `method_to_config` with customized quantization methods.
     method_to_config.update(_CUSTOMIZED_METHOD_TO_QUANT_CONFIG)
