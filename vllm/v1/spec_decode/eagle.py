@@ -4,14 +4,11 @@ import torch.nn as nn
 
 from vllm.attention.layer import Attention
 from vllm.config import (CompilationLevel, VllmConfig,
-                         get_layers_from_vllm_config, set_current_vllm_config)
+                         get_layers_from_vllm_config)
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader import get_model_loader
-from vllm.model_executor.model_loader.utils import (
-    process_weights_after_loading, set_default_torch_dtype)
-from vllm.model_executor.models import ModelRegistry
+from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
@@ -280,51 +277,28 @@ class EagleProposer:
         return cu_num_tokens, token_indices
 
     def load_model(self, target_model: nn.Module) -> None:
-        loader = get_model_loader(self.vllm_config.load_config)
-        target_layer_num = self.vllm_config.model_config.get_num_layers(
-            self.vllm_config.parallel_config)
+        draft_model_config = \
+            self.vllm_config.speculative_config.draft_model_config
         target_attn_layer_names = set(
             get_layers_from_vllm_config(self.vllm_config, Attention).keys())
 
-        draft_model_config = \
-            self.vllm_config.speculative_config.draft_model_config
-        # FIXME(lily): This does not handle with distributed inference.
-        target_device = self.vllm_config.device_config.device
-        # We need to set the vllm_config here to register attention
-        # layers in the forward context.
-        with set_default_torch_dtype(
-                draft_model_config.dtype), set_current_vllm_config(
-                    self.vllm_config):
-            draft_model_cls, arch = ModelRegistry.resolve_model_cls(
-                draft_model_config.architectures)
-            self.model = draft_model_cls(
-                vllm_config=self.vllm_config,
-                start_layer_id=target_layer_num).to(target_device)
+        self.model = get_model(vllm_config=self.vllm_config,
+                               model_config=draft_model_config)
 
         draft_attn_layer_names = (
             get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
             target_attn_layer_names)
         assert len(draft_attn_layer_names) == 1
         self.attn_layer_name = next(iter(draft_attn_layer_names))
-        loaded_weights = self.model.load_weights(
-            loader.get_all_weights(draft_model_config, self.model))
-
-        process_weights_after_loading(self.model, draft_model_config,
-                                      target_device)
 
         # share embed_tokens with the target model if needed
         if get_pp_group().world_size == 1:
-            assert "model.embed_tokens.weight" not in loaded_weights, \
-            "For PP = 1, Eagle draft should share embed with target model"
             logger.info(
                 "The EAGLE head shares the same vocab embedding" \
                 " with the target model."
             )
             self.model.model.embed_tokens = target_model.model.embed_tokens
         else:
-            assert "model.embed_tokens.weight" in loaded_weights, \
-            "For PP > 1, Eagle draft checkpoint should its own copy of "
-            " the model.embed_tokens.weight"
             logger.info(
                 "Since PP > 1, the EAGLE head loaded its own vocab embedding" \
                 " weights instead of sharing them with the target model."
