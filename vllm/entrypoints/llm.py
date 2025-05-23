@@ -1306,27 +1306,25 @@ class LLM:
     ):
         # skip_tokenizer_init is now checked in engine
 
+        if prompts is None and prompt_token_ids is None:
+            raise ValueError(
+                "Either prompts or prompt_token_ids must be provided.")
+        if prompts is not None and prompt_token_ids is not None \
+                and len(prompts) != len(prompt_token_ids):
+            raise ValueError(
+                "The lengths of prompts and prompt_token_ids must be the same."
+            )
+
         if prompts is not None:
             prompts = [p["content"] for p in parse_and_batch_prompt(prompts)]
         if prompt_token_ids is not None:
             prompt_token_ids = [
                 p["content"] for p in parse_and_batch_prompt(prompt_token_ids)
             ]
-
-        num_requests = None
         if prompts is not None:
             num_requests = len(prompts)
-        if prompt_token_ids is not None:
-            if (num_requests is not None
-                    and num_requests != len(prompt_token_ids)):
-                raise ValueError("The lengths of prompts and prompt_token_ids "
-                                 "must be the same.")
-
+        elif prompt_token_ids is not None:
             num_requests = len(prompt_token_ids)
-        if num_requests is None:
-            raise ValueError("Either prompts or prompt_token_ids must be "
-                             "provided.")
-
         parsed_prompts: list[PromptType] = []
         for i in range(num_requests):
             item: PromptType
