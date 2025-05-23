@@ -161,7 +161,7 @@ class UsageMessage:
                              usage_context: UsageContext,
                              extra_kvs: dict[str, Any]) -> None:
         self._report_usage_once(model_architecture, usage_context, extra_kvs)
-        self._report_continous_usage()
+        self._report_continuous_usage()
 
     def _report_usage_once(self, model_architecture: str,
                            usage_context: UsageContext,
@@ -174,6 +174,15 @@ class UsageMessage:
                 cuda_get_device_properties(0, ("name", "total_memory")))
         if current_platform.is_cuda():
             self.cuda_runtime = torch.version.cuda
+        if current_platform.is_tpu():
+            try:
+                import torch_xla
+                self.gpu_count = torch_xla.runtime.world_size()
+                self.gpu_type = torch_xla.tpu.get_tpu_type()
+                self.gpu_memory_per_device = (
+                    torch_xla.core.xla_model.get_memory_info()["bytes_limit"])
+            except Exception:
+                pass
         self.provider = _detect_cloud_provider()
         self.architecture = platform.machine()
         self.platform = platform.platform()
@@ -210,7 +219,7 @@ class UsageMessage:
         self._write_to_file(data)
         self._send_to_server(data)
 
-    def _report_continous_usage(self):
+    def _report_continuous_usage(self):
         """Report usage every 10 minutes.
 
         This helps us to collect more data points for uptime of vLLM usages.

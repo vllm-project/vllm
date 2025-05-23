@@ -12,6 +12,9 @@ from enum import Enum
 from openai import BadRequestError, OpenAI
 from pydantic import BaseModel
 
+openai_api_key = "EMPTY"
+openai_api_base = "http://localhost:8000/v1"
+
 
 # Guided decoding by Choice (list of possible options)
 def guided_choice_completion(client: OpenAI, model: str):
@@ -112,8 +115,8 @@ def extra_backend_options_completion(client: OpenAI, model: str):
               "alan.turing@enigma.com\n")
 
     try:
-        # The no-fallback option forces vLLM to use xgrammar, so when it fails
-        # you get a 400 with the reason why
+        # The guided_decoding_disable_fallback option forces vLLM to use
+        # xgrammar, so when it fails you get a 400 with the reason why
         completion = client.chat.completions.create(
             model=model,
             messages=[{
@@ -123,7 +126,8 @@ def extra_backend_options_completion(client: OpenAI, model: str):
             extra_body={
                 "guided_regex": r"\w+@\w+\.com\n",
                 "stop": ["\n"],
-                "guided_decoding_backend": "xgrammar:no-fallback"
+                "guided_decoding_backend": "xgrammar",
+                "guided_decoding_disable_fallback": True,
             },
         )
         return completion.choices[0].message.content
@@ -133,11 +137,11 @@ def extra_backend_options_completion(client: OpenAI, model: str):
 
 def main():
     client: OpenAI = OpenAI(
-        base_url="http://localhost:8000/v1",
-        api_key="-",
+        base_url=openai_api_base,
+        api_key=openai_api_key,
     )
 
-    model = "Qwen/Qwen2.5-3B-Instruct"
+    model = client.models.list().data[0].id
 
     print("Guided Choice Completion:")
     print(guided_choice_completion(client, model))

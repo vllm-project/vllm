@@ -44,7 +44,7 @@ def create_scheduler(
                              (None)
 
     Returns:
-      :class:`Scheduler` instance
+      {class}`Scheduler` instance
     '''
     if max_model_len is None:
         max_model_len = max_num_batched_tokens
@@ -132,7 +132,6 @@ def create_requests(num_requests: int,
             mm_inputs = None
         request = Request(
             request_id=f"{i}",
-            prompt=None,
             prompt_token_ids=[i] * num_tokens,
             sampling_params=sampling_params,
             multi_modal_inputs=mm_inputs,
@@ -813,10 +812,11 @@ def _assert_right_kv_cache_manager(
     # Make sure the request stats are right.
     EXPECTED_TOTAL_BLOCKS = num_tokens // block_size
     for req_id in req_ids:
-        blocks = scheduler.kv_cache_manager.req_to_blocks[req_id]
+        blocks = (scheduler.kv_cache_manager.single_type_manager.
+                  req_to_blocks[req_id])
         hashes = scheduler.kv_cache_manager.req_to_block_hashes[req_id]
-        assert (scheduler.kv_cache_manager.num_cached_block[req_id] ==
-                EXPECTED_TOTAL_BLOCKS)
+        assert (scheduler.kv_cache_manager.single_type_manager.
+                num_cached_block[req_id] == EXPECTED_TOTAL_BLOCKS)
         assert len(blocks) == EXPECTED_TOTAL_BLOCKS
         assert len(hashes) == EXPECTED_TOTAL_BLOCKS
 
@@ -870,7 +870,7 @@ def test_kv_connector_basic():
     NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE * 2
     scheduler.connector.get_num_new_matched_tokens = Mock(name="method")
     scheduler.connector.get_num_new_matched_tokens.return_value = (
-        NUM_MATCHED_NEW_TOKENS)
+        NUM_MATCHED_NEW_TOKENS, False)
 
     ######################################################
     # FIRST SET OF REQUESTS - External Hit Only
@@ -981,7 +981,7 @@ def test_kv_connector_unable_to_allocate():
     NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE * 2
     scheduler.connector.get_num_new_matched_tokens = Mock(name="method")
     scheduler.connector.get_num_new_matched_tokens.return_value = (
-        NUM_MATCHED_NEW_TOKENS)
+        NUM_MATCHED_NEW_TOKENS, False)
 
     # Create two requests. The second request will not be able to
     # allocate slots because it will not have enough blocks.
@@ -1060,7 +1060,7 @@ def test_kv_connector_handles_preemption():
     NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE
     scheduler.connector.get_num_new_matched_tokens = Mock(name="method")
     scheduler.connector.get_num_new_matched_tokens.return_value = (
-        NUM_MATCHED_NEW_TOKENS)
+        NUM_MATCHED_NEW_TOKENS, False)
 
     # Create two requests.
     # Both can be scheduled at first, but the second request
@@ -1166,3 +1166,82 @@ def test_kv_connector_handles_preemption():
     # All memory should be freed since nothing is running.
     assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() \
         == NUM_BLOCKS - 1
+
+
+def make_output(scheduler: Scheduler):
+    return ModelRunnerOutput(
+        req_ids=[req.request_id for req in scheduler.running],
+        req_id_to_index={
+            req.request_id: i
+            for i, req in enumerate(scheduler.running)
+        },
+        sampled_token_ids=[[1000]] * len(scheduler.running),
+        spec_token_ids=None,
+        logprobs=None,
+        prompt_logprobs_dict={},
+    )
+
+
+def assert_scheduler_empty(scheduler: Scheduler):
+    """Confirm the scheduler is "empty" - i.e. no leaks."""
+    # Scheduler Metadata.
+    assert len(scheduler.requests) == 0
+    assert len(scheduler.waiting) == 0
+    assert len(scheduler.running) == 0
+    assert len(scheduler.finished_req_ids) == 0
+    assert len(scheduler._cached_reqs_data) == 0
+
+    # EncoderCacheManager.
+    assert len(scheduler.encoder_cache_manager.freed) == 0
+    assert len(scheduler.encoder_cache_manager.cached) == 0
+
+    # KVCache Manager.
+    assert len(
+        scheduler.kv_cache_manager.single_type_manager.req_to_blocks) == 0
+    assert len(scheduler.kv_cache_manager.req_to_block_hashes) == 0
+    assert len(
+        scheduler.kv_cache_manager.single_type_manager.num_cached_block) == 0
+    num_free_blocks = (
+        scheduler.kv_cache_manager.block_pool.free_block_queue.num_free_blocks)
+    assert num_free_blocks == (
+        scheduler.kv_cache_manager.block_pool.num_gpu_blocks - 1)
+
+    # NOTE(rob): just the ref count on blocks will be 0. The hash
+    # value, etc will remain since we lazily evict for prefix cache.
+    for block in scheduler.kv_cache_manager.block_pool.blocks:
+        assert block.ref_cnt == 0
+        # assert block._block_hash is None
+    # assert (
+    #     len(scheduler.kv_cache_manager.block_pool.cached_block_hash_to_block
+    #           ) == 0)
+
+
+def test_memory_leak():
+    """Test that we do not have a memory leak."""
+
+    scheduler = create_scheduler(enable_prefix_caching=True)
+
+    NUM_REQUESTS = 5
+    NUM_TOKENS = 10
+    MAX_TOKENS = 10
+    requests = create_requests(num_requests=NUM_REQUESTS,
+                               num_tokens=NUM_TOKENS,
+                               max_tokens=MAX_TOKENS)
+
+    # Add each request.
+    for request in requests:
+        scheduler.add_request(request)
+        scheduler_output = scheduler.schedule()
+        model_runner_output = make_output(scheduler)
+        scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    # Iterate until done.
+    while True:
+        scheduler_output = scheduler.schedule()
+        if len(scheduler.running) == 0:
+            break
+        model_runner_output = make_output(scheduler)
+        scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    # Confirm no memory leak.
+    assert_scheduler_empty(scheduler)

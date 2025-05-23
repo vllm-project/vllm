@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import importlib
 
 import pytest
 import torch
@@ -10,8 +11,7 @@ from vllm.utils import GiB_bytes, sha256
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 # disable yapf here as it formats differently than isort such that both fail
 # yapf: disable
-from vllm.v1.core.kv_cache_utils import (NONE_HASH, BlockHashType,
-                                         FreeKVCacheBlockQueue, KVCacheBlock,
+from vllm.v1.core.kv_cache_utils import (FreeKVCacheBlockQueue, KVCacheBlock,
                                          PrefixCachingMetrics,
                                          estimate_max_model_len,
                                          generate_block_hash_extra_keys,
@@ -29,7 +29,8 @@ from vllm.v1.request import Request
 def make_request(request_id,
                  prompt_token_ids,
                  mm_positions=None,
-                 mm_hashes=None):
+                 mm_hashes=None,
+                 cache_salt=None):
     if mm_positions is None:
         multi_modal_inputs = None
     else:
@@ -37,7 +38,6 @@ def make_request(request_id,
 
     return Request(
         request_id=request_id,
-        prompt=None,
         prompt_token_ids=prompt_token_ids,
         multi_modal_inputs=multi_modal_inputs,
         multi_modal_hashes=mm_hashes,
@@ -46,6 +46,7 @@ def make_request(request_id,
         eos_token_id=100,
         arrival_time=0,
         lora_request=None,
+        cache_salt=cache_salt,
     )
 
 
@@ -61,13 +62,29 @@ def new_kv_cache_spec(block_size=16,
                              use_mla=use_mla)
 
 
-def test_none_hash():
-    assert NONE_HASH is not None
-    assert isinstance(NONE_HASH, int)
-    assert NONE_HASH != 0
+def test_none_hash(monkeypatch):
+    import vllm.v1.core.kv_cache_utils
+
+    # case 1: PYTHONHASHSEED is not set, use random
+    with monkeypatch.context() as m:
+        m.delenv('PYTHONHASHSEED', raising=False)
+        reloaded_kv_cache_utils = importlib.reload(vllm.v1.core.kv_cache_utils)
+        assert reloaded_kv_cache_utils.NONE_HASH is not None
+        assert isinstance(reloaded_kv_cache_utils.NONE_HASH, int)
+        assert reloaded_kv_cache_utils.NONE_HASH != 0
+
+    # case 2: PYTHONHASHSEED is set, use the seed
+    with monkeypatch.context() as m:
+        m.setenv('PYTHONHASHSEED', 'python hash seed')
+        reloaded_kv_cache_utils = importlib.reload(vllm.v1.core.kv_cache_utils)
+        assert reloaded_kv_cache_utils.NONE_HASH is not None
+        assert isinstance(reloaded_kv_cache_utils.NONE_HASH, int)
+        assert sha256('python hash seed') == reloaded_kv_cache_utils.NONE_HASH
 
 
 def test_kv_cache_block():
+    import vllm.v1.core.kv_cache_utils
+
     # Test KVCacheBlock initialization
     block = KVCacheBlock(block_id=0)
     assert block.block_id == 0
@@ -81,7 +98,8 @@ def test_kv_cache_block():
     assert block.ref_cnt == 0
 
     # Test block hash setting and resetting
-    block_hash = BlockHashType(hash_value=123, token_ids=(1, 2, 3))
+    block_hash = vllm.v1.core.kv_cache_utils.BlockHashType(hash_value=123,
+                                                           token_ids=(1, 2, 3))
     block.block_hash = block_hash
     assert block.block_hash == block_hash
 
@@ -214,15 +232,55 @@ def test_generate_block_hash_extra_keys_no_mm_inputs():
     assert next_mm_idx == 0
 
 
+def test_generate_block_hash_extra_keys_cache_salt():
+    request = make_request(
+        request_id=0,
+        prompt_token_ids=[_ for _ in range(6)],
+        mm_positions=None,
+        mm_hashes=None,
+        cache_salt="salt",
+    )
+
+    # salt is added for the first token
+    extra_keys, _ = generate_block_hash_extra_keys(request, 0, 1, 0)
+    assert extra_keys == ('salt', )
+    extra_keys, _ = generate_block_hash_extra_keys(request, 0, 10, 0)
+    assert extra_keys == ('salt', )
+
+    # no salt added for other tokens
+    extra_keys, _ = generate_block_hash_extra_keys(request, 1, 2, 0)
+    assert extra_keys is None
+    extra_keys, _ = generate_block_hash_extra_keys(request, 6, 10, 0)
+    assert extra_keys is None
+
+    # works together with other extra keys
+    request_mm = make_request(
+        request_id=0,
+        prompt_token_ids=[_ for _ in range(20)],
+        mm_positions=[
+            PlaceholderRange(offset=0, length=5),
+        ],
+        mm_hashes=["hash1"],
+        cache_salt="salt",
+    )
+
+    # Test with no extra keys
+    extra_keys, next_mm_idx = generate_block_hash_extra_keys(
+        request_mm, 0, 5, 0)
+    assert extra_keys == ("hash1", "salt")
+    assert next_mm_idx == 1
+
+
 @pytest.mark.parametrize("hash_fn", [sha256, hash])
 def test_hash_block_tokens(hash_fn):
+    import vllm.v1.core.kv_cache_utils
     parent_block_hash = 123
     curr_block_token_ids = (1, 2, 3)
     extra_keys = ("key1", "key2")
 
     block_hash = hash_block_tokens(hash_fn, parent_block_hash,
                                    curr_block_token_ids, extra_keys)
-    assert isinstance(block_hash, BlockHashType)
+    assert isinstance(block_hash, vllm.v1.core.kv_cache_utils.BlockHashType)
     assert block_hash.hash_value == hash_fn(
         (parent_block_hash, curr_block_token_ids, extra_keys))
     assert block_hash.token_ids == curr_block_token_ids
@@ -231,6 +289,7 @@ def test_hash_block_tokens(hash_fn):
 
 @pytest.mark.parametrize("hash_fn", [sha256, hash])
 def test_hash_request_tokens(hash_fn):
+    import vllm.v1.core.kv_cache_utils
     request = make_request(
         request_id=0,
         prompt_token_ids=[_ for _ in range(6)],
@@ -245,8 +304,10 @@ def test_hash_request_tokens(hash_fn):
     block_hashes = hash_request_tokens(hash_fn, block_size, request)
 
     assert len(block_hashes) == 2
-    assert isinstance(block_hashes[0], BlockHashType)
-    assert isinstance(block_hashes[1], BlockHashType)
+    assert isinstance(block_hashes[0],
+                      vllm.v1.core.kv_cache_utils.BlockHashType)
+    assert isinstance(block_hashes[1],
+                      vllm.v1.core.kv_cache_utils.BlockHashType)
 
     # Check the first block
     assert block_hashes[0].token_ids == (0, 1, 2)
@@ -311,7 +372,7 @@ def test_metrics():
     def stats(requests, queries, hits):
         return PrefixCacheStats(requests=requests, queries=queries, hits=hits)
 
-    metrics = PrefixCachingMetrics(interval=5)
+    metrics = PrefixCachingMetrics(max_recent_requests=5)
     assert metrics.hit_rate == 0.0
 
     metrics.observe(stats(1, 20, 9))
@@ -499,10 +560,10 @@ def test_allocate_with_lookahead():
                                       max_model_len=100)
     blocks = kv_cache_manager.allocate_slots(
         request,
-        num_tokens=3,
+        num_new_tokens=3,
         num_lookahead_tokens=2,  # Total required: 3+2=5 tokens
     )
-    assert len(blocks) == 2  # ceil(5/4)=2 blocks
+    assert len(blocks.blocks) == 2  # ceil(5/4)=2 blocks
 
     # Test case 2: With precomputed blocks
     kv_cache_manager = KVCacheManager(kv_cache_config=config,
@@ -510,10 +571,10 @@ def test_allocate_with_lookahead():
     # required_blocks = ceil((3 + 2) /4) = 2
     blocks = kv_cache_manager.allocate_slots(
         request,
-        num_tokens=3,
+        num_new_tokens=3,
         num_lookahead_tokens=2,
     )
-    assert len(blocks) == 2
+    assert len(blocks.blocks) == 2
 
     # Test case 3: With precomputed blocks
     # required_blocks = ceil((3 + 4) / 4) = 2
@@ -521,7 +582,7 @@ def test_allocate_with_lookahead():
                                       max_model_len=100)
     blocks = kv_cache_manager.allocate_slots(
         request,
-        num_tokens=3,
+        num_new_tokens=3,
         num_lookahead_tokens=4,
     )
-    assert len(blocks) == 2
+    assert len(blocks.blocks) == 2
