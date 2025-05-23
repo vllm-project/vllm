@@ -31,13 +31,12 @@ def is_weak_contiguous(inp: torch.Tensor):
 
 '''
 quantization level & int
-close qr = 0
-TwoShotF16 = 1
-TwoShotFP8 = 2
-TwoShotQ8 = 3
-TwoShotQ6 = 4
-TwoShotQ4 = 5
-OneShotQ4 = 6
+ONESHOT_F16 = 0,
+TWOSHOT_F16 = 1,
+TWOSHOT_FP8 = 2,
+TWOSHOT_Q8 = 3,
+TWOSHOT_Q6 = 4,
+TWOSHOT_Q4 = 5,
 '''
 
 
@@ -61,6 +60,7 @@ class QuickAllreduce:
                 it will be bind to f"cuda:{local_rank}".
             max_size: max supported size.
             min_size: Less than this size, custom_allreduce is better.
+            (custom_allreduce is available when less than 16MB)
         It is the caller's responsibility to make sure each communicator
         is bind to a unique device, and all communicators in this group
         are in the same node.
@@ -167,7 +167,7 @@ class QuickAllreduce:
         if not is_weak_contiguous(inp):
             return False
         if inp.dtype in QuickAllreduce._SUPPORTED_DTYPES:
-            return inp_size < self.max_size  # and inp_size > self.min_size
+            return inp_size < self.max_size and inp_size > self.min_size
         return False
 
     def all_reduce(self, inp: torch.Tensor, *, out: torch.Tensor = None):
