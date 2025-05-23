@@ -809,7 +809,6 @@ class DPEngineCoreActor(DPEngineCoreProc):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        on_head_node: bool,
         input_address: str,
         output_address: str,
         executor_class: type[Executor],
