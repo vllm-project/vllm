@@ -185,6 +185,7 @@ _MULTIMODAL_MODELS = {
     "GraniteSpeechForConditionalGeneration": ("granite_speech", "GraniteSpeechForConditionalGeneration"),  # noqa: E501
     "H2OVLChatModel": ("h2ovl", "H2OVLChatModel"),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
+    # "InternVLForConditionalGeneration": ("internvl", "InternVLForConditionalGeneration"), # noqa: E501
     "Idefics3ForConditionalGeneration":("idefics3","Idefics3ForConditionalGeneration"),
     "SmolVLMForConditionalGeneration": ("smolvlm","SmolVLMForConditionalGeneration"),  # noqa: E501
     "KimiVLForConditionalGeneration": ("kimi_vl", "KimiVLForConditionalGeneration"),  # noqa: E501
@@ -229,6 +230,7 @@ _SPECULATIVE_DECODING_MODELS = {
 }
 
 _TRANSFORMERS_MODELS = {
+    "TransformersForMultimodalLM": ("transformers", "TransformersForMultimodalLM"),
     "TransformersForCausalLM": ("transformers", "TransformersForCausalLM"),
 }
 # yapf: enable
@@ -343,6 +345,7 @@ def _try_load_model_cls(
 ) -> Optional[type[nn.Module]]:
     from vllm.platforms import current_platform
     current_platform.verify_model_arch(model_arch)
+    model.load_model_cls()
     try:
         return model.load_model_cls()
     except Exception:
@@ -454,7 +457,9 @@ class _ModelRegistry:
 
         # make sure Transformers backend is put at the last as a fallback
         if len(normalized_arch) != len(architectures):
-            normalized_arch.append("TransformersForCausalLM")
+            # The order matters. If causal comes first, checks on MM model fails because it is not registered in MultimodalRegistry
+            # TODO: needs help from vLLM team
+            normalized_arch.extend(["TransformersForMultimodalLM", "TransformersForCausalLM"])
         return normalized_arch
 
     def inspect_model_cls(
@@ -462,7 +467,6 @@ class _ModelRegistry:
         architectures: Union[str, list[str]],
     ) -> tuple[_ModelInfo, str]:
         architectures = self._normalize_archs(architectures)
-
         for arch in architectures:
             model_info = self._try_inspect_model_cls(arch)
             if model_info is not None:
