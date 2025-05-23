@@ -136,9 +136,10 @@ class BenchmarkDataset(ABC):
                 If `None`, LoRA is not used.
 
         Returns:
-            A tuple where the first element is a LoRARequest
-            (or `None` if not applicable) and the second element is the
-            tokenizer associated with the LoRA request (or the base tokenizer).
+            A tuple with the following elements:
+                - A new [LoRARequest] (or `None` if not applicable)/
+                - The tokenizer associated with the LoRA request
+                  (or the base tokenizer).
         """
         if max_loras is None or lora_path is None:
             return None, tokenizer
