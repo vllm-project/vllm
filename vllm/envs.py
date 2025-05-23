@@ -419,7 +419,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # (CPU backend only) CPU core ids bound by OpenMP threads, e.g., "0-31",
     # "0,1,2", "0-31,33". CPU cores of different ranks are separated by '|'.
     "VLLM_CPU_OMP_THREADS_BIND":
-    lambda: os.getenv("VLLM_CPU_OMP_THREADS_BIND", "all"),
+    lambda: os.getenv("VLLM_CPU_OMP_THREADS_BIND", "auto"),
 
     # (CPU backend only) CPU cores not used by OMP threads .
     # Those CPU cores will not be used by OMP threads of a rank.

@@ -156,10 +156,9 @@ class CPUWorker(LocalOrDistributedWorkerBase):
 
         # Setup OpenMP threads affinity.
         omp_cpuids = envs.VLLM_CPU_OMP_THREADS_BIND
-
-        if omp_cpuids != "all" or omp_cpuids != "auto":
-            self.local_omp_cpuid = omp_cpuids.split("|")[rank]
-        else:
+        if omp_cpuids == "all":
+            self.local_omp_cpuid = "all"
+        elif omp_cpuids == "auto":
             # Setup OpenMP thread affinity based on NUMA nodes automatically
             tp_size = self.vllm_config.parallel_config.tensor_parallel_size
             pp_size = self.vllm_config.parallel_config.pipeline_parallel_size
@@ -195,6 +194,8 @@ class CPUWorker(LocalOrDistributedWorkerBase):
             else:
                 logger.warning("Auto thread-binding is not supported due to the lack of package numa and psutil, fallback to no thread-binding. To get better performance, please try to manually bind threads.")
                 self.local_omp_cpuid = "all"
+        else:
+            self.local_omp_cpuid = omp_cpuids.split("|")[rank]
 
         # Return hidden states from target model if the draft model is an
         # mlp_speculator
