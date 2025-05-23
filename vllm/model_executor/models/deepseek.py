@@ -22,7 +22,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Deepseek model."""
-import typing
 from collections.abc import Iterable
 from typing import Any, Optional, Union
 
@@ -31,13 +30,12 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
-from vllm.distributed.parallel_state import get_ep_group
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
@@ -52,7 +50,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import MixtureOfExperts, SupportsPP
+from .interfaces import SupportsPP
 from .utils import (AutoWeightsLoader, extract_layer_index,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
@@ -96,68 +94,35 @@ class DeepseekMoE(nn.Module):
 
     def __init__(
         self,
-        layer_idx: int,
         config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ):
         super().__init__()
-        self.layer_idx = layer_idx
         self.config = config
         self.rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.ep_group = get_ep_group()
-        self.ep_rank = self.ep_group.rank
-        self.ep_size = self.ep_group.world_size
-        self.n_routed_experts: int = config.n_routed_experts
-        self.n_shared_experts: int = config.n_shared_experts
+        self.n_routed_experts = config.n_routed_experts
         self.top_k = config.num_experts_per_tok
         if self.tp_size > self.n_routed_experts:
             raise ValueError(
                 f"Tensor parallel size {self.tp_size} is greater than "
                 f"the number of experts {self.n_routed_experts}.")
 
-        # Load balancing settings.
-        # Currently, `n_redundant_experts` equals to `n_extra_experts`.
-        vllm_config = get_current_vllm_config()
-        self.n_extra_experts = vllm_config.parallel_config.num_extra_experts
-        self.n_physical_experts = self.n_routed_experts + self.n_extra_experts
-        self.n_logical_experts = self.n_routed_experts
-        self.n_redundant_experts = (self.n_physical_experts -
-                                    self.n_logical_experts)
-        self.n_local_physical_experts = self.n_physical_experts // self.ep_size
-
-        self.physical_expert_start = (self.ep_rank *
-                                      self.n_local_physical_experts)
-        self.physical_expert_end = (self.physical_expert_start +
-                                    self.n_local_physical_experts)
+        self.experts = nn.ModuleList([
+            DeepseekMLP(hidden_size=config.hidden_size,
+                        intermediate_size=config.moe_intermediate_size,
+                        hidden_act=config.hidden_act,
+                        quant_config=quant_config,
+                        reduce_results=False)
+            for idx in range(self.n_routed_experts)
+        ])
+        self.pack_params()
 
         self.gate = ReplicatedLinear(config.hidden_size,
                                      self.n_routed_experts,
                                      bias=False,
                                      quant_config=None)
-
-        if config.topk_method == "noaux_tc":
-            self.gate.e_score_correction_bias = nn.Parameter(
-                torch.empty(config.n_routed_experts))
-        else:
-            self.gate.e_score_correction_bias = typing.cast(Any, None)
-
-        self.experts = FusedMoE(
-            num_experts=config.n_routed_experts,
-            top_k=config.num_experts_per_tok,
-            hidden_size=config.hidden_size,
-            intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
-            renormalize=config.norm_topk_prob,
-            quant_config=quant_config,
-            use_grouped_topk=True,
-            num_expert_group=config.n_groups,
-            topk_group=config.topk_group,
-            prefix=f"{prefix}.experts",
-            scoring_func=config.scoring_func,
-            e_score_correction_bias=self.gate.e_score_correction_bias,
-        )
 
         if config.n_shared_experts is not None:
             intermediate_size = (config.moe_intermediate_size *
@@ -167,28 +132,27 @@ class DeepseekMoE(nn.Module):
                 intermediate_size=intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                reduce_results=self.experts.must_reduce_shared_expert_outputs(
-                ),
-                prefix=f"{prefix}.shared_experts",
+                reduce_results=False,
             )
 
-    def get_weights(self) -> list[torch.Tensor]:
-        ret: list[torch.Tensor] = []
-        for weight in [self.gate_proj_weight, self.down_proj_weight]:
-            weight = typing.cast(
-                Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]], weight)
-            if isinstance(weight, torch.Tensor):
-                assert weight.is_contiguous()
-                ret.append(weight.view(self.n_local_physical_experts, -1))
-            else:
-                # FP8 weights
-                assert weight[0].element_size() == 1
-                assert weight[0].is_contiguous()
-                assert weight[1].is_contiguous()
-                ret.append(weight[0].view(torch.int8).view(
-                    self.n_local_physical_experts, -1))
-                ret.append(weight[1].view(self.n_local_physical_experts, -1))
-        return ret
+    def pack_params(self):
+        w1 = []
+        w2 = []
+        for expert in self.experts:
+            w1.append(expert.gate_up_proj.weight)
+            w2.append(expert.down_proj.weight)
+        self.w1 = torch._utils._flatten_dense_tensors(w1)
+        w1s = torch._utils._unflatten_dense_tensors(self.w1, w1)
+        for data, param in zip(w1s, w1):
+            param.data = data
+        self.w1 = self.w1.view(len(w1), *w1s[0].shape)
+
+        self.w2 = torch._utils._flatten_dense_tensors(w2)
+        w2s = torch._utils._unflatten_dense_tensors(self.w2, w2)
+        for data, param in zip(w2s, w2):
+            param.data = data
+
+        self.w2 = self.w2.view(len(w2), *w2s[0].shape)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
@@ -197,9 +161,13 @@ class DeepseekMoE(nn.Module):
             shared_output = self.shared_experts(hidden_states)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = self.experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits) * self.routed_scaling_factor
+        final_hidden_states = fused_moe(hidden_states,
+                                        self.w1,
+                                        self.w2,
+                                        router_logits,
+                                        self.top_k,
+                                        renormalize=self.config.norm_topk_prob,
+                                        inplace=True)
 
         if self.config.n_shared_experts is not None:
             final_hidden_states = final_hidden_states + shared_output
@@ -320,8 +288,7 @@ class DeepseekDecoderLayer(nn.Module):
         if (config.n_routed_experts is not None
                 and layer_idx >= config.first_k_dense_replace
                 and layer_idx % config.moe_layer_freq == 0):
-            self.mlp = DeepseekMoE(layer_idx=layer_idx,
-                                   config=config,
+            self.mlp = DeepseekMoE(config=config,
                                    quant_config=quant_config,
                                    prefix=f"{prefix}.mlp")
         else:
@@ -470,7 +437,7 @@ class DeepseekModel(nn.Module):
         return loaded_params
 
 
-class DeepseekForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
+class DeepseekForCausalLM(nn.Module, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -488,22 +455,6 @@ class DeepseekForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
-        self.expert_weights = []
-
-        # Set MoE hyperparameters
-        # TODO(bowen): Add support for MTP layers
-        self.num_moe_layers = (config.num_hidden_layers -
-                               config.first_k_dense_replace)
-        self.num_expert_groups = config.n_groups
-
-        example_moe = typing.cast(
-            DeepseekMoE, self.model.layers[config.num_hidden_layers - 1].mlp)
-        self.num_logical_experts = example_moe.n_logical_experts
-        self.num_physical_experts = example_moe.n_physical_experts
-        self.num_local_physical_experts = example_moe.n_local_physical_experts
-        self.num_routed_experts = example_moe.n_routed_experts
-        self.num_shared_experts = example_moe.n_shared_experts
-        self.num_redundant_experts = example_moe.n_redundant_experts
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -531,14 +482,4 @@ class DeepseekForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        loaded_weights = loader.load_weights(weights)
-
-        # Register the expert weights.
-        for layer in self.model.layers:
-            assert isinstance(layer, DeepseekDecoderLayer)
-            if isinstance(layer.mlp, DeepseekMoE):
-                self.expert_weights.append(layer.mlp.get_weights())
-
-        # TODO(bowen): Add support for MTP layers
-
-        return loaded_weights
+        return loader.load_weights(weights)

@@ -22,6 +22,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only DeepseekV2/DeepseekV3 model."""
+import typing
 from collections.abc import Iterable
 from typing import Any, Optional, Union
 
@@ -31,7 +32,8 @@ from transformers import PretrainedConfig
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import (CacheConfig, ModelConfig, VllmConfig,
+                         get_current_vllm_config)
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -42,6 +44,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
@@ -50,7 +53,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsPP
+from .interfaces import MixtureOfExperts, SupportsPP
 from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -95,14 +98,21 @@ class DeepseekV2MoE(nn.Module):
 
     def __init__(
         self,
+        layer_idx: int,
         config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ):
         super().__init__()
+        self.layer_idx = layer_idx
         self.tp_size = get_tensor_model_parallel_world_size()
         self.routed_scaling_factor = config.routed_scaling_factor
-        self.n_shared_experts = config.n_shared_experts
+
+        self.ep_group = get_pp_group().device_group
+        self.ep_rank = self.ep_group.rank()
+        self.ep_size = self.ep_group.size()
+        self.n_routed_experts: int = config.n_routed_experts
+        self.n_shared_experts: int = config.n_shared_experts
 
         if config.hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {config.hidden_act}. "
@@ -118,6 +128,35 @@ class DeepseekV2MoE(nn.Module):
                 torch.empty(config.n_routed_experts))
         else:
             self.gate.e_score_correction_bias = None
+
+        # Load balancing settings.
+        # Currently, `n_redundant_experts` equals to `n_extra_experts`.
+        vllm_config = get_current_vllm_config()
+        parallel_config = vllm_config.parallel_config
+        self.enable_eplb = parallel_config.enable_eplb
+
+        if self.enable_eplb and not isinstance(quant_config, Fp8Config):
+            # TODO(bowen): Add support for additional quantization methods.
+            # The implementation for other quantization methods does not
+            # contain essential differences, but the current quant API design
+            # causes duplicated work when extending to new
+            # quantization methods, so I'm leaving it for now.
+            # If you plan to add support for more quantization methods,
+            # please refer to the implementation in `Fp8MoEMethod`.
+            raise NotImplementedError("EPLB is only supported for FP8 "
+                                      "quantization for now.")
+
+        self.n_extra_experts = parallel_config.num_extra_experts
+        self.n_physical_experts = self.n_routed_experts + self.n_extra_experts
+        self.n_logical_experts = self.n_routed_experts
+        self.n_redundant_experts = (self.n_physical_experts -
+                                    self.n_logical_experts)
+        self.n_local_physical_experts = self.n_physical_experts // self.ep_size
+
+        self.physical_expert_start = (self.ep_rank *
+                                      self.n_local_physical_experts)
+        self.physical_expert_end = (self.physical_expert_start +
+                                    self.n_local_physical_experts)
 
         self.experts = FusedMoE(
             num_experts=config.n_routed_experts,
@@ -179,6 +218,14 @@ class DeepseekV2MoE(nn.Module):
                     final_hidden_states))
 
         return final_hidden_states.view(num_tokens, hidden_dim)
+
+    def get_expert_weights(self) -> Iterable[torch.Tensor]:
+        weights = self.experts.parameters()
+        assert all(weight.is_contiguous() for weight in weights)
+        return [
+            weight.view(self.n_local_physical_experts, -1)
+            for weight in weights
+        ]
 
 
 def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
@@ -539,6 +586,7 @@ class DeepseekV2DecoderLayer(nn.Module):
                 and layer_idx >= config.first_k_dense_replace
                 and layer_idx % config.moe_layer_freq == 0):
             self.mlp = DeepseekV2MoE(
+                layer_idx=self.layer_idx,
                 config=config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
@@ -680,7 +728,7 @@ class DeepseekV2Model(nn.Module):
         return hidden_states
 
 
-class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
+class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -699,6 +747,22 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
+        self.expert_weights = []
+
+        # Set MoE hyperparameters
+        # TODO(bowen): Add support for MTP layers
+        self.num_moe_layers = (config.num_hidden_layers -
+                               config.first_k_dense_replace)
+        self.num_expert_groups = config.n_group
+
+        example_moe = typing.cast(
+            DeepseekV2MoE, self.model.layers[config.num_hidden_layers - 1].mlp)
+        self.num_logical_experts = example_moe.n_logical_experts
+        self.num_physical_experts = example_moe.n_physical_experts
+        self.num_local_physical_experts = example_moe.n_local_physical_experts
+        self.num_routed_experts = example_moe.n_routed_experts
+        self.num_shared_experts = example_moe.n_shared_experts
+        self.num_redundant_experts = example_moe.n_redundant_experts
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -823,6 +887,15 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
                                             default_weight_loader)
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
+
+        # Register the expert weights.
+        for layer in self.model.layers:
+            assert isinstance(layer, DeepseekV2DecoderLayer)
+            if isinstance(layer.mlp, DeepseekV2MoE):
+                self.expert_weights.append(layer.mlp.get_expert_weights())
+
+        # TODO(bowen): Add support for MTP layers
+
         return loaded_params
 
 
